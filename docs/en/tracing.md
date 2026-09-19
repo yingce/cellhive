@@ -124,6 +124,11 @@ Point CellHive to `CELLHIVE_OTLP_ENDPOINT=http://collector:4318` (no headers).
 **Jaeger v2**: `CELLHIVE_OTLP_ENDPOINT=http://jaeger:4318`.
 **Cloud OTLP**: use the cloud provider's OTLP endpoint + `x-otlp-api-key`/`authorization` header.
 
+## 4.5 Log correlation and multi-tenancy (recommended)
+
+- **trace <-> logs**: tenant log lines now carry `trace_id`/`span_id` (`log-tail.js` reads the current `traceparent` at each `console.*` call; cell-agent parses it into `logbuf` and the OTLP log record), so a backend can jump from a trace to the logs of the same request.
+- **Multi-tenancy**: nodes push to an **internal Collector** (`deploy/observability/`), which redacts, routes by `cellhive.namespace` and tail-samples before sending to OpenObserve; tenants query through **backend org/stream + user roles**, so the platform exposes no query surface and never hands OTLP credentials to a tenant. Details in [`observability.md`](./observability.md) -> "Multi-tenancy and external querying".
+
 ## 5. Boundaries and remaining gaps
 
 - See the two correlation break points in §2: **props-bound binding calls inside DO** (new trace), **peer.append** (independent per-batch trace).

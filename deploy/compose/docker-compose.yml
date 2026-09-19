@@ -151,6 +151,23 @@ services:
     volumes:
       - openobserve-data:/data
 
+  # OTLP Collector (profile "observability"): redaction / namespace routing /
+  # tail sampling in front of a backend. Point CellHive at it with
+  #   CELLHIVE_OTLP_ENDPOINT=http://otel-collector:4318
+  #   CELLHIVE_OTLP_HEADERS=authorization=Bearer <internal-token>   # optional
+  # and set OPENOBSERVE_BASIC_AUTH (base64 of user:pass) for the backend hop.
+  # See deploy/observability/README.md for the multi-tenant model.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      OPENOBSERVE_BASIC_AUTH: ${OPENOBSERVE_BASIC_AUTH:-}
+    volumes:
+      - ../observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports: ["4317:4317", "4318:4318"]
+    depends_on: [openobserve]
+
   # Ops-provided edge; the platform does not push its config (ADR-132).
   edge:
     image: traefik:v3

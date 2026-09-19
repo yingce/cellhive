@@ -23,7 +23,8 @@
 
 ## 关键不变量
 
-- 追踪是旁路、best-effort，不影响请求；无端点=零开销。
+- 追踪是旁路、best-effort，不影响请求；无端点=零开销；导出失败/丢弃不阻塞请求。
+- 租户日志行带 `trace_id`/`span_id`（请求内触发时）；resource 带 `service.name`/`service.instance.id`(=节点)/`cellhive.node_id`。
 - 日志 ring 有界、非持久、单节点；`tail` 订阅经 lease 广播到活节点。
 - 新增指标先登记名称与数据源（`observability.md`）。
 

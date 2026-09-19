@@ -62,7 +62,7 @@ export function installLogTail() {
       try { orig[lvl](...args); } catch (e) { /* ignore */ }
       let msg = "";
       try { msg = args.map(fmt).join(" ").slice(0, MAX_LINE); } catch (e) { msg = "<unserializable>"; }
-      buf.push({ level: lvl, message: msg });
+      buf.push({ level: lvl, message: msg, traceparent: globalThis.__cellhiveTraceparent || "" });
       if (buf.length >= MAX_BATCH) {
         flush();
       } else {

@@ -23,7 +23,8 @@ Metrics, tenant log tailing, and OpenTelemetry OTLP traces and logs export.
 
 ## Key Invariants
 
-- Tracing is out-of-band and best-effort, and does not affect requests; no endpoint = zero overhead.
+- Tracing is out-of-band and best-effort and does not affect requests; no endpoint = zero overhead; export failures/drops never block requests.
+- Tenant log lines carry `trace_id`/`span_id` (when emitted inside a traced request); the resource carries `service.name`/`service.instance.id` (= node) /`cellhive.node_id`.
 - The log ring is bounded, non-persistent, and single-node; `tail` subscriptions are broadcast to active nodes via leases.
 - Register the metric name and data source (`observability.md`) before adding a new metric.
 

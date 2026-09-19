@@ -17,6 +17,7 @@ import (
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Log export modes.
@@ -123,9 +124,29 @@ func (s *logState) subscribedLocked(ns, worker string, now time.Time) bool {
 	return true
 }
 
+// TraceIDs extracts the 32-hex trace id and 16-hex span id from a W3C
+// traceparent header. It returns empty strings for a missing or malformed
+// value (or an all-zero id), so callers can attach them unconditionally.
+func TraceIDs(traceparent string) (traceID, spanID string) {
+	parts := strings.Split(strings.TrimSpace(traceparent), "-")
+	if len(parts) < 4 || len(parts[1]) != 32 || len(parts[2]) != 16 {
+		return "", ""
+	}
+	tid, err := trace.TraceIDFromHex(parts[1])
+	if err != nil || !tid.IsValid() {
+		return "", ""
+	}
+	sid, err := trace.SpanIDFromHex(parts[2])
+	if err != nil || !sid.IsValid() {
+		return "", ""
+	}
+	return tid.String(), sid.String()
+}
+
 // ExportLog ships one captured line to the OTLP backend when the mode allows
 // it. It is best-effort and non-blocking: the SDK batches in the background.
-func ExportLog(ns, worker, level, message string, atMs int64) {
+// traceID/spanID (hex, may be empty) correlate the record with its trace.
+func ExportLog(ns, worker, level, message string, atMs int64, traceID, spanID string) {
 	s := logs
 	s.mu.Lock()
 	mode, logger := s.mode, s.logger
@@ -144,6 +165,20 @@ func ExportLog(ns, worker, level, message string, atMs int64) {
 	if atMs == 0 {
 		atMs = time.Now().UnixMilli()
 	}
+	ctx := context.Background()
+	if sc, ok := spanContext(traceID, spanID); ok {
+		ctx = trace.ContextWithSpanContext(ctx, sc)
+	}
+	logger.Emit(ctx, buildLogRecord(ns, worker, level, message, atMs))
+}
+
+// buildLogRecord assembles one OTLP log record: body = message, severity from
+// level, cellhive.namespace/worker as attributes, and W3C trace/span ids when
+// present (so backends can jump trace <-> logs).
+func buildLogRecord(ns, worker, level, message string, atMs int64) otellog.Record {
+	if atMs == 0 {
+		atMs = time.Now().UnixMilli()
+	}
 	var rec otellog.Record
 	rec.SetTimestamp(time.UnixMilli(atMs))
 	rec.SetObservedTimestamp(time.Now())
@@ -154,7 +189,21 @@ func ExportLog(ns, worker, level, message string, atMs int64) {
 		attribute.String("cellhive.namespace", ns),
 		attribute.String("cellhive.worker", worker),
 	)
-	logger.Emit(context.Background(), rec)
+	return rec
+}
+
+// spanContext builds a valid, sampled span context from hex ids (ok=false when
+// either id is missing/invalid). The SDK takes a log record's trace/span ids
+// from the context passed to Emit, not from the record itself.
+func spanContext(traceID, spanID string) (trace.SpanContext, bool) {
+	tid, terr := trace.TraceIDFromHex(traceID)
+	sid, serr := trace.SpanIDFromHex(spanID)
+	if terr != nil || serr != nil || !tid.IsValid() || !sid.IsValid() {
+		return trace.SpanContext{}, false
+	}
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled,
+	}), true
 }
 
 func logSeverity(level string) otellog.Severity {

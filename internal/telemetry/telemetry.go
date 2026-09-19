@@ -90,6 +90,9 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	res := resource.NewSchemaless(
 		attribute.String("service.name", cfg.Service),
 		attribute.String("service.version", cfg.Version),
+		// service.instance.id is the OTel-recommended per-instance identity; the
+		// cellhive.node_id alias is kept for existing dashboards.
+		attribute.String("service.instance.id", cfg.NodeID),
 		attribute.String("cellhive.node_id", cfg.NodeID),
 	)
 	tp := sdktrace.NewTracerProvider(

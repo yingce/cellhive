@@ -2339,6 +2339,18 @@
 - **验证**：`internal/timer TestUpsertFailsClosedWhenIndexDown`（索引失败则不提交 timer）、`TestSyncIndexRepairsMissingEntry`、更新 `TestStoreSyncsWakeIndex`（先发布）；`internal/cellstore TestLocalScopesAndPendingTimerMin`（扫描/只读读取）。
 - **文档**：`docs/configuration.md`、`docs/testing.md`、`docs/release-notes.md`、`docs/known-issues.md`。
 
+## ADR-178 日志带 trace 上下文 + 多租户可观测性参考管线（push）✅实现
+
+- **背景**：ADR-167/172 已有 OTLP traces/logs 导出，但（a）租户日志行没有 `trace_id`/`span_id`，后端无法从 trace 跳日志；（b）对外查询一直靠"每节点裸 `/metrics` + 自建鉴权"，与多租户目标冲突。
+- **决策**：
+  1. **日志关联**：`log-tail.js` 在每次 `console.*` 时取当前 `globalThis.__cellhiveTraceparent` 作为该行的 `traceparent` 上报；cell-agent 解析（`telemetry.TraceIDs`）为 `trace_id`/`span_id`，写入 `logbuf.Entry` 与 OTLP log record（SDK 从 Emit 的 ctx 取 span context）。请求级 `traceparent` 头作为回退。
+  2. **统一资源属性**：resource 增加 OTel 规范的 `service.instance.id`（= 节点 id），保留 `cellhive.node_id`；日志/span 继续带 `cellhive.namespace`/`cellhive.worker`。
+  3. **对外查询用 push**：日志/追踪走 OTLP push 到内网 **Collector**（参考配置 `deploy/observability/otel-collector.yaml`：redact/route/tail-sample → OpenObserve），平台不暴露查询面；**唯一面向租户的跳是后端**，按 namespace 映射到后端 org/stream + 只读用户，不靠属性做行级隔离。**指标保持内部 Prometheus pull**，`/metrics` 免鉴权、不公网暴露；要并入 OTLP 用 Collector 的 `prometheus` receiver。
+- **理由**：push 把"暴露端点 + 自建鉴权"换成"后端 RBAC"；`trace_id` 关联让 指标→trace→日志 可跳转；资源属性对齐 OTel 语义，换后端不改代码。
+- **代价/边界**：OTLP 导出仍是 best-effort（后端不可用丢遥测）；租户查询依赖后端能力（无行级过滤时需 per-org/stream 映射）；平台不提供自带查询 API/存储（长期项）。
+- **验证**：`internal/telemetry TestLogExportTraceCorrelation`（traceparent → OTLP record 的 trace/span id；非法/全零拒绝；无 traceparent 不携带上下文）、`internal/server TestLogIngestAndQuery`（逐条 + 请求头回退都写入 `trace_id`）；`bash scripts/ci.sh` GATE PASS。
+- **文档**：`docs/observability.md`（多租户与对外查询）、`docs/tracing.md`、`docs/modules/observability.md`、`docs/en/*` 同步、`deploy/observability/{otel-collector.yaml,README.md}`、`deploy/compose/docker-compose.yml`（`observability` profile）。
+
 ---
 
 ## 待定（🕓）
@@ -2392,6 +2404,7 @@
 - ADR-131：控制面 schema v2 + 域名/路由模型（**已实现**：软删+purge 循环、bindings 派生表、hosts 验证与 loader 门控、内置域 `<ns>-<worker>.<base>`、JWT 按 ns 授权 + 审计主体、列表分页、路由挂载剥离）。
 - ADR-132：移除边缘配置下发（删 `GET /v1/internal/traefik` 与 `CELLHIVE_ADMIN_HOST/_ADMIN_BACKEND_URL`）；边缘（反代/云 LB）由运维静态配置，平台只保证 loader 级 host 门控。
 - ADR-133：域名不做 DNS 校验（登记即授权）：删 `domain verify`/验证循环/`CELLHIVE_DOMAIN_VERIFY`·`CELLHIVE_DNS_RESOLVER`；host 唯一性/409/审计/`domain rm` 保留，校验字段与状态机保留备用。
+- ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。
 - ADR-177：wake 索引不落后于 timer（先发布 + fail-closed + 认领时重建 + 有界轮转修复）。
 - ADR-176：KV 写入校验对齐 Cloudflare（key≤512B、metadata≤1KiB、expirationTtl≥60s、expiration 须在未来）。
 - ADR-175：兼容性收口（DO WebSocket→`/v1/do/connect` 接线 + ticket、R2 `writeHttpMetadata` 本地包装、DO alarm 身份/storage_id 与 scheme 修复）。

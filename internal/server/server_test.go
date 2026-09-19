@@ -658,9 +658,19 @@ func TestLogIngestAndQuery(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
 	admin := srv.AdminHandler()
-	body := `[{"level":"log","message":"hello"},{"level":"error","message":"boom"}]`
-	if rr := do(t, h, http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", "tok", []byte(body)); rr.Code != http.StatusOK {
-		t.Fatalf("ingest = %d %s", rr.Code, rr.Body.String())
+	// The first entry carries a W3C traceparent, the second inherits the
+	// request-level one (header fallback), and must surface as trace_id.
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	body := `[{"level":"log","message":"hello","traceparent":"` + tp + `"},{"level":"error","message":"boom"}]`
+	{
+		req := httptest.NewRequest(http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", strings.NewReader(body))
+		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("traceparent", tp)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("ingest = %d %s", rr.Code, rr.Body.String())
+		}
 	}
 	// Wrong token (internal instead of log) is rejected.
 	if rr := do(t, h, http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", "wrong", []byte(body)); rr.Code != http.StatusUnauthorized {
@@ -669,6 +679,9 @@ func TestLogIngestAndQuery(t *testing.T) {
 	rr := adminDo(t, admin, http.MethodGet, "/v1/control/logs?namespace=acme&worker=web", "admin-tok", "")
 	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte(`"hello"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"boom"`)) {
 		t.Fatalf("query = %d %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"`)) {
+		t.Fatalf("query missing trace_id (per-entry and header fallback): %s", rr.Body.String())
 	}
 	// since cursor advanced past all entries -> empty.
 	rr = adminDo(t, admin, http.MethodGet, "/v1/control/logs?namespace=acme&worker=web&since=2", "admin-tok", "")

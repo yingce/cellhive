@@ -1,0 +1,98 @@
+# OpenTelemetry Collector reference config for CellHive.
+#
+# CellHive pushes logs and traces over OTLP/HTTP (ADR-167/172). This collector
+# sits in front of a backend (OpenObserve by default) so that:
+#   * CellHive nodes only talk to one internal endpoint (no tenant-facing creds);
+#   * the collector can redact, route per namespace and tail-sample;
+#   * the backend handles storage, retention, query and *backend* auth.
+#
+# CellHive side (any node):
+#   CELLHIVE_OTLP_ENDPOINT=http://otel-collector:4318
+#   CELLHIVE_OTLP_HEADERS=authorization=Bearer <internal-token>   # optional
+#   CELLHIVE_OTLP_LOGS=tail          # off | tail | all
+#   CELLHIVE_TRACES_SAMPLE_RATIO=0.01
+#
+# See docs/observability.md and docs/tracing.md for the multi-tenant model.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # Optional: also scrape CellHive's Prometheus-format metrics and forward them
+  # as OTLP, if you want a single pipeline instead of an internal Prometheus.
+  # Leave disabled (and keep /metrics internal-only) if you already run Prometheus.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: cellhive
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["cell-agent:7001", "do-supervisor:18901"]
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+  # Keep the platform's own credentials out of the backend. CellHive already
+  # refuses to log secrets, so this is defense in depth.
+  attributes/redact:
+    actions:
+      - key_regex: "(?i)(authorization|x-cellhive-internal-token|x-cellhive-scope-token)"
+        action: delete
+  # Route by namespace (uncomment and add per-tenant exporters to isolate).
+  # routing:
+  #   attribute_source: resource
+  #   from_attribute: "cellhive.namespace"
+  #   table:
+  #     - value: acme
+  #       exporter: [otlphttp/acme]
+  #   default_exporter: otlphttp/default
+  # Tail-sample traces so errors and slow requests are always kept.
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: keep-slow
+        type: latency
+        latency: { threshold_ms: 1000 }
+      - name: baseline
+        type: probabilistic
+        probabilistic: { sampling_percentage: 1 }
+
+exporters:
+  # OpenObserve ingests OTLP at /api/<org>; append /v1/traces or /v1/logs.
+  otlphttp/openobserve:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      authorization: "Basic ${OPENOBSERVE_BASIC_AUTH}"
+    compression: gzip
+  # Debug sink for troubleshooting without a backend:
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch, tail_sampling]
+      exporters: [otlphttp/openobserve]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch]
+      exporters: [otlphttp/openobserve]
+    # metrics are scraped by the internal Prometheus by default; enable this
+    # pipeline only if you want to push them through the collector instead.
+    # metrics:
+    #   receivers: [prometheus]
+    #   processors: [memory_limiter, batch]
+    #   exporters: [otlphttp/openobserve]

@@ -124,6 +124,11 @@ CellHive 指向 `CELLHIVE_OTLP_ENDPOINT=http://collector:4318`（无 headers）�
 **Jaeger v2**：`CELLHIVE_OTLP_ENDPOINT=http://jaeger:4318`。
 **云 OTLP**：填云厂商的 OTLP endpoint + `x-otlp-api-key`/`authorization` 头。
 
+## 4.5 日志关联与多租户（推荐）
+
+- **trace ↔ 日志**：租户日志行现在带 `trace_id`/`span_id`（`log-tail.js` 在 `console.*` 时取当前 `traceparent`，cell-agent 解析进 `logbuf` 并写入 OTLP log record）→ 在 OpenObserve/Tempo 里可从 trace 跳到同请求日志。
+- **多租户**：节点 push 到**内网 Collector**（`deploy/observability/`），由 Collector 脱敏、按 `cellhive.namespace` 路由、tail-sample，再落 OpenObserve；租户查询走**后端 org/stream + 用户角色**，平台不暴露查询面，也不把 OTLP 凭据给租户。细节见 [`observability.md`](./observability.md) 的"多租户与对外查询"。
+
 ## 5. 边界与残余
 
 - 见 §2 的两个串联断点：**DO 内 props-bound 绑定调用**（新 trace）、**peer.append**（按批的独立 trace）。

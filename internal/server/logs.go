@@ -30,20 +30,31 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var entries []struct {
-		Level     string `json:"level"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
-		AtMs      int64  `json:"at_ms"`
+		Level       string `json:"level"`
+		Message     string `json:"message"`
+		RequestID   string `json:"request_id"`
+		Traceparent string `json:"traceparent"`
+		AtMs        int64  `json:"at_ms"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&entries); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
+	// A request-level traceparent is the fallback for entries that do not carry
+	// their own (older log-tail versions).
+	reqTP := r.Header.Get("traceparent")
 	for _, e := range entries {
-		added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: e.Level, Message: e.Message, RequestID: e.RequestID, AtMs: e.AtMs})
+		tid, sid := telemetry.TraceIDs(e.Traceparent)
+		if tid == "" {
+			tid, sid = telemetry.TraceIDs(reqTP)
+		}
+		added := s.Logs.Add(logbuf.Entry{
+			Namespace: ns, Worker: worker, Level: e.Level, Message: e.Message,
+			RequestID: e.RequestID, TraceID: tid, SpanID: sid, AtMs: e.AtMs,
+		})
 		// Optional OTLP export (ADR-172): off by default, and "tail" mode only
 		// exports workers with an active subscription. Best-effort/non-blocking.
-		telemetry.ExportLog(ns, worker, added.Level, added.Message, added.AtMs)
+		telemetry.ExportLog(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(entries)})
 }

@@ -57,7 +57,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 ## 日志
 
 - 结构化 JSON（Go `log/slog`；workerd 侧结构化 stdout）；
-- 必备字段：`ts`、`level`、`service`、`node`、`request_id`（可用时）、`ns`/`worker`/`scope`（可用时）、`event`；
+- 必备字段：`ts`、`level`、`service`、`node`、`request_id`（可用时）、`trace_id`/`span_id`（请求内触发时）、`ns`/`worker`/`scope`（可用时）、`event`；
 - **禁止**记录：secrets 明文、internal token、原始桶响应体；
 - 关键事件：`owner_acquired`、`epoch_bumped`、`takeover_started/finished`、`drain_started/finished`、`waker_fire`、`do_restore_started/finished`、`output_gate_timeout`。
 
@@ -82,6 +82,15 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - **传播**：W3C `traceparent` 入口生成/透传 → 租户 handler → props-bound binding 调用（loader 在自身 isolate 设置 `traceparent`，ADR-167 修复了 ADR-146 的"props-bound facades 不带 trace"残余）→ DO invoke spec。
 - **残余**：租户 isolate 的 `facades.js` 调用（非 props-bound 回退路径）无 internal token，不上报 span；`/v1/do/connect`/abort、compaction/upload 后台循环无独立 span；JS span 时间戳为毫秒精度。
 
+## 多租户与对外查询（推荐：日志/追踪 push，指标内部 pull）
+
+- **日志/追踪 push**：节点只向**内网 OTLP 端点**推送（`CELLHIVE_OTLP_ENDPOINT` / `_HEADERS`；`CELLHIVE_OTLP_LOGS=off|tail|all`），平台不对外暴露查询面——存储、保留、查询与**租户鉴权**都交给后端（OpenObserve/Tempo/Collector）。
+- **统一资源属性**：每条记录带 `service.name`、`service.instance.id`（= 节点 id）、`cellhive.namespace`、`cellhive.worker`；租户日志在请求内触发时带 `trace_id`/`span_id`（`logbuf.Entry` + `log-tail.js` 逐行 `traceparent`，cell-agent 解析）→ 后端可 **指标 → trace → 日志** 跳转。
+- **租户隔离的唯一租户面在后端**：把每个 namespace 映射到后端的 **org/stream**（如 OpenObserve 的 `logs-<ns>`），给租户一个只读该范围的用户；**不要**只靠 `cellhive.namespace` 属性做行级隔离（多数后端不支持按任意属性过滤）。
+- **参考管线**：[`../deploy/observability/otel-collector.yaml`](../deploy/observability/otel-collector.yaml)（OTLP in → redact/route/tail-sample → OpenObserve）+ [`../deploy/observability/README.md`](../deploy/observability/README.md)；compose 用 `--profile observability`（OpenObserve 在 `tracing` profile）。
+- **指标保持内部 pull**：`/metrics` **免鉴权**，不要公网暴露；要并入 OTLP 就用 Collector 的 `prometheus` receiver 抓取后转投，而不是开放裸端点。
+- **投递语义**：OTLP 导出是 **best-effort、有界内存批**；后端不可用会丢遥测而不阻塞请求。审计级留存需在 Collector/后端前加持久缓冲（file exporter）。
+
 ## 告警建议（运维）
 
 - `cellhive_takeover_total{outcome="failed"}` 上升（接管竞争/失败）；
@@ -92,4 +101,4 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - `cellhive_do_restore_seconds` p99（`rate(_sum)/rate(_count)`）持续升高；
 - `cellhive_list_calls_total` > 0（回归热路径禁 List）。
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

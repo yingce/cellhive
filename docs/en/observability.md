@@ -82,6 +82,15 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 - **Propagation**: W3C `traceparent` is generated/propagated at ingress → tenant handler → props-bound binding calls (the loader sets `traceparent` in its own isolate; ADR-167 fixed the remaining issue from ADR-146 where "props-bound facades did not carry trace") → DO invoke spec.
 - **Remaining gaps**: tenant isolate `facades.js` calls (non-props-bound fallback path) have no internal token and do not report spans; `/v1/do/connect`/abort and compaction/upload background loops have no independent spans; JS span timestamps have millisecond precision.
 
+## Multi-tenancy and external querying (push logs/traces, pull metrics internally)
+
+- **Push logs and traces**: nodes only push to an **internal OTLP endpoint** (`CELLHIVE_OTLP_ENDPOINT` / `_HEADERS`; `CELLHIVE_OTLP_LOGS=off|tail|all`). The platform exposes no query surface — storage, retention, query and **tenant auth** belong to the backend (OpenObserve/Tempo/Collector).
+- **Unified resource attributes**: every record carries `service.name`, `service.instance.id` (= node id), `cellhive.namespace`, `cellhive.worker`; tenant log lines emitted inside a traced request carry `trace_id`/`span_id` (`logbuf.Entry` + per-line `traceparent` from `log-tail.js`, parsed by cell-agent) so backends can jump **metrics → trace → logs**.
+- **The only tenant-facing hop is the backend**: map each namespace to a backend **org/stream** (e.g. OpenObserve `logs-<ns>`) and give the tenant a read-only user for exactly that scope; do **not** rely on the `cellhive.namespace` attribute alone for row-level isolation (most backends cannot filter by arbitrary attributes).
+- **Reference pipeline**: [`../../deploy/observability/otel-collector.yaml`](../../deploy/observability/otel-collector.yaml) (OTLP in → redact/route/tail-sample → OpenObserve) plus [`../../deploy/observability/README.md`](../../deploy/observability/README.md); compose with `--profile observability` (OpenObserve is in the `tracing` profile).
+- **Keep metrics internal**: `/metrics` is **unauthenticated**; do not expose it publicly. To fold metrics into OTLP, use the collector's `prometheus` receiver instead of exposing the raw endpoint.
+- **Delivery semantics**: OTLP export is **best-effort with bounded in-memory batches**; a backend outage drops telemetry rather than blocking requests. Audit-grade retention needs a durable buffer (file exporter) in front.
+
 ## Alerting recommendations (ops)
 
 - `cellhive_takeover_total{outcome="failed"}` increasing (takeover contention/failure);
@@ -92,4 +101,4 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 - `cellhive_do_restore_seconds` p99 (`rate(_sum)/rate(_count)`) continuously increasing;
 - `cellhive_list_calls_total` > 0 (regression of the hot-path List prohibition).
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-19_

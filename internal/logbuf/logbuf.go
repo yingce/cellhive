@@ -17,6 +17,10 @@ type Entry struct {
 	Level     string `json:"level"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	// TraceID/SpanID correlate a line with its trace (W3C traceparent); empty
+	// when the line was emitted outside a traced request.
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
 }
 
 type ring struct {
