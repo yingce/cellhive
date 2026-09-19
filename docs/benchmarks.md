@@ -332,3 +332,16 @@ loopback + 注入延迟，验证"跳被移除"的机制；生产节省 = 真实�
 - **数据准确**：所有档 `db_integrity=ok`、`failures=0`。
 - **workerd/DO**：进程级上限与门控数字（≈800 req/s 裸 DO、k 写合并提升）见 `docs/archive/p0-report.md`；本页未重跑 workerd 基准。
 - **局限**：单机 loopback、无跨主机 RTT；MinIO 本地；未压真实磁盘/云对象存储。跨主机/云数字需环境（C 类 blocker）。
+
+### 可观测性开销（ADR-178，`-benchmem`）
+
+命令：`go test <tags> -run '^$' -bench 'BenchmarkLogIngest|BenchmarkTraceIDs|BenchmarkExportLogOff' -benchmem ./internal/server/ ./internal/telemetry/`（本机 8 核）。
+
+| benchmark | ns/op | allocs/op |
+|---|---|---|
+| `BenchmarkTraceIDs`（W3C traceparent → trace/span id） | **50** | **0** |
+| `BenchmarkExportLogOff`（OTLP 日志关闭时，每行） | **6.4** | **0** |
+| `BenchmarkLogIngestPlain`（2 行/请求，无 traceparent） | 6138 | 41 |
+| `BenchmarkLogIngestTraceparent`（2 行/请求，带 traceparent） | 6363 | 42 |
+
+含义：**默认（`CELLHIVE_OTLP_ENDPOINT` 空）零开销**——trace 中间件在 `!telemetry.Enabled()` 时直接放行（`internal/server/server.go:333`），`ExportLog` 先查 mode 再早退；打开后新增的每行成本约 **0.1 µs**，且只在**异步日志路径**（非请求热路径）。trace 导出默认头部采样 `0.01`。

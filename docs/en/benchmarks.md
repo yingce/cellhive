@@ -332,3 +332,15 @@ loopback + injected latency validates the mechanism that "the hop is removed"; p
 - **Data is accurate**: all profiles have `db_integrity=ok`, `failures=0`.
 - **workerd/DO**: process-level ceilings and gating numbers (≈800 req/s bare DO, k write coalescing improvement) are in `docs/archive/p0-report.md`; workerd benchmarks were not rerun on this page.
 - **Limitations**: Single-node loopback, no cross-host RTT; local MinIO; did not stress real disks/cloud object storage. Cross-host/cloud numbers require the environment (Class C blocker).
+### Observability overhead (ADR-178, `-benchmem`)
+
+Command: `go test <tags> -run '^$' -bench 'BenchmarkLogIngest|BenchmarkTraceIDs|BenchmarkExportLogOff' -benchmem ./internal/server/ ./internal/telemetry/` (8-core host).
+
+| benchmark | ns/op | allocs/op |
+|---|---|---|
+| `BenchmarkTraceIDs` (W3C traceparent -> trace/span id) | **50** | **0** |
+| `BenchmarkExportLogOff` (per line with OTLP logs off) | **6.4** | **0** |
+| `BenchmarkLogIngestPlain` (2 lines/request, no traceparent) | 6138 | 41 |
+| `BenchmarkLogIngestTraceparent` (2 lines/request, with traceparent) | 6363 | 42 |
+
+Meaning: **default (empty `CELLHIVE_OTLP_ENDPOINT`) is zero-cost** — the trace middleware short-circuits on `!telemetry.Enabled()` (`internal/server/server.go:333`) and `ExportLog` checks the mode first; when enabled the added cost is about **0.1 us per line**, and only on the **asynchronous log path** (not the request hot path). Trace export head-samples at `0.01` by default.
