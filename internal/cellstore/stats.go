@@ -112,8 +112,12 @@ func (c *Cell) KVStats(ctx context.Context, opts KVStatsOptions) (KVStats, error
 	q := `SELECT COUNT(1) FROM kv WHERE expires_ms>0 AND expires_ms<=?`
 	args := []any{now}
 	if scoped {
-		q += ` AND key >= ? AND key < ?`
-		args = append(args, lo, hi)
+		q += ` AND key >= ?`
+		args = append(args, lo)
+		if hi != "" {
+			q += ` AND key < ?`
+			args = append(args, hi)
+		}
 	}
 	if err := c.DB.QueryRowContext(ctx, q, args...).Scan(&st.Expired); err != nil {
 		return st, err
@@ -121,8 +125,12 @@ func (c *Cell) KVStats(ctx context.Context, opts KVStatsOptions) (KVStats, error
 	nq := `SELECT MIN(expires_ms) FROM kv WHERE expires_ms>0`
 	nargs := []any{}
 	if scoped {
-		nq += ` AND key >= ? AND key < ?`
-		nargs = append(nargs, lo, hi)
+		nq += ` AND key >= ?`
+		nargs = append(nargs, lo)
+		if hi != "" {
+			nq += ` AND key < ?`
+			nargs = append(nargs, hi)
+		}
 	}
 	var next sql.NullInt64
 	if err := c.DB.QueryRowContext(ctx, nq, nargs...).Scan(&next); err != nil {
@@ -135,8 +143,12 @@ func (c *Cell) KVStats(ctx context.Context, opts KVStatsOptions) (KVStats, error
 		kq := `SELECT COUNT(1) FROM kv`
 		kargs := []any{}
 		if scoped {
-			kq += ` WHERE key >= ? AND key < ?`
-			kargs = append(kargs, lo, hi)
+			kq += ` WHERE key >= ?`
+			kargs = append(kargs, lo)
+			if hi != "" {
+				kq += ` AND key < ?`
+				kargs = append(kargs, hi)
+			}
 		}
 		if err := c.DB.QueryRowContext(ctx, kq, kargs...).Scan(&st.Keys); err != nil {
 			return st, err
@@ -163,12 +175,17 @@ func (c *Cell) KVStats(ctx context.Context, opts KVStatsOptions) (KVStats, error
 	return st, nil
 }
 
-// kvRange converts an inclusive key prefix into a half-open range.
+// kvRange converts an inclusive key prefix into a half-open range. An empty hi
+// means the prefix has no finite upper bound (every byte is 0xff).
 func kvRange(prefix string) (lo, hi string, ok bool) {
 	if prefix == "" {
 		return "", "", false
 	}
-	return prefix, prefix + "\xff", true
+	hi, bounded := prefixUpperBound(prefix)
+	if !bounded {
+		hi = ""
+	}
+	return prefix, hi, true
 }
 
 func joinNote(a, b string) string {

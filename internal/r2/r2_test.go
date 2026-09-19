@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 )
@@ -73,7 +75,7 @@ func TestR2KeySafety(t *testing.T) {
 func TestR2Multipart(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
-	up, err := s.CreateMultipart("demo", "files", "big.bin")
+	up, err := s.CreateMultipart(ctx, "demo", "files", "big.bin")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -128,7 +130,7 @@ func TestR2Multipart(t *testing.T) {
 	}
 
 	// Abort cancels a pending upload; a bad upload id is rejected.
-	up2, _ := s.CreateMultipart("demo", "files", "other.bin")
+	up2, _ := s.CreateMultipart(ctx, "demo", "files", "other.bin")
 	if _, err := s.UploadPart(ctx, "demo", "files", "other.bin", up2, 1, []byte("x")); err != nil {
 		t.Fatalf("part: %v", err)
 	}
@@ -283,5 +285,59 @@ func TestListPageDelimited(t *testing.T) {
 	objs, prefixes, next, err = s.ListPageDelimited(ctx, "acme", "files", "", "/", "", 2)
 	if err != nil || len(objs)+len(prefixes) != 2 || next == "" {
 		t.Fatalf("bounded = %d objs %d pref next=%q err=%v", len(objs), len(prefixes), next, err)
+	}
+}
+
+// TestGCStaleUploads is the regression for abandoned multipart uploads leaking
+// staged parts forever: GC must reclaim uploads whose creation marker is older
+// than the TTL while leaving fresh (or unmarked) uploads alone.
+func TestGCStaleUploads(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	old, err := s.CreateMultipart(ctx, "demo", "files", "old.bin")
+	if err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if _, err := s.UploadPart(ctx, "demo", "files", "old.bin", old, 1, []byte("x")); err != nil {
+		t.Fatalf("part old: %v", err)
+	}
+	oldPrefix, err := multipartPrefix("demo", "files", old)
+	if err != nil {
+		t.Fatalf("prefix: %v", err)
+	}
+	if _, err := s.B.Put(ctx, createMarkerKey(oldPrefix), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	fresh, err := s.CreateMultipart(ctx, "demo", "files", "new.bin")
+	if err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+	if _, err := s.UploadPart(ctx, "demo", "files", "new.bin", fresh, 1, []byte("y")); err != nil {
+		t.Fatalf("part fresh: %v", err)
+	}
+
+	removed, err := s.GCStaleUploads(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	keys, err := s.B.List(ctx, multipartRoot)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var haveFresh bool
+	for _, k := range keys {
+		if strings.Contains(k, old) {
+			t.Fatalf("stale upload not reclaimed: %s", k)
+		}
+		if strings.Contains(k, fresh) {
+			haveFresh = true
+		}
+	}
+	if !haveFresh {
+		t.Fatalf("fresh upload was reclaimed")
 	}
 }

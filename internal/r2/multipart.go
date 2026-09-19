@@ -6,7 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
+
+	"cellhive/internal/bucket"
 )
 
 // Multipart upload limits (R2-compatible shape).
@@ -64,8 +68,24 @@ func isUploadID(s string) bool {
 	return true
 }
 
-// CreateMultipart mints a new upload id for (ns, bucket, key).
-func (s *Store) CreateMultipart(ns, bucketName, key string) (string, error) {
+// multipartRoot is the staging root; GC lists it to reclaim abandoned uploads.
+const multipartRoot = "r2/.mpu/"
+
+// defaultMultipartTTL is how long abandoned staged parts are retained.
+const defaultMultipartTTL = 24 * time.Hour
+
+const createMarkerName = "created"
+
+// createMarkerKey is the per-upload creation-time marker object used by GC.
+func createMarkerKey(prefix string) string { return prefix + createMarkerName }
+
+// isCreateMarker reports whether key is a GC creation marker (not a part).
+func isCreateMarker(key string) bool { return strings.HasSuffix(key, "/"+createMarkerName) }
+
+// CreateMultipart mints a new upload id for (ns, bucket, key) and records its
+// creation time so a future GC can reclaim it if the caller never completes or
+// aborts.
+func (s *Store) CreateMultipart(ctx context.Context, ns, bucketName, key string) (string, error) {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", err
 	}
@@ -73,7 +93,71 @@ func (s *Store) CreateMultipart(ns, bucketName, key string) (string, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b[:]), nil
+	id := hex.EncodeToString(b[:])
+	p, err := multipartPrefix(ns, bucketName, id)
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(s.now().UnixMilli(), 10))); err != nil {
+		return "", err
+	}
+	s.maybeGC(ctx)
+	return id, nil
+}
+
+// maybeGC opportunistically reclaims stale multipart uploads, throttled to once
+// per hour per process so create stays cheap.
+func (s *Store) maybeGC(ctx context.Context) {
+	s.mu.Lock()
+	if !s.lastGC.IsZero() && s.now().Sub(s.lastGC) < time.Hour {
+		s.mu.Unlock()
+		return
+	}
+	s.lastGC = s.now()
+	s.mu.Unlock()
+	_, _ = s.GCStaleUploads(ctx, s.MultipartTTL)
+}
+
+// GCStaleUploads deletes staged parts of multipart uploads whose creation marker
+// is older than ttl, returning the number of uploads reclaimed. Uploads without
+// a marker are left alone (age cannot be proven).
+func (s *Store) GCStaleUploads(ctx context.Context, ttl time.Duration) (int, error) {
+	if ttl <= 0 {
+		ttl = defaultMultipartTTL
+	}
+	keys, err := s.B.List(ctx, multipartRoot)
+	if err != nil {
+		return 0, err
+	}
+	now := s.now()
+	cutoff := now.Add(-ttl).UnixMilli()
+	byPrefix := map[string][]string{}
+	for _, k := range keys {
+		if i := strings.LastIndexByte(k, '/'); i >= 0 {
+			byPrefix[k[:i+1]] = append(byPrefix[k[:i+1]], k)
+		}
+	}
+	removed := 0
+	for p, ks := range byPrefix {
+		data, _, err := s.B.Get(ctx, createMarkerKey(p))
+		if err != nil {
+			if errors.Is(err, bucket.ErrNotFound) {
+				continue
+			}
+			return removed, err
+		}
+		ms, perr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		if perr != nil || ms > cutoff {
+			continue
+		}
+		for _, k := range ks {
+			if derr := s.B.Delete(ctx, k); derr != nil && !errors.Is(derr, bucket.ErrNotFound) {
+				return removed, derr
+			}
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // UploadPart stores one part and returns its etag.

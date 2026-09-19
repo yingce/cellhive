@@ -106,12 +106,13 @@ func (d *orderedDispatcher) Do(ctx context.Context, key string, base, start, end
 	}
 	q := d.scopes[key]
 	if q == nil {
-		q = &scopeQueue{next: base, buf: map[uint64]*orderedRequest{}}
+		q = &scopeQueue{next: base, buf: map[uint64]*orderedRequest{}, lastUsed: time.Now()}
 		d.scopes[key] = q
 	}
 	d.mu.Unlock()
 
 	q.mu.Lock()
+	q.lastUsed = time.Now()
 	if start != q.next {
 		req := &orderedRequest{end: end, dispatch: dispatch, ready: make(chan struct{})}
 		q.buf[start] = req

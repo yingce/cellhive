@@ -110,3 +110,48 @@ func TestLastInsertID(t *testing.T) {
 		t.Fatalf("batch last_row_id = %+v, %v", b, err)
 	}
 }
+
+// TestD1ModifyingCTEAdvancesTxID is the regression for returnsRows treating every
+// WITH statement as a read: a data-modifying CTE was executed without Cell.Tx, so
+// the txid never advanced and RPO=0 capture could not cover it.
+func TestD1ModifyingCTEAdvancesTxID(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cellstore: %v", err)
+	}
+	defer cs.Close()
+	s := New(cs)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE t (id INTEGER PRIMARY KEY)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.Exec(ctx, "acme", "main", `INSERT INTO t (id) VALUES (1),(2),(3)`, nil); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	c, err := cs.Cell(ctx, Scope("acme", "main"))
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	before, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatalf("txid: %v", err)
+	}
+	if _, err := s.Query(ctx, "acme", "main",
+		`WITH del AS (SELECT id FROM t WHERE id < 3) DELETE FROM t WHERE id IN (SELECT id FROM del)`, nil); err != nil {
+		t.Fatalf("modifying cte: %v", err)
+	}
+	after, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatalf("txid: %v", err)
+	}
+	if after <= before {
+		t.Fatalf("txid did not advance: %d -> %d", before, after)
+	}
+	q, err := s.Query(ctx, "acme", "main", `SELECT count(1) FROM t`, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if q.Rows[0][0] != int64(1) {
+		t.Fatalf("rows after delete = %v, want 1", q.Rows[0][0])
+	}
+}

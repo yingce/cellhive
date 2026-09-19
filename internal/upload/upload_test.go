@@ -2,12 +2,35 @@ package upload
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"cellhive/internal/cell"
 )
+
+type errSink struct{ calls atomic.Int64 }
+
+func (e *errSink) AppendBatch(context.Context, cell.Scope, uint64, [][]byte) (string, string, error) {
+	e.calls.Add(1)
+	return "", "", errors.New("boom")
+}
+
+// TestFlushGroupStopsRetryingOnCancel is the regression for the retry loop
+// ignoring ctx cancellation and re-uploading after the caller gave up.
+func TestFlushGroupStopsRetryingOnCancel(t *testing.T) {
+	sink := &errSink{}
+	b := New(sink, nil, 64, 1<<20, time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
+	b.flushGroup(ctx, []item{{scope: sc, epoch: 1, seg: []byte("x")}})
+	if got := sink.calls.Load(); got != 1 {
+		t.Fatalf("AppendBatch calls = %d, want 1 (no retry after cancel)", got)
+	}
+}
 
 type fakeSink struct {
 	mu       sync.Mutex

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 
@@ -338,5 +339,102 @@ func TestCellConcurrentOpenAndPut(t *testing.T) {
 	wg.Wait()
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestPrefixScanHighByteKeys is the regression for the prefix+"\xff" upper bound:
+// keys whose first byte after the prefix is 0xff used to fall outside the range.
+func TestPrefixScanHighByteKeys(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer s.Close()
+	c, err := s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "prefix"})
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	all := []string{"p", "pa", "p\xff", "p\xff\x00", "p\xff\xff", "q", "\xff", "\xff\x00", "\xffz"}
+	for _, k := range all {
+		if err := c.Put(ctx, k, []byte("v"), nil); err != nil {
+			t.Fatalf("put %q: %v", k, err)
+		}
+	}
+
+	assertKeys := func(label string, got, want []string) {
+		t.Helper()
+		sort.Strings(want)
+		if len(got) != len(want) {
+			t.Fatalf("%s = %q, want %q", label, got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("%s = %q, want %q", label, got, want)
+			}
+		}
+	}
+
+	got, err := c.List(ctx, "p", "", 100)
+	if err != nil {
+		t.Fatalf("list p: %v", err)
+	}
+	assertKeys("list p", got, []string{"p", "pa", "p\xff", "p\xff\x00", "p\xff\xff"})
+
+	meta, err := c.ListMeta(ctx, "p", "", 100)
+	if err != nil {
+		t.Fatalf("listmeta p: %v", err)
+	}
+	mk := make([]string, len(meta))
+	for i, e := range meta {
+		mk[i] = e.Key
+	}
+	assertKeys("listmeta p", mk, []string{"p", "pa", "p\xff", "p\xff\x00", "p\xff\xff"})
+
+	// A prefix that is all 0xff has no finite upper bound and must still scan.
+	gotFF, err := c.List(ctx, "\xff", "", 100)
+	if err != nil {
+		t.Fatalf("list ff: %v", err)
+	}
+	assertKeys("list ff", gotFF, []string{"\xff", "\xff\x00", "\xffz"})
+
+	st, err := c.KVStats(ctx, KVStatsOptions{Prefix: "p", Exact: true})
+	if err != nil {
+		t.Fatalf("kv stats: %v", err)
+	}
+	if st.Keys != 5 {
+		t.Fatalf("kv stats keys = %d, want 5", st.Keys)
+	}
+}
+
+// TestForgetSerializesWithOpen is the regression for Cell/Forget racing: Forget
+// must hold openMu so a cell is never unlinked while Cell is mid-open.
+func TestForgetSerializesWithOpen(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "race"}
+	c, err := s.Open(ctx, sc)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := c.Put(ctx, "k", []byte("v"), nil); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	held := false
+	if err := s.ForgetWithVerify(ctx, sc, func() error {
+		held = !s.openMu.TryLock()
+		if !held {
+			s.openMu.Unlock()
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if !held {
+		t.Fatalf("Forget did not hold openMu during eviction")
 	}
 }

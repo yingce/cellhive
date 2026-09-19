@@ -254,6 +254,9 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 			if _, _, err = b.sink.AppendBatch(ctx, g.scope, g.epoch, g.segments); err == nil {
 				break
 			}
+			if ctx.Err() != nil {
+				break // canceled: stop retrying instead of ignoring the signal
+			}
 			select {
 			case <-ctx.Done():
 			case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):

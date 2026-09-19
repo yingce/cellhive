@@ -156,7 +156,7 @@ func TestD1CaptureConsistency(t *testing.T) {
 		t.Helper()
 		pj, _ := json.Marshal(params)
 		body := fmt.Sprintf(`{"sql":%q,"params":%s}`, sqlStr, pj)
-		req := httptest.NewRequest(http.MethodPost, "/v1/d1/exec?ns=acme&db=main", bytesReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/v1/d1/exec?ns=acme&db=DB", bytesReader(body))
 		req.Header.Set("x-cellhive-scope-token", tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -172,7 +172,7 @@ func TestD1CaptureConsistency(t *testing.T) {
 		do("INSERT INTO items (id, name, extra) VALUES (?, ?, ?)", int64(i), val, val)
 	}
 
-	db := restoreDB(t, rep, d1.Scope("acme", "main"), 1)
+	db := restoreDB(t, rep, d1.Scope("acme", "DB"), 1)
 	rows, err := db.Query("SELECT id, name, extra FROM items")
 	if err != nil {
 		t.Fatalf("query restored items: %v", err)

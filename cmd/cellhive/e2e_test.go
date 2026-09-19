@@ -117,12 +117,9 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 	}
 
 	// 3) Drive the CLI exactly as an operator would. The commands print JSON to
-	// stdout; silence it so the test output stays readable.
-	oldStdout := os.Stdout
-	if devnull, derr := os.OpenFile(os.DevNull, os.O_WRONLY, 0); derr == nil {
-		os.Stdout = devnull
-		defer func() { os.Stdout = oldStdout; devnull.Close() }()
-	}
+	// stdout; `go test` buffers package stdout and only shows it on failure, so
+	// there is nothing to silence. (Swapping the global os.Stdout here raced the
+	// workerd child's os.StartProcess reading it below.)
 	// The bucket conformance probe (conditional write/delete + ranged read) must
 	// pass through the real CLI → /v1/diagnose path.
 	if err := diagnose(); err != nil {

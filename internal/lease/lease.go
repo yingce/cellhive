@@ -149,15 +149,25 @@ func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
 // paths use this so they never hit the object store's List on every request.
 func (m *Manager) SampleCached(ctx context.Context, ttl time.Duration) []NodeLease {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.cached != nil && time.Since(m.cachedAt) < ttl {
-		return m.cached
+		cached := m.cached
+		m.mu.Unlock()
+		return cached
 	}
+	m.mu.Unlock()
+
+	// Sample outside the lock: a bucket List/Get round trip must not serialize
+	// every caller behind one another on cache expiry.
 	sample, err := m.Sample(ctx)
 	if err != nil {
-		return m.cached // fall back to a stale sample on error
+		m.mu.Lock()
+		cached := m.cached
+		m.mu.Unlock()
+		return cached // fall back to a stale sample on error
 	}
+	m.mu.Lock()
 	m.cached = sample
 	m.cachedAt = time.Now()
+	m.mu.Unlock()
 	return sample
 }

@@ -108,3 +108,76 @@ func TestScopeAuthKV(t *testing.T) {
 }
 
 func contextTODO() context.Context { return context.Background() }
+
+// TestScopeAuthEnforcesResourceName is the regression for the middleware only
+// checking the token's own name: a token for resource A must not reach B in the
+// same namespace via the query resource parameter.
+func TestScopeAuthEnforcesResourceName(t *testing.T) {
+	ctx := contextTODO()
+	s := newScopeServer(t)
+	cases := []struct{ kind, name, scope, param, other string }{
+		{"d1", "a", "acme/__d1__/a", "db", "b"},
+		{"r2", "a", "acme/__r2__/a", "bucket", "b"},
+		{"queue", "a", "acme/__queue__/a", "queue", "b"},
+		{"workflow", "a", "acme/__workflow__/a", "workflow", "b"},
+	}
+	for _, tc := range cases {
+		if _, err := s.Control.CreateResource(ctx, "acme", tc.kind, tc.name, tc.scope, "ops"); err != nil {
+			t.Fatalf("resource %s: %v", tc.kind, err)
+		}
+	}
+	for _, tc := range cases {
+		handler := s.scopeAuth(tc.kind)(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		tok := mint(t, s, "acme", tc.kind, tc.name)
+
+		matching := httptest.NewRequest(http.MethodPost, "/x?ns=acme&"+tc.param+"="+tc.name, nil)
+		matching.Header.Set("x-cellhive-scope-token", tok)
+		if rr := httptest.NewRecorder(); func() int { handler(rr, matching); return rr.Code }() != http.StatusOK {
+			t.Fatalf("%s matching resource = %d, want 200", tc.kind, rr.Code)
+		}
+
+		cross := httptest.NewRequest(http.MethodPost, "/x?ns=acme&"+tc.param+"="+tc.other, nil)
+		cross.Header.Set("x-cellhive-scope-token", tok)
+		rr := httptest.NewRecorder()
+		handler(rr, cross)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s cross-resource = %d, want 403", tc.kind, rr.Code)
+		}
+	}
+}
+
+// TestScopeResourceMismatchDeniedViaHandler exercises the real HTTP handlers
+// (not just the middleware) so the cross-resource denial is end-to-end.
+func TestScopeResourceMismatchDeniedViaHandler(t *testing.T) {
+	ctx := contextTODO()
+	s := newScopeServer(t)
+	for _, r := range []struct{ kind, name, scope string }{
+		{"d1", "a", "acme/__d1__/a"},
+		{"d1", "b", "acme/__d1__/b"},
+		{"r2", "a", "acme/__r2__/a"},
+		{"r2", "b", "acme/__r2__/b"},
+	} {
+		if _, err := s.Control.CreateResource(ctx, "acme", r.kind, r.name, r.scope, "ops"); err != nil {
+			t.Fatalf("resource %s/%s: %v", r.kind, r.name, err)
+		}
+	}
+
+	d1tok := mint(t, s, "acme", "d1", "a")
+	body := []byte(`{"sql":"SELECT 1"}`)
+	if code := kvReq(t, s, http.MethodPost, "/v1/d1/query?ns=acme&db=b", d1tok, body); code != http.StatusForbidden {
+		t.Fatalf("d1 cross-resource = %d, want 403", code)
+	}
+	if code := kvReq(t, s, http.MethodPost, "/v1/d1/query?ns=acme&db=a", d1tok, body); code != http.StatusOK {
+		t.Fatalf("d1 own resource = %d, want 200", code)
+	}
+
+	r2tok := mint(t, s, "acme", "r2", "a")
+	if code := kvReq(t, s, http.MethodPut, "/v1/r2/object?ns=acme&bucket=b&key=k", r2tok, []byte("v")); code != http.StatusForbidden {
+		t.Fatalf("r2 cross-resource = %d, want 403", code)
+	}
+	if code := kvReq(t, s, http.MethodPut, "/v1/r2/object?ns=acme&bucket=a&key=k", r2tok, []byte("v")); code != http.StatusOK {
+		t.Fatalf("r2 own resource = %d, want 200", code)
+	}
+}

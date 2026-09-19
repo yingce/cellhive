@@ -3,6 +3,7 @@ package cellcapture
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,10 +30,11 @@ func TestManagerCapturesAndWaits(t *testing.T) {
 	}
 	defer cs.Close()
 	rc := &recCommitter{}
-	owner := true
+	var owner atomic.Bool
+	owner.Store(true)
 	m := &Manager{
 		Store: cs, Committer: rc, AutoSnapshot: true,
-		Owner:      func(context.Context, cell.Scope) (bool, uint64, error) { return owner, 1, nil },
+		Owner:      func(context.Context, cell.Scope) (bool, uint64, error) { return owner.Load(), 1, nil },
 		Checkpoint: 50 * time.Millisecond,
 	}
 	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "default"}
@@ -64,7 +66,7 @@ func TestManagerCapturesAndWaits(t *testing.T) {
 	}
 
 	// Ownership loss stops the capture.
-	owner = false
+	owner.Store(false)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
@@ -90,5 +92,51 @@ func TestEnsureRefusesWhenNotOwner(t *testing.T) {
 		Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return false, 0, nil }}
 	if _, err := m.Ensure(context.Background(), cell.Scope{Namespace: "a", Class: "__kv__", ID: "d"}); err != ErrNotOwner {
 		t.Fatalf("ensure = %v, want ErrNotOwner", err)
+	}
+}
+
+// TestWatermarkSurvivesRequestContextCancel is the regression for the committed
+// watermark closure capturing the request context: once the first request ends,
+// the accessor returned 0 forever and auto-checkpoint truncated the WAL ahead of
+// the durability ticket.
+func TestWatermarkSurvivesRequestContextCancel(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cellstore: %v", err)
+	}
+	defer cs.Close()
+	m := &Manager{
+		Store: cs, Committer: &recCommitter{}, AutoSnapshot: false,
+		Owner:               func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		Checkpoint:          time.Hour,
+		AutoCheckpointBytes: 1 << 20,
+	}
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "wm"}
+	rctx, cancel := context.WithCancel(context.Background())
+	if _, err := m.Ensure(rctx, scope); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	bg := context.Background()
+	c, err := cs.Cell(bg, scope)
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	if err := c.Put(bg, "k", []byte("v"), nil); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	txid, err := c.TxID(bg)
+	if err != nil {
+		t.Fatalf("txid: %v", err)
+	}
+	cancel()
+
+	m.mu.Lock()
+	st := m.caps[scope.String()]
+	m.mu.Unlock()
+	if st == nil {
+		t.Fatalf("capture not registered")
+	}
+	if got := st.cap.CommittedTicket(); got != txid || got == 0 {
+		t.Fatalf("committed ticket after request cancel = %d, want %d", got, txid)
 	}
 }

@@ -5,20 +5,38 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"cellhive/internal/cell"
 )
 
+// flakySink is called concurrently by shard flush loops and the replay loop, so
+// every field access is guarded.
 type flakySink struct {
+	mu      sync.Mutex
 	fail    bool
 	ups     int
 	segs    int
 	lastErr error
 }
 
+func (f *flakySink) setFail(v bool) {
+	f.mu.Lock()
+	f.fail = v
+	f.mu.Unlock()
+}
+
+func (f *flakySink) snapshot() (ups, segs int, lastErr error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ups, f.segs, f.lastErr
+}
+
 func (f *flakySink) AppendBatch(_ context.Context, _ cell.Scope, _ uint64, segments [][]byte) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.fail {
 		f.lastErr = errors.New("bucket unavailable")
 		return "", "", f.lastErr
@@ -65,9 +83,9 @@ func TestSpoolDefersFailedUploadAndReplays(t *testing.T) {
 		t.Fatalf("dropped = %d, want 0 (spooled failures are deferred)", got)
 	}
 
-	sink.fail = false
+	sink.setFail(false)
 	waitFor(t, "replay", func() bool { return statU64(b, "spool") == 0 && statU64(b, "replayed") >= 1 })
-	if sink.segs == 0 {
+	if _, segs, _ := sink.snapshot(); segs == 0 {
 		t.Fatal("replayed segment never reached the sink")
 	}
 }
@@ -110,8 +128,8 @@ func TestSpoolReplaysAfterRestart(t *testing.T) {
 	defer cancel2()
 	b2.Start(ctx2)
 	waitFor(t, "restart replay", func() bool { return sp2.Count() == 0 && statU64(b2, "replayed") == 2 })
-	if good.segs != 2 {
-		t.Fatalf("replayed segments = %d, want 2", good.segs)
+	if _, segs, _ := good.snapshot(); segs != 2 {
+		t.Fatalf("replayed segments = %d, want 2", segs)
 	}
 }
 

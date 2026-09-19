@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -24,6 +25,21 @@ var ErrBadKey = errors.New("r2: unsafe key")
 // Store reads and writes R2 objects.
 type Store struct {
 	B bucket.Bucket
+	// Now is injectable for tests; defaults to time.Now.
+	Now func() time.Time
+	// MultipartTTL bounds how long an abandoned multipart upload's staged parts
+	// are retained before GC reclaims them (0 = default 24h).
+	MultipartTTL time.Duration
+
+	mu     sync.Mutex
+	lastGC time.Time
+}
+
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // New creates an R2 store.

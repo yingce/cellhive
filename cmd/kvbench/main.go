@@ -190,7 +190,7 @@ func d1Setup(client *http.Client, cfg conf, idx int) (int, error) {
 func d1Exec(client *http.Client, cfg conf, idx int, sqlText string, params []any) (int, error) {
 	body, _ := json.Marshal(map[string]any{"sql": sqlText, "params": params})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		cfg.addr+"/v1/d1/exec?ns="+cfg.nsList[idx]+"&db=bench", bytes.NewReader(body))
+		cfg.addr+"/v1/d1/exec?ns="+cfg.nsList[idx]+"&db=DB", bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
@@ -207,7 +207,7 @@ func d1Exec(client *http.Client, cfg conf, idx int, sqlText string, params []any
 func d1Query(client *http.Client, cfg conf, idx int, sqlText string, params []any) (int, error) {
 	body, _ := json.Marshal(map[string]any{"sql": sqlText, "params": params})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		cfg.addr+"/v1/d1/query?ns="+cfg.nsList[idx]+"&db=bench", bytes.NewReader(body))
+		cfg.addr+"/v1/d1/query?ns="+cfg.nsList[idx]+"&db=DB", bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}

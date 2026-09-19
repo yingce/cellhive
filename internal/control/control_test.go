@@ -940,3 +940,29 @@ func TestResourceRevoke(t *testing.T) {
 		t.Fatalf("HasBinding after re-register = %v, %v; want true", ok, err)
 	}
 }
+
+// TestReleasesCarryCrons is the regression for the release log omitting crons,
+// which made `triggers list` unable to show the active version's schedules.
+func TestReleasesCarryCrons(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, true)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatalf("app: %v", err)
+	}
+	if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha1", Crons: []string{"* * * * *"}}, "ops"); err != nil {
+		t.Fatalf("deploy1: %v", err)
+	}
+	if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha2", Crons: []string{"0 * * * *", "30 2 * * *"}}, "ops"); err != nil {
+		t.Fatalf("deploy2: %v", err)
+	}
+	rel, err := s.Releases(ctx, "acme", "api")
+	if err != nil || len(rel) != 2 {
+		t.Fatalf("releases = %+v, %v", rel, err)
+	}
+	if !rel[0].Active || len(rel[0].Crons) != 2 || rel[0].Crons[0] != "0 * * * *" {
+		t.Fatalf("active release = %+v", rel[0])
+	}
+	if rel[1].Active || len(rel[1].Crons) != 1 {
+		t.Fatalf("v1 release = %+v", rel[1])
+	}
+}

@@ -1069,7 +1069,7 @@ func (s *Store) Releases(ctx context.Context, ns, worker string) ([]Release, err
 	var active int
 	_ = c.DB.QueryRowContext(ctx, `SELECT active FROM workers WHERE ns=? AND name=?`, ns, worker).Scan(&active)
 	rows, err := c.DB.QueryContext(ctx,
-		`SELECT number, bundle_sha, actor, created_ms FROM versions WHERE ns=? AND worker=? ORDER BY number DESC`,
+		`SELECT number, bundle_sha, actor, created_ms, crons FROM versions WHERE ns=? AND worker=? ORDER BY number DESC`,
 		ns, worker)
 	if err != nil {
 		return nil, err
@@ -1078,10 +1078,14 @@ func (s *Store) Releases(ctx context.Context, ns, worker string) ([]Release, err
 	var out []Release
 	for rows.Next() {
 		var r Release
-		if err := rows.Scan(&r.Version, &r.BundleSHA, &r.Actors, &r.CreatedMs); err != nil {
+		var crons string
+		if err := rows.Scan(&r.Version, &r.BundleSHA, &r.Actors, &r.CreatedMs, &crons); err != nil {
 			return nil, err
 		}
 		r.Active = r.Version == active
+		if crons != "" {
+			_ = json.Unmarshal([]byte(crons), &r.Crons)
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()

@@ -265,3 +265,19 @@ func TestClaimAsStats(t *testing.T) {
 		t.Fatalf("claimAs epoch_bumps = %d, want 1", got)
 	}
 }
+
+func TestNextEpochRejectsCorruptGeneration(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "corrupt"}
+	if _, err := m.B.Put(ctx, genKey(sc), []byte("not-a-number")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := m.nextEpoch(ctx, sc); !errors.Is(err, ErrGenCorrupt) {
+		t.Fatalf("nextEpoch = %v, want ErrGenCorrupt", err)
+	}
+	// The fence must fail closed rather than reuse epoch 1.
+	if _, err := m.ClaimAs(ctx, sc, "do-1", "", cell.RoleCellAgent, time.Minute, time.Now()); !errors.Is(err, ErrGenCorrupt) {
+		t.Fatalf("ClaimAs = %v, want ErrGenCorrupt", err)
+	}
+}

@@ -129,11 +129,12 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		}
 		cap.GroupCommitWait = m.GroupCommitWait
 		cap.PipelineThreshold = m.PipelineThreshold
+		cctx, cancel := context.WithCancel(context.Background())
 		if m.AutoCheckpointBytes > 0 {
 			cell := c
 			cap.SetCheckpointer(func(cctx context.Context) (uint64, error) { return cell.SafeCheckpoint(cctx) })
 			cap.SetCommittedWatermark(func() uint64 {
-				txid, err := cell.TxID(ctx)
+				txid, err := cell.TxID(cctx)
 				if err != nil {
 					return 0
 				}
@@ -141,7 +142,6 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 			})
 			cap.SetAutoCheckpoint(m.AutoCheckpointBytes)
 		}
-		cctx, cancel := context.WithCancel(context.Background())
 		ready := make(chan struct{})
 		m.caps[key] = &state{scope: scope, epoch: epoch, cap: cap, cancel: cancel, ready: ready}
 		m.mu.Unlock()

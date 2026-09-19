@@ -341,6 +341,15 @@ func (c *Capture) adaptPipeline(latency time.Duration) {
 // before the capture consumed them.
 func (c *Capture) SetCommittedWatermark(f func() uint64) { c.committed = f }
 
+// CommittedTicket reports the writer's committed ticket currently surfaced to
+// the checkpoint watermark (0 when no accessor is wired).
+func (c *Capture) CommittedTicket() uint64 {
+	if c.committed == nil {
+		return 0
+	}
+	return c.committed()
+}
+
 // SetCheckpointer wires the safe TRUNCATE hook: it must pause the writer, run
 // the checkpoint, read the committed ticket, and resume.
 func (c *Capture) SetCheckpointer(f func(ctx context.Context) (uint64, error)) { c.checkpointer = f }

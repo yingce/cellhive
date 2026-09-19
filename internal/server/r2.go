@@ -143,7 +143,7 @@ func (s *Server) handleR2MultipartCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	id, err := s.R2.CreateMultipart(s.scopeNS(r), q.Get("bucket"), q.Get("key"))
+	id, err := s.R2.CreateMultipart(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "r2_multipart_create_failed", err.Error())
 		return

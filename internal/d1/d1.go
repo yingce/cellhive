@@ -57,9 +57,11 @@ func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any)
 	if err != nil {
 		return Result{}, err
 	}
-	// SELECTs are reads (no capture advance). Anything else is a mutation and
-	// must advance the cell txid in the same commit so capture's Wait() covers it.
-	if returnsRows(sqlText) {
+	// Reads skip the capture advance; anything else is a mutation and must
+	// advance the cell txid in the same commit so capture's Wait() covers it.
+	// IsReadOnly (not returnsRows) decides this: a WITH statement returns rows
+	// but may still mutate.
+	if IsReadOnly(sqlText) {
 		return runOne(ctx, c.DB, nil, sqlText, params)
 	}
 	var res Result

@@ -235,3 +235,39 @@ func TestDeleteInstance(t *testing.T) {
 		t.Fatalf("second delete = %v, %v; want false, nil", ok, err)
 	}
 }
+
+// TestReadOnlyCallsDoNotAdvanceTxID is the regression for re-running the schema
+// and ALTER migrations on every call, which made pure reads advance the cell
+// txid and produce capture deltas.
+func TestReadOnlyCallsDoNotAdvanceTxID(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cellstore: %v", err)
+	}
+	defer cs.Close()
+	s := New(cs)
+	if _, err := s.List(ctx, "acme", "wf", 10); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	c, err := cs.Cell(ctx, Scope("acme", "wf"))
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	before, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatalf("txid: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.List(ctx, "acme", "wf", 10); err != nil {
+			t.Fatalf("list %d: %v", i, err)
+		}
+	}
+	after, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatalf("txid: %v", err)
+	}
+	if after != before {
+		t.Fatalf("read calls advanced txid: %d -> %d", before, after)
+	}
+}

@@ -100,11 +100,12 @@ type DeploySpec struct {
 
 // Release is one entry of a worker's release log.
 type Release struct {
-	Version   int    `json:"version"`
-	BundleSHA string `json:"bundle_sha"`
-	Actors    string `json:"actor,omitempty"`
-	CreatedMs int64  `json:"created_ms"`
-	Active    bool   `json:"active"`
+	Version   int      `json:"version"`
+	BundleSHA string   `json:"bundle_sha"`
+	Actors    string   `json:"actor,omitempty"`
+	CreatedMs int64    `json:"created_ms"`
+	Active    bool     `json:"active"`
+	Crons     []string `json:"crons,omitempty"`
 }
 
 // Worker tracks a worker's active and previous (promoted-from) version.

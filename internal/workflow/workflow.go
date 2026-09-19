@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"cellhive/internal/cell"
@@ -80,8 +81,9 @@ CREATE INDEX IF NOT EXISTS events_instance ON events(instance_id, id);
 
 // Store persists workflow instances in cells.
 type Store struct {
-	cs  *cellstore.Store
-	now func() time.Time
+	cs       *cellstore.Store
+	now      func() time.Time
+	migrated sync.Map // scope string -> migrated once per process
 }
 
 // New creates a workflow store.
@@ -108,19 +110,24 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	if ns == "" || name == "" {
 		return nil, fmt.Errorf("workflow: ns and name are required")
 	}
-	c, err := s.cs.Cell(ctx, Scope(ns, name))
+	scope := Scope(ns, name)
+	c, err := s.cs.Cell(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
+	if _, ok := s.migrated.Load(scope.String()); ok {
+		return c, nil
+	}
+	// The schema and best-effort ALTERs are idempotent; run them once per process
+	// so a read API does not advance the capture txid on every call (read traffic
+	// -> replication). Each statement goes through Cell.Tx so a cold cell's
+	// migration cannot desynchronise capture's txid sequence.
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, schema)
 		return err
 	}); err != nil {
 		return nil, err
 	}
-	// Best-effort migration for cells created before these columns existed. Each
-	// statement goes through Cell.Tx (advancing the cell txid) so a cold cell's
-	// migration cannot desynchronise capture's txid sequence.
 	for _, stmt := range []string{
 		`ALTER TABLE events ADD COLUMN consumed INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE instances ADD COLUMN run_token TEXT NOT NULL DEFAULT ''`,
@@ -134,6 +141,7 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 			_ = err // already present on cells created by the current schema
 		}
 	}
+	s.migrated.Store(scope.String(), struct{}{})
 	return c, nil
 }
 

@@ -976,19 +976,30 @@ func bundleFromConfig(m *wrangler.Deploy) (string, error) {
 	if m.NoBundle {
 		return uploadBundle(m.Main)
 	}
-	rules := make([]bundler.Rule, 0, len(m.Rules))
-	for _, r := range m.Rules {
-		rules = append(rules, bundler.Rule{Type: r.Type, Globs: r.Globs})
-	}
-	out, err := bundler.Build(context.Background(), bundler.Options{
-		EntryPoint: m.Main, OutFile: filepath.Join(os.TempDir(), "cellhive-bundle.js"),
-		Minify: m.Minify, KeepNames: m.KeepNames, NodeJSCompat: m.NodeCompat,
-		Rules: rules, Define: m.Defines,
-	})
+	out, err := buildBundle(m)
 	if err != nil {
 		return "", err
 	}
 	return uploadBundleBytes(out)
+}
+
+// buildBundle runs esbuild with a per-build temp OutFile so concurrent deploys
+// never overwrite each other's bundle (a fixed name in os.TempDir() is shared).
+func buildBundle(m *wrangler.Deploy) ([]byte, error) {
+	rules := make([]bundler.Rule, 0, len(m.Rules))
+	for _, r := range m.Rules {
+		rules = append(rules, bundler.Rule{Type: r.Type, Globs: r.Globs})
+	}
+	tmpDir, err := os.MkdirTemp("", "cellhive-bundle-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	return bundler.Build(context.Background(), bundler.Options{
+		EntryPoint: m.Main, OutFile: filepath.Join(tmpDir, "bundle.js"),
+		Minify: m.Minify, KeepNames: m.KeepNames, NodeJSCompat: m.NodeCompat,
+		Rules: rules, Define: m.Defines,
+	})
 }
 
 func uploadBundle(path string) (string, error) {
@@ -1726,24 +1737,38 @@ func cmdCompat(args []string) error {
 	return fmt.Errorf("unknown command: %s", cmd)
 }
 
-// printWorkerCrons prints the cron expressions of a worker's active version.
-func printWorkerCrons(ns, worker string) error {
+// workerCrons returns the cron expressions of a worker's active version (not
+// the whole release history).
+func workerCrons(ns, worker string) ([]string, error) {
 	data, err := adminCall(http.MethodGet, "/v1/control/releases?namespace="+url.QueryEscape(ns)+"&worker="+url.QueryEscape(worker), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var rel struct {
 		Releases []struct {
-			Number int      `json:"number"`
-			Crons  []string `json:"crons"`
+			Version int      `json:"version"`
+			Active  bool     `json:"active"`
+			Crons   []string `json:"crons"`
 		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &rel); err != nil {
-		return err
+		return nil, err
 	}
 	out := []string{}
 	for _, r := range rel.Releases {
-		out = append(out, r.Crons...)
+		if r.Active {
+			out = append(out, r.Crons...)
+			break
+		}
+	}
+	return out, nil
+}
+
+// printWorkerCrons prints the cron expressions of a worker's active version.
+func printWorkerCrons(ns, worker string) error {
+	out, err := workerCrons(ns, worker)
+	if err != nil {
+		return err
 	}
 	enc, err := json.Marshal(map[string]any{"namespace": ns, "worker": worker, "crons": out})
 	if err != nil {

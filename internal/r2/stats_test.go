@@ -16,7 +16,7 @@ func TestStatsBoundedListing(t *testing.T) {
 		}
 	}
 	// An in-flight multipart upload with two parts (staging area, opaque to List).
-	id, err := s.CreateMultipart("acme", "media", "big")
+	id, err := s.CreateMultipart(ctx, "acme", "media", "big")
 	if err != nil {
 		t.Fatalf("create mpu: %v", err)
 	}

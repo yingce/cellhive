@@ -810,7 +810,7 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	// (c) D1 writes go through the same gate: while C owns the cell, a D1 exec on
 	// B is forwarded and executed by C.
 	for _, srv := range []*Server{srvB, srvC} {
-		if _, err := srv.Control.CreateResource(ctx, "app", "d1", "DB", "app/__d1__/db", "t"); err != nil {
+		if _, err := srv.Control.CreateResource(ctx, "app", "d1", "db", "app/__d1__/db", "t"); err != nil {
 			t.Fatalf("resource: %v", err)
 		}
 	}
@@ -818,7 +818,7 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	if _, err := omC.Claim(ctx, d1.Scope("app", "db"), time.Now()); err != nil {
 		t.Fatalf("claim d1: %v", err)
 	}
-	tok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "d1", Name: "DB"})
+	tok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "d1", Name: "db"})
 	if err != nil {
 		t.Fatalf("scope token: %v", err)
 	}
@@ -844,14 +844,14 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 
 	// (d) Queue writes go through the same gate.
 	for _, srv := range []*Server{srvB, srvC} {
-		if _, err := srv.Control.CreateResource(ctx, "app", "queue", "JOBS", "app/__queue__/jobs", "t"); err != nil {
+		if _, err := srv.Control.CreateResource(ctx, "app", "queue", "jobs", "app/__queue__/jobs", "t"); err != nil {
 			t.Fatalf("queue resource: %v", err)
 		}
 	}
 	if _, err := omC.Claim(ctx, queue.Scope("app", "jobs"), time.Now()); err != nil {
 		t.Fatalf("claim queue: %v", err)
 	}
-	qtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "queue", Name: "JOBS"})
+	qtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "queue", Name: "jobs"})
 	if err != nil {
 		t.Fatalf("queue scope token: %v", err)
 	}
@@ -873,14 +873,14 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 
 	// (e) Workflow writes go through the same gate.
 	for _, srv := range []*Server{srvB, srvC} {
-		if _, err := srv.Control.CreateResource(ctx, "app", "workflow", "WF", "class", "t"); err != nil {
+		if _, err := srv.Control.CreateResource(ctx, "app", "workflow", "wf", "class", "t"); err != nil {
 			t.Fatalf("workflow resource: %v", err)
 		}
 	}
 	if _, err := omC.Claim(ctx, workflow.Scope("app", "wf"), time.Now()); err != nil {
 		t.Fatalf("claim workflow: %v", err)
 	}
-	wtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "workflow", Name: "WF"})
+	wtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "workflow", Name: "wf"})
 	if err != nil {
 		t.Fatalf("workflow scope token: %v", err)
 	}

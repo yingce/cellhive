@@ -779,6 +779,9 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "overloaded", "node is above its disk high watermark")
 		return
 	}
+	// Claiming may take over from a peer (or from nobody): drop any stale local
+	// copy first so the claim cannot capture on top of a foreign lineage.
+	s.invalidateStaleLocal(r.Context(), sc)
 	o, err := s.Owner.Claim(r.Context(), sc, time.Now())
 	s.claims.Add(1)
 	switch {
@@ -910,6 +913,62 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 // locally (the local file hydrates from the bucket on first open).
 func (s *Server) forwardRead(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
 	return s.forwardIfNonOwner(w, r, sc, preRead)
+}
+
+// invalidateStaleLocal drops a locally cached cell whose scope this node does
+// not own. A node that was down while a peer took the cell over holds a complete
+// but stale SQLite file; serving it would return old rows, and re-claiming on
+// top of it would fork the replica chain. Dropping it makes the next open a cold
+// restore from the durable chain (celld's took_over rule, crates/logic/restore.rs).
+//
+// It must run OUTSIDE a BeginRequest gate for the scope: Forget waits for the
+// scope's in-flight requests to drain, so calling it from inside a gated request
+// would wait on itself. scopeAuth calls it before opening the gate.
+func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) {
+	if s.Owner == nil || s.Store == nil {
+		return
+	}
+	o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+	if err != nil && !errors.Is(err, owner.ErrUnowned) {
+		return // resolve failed: leave the local cell alone
+	}
+	if err == nil {
+		if o.Node == s.Cfg.NodeID {
+			return // ours (a clean same-node reload): keep the local copy
+		}
+		if !o.Expired(time.Now()) && o.Address != "" {
+			return // a live peer owns it: the request forwards, local is unused
+		}
+	}
+	_ = s.Store.Forget(ctx, sc)
+}
+
+// gateScope returns the cell scope a binding request touches, mirroring gateKey.
+// ok is false when the scope is namespace-level (no per-cell gate).
+func (s *Server) gateScope(ctx context.Context, kind, ns, name string, q url.Values) (cell.Scope, bool) {
+	switch kind {
+	case "kv":
+		if sc, err := s.kvScopeFor(ctx, ns, name); err == nil {
+			return sc, true
+		}
+	case "d1":
+		if db := q.Get("db"); db != "" {
+			return d1.Scope(ns, db), true
+		}
+	case "queue":
+		if n := q.Get("queue"); n != "" {
+			return queue.Scope(ns, n), true
+		}
+	case "workflow":
+		if n := q.Get("workflow"); n != "" {
+			return workflow.Scope(ns, n), true
+		}
+	case "vectorize":
+		if name != "" {
+			return vectorize.Scope(ns, name), true
+		}
+	}
+	return cell.Scope{}, false
 }
 
 // refreshOwner invalidates the cached owner record and re-resolves it, reporting

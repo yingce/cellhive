@@ -164,7 +164,9 @@ func (m *Manager) Release(ctx context.Context) error {
 	if !ok || cur.Node != m.NodeID || cur.Session != m.Session {
 		return nil
 	}
-	// Conditional: never delete a token a newer session has taken over.
+	// Re-read so the fenced delete is bound to one token version, and re-check
+	// that version is still ours: our token may have expired and been taken over
+	// between the check above and here, and deleting it would break the fence.
 	data, etag, err := m.B.Get(ctx, TokenKey)
 	if err != nil {
 		if errors.Is(err, bucket.ErrNotFound) {
@@ -172,7 +174,13 @@ func (m *Manager) Release(ctx context.Context) error {
 		}
 		return err
 	}
-	_ = data
+	var latest Token
+	if err := json.Unmarshal(data, &latest); err != nil {
+		return err
+	}
+	if latest.Node != m.NodeID || latest.Session != m.Session {
+		return nil
+	}
 	if err := m.B.ConditionalDelete(ctx, TokenKey, etag); err != nil && !errors.Is(err, bucket.ErrPrecondition) {
 		return err
 	}

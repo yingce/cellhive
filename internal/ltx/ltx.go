@@ -168,10 +168,10 @@ func Split(b []byte) ([][]byte, error) {
 			return nil, ErrMagic
 		}
 		length := binary.BigEndian.Uint64(b[32:40])
-		total := HeaderSize + int(length)
-		if len(b) < total {
+		if uint64(len(b)-HeaderSize) < length {
 			return nil, ErrShort
 		}
+		total := HeaderSize + int(length)
 		seg := b[:total]
 		if _, _, err := Decode(seg); err != nil {
 			return nil, err

@@ -178,3 +178,53 @@ func TestOrderedDispatcherDoSweepsIdleScope(t *testing.T) {
 		t.Fatal("buffered request was not evicted by the Do-triggered sweep")
 	}
 }
+
+// TestOrderedDispatcherRefreshesLastUsed is the regression for lastUsed being
+// read by sweep but never written: every scope was treated as infinitely idle.
+func TestOrderedDispatcherRefreshesLastUsed(t *testing.T) {
+	d := newOrderedDispatcher()
+	d.ttl = 50 * time.Millisecond
+	defer d.Close()
+
+	ok := func() (<-chan peer.CommitAck, error) {
+		ch := make(chan peer.CommitAck, 1)
+		ch <- peer.CommitAck{}
+		return ch, nil
+	}
+	ctx := context.Background()
+	if _, err := d.Do(ctx, "live", 1, 1, 1, ok); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	d.mu.Lock()
+	q := d.scopes["live"]
+	d.mu.Unlock()
+	q.mu.Lock()
+	first := q.lastUsed
+	q.mu.Unlock()
+	if first.IsZero() {
+		t.Fatalf("lastUsed was not set on first use")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	if _, err := d.Do(ctx, "live", 1, 2, 2, ok); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	q.mu.Lock()
+	second := q.lastUsed
+	q.mu.Unlock()
+	if !second.After(first) {
+		t.Fatalf("lastUsed not refreshed: %v -> %v", first, second)
+	}
+
+	// An active scope (used within the TTL) must survive a sweep.
+	d.mu.Lock()
+	d.lastSweep = time.Time{}
+	d.mu.Unlock()
+	d.sweep(time.Now())
+	d.mu.Lock()
+	_, present := d.scopes["live"]
+	d.mu.Unlock()
+	if !present {
+		t.Fatalf("active scope was evicted")
+	}
+}

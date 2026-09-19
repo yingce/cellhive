@@ -31,14 +31,14 @@ func TestD1ReadSkipsCapture(t *testing.T) {
 		h.ServeHTTP(rr, req)
 		return rr.Code
 	}
-	if code := do("/v1/d1/exec?ns=acme&db=bench", "CREATE TABLE t(a)"); code != http.StatusOK {
+	if code := do("/v1/d1/exec?ns=acme&db=DB", "CREATE TABLE t(a)"); code != http.StatusOK {
 		t.Fatalf("exec = %d, want 200", code)
 	}
 	if atomic.LoadInt64(&calls) == 0 {
 		t.Fatalf("mutation did not go through capture")
 	}
 	before := atomic.LoadInt64(&calls)
-	if code := do("/v1/d1/query?ns=acme&db=bench", "SELECT 1"); code != http.StatusOK {
+	if code := do("/v1/d1/query?ns=acme&db=DB", "SELECT 1"); code != http.StatusOK {
 		t.Fatalf("read = %d, want 200", code)
 	}
 	if after := atomic.LoadInt64(&calls); after != before {

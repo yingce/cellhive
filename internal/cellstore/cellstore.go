@@ -155,8 +155,13 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
-	// Another goroutine may have opened it while we waited.
+	// Another goroutine may have opened it while we waited, or an eviction may
+	// have started between the first gate check and acquiring openMu; Forget
+	// holds openMu, so re-check the gate before opening.
 	s.mu.Lock()
+	for s.evicting[key] {
+		s.cond.Wait()
+	}
 	if c, ok := s.cells[p]; ok {
 		s.touchLocked(p)
 		s.mu.Unlock()
@@ -324,6 +329,10 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 		return err
 	}
 	key := sc.String()
+	// openMu serializes eviction against Cell opening: a cell is never unlinked
+	// while another goroutine is mid-open (which would orphan its writes).
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
 	s.mu.Lock()
 	// Wait for in-flight requests and other evictions: after this loop the cell
 	// cannot be reached through BeginRequest/Cell until the gate is released.
@@ -376,6 +385,9 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 }
 
 func (s *Store) evictOne(ctx context.Context) bool {
+	// Serialize with Cell opening so a cell is never closed mid-open.
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
 	s.mu.Lock()
 	var c *Cell
 	for e := s.lru.Back(); e != nil; e = e.Prev() {
@@ -960,6 +972,21 @@ func (c *Cell) Delete(ctx context.Context, key string) error {
 	return err
 }
 
+// prefixUpperBound returns the smallest string greater than every key that has
+// prefix, for byte-wise (BINARY) comparison. It is the lexicographic successor
+// of the prefix. ok is false when every byte is 0xff: such a prefix has no
+// finite upper bound, and callers must omit the upper condition.
+func prefixUpperBound(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != 0xff {
+			b[i]++
+			return string(b[:i+1]), true
+		}
+	}
+	return "", false
+}
+
 // List returns up to limit keys with the given prefix that sort after `after`,
 // in ascending order (bounded KV-list primitive). limit <= 0 defaults to 100 and
 // is capped at 1000.
@@ -973,9 +1000,9 @@ func (c *Cell) List(ctx context.Context, prefix, after string, limit int) ([]str
 	}
 	q := `SELECT key FROM kv WHERE key >= ? AND (expires_ms=0 OR expires_ms>?)`
 	args := []any{lo, time.Now().UnixMilli()}
-	if prefix != "" {
+	if hi, ok := prefixUpperBound(prefix); ok {
 		q += ` AND key < ?`
-		args = append(args, prefix+"\xff")
+		args = append(args, hi)
 	}
 	q += ` ORDER BY key ASC LIMIT ?`
 	args = append(args, limit)
@@ -1006,9 +1033,9 @@ func (c *Cell) ListMeta(ctx context.Context, prefix, after string, limit int) ([
 	}
 	q := `SELECT key, meta, expires_ms FROM kv WHERE key >= ? AND (expires_ms=0 OR expires_ms>?)`
 	args := []any{lo, time.Now().UnixMilli()}
-	if prefix != "" {
+	if hi, ok := prefixUpperBound(prefix); ok {
 		q += ` AND key < ?`
-		args = append(args, prefix+"\xff")
+		args = append(args, hi)
 	}
 	q += ` ORDER BY key ASC LIMIT ?`
 	args = append(args, limit)

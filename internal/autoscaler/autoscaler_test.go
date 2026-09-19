@@ -2,6 +2,7 @@ package autoscaler
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,11 +51,22 @@ func TestAdvisorScalesUpForLoadAndPressure(t *testing.T) {
 	}
 }
 
-type recordingActuator struct{ plans []Plan }
+type recordingActuator struct {
+	mu    sync.Mutex
+	plans []Plan
+}
 
 func (r *recordingActuator) Apply(_ context.Context, p Plan) error {
+	r.mu.Lock()
 	r.plans = append(r.plans, p)
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *recordingActuator) snapshot() []Plan {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Plan(nil), r.plans...)
 }
 
 func TestAdvisorRunAppliesPlan(t *testing.T) {
@@ -66,14 +78,15 @@ func TestAdvisorRunAppliesPlan(t *testing.T) {
 	defer cancel()
 	a.Run(ctx, 5*time.Millisecond, rec, nil)
 	deadline := time.Now().Add(time.Second)
-	for len(rec.plans) == 0 && time.Now().Before(deadline) {
+	for len(rec.snapshot()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if len(rec.plans) == 0 {
+	plans := rec.snapshot()
+	if len(plans) == 0 {
 		t.Fatal("actuator never invoked")
 	}
-	if rec.plans[0].Action != "scale-up" {
-		t.Fatalf("plan = %+v", rec.plans[0])
+	if plans[0].Action != "scale-up" {
+		t.Fatalf("plan = %+v", plans[0])
 	}
 }
 

@@ -110,28 +110,42 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 
+	// The caller's request context propagates so a disconnected client stops the
+	// proxy instead of leaving it to time out on its own.
+	ctx := r.Context()
+
 	// Owner hint (ADR-103): a previously learned owner is tried directly, which
 	// skips the sharding router hop. Only a failure that proves the invoke did
-	// not start clears the hint and falls back to the shard rotation.
+	// not start clears the hint and falls back to the shard rotation; any other
+	// failure is ambiguous and must not be replayed (ADR-080 at-most-once).
 	key := ownerKey(req, shardClass, shard)
 	if hint, ok := s.getDOOwner(key); ok {
-		res, herr := s.postDO(context.Background(), client, hint, body)
-		if herr == nil && !doRetryable(res.status, res.body) {
+		res, herr := s.postDO(ctx, client, hint, body)
+		switch {
+		case herr == nil && !doRetryable(res.status, res.body):
 			s.setDOOwner(key, res.owner)
 			ticket, exp := s.doTicket(req.Namespace, req.Worker, shardClass, shard)
 			writeDO(w, res, ticket, exp)
 			return
+		case herr == nil || isDialError(herr):
+			s.clearDOOwner(key)
+		default:
+			writeErr(w, http.StatusConflict, "result_unknown", fmt.Sprintf("do-runtime invoke outcome unknown: %v", herr))
+			return
 		}
-		s.clearDOOwner(key)
 	}
 
 	start := shard % len(s.Cfg.DoRuntimes)
 	var lastErr error
 	for i := 0; i < len(s.Cfg.DoRuntimes); i++ {
 		addr := strings.TrimRight(s.Cfg.DoRuntimes[(start+i)%len(s.Cfg.DoRuntimes)], "/")
-		res, herr := s.postDO(context.Background(), client, addr, body)
+		res, herr := s.postDO(ctx, client, addr, body)
 		if herr != nil {
 			lastErr = herr
+			if !isDialError(herr) {
+				writeErr(w, http.StatusConflict, "result_unknown", fmt.Sprintf("do-runtime invoke outcome unknown: %v", herr))
+				return
+			}
 			continue
 		}
 		s.setDOOwner(key, res.owner)
@@ -195,7 +209,13 @@ func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, b
 		return doResult{}, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, doProxyRespLimit))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, doProxyRespLimit+1))
+	if err != nil {
+		return doResult{}, err
+	}
+	if len(respBody) > doProxyRespLimit {
+		return doResult{}, fmt.Errorf("do-runtime response exceeds %d bytes", doProxyRespLimit)
+	}
 	return doResult{
 		status: resp.StatusCode,
 		body:   respBody,

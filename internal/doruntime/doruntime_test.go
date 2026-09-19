@@ -77,8 +77,43 @@ type ownerStub struct {
 	bundles   map[string]string // sha -> source (overrides the single bundle)
 	bindings  map[string]any    // facet binding spec served by /v1/internal/do/bindings
 	self      atomic.Value      // string: this runtime's base URL, for DO->DO proxying
+	ownerMu   sync.Mutex        // guards live/lease/forwardTo (mutated while serving)
 	spanMu    sync.Mutex        // guards spans
 	spans     []map[string]any  // JS-reported OTLP spans (ADR-167)
+}
+
+// setLive marks a class as held by another node, for tests that force a
+// cross-node forward after the stub is already serving.
+func (o *ownerStub) setLive(cls string) {
+	o.ownerMu.Lock()
+	if o.live == nil {
+		o.live = map[string]bool{}
+	}
+	o.live[cls] = true
+	o.ownerMu.Unlock()
+}
+
+func (o *ownerStub) setForwardTo(addr string) {
+	o.ownerMu.Lock()
+	o.forwardTo = addr
+	o.ownerMu.Unlock()
+}
+
+func (o *ownerStub) setLease(v bool) {
+	o.ownerMu.Lock()
+	o.lease = v
+	o.ownerMu.Unlock()
+}
+
+// claimDenied reports whether the claim for cls must fail with owner_live and
+// the forward address to advertise.
+func (o *ownerStub) claimDenied(cls string) (bool, string) {
+	o.ownerMu.Lock()
+	defer o.ownerMu.Unlock()
+	if o.live[cls] || o.lease || o.forwardTo != "" {
+		return true, o.forwardTo
+	}
+	return false, ""
 }
 
 func (o *ownerStub) handler(bundle string) http.HandlerFunc {
@@ -99,9 +134,9 @@ func (o *ownerStub) handler(bundle string) http.HandlerFunc {
 			var req map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			cls, _ := req["class"].(string)
-			if o.live[cls] || o.lease || o.forwardTo != "" {
+			if denied, addr := o.claimDenied(cls); denied {
 				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]any{"error": "owner_live", "node": "other", "address": o.forwardTo})
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "owner_live", "node": "other", "address": addr})
 				return
 			}
 			o.claims++
@@ -276,7 +311,7 @@ func TestDoRuntimeOwnershipFenceAndDrain(t *testing.T) {
 	}
 
 	// A foreign live owner -> fail closed (owner_unavailable), no dispatch.
-	o.live["Locked"] = true
+	o.setLive("Locked")
 	resp, body = invoke(t, base, "Locked", "a1")
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "owner_unavailable") {
 		t.Fatalf("foreign owner invoke = %d %q, want 409 owner_unavailable", resp.StatusCode, body)
@@ -646,8 +681,8 @@ func TestDoRuntimeWebSocketCrossNodeForward(t *testing.T) {
 		"namespace": "demo", "worker": "counter", "bundle_sha": "sha1", "class": "Tenant", "id": "a1",
 		"request": map[string]any{"path": "/"},
 	})
-	o.live["Tenant"] = true
-	o.forwardTo = baseA
+	o.setLive("Tenant")
+	o.setForwardTo(baseA)
 
 	wsURL := baseB + "/v1/do/connect?namespace=demo&worker=counter&class=Tenant&id=a1&bundle_sha=sha1"
 	wait, stopWS := wsClient(t, wsURL, "tok")
@@ -1125,9 +1160,9 @@ func TestDoRuntimeTakeoverAfterCrash(t *testing.T) {
 		t.Fatalf("node A = %q", body)
 	}
 	// Crash A and let its lease expire.
-	o.lease = true
+	o.setLease(true)
 	stopA()
-	o.lease = false
+	o.setLease(false)
 
 	// Node B cold-starts from the bucket and takes over.
 	dirB := t.TempDir()

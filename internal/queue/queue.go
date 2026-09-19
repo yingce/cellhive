@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
 	"cellhive/internal/cell"
@@ -32,8 +33,9 @@ CREATE INDEX IF NOT EXISTS messages_visible ON messages(visible_at_ms);
 
 // Store persists queue messages in a cell.
 type Store struct {
-	cs  *cellstore.Store
-	now func() time.Time
+	cs       *cellstore.Store
+	now      func() time.Time
+	migrated sync.Map // scope string -> migrated once per process
 }
 
 // New creates a queue store.
@@ -48,16 +50,23 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	if ns == "" || name == "" {
 		return nil, fmt.Errorf("queue: ns and name are required")
 	}
-	c, err := s.cs.Cell(ctx, Scope(ns, name))
+	scope := Scope(ns, name)
+	c, err := s.cs.Cell(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
+	if _, ok := s.migrated.Load(scope.String()); ok {
+		return c, nil
+	}
+	// The schema is idempotent; run it once per process so a read API does not
+	// advance the capture txid on every call (read traffic -> replication).
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, schema)
 		return err
 	}); err != nil {
 		return nil, err
 	}
+	s.migrated.Store(scope.String(), struct{}{})
 	return c, nil
 }
 
@@ -106,6 +115,15 @@ func (s *Store) Send(ctx context.Context, ns, name string, body []byte, contentT
 			id, body, contentType, visible, idem, now)
 		return err
 	}); err != nil {
+		// A concurrent send with the same idempotency key won the unique index;
+		// dedupe by returning its id instead of surfacing a constraint error.
+		if idempotencyKey != "" {
+			var existing string
+			if qerr := c.DB.QueryRowContext(ctx,
+				`SELECT id FROM messages WHERE idempotency_key=?`, idempotencyKey).Scan(&existing); qerr == nil {
+				return existing, nil
+			}
+		}
 		return "", err
 	}
 	return id, nil

@@ -23,6 +23,16 @@ const (
 // scopeSecret is the HMAC key for binding scoped tokens (ADR-074). Required.
 func (s *Server) scopeSecret() []byte { return []byte(s.Cfg.ScopeSecret) }
 
+// scopeResourceParam maps a binding kind to the query parameter that carries
+// the resource name. The middleware compares it against the token's Name so a
+// scoped token can only touch its own resource, even within one namespace.
+var scopeResourceParam = map[string]string{
+	"d1":       "db",
+	"r2":       "bucket",
+	"queue":    "queue",
+	"workflow": "workflow",
+}
+
 // scopeAuth enforces the per-binding scoped token on tenant binding endpoints
 // (ADR-029 layers 3+4, ADR-074). It always requires a valid token: it verifies
 // the signature, expiry, binding kind and that the binding is declared for the
@@ -54,6 +64,12 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				writeErr(w, http.StatusForbidden, "scope_mismatch", "request namespace does not match the token")
 				return
 			}
+			if param, ok := scopeResourceParam[kind]; ok {
+				if got := r.URL.Query().Get(param); got != claims.Name {
+					writeErr(w, http.StatusForbidden, "scope_resource_mismatch", "request resource does not match the token")
+					return
+				}
+			}
 			if s.Control != nil {
 				ok, _, cerr := s.bindingInfo(r.Context(), claims.Namespace, kind, claims.Name)
 				if cerr != nil {
@@ -68,6 +84,13 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			telemetry.SpanFromContext(r.Context()).SetAttributes(
 				telemetry.ScopeAttrs(claims.Namespace, kind, claims.Name, "")...)
 			if s.Store != nil {
+				// Before gating in-flight requests, drop a local cell this node
+				// does not own (a stale foreign lineage after a restart or
+				// takeover). Done here, outside BeginRequest, so Forget never
+				// waits on this request's own eviction gate.
+				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
+					s.invalidateStaleLocal(r.Context(), sc)
+				}
 				end := s.Store.BeginRequest(s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
 				defer end()
 			}

@@ -1,7 +1,9 @@
 package ltx
 
 import (
+	"encoding/binary"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -44,6 +46,30 @@ func TestDecodeRejectsCorruption(t *testing.T) {
 func TestDecodeRejectsShort(t *testing.T) {
 	if _, _, err := Decode([]byte("short")); !errors.Is(err, ErrShort) {
 		t.Fatalf("short: got %v, want ErrShort", err)
+	}
+}
+
+func TestSplitRejectsOverflowingLength(t *testing.T) {
+	for _, length := range []uint64{1 << 63, math.MaxUint64, math.MaxUint64 - 43} {
+		seg := make([]byte, HeaderSize)
+		copy(seg[0:4], Magic[:])
+		seg[4] = Version
+		binary.BigEndian.PutUint64(seg[32:40], length)
+		if _, err := Split(seg); !errors.Is(err, ErrShort) {
+			t.Fatalf("length %d: got %v, want ErrShort", length, err)
+		}
+	}
+}
+
+func TestSplitConcatenated(t *testing.T) {
+	a := Encode(Header{Kind: KindDelta, StartTxID: 1, EndTxID: 1}, []byte("a"))
+	b := Encode(Header{Kind: KindDelta, StartTxID: 2, EndTxID: 2}, []byte("bb"))
+	segs, err := Split(append(append([]byte{}, a...), b...))
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	if len(segs) != 2 || len(segs[0]) != len(a) || len(segs[1]) != len(b) {
+		t.Fatalf("split segments = %d", len(segs))
 	}
 }
 

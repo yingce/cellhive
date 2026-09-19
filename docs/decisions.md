@@ -2368,6 +2368,19 @@
 
 ---
 
+## ADR-180 接管丢弃陈旧本地 cell（celld took_over 规则）✅实现
+
+- **背景**：本地 SQLite 只在该 scope 由本节点持有时才可信。一个在**接管期间宕机**的节点重启后，本地仍留着一份完整但陈旧的库：读路径在 owner 租约过期/无人持有时直接读本地（`forwardTo` 的 expired 分支），写路径 `forwardOrClaim` 又会用更高 epoch 在陈旧 base 上继续写，产生一条覆盖正确链的 fork 链。实测：A 写 1–100 → B 接管写 101–200 并改 20–50 → A 重启读到的仍是旧值、101–200 读不到；A 再写则新 epoch 链只有 101 keys（覆盖 B 的 200 keys），全新节点从桶恢复也丢 101–200。`OnLostOwner → Forget` 只在**运行中**失权时触发，宕机重启不补触发；`store.Paged`/`Hydrate` 又只对「缺失/带 marker」的冷 cell 生效，完整陈旧文件绕过了按需加载。
+- **决策**（对齐 celld `crates/logic/restore.rs` 的 `took_over` 谓词）：**本地 cell 只在「本节点干净续用」时复用；任何接管都丢弃本地、从 durable chain 冷恢复。**
+  1. `server.invalidateStaleLocal(sc)`：解析 owner，若 owner 是本节点（或本节点仍持有）→ 保留；若 owner 是**别的节点且租约已过期**、或**无人拥有**→ `store.Forget(sc)`，使下一次 open 走冷路径（paged `PageFetcher` 或全量 `Hydrate`），从桶恢复最新 epoch 链。live 外部 owner 不删（请求会转发，本地不被使用）。
+  2. **调用点必须在 `BeginRequest` 之前**：`scopeAuth` 先按 kind 解析 cell scope（`gateScope`，kv/d1/queue/workflow/vectorize）失效，再 `BeginRequest`；否则 `Forget` 会等待本请求自己的 eviction gate 而死锁。内部 `/v1/internal/claim`（`handleClaim`，不在 gate 内）在 `Claim` 前同样失效。
+  3. 内部 claim 陈旧副本仍可能出现在 `ClaimAs`（do/queue_admin）路径，属后续对齐项。
+- **理由**：复用已有的 `Paged`/`Hydrate`（ADR-092/160），只补「完整文件是否仍属当前 owner」这一判定；同节点重启（owner 仍是自己）保留本地热开，不牺牲既有优化。这正是 celld 的 `previous_epoch_reusable(epoch, took_over) = epoch>1 && !took_over`。
+- **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
+- **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
+
+---
+
 ## 待定（🕓）
 
 无。历史待定项均已定稿：bundle/assets 读取路径 → **ADR-030**；路由投影下发 → **ADR-031**；管理后台/身份模型 → **ADR-036**。
@@ -2521,4 +2534,4 @@
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-20_

@@ -16,6 +16,11 @@ import (
 // caller should re-resolve and try again. Epochs are only skipped, never reused.
 var ErrGenContention = errors.New("owner: generation bump contention")
 
+// ErrGenCorrupt means the generation fence could not be parsed. Failing closed
+// is required: defaulting to 0 would reuse an epoch and break the single-writer
+// fence (ADR-078).
+var ErrGenCorrupt = errors.New("owner: corrupt generation record")
+
 // genKey is the monotonic generation counter for a scope. Unlike the owner
 // record it is never deleted, so epochs are never reused even after release
 // (WDL: "the generation key is a fence, not a cache", ADR-078).
@@ -30,7 +35,11 @@ func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope) (uint64, error) {
 		var g uint64
 		switch {
 		case err == nil:
-			g, _ = strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+			parsed, perr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+			if perr != nil {
+				return 0, ErrGenCorrupt
+			}
+			g = parsed
 		case errors.Is(err, bucket.ErrNotFound):
 			g = 0
 		default:

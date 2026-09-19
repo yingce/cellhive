@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +16,27 @@ import (
 	"cellhive/internal/doticket"
 	"time"
 )
+
+func pickShardID(t *testing.T, mod, want int) string {
+	t.Helper()
+	for i := 0; i < 256; i++ {
+		cand := fmt.Sprintf("id-%d", i)
+		if cell.DOShard("acme", "web", "Room", cand)%mod == want {
+			return cand
+		}
+	}
+	t.Fatalf("no id with shard%%%d==%d", mod, want)
+	return ""
+}
+
+func invokeDO(t *testing.T, srv *Server, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: id, BundleSHA: "sha"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleDOProxy(rr, req)
+	return rr
+}
 
 // TestDOOwnerHintSkipsShardingRouter covers ADR-103: cell-agent learns the owner
 // address from a do-runtime response, then invokes the owner directly; a hint
@@ -223,5 +246,69 @@ func TestDOProxyForwardsTenantResponse(t *testing.T) {
 	}
 	if rr.Body.String() != "websocket upgrade required" {
 		t.Fatalf("body = %q", rr.Body.String())
+	}
+}
+
+// TestDOProxyAmbiguousTransportIsNotRetried is the regression for retrying any
+// transport error: a response read failure may mean the invoke already ran, so
+// the proxy must report result_unknown and never reach another runtime.
+func TestDOProxyAmbiguousTransportIsNotRetried(t *testing.T) {
+	var goodHits, truncHits atomic.Int64
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits.Add(1)
+		_, _ = w.Write([]byte(`{"ok":"good"}`))
+	}))
+	defer good.Close()
+	trunc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		truncHits.Add(1)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("no hijacker")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+		_ = buf.Flush()
+	}))
+	defer trunc.Close()
+
+	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{trunc.URL, good.URL}}})
+	id := pickShardID(t, 2, 0)
+	if rr := invokeDO(t, srv, id); rr.Code != http.StatusConflict {
+		t.Fatalf("ambiguous transport = %d %s, want 409", rr.Code, rr.Body.String())
+	}
+	if truncHits.Load() != 1 || goodHits.Load() != 0 {
+		t.Fatalf("ambiguous transport was retried: trunc=%d good=%d", truncHits.Load(), goodHits.Load())
+	}
+}
+
+// TestDOProxyDialFailureFailsOver: a connect failure proves nothing ran, so the
+// shard rotation may try the next runtime.
+func TestDOProxyDialFailureFailsOver(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	dead := "http://" + l.Addr().String()
+	l.Close()
+
+	var goodHits atomic.Int64
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits.Add(1)
+		_, _ = w.Write([]byte(`{"ok":"good"}`))
+	}))
+	defer good.Close()
+
+	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{dead, good.URL}}})
+	id := pickShardID(t, 2, 0)
+	if rr := invokeDO(t, srv, id); rr.Code != http.StatusOK || rr.Body.String() != `{"ok":"good"}` {
+		t.Fatalf("dial failover = %d %s", rr.Code, rr.Body.String())
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good runtime hits = %d, want 1", goodHits.Load())
 	}
 }

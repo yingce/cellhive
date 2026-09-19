@@ -1,8 +1,12 @@
 package lease
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"cellhive/internal/bucket"
 )
 
 // TestHasShedTarget covers the pressure check (ADR-123): a node only refuses new
@@ -36,5 +40,39 @@ func TestHasShedTarget(t *testing.T) {
 	zero := NodeLease{Node: "peer", Expiry: now.Add(time.Minute).UnixMilli(), Load: Load{OwnedCells: 0, Weight: 0}}
 	if !HasShedTarget([]NodeLease{zero}, "self", now) {
 		t.Fatal("zero-weight peer without cells should have headroom")
+	}
+}
+
+type probeBucket struct {
+	bucket.Bucket
+	probe func()
+}
+
+func (b *probeBucket) List(ctx context.Context, prefix string) ([]string, error) {
+	b.probe()
+	return b.Bucket.List(ctx, prefix)
+}
+
+// TestSampleCachedDoesNotHoldLockDuringIO is the regression for holding mu across
+// the bucket round trip, which serialized every caller behind the slowest one.
+func TestSampleCachedDoesNotHoldLockDuringIO(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Minute}
+	var held atomic.Bool
+	m.B = &probeBucket{Bucket: base, probe: func() {
+		if !m.mu.TryLock() {
+			held.Store(true)
+			return
+		}
+		m.mu.Unlock()
+	}}
+	if got := m.SampleCached(context.Background(), time.Minute); got == nil {
+		t.Fatalf("SampleCached returned nil")
+	}
+	if held.Load() {
+		t.Fatalf("SampleCached held mu during bucket I/O")
 	}
 }

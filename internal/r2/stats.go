@@ -91,6 +91,9 @@ func (s *Store) Stats(ctx context.Context, ns, bucketName string, opts StatsOpti
 			break // defensive: never spin on an empty page
 		}
 		for _, it := range items {
+			if isCreateMarker(it.Key) {
+				continue // GC bookkeeping, not a staged part
+			}
 			st.MultipartParts++
 			rest := strings.TrimPrefix(it.Key, base)
 			if i := strings.Index(rest, "/"); i > 0 {
