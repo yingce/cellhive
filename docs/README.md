@@ -56,6 +56,7 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 | [`glossary.md`](./glossary.md) | 术语表 |
 | [`decisions.md`](./decisions.md) | 决策记录（ADR）——每个选择的原因与代价 |
 | [`contributing.md`](./contributing.md) | 贡献者阅读路径：按改动类型给出"先读什么、必须跑什么、守住什么不变量" |
+| [`acknowledgements.md`](./acknowledgements.md) | 致谢与设计参考：借鉴了 celld、WDL（以及 LiteFS/superfly-ltx）的哪些设计与工程手法，哪些没有借鉴 |
 | [`modules/`](./modules/README.md) | **模块文档**：逐模块的作用、关键接口、环境变量表（默认值）、不变量、源码与测试锚点 |
 
 ### 绑定、兼容与打包

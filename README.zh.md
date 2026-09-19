@@ -124,6 +124,10 @@ scripts/    CI 与运维脚本
 - 设计与代码同步：改代码要同步改文档（含 `docs/decisions.md`）。
 - 不 fork / 不修改 workerd；只通过 `workerLoader`、bindings、capnp 扩展。
 
+## 致谢
+
+CellHive 的设计参考了同领域几个开源项目：**celld**（`denoland/celld`）的 cell 模型、bucket 条件写 owner、epoch fence、LTX 与 RPO=0；**WDL**（`wdl-dev/wdl`）的多租户 `workerLoader` 动态加载、binding host adapter、DO host actor + facets 与 alarm shim；以及 **LiteFS / superfly-ltx** 的 Go 侧 SQLite 复制与 LTX 格式实现参照。借的是**设计与契约**而非实现——完整的"借鉴/未借鉴"说明见 [`docs/acknowledgements.md`](./docs/acknowledgements.md)。
+
 ## 许可
 
 CellHive 复用了一部分 Apache-2.0 许可的代码与设计；使用/再分发这些部分时请保留对应的 `LICENSE`/`NOTICE` 与署名（见 [`docs/decisions.md`](./docs/decisions.md) ADR-016）。

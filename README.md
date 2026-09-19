@@ -124,6 +124,10 @@ scripts/    CI and ops scripts
 - Keep design and code in sync: change the docs (and `docs/decisions.md`) with the code.
 - Never fork or patch workerd; extend through `workerLoader`, bindings and capnp only.
 
+## Acknowledgements
+
+CellHive's design is informed by several open-source projects in the same space — **celld** (`denoland/celld`) for the cell model, bucket conditional-write ownership, epoch fencing, LTX and RPO=0; **WDL** (`wdl-dev/wdl`) for multi-tenant `workerLoader` loading, the binding host adapter, the DO host-actor + facets approach and the alarm shim; and **LiteFS / superfly-ltx** for the Go-side SQLite replication and LTX format reference. What was borrowed (design and contracts, not implementations) and what was deliberately not borrowed is documented in [`docs/acknowledgements.md`](./docs/acknowledgements.md).
+
 ## License
 
 CellHive reuses some Apache-2.0-licensed code and ideas; keep the corresponding `LICENSE`/`NOTICE` files and attribution when you use or redistribute such parts (see [`docs/decisions.md`](./docs/decisions.md) ADR-016).

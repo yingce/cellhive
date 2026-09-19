@@ -159,9 +159,15 @@ Worker → env.NS.get(id).fetch() → host adapter
 
 ## 与既有项目的关系
 
-| 项目 | CellHive 借用什么 | 不借用什么 |
+CellHive 的设计在多处参考了同领域开源项目。借的是**设计与契约**，不是实现：
+
+| 项目 | 借鉴 | 不借鉴 |
 |---|---|---|
-| **LiteFS / superfly/ltx** | Go 侧的 SQLite 复制与 LTX 库实现参照 | — |
+| **celld** (`denoland/celld`) | cell=SQLite、bucket 条件写 owner、epoch fence、LTX、RPO=0、持久寻址、节点 lease 伸缩信号、优雅 handoff、"索引非权威、可修复" | 其自带 V8 的执行引擎；不 fork/改造其二进制（我们用 stock workerd） |
+| **wdl** (`wdl-dev/wdl`) | `workerLoader` 多租户动态加载、binding host adapter、版本/回滚、双 socket 特权分离、DO host actor + facets、alarm shim、按模块组织文档 | 其 Redis/Valkey 状态模型、独立 gateway、独立 scheduler/workflows 服务 |
+| **LiteFS / superfly/ltx** | Go 侧的 SQLite 复制与 LTX 格式实现参照 | — |
+
+完整的借鉴/未借鉴说明与致谢见 [`acknowledgements.md`](./acknowledgements.md)。
 
 ## 服务与 supervisor 的对应
 
