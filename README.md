@@ -108,16 +108,16 @@ scripts/    CI and ops scripts
 
 ## Documentation
 
-> **Language:** the design docs under [`docs/`](./docs/) are written in **Chinese**, the project's primary documentation language. This README (and the module/example code) are the English entry points; for behavior, the source and tests are authoritative.
+> **Language:** design docs are available in English under [`docs/en/`](./docs/en/README.md) (the **Chinese originals** under [`docs/`](./docs/en/README.md) are authoritative and may be newer). This README, the module docs and the examples are the English entry points; for behavior, the source and tests are authoritative.
 
-- **Docs home / start here:** [`docs/README.md`](./docs/README.md) — audience paths (operate · build Workers · contribute · protocol deep-dive) and a grouped map of every doc.
-- **Module docs:** [`docs/modules/`](./docs/modules/README.md) — per module: role, interfaces, an environment-variable table (with defaults), invariants, source layout and test anchors.
+- **Docs home / start here:** [`docs/README.md`](./docs/en/README.md) — audience paths (operate · build Workers · contribute · protocol deep-dive) and a grouped map of every doc.
+- **Module docs:** [`docs/modules/`](./docs/en/modules/README.md) — per module: role, interfaces, an environment-variable table (with defaults), invariants, source layout and test anchors.
 - **Examples:** [`examples/`](./examples/README.md) — one runnable project per feature (KV, D1, R2, Queues, Cron, Durable Objects, Workflows, service bindings, assets, AI, Vectorize, …) plus a feature→source→doc code map.
-- **Concepts & design:** [`architecture.md`](./docs/architecture.md), [`cell-protocol.md`](./docs/cell-protocol.md), [`durable-objects.md`](./docs/durable-objects.md), [`protocol-formats.md`](./docs/protocol-formats.md), [`glossary.md`](./docs/glossary.md).
-- **Bindings & compatibility:** [`bindings.md`](./docs/bindings.md), [`compatibility-matrix.md`](./docs/compatibility-matrix.md), [`wrangler-compat.md`](./docs/wrangler-compat.md).
-- **Storage, replication & scaling:** [`storage-and-s3.md`](./docs/storage-and-s3.md), [`scaling-and-ha.md`](./docs/scaling-and-ha.md), [`timers-and-dispatch.md`](./docs/timers-and-dispatch.md).
-- **Operations:** [`deployment.md`](./docs/deployment.md), [`configuration.md`](./docs/configuration.md), [`operations.md`](./docs/operations.md), [`observability.md`](./docs/observability.md), [`testing.md`](./docs/testing.md).
-- **Decisions:** [`docs/decisions.md`](./docs/decisions.md).
+- **Concepts & design:** [`architecture.md`](./docs/en/architecture.md), [`cell-protocol.md`](./docs/en/cell-protocol.md), [`durable-objects.md`](./docs/en/durable-objects.md), [`protocol-formats.md`](./docs/en/protocol-formats.md), [`glossary.md`](./docs/en/glossary.md).
+- **Bindings & compatibility:** [`bindings.md`](./docs/en/bindings.md), [`compatibility-matrix.md`](./docs/en/compatibility-matrix.md), [`wrangler-compat.md`](./docs/en/wrangler-compat.md).
+- **Storage, replication & scaling:** [`storage-and-s3.md`](./docs/en/storage-and-s3.md), [`scaling-and-ha.md`](./docs/en/scaling-and-ha.md), [`timers-and-dispatch.md`](./docs/en/timers-and-dispatch.md).
+- **Operations:** [`deployment.md`](./docs/en/deployment.md), [`configuration.md`](./docs/en/configuration.md), [`operations.md`](./docs/en/operations.md), [`observability.md`](./docs/en/observability.md), [`testing.md`](./docs/en/testing.md).
+- **Decisions:** [`docs/decisions.md`](./docs/en/decisions.md).
 
 ## Contributing
 
@@ -132,6 +132,6 @@ CellHive's design is informed by several open-source projects in the same space 
 
 ## License
 
-CellHive reuses some Apache-2.0-licensed code and ideas; keep the corresponding `LICENSE`/`NOTICE` files and attribution when you use or redistribute such parts (see [`docs/decisions.md`](./docs/decisions.md) ADR-016).
+CellHive reuses some Apache-2.0-licensed code and ideas; keep the corresponding `LICENSE`/`NOTICE` files and attribution when you use or redistribute such parts (see [`docs/decisions.md`](./docs/en/decisions.md) ADR-016).
 
 中文说明见 [`README.zh.md`](./README.zh.md)。

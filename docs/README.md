@@ -4,7 +4,7 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 
 本目录是**设计定稿**。代码与文档冲突时以文档为准并同步两者；改设计先改 [`decisions.md`](./decisions.md)，实现变更随代码一起更新对应文档。
 
-> English readers: see the [root README](../README.md) for the project overview; the design docs below are written in Chinese.
+> English readers: an English mirror of these design docs lives in [`en/`](./en/README.md) (English docs home + module docs). The Chinese originals here remain authoritative.
 
 ## 从这里开始
 
