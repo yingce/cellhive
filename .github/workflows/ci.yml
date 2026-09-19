@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: make build
+      - run: make perf-test
+      - run: make rpo-test
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Pin the platform workerd; js-test skips cleanly if it is absent.
+      - run: npm i -g @cloudflare/workerd-linux-64@1.20260615.1
+      - run: ln -sf "$(npm root -g)/@cloudflare/workerd-linux-64/bin/workerd" /usr/local/bin/workerd
+      - run: workerd --version
+      - run: make js-test
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd cli && bun install --frozen-lockfile
+      - run: make cli-test
+
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - run: make docker-build
+      - run: make compose-config
+      - run: make k8s-render
+      - uses: azure/setup-helm@v4
+      - run: make helm-lint

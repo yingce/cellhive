@@ -1,0 +1,55 @@
+# In-cluster isolation: cell-agent and do-runtime accept traffic only from this
+# namespace's pods; the public entry (user-runtime) is open for the
+# operator-provided edge (ADR-132). Egress: in-cluster + DNS + public internet
+# (tenant outbound, cloud object storage), other private ranges excluded.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cell-agent
+  namespace: cellhive
+spec:
+  podSelector: {matchLabels: {app: cell-agent}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {}}]
+  egress:
+    - to: [{podSelector: {}}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: do-runtime
+  namespace: cellhive
+spec:
+  podSelector: {matchLabels: {app: do-runtime}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {}}]
+  egress:
+    - to: [{podSelector: {}}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: user-runtime
+  namespace: cellhive
+spec:
+  podSelector: {matchLabels: {app: user-runtime}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {}}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]

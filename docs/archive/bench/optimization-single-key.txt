@@ -1,0 +1,29 @@
+# single-key write optimization (no client batching), single host 8 cores, FS bucket
+
+## capture OFF, single-key put, single cell
+# BEFORE (no writeMu, ticker=1ms)
+c=1   3475? no -> 3121   c=8 6156   c=16 5561   c=32 5985   c=128 5722
+# two clients c=16 each: 1980 + 1934 = 3914   (collapse)
+# AFTER (Cell.writeMu serializes write txns in-process; no SQLITE_BUSY storms)
+mode=put c=1    rps=3475  p50=0.28ms
+mode=put c=8    rps=7481  p50=1.23ms
+mode=put c=16   rps=9637  p50=1.61ms
+mode=put c=32   rps=8679  p50=3.28ms
+mode=put c=128  rps=9334  p50=13.39ms
+# two clients c=16 each: 4563 + 4561 = 9124   (stable)
+
+## capture ON (durability=bucket, RPO=0), single-key put, with writeMu
+mode=put c=1    rps=322   p50=2.79ms
+mode=put c=8    rps=2507  p50=3.06ms
+mode=put c=16   rps=4616  p50=2.91ms
+mode=put c=32   rps=5052  p50=6.62ms
+mode=put c=128  rps=4512  p50=27.31ms
+# two clients c=16 each: 2344 + 2337 = 4681  -> proof path (bucket commit) is the limit
+
+## group-commit window now actually coalesces (ticker follows window), capture ON c=128
+window=2ms  segments=2318 txns/segment~8.6   rps=5954
+window=5ms  segments=941  txns/segment~21.3  rps=6166
+window=10ms segments=486  txns/segment~41.2  rps=6117
+window=20ms segments=224  txns/segment~89.3  rps=5396
+# -> depth scales with the window, but throughput is flat: capture is not the limiter for capture OFF;
+#    for capture ON the bucket proof (commits/s) is.

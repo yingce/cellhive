@@ -1,0 +1,20 @@
+# single-cell vs dual-cell capture (capture ON, FS bucket): repeat runs to bound box noise; compression on/off (CELLHIVE_LTX_COMPRESSION)
+# date=2026-09-18T03:44:31+08:00 nproc=8
+## run A: CELLHIVE_LTX_COMPRESSION=off
+off mode=put cells=1  c=16   n=51621   fail=0    p50=2.87   ms p90=3.75   ms p99=4.24    ms mean=3.10   ms rps=5161     
+off mode=put cells=1  c=32   n=100351  fail=0    p50=2.77   ms p90=4.61   ms p99=5.85    ms mean=3.19   ms rps=10031    
+off mode=put cells=1  c=64   n=123411  fail=0    p50=4.71   ms p90=7.25   ms p99=11.04   ms mean=5.18   ms rps=12336    
+off mode=put cells=1  c=128  n=132875  fail=0    p50=9.28   ms p90=12.67  ms p99=60.83   ms mean=9.63   ms rps=13278    
+off mode=put cells=2  c=16   n=48274   fail=0    p50=2.98   ms p90=3.41   ms p99=3.95    ms mean=3.36   ms rps=4760     
+off mode=put cells=2  c=32   n=85058   fail=0    p50=3.30   ms p90=4.02   ms p99=5.10    ms mean=3.76   ms rps=8503     
+off mode=put cells=2  c=64   n=154509  fail=0    p50=3.12   ms p90=4.99   ms p99=7.23    ms mean=4.14   ms rps=15445    
+off mode=put cells=2  c=128  n=167819  fail=0    p50=5.71   ms p90=9.51   ms p99=15.72   ms mean=7.62   ms rps=16773    
+## run B: CELLHIVE_LTX_COMPRESSION=on
+on  mode=put cells=1  c=16   n=51907   fail=0    p50=2.86   ms p90=3.67   ms p99=4.16    ms mean=3.08   ms rps=5189     
+on  mode=put cells=1  c=32   n=97642   fail=0    p50=2.82   ms p90=4.69   ms p99=6.16    ms mean=3.28   ms rps=9760     
+on  mode=put cells=1  c=64   n=123427  fail=0    p50=4.71   ms p90=7.26   ms p99=10.25   ms mean=5.18   ms rps=12338    
+on  mode=put cells=1  c=128  n=133022  fail=0    p50=9.30   ms p90=12.68  ms p99=60.86   ms mean=9.62   ms rps=13295    
+on  mode=put cells=2  c=16   n=49083   fail=0    p50=2.98   ms p90=3.41   ms p99=3.96    ms mean=3.26   ms rps=4908     
+on  mode=put cells=2  c=32   n=86045   fail=0    p50=3.26   ms p90=3.91   ms p99=4.80    ms mean=3.72   ms rps=8602     
+on  mode=put cells=2  c=64   n=153165  fail=0    p50=3.11   ms p90=5.00   ms p99=7.37    ms mean=4.18   ms rps=15310    
+on  mode=put cells=2  c=128  n=163319  fail=0    p50=5.72   ms p90=9.67   ms p99=24.39   ms mean=7.83   ms rps=16322    

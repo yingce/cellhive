@@ -1,0 +1,77 @@
+# do-runtime with the ADR-083 output gate (DO RPO=0): do-supervisor renders via
+# `do-runtime -render-only`, spawns workerd, gates responses on cell-agent
+# durability and owns lease renew/drain. Apply via the rpo0 overlay:
+#   kubectl apply -k deploy/k8s/rpo0
+apiVersion: v1
+kind: Service
+metadata:
+  name: do-runtime-gated
+  namespace: cellhive
+  labels: {app: do-runtime-gated, app.kubernetes.io/part-of: cellhive}
+spec:
+  clusterIP: None
+  selector: {app: do-runtime-gated}
+  ports:
+    - {name: do, port: 8788, targetPort: 8788}
+    - {name: gate, port: 18901, targetPort: 18901}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: do-runtime-gated
+  namespace: cellhive
+  labels: {app: do-runtime-gated, app.kubernetes.io/part-of: cellhive}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: do-runtime-gated}
+  template:
+    metadata:
+      labels: {app: do-runtime-gated}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      serviceAccountName: cellhive
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: do-runtime-gated
+          image: cellhive:dev
+          imagePullPolicy: IfNotPresent
+          command: ["do-runtime-gated"]
+          envFrom:
+            - configMapRef: {name: cellhive-config}
+            - secretRef: {name: cellhive-secrets}
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: CELLHIVE_DO_NODE
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: CELLHIVE_DO_ADVERTISE
+              value: $(POD_IP):8788
+            - name: CELLHIVE_DO_GATE_LISTEN
+              value: ":18901"
+          ports:
+            - {name: do, containerPort: 8788}
+            - {name: gate, containerPort: 18901}
+          startupProbe:
+            tcpSocket: {port: 8788}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket: {port: 8788}
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 8788}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {memory: 4Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}

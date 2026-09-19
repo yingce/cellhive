@@ -1,0 +1,5 @@
+{
+  "name": "worker-rpc-api",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "queues",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "JOBS"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "JOBS",
+        "max_batch_size": 10,
+        "max_retries": 3,
+        "dead_letter_queue": "DLQ"
+      }
+    ]
+  }
+}

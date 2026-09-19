@@ -1,0 +1,72 @@
+# CellHive Helm values. Only `rootKey` (or `existingSecret`) is required: every
+# role credential is HKDF-derived from it (ADR-137).
+
+image:
+  repository: cellhive
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Provide the platform root key either inline (rootKey) or via a pre-created
+# Secret (existingSecret with key CELLHIVE_ROOT_KEY). Secrets should not be
+# committed: prefer existingSecret or --set-file. A mounted file works too: add
+# the volume yourself and set CELLHIVE_ROOT_KEY_FILE (ADR-150).
+rootKey: ""
+existingSecret: ""
+
+config:
+  dataDir: /data/state
+  runtimeDir: /data/runtime
+  bucketDir: /data/bucket
+  # Use S3 instead of the filesystem bucket:
+  # bucket: s3://cellhive
+  # awsEndpoint / awsRegion / awsAccessKey / awsSecretKey -> put in the Secret.
+
+cellAgent:
+  replicas: 2
+  storage: 20Gi
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 2Gi}
+
+userRuntime:
+  replicas: 2
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 2Gi}
+
+doRuntime:
+  replicas: 2
+  # gate=true deploys do-runtime-gated (ADR-083/140: DO RPO=0 via the output
+  # gate); false deploys the ungated runtime.
+  gate: true
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {memory: 4Gi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # Extra ingress sources for the admin port (8082), e.g. the ingress
+  # controller's namespace when the edge runs outside this release:
+  #   adminIngressFrom:
+  #     - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress}}
+  adminIngressFrom: []
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""            # e.g. cellhive.example.com (admin/API host)
+  tlsSecret: ""       # optional TLS secret name
+  annotations: {}

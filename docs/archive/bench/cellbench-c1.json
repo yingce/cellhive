@@ -1,0 +1,41 @@
+{
+  "bucket": {
+    "mode": "bucket",
+    "n": 3000,
+    "failures": 0,
+    "concurrency": 1,
+    "p50_ms": 0.003,
+    "p99_ms": 0.025,
+    "mean_ms": 0.005,
+    "rps": 101213.19192500912,
+    "puts": 49,
+    "put_per_ack": 0.01633333333333333
+  },
+  "bucket_ops": {
+    "cas": 0,
+    "conditional_create": 3,
+    "delete": 0,
+    "get": 208,
+    "list": 2,
+    "put": 556
+  },
+  "fleet": {
+    "mode": "fleet",
+    "n": 3000,
+    "failures": 0,
+    "concurrency": 1,
+    "p50_ms": 0.932,
+    "p99_ms": 2.219,
+    "mean_ms": 1.011,
+    "rps": 979.4148870863037,
+    "puts": 307,
+    "put_per_ack": 0.10233333333333333
+  },
+  "note": "in-process httptest + filesystem bucket; not production S3",
+  "restore": {
+    "count": 200,
+    "error": "",
+    "ms": 2.169,
+    "segments": 200
+  }
+}

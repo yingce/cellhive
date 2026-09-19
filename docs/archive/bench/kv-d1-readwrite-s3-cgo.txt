@@ -1,0 +1,36 @@
+# KV / D1 read+write on S3/MinIO (ADR-159 CGo + ADR-160 LZ4 WAL3), single cell capA, capture off/on, kvbench -d 8s
+# date=2026-09-18T03:39:56+08:00 nproc=8 bucket=s3://cellhive endpoint=http://127.0.0.1:9000
+## capture on
+mode=put cells=1  c=1    n=1166    fail=0    p50=6.86   ms p90=7.67   ms p99=8.50    ms mean=6.86   ms rps=146      
+mode=put cells=1  c=16   n=15028   fail=0    p50=8.24   ms p90=10.88  ms p99=13.59   ms mean=8.52   ms rps=1877     
+mode=put cells=1  c=64   n=27113   fail=0    p50=17.81  ms p90=24.78  ms p99=37.03   ms mean=18.90  ms rps=3383     
+mode=put cells=1  c=128  n=30308   fail=0    p50=32.13  ms p90=45.47  ms p99=87.09   ms mean=33.81  ms rps=3781     
+mode=get cells=1  c=1    n=37110   fail=0    p50=0.21   ms p90=0.25   ms p99=0.34    ms mean=0.21   ms rps=4639     
+mode=get cells=1  c=16   n=247763  fail=0    p50=0.44   ms p90=0.88   ms p99=1.55    ms mean=0.51   ms rps=30968    
+mode=get cells=1  c=64   n=271309  fail=0    p50=1.51   ms p90=3.72   ms p99=6.65    ms mean=1.88   ms rps=33899    
+mode=get cells=1  c=128  n=302014  fail=0    p50=2.63   ms p90=7.00   ms p99=12.81   ms mean=3.38   ms rps=37738    
+mode=d1  cells=1  c=1    n=1123    fail=0    p50=7.16   ms p90=8.06   ms p99=9.20    ms mean=7.12   ms rps=140      
+mode=d1  cells=1  c=16   n=12734   fail=0    p50=9.58   ms p90=12.76  ms p99=16.35   ms mean=10.05  ms rps=1592     
+mode=d1  cells=1  c=64   n=23330   fail=0    p50=20.51  ms p90=26.73  ms p99=76.56   ms mean=21.95  ms rps=2915     
+mode=d1  cells=1  c=128  n=29168   fail=0    p50=32.71  ms p90=46.65  ms p99=88.54   ms mean=35.13  ms rps=3636     
+mode=d1query cells=1  c=1    n=35587   fail=0    p50=0.22   ms p90=0.26   ms p99=0.34    ms mean=0.22   ms rps=4448     
+mode=d1query cells=1  c=16   n=215485  fail=0    p50=0.51   ms p90=1.01   ms p99=1.79    ms mean=0.59   ms rps=26931    
+mode=d1query cells=1  c=64   n=252681  fail=0    p50=1.62   ms p90=4.00   ms p99=7.06    ms mean=2.02   ms rps=31579    
+mode=d1query cells=1  c=128  n=268785  fail=0    p50=2.97   ms p90=7.87   ms p99=14.32   ms mean=3.80   ms rps=33585    
+## capture off
+mode=put cells=1  c=1    n=32244   fail=0    p50=0.24   ms p90=0.28   ms p99=0.34    ms mean=0.25   ms rps=4030     
+mode=put cells=1  c=16   n=99171   fail=0    p50=1.38   ms p90=1.72   ms p99=2.51    ms mean=1.29   ms rps=12394    
+mode=put cells=1  c=64   n=128189  fail=0    p50=3.93   ms p90=4.66   ms p99=5.56    ms mean=3.99   ms rps=16015    
+mode=put cells=1  c=128  n=114697  fail=0    p50=8.11   ms p90=9.05   ms p99=17.29   ms mean=8.93   ms rps=14324    
+mode=get cells=1  c=1    n=42545   fail=0    p50=0.18   ms p90=0.21   ms p99=0.26    ms mean=0.19   ms rps=5318     
+mode=get cells=1  c=16   n=235180  fail=0    p50=0.46   ms p90=0.94   ms p99=1.67    ms mean=0.54   ms rps=29395    
+mode=get cells=1  c=64   n=286685  fail=0    p50=1.43   ms p90=3.54   ms p99=6.17    ms mean=1.78   ms rps=35830    
+mode=get cells=1  c=128  n=305186  fail=0    p50=2.61   ms p90=6.92   ms p99=12.55   ms mean=3.35   ms rps=38136    
+mode=d1  cells=1  c=1    n=30894   fail=0    p50=0.25   ms p90=0.29   ms p99=0.35    ms mean=0.26   ms rps=3862     
+mode=d1  cells=1  c=16   n=98694   fail=0    p50=1.39   ms p90=1.75   ms p99=2.60    ms mean=1.29   ms rps=12334    
+mode=d1  cells=1  c=64   n=123337  fail=0    p50=3.93   ms p90=4.63   ms p99=6.46    ms mean=4.15   ms rps=15410    
+mode=d1  cells=1  c=128  n=108529  fail=0    p50=8.05   ms p90=9.04   ms p99=110.28  ms mean=9.43   ms rps=13554    
+mode=d1query cells=1  c=1    n=38693   fail=0    p50=0.20   ms p90=0.23   ms p99=0.28    ms mean=0.20   ms rps=4836     
+mode=d1query cells=1  c=16   n=218818  fail=0    p50=0.50   ms p90=0.99   ms p99=1.77    ms mean=0.58   ms rps=27350    
+mode=d1query cells=1  c=64   n=265319  fail=0    p50=1.53   ms p90=3.83   ms p99=6.70    ms mean=1.93   ms rps=33156    
+mode=d1query cells=1  c=128  n=271658  fail=0    p50=2.94   ms p90=7.75   ms p99=14.20   ms mean=3.76   ms rps=33947    

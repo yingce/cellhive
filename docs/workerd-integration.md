@@ -1,0 +1,73 @@
+# workerd 集成
+
+## 原则
+
+**使用 stock workerd，不修改一行 C++**。只通过官方公开面使用它：
+
+- `workerLoader`（动态加载租户 bundle，进程需 `--experimental`）；
+- capnp 配置（services / sockets / bindings / `durableObjectNamespaces` / localDisk / network）；
+- bindings（`globalOutbound`、service、network、DO namespace 等）；
+- 进程开关与兼容配置。
+
+## 版本 pin
+
+- **workerd 二进制固定某个确切版本**；`compatibility_date`/`flags` 的合法集合随该版本维护（一张表）；
+- 载入的 bundle 必须满足该 workerd 支持的最大 `compatibility_date`；
+- **不启用**上游 `$experimental` 的租户 flag；`nodejs_compat`/`nodejs_compat_v2` 默认策略随 date 决定；
+- 契约测试固定在 pin 的版本上。
+
+## 服务与配置
+
+| 服务 | workerd 角色 | 配置要点 |
+|---|---|---|
+| `user-runtime` | 租户 loader | `workerLoader`；sockets `:8081`（公开 loader）+ `:8088`（内部特权派发）；租户 loaded worker **仅公网 outbound** |
+| `do-runtime` | DO host actor + facet | `durableObjectNamespaces` + localDisk；`workerLoader` 加载同一 bundle 并 `getDurableObjectClass()`；supervisor 作 PID1 |
+| （可选）`system-runtime` | 平台内部 worker | 私网 + 公网 outbound（如启用平台侧 workerd worker） |
+
+## 加载流程
+
+```
+worker id = <ns>:<worker>:<version>   （不可变）
+user-runtime loader：
+  1. 从路由投影得到 worker id
+  2. workerLoader.get(id, () => fetchBundle(id))
+       · bundle 由内容寻址（SHA-256）从对象存储拉取（scoped 只读凭据，ADR-030）
+  3. 生成 wrapper（JS 层）：
+       · 包装租户模块导出（fetch/scheduled/queue/alarm/RPC）
+       · 构造租户 env：vars < namespace secrets < worker secrets；注入 binding facades
+       · 保留 `cloudflare:workers` 等内建模块；对 `cloudflare:workflows` 等做 shim
+  4. 调用 handler
+```
+
+- **env 预算**：workerd 的序列化 env 上限（约 1 MiB）；控制面在 deploy/secret 变更时校验（含 V8 双字节开销）。
+- **模块前缀保留**：平台生成的模块名使用保留前缀（如 `__cellhive-`），租户不得占用。
+
+## host adapter 与网络
+
+- 每个 binding 生成 **binding-scoped facade**，props 不可变（`ns` + binding 类型/id）；
+- facade 调 `cell-agent`（`:7001` REST/JSON），带 **scope 声明**（ADR-029）；
+- **租户 loaded worker 的 `globalOutbound` = 公网 only**，不含 RFC1918/cell-agent；
+- 平台代码（loader/host adapter/DO host actor）使用单独的 private network binding。
+
+## 限制
+
+- `limits`：每 worker `cpu_ms`/`subrequests`（workerd config）；V8 heap 上限（进程/isolate 级）；
+- 不支持：Python Workers、Cache API、Vectorize、Hyperdrive、Browser Rendering、Email Workers、Analytics Engine（与 workerd 暴露面一致）；
+- 不保证兼容所有历史 `compatibility_date` 行为——按我们支持的 flag 集合为准。
+
+## P0 验证项（与 DO/WAL 一起）
+
+1. actor SQLite 是否 WAL、可被外部进程只读打开；
+2. checkpoint/截断可检测、可对齐；
+3. actor 文件布局（共享 metadata + 每 actor）；
+4. `globalOutbound` 公网限制配置生效；
+5. `workerLoader` 在当前 pin 版本下加载/驱逐行为正常；
+6. env 预算校验与实际一致。
+
+## 待细化
+
+- capnp 配置的具体片段（user-runtime / do-runtime）；
+- wrapper 生成细节与保留模块名前缀；
+- 兼容 flag 表（跟随 pinned workerd）。
+
+_最后更新：2026-09-14_

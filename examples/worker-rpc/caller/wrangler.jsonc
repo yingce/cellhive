@@ -1,0 +1,12 @@
+{
+  "name": "worker-rpc-caller",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  "services": [
+    {
+      "binding": "MATH",
+      "service": "worker-rpc-api",
+      "entrypoint": "Math"
+    }
+  ]
+}

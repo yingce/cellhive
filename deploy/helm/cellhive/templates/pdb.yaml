@@ -1,0 +1,29 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $comp := list "cell-agent" "user-runtime" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $.Release.Name }}-{{ $comp }}
+  labels:
+    {{- include "cellhive.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ $comp }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+---
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cellhive.doRuntimeService" . }}
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: do-runtime
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

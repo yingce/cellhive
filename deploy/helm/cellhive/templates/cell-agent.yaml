@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-cell-agent
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+    app: cell-agent
+spec:
+  clusterIP: None
+  selector:
+    app: cell-agent
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - {name: rest, port: 7001, targetPort: 7001}
+    - {name: admin, port: 8082, targetPort: 8082}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-cell-agent
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+    app: cell-agent
+spec:
+  serviceName: {{ .Release.Name }}-cell-agent
+  replicas: {{ .Values.cellAgent.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: cell-agent
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: cell-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: cell-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["cell-agent"]
+          envFrom:
+            - configMapRef: {name: {{ .Release.Name }}-config}
+            - secretRef: {name: {{ include "cellhive.secretName" . }}}
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: CELLHIVE_NODE_ID
+              value: $(POD_NAME)
+            - name: CELLHIVE_ADVERTISE
+              value: $(POD_IP):7001
+          ports:
+            - {name: rest, containerPort: 7001}
+            - {name: admin, containerPort: 8082}
+          startupProbe:
+            httpGet: {path: /readyz, port: 7001}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: 7001}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 7001}
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.cellAgent.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: {storage: {{ .Values.cellAgent.storage }}}

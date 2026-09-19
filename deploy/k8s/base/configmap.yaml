@@ -1,0 +1,26 @@
+# Non-secret configuration shared by every CellHive workload. Per-pod values
+# (node id / advertise address) are set from the downward API in each pod spec.
+# Secrets (CELLHIVE_ROOT_KEY, AWS_*) come from the `cellhive-secrets` Secret
+# (see secret.example.yaml); see docs/configuration.md for every variable.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cellhive-config
+  namespace: cellhive
+data:
+  CELLHIVE_CELL_URL: http://cell-agent:7001
+  CELLHIVE_REST_ADDR: ":7001"
+  CELLHIVE_ADMIN_ADDR: ":8082"
+  CELLHIVE_DATA_DIR: /data/state
+  CELLHIVE_RUNTIME_DIR: /data/runtime
+  CELLHIVE_BUCKET_DIR: /data/bucket
+  CELLHIVE_WORKERD: /usr/local/bin/workerd
+  CELLHIVE_USER_RUNTIME_JS: /app/workerd/user-runtime
+  CELLHIVE_DO_RUNTIME_JS: /app/workerd/do-runtime
+  CELLHIVE_FACADES_JS: /app/workerd/platform/facades.js
+  CELLHIVE_USER_RUNTIME_PORT: "8081"
+  CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
+  CELLHIVE_DO_ADDR: "*:8788"
+  CELLHIVE_DO_RUNTIMES: do-runtime:8788
+  # Queue/timer/cron/waker dispatch target (user-runtime internal service).
+  CELLHIVE_DISPATCH_URL: http://user-runtime:8088

@@ -1,0 +1,25 @@
+# single-cell vs dual-cell capture benchmark (capture ON, durability=bucket, RPO=0)
+# date=2026-09-16T07:08:39+08:00 host=vwork-dev nproc=8 go=go1.27.1
+# cmd: CONCS="1 16 32 64 128 256" DUR=10s MODE=put
+### single-cell (1 cell(s): capA)
+mode=put cells=1  c=1    n=3425    fail=0    p50=2.73   ms p90=3.66   ms p99=3.88    ms mean=2.92   ms rps=342      
+mode=put cells=1  c=16   n=46173   fail=0    p50=2.96   ms p90=5.07   ms p99=11.31   ms mean=3.46   ms rps=4612     
+mode=put cells=1  c=32   n=54057   fail=0    p50=4.81   ms p90=8.27   ms p99=23.49   ms mean=5.92   ms rps=5395     
+mode=put cells=1  c=64   n=54071   fail=0    p50=10.27  ms p90=19.50  ms p99=33.37   ms mean=11.84  ms rps=5393     
+mode=put cells=1  c=128  n=51911   fail=0    p50=21.99  ms p90=42.43  ms p99=67.40   ms mean=24.67  ms rps=5175     
+mode=put cells=1  c=256  n=47786   fail=0    p50=47.19  ms p90=94.70  ms p99=158.27  ms mean=53.66  ms rps=4758     
+### dual-cell (2 cell(s): capB1,capB2)
+mode=put cells=2  c=1    n=3232    fail=0    p50=2.93   ms p90=3.89   ms p99=4.30    ms mean=3.09   ms rps=323      
+mode=put cells=2  c=16   n=49843   fail=0    p50=2.80   ms p90=4.45   ms p99=12.18   ms mean=3.21   ms rps=4979     
+mode=put cells=2  c=32   n=79655   fail=0    p50=3.35   ms p90=5.75   ms p99=20.64   ms mean=4.02   ms rps=7955     
+mode=put cells=2  c=64   n=65931   fail=0    p50=7.77   ms p90=17.71  ms p99=35.44   ms mean=9.71   ms rps=6578     
+mode=put cells=2  c=128  n=65225   fail=0    p50=15.64  ms p90=39.19  ms p99=72.20   ms mean=19.62  ms rps=6509     
+mode=put cells=2  c=256  n=74078   fail=0    p50=25.99  ms p90=74.63  ms p99=149.63  ms mean=34.68  ms rps=7362     
+--- LTX in bucket for capA/__kv__/default (epoch 1) ---
+{"mode":"ondemand","page_count":29,"page_size":4096,"watermark":258023,"filled":29,"integrity":"ok","keys":1000}
+{"mode":"ondemand","page_count":29,"page_size":4096,"watermark":258023,"filled":29,"integrity":"ok","keys":1000}
+--- LTX in bucket for capB1/__kv__/default (epoch 1) ---
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":163136,"filled":18,"integrity":"ok","keys":500}
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":163136,"filled":18,"integrity":"ok","keys":500}
+--- LTX in bucket for capB2/__kv__/default (epoch 1) ---
+materialize: replica: ranged read cells/capB2/__kv__/default/ltx/e1/L1/65492.snapshot page 1: bucket: not found

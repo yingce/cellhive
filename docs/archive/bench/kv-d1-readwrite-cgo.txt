@@ -1,0 +1,36 @@
+# KV / D1 read+write re-run after ADR-159 (CGo driver) + ADR-160 (LZ4 WAL3): single cell capA, FS bucket, kvbench -d 8s, fail=0
+# date=2026-09-18T03:20:49+08:00 host=vwork-dev nproc=8 go=go1.27.1  | code: ADR-159 (mattn CGo driver) + ADR-160 (WAL3/LZ4 L1) | method: same as kv-d1-readwrite.txt (single cell capA, c=1/16/64/128, -d 8s, FS bucket, capture off/on)
+## capture OFF (local only)
+mode=put cells=1  c=1    n=20181   fail=0    p50=0.30   ms p90=0.46   ms p99=2.72    ms mean=0.40   ms rps=2523     
+mode=put cells=1  c=16   n=98956   fail=0    p50=1.39   ms p90=1.73   ms p99=2.47    ms mean=1.29   ms rps=12368    
+mode=put cells=1  c=64   n=125922  fail=0    p50=3.98   ms p90=4.87   ms p99=7.54    ms mean=4.07   ms rps=15733    
+mode=put cells=1  c=128  n=104178  fail=0    p50=8.06   ms p90=9.09   ms p99=114.66  ms mean=9.83   ms rps=13011    
+mode=get cells=1  c=1    n=42324   fail=0    p50=0.18   ms p90=0.22   ms p99=0.28    ms mean=0.19   ms rps=5290     
+mode=get cells=1  c=16   n=238175  fail=0    p50=0.46   ms p90=0.92   ms p99=1.61    ms mean=0.54   ms rps=29770    
+mode=get cells=1  c=64   n=291215  fail=0    p50=1.40   ms p90=3.48   ms p99=6.21    ms mean=1.75   ms rps=36394    
+mode=get cells=1  c=128  n=307610  fail=0    p50=2.61   ms p90=6.84   ms p99=12.47   ms mean=3.32   ms rps=38436    
+mode=d1  cells=1  c=1    n=30980   fail=0    p50=0.25   ms p90=0.29   ms p99=0.34    ms mean=0.26   ms rps=3872     
+mode=d1  cells=1  c=16   n=97917   fail=0    p50=1.40   ms p90=1.76   ms p99=2.57    ms mean=1.30   ms rps=12237    
+mode=d1  cells=1  c=64   n=104186  fail=0    p50=4.06   ms p90=4.80   ms p99=15.64   ms mean=5.02   ms rps=12738    
+mode=d1  cells=1  c=128  n=107613  fail=0    p50=8.28   ms p90=9.34   ms p99=77.57   ms mean=9.51   ms rps=13440    
+mode=d1query cells=1  c=1    n=38559   fail=0    p50=0.20   ms p90=0.23   ms p99=0.28    ms mean=0.21   ms rps=4820     
+mode=d1query cells=1  c=16   n=221146  fail=0    p50=0.50   ms p90=0.98   ms p99=1.70    ms mean=0.58   ms rps=27641    
+mode=d1query cells=1  c=64   n=267528  fail=0    p50=1.53   ms p90=3.78   ms p99=6.62    ms mean=1.91   ms rps=33435    
+mode=d1query cells=1  c=128  n=276001  fail=0    p50=2.92   ms p90=7.65   ms p99=13.76   ms mean=3.70   ms rps=34487    
+## capture ON (durability=bucket, RPO=0)
+mode=put cells=1  c=1    n=2650    fail=0    p50=2.85   ms p90=3.69   ms p99=4.33    ms mean=3.02   ms rps=331      
+mode=put cells=1  c=16   n=37019   fail=0    p50=3.27   ms p90=4.03   ms p99=4.80    ms mean=3.46   ms rps=4623     
+mode=put cells=1  c=64   n=74729   fail=0    p50=6.15   ms p90=9.63   ms p99=20.56   ms mean=6.85   ms rps=9336     
+mode=put cells=1  c=128  n=89505   fail=0    p50=10.86  ms p90=15.06  ms p99=66.25   ms mean=11.45  ms rps=11173    
+mode=get cells=1  c=1    n=43134   fail=0    p50=0.18   ms p90=0.21   ms p99=0.27    ms mean=0.18   ms rps=5392     
+mode=get cells=1  c=16   n=250537  fail=0    p50=0.44   ms p90=0.86   ms p99=1.52    ms mean=0.51   ms rps=31314    
+mode=get cells=1  c=64   n=304863  fail=0    p50=1.34   ms p90=3.32   ms p99=5.79    ms mean=1.68   ms rps=38098    
+mode=get cells=1  c=128  n=309666  fail=0    p50=2.57   ms p90=6.84   ms p99=12.35   ms mean=3.30   ms rps=38696    
+mode=d1  cells=1  c=1    n=2546    fail=0    p50=3.10   ms p90=3.75   ms p99=4.45    ms mean=3.14   ms rps=318      
+mode=d1  cells=1  c=16   n=29925   fail=0    p50=3.96   ms p90=4.80   ms p99=5.64    ms mean=4.28   ms rps=3739     
+mode=d1  cells=1  c=64   n=65410   fail=0    p50=6.87   ms p90=10.37  ms p99=62.47   ms mean=7.83   ms rps=8171     
+mode=d1  cells=1  c=128  n=74516   fail=0    p50=12.21  ms p90=17.51  ms p99=71.96   ms mean=13.75  ms rps=9302     
+mode=d1query cells=1  c=1    n=38516   fail=0    p50=0.20   ms p90=0.23   ms p99=0.28    ms mean=0.21   ms rps=4814     
+mode=d1query cells=1  c=16   n=217738  fail=0    p50=0.50   ms p90=1.00   ms p99=1.76    ms mean=0.58   ms rps=27215    
+mode=d1query cells=1  c=64   n=263725  fail=0    p50=1.55   ms p90=3.85   ms p99=6.69    ms mean=1.94   ms rps=32958    
+mode=d1query cells=1  c=128  n=275414  fail=0    p50=2.91   ms p90=7.67   ms p99=13.86   ms mean=3.71   ms rps=34413    

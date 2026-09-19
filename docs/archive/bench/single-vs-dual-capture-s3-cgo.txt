@@ -1,0 +1,18 @@
+# single-cell vs dual-cell capture benchmark (capture ON, durability=bucket, RPO=0)
+# date=2026-09-18T03:37:50+08:00 host=vwork-dev nproc=8 go=go1.27.1
+# cmd: CONCS="1 16 32 64 128" DUR=10s MODE=put BUCKET_MODE=s3 CAPTURE=on BINDING_CACHE=default
+### single-cell (1 cell(s): capA)
+mode=put cells=1  c=1    n=1440    fail=0    p50=7.01   ms p90=7.76   ms p99=8.58    ms mean=6.94   ms rps=144      
+mode=put cells=1  c=16   n=18937   fail=0    p50=8.17   ms p90=10.79  ms p99=13.38   ms mean=8.45   ms rps=1892     
+mode=put cells=1  c=32   n=27176   fail=0    p50=11.41  ms p90=14.94  ms p99=19.93   ms mean=11.78  ms rps=2716     
+mode=put cells=1  c=64   n=34435   fail=0    p50=17.53  ms p90=24.18  ms p99=37.57   ms mean=18.60  ms rps=3439     
+mode=put cells=1  c=128  n=38267   fail=0    p50=32.08  ms p90=44.90  ms p99=81.25   ms mean=33.54  ms rps=3812     
+### dual-cell (2 cell(s): capB1,capB2)
+mode=put cells=2  c=1    n=1465    fail=0    p50=6.79   ms p90=7.75   ms p99=8.45    ms mean=6.82   ms rps=146      
+mode=put cells=2  c=16   n=18373   fail=0    p50=8.27   ms p90=11.34  ms p99=16.71   ms mean=8.71   ms rps=1836     
+mode=put cells=2  c=32   n=28235   fail=0    p50=10.88  ms p90=14.50  ms p99=19.05   ms mean=11.57  ms rps=2764     
+mode=put cells=2  c=64   n=34378   fail=0    p50=17.60  ms p90=23.82  ms p99=33.23   ms mean=18.62  ms rps=3434     
+mode=put cells=2  c=128  n=38776   fail=0    p50=31.05  ms p90=43.29  ms p99=60.01   ms mean=33.02  ms rps=3871     
+--- LTX verify skipped for capA/__kv__/default (BUCKET_MODE=s3; use a FS run for restoreverify) ---
+--- LTX verify skipped for capB1/__kv__/default (BUCKET_MODE=s3; use a FS run for restoreverify) ---
+--- LTX verify skipped for capB2/__kv__/default (BUCKET_MODE=s3; use a FS run for restoreverify) ---

@@ -1,0 +1,20 @@
+{
+  "name": "@cellhive/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "cellhive": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts dev",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "miniflare": "4.20260616.0"
+  },
+  "overrides": {
+    "workerd": "1.20260615.1"
+  }
+}

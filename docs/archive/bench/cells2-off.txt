@@ -1,0 +1,14 @@
+# single-cell vs dual-cell capture benchmark (capture ON, durability=bucket, RPO=0)
+# date=2026-09-16T14:51:59+08:00 host=vwork-dev nproc=8 go=go1.27.1
+# cmd: CONCS="16 32 64 128" DUR=10s MODE=put BUCKET_MODE=fs CAPTURE=off BINDING_CACHE_MS=default
+### single-cell (1 cell(s): capA)
+mode=put cells=1  c=16   n=111355  fail=0    p50=1.44   ms p90=1.84   ms p99=2.62    ms mean=1.44   ms rps=11134    
+mode=put cells=1  c=32   n=122348  fail=0    p50=2.47   ms p90=3.15   ms p99=4.11    ms mean=2.61   ms rps=12233    
+mode=put cells=1  c=64   n=120701  fail=0    p50=5.06   ms p90=6.29   ms p99=7.48    ms mean=5.30   ms rps=12063    
+mode=put cells=1  c=128  n=118174  fail=0    p50=10.54  ms p90=12.58  ms p99=15.35   ms mean=10.83  ms rps=11808    
+### dual-cell (2 cell(s): capB1,capB2)
+mode=put cells=2  c=16   n=146297  fail=0    p50=1.18   ms p90=1.60   ms p99=2.38    ms mean=1.09   ms rps=14628    
+mode=put cells=2  c=32   n=185278  fail=0    p50=1.65   ms p90=2.51   ms p99=3.76    ms mean=1.72   ms rps=18525    
+mode=put cells=2  c=64   n=176152  fail=0    p50=3.02   ms p90=4.76   ms p99=10.54   ms mean=3.63   ms rps=17610    
+mode=put cells=2  c=128  n=193017  fail=0    p50=6.11   ms p90=11.16  ms p99=16.58   ms mean=6.66   ms rps=19165    
+--- LTX verify skipped (CAPTURE=off; no replication) ---

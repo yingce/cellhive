@@ -1,0 +1,49 @@
+# --- build output ---
+/bin/
+/*.test
+/cell-agent
+/cellhive
+/do-supervisor
+/user-runtime
+
+# --- local runtime state / data ---
+/.cellhive/
+/.cellhive-dev/
+/cli/.cellhive-dev/
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.ltx
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# --- node / dev CLI ---
+node_modules/
+/cli/node_modules/
+/cli/dist/
+
+# --- logs / profiles ---
+*.log
+*.pprof
+*.out
+coverage.txt
+
+# --- secrets / env ---
+.env
+.env.*
+!.env.example
+*.local
+
+# --- editors / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- misc ---
+/tmp/
+
+# --- generated visualizations (archify skill) ---
+/.archify/

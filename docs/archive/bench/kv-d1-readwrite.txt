@@ -1,0 +1,14 @@
+# KV / D1 read+write, single cell, single host 8 cores, FS bucket, kvbench -d 8s, fail=0
+# node=bench; resources: kv/KV scope=default, d1/DB scope=bench
+
+## capture OFF (local only)
+KV  put  c=1 3793   c=16 11173  c=64 12149  c=128 11713   (p50 c64 5.11ms)
+KV  get  c=1 4899   c=16 25667  c=64 29529  c=128 30317   (p50 c64 1.71ms)
+D1  insert c=1 3596 c=16 10763  c=64 11929  c=128 10935
+D1  query  c=1 4521 c=16 24502  c=64 28373  c=128 29225
+
+## capture ON (durability=bucket, RPO=0)
+KV  put  c=1 359    c=16 5099   c=64 9475   c=128 11308
+KV  get  c=1 4873   c=16 25355  c=64 30011  c=128 30471
+D1  insert c=1 359  c=16 4992   c=64 8563   c=128 7746    (p99 c128 244ms)
+D1  query  c=1 4014 c=16 21193  c=64 26006  c=128 26652

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+data:
+  CELLHIVE_REST_ADDR: ":7001"
+  CELLHIVE_ADMIN_ADDR: ":8082"
+  CELLHIVE_BUCKET_DIR: {{ .Values.config.bucketDir | quote }}
+  CELLHIVE_USER_RUNTIME_PORT: "8081"
+  CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
+  CELLHIVE_DO_ADDR: "*:8788"
+  CELLHIVE_DO_RUNTIMES: {{ printf "%s:8788" (include "cellhive.doRuntimeService" .) | quote }}
+  CELLHIVE_DISPATCH_URL: {{ printf "http://%s-user-runtime:8088" .Release.Name | quote }}
+  {{- if .Values.config.bucket }}
+  CELLHIVE_BUCKET: {{ .Values.config.bucket | quote }}
+  {{- end }}

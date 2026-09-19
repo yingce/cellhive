@@ -1,0 +1,10 @@
+.git
+.gitignore
+bin
+.cellhive
+.cellhive-dev
+docs/archive
+cli/node_modules
+node_modules
+**/*_test.go
+deploy/compose/.env

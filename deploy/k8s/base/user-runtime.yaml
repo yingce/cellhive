@@ -1,0 +1,77 @@
+# user-runtime is stateless (entry + tenant execution) and scales with load.
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-runtime
+  namespace: cellhive
+  labels: {app: user-runtime, app.kubernetes.io/part-of: cellhive}
+spec:
+  selector: {app: user-runtime}
+  ports:
+    - {name: public, port: 8081, targetPort: 8081}
+    - {name: internal, port: 8088, targetPort: 8088}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-runtime
+  namespace: cellhive
+  labels: {app: user-runtime, app.kubernetes.io/part-of: cellhive}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: user-runtime}
+  template:
+    metadata:
+      labels: {app: user-runtime}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      serviceAccountName: cellhive
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: user-runtime
+          image: cellhive:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/user-runtime"]
+          envFrom:
+            - configMapRef: {name: cellhive-config}
+            - secretRef: {name: cellhive-secrets}
+          ports:
+            - {name: public, containerPort: 8081}
+            - {name: internal, containerPort: 8088}
+          startupProbe:
+            tcpSocket: {port: 8081}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            # ADR-156: /ready reports projection availability and flips to 503
+            # after POST /drain (the process drains itself on SIGTERM).
+            httpGet: {path: /ready, port: 8081}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8081}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {memory: 2Gi}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-runtime
+  namespace: cellhive
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: user-runtime}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}

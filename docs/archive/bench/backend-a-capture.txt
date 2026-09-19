@@ -1,0 +1,49 @@
+# backend-A capture overhead (kvbench -> cell-agent, single host, FS bucket)
+# Go 1.27.1, stock cell-agent, CELLHIVE_DURABILITY=bucket (RPO=0), LeaseTTL=30s
+# kvbench -d 15s, FS bucket, node=bench
+
+# capture ON (replication proof before ack; RPO=0)
+mode=put c=1    n=5032    fail=0    p50=2.76   ms p90=3.68   ms p99=3.88    ms mean=2.98   ms rps=335
+mode=put c=4    n=17350   fail=0    p50=3.55   ms p90=3.73   ms p99=6.31    ms mean=3.46   ms rps=1157
+mode=d1  c=1    n=4956    fail=0    p50=2.79   ms p90=3.73   ms p99=4.00    ms mean=3.02   ms rps=330
+mode=d1  c=4    n=17120   fail=0    p50=3.60   ms p90=3.79   ms p99=6.11    ms mean=3.50   ms rps=1141
+
+# capture OFF (local-only; no replication proof; CELLHIVE_CAPTURE=off)
+mode=put c=4    n=83190   fail=0    p50=0.34   ms p90=0.47   ms p99=8.77    ms mean=0.72   ms rps=5542
+mode=d1  c=4    n=76225   fail=0    p50=0.37   ms p90=0.49   ms p99=8.74    ms mean=0.79   ms rps=5061
+
+# consistency / crash recovery (separate runs)
+# TestKVCaptureConsistencyN: 250 unique keys, cold restore byte-exact, 0 dup, integrity_check=ok
+# TestD1CaptureConsistency: 100 rows, cold restore byte-exact, integrity_check=ok
+# live e2e: 1000 acked KV writes -> kill -9 owner -> fresh node (empty disk, same bucket)
+#           -> claim takeover -> read back all 1000 keys (fail=0, p50 0.27ms) => RPO=0
+# capture ON + CELLHIVE_BUCKET_WAIT=false is refused by design:
+#   put_failed: cellcapture: commit was not durable (mode "bucket-async")
+
+# --- concurrency scaling (capture ON, durability=bucket, single cell, 10s) ---
+mode=put c=1    n=3409    fail=0    p50=2.73   ms p90=3.66   ms p99=3.92    ms rps=341
+mode=put c=4    n=11603   fail=0    p50=3.56   ms p90=3.68   ms p99=4.68    ms rps=1160
+mode=put c=16   n=45267   fail=0    p50=2.98   ms p90=5.13   ms p99=11.54   ms rps=4524
+mode=put c=32   n=55063   fail=0    p50=4.74   ms p90=7.92   ms p99=20.79   ms rps=5500
+mode=put c=64   n=53496   fail=0    p50=10.45  ms p90=19.66  ms p99=33.84   ms rps=5342
+mode=put c=128  n=49692   fail=0    p50=22.52  ms p90=44.72  ms p99=75.81   ms rps=4959
+mode=put c=256  n=49939   fail=0    p50=45.83  ms p90=89.78  ms p99=143.80  ms rps=4973
+mode=d1  c=1    n=3245    fail=0    p50=2.79   ms p90=3.73   ms p99=5.01    ms rps=324
+mode=d1  c=8    n=23736   fail=0    p50=3.25   ms p90=4.10   ms p99=9.31    ms rps=2373
+mode=d1  c=32   n=51693   fail=0    p50=4.98   ms p90=8.24   ms p99=28.15   ms rps=5158
+mode=d1  c=64   n=49249   fail=0    p50=10.54  ms p90=19.90  ms p99=67.80   ms rps=4892
+mode=d1  c=128  n=49677   fail=0    p50=22.89  ms p90=44.19  ms p99=72.84   ms rps=4956
+
+# --- capture OFF (local-only) single cell: write vs read ceiling ---
+mode=put c=1    n=31436   fail=0    p50=0.31   ms p90=0.36   ms p99=0.43    ms rps=3144
+mode=put c=8    n=61378   fail=0    p50=0.80   ms p90=1.86   ms p99=4.88    ms rps=6136
+mode=put c=32   n=59230   fail=0    p50=3.67   ms p90=11.47  ms p99=24.50   ms rps=5896
+mode=put c=64   n=57312   fail=0    p50=7.76   ms p90=25.05  ms p99=51.30   ms rps=5703
+mode=put c=128  n=55006   fail=0    p50=16.03  ms p90=52.84  ms p99=109.89  ms rps=5466
+mode=get c=8    n=136964  fail=0    p50=0.41   ms p90=0.74   ms p99=1.24    ms rps=17120
+mode=get c=32   n=194806  fail=0    p50=1.11   ms p90=2.38   ms p99=4.00    ms rps=24348
+mode=get c=128  n=238036  fail=0    p50=3.56   ms p90=8.35   ms p99=14.46   ms rps=29740
+# cell-agent CPU: write peak ~210% (2.1/8 cores), read peak ~470% (4.7/8) -> not CPU bound
+
+# --- capture OFF: 4 independent cells in parallel (each c=8, 10s) ---
+ns1 rps=3471  ns2 rps=3469  ns3 rps=3464  ns4 rps=3457  aggregate=13861

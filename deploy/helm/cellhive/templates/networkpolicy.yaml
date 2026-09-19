@@ -1,0 +1,78 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $inst := .Release.Name }}
+# In-cluster isolation: cell-agent (data/control) and do-runtime (DO invoke +
+# gate) accept traffic only from this release's pods; the public entry
+# (user-runtime) is left open for the operator-provided edge (ADR-132). Egress
+# allows DNS, in-cluster peers and the public internet (tenant outbound + cloud
+# object storage) but not other private ranges.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-cell-agent
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app: cell-agent, app.kubernetes.io/instance: {{ $inst }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
+      {{- with .Values.networkPolicy.adminIngressFrom }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-do-runtime
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app: do-runtime, app.kubernetes.io/instance: {{ $inst }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-user-runtime
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app: user-runtime, app.kubernetes.io/instance: {{ $inst }}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+{{- end }}

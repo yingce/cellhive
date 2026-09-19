@@ -1,0 +1,75 @@
+# do-runtime: native Durable Objects on a disposable local disk. The Service is
+# headless so owner records advertise reachable pod IPs; cell-agent places DOs
+# with CELLHIVE_DO_RUNTIMES=do-runtime:8788.
+apiVersion: v1
+kind: Service
+metadata:
+  name: do-runtime
+  namespace: cellhive
+  labels: {app: do-runtime, app.kubernetes.io/part-of: cellhive}
+spec:
+  clusterIP: None
+  selector: {app: do-runtime}
+  ports:
+    - {name: do, port: 8788, targetPort: 8788}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: do-runtime
+  namespace: cellhive
+  labels: {app: do-runtime, app.kubernetes.io/part-of: cellhive}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: do-runtime}
+  template:
+    metadata:
+      labels: {app: do-runtime}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      serviceAccountName: cellhive
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: do-runtime
+          image: cellhive:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/do-runtime"]
+          envFrom:
+            - configMapRef: {name: cellhive-config}
+            - secretRef: {name: cellhive-secrets}
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: CELLHIVE_DO_NODE
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: CELLHIVE_DO_ADVERTISE
+              value: $(POD_IP):8788
+          ports:
+            - {name: do, containerPort: 8788}
+          startupProbe:
+            tcpSocket: {port: 8788}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            # ADR-156: 503 while draining or while cell-agent is unreachable.
+            httpGet: {path: /ready, port: 8788}
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 8788}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {memory: 4Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        # DO storage is a disposable working copy; the authority is the bucket /
+        # cell-agent. emptyDir is enough (do not use a shared PV).
+        - name: data
+          emptyDir: {}

@@ -1,0 +1,22 @@
+# single-cell vs dual-cell capture benchmark (capture ON, durability=bucket, RPO=0)
+# date=2026-09-16T11:06:39+08:00 host=vwork-dev nproc=8 go=go1.27.1
+# cmd: CONCS="1 8 32 128" DUR=8s MODE=put BUCKET_MODE=fs CAPTURE=on BINDING_CACHE_MS=1000
+### single-cell (1 cell(s): capA)
+mode=put cells=1  c=1    n=2740    fail=0    p50=2.76   ms p90=3.70   ms p99=4.18    ms mean=2.92   ms rps=342      
+mode=put cells=1  c=8    n=18817   fail=0    p50=3.26   ms p90=4.06   ms p99=9.32    ms mean=3.40   ms rps=2351     
+mode=put cells=1  c=32   n=45541   fail=0    p50=4.82   ms p90=8.08   ms p99=15.40   ms mean=5.62   ms rps=5680     
+mode=put cells=1  c=128  n=40501   fail=0    p50=21.58  ms p90=43.23  ms p99=102.87  ms mean=25.30  ms rps=5048     
+### dual-cell (2 cell(s): capB1,capB2)
+mode=put cells=2  c=1    n=2670    fail=0    p50=2.77   ms p90=3.73   ms p99=4.08    ms mean=3.00   ms rps=334      
+mode=put cells=2  c=8    n=19116   fail=0    p50=3.35   ms p90=3.79   ms p99=4.61    ms mean=3.35   ms rps=2389     
+mode=put cells=2  c=32   n=67907   fail=0    p50=3.19   ms p90=5.33   ms p99=16.80   ms mean=3.77   ms rps=8467     
+mode=put cells=2  c=128  n=63206   fail=0    p50=11.62  ms p90=29.90  ms p99=124.26  ms mean=16.20  ms rps=7877     
+--- LTX in bucket for capA/__kv__/default (epoch 1) ---
+{"mode":"ondemand","page_count":29,"page_size":4096,"watermark":107999,"filled":29,"integrity":"ok","keys":1000}
+{"mode":"ondemand","page_count":29,"page_size":4096,"watermark":107999,"filled":29,"integrity":"ok","keys":1000}
+--- LTX in bucket for capB1/__kv__/default (epoch 1) ---
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":54743,"filled":18,"integrity":"ok","keys":500}
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":54743,"filled":18,"integrity":"ok","keys":500}
+--- LTX in bucket for capB2/__kv__/default (epoch 1) ---
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":59131,"filled":18,"integrity":"ok","keys":500}
+{"mode":"ondemand","page_count":18,"page_size":4096,"watermark":59131,"filled":18,"integrity":"ok","keys":500}

@@ -1,0 +1,165 @@
+# CellHive local stack: cell-agent + user-runtime + do-runtime on one image.
+#
+#   export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)   # or copy .env.example
+#   docker compose -f deploy/compose/docker-compose.yml up --build
+#
+# The edge (Traefik/ingress) is opt-in via the "edge" profile: the platform does
+# not push edge config (ADR-132), so routing is configured by the operator.
+name: cellhive
+
+x-image: &image
+  build:
+    context: ../..
+    dockerfile: deploy/Dockerfile
+  image: cellhive:dev
+  restart: unless-stopped
+
+x-common-env: &common-env
+  CELLHIVE_ROOT_KEY: ${CELLHIVE_ROOT_KEY:?set CELLHIVE_ROOT_KEY (openssl rand -base64 32)}
+  CELLHIVE_CELL_URL: http://cell-agent:7001
+  CELLHIVE_WORKERD: /usr/local/bin/workerd
+  CELLHIVE_RUNTIME_DIR: /data/runtime
+  # OTLP tracing is off unless CELLHIVE_OTLP_ENDPOINT is set (ADR-167).
+  CELLHIVE_OTLP_ENDPOINT: ${CELLHIVE_OTLP_ENDPOINT:-}
+  CELLHIVE_OTLP_HEADERS: ${CELLHIVE_OTLP_HEADERS:-}
+  CELLHIVE_TRACES_SAMPLE_RATIO: ${CELLHIVE_TRACES_SAMPLE_RATIO:-0.01}
+
+services:
+  cell-agent:
+    <<: *image
+    command: ["cell-agent"]
+    environment:
+      <<: *common-env
+      CELLHIVE_NODE_ID: cell-agent-a
+      CELLHIVE_ADVERTISE: cell-agent:7001
+      CELLHIVE_REST_ADDR: ":7001"
+      CELLHIVE_ADMIN_ADDR: ":8082"
+      CELLHIVE_DATA_DIR: /data/state
+      CELLHIVE_BUCKET_DIR: /data/bucket
+      # Override with do-runtime-gated:8788 when running the rpo0 profile
+      # (ADR-140/153).
+      CELLHIVE_DO_RUNTIMES: ${CELLHIVE_DO_RUNTIMES:-do-runtime:8788}
+      # The queue/timer/cron/waker loops POST due work to user-runtime's internal
+      # privileged endpoint; without this they silently never dispatch.
+      CELLHIVE_DISPATCH_URL: http://user-runtime:8088
+    expose: ["7001", "8082"]
+    volumes:
+      - cell-agent-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7001/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  user-runtime:
+    <<: *image
+    command: ["user-runtime"]
+    environment:
+      <<: *common-env
+      CELLHIVE_USER_RUNTIME_PORT: "8081"
+      CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
+      CELLHIVE_USER_RUNTIME_JS: /app/workerd/user-runtime
+      CELLHIVE_FACADES_JS: /app/workerd/platform/facades.js
+    expose: ["8081", "8088"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - runtime-data:/data
+    depends_on:
+      cell-agent:
+        condition: service_healthy
+
+  do-runtime:
+    <<: *image
+    command: ["do-runtime"]
+    environment:
+      <<: *common-env
+      CELLHIVE_DO_ADDR: "*:8788"
+      CELLHIVE_DO_NODE: do-runtime-1
+      CELLHIVE_DO_ADVERTISE: do-runtime:8788
+      CELLHIVE_DO_RUNTIME_JS: /app/workerd/do-runtime
+      CELLHIVE_DATA_DIR: /data/state
+    expose: ["8788"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8788/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - runtime-data:/data
+    depends_on:
+      cell-agent:
+        condition: service_healthy
+
+  # DO with the ADR-083 output gate (RPO=0), profile "rpo0": do-supervisor spawns
+  # workerd and gates responses on cell-agent durability. Use this instead of
+  # do-runtime in production.
+  do-runtime-gated:
+    <<: *image
+    command: ["do-runtime-gated"]
+    profiles: ["rpo0"]
+    environment:
+      <<: *common-env
+      CELLHIVE_DO_ADDR: "*:8788"
+      CELLHIVE_DO_NODE: do-runtime-gated-1
+      CELLHIVE_DO_ADVERTISE: do-runtime-gated:8788
+      CELLHIVE_DO_RUNTIME_JS: /app/workerd/do-runtime
+      CELLHIVE_DATA_DIR: /data/state
+      CELLHIVE_DO_GATE_LISTEN: ":18901"
+    expose: ["8788", "18901"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8788/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - runtime-data:/data
+    depends_on:
+      cell-agent:
+        condition: service_healthy
+
+  # Optional object storage for the s3 profile; point cell-agent at it with
+  # CELLHIVE_BUCKET=s3://cellhive + AWS_* (see docs/configuration.md).
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    profiles: ["s3"]
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - minio-data:/data
+
+  # Optional OTLP trace backend (profile "tracing", ADR-167). Point CellHive at
+  # it with CELLHIVE_OTLP_ENDPOINT=http://openobserve:5080/api/default and
+  # CELLHIVE_OTLP_HEADERS="authorization=Basic $(printf %s 'root@example.com:Complexpass#123' | base64)".
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    profiles: ["tracing"]
+    environment:
+      ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL:-root@example.com}
+      ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD:-Complexpass#123}
+    ports: ["5080:5080"]
+    volumes:
+      - openobserve-data:/data
+
+  # Ops-provided edge; the platform does not push its config (ADR-132).
+  edge:
+    image: traefik:v3
+    profiles: ["edge"]
+    ports: ["80:80", "443:443"]
+    depends_on: [user-runtime]
+
+volumes:
+  cell-agent-data:
+  runtime-data:
+  minio-data:
+  openobserve-data:

@@ -1,0 +1,11 @@
+{
+  "name": "vectorize",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  "vectorize": [
+    {
+      "binding": "VEC",
+      "index_name": "VEC"
+    }
+  ]
+}

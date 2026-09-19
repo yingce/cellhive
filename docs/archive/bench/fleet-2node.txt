@@ -1,0 +1,8 @@
+# 2-node fleet benchmark (capture ON, durability=auto -> peer fsync; bucket async after ack)
+# date=2026-09-16T11:46:05+08:00 host=vwork-dev nproc=8 go=go1.27.1
+# cmd: CONCS="1 16 32 64" DUR=10s LEASE_TTL=10s
+mode=put cells=1  c=1    n=2415    fail=0    p50=4.44   ms p90=4.75   ms p99=5.26    ms mean=4.14   ms rps=241      
+mode=put cells=1  c=16   n=35255   fail=0    p50=4.26   ms p90=6.48   ms p99=8.30    ms mean=4.54   ms rps=3524     
+mode=put cells=1  c=32   n=42166   fail=0    p50=7.45   ms p90=10.46  ms p99=14.51   ms mean=7.59   ms rps=4215     
+mode=put cells=1  c=64   n=36768   fail=0    p50=13.99  ms p90=17.51  ms p99=187.72  ms mean=17.41  ms rps=3674     
+# fleet path proof: follower spool files=1  bucket .batch objects=727

@@ -1,0 +1,40 @@
+# 模块：bindings 与兼容面
+
+把每种 Cloudflare binding 映射到平台资源与 host adapter，并定义同步/异步边界与拒绝项：KV、D1、R2、Queue、Cron、Workflows、Assets、Vars/Secrets、AI（BYO）、Hyperdrive、Vectorize、Service。
+
+> 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
+## 关键接口
+
+cell-agent 上的 `/v1/kv/*`、`/v1/d1/*`、`/v1/r2/*`、`/v1/queue/*`、`/v1/workflow/*`、`/v1/vectorize/*`、`/v1/service/run`、`/v1/internal/hyperdrive`。
+
+## 配置（环境变量）
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CELLHIVE_AI_URL` / `_KEY` | 空 | BYO AI 端点；空=不注入 |
+| `CELLHIVE_BINDING_CACHE` | `1s` (0 关) | binding 声明缓存 |
+| `CELLHIVE_NS_RATE` | 空（关） | 每 ns 写准入 `rps[/burst]`（缺省 burst=rps） |
+
+
+> 解析规则（字符串/布尔/时长/字节/列表）见 [`../configuration.md`](../configuration.md#解析规则)。
+
+## 关键不变量
+
+- binding 名 = 已登记资源名（无自动 provisioning）。
+- 每个 binding 一个 scoped token（HMAC）。
+- 读**强一致**（转发 owner）。
+- 对 CF 拒绝项**显式拒绝**（Cache API、Sessions、SSE-C…），未知字段/flag 部署期拒绝。
+
+## 源码位置
+
+`internal/{kv,d1,r2,queue,workflow,vectorize}`（在 cellstore 之上）；`workerd/platform/{bindings.js,facades.js,bindings-wrapper.js}`；`internal/server/*_binding*.go`。
+
+## 测试锚点
+
+`make js-test`、`internal/server`、`make cli-test`（wrangler 映射）。
+
+## 相关文档
+
+[`bindings.md`](../bindings.md)、[`compatibility-matrix.md`](../compatibility-matrix.md)、[`wrangler-compat.md`](../wrangler-compat.md)
+
+_最后更新：2026-09-19_

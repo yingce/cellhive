@@ -1,0 +1,24 @@
+# write-cost decomposition + txid mirror (single host 8 cores, Go benchmarks)
+
+## layered per-write cost (cellstore benchmarks)
+raw autocommit UPSERT (1 stmt, no txn/txid): 12.3us   ~81k/s
+explicit txn + UPSERT (no txid):             16.4us   ~61k/s
+txid UPDATE + SELECT readback (marginal):    ~41us
+cellstore PutTx BEFORE mirror:               57.6us   ~17k/s
+cellstore PutTx AFTER  mirror:               40.4us   ~25k/s   (-30%)
+
+## in-process handler (mux + scopeAuth + binding + JSON; httptest, no network)
+BEFORE: binding uncached 112us / cached 91us
+AFTER : binding uncached  99us / cached 74.6us   (-18%)
+
+## real HTTP, single-key put, single cell, capture OFF (writeMu + mirror + binding cache)
+c=16  9807 rps p50 1.58ms
+c=32  9784 rps p50 3.19ms   (was 8679 before mirror)
+c=128 9399 rps p50 13.35ms
+
+## capture ON (durability=bucket, RPO=0) -- proof bound, unchanged by the mirror
+c=16 4633 c=32 4726 c=128 4581
+
+## safety tests
+TestTxIDMirrorContinuesAcrossReopen  (restart continues txid from cell_meta)
+TestTxIDsUniqueUnderConcurrency      (16 writers x 32 = 512 txids, unique & gap-free)

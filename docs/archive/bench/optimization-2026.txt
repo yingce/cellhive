@@ -1,0 +1,25 @@
+# cell-agent write-path optimization (single host, 8 cores, FS bucket)
+
+## A/B: binding cache (capture OFF, single cell, 8s)
+# A) CELLHIVE_BINDING_CACHE_MS=0 (baseline)
+mode=put cells=1 c=8   rps=6156  p50=0.80ms
+mode=put cells=1 c=32  rps=5985  p50=3.65ms
+mode=put cells=1 c=128 rps=5722  p50=15.51ms
+# B) CELLHIVE_BINDING_CACHE_MS=1000
+mode=put cells=1 c=8   rps=6045  p50=0.82ms
+mode=put cells=1 c=32  rps=5911  p50=3.72ms
+mode=put cells=1 c=128 rps=5458  p50=16.23ms
+# -> binding lookup is NOT the bottleneck; cache kept (harmless) but no measurable gain.
+
+## Batched KV writes [REMOVED later: env.KV has no batch API; endpoint deleted] (capture ON, durability=bucket, RPO=0, single cell, c=32, 10s)
+mode=put      c=32  rps=6298   keys/s=6298
+mode=putbatch batch=10  rps=3110  keys/s=31097
+mode=putbatch batch=50  rps=1139  keys/s=56963
+mode=putbatch batch=100 rps=668   keys/s=66778
+mode=putbatch batch=100 c=128 rps=670 keys/s=67009
+# -> one txn + one capture segment per request: 6.3k -> 67k keys/s (10.6x), RPO=0 unchanged.
+
+## Raw SQLite baselines (internal/cellstore benchmarks)
+# raw autocommit UPSERT: 12.4us   ~80k/s
+# cellstore PutTx:       58.8us   ~17k/s   (parallel same: single writer)
+# PutTx batch 100/txn:   10.2us/key ~98k/s

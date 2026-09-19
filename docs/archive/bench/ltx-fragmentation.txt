@@ -1,0 +1,11 @@
+# LTX fragmentation vs automatic compaction (single cell, capture ON, RPO=0, FS bucket)
+# 20000 KV puts, c=64, capture window 2ms default, min 64 segments
+
+## compaction disabled (MinSegments huge)
+L0 objects=1336   L1 objects=0   total=1336     (~15 writes per object)
+
+## compaction enabled (interval 2s, min 64 segments)
+L0 objects=0      L1 objects=3   total=3
+  ltx/e1/L1/manifest.json
+  ltx/e1/L1/20100.snapshot
+  ltx/e1/L1/index.bin

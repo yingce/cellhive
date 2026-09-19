@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cellhive
+description: CellHive — self-hosted Cloudflare Workers compatible runtime (cell-agent + workerd runtimes)
+type: application
+version: 0.1.0
+appVersion: "0.0.1-p1"

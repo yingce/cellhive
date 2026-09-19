@@ -1,0 +1,16 @@
+# capture-ON KV put, LZ4 WAL3 compression on vs off (CELLHIVE_LTX_COMPRESSION), FS bucket, 2 reps, kvbench -d 8s
+# date=2026-09-18T03:32:39+08:00 nproc=8
+## CELLHIVE_LTX_COMPRESSION=off (WAL2=yes)
+rep1 mode=put cells=1  c=16   n=41328   fail=0    p50=2.87   ms p90=3.67   ms p99=4.19    ms mean=3.10   ms rps=5165     
+rep1 mode=put cells=1  c=32   n=80511   fail=0    p50=2.74   ms p90=4.62   ms p99=5.81    ms mean=3.18   ms rps=10062    
+rep1 mode=put cells=1  c=64   n=99642   fail=0    p50=4.69   ms p90=7.26   ms p99=9.93    ms mean=5.14   ms rps=12447    
+rep2 mode=put cells=1  c=16   n=40506   fail=0    p50=2.88   ms p90=3.79   ms p99=4.50    ms mean=3.16   ms rps=5062     
+rep2 mode=put cells=1  c=32   n=80245   fail=0    p50=2.76   ms p90=4.63   ms p99=5.81    ms mean=3.19   ms rps=10024    
+rep2 mode=put cells=1  c=64   n=98456   fail=0    p50=4.70   ms p90=7.29   ms p99=10.46   ms mean=5.20   ms rps=12300    
+## CELLHIVE_LTX_COMPRESSION=on (WAL2=no)
+rep1 mode=put cells=1  c=16   n=41300   fail=0    p50=2.87   ms p90=3.72   ms p99=4.14    ms mean=3.10   ms rps=5161     
+rep1 mode=put cells=1  c=32   n=80191   fail=0    p50=2.78   ms p90=4.65   ms p99=5.79    ms mean=3.19   ms rps=10020    
+rep1 mode=put cells=1  c=64   n=98834   fail=0    p50=4.70   ms p90=7.26   ms p99=10.19   ms mean=5.18   ms rps=12347    
+rep2 mode=put cells=1  c=16   n=40533   fail=0    p50=2.88   ms p90=3.80   ms p99=4.57    ms mean=3.16   ms rps=5065     
+rep2 mode=put cells=1  c=32   n=80982   fail=0    p50=2.76   ms p90=4.60   ms p99=5.85    ms mean=3.18   ms rps=10064    
+rep2 mode=put cells=1  c=64   n=98913   fail=0    p50=4.70   ms p90=7.28   ms p99=10.19   ms mean=5.17   ms rps=12356    

@@ -1,0 +1,26 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cell-agent
+  namespace: cellhive
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: cell-agent}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: user-runtime
+  namespace: cellhive
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: user-runtime}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: do-runtime
+  namespace: cellhive
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: do-runtime}}
