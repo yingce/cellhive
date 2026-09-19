@@ -1,5 +1,5 @@
 # RPO=0 fault injection: SIGKILL owner mid-write + delete local DB
-# date=2026-09-19T21:22:47+08:00 host=vwork-dev N=2000 KILL_AT=1200 LEASE_TTL=3s
+# date=2026-09-19T21:52:11+08:00 host=vwork-dev N=2000 KILL_AT=1200 LEASE_TTL=3s
 killed node a at key 1200
 acked keys before crash: 1200 (SIGKILL at 1200)
 takeover capA/__control__/main -> 200

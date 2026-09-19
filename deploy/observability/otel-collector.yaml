@@ -42,10 +42,16 @@ processors:
     send_batch_size: 1024
     timeout: 5s
   # Keep the platform's own credentials out of the backend. CellHive already
-  # refuses to log secrets, so this is defense in depth.
+  # refuses to log secrets, so this is defense in depth. The attributes
+  # processor only accepts exact keys for `delete` (no key_regex), so the
+  # credential headers are listed explicitly.
   attributes/redact:
     actions:
-      - key_regex: "(?i)(authorization|x-cellhive-internal-token|x-cellhive-scope-token)"
+      - key: authorization
+        action: delete
+      - key: x-cellhive-internal-token
+        action: delete
+      - key: x-cellhive-scope-token
         action: delete
   # Route by namespace (uncomment and add per-tenant exporters to isolate).
   # routing:

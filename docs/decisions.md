@@ -2349,6 +2349,7 @@
 - **理由**：push 把"暴露端点 + 自建鉴权"换成"后端 RBAC"；`trace_id` 关联让 指标→trace→日志 可跳转；资源属性对齐 OTel 语义，换后端不改代码。
 - **代价/边界**：OTLP 导出仍是 best-effort（后端不可用丢遥测）；租户查询依赖后端能力（无行级过滤时需 per-org/stream 映射）；平台不提供自带查询 API/存储（长期项）。
 - **验证**：`internal/telemetry TestLogExportTraceCorrelation`（traceparent → OTLP record 的 trace/span id；非法/全零拒绝；无 traceparent 不携带上下文）、`internal/server TestLogIngestAndQuery`（逐条 + 请求头回退都写入 `trace_id`）；`bash scripts/ci.sh` GATE PASS。
+- **实测修复（ADR-179 期间）**：新增 `scripts/openobserve-e2e.sh` 真实起 OpenObserve + 仓库参考 collector 配置做端到端，发现参考配置的 `attributes/redact` 用了 `key_regex`（当前 collector 对 `delete` 只接受显式 key，配置直接启动失败）→ 改为显式删除 `authorization`/`x-cellhive-internal-token`/`x-cellhive-scope-token`；并确认 log record 的 `trace_id`（cell-agent 缓冲区与 OTLP 记录都有，`4bf9…`）与 span 同 trace。
 - **文档**：`docs/observability.md`（多租户与对外查询）、`docs/tracing.md`、`docs/modules/observability.md`、`docs/en/*` 同步、`deploy/observability/{otel-collector.yaml,README.md}`、`deploy/compose/docker-compose.yml`（`observability` profile）。
 
 ---

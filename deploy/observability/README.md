@@ -40,6 +40,31 @@ Every record carries the resource attributes `service.name`,
 `span_id` when emitted inside a traced request, so backends can jump
 metrics → trace → logs.
 
+## Validated end-to-end
+
+`bash scripts/openobserve-e2e.sh` (repo root) starts OpenObserve + this
+collector config + cell-agent + user-runtime + a probe worker and asserts:
+
+- logs land in OpenObserve stream `default logs` with `cellhive_namespace=obs`
+  and the caller's `trace_id` preserved;
+- a slow (>1s) request survives the reference `tail_sampling` keep-slow policy,
+  so the whole trace (loader `http.server`, cell-agent `http.server`,
+  `cell.durability_proof`) lands in `default traces` with
+  `cellhive_namespace`/`cellhive_binding` attributes.
+
+Notes learned from the live run:
+
+- OpenObserve **flattens attribute dots** for SQL: query `cellhive.namespace`
+  as `cellhive_namespace`. Traces are searched with
+  `POST /api/<org>/_search?type=traces`; the span name column is
+  `operation_name`.
+- The `attributes/redact` processor only accepts exact keys for `delete` on
+  current Collector versions (no `key_regex`); the config lists the credential
+  headers explicitly. A `key_regex` there makes the Collector fail to start.
+- The reference `tail_sampling` keeps errors, >1s traces and a 1% baseline, so
+  fast, successful traces are intentionally dropped. Raise `baseline` or drop
+  the processor when you want every trace.
+
 ## Metrics
 
 Keep `/metrics` **internal** (Prometheus pull). It is unauthenticated, so do not

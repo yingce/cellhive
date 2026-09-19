@@ -151,6 +151,7 @@
 ## One-command Gate (ADR-141)
 
 OTLP/collector end-to-end: `bash scripts/otlp-collector-smoke.sh` (needs docker plus the `otel/opentelemetry-collector-contrib` image; starts a real collector + cell-agent + user-runtime + a probe worker and asserts spans/logs/`ns` metrics, ADR-179).
+Backend end-to-end: `bash scripts/openobserve-e2e.sh` (needs docker plus an `openobserve` image; real OpenObserve behind the repo's reference collector config, asserting logs/traces land in OO and are queryable by ns/trace_id).
 
 `make ci` (`scripts/ci.sh`) chains all checks: gofmt, `go vet`, `go test`, `make build`, `js-test`, `cli-test`, `perf-test`, `rpo-test`, `s3-test`, `docker-build`, `compose-config`, `k8s-render`, `helm-lint`; missing tools are skipped (`REQUIRE_ALL=1` turns them into hard failures). Most recent run: **GATE: PASS 13/13**.
 ## compose Stack Startup Smoke (C, ADR-140/153)

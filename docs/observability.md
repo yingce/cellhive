@@ -88,7 +88,10 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - **统一资源属性**：每条记录带 `service.name`、`service.instance.id`（= 节点 id）、`cellhive.namespace`、`cellhive.worker`；租户日志在请求内触发时带 `trace_id`/`span_id`（`logbuf.Entry` + `log-tail.js` 逐行 `traceparent`，cell-agent 解析）→ 后端可 **指标 → trace → 日志** 跳转。
 - **租户隔离的唯一租户面在后端**：把每个 namespace 映射到后端的 **org/stream**（如 OpenObserve 的 `logs-<ns>`），给租户一个只读该范围的用户；**不要**只靠 `cellhive.namespace` 属性做行级隔离（多数后端不支持按任意属性过滤）。
 - **参考管线**：[`../deploy/observability/otel-collector.yaml`](../deploy/observability/otel-collector.yaml)（OTLP in → redact/route/tail-sample → OpenObserve）+ [`../deploy/observability/README.md`](../deploy/observability/README.md)；compose 用 `--profile observability`（OpenObserve 在 `tracing` profile）。
-- **可复现冒烟**：`bash scripts/otlp-collector-smoke.sh` 起真实 `otel/opentelemetry-collector-contrib` + cell-agent + user-runtime + 一个会 `console.log`/写 KV 的 worker，断言 collector 收到 span（带 `cellhive.namespace`）、带调用方 `trace_id` 的 log record，且 `/metrics` 出现带 `ns` 的绑定计数。
+- **可复现冒烟**：
+  - `bash scripts/otlp-collector-smoke.sh`：真实 `otelcol-contrib`（file/debug 导出）+ cell-agent + user-runtime + 探针 worker，断言 collector 收到 span（带 `cellhive.namespace`）、带调用方 `trace_id` 的 log record，且 `/metrics` 出现带 `ns` 的绑定计数。
+  - `bash scripts/openobserve-e2e.sh`：真实 **OpenObserve** + 仓库参考 collector 配置，端到端验证后端一段（已跑通 `OPENOBSERVE-E2E: PASS`）：日志进 `default logs`（`cellhive_namespace=obs`，并保留 `trace_id`），慢请求（>1s）经参考配置的 `tail_sampling`（keep-slow）保留整条 trace 进 `default traces`（span 带 `cellhive_namespace`/`cellhive_binding`）。
+  - **后端字段命名**：OpenObserve 会把属性点号展平（`cellhive.namespace` → 查询列 `cellhive_namespace`），SQL 用展平名；trace 查询用 `POST /api/<org>/_search?type=traces`，span 名在 `operation_name`。
 - **指标保持内部 pull**：`/metrics` **免鉴权**，不要公网暴露；要并入 OTLP 就用 Collector 的 `prometheus` receiver 抓取后转投，而不是开放裸端点。
 - **投递语义**：OTLP 导出是 **best-effort、有界内存批**；后端不可用会丢遥测而不阻塞请求。审计级留存需在 Collector/后端前加持久缓冲（file exporter）。
 
