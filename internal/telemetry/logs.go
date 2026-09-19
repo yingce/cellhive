@@ -128,19 +128,21 @@ func (s *logState) subscribedLocked(ns, worker string, now time.Time) bool {
 // traceparent header. It returns empty strings for a missing or malformed
 // value (or an all-zero id), so callers can attach them unconditionally.
 func TraceIDs(traceparent string) (traceID, spanID string) {
-	parts := strings.Split(strings.TrimSpace(traceparent), "-")
-	if len(parts) < 4 || len(parts[1]) != 32 || len(parts[2]) != 16 {
+	// Fixed W3C layout: 00-<32 hex trace>-<16 hex span>-<2 hex flags>. Parse by
+	// position (no split/allocation) and return the original hex substrings.
+	tp := strings.TrimSpace(traceparent)
+	if len(tp) < 55 || tp[2] != '-' || tp[35] != '-' || tp[52] != '-' {
 		return "", ""
 	}
-	tid, err := trace.TraceIDFromHex(parts[1])
+	tid, err := trace.TraceIDFromHex(tp[3:35])
 	if err != nil || !tid.IsValid() {
 		return "", ""
 	}
-	sid, err := trace.SpanIDFromHex(parts[2])
+	sid, err := trace.SpanIDFromHex(tp[36:52])
 	if err != nil || !sid.IsValid() {
 		return "", ""
 	}
-	return tid.String(), sid.String()
+	return tp[3:35], tp[36:52]
 }
 
 // ExportLog ships one captured line to the OTLP backend when the mode allows

@@ -166,3 +166,23 @@ func TestLogExportTraceCorrelation(t *testing.T) {
 		t.Fatalf("untraced record has trace context: %x/%x", u[0], u[1])
 	}
 }
+
+func BenchmarkTraceIDs(b *testing.B) {
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		TraceIDs(tp)
+	}
+}
+
+// BenchmarkExportLogOff is the per-line cost when OTLP log export is disabled
+// (the default): a mutex-guarded mode check followed by an early return.
+func BenchmarkExportLogOff(b *testing.B) {
+	if _, err := New(context.Background(), Config{}); err != nil {
+		b.Fatalf("new: %v", err)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		ExportLog("ns", "w", "log", "hello", 0, "", "")
+	}
+}
