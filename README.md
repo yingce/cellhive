@@ -108,6 +108,8 @@ scripts/    CI and ops scripts
 
 ## Documentation
 
+> **Language:** the design docs under [`docs/`](./docs/) are written in **Chinese**, the project's primary documentation language. This README (and the module/example code) are the English entry points; for behavior, the source and tests are authoritative.
+
 - **Docs home / start here:** [`docs/README.md`](./docs/README.md) — audience paths (operate · build Workers · contribute · protocol deep-dive) and a grouped map of every doc.
 - **Module docs:** [`docs/modules/`](./docs/modules/README.md) — per module: role, interfaces, an environment-variable table (with defaults), invariants, source layout and test anchors.
 - **Examples:** [`examples/`](./examples/README.md) — one runnable project per feature (KV, D1, R2, Queues, Cron, Durable Objects, Workflows, service bindings, assets, AI, Vectorize, …) plus a feature→source→doc code map.

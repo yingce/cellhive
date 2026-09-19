@@ -29,4 +29,4 @@
 - **envelope encryption（信封加密）**：secrets 以密文存储，根密钥（KEK）在 cell 之外（env/KMS）。
 - **CAS / 条件写**：bucket 的 compare-and-swap / if-match 写，用于单写者判定。
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

@@ -385,4 +385,4 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 | **hedge 命中 / 无效比例** | `/metrics` `cellhive_peer_hedge_fired_total`（发出副本）/`cellhive_peer_hedge_won_total`（副本赢得 ack）；等待用滚动窗口的最近最慢 append 推导（ADR-164/165） |
 | **group commit 合批比** | 高并发下每 ack 的 append/fsync 次数显著 < 1 |
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

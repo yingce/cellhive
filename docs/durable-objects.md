@@ -14,7 +14,7 @@
 > **`deleteAll()` shim ✅**：stock workerd 对 SQLite facet 的 `deleteAll()` 抛内部错误；基类改为清 KV + drop 用户表 + 清 alarm（`cellhive-do.js`）。
 > **facet 发现 ✅**：`.facets` 格式已解析（magic + `[flag][len][name]`，条目 i→`<hash>.<i+1>.sqlite`）；**按需分页 ✅**（`CompactAll` + `PageFetcher.Materialize`，每页 ranged 读）；**接管 ✅**（`TestDoRuntimeTakeoverAfterCrash`）；**compat 套件 ✅**（`TestDOCompatSuite`，19 子测试）。
 > **对象键 ✅**：`ctx.id.toString()` = `<hosthash>`、`ctx.id.name` = hostId（含 storage_id）→ host.js 上报 → supervisor 按 `storage_id/<class>/<objectName>` 复制 facet 文件；`RestoreObject` 按对象冷启动（ADR-084）。
-> **P3 剩余（非功能缺口）**：① 运行期 SQLite VFS 懒读 —— **DO 侧** stock workerd 下不可实现（ADR-085，替代=冷启动按对象/按页 materialize）；ADR-159 后 cell-agent 侧 CGo 自定义 VFS 技术可行但未实现（需捕获/快照也走 VFS）；② **C 类环境验证**（真实跨主机 RTT、云端对象存储、多主机混沌/接管）缺环境；③ **跨 worker `transferred_classes`** 有意拒绝（同 worker 支持，见 wrangler-compat）；④ worker↔worker 已是同实例原生 JSRPC（ADR-102），DO RPC 已支持 JSON+tagged（ADR-162）；剩余仅为 RPC 跨 `ReadableStream`/`RpcTarget` 传递。
+> **P3 剩余（非功能缺口）**：① 运行期 SQLite VFS 懒读 —— **DO 侧** stock workerd 下不可实现（ADR-085，替代=冷启动按对象/按页 materialize）；cell-agent 侧已实现（ADR-160，`internal/pagedvfs`；捕获/快照前强制 hydrate）；② **C 类环境验证**（真实跨主机 RTT、云端对象存储、多主机混沌/接管）缺环境；③ **跨 worker `transferred_classes`** 有意拒绝（同 worker 支持，见 wrangler-compat）；④ worker↔worker 已是同实例原生 JSRPC（ADR-102），DO RPC 已支持 JSON+tagged（ADR-162）；剩余仅为 RPC 跨 `ReadableStream`/`RpcTarget` 传递。
 
 ## 定位
 
@@ -245,4 +245,4 @@ do-runtime 的 supervisor 主动向 cell-agent 发起 claim。流程：
 - 临时盘 ⇒ 冷激活需从 cell-agent/对象存储恢复，冷启动成本是弹性代价；
 - 自研 PID1 supervisor 需正确编排跨进程关停顺序。
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

@@ -56,4 +56,4 @@
 - **框架预构建产物验收**：`internal/wrangler TestFrameworkPrebuiltLayouts` 覆盖 OpenNext（`.open-next/worker.js` + `.open-next/assets`）、SvelteKit（`.svelte-kit/cloudflare/_worker.js` + 同目录资产）、Astro（`dist/_worker.js/index.js` + `dist/client`）：配置映射 + `bundler.Build` 打包。
 - **不做的项**：见"Rejected"行的原因说明（Cache API/浏览器渲染/Email/Python 等）；Vectorize 已支持（ADR-158/159）。
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

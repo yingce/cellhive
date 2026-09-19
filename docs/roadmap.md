@@ -66,7 +66,7 @@
 - HTTPCommitter 证明放宽为 `fleet`/`bucket`/`bucket-batch`（拒绝 `bucket-async`）✅；
 - **WS 跨节点转发** ✅（`proxyConnect`，1012 透传）；
 - **`transferred_classes` 同 worker** ✅（= rename 别名；跨 worker `script_name` 拒绝）；
-- **运行期 VFS 懒读** ⛔ DO 侧边界定稿（ADR-085）；ADR-159 后 cell-agent 侧 CGo 自定义 VFS 技术可行但未实现；替代=冷启动按对象/按页 materialize ✅；
+- **运行期 VFS 懒读** ✅ cell-agent 侧已实现（ADR-160，`internal/pagedvfs`，默认开）；DO 侧不可行（ADR-085），替代=冷启动按对象/按页 materialize ✅；
 - `refreshFacets` 增量缓存 ✅；`deleteAll()` shim（KV+SQL）✅。
 - 剩余仅 **C 类环境验证**（真实跨主机 RTT、云端对象存储条件写、多主机接管）缺环境，如实记 blocker。
 

@@ -11,7 +11,7 @@
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_AI_URL` / `_KEY` | 空 | BYO AI 端点；空=不注入 |
+| `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 空 | BYO AI 端点与密钥；空=不注入 |
 | `CELLHIVE_CELL_URL` | `http://127.0.0.1:7001` | cell-agent REST |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_ESBUILD` | 自动查找 | esbuild 路径 |

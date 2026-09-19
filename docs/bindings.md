@@ -122,7 +122,7 @@ export default {
 
 cell-agent 的 `queue.Runner` 周期性从**控制面登记的 queue 资源**取轮询集（`control.ResourcesByKind("queue")`，冷路径），对每个队列 `Claim` 一批（lease），POST 到 `CELLHIVE_DISPATCH_URL` 的 **`/v1/queues/dispatch`**；成功 `Ack`、失败整批 `Retry`（**at-least-once**）。body 含 `(namespace, queue, worker, bundle_sha, version, messages)`（worker/bundle/version 由 `Projection.QueueTargets()` 解析，ADR-067/112/127），user-runtime 直接加载该活跃版本并调用其 `queue()` handler。body 不带 bindings；user-runtime 在加载时按 `(ns, worker, version)` 调 `GET /v1/internal/worker/bindings` 取该版本的 binding spec 注入 env（ADR-128，失败开放），故 `queue(batch, env)` 与 fetch 的 env 一致。配置：`CELLHIVE_QUEUE_INTERVAL`（默认 1s，0 关闭）。**已实现**：user-runtime `/v1/queues/dispatch`（ADR-067）；重试上限 + 死信（`DeadLetterQueue`，ADR-072，`internal/queue/runner.go`）。
 
-_最后更新：2026-09-16_
+_最后更新：2026-09-19_
 
 ## 绑定实现（ADR-090，RPC entrypoint env）
 

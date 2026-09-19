@@ -5,7 +5,7 @@
 | 层 | 范围 | 方式 |
 |---|---|---|
 | 单元 | cell 协议逻辑、owner/epoch、timer 去重、路由解析 | Go 单测 |
-| 契约 | Wrangler 语义基线、gRPC protobuf、内部 REST schema | 固定基线/生成的契约测试 |
+| 契约 | Wrangler 语义基线、内部 REST/绑定 schema | 固定基线/契约测试 |
 | 集成 | 真实 workerd + cell-agent + 对象存储（MinIO/本地 stub） | docker-compose 起栈 |
 | 端到端 | wrangler 项目 → deploy → fetch/binding/DO/cron/queue | 兼容套件 |
 | 故障注入 | 崩溃/分区/接管/checkpoint | 定向脚本 |
@@ -177,9 +177,9 @@
 
 ## 包级覆盖
 
-`go test ./...` 覆盖 **47/63** 包。无独立单测的是 16 个包：
+`go test ./...` 覆盖 **54/68** 包。无独立单测的是 **14** 个包：
 
-- 服务入口 `cmd/{cell-agent,user-runtime,do-runtime,do-supervisor}`：由集成/e2e（`internal/userruntime`、`internal/doruntime`、`cmd/cellhive` e2e）覆盖；
+- 服务入口 `cmd/user-runtime`、`cmd/do-supervisor`：由集成/e2e（`internal/userruntime`、`internal/doruntime`、`cmd/cellhive` e2e）覆盖（`cmd/cell-agent`、`cmd/do-runtime`、`cmd/cellhive` 自身有单测）；
 - 压测/工具 `cmd/{cellbench,realbench,sqlbench,kvbench,gatebench,s3init,s3probe,walscan,recoververify,restoreverify,cell-supervisor}`：一次性 CLI，靠 `make s3-test`/`make perf-test` 触发；
 - `internal/workerdbin`：二进制发现，由 `make js-test`（真实 workerd）间接覆盖。
 
@@ -307,8 +307,8 @@ ADR-169（purge 分页删除）：`internal/objectstore TestObjectsListPage`（�
 ADR-168（R2 list include/delimiter）：`internal/r2 TestListPageDelimited`（delimiter 归并、prefix 收窄、limit/truncated+cursor）、`internal/server TestR2ListDelimiterAndInclude`（`include` 按需回填 sidecar metadata、`delimitedPrefixes`、未知 include 400）、`internal/userruntime TestUserRuntimeR2ObjectFidelityAndD1Meta`（真 workerd：`list({delimiter,include})` 透传 + 返回 `delimitedPrefixes`/对象 metadata）。
 ADR-163（R2/D1 契约保真）：`internal/r2 TestR2MetadataStatAndChecksums`（metadata sidecar 往返/`Stat`/checksum 校验/删除清 sidecar）、`internal/d1 TestLastInsertID`（exec/query/batch 的 `last_row_id`）、`internal/userruntime TestUserRuntimeR2ObjectFidelityAndD1Meta`（真 workerd：R2ObjectBody 字段 + `text()` + `head()` + list `truncated/cursor` + put metadata 头 + D1 `meta.last_row_id`/`D1_ERROR`）。
 ADR-162（DO RPC）：`internal/doruntime TestDoRuntimeRPCDispatch`（真 workerd：普通 tenant 方法的原生 JSRPC、tagged Map/Date 往返、tagged Map 参数、共享引用/环、handler 错误 500、缺失方法 404、保留/`__ch*` 方法 400、不可序列化结果 500）、`TestDoRuntimeDurableObjectToDurableObjectRPC`（facet 内经注入 facade 调兄弟 DO）、`internal/userruntime TestUserRuntimeDurableObjectRPC`（真 user-runtime：`getByName` → tagged 往返 → 结构化 Error 的 `code`/`message`）、`internal/server TestDOProxyRPCPassthrough`（rpc 字节透传如 `1e21`、request/rpc 互斥、kind 校验、8 MiB 超限 400）。
-ADR-159（CGo + vec1）：`internal/vectorize TestVec1CellReplicatesThroughLTX`（**LTX 复制端到端**：vec1 索引 + ANN 模型 → cellcapture 快照/delta → `restore.ApplyFile` 还原到新 cellstore → 查询结果/模型/删除/元数据一致，还原后可写）、`TestVec1ExtensionRegistered`（无 `.so` 也能 `vec1_info()` + 建 vec1 vtab；证明静态注册成功）、store 单测改为 vec1 后端（insert-only/upsert 替换、cosine/euclidean 的 score 映射、namespace 下推、9 种 metadata 过滤、上限与 config 不可变、dot-product 拒绝、`BuildANN`/`DropANN`）、`BenchmarkQueryVec1`（20k×256 flat ≈ 6.3ms；ANN ≈ 0.22ms 由 `cellhive vectorize rebuild` 复现）；`internal/server TestVectorizeANNEndpoints`（rebuild/stats ann/drop-ann/dot-product 400）；驱动回归 `go test ./...` 51 包 + `scripts/ci.sh`（tags 由 Makefile/ci.sh 传递，S3 复制/恢复链已复测）。
+ADR-159（CGo + vec1）：`internal/vectorize TestVec1CellReplicatesThroughLTX`（**LTX 复制端到端**：vec1 索引 + ANN 模型 → cellcapture 快照/delta → `restore.ApplyFile` 还原到新 cellstore → 查询结果/模型/删除/元数据一致，还原后可写）、`TestVec1ExtensionRegistered`（无 `.so` 也能 `vec1_info()` + 建 vec1 vtab；证明静态注册成功）、store 单测改为 vec1 后端（insert-only/upsert 替换、cosine/euclidean 的 score 映射、namespace 下推、9 种 metadata 过滤、上限与 config 不可变、dot-product 拒绝、`BuildANN`/`DropANN`）、`BenchmarkQueryVec1`（20k×256 flat ≈ 6.3ms；ANN ≈ 0.22ms 由 `cellhive vectorize rebuild` 复现）；`internal/server TestVectorizeANNEndpoints`（rebuild/stats ann/drop-ann/dot-product 400）；驱动回归 `go test ./...`（全量包）+ `scripts/ci.sh`（tags 由 Makefile/ci.sh 传递，S3 复制/恢复链已复测）。
 
 ADR-158（Vectorize）：`internal/vectorize`（store 单测：`insert` 不覆盖已存在 id / `upsert` 全量替换、cosine/euclidean/dot-product 三种 score 与排序、namespace、9 种 filter 操作含嵌套点路径与隐式 AND、维度/metadata/id 上限、`topK` 夹取、metadata index 目录与 10 条上限、`describe`/`listVectors`/`stats`/`queryById`；`TestTopKWindowOrdering`（部分填充窗口的中间插入必须位移、不得留空槽——容器 smoke 抓到的真 bug）、`BenchmarkQueryExactScan` 给出延迟表）；`internal/server TestVectorizeEndpoints`（缺 config 拒绝 → 创建 → `/v1/vectorize/stats` → 绑定面 insert/query/filter/queryById/get/list/describe/维度 400/delete → metadata index CRUD → 吊销后 403 `binding_not_registered` → 跨 ns scoped token 403）；`internal/userruntime TestUserRuntimeVectorizeBinding`（**真 workerd**：facade 全方法、`ns=acme&index=docs` 寻址、JS 铸造 token 可被 Go 验证、响应形状与 CF 一致）；`internal/wranglercompat TestVendorMatrixContract`（vectorize 在支持矩阵内 + 用 `index_name` 查登记）；CLI `cli/test/bindings-parity.test.ts`（dev 对 vectorize 明确报错且不再是平台拒绝项）。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-19_

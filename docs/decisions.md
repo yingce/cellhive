@@ -625,13 +625,14 @@
   - **关键约束（实测）**：`workerLoader` 的 env 必须可结构化克隆 → **不能把函数放进 env**（`DataCloneError`）。改为**平台注入 wrapper 模块**（`workerd/spikes/p0/host.js`）：loader 的 `modules` 传**源码字符串**（`worker.js`/`tenant.js`/`facades.js`，模块名须以 `.js` 结尾）与**纯文本 bindings**；`worker.js` wrapper 在 loaded worker 内 `buildBindings` 构造 facade，只把 facade 交给租户 → 租户 env 不含 internal token。
 - **验收（单测）**：`d1`（create/insert/query、int64 规范化、batch 原子回滚、错误）、`r2`（put/get/range/delete/list、键安全）、`queue`（send/claim/lease/ack、retry+delay、幂等、depth）、`server`（KV/D1/R2/Queue 经 scope token 的集成 + 跨 kind token 403）；全量 `gofmt/build/vet/test`（**27 包**）+ `-race` 绿。
 - **验收（真实 E2E）**：真实 workerd（`workerLoader`）+ cell-agent（RequireScope=true，注册 kv/d1/r2/queue 资源）→ 租户经 facade：KV `put`/`get` 往返、D1 `exec`+`prepare/bind/run/first` 往返 `{"d1":"dv"}`、R2 `put`/`get` 往返 + 桶内 `r2/p0/files/o.txt`、Queue `send` 返回 id。
-- **边界（未做）**：Workflows/Cron binding；Queue 消费者派发（复用 timer/dispatcher）；R2 multipart/presign；D1 migrations/sessions；service binding 版本冻结/ACL；facade 的 wrapper 生成尚未做成通用 loader（当前在 P0 spike 内联）。
+- **边界（当时未做）**：Workflows/Cron binding；Queue 消费者派发；R2 multipart/presign；D1 migrations/sessions；service binding 版本冻结/ACL；facade wrapper 尚未通用化（当时在 P0 spike 内联）。
+  - **修订（2026-09-19）**：除 D1 sessions（**显式拒绝**）外均已落地——Workflows（ADR-086）、Cron（ADR-070/076）、Queue 消费者派发（ADR-112/119）、R2 multipart/presign（ADR-113）、service binding 版本冻结/ACL（ADR-104/144）、通用 wrapper（ADR-090）。
 
 ---
 
 ## ADR-064 `cellhive dev` 本地开发模式 ✅实现
 
-> 状态：**设计定稿，未实现**（完整设计见 [`dev-mode.md`](./dev-mode.md)；实现属 P2）。
+> 状态：**已实现（M1/M2）**（完整设计见 [`dev-mode.md`](./dev-mode.md)；实现与验证见 `known-issues.md` M-08 与 `release-notes.md`）。
 
 - **决策**：
   1. **真实组件、只差拓扑**：dev = 单节点 `cell-agent`（**bucket 持久性**，本机 FS，RPO=0）+ 真实 workerd（`workerLoader`）+ 文件系统 bucket + 真实控制面/复制路径；**不做内存假实现**，避免"本地能跑线上崩"。
@@ -980,7 +981,7 @@
   - 真实 workerd：`TestDoRuntimeCrossNodeColdActivation`、`TestDoRuntimePerObjectColdStart`（A 计数 1 → 只恢复该对象到 B → 计数 2）、`TestDoRuntimeTakeoverAfterCrash`、`TestDOCompatSuite`（12 子测试）。
   - cell-agent：`TestInternalBlobRoundTrip`、`TestReadSegmentRange`。
 - **WS 跨节点转发**：`proxyConnect` 把升级 socket 代理到 owner do-runtime（`WebSocketPair` 双向透传；1012 透传，不 resume）；`TestDoRuntimeWebSocketCrossNodeForward`。
-- **边界**：hosthash 依赖 runtime 的 `uniqueKey` + pinned workerd 版本（当前固定 `cellhive-do-host` / 2026-06-15）；`.facets` 解析是 best-effort，失败回退 relpath scope。`transferred_classes` 未做；运行期 VFS 懒读在 **do-runtime（workerd）侧**不可行（ADR-085），在 **cell-agent 侧** CGo 下技术可行但未实现（ADR-159 修订）。
+- **边界**：hosthash 依赖 runtime 的 `uniqueKey` + pinned workerd 版本（当前固定 `cellhive-do-host` / 2026-06-15）；`.facets` 解析是 best-effort，失败回退 relpath scope。`transferred_classes` 未做；运行期 VFS 懒读在 **do-runtime（workerd）侧**不可行（ADR-085），在 **cell-agent 侧**已由 ADR-160 实现（`internal/pagedvfs`）。
 
 ---
 
@@ -999,7 +1000,7 @@
   - 运行期读写落在本地盘（workerd 直接读写），**写**经 WAL 捕获复制、**读**本地无网络。
   - 因此网络成本集中在**冷启动一次**，且已按对象/页最小化；稳态运行无远程读。
 - **后续可选（未做，需架构决策）**：若必须进一步降低超大对象的冷启动延迟，可评估 FUSE 懒读作为**可选部署组件**（显式引入依赖 + 独立 ADR），或在放置时优先把热对象常驻（`DO_PREVENT_EVICTION`，ADR-078）。
-- **修订（ADR-159）**：SQLite 换成 CGo（mattn）后，**cell-agent 侧**的 cell 理论上可以用自定义 C VFS（`sqlite3_vfs_register`）做运行期懒读——不再是"驱动不可能"，而是**未实现**（且无 DO 的同步/事件循环约束，阻塞回源是允许的）。真要做的三个前提：
+- **修订（ADR-159）**：SQLite 换成 CGo（mattn）后，**cell-agent 侧**的 cell 理论上可以用自定义 C VFS（`sqlite3_vfs_register`）做运行期懒读——不再是"驱动不可能"，而是**当时未实现——已由 ADR-160 实现**（`internal/pagedvfs`）；且无 DO 的同步/事件循环约束，阻塞回源是允许的。设计前提（供追溯）：
   1. **捕获/快照必须一起走 VFS**：`internal/wal` 与 `cellstore.ReadDBPages` 用 `os.ReadFile` 直接读文件，页未真正物化时会读到零页 → 把静默损坏写进 LTX；必须在 checkpoint/快照前强制物化，或让它们也用同一 VFS。
   2. **p99 成本**：写事务缺页会同步阻塞一次远端 ranged GET（点查，不违反禁 List），单写者下延迟直接进写路径；因此"懒读"适合**冷启动/工作集**，稳态仍应把页留在本地（cellstore LRU/驱逐）。
   3. **不完整实现 = 损坏**：任何"稀疏文件 + 补零"的取巧都不可接受（同 DO 侧）。
@@ -2491,4 +2492,4 @@
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-09-18_
+_最后更新：2026-09-19_

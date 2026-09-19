@@ -215,4 +215,4 @@ CellHive 的设计在多处参考了同领域开源项目。借的是**设计与
 
 因此可部署于：**Docker Compose、systemd 单元、Nomad、裸机/VM、任意编排器**。详见 [`decisions.md`](./decisions.md) ADR-011 / ADR-018 / ADR-025 / ADR-027。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-19_

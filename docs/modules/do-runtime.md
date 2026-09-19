@@ -11,7 +11,7 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `TENANT_OUTBOUND` / `AI_*` | 同上 | 与 user-runtime 相同 |
+| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `CELLHIVE_TENANT_OUTBOUND` / `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 同上 | 与 user-runtime 相同 |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite 盘 = `<DATA_DIR>/do` |
 | `CELLHIVE_DO_ADDR` | `*:8788` | workerd 监听 |
 | `CELLHIVE_DO_ADVERTISE` | `http://127.0.0.1:8788` | 广告地址（owner 转发目标） |

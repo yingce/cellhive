@@ -139,4 +139,4 @@ CellHive 指向 `CELLHIVE_OTLP_ENDPOINT=http://collector:4318`（无 headers）�
 - 全部环境变量：[`configuration.md`](./configuration.md)
 - 决策：[`decisions.md`](./decisions.md) ADR-167、ADR-146（traceparent 透传）
 
-_最后更新：2026-09-18_
+_最后更新：2026-09-19_

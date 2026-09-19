@@ -175,4 +175,4 @@ Body: raw LTX segment (max 64MiB)
 | `storage_unavailable` | 对象存储不可用 |
 | `overloaded` | 过载（P1 admission） |
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-19_

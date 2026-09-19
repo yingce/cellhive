@@ -172,7 +172,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
-| `CELLHIVE_AI_URL` / `_KEY` | 空 | BYO AI 端点；空=不注入 |
+| `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 空 | BYO AI 端点与密钥；空=不注入 |
 
 ## do-runtime
 
@@ -216,4 +216,4 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 - 安全边界与凭据分层：[`security.md`](./security.md)
 - 桶角色与凭据：[`storage-and-s3.md`](./storage-and-s3.md)
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-19_

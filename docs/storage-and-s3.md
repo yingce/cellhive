@@ -75,4 +75,4 @@ r2/<ns>/<bucket_name>/<object-key>
 - backup 角色的快照/归档策略；
 - 云端条件写/条件删除实测（C 类环境，见 [`testing.md`](./testing.md)）。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-19_
