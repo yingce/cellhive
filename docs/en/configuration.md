@@ -139,6 +139,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_AUDIT_RETENTION` | `720h` (0 forever) | Audit retention |
 | `CELLHIVE_WORKFLOW_RETENTION` | `0` forever | Prune terminal instances |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | Log tail buffer `<entries>:<workers>` (`cellhive tail --worker`) |
+| `CELLHIVE_METRICS_NS_MAX` | `1000` | Cap on `ns` label values for tenant-attributable `/metrics` (overflow -> `other`, empty -> `platform`, 0 = unlimited) (ADR-179) |
 | `CELLHIVE_BINDING_CACHE` | `1s` (0 off) | binding declaration cache |
 | `CELLHIVE_NS_RATE` | Empty (off) | Per-ns write admission `rps[/burst]` (default burst=rps) |
 

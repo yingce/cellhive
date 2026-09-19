@@ -139,6 +139,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_AUDIT_RETENTION` | `720h` (0 永久) | 审计保留 |
 | `CELLHIVE_WORKFLOW_RETENTION` | `0` 永久 | 终态实例修剪 |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
+| `CELLHIVE_METRICS_NS_MAX` | `1000` | `/metrics` 上租户可归因指标的 ns 标签上限：超出记 `other`，空 ns 记 `platform`，0=不限（ADR-179） |
 | `CELLHIVE_BINDING_CACHE` | `1s` (0 关) | binding 声明缓存 |
 | `CELLHIVE_NS_RATE` | 空（关） | 每 ns 写准入 `rps[/burst]`（缺省 burst=rps） |
 

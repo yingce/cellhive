@@ -80,6 +80,11 @@ type Config struct {
 	// several LTX chunks in flight (0 = default 8ms).
 	CapturePipelineThreshold time.Duration
 
+	// MetricsNSMax bounds the number of namespace label values in /metrics so
+	// a tenant-attributable metric cannot blow up Prometheus cardinality; names
+	// beyond the cap are reported as ns="other". 0 disables the cap.
+	MetricsNSMax int
+
 	// BindingCacheTTL caches scoped-token binding declarations so a hot write
 	// path does not read the control cell on every request. 0 disables it.
 	BindingCacheTTL time.Duration
@@ -547,6 +552,7 @@ func FromEnv() Config {
 		SecretKey:                creds.SecretKey,
 		ScopeSecret:              creds.Scope,
 		UploadShards:             envInt("CELLHIVE_UPLOAD_SHARDS", 0),
+		MetricsNSMax:             envInt("CELLHIVE_METRICS_NS_MAX", 1000),
 		BindingCacheTTL:          envDuration("CELLHIVE_BINDING_CACHE", time.Second),
 		DoTicketSecret:           creds.DoTicket,
 		DOObjectIndex:            envBool("CELLHIVE_DO_OBJECT_INDEX", false),

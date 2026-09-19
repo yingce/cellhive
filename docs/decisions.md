@@ -2353,6 +2353,20 @@
 
 ---
 
+## ADR-179 指标按命名空间归属（ns 维度）+ 绑定 span 带租户属性 ✅实现
+
+- **背景**：ADR-165 的 `cellhive_binding_calls_total{kind,outcome}` 与 `cellhive_durability_proof_seconds` 是全局聚合，运维无法回答"哪个租户在打/哪个租户慢"；直接把 `ns` 当标签又会因任意租户名打爆 Prometheus 基数。
+- **决策**：
+  1. **有界 ns 标签**：`/metrics` 的租户可归因指标带 `ns` 标签；cell-agent 维护已见 ns 集合，超过 `CELLHIVE_METRICS_NS_MAX`（默认 1000，0=不限）的后续 ns 一律记为 `ns="other"`，空 ns（无 scope 的内部调用）记为 `ns="platform"`，基数因此有上界。
+  2. **归属范围**：`cellhive_binding_calls_total{ns,kind,outcome}`、`cellhive_durability_proof_seconds_*{ns}`（直方图改为 per-ns）；`cellhive_requests_total` 保持全局不加 ns（避免与绑定调用双计）；cellstore/磁盘/租约等**节点级** gauge 不加 ns 并在文档注明。
+  3. **trace 同步归属**：绑定端点的 `http.server` span 在 `scopeAuth` 解析出 namespace 后追加 `cellhive.namespace`/`cellhive.binding` 属性，使 指标→trace 按同一维度关联（未开 tracing 时为空操作）。
+- **理由**：把"per-tenant 观测"做成**有界标签**而非无界标签或独立端点，既不炸基数也不新增鉴权面（`/metrics` 仍内部 pull）；ns 与 trace 属性同名同值，后端可按 ns 对齐 指标/trace/日志。
+- **代价/边界**：溢出到 `other` 后无法区分是哪个长尾 ns；热路径多一次加锁查表（命中后只读锁、未命中才写入）；`/metrics` 仍免鉴权（留给网关，见 ADR-178）。
+- **验证**：`internal/server TestMetricsNamespaceLabels`（两个 ns 各自成标签、超 `MetricsNSMax` 溢出为 `other`、空 ns → `platform`）、`TestMetricsObservability`（既有直方图/计数在新标签下仍正确）；**真实 collector 端到端** `bash scripts/otlp-collector-smoke.sh`（Docker 起 `otel/opentelemetry-collector-contrib`，起 cell-agent + user-runtime，部署会 `console.log` 且写 KV 的 worker，带 `traceparent` 请求）：collector 收到 `http.server` span（含 `cellhive.namespace=otlp`）、`cell.durability_proof` span、带调用方 trace_id 的 log record，且 `/metrics` 出现 `cellhive_binding_calls_total{ns="otlp",...}`；`bash scripts/ci.sh` GATE PASS。
+- **文档**：`docs/observability.md`、`docs/configuration.md`、`docs/modules/cell-agent.md`、`docs/testing.md`、`docs/en/*` 同步。
+
+---
+
 ## 待定（🕓）
 
 无。历史待定项均已定稿：bundle/assets 读取路径 → **ADR-030**；路由投影下发 → **ADR-031**；管理后台/身份模型 → **ADR-036**。
@@ -2404,6 +2418,7 @@
 - ADR-131：控制面 schema v2 + 域名/路由模型（**已实现**：软删+purge 循环、bindings 派生表、hosts 验证与 loader 门控、内置域 `<ns>-<worker>.<base>`、JWT 按 ns 授权 + 审计主体、列表分页、路由挂载剥离）。
 - ADR-132：移除边缘配置下发（删 `GET /v1/internal/traefik` 与 `CELLHIVE_ADMIN_HOST/_ADMIN_BACKEND_URL`）；边缘（反代/云 LB）由运维静态配置，平台只保证 loader 级 host 门控。
 - ADR-133：域名不做 DNS 校验（登记即授权）：删 `domain verify`/验证循环/`CELLHIVE_DOMAIN_VERIFY`·`CELLHIVE_DNS_RESOLVER`；host 唯一性/409/审计/`domain rm` 保留，校验字段与状态机保留备用。
+- ADR-179：指标按命名空间归属（ns 维度，有界标签）+ 绑定 span 带租户属性。
 - ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。
 - ADR-177：wake 索引不落后于 timer（先发布 + fail-closed + 认领时重建 + 有界轮转修复）。
 - ADR-176：KV 写入校验对齐 Cloudflare（key≤512B、metadata≤1KiB、expirationTtl≥60s、expiration 须在未来）。

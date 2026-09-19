@@ -134,10 +134,10 @@ type Server struct {
 	segments atomic.Uint64
 
 	// Observability (ADR-165).
-	proofCount    atomic.Int64
-	proofMicros   atomic.Int64
-	proofBuckets  [6]atomic.Int64
-	bindingCalls  sync.Map // "kind|outcome" -> *atomic.Int64
+	proofByNS     sync.Map // ns -> *proofHist (ADR-179)
+	bindingCalls  sync.Map // "ns|kind|outcome" -> *atomic.Int64 (ADR-179)
+	nsMu          sync.Mutex
+	nsSeen        map[string]struct{} // bounded ns label values (ADR-179)
 	projRev       atomic.Int64
 	peerRecvBytes atomic.Int64
 	logFanMu      sync.Mutex
@@ -447,18 +447,58 @@ func (r *statusRecorder) Flush() {
 // proofBucketBounds are the durability-proof latency buckets (seconds).
 var proofBucketBounds = [6]float64{0.005, 0.025, 0.1, 0.5, 1, 5}
 
-func (s *Server) recordProof(d time.Duration) {
-	sec := d.Seconds()
-	s.proofCount.Add(1)
-	s.proofMicros.Add(d.Microseconds())
+// proofHist is one namespace's durability-proof latency histogram (ADR-179).
+type proofHist struct {
+	buckets [6]atomic.Int64
+	count   atomic.Int64
+	micros  atomic.Int64
+}
+
+func (h *proofHist) observe(sec float64, micros int64) {
+	h.count.Add(1)
+	h.micros.Add(micros)
 	for i, b := range proofBucketBounds {
 		if sec <= b {
-			s.proofBuckets[i].Add(1)
+			h.buckets[i].Add(1)
 		}
 	}
 }
 
-func (s *Server) recordBindingCall(kind string, status int) {
+// nsLabel bounds the ns label cardinality: known names pass through, the
+// first MetricsNSMax distinct names are admitted, and the rest collapse to
+// "other" so a busy fleet cannot explode a time series (ADR-179).
+func (s *Server) nsLabel(ns string) string {
+	if ns == "" {
+		return "platform"
+	}
+	max := s.Cfg.MetricsNSMax
+	s.nsMu.Lock()
+	defer s.nsMu.Unlock()
+	if _, ok := s.nsSeen[ns]; ok {
+		return ns
+	}
+	if max > 0 && len(s.nsSeen) >= max {
+		return "other"
+	}
+	if s.nsSeen == nil {
+		s.nsSeen = map[string]struct{}{}
+	}
+	s.nsSeen[ns] = struct{}{}
+	return ns
+}
+
+func (s *Server) proofFor(ns string) *proofHist {
+	v, _ := s.proofByNS.LoadOrStore(ns, &proofHist{})
+	return v.(*proofHist)
+}
+
+// recordProof records one durability proof under its namespace (bounded label).
+func (s *Server) recordProof(ns string, d time.Duration) {
+	s.proofFor(s.nsLabel(ns)).observe(d.Seconds(), d.Microseconds())
+}
+
+// recordBindingCall records one tenant binding call per (ns, kind, outcome).
+func (s *Server) recordBindingCall(ns, kind string, status int) {
 	outcome := "error"
 	switch {
 	case status >= 200 && status < 300:
@@ -466,7 +506,8 @@ func (s *Server) recordBindingCall(kind string, status int) {
 	case status == http.StatusForbidden || status == http.StatusUnauthorized || status == http.StatusTooManyRequests:
 		outcome = "denied"
 	}
-	v, _ := s.bindingCalls.LoadOrStore(kind+"|"+outcome, &atomic.Int64{})
+	label := s.nsLabel(ns)
+	v, _ := s.bindingCalls.LoadOrStore(label+"|"+kind+"|"+outcome, &atomic.Int64{})
 	v.(*atomic.Int64).Add(1)
 }
 
@@ -564,24 +605,33 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			sort.Strings(keys)
 			writeFmt(w, "# TYPE cellhive_binding_calls_total counter\n")
 			for _, k := range keys {
-				kind, outcome, _ := strings.Cut(k, "|")
+				ns, rest, _ := strings.Cut(k, "|")
+				kind, outcome, _ := strings.Cut(rest, "|")
 				v, _ := s.bindingCalls.Load(k)
-				writeFmt(w, "cellhive_binding_calls_total{kind=%q,outcome=%q} %d\n", kind, outcome, v.(*atomic.Int64).Load())
+				writeFmt(w, "cellhive_binding_calls_total{ns=%q,kind=%q,outcome=%q} %d\n", ns, kind, outcome, v.(*atomic.Int64).Load())
 			}
 		}
 	}
-	// Durability proof latency histogram (ADR-165). Buckets are cumulative.
+	// Durability proof latency histogram per namespace (ADR-165/179). Buckets
+	// are cumulative (recordProof increments every le >= the observation).
 	{
 		writeFmt(w, "# TYPE cellhive_durability_proof_seconds histogram\n")
-		// recordProof increments every bucket with le >= the observation, so the
-		// stored counts are already cumulative for Prometheus' le semantics.
-		for i, b := range proofBucketBounds {
-			writeFmt(w, "cellhive_durability_proof_seconds_bucket{le=%q} %d\n", strconv.FormatFloat(b, 'g', -1, 64), s.proofBuckets[i].Load())
+		nss := make([]string, 0, 8)
+		s.proofByNS.Range(func(k, _ any) bool { nss = append(nss, k.(string)); return true })
+		sort.Strings(nss)
+		for _, ns := range nss {
+			v, ok := s.proofByNS.Load(ns)
+			if !ok {
+				continue
+			}
+			h := v.(*proofHist)
+			for i, b := range proofBucketBounds {
+				writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=%q,le=%q} %d\n", ns, strconv.FormatFloat(b, 'g', -1, 64), h.buckets[i].Load())
+			}
+			writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=%q,le=\"+Inf\"} %d\n", ns, h.count.Load())
+			writeFmt(w, "cellhive_durability_proof_seconds_sum{ns=%q} %g\n", ns, float64(h.micros.Load())/1e6)
+			writeFmt(w, "cellhive_durability_proof_seconds_count{ns=%q} %d\n", ns, h.count.Load())
 		}
-		count := s.proofCount.Load()
-		writeFmt(w, "cellhive_durability_proof_seconds_bucket{le=\"+Inf\"} %d\n", count)
-		writeFmt(w, "cellhive_durability_proof_seconds_sum %g\n", float64(s.proofMicros.Load())/1e6)
-		writeFmt(w, "cellhive_durability_proof_seconds_count %d\n", count)
 	}
 	// Owner lifecycle (ADR-165).
 	if s.Owner != nil {
@@ -2110,7 +2160,7 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
 	proofStart := time.Now()
 	werr := s.Capture.Wait(ctx, scope, txid)
-	s.recordProof(time.Since(proofStart))
+	s.recordProof(scope.Namespace, time.Since(proofStart))
 	telemetry.End(span, werr)
 	return werr
 }

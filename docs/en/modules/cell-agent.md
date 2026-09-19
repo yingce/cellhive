@@ -5,7 +5,7 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 > See [`../configuration.md`](../configuration.md) and the code for the authoritative configuration source; the table below is the subset relevant to this module.
 ## Key Interfaces
 
-`:7001` internal REST (shared by Go↔Go and workerd bindings, no gRPC) / `:8082` admin. Key endpoints: `/readyz`, `/metrics`, `/v1/diagnose`, `/v1/internal/{resolve,claim,renew,release,commit(_binary),worker/bindings,do/*,logs,telemetry/spans}`, `/v1/{kv,d1,r2,queue,workflow,vectorize}/*`, `/v1/control/*`.
+`:7001` internal REST (shared by Go↔Go and workerd bindings, no gRPC) / `:8082` admin. Key endpoints: `/readyz`, `/metrics` (binding counters and the durability-proof histogram carry a **bounded `ns` label**, ADR-179), `/v1/diagnose`, `/v1/internal/{resolve,claim,renew,release,commit(_binary),worker/bindings,do/*,logs,telemetry/spans}`, `/v1/{kv,d1,r2,queue,workflow,vectorize}/*`, `/v1/control/*`.
 
 ## Configuration (Environment Variables)
 

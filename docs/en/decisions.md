@@ -1,6 +1,6 @@
 # Decision records (English index)
 
-CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record (ADR-001 ~ 178). This page is an English index of the titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
+CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record (ADR-001 ~ 179). This page is an English index of the titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
 
 > Generated from `docs/decisions.md`. If the two disagree, the Chinese record wins.
 
@@ -183,6 +183,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-175 | Compatibility Closure: DO WebSocket Wiring, R2 Local Metadata, and DO Alarm Identity Implementation | Finalizes compatibility for Durable Object WebSockets, R2 local metadata, and alarm identity. |
 | ADR-176 | KV Write Validation Aligned with Cloudflare: Key, Metadata, TTL, and Expiration Implementation | Aligns KV write validation rules with Cloudflare for keys, metadata, TTL, and expiration. |
 | ADR-177 | Wake Index Not Behind Timer: Publish First and Repairable Implementation | Ensures wake indexes do not lag timers by publishing first and allowing repair. |
+| ADR-179 | Namespace attribution for metrics (ns dimension) + tenant attributes on binding spans | Tenant-attributable metrics carry a bounded `ns` label (cap `CELLHIVE_METRICS_NS_MAX`; overflow `other`, empty -> `platform`), and binding `http.server` spans carry `cellhive.namespace`. |
 | ADR-178 | Logs carry trace context + a multi-tenant observability reference pipeline (push) | Tenant log lines carry trace_id/span_id, OTLP resource gains service.instance.id, and a Collector+backend org/stream push model replaces exposing /metrics. |
 
 _Last updated: 2026-09-19_

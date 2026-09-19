@@ -4,11 +4,13 @@ import (
 	"context"
 	"net/http"
 
-	"cellhive/internal/telemetry"
 	"strings"
 	"time"
 
 	"cellhive/internal/scopedtoken"
+	"cellhive/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type ctxKey int
@@ -30,7 +32,10 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 		return func(w http.ResponseWriter, r *http.Request) {
 			rec := &statusRecorder{ResponseWriter: w}
 			w = rec
-			defer func() { s.recordBindingCall(kind, rec.code()) }()
+			// claims is verified below; the deferred metric reads the resolved
+			// namespace (empty until then, which maps to ns="platform").
+			nsForMetrics := ""
+			defer func() { s.recordBindingCall(nsForMetrics, kind, rec.code()) }()
 			tok := r.Header.Get("x-cellhive-scope-token")
 			if tok == "" {
 				writeErr(w, http.StatusForbidden, "scope_required", "a scoped token is required for binding calls")
@@ -65,6 +70,15 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			if s.Store != nil {
 				end := s.Store.BeginRequest(s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
 				defer end()
+			}
+			nsForMetrics = claims.Namespace
+			// Attribute the in-flight http.server span to the tenant so traces
+			// are namespaced like the ADR-179 metrics (no-op when tracing is off).
+			if span := oteltrace.SpanFromContext(r.Context()); span.IsRecording() {
+				span.SetAttributes(
+					attribute.String("cellhive.namespace", claims.Namespace),
+					attribute.String("cellhive.binding", kind),
+				)
 			}
 			ctx := context.WithValue(r.Context(), ctxScopeNS, claims.Namespace)
 			ctx = context.WithValue(ctx, ctxScopeName, claims.Name)

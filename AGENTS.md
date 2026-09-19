@@ -31,7 +31,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 必须遵守的决策
 
-见 `docs/decisions.md`（ADR-001 ~ 178）。改设计要先改文档。
+见 `docs/decisions.md`（ADR-001 ~ 179）。改设计要先改文档。
 
 ## 命令
 

@@ -23,8 +23,8 @@
 | `cellhive_paged_hydrated_pages` / `_total_pages` | gauge | 已物化页数 / cut 总页数（后台补齐进度） |
 | `cellhive_upload_batches_total` / `_segments_total` / `_dropped_total` / `_deferred_total` / `_replayed_total` / `_spool` | counter/gauge | 上传批/spool（ADR-143） |
 | `cellhive_upload_spool_file_syncs_total` / `_dir_syncs_total` / `_sync_seconds_total` | counter | spool 断电安全 fsync 计数与耗时（目录 sync 记忆化，ADR-171） |
-| `cellhive_binding_calls_total{kind,outcome}` | counter | 绑定端点调用（`outcome=ok|denied|error`；`denied`=401/403/429）（ADR-165） |
-| `cellhive_durability_proof_seconds` | histogram | 写路径 `Capture.Wait` 持久化证明耗时（桶 5ms/25ms/100ms/500ms/1s/5s）（ADR-165） |
+| `cellhive_binding_calls_total{ns,kind,outcome}` | counter | 绑定端点调用（`outcome=ok|denied|error`；`denied`=401/403/429）。`ns` 有上界：超 `CELLHIVE_METRICS_NS_MAX`（默认 1000）的记为 `other`，无 ns 的内部调用记为 `platform`（ADR-165/179） |
+| `cellhive_durability_proof_seconds{ns}` | histogram | 写路径 `Capture.Wait` 持久化证明耗时，按 ns 分（桶 5ms/25ms/100ms/500ms/1s/5s；ns 同上（ADR-165/179） |
 | `cellhive_owner_epoch_changes_total{role}` | counter | epoch（generation）递增次数（ADR-165） |
 | `cellhive_takeover_total{outcome}` | counter | 接管：`success`（接管过期的外部 owner 记录）/`failed`（CAS 竞争失败）/`blocked`（活跃外部租约阻塞）（ADR-165） |
 | `cellhive_route_projection_version` | gauge | 路由投影已构建的 control revision（ADR-165） |
@@ -77,7 +77,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 概览：对齐标准 **OpenTelemetry OTLP/HTTP**：CellHive 不存 trace，只把 span 导出到你配置的 OTLP 后端，**换后端只改 `CELLHIVE_OTLP_ENDPOINT`/`CELLHIVE_OTLP_HEADERS`**。
 
 - **开关/采样**：`CELLHIVE_OTLP_ENDPOINT` 空 = 关闭（无 span、无开销）；否则按 `CELLHIVE_TRACES_SAMPLE_RATIO` 对入口新 trace 头部采样，上游 `traceparent` 的 sampled 位优先（`ParentBased`）。
-- **Go span**（cell-agent）：`http.server`（每请求，`http.route`/`http.status_code` + `cellhive.namespace/kind/name/scope`）、`cell.durability_proof`（`Capture.Wait`）、`peer.append`（每次向 follower 发出副本，带 scope 属性）。do-supervisor 的 gate/restore 也走同一导出。
+- **Go span**（cell-agent）：`http.server`（每请求，`http.route`/`http.status_code`；绑定端点解析出 scope 后追加 `cellhive.namespace`/`cellhive.binding`，与 ADR-179 指标同维度）、`cell.durability_proof`（`Capture.Wait`）、`peer.append`（每次向 follower 发出副本，带 scope 属性）。do-supervisor 的 gate/restore 也走同一导出。
 - **JS span**（workerd，平台 worker 持 internal token）：loader 的 `http.server` 入口 span、do-runtime host 的 `do.invoke` 与 `do.gate`。JS 无法跑 OTel SDK，因此把 span 记录 best-effort `POST` 到 cell-agent 的 `/v1/internal/telemetry/spans`，由 Go 统一导出。
 - **传播**：W3C `traceparent` 入口生成/透传 → 租户 handler → props-bound binding 调用（loader 在自身 isolate 设置 `traceparent`，ADR-167 修复了 ADR-146 的"props-bound facades 不带 trace"残余）→ DO invoke spec。
 - **残余**：租户 isolate 的 `facades.js` 调用（非 props-bound 回退路径）无 internal token，不上报 span；`/v1/do/connect`/abort、compaction/upload 后台循环无独立 span；JS span 时间戳为毫秒精度。
@@ -88,6 +88,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - **统一资源属性**：每条记录带 `service.name`、`service.instance.id`（= 节点 id）、`cellhive.namespace`、`cellhive.worker`；租户日志在请求内触发时带 `trace_id`/`span_id`（`logbuf.Entry` + `log-tail.js` 逐行 `traceparent`，cell-agent 解析）→ 后端可 **指标 → trace → 日志** 跳转。
 - **租户隔离的唯一租户面在后端**：把每个 namespace 映射到后端的 **org/stream**（如 OpenObserve 的 `logs-<ns>`），给租户一个只读该范围的用户；**不要**只靠 `cellhive.namespace` 属性做行级隔离（多数后端不支持按任意属性过滤）。
 - **参考管线**：[`../deploy/observability/otel-collector.yaml`](../deploy/observability/otel-collector.yaml)（OTLP in → redact/route/tail-sample → OpenObserve）+ [`../deploy/observability/README.md`](../deploy/observability/README.md)；compose 用 `--profile observability`（OpenObserve 在 `tracing` profile）。
+- **可复现冒烟**：`bash scripts/otlp-collector-smoke.sh` 起真实 `otel/opentelemetry-collector-contrib` + cell-agent + user-runtime + 一个会 `console.log`/写 KV 的 worker，断言 collector 收到 span（带 `cellhive.namespace`）、带调用方 `trace_id` 的 log record，且 `/metrics` 出现带 `ns` 的绑定计数。
 - **指标保持内部 pull**：`/metrics` **免鉴权**，不要公网暴露；要并入 OTLP 就用 Collector 的 `prometheus` receiver 抓取后转投，而不是开放裸端点。
 - **投递语义**：OTLP 导出是 **best-effort、有界内存批**；后端不可用会丢遥测而不阻塞请求。审计级留存需在 Collector/后端前加持久缓冲（file exporter）。
 

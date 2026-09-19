@@ -5,7 +5,7 @@
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
 ## 关键接口
 
-`:7001` 内部 REST（Go↔Go 与 workerd bindings 共用，无 gRPC）/ `:8082` admin。关键端点：`/readyz`、`/metrics`、`/v1/diagnose`、`/v1/internal/{resolve,claim,renew,release,commit(_binary),worker/bindings,do/*,logs,telemetry/spans}`、`/v1/{kv,d1,r2,queue,workflow,vectorize}/*`、`/v1/control/*`。
+`:7001` 内部 REST（Go↔Go 与 workerd bindings 共用，无 gRPC）/ `:8082` admin。关键端点：`/readyz`、`/metrics`（绑定计数与持久化证明直方图带**有界 `ns` 标签**，ADR-179）、`/v1/diagnose`、`/v1/internal/{resolve,claim,renew,release,commit(_binary),worker/bindings,do/*,logs,telemetry/spans}`、`/v1/{kv,d1,r2,queue,workflow,vectorize}/*`、`/v1/control/*`。
 
 ## 配置（环境变量）
 

@@ -1128,23 +1128,23 @@ func TestOverloadedRefusesClaims(t *testing.T) {
 // projection version gauge and the peer hedge counters.
 func TestMetricsObservability(t *testing.T) {
 	s, _ := newTestServer(t)
-	s.recordBindingCall("kv", 200)
-	s.recordBindingCall("d1", 403)
-	s.recordProof(3 * time.Millisecond)
-	s.recordProof(700 * time.Millisecond)
+	s.recordBindingCall("acme", "kv", 200)
+	s.recordBindingCall("acme", "d1", 403)
+	s.recordProof("acme", 3*time.Millisecond)
+	s.recordProof("acme", 700*time.Millisecond)
 	s.projRev.Store(7)
 
 	rr := httptest.NewRecorder()
 	s.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rr.Body.String()
 	for _, want := range []string{
-		`cellhive_binding_calls_total{kind="kv",outcome="ok"} 1`,
-		`cellhive_binding_calls_total{kind="d1",outcome="denied"} 1`,
-		`cellhive_durability_proof_seconds_bucket{le="0.005"} 1`,
-		`cellhive_durability_proof_seconds_bucket{le="1"} 2`,
-		`cellhive_durability_proof_seconds_bucket{le="+Inf"} 2`,
-		`cellhive_durability_proof_seconds_count 2`,
-		`cellhive_durability_proof_seconds_sum 0.703`,
+		`cellhive_binding_calls_total{ns="acme",kind="kv",outcome="ok"} 1`,
+		`cellhive_binding_calls_total{ns="acme",kind="d1",outcome="denied"} 1`,
+		`cellhive_durability_proof_seconds_bucket{ns="acme",le="0.005"} 1`,
+		`cellhive_durability_proof_seconds_bucket{ns="acme",le="1"} 2`,
+		`cellhive_durability_proof_seconds_bucket{ns="acme",le="+Inf"} 2`,
+		`cellhive_durability_proof_seconds_count{ns="acme"} 2`,
+		`cellhive_durability_proof_seconds_sum{ns="acme"} 0.703`,
 		`cellhive_route_projection_version 7`,
 		`cellhive_owner_epoch_changes_total{role="owner"}`,
 		`cellhive_takeover_total{outcome="success"} 0`,
@@ -1239,5 +1239,39 @@ func TestLogSubscribeFleetFanout(t *testing.T) {
 	}
 	if !telemetry.LogSubscribed("team", "api") {
 		t.Fatal("internal subscription missing")
+	}
+}
+
+// TestMetricsNamespaceLabels covers ADR-179: tenant-attributable metrics carry
+// a bounded ns label (binding calls + durability proof), and namespaces beyond
+// the configured cap collapse to ns="other" so cardinality cannot explode.
+func TestMetricsNamespaceLabels(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.Cfg.MetricsNSMax = 2
+	srv.recordBindingCall("acme", "kv", 200)
+	srv.recordBindingCall("globex", "d1", 500)
+	srv.recordBindingCall("initech", "r2", 200) // beyond the cap
+	srv.recordProof("acme", 3*time.Millisecond)
+	srv.recordProof("initech", 3*time.Millisecond)
+	rr := httptest.NewRecorder()
+	srv.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+	for _, want := range []string{
+		`cellhive_binding_calls_total{ns="acme",kind="kv",outcome="ok"} 1`,
+		`cellhive_binding_calls_total{ns="globex",kind="d1",outcome="error"} 1`,
+		`cellhive_binding_calls_total{ns="other",kind="r2",outcome="ok"} 1`,
+		`cellhive_durability_proof_seconds_count{ns="acme"} 1`,
+		`cellhive_durability_proof_seconds_count{ns="other"} 1`,
+	} {
+		if !bytes.Contains([]byte(body), []byte(want)) {
+			t.Fatalf("metrics missing %q:\n%s", want, body)
+		}
+	}
+	// A request without a namespace is attributed to "platform".
+	srv.recordBindingCall("", "kv", 200)
+	rr = httptest.NewRecorder()
+	srv.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`cellhive_binding_calls_total{ns="platform",kind="kv",outcome="ok"} 1`)) {
+		t.Fatalf("missing platform ns attribution:\n%s", rr.Body.String())
 	}
 }

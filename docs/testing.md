@@ -150,6 +150,8 @@
 
 ## 一键门禁（ADR-141）
 
+OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker 与 `otel/opentelemetry-collector-contrib` 镜像；起真实 collector + cell-agent + user-runtime + 探针 worker，验 span/log/`ns` 指标，见 ADR-179）。
+
 `make ci`（`scripts/ci.sh`）串起全部检查：gofmt、`go vet`、`go test`、`make build`、`js-test`、`cli-test`、`perf-test`、`rpo-test`、`s3-test`、`docker-build`、`compose-config`、`k8s-render`、`helm-lint`；缺工具则 skip（`REQUIRE_ALL=1` 转硬失败）。最近一次：**GATE: PASS 13/13**。
 
 ## compose 起栈 smoke（C，ADR-140/153）
