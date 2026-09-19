@@ -64,13 +64,19 @@ type Store struct {
 	evicted atomic.Uint64
 	sweeps  atomic.Uint64
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	cells    map[string]*Cell
-	lru      *list.List // front = most recently used; values are *lruEnt
-	byPath   map[string]*list.Element
-	busy     map[string]int  // in-flight requests per gate key (a cell scope)
-	evicting map[string]bool // gate key currently being evicted
+	mu     sync.Mutex
+	cond   *sync.Cond
+	cells  map[string]*Cell
+	lru    *list.List // front = most recently used; values are *lruEnt
+	byPath map[string]*list.Element
+	busy   map[string]int // in-flight requests per gate key (a cell scope)
+	// evicting gates a key whose cell is being closed/deleted. INVARIANT: it is
+	// only set (forget, evictOne) and cleared while that same goroutine holds
+	// openMu. So a caller holding openMu can never observe evicting==true, and
+	// Cell's re-check below can never Wait. Keep this property: a setter that
+	// mutates evicting without openMu would make that Wait block until openMu is
+	// released -- which never happens -- i.e. deadlock.
+	evicting map[string]bool
 
 	// diskMu caches the cold-path DiskFiles walk for metrics (ADR-122).
 	diskMu    sync.Mutex
@@ -155,9 +161,11 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
-	// Another goroutine may have opened it while we waited, or an eviction may
-	// have started between the first gate check and acquiring openMu; Forget
-	// holds openMu, so re-check the gate before opening.
+	// Another goroutine may have opened it while we waited. The evicting re-check
+	// is belt-and-braces: it CANNOT fire, because evicting is only set while the
+	// setter holds openMu (see the field invariant), which this goroutine holds.
+	// If it ever did fire, cond.Wait() would deadlock -- so this loop is a guard
+	// on the invariant, not a path that should ever run.
 	s.mu.Lock()
 	for s.evicting[key] {
 		s.cond.Wait()
