@@ -209,7 +209,27 @@ func returnsRows(sqlText string) bool {
 			return true
 		}
 	}
-	return false
+	// A data-modifying statement with RETURNING also yields rows; it must run as
+	// a query or the rows are silently dropped by Exec (the gate that chooses
+	// Cell.Tx is IsReadOnly, independent of this).
+	return containsWord(up, "RETURNING")
+}
+
+// containsWord reports whether word occurs in up delimited by non-word bytes.
+func containsWord(up, word string) bool {
+	for i := 0; ; {
+		j := strings.Index(up[i:], word)
+		if j < 0 {
+			return false
+		}
+		j += i
+		before := j == 0 || !isWordByte(up[j-1])
+		after := j+len(word) >= len(up) || !isWordByte(up[j+len(word)])
+		if before && after {
+			return true
+		}
+		i = j + len(word)
+	}
 }
 
 // normalizeParams converts JSON numbers (float64) with integral values to int64

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -269,5 +270,48 @@ func TestReadOnlyCallsDoNotAdvanceTxID(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("read calls advanced txid: %d -> %d", before, after)
+	}
+}
+
+func TestIsDuplicateColumn(t *testing.T) {
+	if !isDuplicateColumn(errors.New("SQL logic error: duplicate column name: consumed")) {
+		t.Fatal("duplicate column should be tolerated")
+	}
+	if isDuplicateColumn(errors.New("database is locked")) {
+		t.Fatal("a real error must not be treated as duplicate column")
+	}
+	if isDuplicateColumn(nil) {
+		t.Fatal("nil is not a duplicate column")
+	}
+}
+
+// TestMigrationFailureNotCached is the regression for swallowing ALTER errors
+// and marking the cell migrated anyway: a real migration failure must surface
+// and must be retried on the next call.
+func TestMigrationFailureNotCached(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cellstore: %v", err)
+	}
+	defer cs.Close()
+	c, err := cs.Cell(ctx, Scope("acme", "wf"))
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	// A view named "events" makes CREATE TABLE IF NOT EXISTS a no-op and the
+	// ALTER fail with a non-duplicate error.
+	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(ctx, `CREATE VIEW events AS SELECT 1 AS x`)
+		return e
+	}); err != nil {
+		t.Fatalf("seed view: %v", err)
+	}
+	s := New(cs)
+	if _, err := s.List(ctx, "acme", "wf", 10); err == nil {
+		t.Fatal("migration error was swallowed")
+	}
+	if _, err := s.List(ctx, "acme", "wf", 10); err == nil {
+		t.Fatal("a failed migration must not be cached as done")
 	}
 }

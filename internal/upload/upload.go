@@ -255,7 +255,11 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 				break
 			}
 			if ctx.Err() != nil {
-				break // canceled: stop retrying instead of ignoring the signal
+				// Canceled: stop retrying and record the cancellation rather than
+				// the sink's transient error (the batch is deferred/dropped either
+				// way; only the log/attribution should say "canceled").
+				err = ctx.Err()
+				break
 			}
 			select {
 			case <-ctx.Done():

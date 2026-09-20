@@ -155,3 +155,26 @@ func TestD1ModifyingCTEAdvancesTxID(t *testing.T) {
 		t.Fatalf("rows after delete = %v, want 1", q.Rows[0][0])
 	}
 }
+
+// TestD1ReturningRows is the regression for returnsRows missing RETURNING: the
+// rows of INSERT/UPDATE/DELETE ... RETURNING were dropped by Exec, and the
+// statement's read/write gate (IsReadOnly) disagreed with the executor.
+func TestD1ReturningRows(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	r, err := s.Query(ctx, "acme", "main", `INSERT INTO t (id, v) VALUES (?, ?) RETURNING id, v`, []any{1, "a"})
+	if err != nil {
+		t.Fatalf("returning insert: %v", err)
+	}
+	if len(r.Rows) != 1 || len(r.Rows[0]) != 2 || r.Rows[0][1] != "a" {
+		t.Fatalf("returning rows = %+v, want one [1 a]", r.Rows)
+	}
+	// A plain mutation must still report affected rows (Exec path).
+	ra, err := s.Exec(ctx, "acme", "main", `INSERT INTO t (id, v) VALUES (?, ?)`, []any{2, "b"})
+	if err != nil || ra.RowsAffected != 1 {
+		t.Fatalf("plain insert = %+v, %v", ra, err)
+	}
+}

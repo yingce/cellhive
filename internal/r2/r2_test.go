@@ -341,3 +341,85 @@ func TestGCStaleUploads(t *testing.T) {
 		t.Fatalf("fresh upload was reclaimed")
 	}
 }
+
+// failingDeleteBucket fails Delete for keys ending in failSuffix.
+type failingDeleteBucket struct {
+	bucket.Bucket
+	failSuffix string
+}
+
+func (b *failingDeleteBucket) Delete(ctx context.Context, key string) error {
+	if strings.HasSuffix(key, b.failSuffix) {
+		return errors.New("delete failed")
+	}
+	return b.Bucket.Delete(ctx, key)
+}
+
+// TestUploadPartRefreshesMarker: an upload whose parts keep arriving must not be
+// reclaimed by GC even if the marker was created long ago.
+func TestUploadPartRefreshesMarker(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	up, err := s.CreateMultipart(ctx, "demo", "files", "big.bin")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	p, err := multipartPrefix("demo", "files", up)
+	if err != nil {
+		t.Fatalf("prefix: %v", err)
+	}
+	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
+		t.Fatalf("age marker: %v", err)
+	}
+	if _, err := s.UploadPart(ctx, "demo", "files", "big.bin", up, 1, []byte("x")); err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+	if removed, err := s.GCStaleUploads(ctx, 24*time.Hour); err != nil || removed != 0 {
+		t.Fatalf("active upload reclaimed: removed=%d err=%v", removed, err)
+	}
+	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
+		t.Fatalf("re-age marker: %v", err)
+	}
+	if removed, err := s.GCStaleUploads(ctx, 24*time.Hour); err != nil || removed != 1 {
+		t.Fatalf("stale upload not reclaimed: removed=%d err=%v", removed, err)
+	}
+}
+
+// TestAbortMultipartContinuesOnError: one failing delete must not stop the rest,
+// and a retry must still be able to finish.
+func TestAbortMultipartContinuesOnError(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	up, err := s.CreateMultipart(ctx, "demo", "files", "big.bin")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	p, err := multipartPrefix("demo", "files", up)
+	if err != nil {
+		t.Fatalf("prefix: %v", err)
+	}
+	if _, err := s.UploadPart(ctx, "demo", "files", "big.bin", up, 1, []byte("a")); err != nil {
+		t.Fatalf("part1: %v", err)
+	}
+	if _, err := s.UploadPart(ctx, "demo", "files", "big.bin", up, 2, []byte("b")); err != nil {
+		t.Fatalf("part2: %v", err)
+	}
+	base := s.B
+	s.B = &failingDeleteBucket{Bucket: base, failSuffix: "00001"}
+	if err := s.AbortMultipart(ctx, "demo", "files", "big.bin", up); err == nil {
+		t.Fatal("abort should surface the delete error")
+	}
+	s.B = base
+	if _, _, err := base.Get(ctx, p+"00002"); !errors.Is(err, bucket.ErrNotFound) {
+		t.Fatalf("part 2 not deleted despite continuing: %v", err)
+	}
+	if _, _, err := base.Get(ctx, p+"00001"); err != nil {
+		t.Fatalf("failed part 1 unexpectedly gone: %v", err)
+	}
+	if err := s.AbortMultipart(ctx, "demo", "files", "big.bin", up); err != nil {
+		t.Fatalf("retry abort: %v", err)
+	}
+	if keys, err := base.List(ctx, p); err != nil || len(keys) != 0 {
+		t.Fatalf("abort left keys: %v %v", keys, err)
+	}
+}

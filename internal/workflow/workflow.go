@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,12 +138,22 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, stmt)
 			return err
-		}); err != nil {
-			_ = err // already present on cells created by the current schema
+		}); err != nil && !isDuplicateColumn(err) {
+			// A real migration failure (permissions, disk, corruption) must fail
+			// the operation and must NOT be cached as migrated, or every later
+			// call would run against a half-migrated cell.
+			return nil, fmt.Errorf("workflow: migrate %s: %w", scope.String(), err)
 		}
 	}
 	s.migrated.Store(scope.String(), struct{}{})
 	return c, nil
+}
+
+// isDuplicateColumn reports the expected "duplicate column name" error from an
+// ADD COLUMN for a column the current schema already created. SQLite reports it
+// as a plain SQLITE_ERROR (no distinct code), so match the message.
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
 
 // ErrStaleRun means a callback carried a run token that no longer owns the

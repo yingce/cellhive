@@ -173,7 +173,15 @@ func (s *Store) UploadPart(ctx context.Context, ns, bucketName, key, uploadID st
 	if err != nil {
 		return "", err
 	}
-	return s.B.Put(ctx, k, data)
+	etag, err := s.B.Put(ctx, k, data)
+	if err != nil {
+		return "", err
+	}
+	// Refresh the creation marker so GC never reclaims a live upload whose parts
+	// are still arriving: the marker doubles as a heartbeat. Best effort -- a
+	// failed refresh must not fail a part that was already stored.
+	_, _ = s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(s.now().UnixMilli(), 10)))
+	return etag, nil
 }
 
 // CompleteMultipart assembles the listed parts in the given order, writes the
@@ -234,10 +242,13 @@ func (s *Store) AbortMultipart(ctx context.Context, ns, bucketName, key, uploadI
 	if err != nil {
 		return err
 	}
+	// Delete everything we can: a single failure must not leave the rest behind,
+	// so a retry sees a smaller, still-abortable set. Return the last real error.
+	var lastErr error
 	for _, k := range keys {
-		if err := s.B.Delete(ctx, k); err != nil {
-			return err
+		if err := s.B.Delete(ctx, k); err != nil && !errors.Is(err, bucket.ErrNotFound) {
+			lastErr = err
 		}
 	}
-	return nil
+	return lastErr
 }
