@@ -16,8 +16,9 @@ import (
 // it, and tests assert the two stay in sync (ADR-153).
 const PinnedVersion = "1.20260615.1"
 
-// Find locates the workerd binary: CELLHIVE_WORKERD, PATH, then the local dev
-// package store (PinnedVersion preferred).
+// Find locates the workerd binary: CELLHIVE_WORKERD, then PATH, then
+// CELLHIVE_WORKERD_DIR (a local dev package store searched for
+// @cloudflare+workerd-linux-64@*/..., PinnedVersion preferred).
 func Find() (string, error) {
 	if p := os.Getenv("CELLHIVE_WORKERD"); p != "" {
 		return p, nil
@@ -25,15 +26,17 @@ func Find() (string, error) {
 	if p, err := exec.LookPath("workerd"); err == nil {
 		return p, nil
 	}
-	matches, _ := filepath.Glob("/opt/vwork/node_modules/.pnpm/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd")
-	if len(matches) > 0 {
-		sort.Strings(matches)
-		for _, m := range matches {
-			if strings.Contains(m, PinnedVersion) {
-				return m, nil
+	if dir := os.Getenv("CELLHIVE_WORKERD_DIR"); dir != "" {
+		matches, _ := filepath.Glob(filepath.Join(dir, "@cloudflare+workerd-linux-64@*", "node_modules", "@cloudflare", "workerd-linux-64", "bin", "workerd"))
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			for _, m := range matches {
+				if strings.Contains(m, PinnedVersion) {
+					return m, nil
+				}
 			}
+			return matches[len(matches)-1], nil
 		}
-		return matches[len(matches)-1], nil
 	}
 	return "", errors.New("workerdbin: workerd not found (set CELLHIVE_WORKERD)")
 }

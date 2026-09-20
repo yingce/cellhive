@@ -1874,8 +1874,8 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, cellstore.ErrConditionFailed) {
 		// Condition not met: nothing written, nothing captured. The caller
-		// gets a clean boolean instead of an error (vwork maps this to
-		// {applied:false}).
+		// gets a clean boolean instead of an error (platform adapters map
+		// this to {applied:false}).
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "txid": txid})
 		return
 	}

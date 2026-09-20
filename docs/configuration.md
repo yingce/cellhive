@@ -157,7 +157,9 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260615.1`） |
+| `CELLHIVE_WORKERD_DIR` | 空 | 本地包存储目录（按 `@cloudflare+workerd-linux-64@*` 搜索，pin 优先） |
 | `CELLHIVE_ESBUILD` | 自动查找 | esbuild 路径 |
+| `CELLHIVE_ESBUILD_DIR` | 空 | 本地包存储目录（按 `esbuild@*` 搜索） |
 
 ## user-runtime
 

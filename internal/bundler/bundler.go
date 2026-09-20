@@ -36,8 +36,9 @@ type Options struct {
 	EsbuildPath string
 }
 
-// FindEsbuild locates the esbuild binary: CELLHIVE_ESBUILD, PATH, then the
-// local dev package store.
+// FindEsbuild locates the esbuild binary: CELLHIVE_ESBUILD, then PATH. A local
+// dev package store can be added via CELLHIVE_ESBUILD_DIR (searched for
+// esbuild@*/...), keeping the platform decoupled from any host layout.
 func FindEsbuild() (string, error) {
 	if p := os.Getenv("CELLHIVE_ESBUILD"); p != "" {
 		return p, nil
@@ -45,10 +46,12 @@ func FindEsbuild() (string, error) {
 	if p, err := exec.LookPath("esbuild"); err == nil {
 		return p, nil
 	}
-	matches, _ := filepath.Glob("/opt/vwork/node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild")
-	if len(matches) > 0 {
-		sort.Strings(matches)
-		return matches[len(matches)-1], nil
+	if dir := os.Getenv("CELLHIVE_ESBUILD_DIR"); dir != "" {
+		matches, _ := filepath.Glob(filepath.Join(dir, "esbuild@*", "node_modules", "esbuild", "bin", "esbuild"))
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			return matches[len(matches)-1], nil
+		}
 	}
 	return "", errors.New("bundler: esbuild not found (install esbuild or set CELLHIVE_ESBUILD)")
 }

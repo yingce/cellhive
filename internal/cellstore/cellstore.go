@@ -971,7 +971,7 @@ func (c *Cell) PutOpts(ctx context.Context, key string, value, meta []byte, expi
 var ErrConditionFailed = errors.New("cellstore: condition failed")
 
 // PutTxCondition is an existence precondition for PutTxIf, mirroring the
-// platform-facing semantics of "onlyIf" (vwork capability KV).
+// platform-facing semantics of "onlyIf" (an entry platform's capability KV).
 type PutTxCondition int
 
 const (
