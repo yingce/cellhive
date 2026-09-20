@@ -318,6 +318,116 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	}
 }
 
+// TestCapEgressRestrictsTenantReach asserts the capability-egress narrowing
+// (vwork-migration review): the loader worker's PLATFORM binding points at a
+// dedicated network whose allow list is configurable. With EgressAllow set to
+// a narrow range, a tenant-adjacent PLATFORM fetch to a non-listed private
+// address is refused by workerd (restrictPeers), while listed addresses and
+// plain public internet still work via the unchanged globalOutbound.
+func TestCapEgressRestrictsTenantReach(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+
+	const probe = `
+export default {
+  async fetch(req, env) {
+    const out = [];
+    // 1. listed (allow) range: the projection stub itself runs on 127.0.0.1
+    try { const r = await env.PLATFORM.fetch(env.CELL_URL + "/v1/control/routes"); out.push("listed:" + r.status); }
+    catch(e) { out.push("listed:BLOCKED"); }
+    // 2. non-listed private address: refused by restrictPeers
+    try { const r = await env.PLATFORM.fetch("http://10.1.2.3:9999/x"); out.push("other-private:" + r.status); }
+    catch(e) { out.push("other-private:BLOCKED"); }
+    // 3. plain public internet: unchanged via globalOutbound (public)
+    try { const r = await fetch("http://example.com/"); out.push("public:" + r.status); }
+    catch(e) { out.push("public:BLOCKED"); }
+    return new Response(out.join(" | "));
+  }
+};
+`
+
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "egress.test", "worker": "probe"}},
+		"workers": []any{map[string]any{
+			"worker":  "probe",
+			"active":  1,
+			"version": map[string]any{"number": 1, "bundle_sha": "shaEgress"},
+		}},
+	}}}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(probe))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	dir := t.TempDir()
+	// "local" covers the httptest stub (127.0.0.1); 10/8 deliberately NOT listed.
+	capnpPath, err := Render(dir, Config{
+		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		EgressAllow: []string{"local"},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("public loader not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, public+"/probe", nil)
+	req.Host = "egress.test"
+	resp, err := client.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "listed:200") {
+		t.Fatalf("listed range should be reachable, got: %s", body)
+	}
+	if !strings.Contains(string(body), "other-private:BLOCKED") {
+		t.Fatalf("non-listed private range should be blocked, got: %s", body)
+	}
+	if !strings.Contains(string(body), "public:200") {
+		t.Fatalf("plain public internet should be unchanged, got: %s", body)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 // TestTenantEnvHasNoPlatformCredentials asserts the ADR-074 boundary with real
 // workerd: the tenant env object carries no internal/platform credential —
 // env.CELL_TOKEN must be absent — and the wrapper's module-scope

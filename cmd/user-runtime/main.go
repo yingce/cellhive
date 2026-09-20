@@ -60,6 +60,7 @@ func main() {
 		TraceSampleRatio: traceRatio(),
 		DoDirect:         getenv("CELLHIVE_DO_DIRECT", ""),
 		OutboundAllow:    outboundAllow(),
+		EgressAllow:      egressAllow(),
 	})
 	if err != nil {
 		log.Error("render config", "err", err)
@@ -156,6 +157,24 @@ func envInt(k string, def int) int {
 // categories: public|private|local). Empty = public only (I-09, ADR-130).
 func outboundAllow() []string {
 	raw := strings.TrimSpace(os.Getenv("CELLHIVE_TENANT_OUTBOUND"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// egressAllow parses CELLHIVE_CAP_EGRESS (comma-separated CIDR blocks or
+// workerd categories) into the loader PLATFORM binding's capability-egress
+// policy. Empty keeps the legacy permissive posture (public+private) until
+// the deployment configures the runtime-services range.
+func egressAllow() []string {
+	raw := strings.TrimSpace(os.Getenv("CELLHIVE_CAP_EGRESS"))
 	if raw == "" {
 		return nil
 	}

@@ -175,6 +175,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
+| `CELLHIVE_CAP_EGRESS` | 空→`public+private`（宽松） | capability 数据面出口（PLATFORM binding）允许的网络段（CIDR/类别，逗号分隔）；生产应设为 runtime-services 解析段，收窄租户私网可达面 |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 空 | BYO AI 端点与密钥；空=不注入 |
 
 ## do-runtime
