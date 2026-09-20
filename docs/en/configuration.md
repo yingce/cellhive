@@ -174,7 +174,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_SERVICE_NATIVE` | empty=enabled | `0` disables native service RPC |
 | `CELLHIVE_DO_DIRECT` | empty=enabled | `0` disables owner-hint direct access |
 | `CELLHIVE_TENANT_OUTBOUND` | empty→`public` | egress category `public`/`private`/`local` |
-| `CELLHIVE_CAP_EGRESS` | empty→`public+private` (permissive) | capability data-plane egress (PLATFORM binding) allowed network ranges (CIDR/categories, comma-separated); production should set the runtime-services range to narrow the tenant private-reach surface |
+| `CELLHIVE_CAP_EGRESS` | empty (recommended default) | extra network ranges (CIDR/categories, comma-separated) allowed for the capability data-plane egress (PLATFORM binding). **No configuration needed** when capability runs over the public domain + TLS (allow=`public`, private denied by default = secure default); only set when later optimizing to intranet-direct runtime-services |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | empty | BYO AI endpoint and key; empty=not injected |
 
 ## do-runtime
