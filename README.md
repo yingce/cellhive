@@ -34,7 +34,8 @@
 - One image with all services and the pinned workerd; Docker Compose, Kubernetes (kustomize), Helm; graceful drain and readiness probes.
 
 **Multi-tenancy & isolation**
-- Per-binding scoped tokens (HMAC); tenant workers get binding facades, never platform secrets; tenant outbound is public-only by default; only `cell-agent` holds bucket credentials.
+- Per-binding scoped tokens (HMAC) with segment-level scopes (`<ns>:<kind>:<cell>`, `*`/`pre*`); tenant workers get binding facades, never platform secrets; tenant outbound is public-only by default; only `cell-agent` holds bucket credentials.
+- Trusted entry platforms can be delegated token issuance: they hold a derived issuer key (`cellhive creds issuer <name>`) and sign short-lived scoped tokens themselves (`cellhive token ... --iss <name> --ttl 5m`, ADR-181).
 
 ## Architecture
 

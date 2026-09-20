@@ -5,7 +5,12 @@
 > The authoritative sources for configuration are [`../configuration.md`](../configuration.md) and the code; the table below is the subset relevant to this module.
 ## Key Interfaces
 
-CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`, `vectorize`, `domain/route`, `creds`, `tail`…); packaging via `internal/bundler` (esbuild).
+CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`, `vectorize`, `domain/route`, `creds`, `token`, `tail`…); packaging via `internal/bundler` (esbuild).
+
+**Credentials and scoped-token issuance (ADR-181)**:
+- `cellhive creds [role]`: print the 8 root-derived role credentials.
+- `cellhive creds issuer <name>`: print a delegated issuer key (`HKDF(SCOPE_SECRET,"issuer/"+name)`) to hand to a trusted entry (holds no root).
+- `cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <name>] [--ttl 5m] [--key <b64>]`: single issuance entry point (platform key / delegated issuer key / a given key); delegated tokens require `--ttl>0`; `kind`/`name` accept `*`/`pre*`.
 
 ## Configuration (Environment Variables)
 
@@ -38,10 +43,10 @@ CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`,
 
 ## Test Anchors
 
-`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`.
+`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`; `cmd/cellhive TestMintScopeToken` (issuance), `internal/scopedtoken` (glob/issuer), `internal/server TestScopeAuthDelegated`.
 
 ## Related Documentation
 
-[`wrangler-compat.md`](../wrangler-compat.md), [`dev-mode.md`](../dev-mode.md)
+[`wrangler-compat.md`](../wrangler-compat.md), [`dev-mode.md`](../dev-mode.md), [`security.md`](../security.md) (scoped-token scope and delegation), [`control-plane.md`](../control-plane.md) (issuance CLI)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_

@@ -35,6 +35,7 @@
 
 **多租户与隔离**
 - 每个 binding 一个 scoped token（HMAC）；租户 worker 只拿到 binding facade，拿不到平台 secret；租户出网默认仅公网；只有 `cell-agent` 持有桶凭据。
+- scoped token 支持段级范围（`<ns>:<kind>:<cell>`，`*`/`pre*`）与**可信入口委派签发**：入口用派生的 issuer key 自签短时令牌（`cellhive creds issuer <name>` 取 key、`cellhive token ... --iss <name> --ttl 5m` 签发；ADR-181）。
 
 ## 架构
 

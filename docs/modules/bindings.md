@@ -24,6 +24,7 @@ cell-agent 上的 `/v1/kv/*`、`/v1/d1/*`、`/v1/r2/*`、`/v1/queue/*`、`/v1/wo
 - 每个 binding 一个 scoped token（HMAC）。
 - 读**强一致**（转发 owner）。
 - 对 CF 拒绝项**显式拒绝**（Cache API、Sessions、SSE-C…），未知字段/flag 部署期拒绝。
+- KV 超出 CF API 的能力走**原子存在性条件写**（ADR-182，平台侧 "onlyIf"）：`put?if_exists=absent|present` 与写入同事务原子判定（失败 `200 {applied:false}`，非错误；无关 key 不影响；过期行计为 absent）；`POST /v1/kv/incr?by=`（默认 1，可负）读-加-写单事务原子，非整数 `400 not_integer`。
 
 ## 源码位置
 

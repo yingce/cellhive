@@ -35,8 +35,9 @@ var scopeResourceParam = map[string]string{
 
 // scopeAuth enforces the per-binding scoped token on tenant binding endpoints
 // (ADR-029 layers 3+4, ADR-074). It always requires a valid token: it verifies
-// the signature, expiry, binding kind and that the binding is declared for the
-// namespace. A missing token fails closed (403).
+// the signature, expiry, binding kind (segment-glob, ADR-181) and either the
+// registered-binding ACL (platform tokens) or the ns/scope itself (delegated
+// issuer tokens, which must expire). A missing token fails closed (403).
 func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -51,26 +52,43 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				writeErr(w, http.StatusForbidden, "scope_required", "a scoped token is required for binding calls")
 				return
 			}
-			claims, err := scopedtoken.Verify(s.scopeSecret(), tok, time.Now())
+			claims, err := scopedtoken.VerifyIssuer(s.scopeSecret(), tok, time.Now())
 			if err != nil {
 				writeErr(w, http.StatusForbidden, "scope_invalid", err.Error())
 				return
 			}
-			if claims.Kind != kind {
+			delegated := claims.Iss != ""
+			// A delegated (external) token must expire: without an expiry it
+			// cannot be bounded by the issuer's own lifetime (ADR-181).
+			if delegated && claims.ExpiresMs == 0 {
+				writeErr(w, http.StatusForbidden, "scope_exp_required", "a delegated token must carry an expiry")
+				return
+			}
+			if !scopedtoken.MatchKind(claims, kind) {
 				writeErr(w, http.StatusForbidden, "scope_kind", "token is not valid for a "+kind+" binding")
 				return
 			}
+			// The namespace is exact and authoritative (isolation boundary).
 			if q := r.URL.Query().Get("ns"); q != "" && q != claims.Namespace {
 				writeErr(w, http.StatusForbidden, "scope_mismatch", "request namespace does not match the token")
 				return
 			}
 			if param, ok := scopeResourceParam[kind]; ok {
-				if got := r.URL.Query().Get(param); got != claims.Name {
+				// The resource name comes from the request; a glob token matches it.
+				got := r.URL.Query().Get(param)
+				if got == "" || !scopedtoken.MatchName(claims, got) {
 					writeErr(w, http.StatusForbidden, "scope_resource_mismatch", "request resource does not match the token")
 					return
 				}
+			} else if scopedtoken.HasWildcard(claims.Name) {
+				// Token-derived resources (kv/vectorize/service/do) need a
+				// concrete name to resolve a cell; a wildcard cannot resolve.
+				writeErr(w, http.StatusForbidden, "scope_name_required", "this binding kind requires a concrete resource name")
+				return
 			}
-			if s.Control != nil {
+			if !delegated && s.Control != nil {
+				// Internal tokens are bounded by the registered-binding ACL;
+				// delegated tokens are authorized by their ns/scope (ADR-181).
 				ok, _, cerr := s.bindingInfo(r.Context(), claims.Namespace, kind, claims.Name)
 				if cerr != nil {
 					writeErr(w, http.StatusInternalServerError, "scope_check_failed", cerr.Error())

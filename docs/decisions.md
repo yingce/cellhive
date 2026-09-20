@@ -2379,6 +2379,21 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
+## ADR-181 凭据收敛与能力令牌委派（a+b 已实现，收敛设计）✅部分实现
+
+> 状态：**凭据收敛的 (a)+(b) 已实现（2026-09-20）；8 凭据收敛/非对称（档 1–3）仍为设计，
+> 未实现**。本 ADR 记录收敛设计与已落地部分。
+
+- **已实现（2026-09-20）**：
+  1. `internal/scopedtoken`：新增 `Iss` claim（空值仍产出 ADR-074 的 canonical 字节，字段序 `ns,kind,name,iss,exp_ms`）；段级 glob `MatchKind`/`MatchName`（`*` 任意、`pre*` 前缀、否则精确，**逐段锚定**，`acme` 不匹配 `acmex`）；`IssuerKey(scope,iss)=HKDF-SHA256(scope,nil,"issuer/"+iss,32)` 与 `VerifyIssuer`（未验签的 `Iss` 仅用于选 key，伪造者无对应 key 无法签名）。
+  2. `server.scopeAuth`：改用 `VerifyIssuer`；**delegated（`Iss != ""`）强制 `exp`**、按 ns/scope 授权（跳过 `HasBinding`）；平台令牌（`Iss==""`）仍走注册绑定 ACL。**ns 始终精确**（隔离边界）；`kind`/`name` 支持 glob；token 派生的资源（kv/vectorize/service/do）**拒绝通配 name**（无法解析 cell）；资源在请求里的 kind（d1/r2/queue/workflow）支持通配。
+  3. CLI（**统一签发入口**）：`cellhive creds issuer <name>` 打印派生 issuer key（供可信租户平台持有，vwork 不持 root）；`cellhive token --ns --kind --name [--iss <issuer>] [--ttl 5m] [--key <b64>]` 签发 scoped token（`--key` 让委派方不持 root 也能签；委派令牌强制 `--ttl > 0`）。
+  4. 验证：`internal/scopedtoken`（glob、issuer key/verify、canonical 字段序）、`internal/server TestScopeAuthDelegated`（glob 命中/落空、跨 ns 拒绝、强制 exp、kv 通配拒绝、错 issuer 拒绝）；`make build`/`vet`/`test` 全绿。
+- **未实现（下一步）**：外部数据面入口（`ExternalHandler` 只挂数据面 + 公开 8 凭据收敛全景）；**委派模型**：`issuer`（vwork 等入口）持由其 `iss` 派生的签名密钥（当前不按 ns 收窄，故可签任意 ns——对应"入口管多个 ns、可委派所有 ns"），**每请求现签短 `exp`（30s–5min）** 的 scoped token；cell-agent 只做无状态验签 + 强制 exp + authorize + 请求 ns == token ns，不做动态 epoch/吊销表。撤销靠"委派方停签 + 短 exp"；per-user/跨 ns 隔离由委派方自律（信任声明）。
+- **对称不能合，非对称才能合**：终态引入单一 Ed25519 签名密钥对替代全部 HMAC 签名密钥——私钥只在一处（cell-agent/专用 issuer），其余组件只持公钥，验证者不可伪造；loader 不再本地签，scoped token 改由 cell-agent 在加载期（冷路径）下发（do-runtime 已如此）。
+- **key 泄漏必须留最小止损**：`issuer` 密钥泄漏时，纯无状态 + 短 exp **不构成止损**（攻击者可无限现签新 token）。必须二选一并显式记录：(a) 一份 per-issuer 注册表（`{key_version, active, allowed_ns}`，控制面 + TTL 缓存，量级为"每个入口一行"）；或 (b) 接受"整平台换 root"。**推荐 (a)**。
+- **理由**：把"全局权"表达成"具名 issuer + ns 范围"，而非"所有组件共用 root"；用非对称把"验证"与"签发"解耦，从而在不牺牲隔离的前提下减少密钥数量；用短 `exp` + 委派方自控替代服务端逐 token 状态，保持热路径无状态。
+- **未实现 / 待定**：issuer 取 per-ns 还是 `issuer×ns`；allowlist 存放（控制面保留前缀 vs 静态配置）；是否引入 `jti` 吊销表；引导凭据（bootstrap）；外部 API key 管理 API、审计归属、按 key 限流；外部令牌与 role 令牌的 header/入口区分。
 ---
 
 ## 待定（🕓）
@@ -2432,6 +2447,7 @@
 - ADR-131：控制面 schema v2 + 域名/路由模型（**已实现**：软删+purge 循环、bindings 派生表、hosts 验证与 loader 门控、内置域 `<ns>-<worker>.<base>`、JWT 按 ns 授权 + 审计主体、列表分页、路由挂载剥离）。
 - ADR-132：移除边缘配置下发（删 `GET /v1/internal/traefik` 与 `CELLHIVE_ADMIN_HOST/_ADMIN_BACKEND_URL`）；边缘（反代/云 LB）由运维静态配置，平台只保证 loader 级 host 门控。
 - ADR-133：域名不做 DNS 校验（登记即授权）：删 `domain verify`/验证循环/`CELLHIVE_DOMAIN_VERIFY`·`CELLHIVE_DNS_RESOLVER`；host 唯一性/409/审计/`domain rm` 保留，校验字段与状态机保留备用。
+- ADR-181：凭据收敛与能力令牌委派（**a+b 已实现**：scoped token 段级 glob + `iss`/`IssuerKey`/`VerifyIssuer` 委派签发，`scopeAuth` 对外部令牌强制 exp/跳 HasBinding，CLI `creds issuer <name>`；**8 凭据收敛/非对称仍设计**）：按信任边界分三类凭据；对称不能合角色、非对称才能合；最小分发；per-issuer kill switch vs 换 root 取舍；log 独立、secrets-root 移出 root；分档 1→1.5→2→3。
 - ADR-179：指标按命名空间归属（ns 维度，有界标签）+ 绑定 span 带租户属性。
 - ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。
 - ADR-177：wake 索引不落后于 timer（先发布 + fail-closed + 认领时重建 + 有界轮转修复）。

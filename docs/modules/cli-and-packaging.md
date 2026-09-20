@@ -5,7 +5,12 @@
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
 ## 关键接口
 
-CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、`vectorize`、`domain/route`、`creds`、`tail`…）；打包经 `internal/bundler`（esbuild）。
+CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、`vectorize`、`domain/route`、`creds`、`token`、`tail`…）；打包经 `internal/bundler`（esbuild）。
+
+**凭据与 scoped token 签发（ADR-181）**：
+- `cellhive creds [role]`：打印 root 派生的 8 个角色凭据。
+- `cellhive creds issuer <name>`：打印委派签发方的 issuer key（`HKDF(SCOPE_SECRET,"issuer/"+name)`），交给可信入口（不持 root）。
+- `cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <name>] [--ttl 5m] [--key <b64>]`：统一签发 scoped token（平台 key / 委派 issuer key / 直接给定 key）；委派令牌强制 `--ttl>0`；`kind`/`name` 支持 `*`/`pre*`。
 
 ## 配置（环境变量）
 
@@ -38,10 +43,10 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、
 
 ## 测试锚点
 
-`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`。
+`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`；`cmd/cellhive TestMintScopeToken`（签发）、`internal/scopedtoken`（glob/issuer）、`internal/server TestScopeAuthDelegated`。
 
 ## 相关文档
 
-[`wrangler-compat.md`](../wrangler-compat.md)、[`dev-mode.md`](../dev-mode.md)
+[`wrangler-compat.md`](../wrangler-compat.md)、[`dev-mode.md`](../dev-mode.md)、[`security.md`](../security.md)（scoped token 范围与委派）、[`control-plane.md`](../control-plane.md)（签发 CLI）
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-20_

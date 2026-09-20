@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cellstore"
@@ -179,5 +180,85 @@ func TestScopeResourceMismatchDeniedViaHandler(t *testing.T) {
 	}
 	if code := kvReq(t, s, http.MethodPut, "/v1/r2/object?ns=acme&bucket=a&key=k", r2tok, []byte("v")); code != http.StatusOK {
 		t.Fatalf("r2 own resource = %d, want 200", code)
+	}
+}
+
+// mintIssuer signs a token as a delegated issuer (ADR-181).
+func mintIssuer(t *testing.T, s *Server, iss string, c scopedtoken.Claims) string {
+	t.Helper()
+	key, err := scopedtoken.IssuerKey([]byte(s.Cfg.ScopeSecret), iss)
+	if err != nil {
+		t.Fatalf("issuer key: %v", err)
+	}
+	tok, err := scopedtoken.Mint(key, c)
+	if err != nil {
+		t.Fatalf("mint issuer: %v", err)
+	}
+	return tok
+}
+
+// scopeAuthCode runs the middleware alone (no handler) and returns its status.
+func scopeAuthCode(s *Server, kind, token, query string) int {
+	handler := s.scopeAuth(kind)(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/x?"+query, nil)
+	if token != "" {
+		req.Header.Set("x-cellhive-scope-token", token)
+	}
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+	return rr.Code
+}
+
+// TestScopeAuthDelegated covers ADR-181 delegated tokens: segment globs, the
+// mandatory expiry, ns as the isolation boundary, and the token-derived-resource
+// wildcard rejection.
+func TestScopeAuthDelegated(t *testing.T) {
+	s := newScopeServer(t)
+	exp := time.Now().Add(time.Minute).UnixMilli()
+
+	// Glob resource name: matches any d1 db under acme, no registered binding
+	// required (ACL is the ns/scope for delegated tokens).
+	tok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
+		Namespace: "acme", Kind: "d1", Name: "user*", Iss: "vwork", ExpiresMs: exp,
+	})
+	if code := scopeAuthCode(s, "d1", tok, "ns=acme&db=user42"); code != http.StatusOK {
+		t.Fatalf("glob match = %d, want 200", code)
+	}
+	if code := scopeAuthCode(s, "d1", tok, "ns=acme&db=other"); code != http.StatusForbidden {
+		t.Fatalf("glob miss = %d, want 403", code)
+	}
+	// Cross-namespace denied even though the issuer may sign any ns.
+	if code := scopeAuthCode(s, "d1", tok, "ns=evil&db=user42"); code != http.StatusForbidden {
+		t.Fatalf("cross-ns = %d, want 403", code)
+	}
+	// Kind glob.
+	ktok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
+		Namespace: "acme", Kind: "*", Name: "main", Iss: "vwork", ExpiresMs: exp,
+	})
+	if code := scopeAuthCode(s, "queue", ktok, "ns=acme&queue=main"); code != http.StatusOK {
+		t.Fatalf("kind glob = %d, want 200", code)
+	}
+	// A delegated token without an expiry is rejected.
+	notok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
+		Namespace: "acme", Kind: "d1", Name: "a", Iss: "vwork",
+	})
+	if code := scopeAuthCode(s, "d1", notok, "ns=acme&db=a"); code != http.StatusForbidden {
+		t.Fatalf("no-exp delegated = %d, want 403", code)
+	}
+	// A wildcard name for a token-derived resource (kv) cannot resolve a cell.
+	kvtok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
+		Namespace: "acme", Kind: "kv", Name: "*", Iss: "vwork", ExpiresMs: exp,
+	})
+	if code := scopeAuthCode(s, "kv", kvtok, "ns=acme"); code != http.StatusForbidden {
+		t.Fatalf("wildcard kv = %d, want 403", code)
+	}
+	// A token signed by a different issuer key does not verify.
+	wrong := mintIssuer(t, s, "other", scopedtoken.Claims{
+		Namespace: "acme", Kind: "d1", Name: "a", Iss: "vwork", ExpiresMs: exp,
+	})
+	if code := scopeAuthCode(s, "d1", wrong, "ns=acme&db=a"); code != http.StatusForbidden {
+		t.Fatalf("wrong issuer = %d, want 403", code)
 	}
 }

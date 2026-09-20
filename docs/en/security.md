@@ -55,11 +55,19 @@
 - **Secure defaults**: `Validate()` rejects missing/dev root keys unless `CELLHIVE_ALLOW_INSECURE_DEFAULTS=1` is set (otherwise the admin plane could be accessed with known credentials, ADR-134/137).
 - **Honest note**: Without PKI, role isolation = independent secrets, not cryptographic identity; mTLS/internal CA is a stronger future option (not implemented).
 
+## Scoped Token Scope and Delegated Issuance (ADR-074/181)
+
+- Binding endpoints accept only `x-cellhive-scope-token`; claims `{ns,kind,name,iss?,exp_ms?}`.
+- **`ns` is always exact** (isolation boundary); `kind`/`name` support segment-level globs (`*` any, `pre*` prefix), **anchored per segment** (`acme` does not match `acmex`).
+- **Platform tokens** (empty `iss`): the loader signs locally with `SCOPE_SECRET`; `HasBinding` is validated on every request.
+- **Delegated tokens** (non-empty `iss`): a trusted tenant platform signs with a derived issuer key (`HKDF(SCOPE_SECRET,"issuer/"+iss)`; print with `cellhive creds issuer <name>`, or mint directly with `cellhive token ... --iss <name> --ttl 5m`); an **expiry is mandatory** and authorization is by ns/scope (no registered-binding requirement).
+- **Honest boundary**: the delegated key is **not narrowed per ns** (it can sign any ns) — that is the "entry manages many namespaces, may delegate all of them" design. The platform only enforces **request ns == token ns**; cross-ns / per-user isolation is the delegate's responsibility. A leaked issuer key therefore exposes every ns it may sign for; stop-loss is rotating `SCOPE_SECRET`/root (issuer versions/allowlist are not implemented).
+
 ## Implemented
 
 - capnp `globalOutbound`/network: `workerd/user-runtime/userruntime.go` rendering + `CELLHIVE_TENANT_OUTBOUND` (ADR-130);
 - Control-plane authentication middleware (role tokens + OIDC/JWT) and audit logs (including actor/on_behalf_of/request_id, ADR-131);
-- Scoped token revocation: `HasBinding` validation on every request + `SCOPE_SECRET` rotation (ADR-074).
+- Scoped token revocation: `HasBinding` (platform tokens) on every request + `SCOPE_SECRET` rotation (ADR-074); delegated tokens rely on a mandatory short `exp` + issuer-key rotation (ADR-181).
 
 ## Root Key Sources (ADR-150)
 

@@ -58,6 +58,17 @@ Wrangler's "automatic resource creation without id" is **rejected** (wrangler-co
 - deploy references a non-existent resource → **explicit error and suggestion of the corresponding create command**;
 - Resource creation = register scope in the control plane (the cell is lazily activated on first access).
 
+## Credentials and Token Issuance CLI (ADR-074/137/181)
+
+| Command | Effect |
+|---|---|
+| `cellhive creds [role]` | Print the role credentials derived from `CELLHIVE_ROOT_KEY` (`peer`/`internal`/`dispatch`/`log`/`admin`/`scope`/`do-ticket`/`secret-key`) |
+| `cellhive creds issuer <name>` | Print a delegated issuer key (`HKDF(SCOPE_SECRET,"issuer/"+name)`) to hand to a trusted entry (e.g. vwork); it holds **no root** |
+| `cellhive token --ns <ns> --kind <kind> --name <name\|glob> [--iss <name>] [--ttl 5m] [--key <b64>]` | **Single issuance entry point**: platform scope key by default (no expiry); `--iss` uses the delegated issuer key and **requires `--ttl>0`**; `--key` signs with a given key (delegated self-sign, no root). `kind`/`name` accept `*`/`pre*` |
+
+- Binding endpoints accept only `x-cellhive-scope-token`: platform tokens (empty `iss`) use the registered-binding ACL; delegated tokens (non-empty `iss`) require an expiry and authorize by ns/scope (ADR-181).
+- The delegated key is **not narrowed per ns** (it can sign any ns); isolation is the delegate's responsibility. Stop-loss on leak = rotate root/`SCOPE_SECRET`. See `docs/security.md`.
+
 ## Deploy Server-Side Feature/Compatibility Interception (ADR-065)
 
 The CLI is only for **fast feedback**; `deploy` validation treats the **server side as authoritative** (prevents bypass and different CLI versions). Validation logic is placed in a **shared library**, used by both the `deploy` endpoint and CLI preflight.

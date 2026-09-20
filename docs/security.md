@@ -55,11 +55,20 @@
 - **安全默认**：`Validate()` 在未设 `CELLHIVE_ALLOW_INSECURE_DEFAULTS=1` 时拒绝缺失/dev 根密钥（否则 admin 面可被已知凭据访问，ADR-134/137）。
 - **诚实说明**：无 PKI 时角色隔离 = 独立 secret，非密码学身份；mTLS/内部 CA 为后续更强方案（未做）。
 
+## scoped token 范围与委派签发（ADR-074/181）
+
+- 绑定端点只认 `x-cellhive-scope-token`；claims `{ns,kind,name,iss?,exp_ms?}`。
+- **ns 始终精确**（隔离边界）；`kind`/`name` 支持段级 glob（`*` 任意、`pre*` 前缀），**逐段锚定**（`acme` 不匹配 `acmex`）。
+- **平台令牌**（`iss` 空）：loader 用 `SCOPE_SECRET` 本地签；每请求 `HasBinding` 校验。
+- **委派令牌**（`iss` 非空）：可信租户平台用派生 issuer key（`HKDF(SCOPE_SECRET,"issuer/"+iss)`；`cellhive creds issuer <name>` 打印，或 `cellhive token ... --iss <name> --ttl 5m` 直接签）签发；**强制 `exp`**、按 ns/scope 授权（不再要求已登记 binding）。
+- **诚实边界（重要）**：委派 key **不按 ns 收窄**——`IssueKey` 只由 `iss` 派生，故持有者可签任意 ns 的令牌（这正是"入口管多个 ns、可委派所有 ns"的设计）。平台只强制 **请求 ns == token ns**，**不能**阻止委派方自己选 ns；per-user/跨 ns 隔离由委派方自律。因此 **issuer key 泄漏 = 其被授权覆盖的全部 ns 沦陷**，止损只有轮换 `SCOPE_SECRET`/root（issuer 版本/allowlist 未实现）。
+- **边界**：token 派生的资源（kv/vectorize/service/do）要求具体 name（通配无法解析 cell）；对外数据面入口（`ExternalHandler`）与 API key 管理未实现。
+
 ## 已实现
 
 - capnp `globalOutbound`/network：`workerd/user-runtime/userruntime.go` 渲染 + `CELLHIVE_TENANT_OUTBOUND`（ADR-130）；
 - 控制面鉴权中间件（角色令牌 + OIDC/JWT）与审计日志（含 actor/on_behalf_of/request_id，ADR-131）；
-- scoped token 撤销：`HasBinding` 每请求校验 + `SCOPE_SECRET` 轮换（ADR-074）。
+- scoped token 撤销：`HasBinding`（平台令牌）每请求校验 + `SCOPE_SECRET` 轮换（ADR-074）；委派令牌靠强制短 `exp` + issuer key 轮换（ADR-181）。
 
 ## 根密钥来源（ADR-150）
 

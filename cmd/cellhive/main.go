@@ -85,6 +85,8 @@ func dispatch(args []string) error {
 		return cmdTail(args[1:])
 	case "creds":
 		return cmdCreds(args[1:])
+	case "token":
+		return cmdToken(args[1:])
 	case "status":
 		return cmdStatus()
 	case "capacity":
@@ -1824,8 +1826,22 @@ func cmdServiceACL(args []string) error {
 // cmdCreds prints the role credentials derived from CELLHIVE_ROOT_KEY, so
 // scripts and operators never hand-copy per-role secrets (ADR-137).
 func cmdCreds(args []string) error {
+	// cellhive creds issuer <name>: print the delegated issuer signing key a
+	// trusted tenant platform uses to mint scoped tokens (ADR-181).
+	if len(args) == 2 && args[0] == "issuer" {
+		c := config.DeriveCredentials(config.LoadRootKey())
+		if c.Scope == "" {
+			return fmt.Errorf("CELLHIVE_ROOT_KEY is required (or CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 for local use)")
+		}
+		key, err := scopedtoken.IssuerKey([]byte(c.Scope), args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Println(base64.RawURLEncoding.EncodeToString(key))
+		return nil
+	}
 	if len(args) > 1 {
-		return fmt.Errorf("usage: cellhive creds [role]")
+		return fmt.Errorf("usage: cellhive creds [role|issuer <name>]")
 	}
 	c := config.DeriveCredentials(config.LoadRootKey())
 	all := map[string]string{
@@ -1847,6 +1863,66 @@ func cmdCreds(args []string) error {
 	for _, role := range []string{"peer", "internal", "dispatch", "log", "admin", "scope", "do-ticket", "secret-key"} {
 		fmt.Printf("%s=%s\n", role, all[role])
 	}
+	return nil
+}
+
+// mintScopeToken mints a scoped binding token from one place (ADR-181). keyB64
+// (raw base64url) overrides root derivation so a delegated holder can mint
+// without holding the root key.
+func mintScopeToken(ns, kind, name, iss string, ttl time.Duration, keyB64 string) (string, error) {
+	if ns == "" || kind == "" || name == "" {
+		return "", fmt.Errorf("namespace, kind and name are required")
+	}
+	var key []byte
+	if keyB64 != "" {
+		b, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(keyB64))
+		if err != nil || len(b) == 0 {
+			return "", fmt.Errorf("invalid key (want raw base64url)")
+		}
+		key = b
+	} else {
+		scope := config.DeriveCredentials(config.LoadRootKey()).Scope
+		if scope == "" {
+			return "", fmt.Errorf("CELLHIVE_ROOT_KEY is required (or pass --key)")
+		}
+		k, err := scopedtoken.IssuerKey([]byte(scope), iss)
+		if err != nil {
+			return "", err
+		}
+		key = k
+	}
+	var exp int64
+	switch {
+	case ttl > 0:
+		exp = time.Now().Add(ttl).UnixMilli()
+	case ttl < 0:
+		return "", fmt.Errorf("ttl must be positive")
+	case iss != "":
+		return "", fmt.Errorf("delegated tokens (--iss) require --ttl > 0")
+	}
+	return scopedtoken.Mint(key, scopedtoken.Claims{
+		Namespace: ns, Kind: kind, Name: name, Iss: iss, ExpiresMs: exp,
+	})
+}
+
+// cmdToken is the single issuance entry point: platform or delegated issuer key,
+// ns/kind/name (kind and name may be globs), printed to stdout.
+func cmdToken(args []string) error {
+	fs := flag.NewFlagSet("token", flag.ContinueOnError)
+	ns := fs.String("ns", "", "namespace (exact)")
+	kind := fs.String("kind", "", "binding kind (may be * or pre*)")
+	name := fs.String("name", "", "resource name (may be * or pre*)")
+	iss := fs.String("iss", "", "delegated issuer name (empty = platform scope key)")
+	ttl := fs.Duration("ttl", 0, "lifetime; delegated tokens require > 0")
+	keyB64 := fs.String("key", "", "issuer signing key (raw base64url); skips root derivation")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	tok, err := mintScopeToken(*ns, *kind, *name, *iss, *ttl, *keyB64)
+	if err != nil {
+		return fmt.Errorf("usage: cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <issuer>] [--ttl 5m] [--key <b64>]: %w", err)
+	}
+	fmt.Println(tok)
 	return nil
 }
 
@@ -2020,6 +2096,9 @@ Usage:
   cellhive releases <namespace> <worker>
   cellhive workflow create <namespace> <name>
   cellhive creds [role]                  # print root-derived role credentials
+  cellhive creds issuer <name>           # print a delegated issuer signing key (ADR-181)
+  cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <issuer>] [--ttl 5m] [--key <b64>]
+                                         # mint a scoped binding token (single issuance point)
   cellhive versions list|deployments list|status <ns> <worker>   # = releases
   cellhive triggers list <namespace> <worker>
   cellhive workflows list <namespace> | cellhive queues list <namespace>

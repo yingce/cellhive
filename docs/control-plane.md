@@ -58,6 +58,17 @@ Wrangler 的"无 id 自动创建资源"被**拒绝**（wrangler-compat.md）：�
 - deploy 引用不存在的资源 → **明确报错并提示对应 create 命令**；
 - 资源创建 = 在控制面登记 scope（cell 首次访问时惰性激活）。
 
+## 凭据与 token 签发 CLI（ADR-074/137/181）
+
+| 命令 | 作用 |
+|---|---|
+| `cellhive creds [role]` | 打印由 `CELLHIVE_ROOT_KEY` 派生的角色凭据（`peer`/`internal`/`dispatch`/`log`/`admin`/`scope`/`do-ticket`/`secret-key`） |
+| `cellhive creds issuer <name>` | 打印某委派签发方的 issuer key（`HKDF(SCOPE_SECRET,"issuer/"+name)`），交给可信入口（如 vwork），其**不持 root** |
+| `cellhive token --ns <ns> --kind <kind> --name <name\|glob> [--iss <name>] [--ttl 5m] [--key <b64>]` | **统一签发** scoped token：默认平台 scope key（无过期）；`--iss` 用委派 issuer key 且**强制 `--ttl>0`**；`--key` 直接用给定 key（委派方自签，无需 root）。`kind`/`name` 支持 `*`/`pre*` |
+
+- 绑定端点只认 `x-cellhive-scope-token`：平台令牌（`iss` 空）走注册绑定 ACL；委派令牌（`iss` 非空）强制过期、按 ns/scope 授权（ADR-181）。
+- 委派 key **不按 ns 收窄**（可签任意 ns），隔离由委派方自律；泄漏止损 = 轮换 root/`SCOPE_SECRET`。详见 `docs/security.md`。
+
 ## Deploy 服务端功能/兼容性拦截（ADR-065）
 
 CLI 只是**快速反馈**；`deploy` 的校验以**服务端为权威**（防绕过、防不同 CLI 版本）。校验逻辑放在**共享库**，`deploy` 端点与 CLI preflight 共用。

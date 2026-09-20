@@ -1,11 +1,16 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"cellhive/internal/config"
+	"cellhive/internal/scopedtoken"
 )
 
 func TestBuildBindings(t *testing.T) {
@@ -357,5 +362,53 @@ func TestWranglerRejectionsAreActionable(t *testing.T) {
 	}
 	if err := cmdCompat([]string{"workflows", "status", "acme", "w"}); err == nil || !strings.Contains(err.Error(), "runtime-only") {
 		t.Errorf("workflows status = %v", err)
+	}
+}
+
+// TestMintScopeToken covers the single issuance entry point (ADR-181): platform
+// tokens (no issuer), delegated tokens (forced expiry), globs, and the --key
+// path that lets a delegated holder mint without the root key.
+func TestMintScopeToken(t *testing.T) {
+	t.Setenv("CELLHIVE_ROOT_KEY", "unit-test-root-key-not-the-dev-default")
+	scope := config.DeriveCredentials(config.LoadRootKey()).Scope
+	if scope == "" {
+		t.Fatal("no scope secret derived")
+	}
+
+	tok, err := mintScopeToken("acme", "kv", "main", "", 0, "")
+	if err != nil {
+		t.Fatalf("platform mint: %v", err)
+	}
+	c, err := scopedtoken.Verify([]byte(scope), tok, time.Now())
+	if err != nil {
+		t.Fatalf("platform verify: %v", err)
+	}
+	if c.Iss != "" || c.Namespace != "acme" || c.Kind != "kv" || c.Name != "main" || c.ExpiresMs != 0 {
+		t.Fatalf("platform claims = %+v", c)
+	}
+
+	dtok, err := mintScopeToken("acme", "d1", "user*", "vwork", 5*time.Minute, "")
+	if err != nil {
+		t.Fatalf("delegated mint: %v", err)
+	}
+	dc, err := scopedtoken.VerifyIssuer([]byte(scope), dtok, time.Now())
+	if err != nil {
+		t.Fatalf("delegated verify: %v", err)
+	}
+	if dc.Iss != "vwork" || dc.Name != "user*" || dc.ExpiresMs == 0 {
+		t.Fatalf("delegated claims = %+v", dc)
+	}
+
+	if _, err := mintScopeToken("acme", "d1", "a", "vwork", 0, ""); err == nil {
+		t.Fatal("delegated token without ttl accepted")
+	}
+
+	key, _ := scopedtoken.IssuerKey([]byte(scope), "vwork")
+	ktok, err := mintScopeToken("acme", "kv", "main", "vwork", time.Minute, base64.RawURLEncoding.EncodeToString(key))
+	if err != nil {
+		t.Fatalf("key-path mint: %v", err)
+	}
+	if _, err := scopedtoken.VerifyIssuer([]byte(scope), ktok, time.Now()); err != nil {
+		t.Fatalf("key-path verify: %v", err)
 	}
 }
