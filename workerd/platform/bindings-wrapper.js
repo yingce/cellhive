@@ -15,8 +15,10 @@ import { buildBindings, wrapR2Metadata } from "facades.js";
 try {
   const specText = env.CH_FACADE_SPEC;
   if (specText) {
+    // __cellhivePlatform is injected as a module-scope const in this module's
+    // source (host.js platformConsts) — never in the facet env (ADR-074).
     const facades = buildBindings(
-      { url: env.CELL_URL, token: env.CELL_TOKEN, fetcher: env.PLATFORM },
+      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: env.PLATFORM },
       JSON.parse(specText),
     );
     for (const [name, value] of Object.entries(facades)) {

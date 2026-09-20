@@ -20,7 +20,11 @@ function fmt(a) {
 }
 
 export function installLogTail() {
-  if (!env || !env.LOG_TOKEN || !env.CELL_URL || !env.LOG_NS || !env.LOG_WORKER) {
+  // LOG_TOKEN arrives via the module-scope __cellhivePlatform const (ADR-074):
+// role credentials never enter the tenant env. LOG_NS/LOG_WORKER stay in env
+// (plain labels, not secrets).
+  const logToken = (typeof __cellhivePlatform !== "undefined" && __cellhivePlatform.logToken) || env.LOG_TOKEN || "";
+  if (!logToken || !env || !env.CELL_URL || !env.LOG_NS || !env.LOG_WORKER) {
     return;
   }
   if (globalThis.__cellhiveLogTail) return;
@@ -41,7 +45,7 @@ export function installLogTail() {
         "&worker=" + encodeURIComponent(env.LOG_WORKER);
       const init = {
         method: "POST",
-        headers: { "content-type": "application/json", "x-cellhive-internal-token": env.LOG_TOKEN },
+        headers: { "content-type": "application/json", "x-cellhive-internal-token": logToken },
         body: JSON.stringify(batch),
       };
       const sent = env.PLATFORM && typeof env.PLATFORM.fetch === "function"

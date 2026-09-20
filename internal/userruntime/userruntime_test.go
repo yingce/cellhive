@@ -318,6 +318,124 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	}
 }
 
+// TestTenantEnvHasNoPlatformCredentials asserts the ADR-074 boundary with real
+// workerd: the tenant env object carries no internal/platform credential —
+// env.CELL_TOKEN must be absent — and the wrapper's module-scope
+// __cellhivePlatform const must stay invisible to tenant code (module scope is
+// isolated per module, unlike the shared env object).
+func TestTenantEnvHasNoPlatformCredentials(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+
+	const leakProbe = `
+export default {
+  async fetch(req, env) {
+    return Response.json({
+      cellToken: typeof env.CELL_TOKEN === "undefined" ? "absent" : "LEAKED",
+      cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "present",
+      platformBinding: typeof env.PLATFORM === "undefined" ? "absent" : "present",
+      globalLeak: typeof globalThis.__cellhivePlatform === "undefined" ? "absent" : "LEAKED",
+      logToken: typeof env.LOG_TOKEN === "undefined" ? "absent" : "LEAKED",
+    });
+  },
+};
+`
+
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "probe.test", "worker": "probe"}},
+		"workers": []any{map[string]any{
+			"worker":  "probe",
+			"active":  1,
+			"version": map[string]any{"number": 1, "bundle_sha": "shaProbe"},
+		}},
+	}}}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(leakProbe))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	dir := t.TempDir()
+	capnpPath, err := Render(dir, Config{
+		CellURL: stub.URL, CellToken: "secret-internal-token", InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("public loader not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, public+"/probe", nil)
+	req.Host = "probe.test"
+	resp, err := client.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var out struct {
+		CellToken       string `json:"cellToken"`
+		GlobalLeak      string `json:"globalLeak"`
+		LogToken        string `json:"logToken"`
+		CellURL         string `json:"cellUrl"`
+		PlatformBinding string `json:"platformBinding"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+	if out.CellToken != "absent" {
+		t.Fatalf("internal token leaked into tenant env")
+	}
+	if out.GlobalLeak != "absent" {
+		t.Fatalf("platform consts leaked into tenant global scope")
+	}
+	if out.LogToken != "absent" {
+		t.Fatalf("log token leaked into tenant env")
+	}
+	// Non-credential platform surfaces stay: the transport binding (PLATFORM)
+	// and the backend address (CELL_URL) are functional, not secrets.
+	if out.PlatformBinding != "present" || out.CellURL != "present" {
+		t.Fatalf("platform transport missing: %+v", out)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 const workerWithFallback = `
 export default {
   async fetch() { return new Response("worker-fallback"); },

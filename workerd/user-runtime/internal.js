@@ -218,12 +218,12 @@ async function loadWorkflowWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "workflow-wrapper.js",
     modules: {
-      "workflow-wrapper.js": env.WF_WRAPPER_SRC,
+      "workflow-wrapper.js": platformConsts(env) + env.WF_WRAPPER_SRC,
       "cellhive-workflow.js": env.WF_BASE_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
     },
     env: Object.assign(tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker), {
       WF_NS: body.namespace, WF_NAME: body.workflow, WF_ID: body.id, WF_RUN_TOKEN: body.run_token || "",
@@ -232,8 +232,19 @@ async function loadWorkflowWorker(env, ctx, body) {
   }));
 }
 
+// platformConsts renders the platform-only credentials as a module-scope const
+// PREPENDED to a wrapper module's source (same mechanism as loader.js; ADR-074):
+// module scope is isolated per module, so tenant.js cannot read it — unlike
+// `env`, which is shared with tenant code.
+function platformConsts(env) {
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
+}
+
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs, with
 // CH_FACADE_SPEC carrying not-yet-migrated bindings for the wrapper facades.
+// The internal token is NOT put here: it reaches platform wrappers via the
+// module-scope __cellhivePlatform const appended to their source (ADR-074 —
+// the tenant env must not carry internal/platform credentials).
 function tenantEnv(env, ctx, spec, vars, ns, worker) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
@@ -244,9 +255,7 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
   }
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   out.CELL_URL = env.CELL_URL;
-  out.CELL_TOKEN = env.CELL_TOKEN;
   out.PLATFORM = env.PLATFORM;
-  out.LOG_TOKEN = env.LOG_TOKEN;
   out.LOG_NS = ns || "";
   out.LOG_WORKER = worker || "";
   return out;
@@ -263,11 +272,11 @@ async function loadWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(env) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,

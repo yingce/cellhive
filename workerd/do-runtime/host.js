@@ -366,6 +366,14 @@ async function connect(req, env, url, ticket) {
 
 // buildFacetEnv materializes the worker's bindings as props-bound entrypoint
 // stubs (ADR-090) plus vars, so the tenant DO's env is complete natively.
+// platformConsts renders the platform-only credentials as a module-scope const
+// PREPENDED to a wrapper module's source (same mechanism as user-runtime's
+// loader.js/internal.js; ADR-074): module scope is isolated per module, so the
+// tenant DO class cannot read it — unlike `env`, which is shared.
+function platformConsts(env) {
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
+}
+
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
   const env = {};
   for (const [name, val] of Object.entries(bs.vars || {})) env[name] = val;
@@ -381,9 +389,7 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
   env.CH_FACADE_SPEC = JSON.stringify(facades);
   env.CH_R2_BINDINGS = JSON.stringify(r2names);
   env.CELL_URL = hostEnv.CELL_URL;
-  env.CELL_TOKEN = hostEnv.CELL_TOKEN;
   env.PLATFORM = hostEnv.PLATFORM;
-  env.LOG_TOKEN = hostEnv.LOG_TOKEN;
   env.LOG_NS = (spec && spec.namespace) || hostEnv.LOG_NS || "";
   env.LOG_WORKER = (spec && spec.worker) || hostEnv.LOG_WORKER || "";
   return env;
@@ -842,11 +848,13 @@ export class Host extends DurableObject {
         modules: Object.assign(
           facetSrc ? { "cellhive-facet.js": facetSrc } : {},
           {
-            "bindings-wrapper.js": this.env.BINDINGS_WRAPPER_SRC,
+            // The internal token reaches the wrapper via a module-scope const
+            // appended to its source (ADR-074) — never via the tenant env.
+            "bindings-wrapper.js": platformConsts(this.env) + this.env.BINDINGS_WRAPPER_SRC,
             "tenant.js": bundle,
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,
-            "log-tail.js": this.env.LOG_TAIL_SRC,
+            "log-tail.js": platformConsts(this.env) + this.env.LOG_TAIL_SRC,
             "rpc-codec.js": this.env.RPC_CODEC_SRC,
           },
         ),

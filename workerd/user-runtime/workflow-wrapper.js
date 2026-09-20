@@ -12,8 +12,10 @@ import { buildBindings } from "facades.js";
 
 try {
   if (__env.CH_FACADE_SPEC) {
+    // __cellhivePlatform is injected as a module-scope const in this module's
+    // source (internal.js platformConsts) — never in the tenant env.
     const facades = buildBindings(
-      { url: __env.CELL_URL, token: __env.CELL_TOKEN, fetcher: __env.PLATFORM },
+      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: __env.PLATFORM },
       JSON.parse(__env.CH_FACADE_SPEC),
     );
     for (const [name, value] of Object.entries(facades)) {
@@ -63,10 +65,12 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
 
 // call routes a platform step callback through the PLATFORM service binding so it
 // can reach the private cell-agent without widening the tenant's globalOutbound.
+// The internal token comes from the module-scope __cellhivePlatform const
+// (injected into this module's source, ADR-074) — never from the tenant env.
 function call(env, path, init) {
-  const url = env.CELL_URL.replace(/\/$/, "") + path;
+  const url = __cellhivePlatform.cellUrl.replace(/\/$/, "") + path;
   const withToken = { ...(init || {}) };
-  withToken.headers = { ...(withToken.headers || {}), "x-cellhive-internal-token": env.CELL_TOKEN };
+  withToken.headers = { ...(withToken.headers || {}), "x-cellhive-internal-token": __cellhivePlatform.cellToken };
   if (env.PLATFORM && typeof env.PLATFORM.fetch === "function") return env.PLATFORM.fetch(url, withToken);
   return fetch(url, withToken);
 }

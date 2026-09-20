@@ -30,8 +30,10 @@ import { buildBindings, wrapR2Metadata } from "facades.js";
 // bindings-wrapper (ADR-090). Migrated bindings are already entrypoint stubs.
 try {
   if (__env.CH_FACADE_SPEC) {
+    // __cellhivePlatform is injected as a module-scope const in this module's
+    // source (loader.js/internal.js platformConsts) — never in the tenant env.
     const facades = buildBindings(
-      { url: __env.CELL_URL, token: __env.CELL_TOKEN, fetcher: __env.PLATFORM },
+      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: __env.PLATFORM },
       JSON.parse(__env.CH_FACADE_SPEC),
     );
     for (const [name, value] of Object.entries(facades)) {

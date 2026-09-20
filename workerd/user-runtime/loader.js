@@ -188,11 +188,11 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
     compatibilityFlags: version.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(env) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
     },
     // ADR-090: migrated bindings become props-bound entrypoint stubs in env;
     // not-yet-migrated ones stay as HTTP facades via CH_FACADE_SPEC (the wrapper
@@ -247,12 +247,23 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   out.CH_R2_BINDINGS = JSON.stringify(r2names);
   out.CELL_URL = env.CELL_URL;
-  out.CELL_TOKEN = env.CELL_TOKEN;
   out.PLATFORM = env.PLATFORM;
-  out.LOG_TOKEN = env.LOG_TOKEN;
   out.LOG_NS = ns || "";
   out.LOG_WORKER = worker || "";
   return out;
+}
+
+// platformConsts renders the platform-only credentials as a module-scope const
+// appended to a wrapper module's source. It is how platform JS (queue/workflow
+// wrappers, do-runtime bindings-wrapper) gets the internal token WITHOUT it
+// ever entering the tenant env object (ADR-074: the internal token must not be
+// visible to tenant code). Module scope is isolated per module, so tenant.js
+// cannot read a const defined in wrapper.js — unlike `env`, which is shared.
+function platformConsts(env) {
+  // PREPENDED to the wrapper source: the wrapper's top-level code runs before
+  // any later statement, so the const must exist before the try block (a const
+  // declared after use is in the temporal dead zone).
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
 }
 
 // --- assets ---------------------------------------------------------------
