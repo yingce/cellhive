@@ -4,6 +4,23 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
+### KV TTL 放开 60s 下限（ADR-183）
+- `expirationTtl` 接受任意正整数秒（原来 ≥60s，对齐 CF 的人为收紧）；`expiration` 仍须在未来。过期在读路径惰性生效（秒级），timer 清扫仅做空间回收。与 CF Workers KV 的显式差异：CF 拒 <60s，本平台接受。
+
+### queue DLQ replay 保留幂等键
+- 死信投递与 DLQ replay（本地/远端转发链）现在**透传消息的 `idempotency_key`**（原来写死为空）：重放的消息与仍在原队列的活副本按唯一索引去重，不再产生双份。`queue.Message` 新增 `IdempotencyKey` 字段（claim 时带出）。
+
+### KV 条件写与原子自增
+- `POST /v1/kv/put` 支持 **`if_exists=absent|present`**（原子存在性条件写，ADR-182，即平台侧 "onlyIf" 语义）：`absent` = create-if-absent（锁/幂等），`present` = key 存在才写（活值替换）。存在性判定与写入在同一事务（单写者 + `writeMu` 串行），条件不满足返回 `200 {applied:false}`（布尔语义，非错误），key 与 cell txid 均不动；无关 key 的写入不影响判定。过期行计为 absent（TTL 锁过期后可重新获取）。
+- 新增 **`POST /v1/kv/incr`**：`by`（默认 1，可负）对十进制整数值原子加，缺失按 0 创建；读-加-写在单事务内（`writeMu` 串行），并发无丢失更新；非整数目标 `400 not_integer`（txid 不动）；支持可选 `if_exists`（条件守卫的 incr，失败同样 `200 {applied:false}`）、`metadata`（新建/刷新时生效，纯加保留原 metadata）、`expiration`/`expiration_ttl`。
+- 存储层：`cellstore.PutTxIf`（`PutTxCondition` 存在性判定，哨兵 `ErrConditionFailed`）、`cellstore.IncrTx/IncrTxIn`（溢出检查）。schema 零变更；cell txid 语义不变（capture 水位，与条件写解耦）。
+
+### scoped token 范围匹配 + 委派签发（ADR-181）
+- scoped token 的 `kind`/`name` 支持**段级 glob**（`*` 任意、`pre*` 前缀，逐段锚定）；`ns` 仍精确（隔离边界）。
+- 新增 `iss` claim 与**委派签发**：可信入口持派生 issuer key（`cellhive creds issuer <name>`），自行签短时 scoped token（`cellhive token ... --iss <name> --ttl 5m`）；委派令牌**强制过期**、按 ns/scope 授权（跳过 `HasBinding`），平台令牌（`iss` 空）行为不变。
+- 新增**单一签发入口** `cellhive token`，`--key` 让委派方不持 root 也能签；字段序 `ns,kind,name,iss,exp_ms`，空 `iss` 保持 ADR-074 的 canonical 字节不变。
+- 边界：token 派生的资源（kv/vectorize/service/do）要求具体 name；对外数据面入口与 API key 管理未做。
+
 ### 租户日志可选 OTLP 导出（ADR-172）
 - `CELLHIVE_OTLP_LOGS=off|tail|all`（默认 `off`）：用与 traces 相同的 OTLP 端点/headers 导出 logs（`/v1/logs`）；`tail` 只在 `cellhive tail --worker` 的 TTL 订阅有效期间导出，退出后 ≤60s 停。
 - 导出是旁路、best-effort、后台批量，不影响请求；内存 ring 与 `cellhive tail` 行为不变。

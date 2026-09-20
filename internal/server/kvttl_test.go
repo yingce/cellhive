@@ -98,12 +98,19 @@ func TestKVValidationLimits(t *testing.T) {
 		t.Fatalf("big metadata = %d %s, want 400 metadata_too_large", rr.Code, rr.Body.String())
 	}
 	future := time.Now().Add(time.Hour).Unix()
-	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=59", []byte("v")); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "at least 60 seconds") {
-		t.Fatalf("ttl 59 = %d %s, want 400 ttl too short", rr.Code, rr.Body.String())
+	// ADR-183: any positive TTL is accepted (sub-60s included); expiry is
+	// enforced lazily on read, so a 1s key vanishes without waiting for a sweep.
+	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=59", []byte("v")); rr.Code != http.StatusOK {
+		t.Fatalf("ttl 59 = %d %s, want 200 (no 60s floor)", rr.Code, rr.Body.String())
 	}
 	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=60", []byte("v")); rr.Code != http.StatusOK {
 		t.Fatalf("ttl 60 = %d %s, want 200", rr.Code, rr.Body.String())
 	}
+	zero := time.Now().Add(-time.Minute).Unix()
+	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=0", []byte("v")); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ttl 0 = %d %s, want 400", rr.Code, rr.Body.String())
+	}
+	_ = zero
 	past := time.Now().Add(-time.Minute).Unix()
 	if rr := do("/v1/kv/put?ns=acme&key=m&expiration="+strconv.FormatInt(past, 10), []byte("v")); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "future") {
 		t.Fatalf("past expiration = %d %s, want 400 expiration in the future", rr.Code, rr.Body.String())

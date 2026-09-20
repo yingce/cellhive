@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -228,6 +229,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/peer/stream", s.roleAuth("peer")(s.handlePeerStream))
 	mux.HandleFunc("GET /v1/peer/held", s.roleAuth("peer")(s.handlePeerHeld))
 	mux.HandleFunc("POST /v1/kv/put", s.scopeAuth("kv")(s.admit(s.handleKVPut)))
+	mux.HandleFunc("POST /v1/kv/incr", s.scopeAuth("kv")(s.admit(s.handleKVIncr)))
 	mux.HandleFunc("POST /v1/internal/logs", s.roleAuth("log")(s.handleLogIngest))
 	mux.HandleFunc("POST /v1/internal/logs/subscribe", s.auth(s.handleLogSubscribeInternal))
 	mux.HandleFunc("POST /v1/internal/timer/upsert", s.auth(s.handleTimerUpsert))
@@ -1660,20 +1662,21 @@ func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 // kvExpiry derives an absolute expiry (unix millis) from the expiration (unix
 // seconds) or expiration_ttl (seconds from now) query parameter. ok is false
 // only when the parameter is present but not a positive integer.
-// KV limits, aligned with Cloudflare/celld (docs/bindings.md): a key is at most
-// 512 bytes, metadata at most 1 KiB, expirationTtl at least 60 seconds, and an
-// absolute expiration must be in the future. Values are capped at 25 MiB by the
-// body reader in handleKVPut.
+// KV limits (docs/bindings.md): a key is at most 512 bytes, metadata at most
+// 1 KiB, and an absolute expiration must be in the future. Values are capped
+// at 25 MiB by the body reader in handleKVPut. expirationTtl accepts ANY
+// positive second value (ADR-183): expiry is enforced lazily on read
+// (expires_ms > now filters) with second-granularity timer sweeps for space
+// reclamation, so sub-60s TTLs are honored — deliberately more permissive
+// than Cloudflare's ≥60s KV limit (platform requirement).
 const (
 	kvMaxKeyBytes      = 512
 	kvMaxMetadataBytes = 1024
-	kvMinExpirationTTL = 60 * time.Second
 )
 
 var (
 	errKVKeyTooLarge      = errors.New("a key is at most 512 bytes")
 	errKVMetadataTooLarge = errors.New("metadata is at most 1024 bytes")
-	errKVTTLTooShort      = errors.New("expirationTtl is at least 60 seconds")
 	errKVExpirationPast   = errors.New("expiration must be in the future")
 	errKVExpirationBad    = errors.New("expiration/expiration_ttl must be a positive integer")
 )
@@ -1698,9 +1701,6 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 		sec, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || sec <= 0 {
 			return 0, errKVExpirationBad
-		}
-		if time.Duration(sec)*time.Second < kvMinExpirationTTL {
-			return 0, errKVTTLTooShort
 		}
 		return now.Add(time.Duration(sec) * time.Second).UnixMilli(), nil
 	}
@@ -1835,12 +1835,51 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "value_too_large", "value exceeds 25 MiB")
 		return
 	}
+	// if_exists turns the put into an atomic existence-conditioned write
+	// (ADR-182, the "onlyIf" semantics): absent = create-if-absent, present =
+	// key must exist. The check and the write are one transaction; on a failed
+	// condition the response is 200 {applied:false} (the platform layer
+	// surfaces it as a boolean, not an error).
+	var cond cellstore.PutTxCondition
+	condParam := q.Get("if_exists")
+	switch condParam {
+	case "":
+		cond = -1 // unconditional
+	case "absent":
+		cond = cellstore.CondAbsent
+	case "present":
+		cond = cellstore.CondPresent
+	default:
+		writeErr(w, http.StatusBadRequest, "bad_if_exists", `if_exists must be "absent" or "present"`)
+		return
+	}
 	c, err := s.Store.Cell(r.Context(), scope)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
-	if err := s.capturedWrite(r.Context(), scope, func() error { return c.PutOpts(r.Context(), key, val, meta, expiresMs) }); err != nil {
+	var txid uint64
+	if condParam != "" {
+		err = s.capturedWrite(r.Context(), scope, func() error {
+			var werr error
+			txid, werr = c.PutTxIf(r.Context(), key, val, meta, expiresMs, cond)
+			return werr
+		})
+	} else {
+		err = s.capturedWrite(r.Context(), scope, func() error {
+			var werr error
+			txid, werr = c.PutTxOpts(r.Context(), key, val, meta, expiresMs)
+			return werr
+		})
+	}
+	if errors.Is(err, cellstore.ErrConditionFailed) {
+		// Condition not met: nothing written, nothing captured. The caller
+		// gets a clean boolean instead of an error (vwork maps this to
+		// {applied:false}).
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "txid": txid})
+		return
+	}
+	if err != nil {
 		if errors.Is(err, cellcapture.ErrNotOwner) {
 			writeErr(w, http.StatusServiceUnavailable, "not_owner", "this node does not own the cell")
 			return
@@ -1851,7 +1890,139 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 	if expiresMs > 0 {
 		s.armKVExpiry(r.Context(), scope)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": true, "txid": txid})
+}
+
+// handleKVIncr atomically adds the "by" query value (default 1; may be
+// negative) to a key's unsigned integer value, creating the key at the delta
+// when missing. The read-add-write runs in one captured transaction, so
+// concurrent incrementers serialize per cell. The response carries the new
+// value and the cell txid. An optional if_exists performs the increment only
+// when the key's existence state satisfies the condition (absent/present;
+// a failed condition yields 200 {applied:false}); optional
+// expiration/expiration_ttl/metadata follow the put semantics (a refreshed
+// expiry applies only when the increment commits).
+func (s *Server) handleKVIncr(w http.ResponseWriter, r *http.Request) {
+	ns, key := s.scopeNS(r), r.URL.Query().Get("key")
+	if ns == "" || key == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_arg", "ns and key are required")
+		return
+	}
+	if kvKeyTooLarge(key) {
+		writeErr(w, http.StatusBadRequest, "key_too_large", errKVKeyTooLarge.Error())
+		return
+	}
+	if s.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_store", "cellstore not configured")
+		return
+	}
+	scope, err := s.kvScope(r)
+	if err != nil {
+		kvScopeErr(w, err)
+		return
+	}
+	q := r.URL.Query()
+	expiresMs, xerr := kvExpiry(q, time.Now())
+	if xerr != nil {
+		writeErr(w, http.StatusBadRequest, "bad_expiration", xerr.Error())
+		return
+	}
+	var by int64 = 1
+	if v := q.Get("by"); v != "" {
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil {
+			writeErr(w, http.StatusBadRequest, "bad_by", "by must be an integer")
+			return
+		}
+		by = n
+	}
+	var meta []byte
+	if v := q.Get("metadata"); v != "" {
+		meta, err = base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_metadata", "metadata must be base64")
+			return
+		}
+		if len(meta) > kvMaxMetadataBytes {
+			writeErr(w, http.StatusRequestEntityTooLarge, "metadata_too_large", errKVMetadataTooLarge.Error())
+			return
+		}
+	}
+	// Gate before any write so a non-owner forwards the caller's request.
+	if s.forwardOrClaim(w, r, scope, nil) {
+		return
+	}
+	c, err := s.Store.Cell(r.Context(), scope)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
+		return
+	}
+	var (
+		next int64
+		txid uint64
+	)
+	if v := q.Get("if_exists"); v != "" {
+		var cond cellstore.PutTxCondition
+		switch v {
+		case "absent":
+			cond = cellstore.CondAbsent
+		case "present":
+			cond = cellstore.CondPresent
+		default:
+			writeErr(w, http.StatusBadRequest, "bad_if_exists", `if_exists must be "absent" or "present"`)
+			return
+		}
+		// Condition-guarded increment: verify the key's existence and apply
+		// the increment in one transaction so both the guard and the
+		// arithmetic commit atomically or not at all. On a failed condition
+		// nothing committed, so there is nothing to capture
+		// (capturedWrite is deliberately not entered).
+		if err := s.CaptureEnsure(r.Context(), scope); err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "not_owner", err.Error())
+			return
+		}
+		txid, err = c.Tx(r.Context(), func(tx *sql.Tx) error {
+			var exists bool
+			if qerr := tx.QueryRowContext(r.Context(),
+				`SELECT EXISTS(SELECT 1 FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?))`,
+				key, time.Now().UnixMilli()).Scan(&exists); qerr != nil {
+				return qerr
+			}
+			if (cond == cellstore.CondAbsent && exists) || (cond == cellstore.CondPresent && !exists) {
+				return cellstore.ErrConditionFailed
+			}
+			return c.IncrTxIn(r.Context(), tx, key, by, expiresMs, meta, &next)
+		})
+		if errors.Is(err, cellstore.ErrConditionFailed) {
+			writeJSON(w, http.StatusOK, map[string]any{"applied": false})
+			return
+		}
+		if err == nil {
+			err = s.CaptureWait(r.Context(), scope)
+		}
+	} else {
+		err = s.capturedWrite(r.Context(), scope, func() error {
+			var werr error
+			next, txid, werr = c.IncrTx(r.Context(), key, by, expiresMs, meta)
+			return werr
+		})
+	}
+	if err != nil {
+		if errors.Is(err, cellcapture.ErrNotOwner) {
+			writeErr(w, http.StatusServiceUnavailable, "not_owner", "this node does not own the cell")
+			return
+		}
+		if strings.Contains(err.Error(), "not an integer") {
+			writeErr(w, http.StatusBadRequest, "not_integer", err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "incr_failed", err.Error())
+		return
+	}
+	if expiresMs > 0 {
+		s.armKVExpiry(r.Context(), scope)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"value": next, "applied": true, "txid": txid})
 }
 
 func (s *Server) handleKVDelete(w http.ResponseWriter, r *http.Request) {
@@ -1990,13 +2161,13 @@ func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
-	v, meta, err := c.Get(r.Context(), key)
-	if errors.Is(err, cellstore.ErrNotFound) {
+	v, meta, gerr := c.Get(r.Context(), key)
+	if errors.Is(gerr, cellstore.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "key not found")
 		return
 	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "get_failed", err.Error())
+	if gerr != nil {
+		writeErr(w, http.StatusInternalServerError, "get_failed", gerr.Error())
 		return
 	}
 	if len(meta) > 0 {
@@ -2205,6 +2376,43 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 	}
 	if err := write(); err != nil {
 		return err
+	}
+	c, err := s.Store.Cell(ctx, scope)
+	if err != nil {
+		return err
+	}
+	txid, err := c.TxID(ctx)
+	if err != nil {
+		return err
+	}
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.durability_proof",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
+	proofStart := time.Now()
+	werr := s.Capture.Wait(ctx, scope, txid)
+	s.recordProof(scope.Namespace, time.Since(proofStart))
+	telemetry.End(span, werr)
+	return werr
+}
+
+// CaptureEnsure starts the capture pipeline for a scope without performing a
+// write. For handlers that conditionally write (a CAS miss commits nothing,
+// so there is no txid to wait for) but must still arm capture before their
+// own transaction.
+func (s *Server) CaptureEnsure(ctx context.Context, scope cell.Scope) error {
+	if s.Capture == nil {
+		return nil
+	}
+	_, err := s.Capture.Ensure(ctx, scope)
+	return err
+}
+
+// CaptureWait blocks until the scope's current cell txid has a durable proof.
+// It is the second half of capturedWrite for callers that ran their own
+// conditional transaction.
+func (s *Server) CaptureWait(ctx context.Context, scope cell.Scope) error {
+	if s.Capture == nil {
+		return nil
 	}
 	c, err := s.Store.Cell(ctx, scope)
 	if err != nil {

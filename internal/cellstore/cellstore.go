@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -962,9 +963,131 @@ func (c *Cell) PutOpts(ctx context.Context, key string, value, meta []byte, expi
 	return err
 }
 
+// ErrConditionFailed is returned by PutTxIf when the target key's existence
+// state does not satisfy the caller's condition: the transaction rolled back
+// and nothing committed (the cell txid is untouched, so capture has nothing
+// to wait for). The condition is an existence check, not a value or version
+// comparison, so an unrelated key's write never affects it.
+var ErrConditionFailed = errors.New("cellstore: condition failed")
+
+// PutTxCondition is an existence precondition for PutTxIf, mirroring the
+// platform-facing semantics of "onlyIf" (vwork capability KV).
+type PutTxCondition int
+
+const (
+	// CondAbsent commits only when the key does not exist (create-if-absent;
+	// distributed locks, idempotency guards).
+	CondAbsent PutTxCondition = iota
+	// CondPresent commits only when the key exists (value swaps on a live key).
+	CondPresent
+)
+
+// PutTxIf is PutTxOpts guarded by an atomic existence check on the target
+// key: the write commits only when the key's current state satisfies the
+// condition (CondAbsent = key must not exist; CondPresent = key must exist).
+// The check and the write run in the same transaction under the write mutex,
+// so concurrent conditional writers serialize and exactly one wins. On a
+// failed condition the transaction rolls back entirely — the cell txid is
+// not advanced, nothing is captured, and ErrConditionFailed is returned.
+// An expired-but-present row counts as absent (reads already treat expiry as
+// absence, so locks guarded by TTL expire correctly).
+func (c *Cell) PutTxIf(ctx context.Context, key string, value, meta []byte, expiresMs int64, cond PutTxCondition) (uint64, error) {
+	now := time.Now().UnixMilli()
+	if expiresMs > 0 && expiresMs <= now {
+		expiresMs = now
+	}
+	txid, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?))`,
+			key, now).Scan(&exists); err != nil {
+			return err
+		}
+		if (cond == CondAbsent && exists) || (cond == CondPresent && !exists) {
+			return ErrConditionFailed
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`,
+			key, value, meta, now, expiresMs)
+		return err
+	})
+	if errors.Is(err, ErrConditionFailed) {
+		return 0, ErrConditionFailed
+	}
+	return txid, err
+}
+
+// IncrTx atomically adds delta to a key's unsigned integer value in one
+// transaction and returns the new value and the committed txid. A missing key
+// counts as 0 (so a plain IncrTx initializes it). The value is the decimal
+// string of the counter; other formats are rejected. The whole read-add-write
+// runs inside c.Tx under the write mutex, so concurrent incrementers are
+// serialized and none can observe an intermediate value. meta (nil = keep
+// existing metadata on an increment; only used when the key is created or
+// expiresMs refreshes the row) and expiresMs follow PutTxOpts semantics.
+func (c *Cell) IncrTx(ctx context.Context, key string, delta, expiresMs int64, meta []byte) (int64, uint64, error) {
+	now := time.Now().UnixMilli()
+	if expiresMs > 0 && expiresMs <= now {
+		expiresMs = now
+	}
+	var next int64
+	txid, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		return c.incrTxIn(ctx, tx, key, delta, expiresMs, meta, now, &next)
+	})
+	return next, txid, err
+}
+
+// IncrTxIn is IncrTx's body for a caller that has already begun its own Tx
+// (e.g. a condition-guarded increment). It must run inside c.Tx's
+// transaction; it does not commit.
+func (c *Cell) IncrTxIn(ctx context.Context, tx *sql.Tx, key string, delta, expiresMs int64, meta []byte, next *int64) error {
+	now := time.Now().UnixMilli()
+	if expiresMs > 0 && expiresMs <= now {
+		expiresMs = now
+	}
+	return c.incrTxIn(ctx, tx, key, delta, expiresMs, meta, now, next)
+}
+
+func (c *Cell) incrTxIn(ctx context.Context, tx *sql.Tx, key string, delta, expiresMs int64, meta []byte, nowMs int64, next *int64) error {
+	var cur []byte
+	serr := tx.QueryRowContext(ctx,
+		`SELECT value FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?)`, key, nowMs).Scan(&cur)
+	switch {
+	case errors.Is(serr, sql.ErrNoRows):
+		*next = delta
+	case serr != nil:
+		return serr
+	default:
+		v, perr := strconv.ParseInt(strings.TrimSpace(string(cur)), 10, 64)
+		if perr != nil {
+			return fmt.Errorf("cellstore: incr target is not an integer: %w", perr)
+		}
+		if (delta > 0 && v > math.MaxInt64-delta) || (delta < 0 && v < math.MinInt64-delta) {
+			return errors.New("cellstore: incr overflow")
+		}
+		*next = v + delta
+	}
+	// Keep the existing metadata on a pure increment unless the caller supplied
+	// new metadata explicitly.
+	if meta == nil {
+		var existing []byte
+		if qerr := tx.QueryRowContext(ctx, `SELECT meta FROM kv WHERE key=?`, key).Scan(&existing); qerr == nil && len(existing) > 0 {
+			meta = existing
+		}
+	}
+	_, werr := tx.ExecContext(ctx,
+		`INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`,
+		key, []byte(strconv.FormatInt(*next, 10)), meta, nowMs, expiresMs)
+	return werr
+}
+
 // Get reads a key. Missing -> ErrNotFound.
 func (c *Cell) Get(ctx context.Context, key string) (value, meta []byte, err error) {
-	err = c.DB.QueryRowContext(ctx, `SELECT value, meta FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?)`, key, time.Now().UnixMilli()).Scan(&value, &meta)
+	err = c.DB.QueryRowContext(ctx,
+		`SELECT value, meta FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?)`,
+		key, time.Now().UnixMilli()).Scan(&value, &meta)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}

@@ -2394,6 +2394,9 @@
 - **key 泄漏必须留最小止损**：`issuer` 密钥泄漏时，纯无状态 + 短 exp **不构成止损**（攻击者可无限现签新 token）。必须二选一并显式记录：(a) 一份 per-issuer 注册表（`{key_version, active, allowed_ns}`，控制面 + TTL 缓存，量级为"每个入口一行"）；或 (b) 接受"整平台换 root"。**推荐 (a)**。
 - **理由**：把"全局权"表达成"具名 issuer + ns 范围"，而非"所有组件共用 root"；用非对称把"验证"与"签发"解耦，从而在不牺牲隔离的前提下减少密钥数量；用短 `exp` + 委派方自控替代服务端逐 token 状态，保持热路径无状态。
 - **未实现 / 待定**：issuer 取 per-ns 还是 `issuer×ns`；allowlist 存放（控制面保留前缀 vs 静态配置）；是否引入 `jti` 吊销表；引导凭据（bootstrap）；外部 API key 管理 API、审计归属、按 key 限流；外部令牌与 role 令牌的 header/入口区分。
+
+---
+
 ---
 
 ## 待定（🕓）
@@ -2447,6 +2450,8 @@
 - ADR-131：控制面 schema v2 + 域名/路由模型（**已实现**：软删+purge 循环、bindings 派生表、hosts 验证与 loader 门控、内置域 `<ns>-<worker>.<base>`、JWT 按 ns 授权 + 审计主体、列表分页、路由挂载剥离）。
 - ADR-132：移除边缘配置下发（删 `GET /v1/internal/traefik` 与 `CELLHIVE_ADMIN_HOST/_ADMIN_BACKEND_URL`）；边缘（反代/云 LB）由运维静态配置，平台只保证 loader 级 host 门控。
 - ADR-133：域名不做 DNS 校验（登记即授权）：删 `domain verify`/验证循环/`CELLHIVE_DOMAIN_VERIFY`·`CELLHIVE_DNS_RESOLVER`；host 唯一性/409/审计/`domain rm` 保留，校验字段与状态机保留备用。
+- ADR-183：KV TTL 放开 60s 下限（平台要求，vwork 迁移开放项 3）：`expirationTtl` 接受任意正整数秒，`expiration` 仍须在未来；技术依据——过期是**双机制**：读路径惰性过滤（`expires_ms > now`，get/put-if/incr/list 全部带该条件，过期即刻不可见）+ timer 清扫（`kv-expire` 按最近到期武装、`CELLHIVE_TIMER_INTERVAL` 秒级）只负责空间回收，故 60s 下限从来不是技术必需（ADR-176 是对齐 CF 的人为收紧）。影响：与 CF Workers KV 的显式差异（CF 拒 <60s），wranglercompat 不含该校验（已核实），JS facade 直传；`internal/server TestKVTTLAndMetadataE2E` 用例更新（59s 接受）。
+- ADR-182：KV 条件写与原子自增（超 CF API 的能力）。**条件写是原子存在性判定（`absent`/`present`），不是版本 CAS**——先后否证两版：① cell txid 守卫（cell 级计数器，无关 key 写入也推进，伪冲突）；② per-key version 列（实现对，但评审发现 vwork `onlyIf` 只有 `"absent"|"present"` 两个字面量，无值/版本比对，version 令牌是过度设计——`sqlite` 单写者 + 同事务 `EXISTS` 判定即原子）。终版：`put?if_exists=absent|present`（`cellstore.PutTxIf` + `PutTxCondition`，存在性判定与写入同事务，条件不满足整体回滚不推进 txid 不捕获，HTTP `200 {applied:false}` 对齐 vwork 布尔语义而非错误码）；过期行计为 absent（锁 + TTL 过期后可重新获取）。`POST /v1/kv/incr?by=`（默认 1，可负）单事务读-加-写（`IncrTx`/`IncrTxIn`，溢出/非整数 `400 not_integer`，纯加保留原 metadata），支持可选 `if_exists` 守卫。动机：vwork 平台适配层需要 `put(onlyIf)`/`incr` 语义（锁/幂等/计数器），SQLite 单写者 + `writeMu` 使事务内判定天然原子。schema 零变更（version 列已从终版移除）。
 - ADR-181：凭据收敛与能力令牌委派（**a+b 已实现**：scoped token 段级 glob + `iss`/`IssuerKey`/`VerifyIssuer` 委派签发，`scopeAuth` 对外部令牌强制 exp/跳 HasBinding，CLI `creds issuer <name>`；**8 凭据收敛/非对称仍设计**）：按信任边界分三类凭据；对称不能合角色、非对称才能合；最小分发；per-issuer kill switch vs 换 root 取舍；log 独立、secrets-root 移出 root；分档 1→1.5→2→3。
 - ADR-179：指标按命名空间归属（ns 维度，有界标签）+ 绑定 span 带租户属性。
 - ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。

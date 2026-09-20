@@ -8,7 +8,7 @@
 |---|---|---|
 | ES module Workers / `fetch` | Supported | `workerLoader` 动态加载不可变版本 |
 | WebSocket | Supported | user-runtime 代理；DO 上迁移/部署时 1012，客户端重连（CF 兼容）；**`env.DO.get().fetch(升级请求)` 经 `/v1/do/connect` 直连 owner（`{owner,ticket}` 查询 + ticket 仅本 shard，ADR-175）** |
-| KV | Supported | 强一致（读也转发给 owner，ADR-120；cell SQLite）；无全局边缘复制；**`put` 接受 string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream（ADR-174）**；**写入校验对齐 Cloudflare（ADR-176）：key≤512B、metadata≤1KiB、expirationTtl≥60s、expiration 须在未来、value≤25MiB** |
+| KV | Supported | 强一致（读也转发给 owner，ADR-120；cell SQLite）；无全局边缘复制；**`put` 接受 string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream（ADR-174）**；**写入校验：key≤512B、metadata≤1KiB、expiration 须在未来、value≤25MiB（ADR-176）；expirationTtl 接受任意正整数（ADR-183 放开 CF 的 ≥60s 下限——读路径惰性过期秒级生效，清扫按最近到期武装）** |
 | D1 | Supported | SQL + `batch`/`exec`；单写者；**Sessions/bookmarks 显式拒绝**（`withSession()`/`session()` 抛错，无读复制，ADR-153）；`run()/batch()` 的 `meta` 含 `last_row_id`/`changed_db`，错误映射 `D1_ERROR`（ADR-163） |
 | R2 | Supported | S3 兼容 + **presign（`createPresignedUrl`）** + **multipart（ADR-113）** + **cursor 分页 list（ADR-145）**；**R2Object 全字段 + `put` http/custom metadata/checksums + `head()`（ADR-163）**；**list 支持 `include`（按需回填逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（ADR-168）**；**`R2ObjectBody.body` + `writeHttpMetadata`（ADR-174/175：本地 Proxy 包装，metadata 写入调用方 Headers）**；无 SSE-C/jurisdiction、无 object versioning/conditional put |
 | Queues | Partial | 至少一次 + DLQ；`max_concurrency` **支持**（ADR-112，批次并发上限）；`contentType=v8` 拒绝 |

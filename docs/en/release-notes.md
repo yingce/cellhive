@@ -4,6 +4,23 @@
 
 This release closes out the remaining items in roadmap P3–P5, all backed by real runtime/test evidence.
 
+### KV TTL: 60s Floor Removed (ADR-183)
+- `expirationTtl` now accepts any positive integer seconds (previously ≥60s, an artificial tightening to match Cloudflare); absolute `expiration` must still be in the future. Expiry takes effect lazily on read (second granularity); the timer sweep only reclaims space. Explicit divergence from Cloudflare Workers KV: CF rejects <60s, this platform accepts it.
+
+### Queue DLQ Replay Preserves the Idempotency Key
+- Dead-letter delivery and DLQ replay (both the local path and the remote forwarding chain) now **pass the message's `idempotency_key` through** (previously hard-coded empty): a replayed message dedupes against a still-live twin via the unique index instead of duplicating it. `queue.Message` gains an `IdempotencyKey` field (populated at claim time).
+
+### KV Conditional Write & Atomic Increment
+- `POST /v1/kv/put` supports **`if_exists=absent|present`** (atomic existence-conditioned write, ADR-182, the platform-facing "onlyIf" semantics): `absent` = create-if-absent (locks/idempotency), `present` = swap on a live key. The existence check and the write run in one transaction (single writer + `writeMu` serialization); a failed condition returns `200 {applied:false}` (boolean semantics, not an error); the key and the cell txid are untouched; unrelated keys never interfere. An expired-but-present row counts as absent (a TTL lock can be re-acquired after expiry).
+- New **`POST /v1/kv/incr`**: `by` (default 1, may be negative) atomically adds to a decimal integer value, creating the key at the delta when missing; the read-add-write runs in one transaction (no lost updates); non-integer targets get `400 not_integer` (txid untouched); optional `if_exists` guard (failed condition also yields `200 {applied:false}`), `metadata` (applies on create/refresh; a pure add keeps existing metadata), `expiration`/`expiration_ttl`.
+- Storage layer: `cellstore.PutTxIf` (`PutTxCondition` existence check, sentinel `ErrConditionFailed`), `cellstore.IncrTx/IncrTxIn` (overflow checks). Zero schema changes; the cell txid semantics are unchanged (capture watermark, decoupled from conditional writes).
+
+### Scoped Token Range Matching + Delegated Issuance (ADR-181)
+- Scoped token `kind`/`name` support **segment-level globs** (`*` any, `pre*` prefix, anchored per segment); `ns` stays exact (the isolation boundary).
+- New `iss` claim and **delegated issuance**: a trusted entry holds a derived issuer key (`cellhive creds issuer <name>`) and signs short-lived scoped tokens itself (`cellhive token ... --iss <name> --ttl 5m`); delegated tokens **require an expiry** and authorize by ns/scope (skipping `HasBinding`), while platform tokens (empty `iss`) are unchanged.
+- New **single issuance entry point** `cellhive token`; `--key` lets a delegate sign without root; field order `ns,kind,name,iss,exp_ms`, empty `iss` keeps the ADR-074 canonical bytes unchanged.
+- Boundary: token-derived resources (kv/vectorize/service/do) require a concrete name; the external data-plane listener and API-key management are not built.
+
 ### Optional OTLP Export for Tenant Logs (ADR-172)
 - `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`): exports logs to the same OTLP endpoint/headers as traces (`/v1/logs`); `tail` exports only while the TTL subscription of `cellhive tail --worker` is active, and stops within ≤60s after exit.
 - Export is side-channel, best-effort, and batched in the background; it does not affect requests. The in-memory ring and `cellhive tail` behavior are unchanged.
