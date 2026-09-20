@@ -78,6 +78,9 @@ type Message struct {
 	VisibleAtMs  int64  `json:"visible_at_ms"`
 	Attempts     int    `json:"attempts"`
 	LeaseUntilMs int64  `json:"lease_until_ms"`
+	// IdempotencyKey travels with the message so a dead-letter replay can
+	// preserve it (the replayed send dedupes against live messages again).
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func newID() string {
@@ -145,7 +148,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 	var out []Message
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms FROM messages
+			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,'') FROM messages
 			 WHERE visible_at_ms <= ? AND lease_until_ms <= ? ORDER BY visible_at_ms, id LIMIT ?`,
 			now, now, limit)
 		if err != nil {
@@ -153,7 +156,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 		}
 		for rows.Next() {
 			var m Message
-			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs); err != nil {
+			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey); err != nil {
 				rows.Close()
 				return err
 			}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"time"
 
@@ -168,7 +169,7 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
 	sc := queuepkg.Scope(ns, queue)
 	if s.Owner == nil {
-		_, err := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, "")
+		_, err := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
 		return err
 	}
 	now := time.Now()
@@ -189,7 +190,7 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 		} else {
 			s.registerPendingTimers(context.Background(), sc)
 			if err := s.capturedWrite(ctx, sc, func() error {
-				_, e := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, "")
+				_, e := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
 				return e
 			}); err != nil {
 				return err
@@ -202,6 +203,9 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 		return err
 	}
 	url := ownerclient.OwnerURL(ownerclient.Hint{Address: addr}) + "/v1/queue/send?ns=" + ns + "&queue=" + queue
+	if m.IdempotencyKey != "" {
+		url += "&idempotency_key=" + neturl.QueryEscape(m.IdempotencyKey)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(m.Body))
 	if err != nil {
 		return err

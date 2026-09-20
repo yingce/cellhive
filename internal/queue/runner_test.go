@@ -167,6 +167,45 @@ func TestRunnerDeadLettersExhaustedMessage(t *testing.T) {
 	}
 }
 
+// TestRunnerDeadLetterPreservesIdempotencyKey covers the replay-dedup fix:
+// a message dead-lettered with an idempotency key keeps that key, so a DLQ
+// replay dedupes against any still-live twin instead of duplicating it.
+func TestRunnerDeadLetterPreservesIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	if _, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, "biz-key-1"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	fd := &fakeDispatcher{err: errors.New("consumer down")}
+	r := &queue.Runner{
+		Store: st, Dispatch: fd,
+		Queues: func(context.Context) ([]queue.Ref, error) {
+			return []queue.Ref{{Namespace: "demo", Name: "jobs", Worker: "c", BundleSHA: "s", MaxRetries: 1, DeadLetterQueue: "jobs-dlq"}}, nil
+		},
+	}
+	if n, err := r.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("pass = %d, %v", n, err)
+	}
+	claimed, err := st.Claim(ctx, "demo", "jobs-dlq", 10, 30_000)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("dlq claim = %d, %v", len(claimed), err)
+	}
+	if claimed[0].IdempotencyKey != "biz-key-1" {
+		t.Fatalf("dlq idempotency key = %q, want biz-key-1", claimed[0].IdempotencyKey)
+	}
+	// A replay Send with the same key into the original queue dedupes when a
+	// live twin exists (the unique-index path), proving the key survived the
+	// dead-letter round trip.
+	id, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, "biz-key-1")
+	if err != nil {
+		t.Fatalf("replay send: %v", err)
+	}
+	if d, _ := st.Depth(ctx, "demo", "jobs"); d != 1 {
+		t.Fatalf("depth after replay = %d, want 1 (deduped)", d)
+	}
+	_ = id
+}
+
 func TestRunnerDropsWhenNoDeadLetterQueue(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)
