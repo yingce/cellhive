@@ -389,6 +389,35 @@ func TestRenderResidencyAndDisk(t *testing.T) {
 	}
 }
 
+func TestRenderUsesEnvironmentBindings(t *testing.T) {
+	dir := t.TempDir()
+	path, err := Render(dir, Config{
+		CellURL: "https://platform-secret.invalid", CellToken: "token-canary-7f6e",
+		Addr: "*:8788", DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, leaked := range []string{"https://platform-secret.invalid", "token-canary-7f6e"} {
+		if strings.Contains(s, leaked) {
+			t.Fatalf("capnp leaks %q", leaked)
+		}
+	}
+	for _, want := range []string{
+		`(name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL")`,
+		`(name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN")`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("capnp missing %q", want)
+		}
+	}
+}
+
 // TestDoRuntimeAlarmShim covers ADR-079: setAlarm is shimmed into the object's
 // storage, the host reports the due time to cell-agent, an alarm invocation runs
 // the tenant alarm() and re-reports, and deleteAlarm clears it.

@@ -44,7 +44,7 @@ func main() {
 	platformJS := getenv("CELLHIVE_USER_RUNTIME_JS", "workerd/user-runtime")
 	facadesJS := getenv("CELLHIVE_FACADES_JS", "workerd/platform/facades.js")
 
-	capnpPath, err := userruntime.Render(dataDir, userruntime.Config{
+	runtimeCfg := userruntime.Config{
 		CellURL:          cellURL,
 		CellToken:        cellToken,
 		AIURL:            getenv("CELLHIVE_AI_URL", ""),
@@ -60,9 +60,15 @@ func main() {
 		DoDirect:         getenv("CELLHIVE_DO_DIRECT", ""),
 		OutboundAllow:    outboundAllow(),
 		EgressAllow:      egressAllow(),
-	})
+	}
+	capnpPath, err := userruntime.Render(dataDir, runtimeCfg)
 	if err != nil {
 		log.Error("render config", "err", err)
+		os.Exit(1)
+	}
+	childEnv, err := userruntime.WorkerdEnv(runtimeCfg)
+	if err != nil {
+		log.Error("build workerd environment", "err", err)
 		os.Exit(1)
 	}
 	workerd, err := userruntime.FindWorkerd()
@@ -91,7 +97,7 @@ func main() {
 		}
 		cancelRun()
 	}()
-	if err := userruntime.Run(runCtx, workerd, capnpPath); err != nil {
+	if err := userruntime.Run(runCtx, workerd, capnpPath, childEnv); err != nil {
 		log.Error("user-runtime exited", "err", err)
 		os.Exit(1)
 	}

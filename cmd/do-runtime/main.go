@@ -53,7 +53,7 @@ func main() {
 	platformJS := getenv("CELLHIVE_DO_RUNTIME_JS", "workerd/do-runtime")
 	gateURL := getenv("CELLHIVE_DO_GATE_URL", "")
 
-	capnpPath, err := doruntime.Render(runtimeDir, doruntime.Config{
+	runtimeCfg := doruntime.Config{
 		CellURL:         cellURL,
 		DoTicketSecret:  creds.DoTicket,
 		DoLeaseS:        doLeaseSeconds(),
@@ -69,9 +69,15 @@ func main() {
 		PreventEviction: preventEviction,
 		GateURL:         gateURL,
 		OutboundAllow:   outboundAllow(),
-	})
+	}
+	capnpPath, err := doruntime.Render(runtimeDir, runtimeCfg)
 	if err != nil {
 		log.Error("render config", "err", err)
+		os.Exit(1)
+	}
+	childEnv, err := doruntime.WorkerdEnv(runtimeCfg)
+	if err != nil {
+		log.Error("build workerd environment", "err", err)
 		os.Exit(1)
 	}
 	if *renderOnly {
@@ -105,7 +111,7 @@ func main() {
 		log.Info("do-runtime drained")
 	}()
 
-	if err := doruntime.Run(ctx, workerd, capnpPath); err != nil {
+	if err := doruntime.Run(ctx, workerd, capnpPath, childEnv); err != nil {
 		log.Error("do-runtime exited", "err", err)
 		os.Exit(1)
 	}

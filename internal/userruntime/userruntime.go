@@ -3,9 +3,8 @@
 // dispatch service (:8088) that runs tenant non-fetch handlers (queue/scheduled)
 // by loading their immutable bundle through workerLoader.
 //
-// workerd cannot read environment variables into bindings, so the Cap'n Proto
-// config is rendered at startup from a template with the cell-agent URL/token and
-// ports substituted in.
+// Host-only bindings are supplied through Cap'n Proto fromEnvironment entries;
+// tenant bindings remain entirely user-owned.
 package userruntime
 
 import (
@@ -18,14 +17,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
+	"cellhive/internal/runtimeenv"
 	"cellhive/internal/workerdbin"
 )
 
 // outboundCategories are the workerd network categories a tenant outbound policy
 // may name.
 var outboundCategories = map[string]bool{"public": true, "private": true, "local": true}
+
+// renderedEnvs preserves compatibility for same-process Render/Run integration
+// tests. Production launchers always pass WorkerdEnv explicitly; this map is
+// never a parent-environment fallback and cannot cross a process boundary.
+var renderedEnvs sync.Map
 
 // OutboundAllowList renders the tenant outbound policy for the capnp config.
 // Empty defaults to "public" (I-09, ADR-130).
@@ -127,16 +133,16 @@ const config :Workerd.Config = (
       compatibilityDate = "2026-06-15",
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-user-runtime")),
-        (name = "CELL_URL", text = "{{.CellURL}}"),
-        (name = "CELL_TOKEN", text = "{{.CellToken}}"),
-        (name = "DISPATCH_TOKEN", text = "{{.DispatchToken}}"),
+        (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
+        (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
+        (name = "DISPATCH_TOKEN", fromEnvironment = "CELLHIVE_HOST_DISPATCH_TOKEN"),
         (name = "WRAPPER_SRC", text = embed "queue-wrapper.js"),
         (name = "WF_WRAPPER_SRC", text = embed "workflow-wrapper.js"),
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "AI_URL", text = "{{.AIURL}}"),
-        (name = "AI_KEY", text = "{{.AIKey}}"),
+        (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
+        (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "private-outbound"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
@@ -156,16 +162,16 @@ const config :Workerd.Config = (
       compatibilityDate = "2026-06-15",
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-user-runtime-loader")),
-        (name = "CELL_URL", text = "{{.CellURL}}"),
-        (name = "CELL_TOKEN", text = "{{.CellToken}}"),
-        (name = "SCOPE_SECRET", text = "{{.ScopeSecret}}"),
+        (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
+        (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
+        (name = "SCOPE_SECRET", fromEnvironment = "CELLHIVE_HOST_SCOPE_SECRET"),
         (name = "WRAPPER_SRC", text = embed "queue-wrapper.js"),
         (name = "WF_WRAPPER_SRC", text = embed "workflow-wrapper.js"),
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "AI_URL", text = "{{.AIURL}}"),
-        (name = "AI_KEY", text = "{{.AIKey}}"),
+        (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
+        (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "cap-egress"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
@@ -197,6 +203,10 @@ func Render(dir string, cfg Config) (string, error) {
 	}
 	if cfg.PlatformJS == "" || cfg.FacadesJS == "" {
 		return "", errors.New("userruntime: PlatformJS and FacadesJS are required")
+	}
+	childEnv, err := WorkerdEnv(cfg)
+	if err != nil {
+		return "", err
 	}
 	for _, a := range cfg.OutboundAllow {
 		if !outboundCategories[strings.TrimSpace(a)] {
@@ -235,13 +245,50 @@ func Render(dir string, cfg Config) (string, error) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return "", err
 	}
+	renderedEnvs.Store(path, childEnv)
 	return path, nil
+}
+
+// WorkerdEnv returns the complete host environment consumed by the generated
+// Cap'n Proto fromEnvironment bindings.
+func WorkerdEnv(cfg Config) ([]string, error) {
+	return runtimeenv.Build(map[string]string{
+		"CELLHIVE_HOST_AI_KEY":         cfg.AIKey,
+		"CELLHIVE_HOST_AI_URL":         cfg.AIURL,
+		"CELLHIVE_HOST_CELL_TOKEN":     cfg.CellToken,
+		"CELLHIVE_HOST_CELL_URL":       cfg.CellURL,
+		"CELLHIVE_HOST_DISPATCH_TOKEN": cfg.DispatchToken,
+		"CELLHIVE_HOST_SCOPE_SECRET":   cfg.ScopeSecret,
+	})
 }
 
 // Run starts workerd with the rendered config and blocks until it exits or ctx is
 // cancelled. workerd stderr/stdout are inherited.
-func Run(ctx context.Context, workerdBin, capnpPath string) error {
+func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string) error {
+	var childEnv []string
+	if len(supplied) > 1 {
+		return errors.New("userruntime: Run accepts at most one child environment")
+	}
+	if len(supplied) == 1 {
+		childEnv = supplied[0]
+		renderedEnvs.Delete(capnpPath)
+	} else if saved, ok := renderedEnvs.LoadAndDelete(capnpPath); ok {
+		childEnv = saved.([]string)
+	}
+	if err := runtimeenv.Require(childEnv,
+		"CELLHIVE_HOST_AI_KEY",
+		"CELLHIVE_HOST_AI_URL",
+		"CELLHIVE_HOST_CELL_TOKEN",
+		"CELLHIVE_HOST_CELL_URL",
+		"CELLHIVE_HOST_DISPATCH_TOKEN",
+		"CELLHIVE_HOST_SCOPE_SECRET",
+	); err != nil {
+		return fmt.Errorf("userruntime: child environment: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, workerdBin, "serve", "--experimental", capnpPath)
+	// A nil Cmd.Env inherits the parent. Allocate even for an explicitly empty
+	// environment so no system-reserved variables reach workerd.
+	cmd.Env = append(make([]string, 0, len(childEnv)), childEnv...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

@@ -201,8 +201,8 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	}
 }
 
-// TestRenderSubstitutesConfig checks the generated capnp carries the cell URL,
-// token and ports (no workerd required).
+// TestRenderSubstitutesConfig checks host secrets are environment-backed while
+// non-secret structural settings remain rendered (no workerd required).
 func TestRenderSubstitutesConfig(t *testing.T) {
 	dir := t.TempDir()
 	path, err := Render(dir, Config{
@@ -217,10 +217,76 @@ func TestRenderSubstitutesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	for _, want := range []string{"http://cell:7001", "tok", ":18088", ":18081", `embed "internal.js"`} {
+	for _, leaked := range []string{"http://cell:7001", `text = "tok"`} {
+		if strings.Contains(string(data), leaked) {
+			t.Fatalf("capnp leaks %q:\n%s", leaked, data)
+		}
+	}
+	for _, want := range []string{
+		`(name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL")`,
+		`(name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN")`,
+		":18088", ":18081", `embed "internal.js"`,
+	} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("capnp missing %q:\n%s", want, data)
 		}
+	}
+}
+
+func TestFromEnvironmentRequiresExplicitChildEnv(t *testing.T) {
+	workerd, err := FindWorkerd()
+	if err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	internalPort, publicPort := freePort(t), freePort(t)
+	cfg := Config{
+		CellURL: "http://127.0.0.1:1", CellToken: "token-canary",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	}
+	path, err := Render(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Even if the parent has a matching variable, an explicitly empty child
+	// environment must not inherit it.
+	t.Setenv("CELLHIVE_HOST_CELL_URL", cfg.CellURL)
+	missingCtx, missingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer missingCancel()
+	started := time.Now()
+	if err := Run(missingCtx, workerd, path, []string{}); err == nil {
+		t.Fatal("workerd unexpectedly started without required host environment")
+	} else if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("missing host environment was not rejected at startup (elapsed %s): %v", elapsed, err)
+	}
+
+	childEnv, err := WorkerdEnv(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(runCtx, workerd, path, childEnv) }()
+	base := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, getErr := noProxyClient().Get(base + "/healthz")
+		if getErr == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("workerd did not start with explicit host environment: %v", getErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
 	}
 }
 
@@ -3219,7 +3285,11 @@ const config :Workerd.Config = (
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, workerd, filepath.Join(dir, "workerd.capnp")) }()
+	childEnv, err := WorkerdEnv(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- Run(ctx, workerd, filepath.Join(dir, "workerd.capnp"), childEnv) }()
 	client := noProxyClient()
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	deadline := time.Now().Add(25 * time.Second)

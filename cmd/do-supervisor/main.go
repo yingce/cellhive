@@ -115,8 +115,20 @@ func main() {
 				log.Fatalf("find workerd: %v", err)
 			}
 		}
+		creds := cellcfg.DeriveCredentials(cellcfg.LoadRootKey())
+		childEnv, err := doruntime.WorkerdEnv(doruntime.Config{
+			CellURL:        *owner,
+			CellToken:      *token,
+			DoTicketSecret: creds.DoTicket,
+			AIURL:          os.Getenv("CELLHIVE_AI_URL"),
+			AIKey:          os.Getenv("CELLHIVE_AI_KEY"),
+			GateURL:        os.Getenv("CELLHIVE_DO_GATE_URL"),
+		})
+		if err != nil {
+			log.Fatalf("build workerd environment: %v", err)
+		}
 		go func() {
-			if err := doruntime.Run(ctx, bin, *config); err != nil && ctx.Err() == nil {
+			if err := doruntime.Run(ctx, bin, *config, childEnv); err != nil && ctx.Err() == nil {
 				log.Printf("workerd exited: %v", err)
 				stop()
 			}

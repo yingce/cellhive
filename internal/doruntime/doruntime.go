@@ -13,14 +13,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
+	"cellhive/internal/runtimeenv"
 	"cellhive/internal/workerdbin"
 )
 
 // outboundCategories are the workerd network categories a tenant outbound policy
 // may name.
 var outboundCategories = map[string]bool{"public": true, "private": true, "local": true}
+
+// renderedEnvs is a same-process Render/Run compatibility path for integration
+// tests. Production launchers, especially do-supervisor, pass an explicit env.
+var renderedEnvs sync.Map
 
 // OutboundAllowList renders the tenant facet outbound policy for the capnp
 // config. Empty defaults to "public" (ADR-130).
@@ -95,22 +101,22 @@ const config :Workerd.Config = (
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-do-runtime")),
         (name = "HOST", durableObjectNamespace = "Host"),
-        (name = "CELL_URL", text = "{{.CellURL}}"),
-        (name = "CELL_TOKEN", text = "{{.CellToken}}"),
+        (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
+        (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
         (name = "NODE_ID", text = "{{.NodeID}}"),
         (name = "ADVERTISE", text = "{{.Advertise}}"),
         (name = "CELLHIVE_DO_SRC", text = embed "cellhive-do.js"),
-        (name = "GATE_URL", text = "{{.GateURL}}"),
+        (name = "GATE_URL", fromEnvironment = "CELLHIVE_HOST_GATE_URL"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "private-outbound"),
         (name = "BINDINGS_WRAPPER_SRC", text = embed "bindings-wrapper.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "DO_TICKET_SECRET", text = "{{.DoTicketSecret}}"),
+        (name = "DO_TICKET_SECRET", fromEnvironment = "CELLHIVE_HOST_DO_TICKET_SECRET"),
         (name = "DO_LEASE_S", text = "{{.DoLeaseS}}"),
         (name = "DO_OBJECT_INDEX", text = "{{if .DOObjectIndex}}1{{end}}"),
-        (name = "AI_URL", text = "{{.AIURL}}"),
-        (name = "AI_KEY", text = "{{.AIKey}}"),
+        (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
+        (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
       ],
       globalOutbound = "private-outbound",
       durableObjectNamespaces = [
@@ -131,6 +137,10 @@ const config :Workerd.Config = (
 func Render(dir string, cfg Config) (string, error) {
 	if cfg.Addr == "" || cfg.DiskDir == "" || cfg.PlatformJS == "" {
 		return "", errors.New("doruntime: Addr, DiskDir and PlatformJS are required")
+	}
+	childEnv, err := WorkerdEnv(cfg)
+	if err != nil {
+		return "", err
 	}
 	for _, a := range cfg.OutboundAllow {
 		if !outboundCategories[strings.TrimSpace(a)] {
@@ -181,13 +191,48 @@ func Render(dir string, cfg Config) (string, error) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return "", err
 	}
+	renderedEnvs.Store(path, childEnv)
 	return path, nil
+}
+
+// WorkerdEnv returns the complete host environment consumed by the generated
+// Cap'n Proto fromEnvironment bindings.
+func WorkerdEnv(cfg Config) ([]string, error) {
+	return runtimeenv.Build(map[string]string{
+		"CELLHIVE_HOST_AI_KEY":           cfg.AIKey,
+		"CELLHIVE_HOST_AI_URL":           cfg.AIURL,
+		"CELLHIVE_HOST_CELL_TOKEN":       cfg.CellToken,
+		"CELLHIVE_HOST_CELL_URL":         cfg.CellURL,
+		"CELLHIVE_HOST_DO_TICKET_SECRET": cfg.DoTicketSecret,
+		"CELLHIVE_HOST_GATE_URL":         cfg.GateURL,
+	})
 }
 
 // Run starts workerd with the rendered config and blocks until it exits or ctx is
 // cancelled.
-func Run(ctx context.Context, workerdBin, capnpPath string) error {
+func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string) error {
+	var childEnv []string
+	if len(supplied) > 1 {
+		return errors.New("doruntime: Run accepts at most one child environment")
+	}
+	if len(supplied) == 1 {
+		childEnv = supplied[0]
+		renderedEnvs.Delete(capnpPath)
+	} else if saved, ok := renderedEnvs.LoadAndDelete(capnpPath); ok {
+		childEnv = saved.([]string)
+	}
+	if err := runtimeenv.Require(childEnv,
+		"CELLHIVE_HOST_AI_KEY",
+		"CELLHIVE_HOST_AI_URL",
+		"CELLHIVE_HOST_CELL_TOKEN",
+		"CELLHIVE_HOST_CELL_URL",
+		"CELLHIVE_HOST_DO_TICKET_SECRET",
+		"CELLHIVE_HOST_GATE_URL",
+	); err != nil {
+		return fmt.Errorf("doruntime: child environment: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, workerdBin, "serve", "--experimental", capnpPath)
+	cmd.Env = append(make([]string, 0, len(childEnv)), childEnv...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

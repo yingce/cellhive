@@ -142,16 +142,21 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 
 	// 4) Real workerd loader in front of the cell-agent.
 	internalPort, publicPort := freePort(t), freePort(t)
-	capnpPath, err := userruntime.Render(t.TempDir(), userruntime.Config{
+	userCfg := userruntime.Config{
 		CellURL: internal.URL, CellToken: creds.Internal, ScopeSecret: creds.Scope,
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
-	})
+	}
+	capnpPath, err := userruntime.Render(t.TempDir(), userCfg)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	workerd, _ := userruntime.FindWorkerd()
-	go func() { _ = userruntime.Run(ctx, workerd, capnpPath) }()
+	childEnv, err := userruntime.WorkerdEnv(userCfg)
+	if err != nil {
+		t.Fatalf("build workerd environment: %v", err)
+	}
+	go func() { _ = userruntime.Run(ctx, workerd, capnpPath, childEnv) }()
 
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
