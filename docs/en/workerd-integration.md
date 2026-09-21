@@ -16,6 +16,8 @@
 - Upstream `$experimental` tenant flags are **not enabled**; the default policy for `nodejs_compat`/`nodejs_compat_v2` is determined by date;
 - Contract tests are fixed to the pinned version.
 
+ADR-186 approves an in-progress baseline of stock workerd `1.20260916.1` and esbuild `0.28.2`. Until implementation and acceptance pass, the pin and compatibility ceiling in current code remain the runtime truth. The new baseline generates its compatibility manifest from the exact upstream source and cross-checks it against the real binary.
+
 ## Services and Configuration
 
 | Service | workerd Role | Configuration Notes |
@@ -39,7 +41,9 @@ user-runtime loader:
   4. Invoke handler
 ```
 
-- **env budget**: workerd serialized env limit (about 1 MiB); the control plane validates it on deploy/secret changes (including V8 double-byte overhead).
+- **Env budget (ADR-186, in progress)**: 1 MiB upstream limit with 8 KiB headroom, giving a **1016 KiB** CellHive limit, including V8 two-byte string cost.
+- **WorkerCode budget (ADR-186, in progress)**: the final form passed to `workerLoader` (tenant modules, wrapper and platform-injected modules) is limited to **64 MiB**; reject before activation and recheck at runtime.
+- **Host secrets (ADR-186, in progress)**: platform URLs/tokens enter trusted host bindings only through Cap'n Proto `fromEnvironment`; they must not appear in rendered capnp, final WorkerCode, tenant env or logs.
 - **Secret boundary**: secrets can be encrypted, stored, and managed, but are not yet injected into the runtime env; they are not an env source above. A future injection path must retain zero platform keys and no reserved names.
 - **Workflow / logging boundary**: a trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` and passes it as a JSRPC parameter across `workerLoader` to the wrapper. It is neither a `ServiceStub` nor tenant env. Native Tail Workers for dynamically loaded Workers are rejected on pin `1.20260615.1` (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled and must not fall back to env transport.
 - **Reserved module prefixes**: platform-generated module names use reserved prefixes (such as `__cellhive-`); tenants must not occupy them.

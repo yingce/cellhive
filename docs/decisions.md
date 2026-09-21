@@ -2379,6 +2379,22 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
+## ADR-186 stock workerd 运行时基线与安全加固（设计批准，实施中）
+
+- **背景**：当前 pin 仍为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
+- **决策**：
+  1. 固定升级到 stock workerd `1.20260916.1`；固定 **esbuild 0.28.2**。校验下载完整性、随附许可证，并在构建和真实镜像内读回版本。dev CLI 只接受同期间、真实 smoke 通过的精确 Miniflare/workerd 组合。
+  2. 宿主平台配置改用 capnp `fromEnvironment`；workerd 子进程从空环境构造显式白名单。渲染 capnp、进程参数与日志不含秘密；user-runtime、do-runtime 与 do-supervisor 托管路径遵守同一契约。
+  3. 最终动态 WorkerCode 不得包含平台 URL/token。tenant env 继续遵守 ADR-185（平台键为 0、所有名称归用户）；测试递归检查交给 `workerLoader.get()` 的 env、模块名、文本/二进制模块和兼容字段。
+  4. 从对应 pin 的 workerd 上游 compatibility 定义生成带 revision/source SHA-256 的单一 manifest；Go 控制面与 Bun CLI 消费同一清单，真实二进制探测允许 flag、未知 flag 和最大 compatibility date；实验 flag 默认 fail-closed。
+  5. 最终 WorkerCode 上限 **64 MiB**；workerLoader env 上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**。控制面在 active pointer 切换前拒绝超限，运行时在 `workerLoader.get()` 前复核；不截断、不删字段、不暴露源码或 secret。
+- **升级/回滚**：reader-before-writer；新 pin 先证明能读取旧 artifact/DO working copy，再开放新 date/flag。manifest 与二进制成对回滚；若存在旧 pin 无法加载的 active version，则拒绝回滚。schema、cell/owner/epoch/RPO=0 协议不变。
+- **阶段边界**：本 ADR 只覆盖秘密隔离、固定工具链、compatibility authority 与 code/env 预算。冷加载治理、invocation-scoped context、isolate 淘汰、DO mid-flight fence/restart generation、原生 Tail/OTLP 和多模块 artifact 后续分阶段实施。Tenant Tail 当前仍关闭，不以 env transport 回退。
+- **验收**：单元测试先红后绿；真实 workerd 覆盖 `fromEnvironment`、env/KV/D1/R2/Queue/Workflow/Service/DO；真实 Docker Compose 覆盖镜像内 esbuild 打包、用户同名 env、KV、gated DO、重启持久性和秘密扫描；最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 无相关隐式 SKIP。
+- **详细设计/计划**：`docs/superpowers/specs/2026-09-22-workerd-runtime-baseline-security-design.md`、`docs/superpowers/plans/2026-09-22-workerd-runtime-baseline-security.md`。
+
+---
+
 ## ADR-185 租户 env 完全由用户拥有：零平台键
 
 - **背景**：ADR-184 把传输与凭据收敛到平台侧 stub，但仍把 `CH_PLATFORM` 写入 loaded Worker 的 `env`，并因此保留 `CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称。平台键即使没有直接暴露凭据，仍占用用户命名空间，也允许租户代码直接触达平台能力。
@@ -2588,4 +2604,4 @@
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-09-20_
+_最后更新：2026-09-22_

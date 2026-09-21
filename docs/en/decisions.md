@@ -185,5 +185,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-177 | Wake Index Not Behind Timer: Publish First and Repairable Implementation | Ensures wake indexes do not lag timers by publishing first and allowing repair. |
 | ADR-179 | Namespace attribution for metrics (ns dimension) + tenant attributes on binding spans | Tenant-attributable metrics carry a bounded `ns` label (cap `CELLHIVE_METRICS_NS_MAX`; overflow `other`, empty -> `platform`), and binding `http.server` spans carry `cellhive.namespace`. |
 | ADR-178 | Logs carry trace context + a multi-tenant observability reference pipeline (push) | Tenant log lines carry trace_id/span_id, OTLP resource gains service.instance.id, and a Collector+backend org/stream push model replaces exposing /metrics. |
+| ADR-185 | Tenant Env Is Fully User-Owned: Zero Platform Keys | Tenant Worker and DO env namespaces contain only user-declared values and user-named bindings; platform transport and credentials stay in trusted hosts. |
+| ADR-186 | Stock-workerd Runtime Baseline and Security Hardening | Pins stock workerd `1.20260916.1` and esbuild `0.28.2`; uses `fromEnvironment`, removes platform credentials from final WorkerCode, generates compatibility rules from pinned source, and enforces 64 MiB code / 1016 KiB env budgets. Status: approved, implementation in progress. |
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_
