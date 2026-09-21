@@ -386,6 +386,9 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
       if (spec && spec.kind === "r2") r2names.push(name);
     } else facades[name] = spec; // DO/Workflow: local facades via bindings-wrapper
   }
+  if (Object.keys(facades).length > 0) {
+    console.error("cellhive: binding kinds without a platform stub:", Object.keys(facades).join(","));
+  }
   env.CH_FACADE_SPEC = JSON.stringify(facades);
   env.CH_R2_BINDINGS = JSON.stringify(r2names);
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
@@ -399,7 +402,8 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
     if (s && s.kind === "workflow") hasWorkflow = true;
   }
   if (Object.keys(doSpecs).length > 0) {
-    env.CH_DO_SPEC = JSON.stringify(doSpecs);
+    // Names only (ADR-184): the platform stub owns the identity/scoped token.
+    env.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
     if (hostEnv.CH_DO_CONNECT) env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
   }
   const ex = ctx && ctx.exports;
@@ -407,8 +411,6 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
   const facetWorker = (spec && spec.worker) || env.LOG_WORKER || "";
   if (ex && ex.WorkflowSteps) env.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns: facetNS, worker: facetWorker } });
   if (ex && ex.LogSink) env.CH_LOG_SINK = ex.LogSink({ props: { ns: facetNS, worker: facetWorker } });
-  env.LOG_NS = (spec && spec.namespace) || hostEnv.LOG_NS || "";
-  env.LOG_WORKER = (spec && spec.worker) || hostEnv.LOG_WORKER || "";
   return env;
 }
 

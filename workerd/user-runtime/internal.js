@@ -225,9 +225,10 @@ async function loadWorkflowWorker(env, ctx, body) {
       "rpc-codec.js": env.RPC_CODEC_SRC,
       "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
     },
-    env: Object.assign(tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker), {
-      WF_NS: body.namespace, WF_NAME: body.workflow, WF_ID: body.id, WF_RUN_TOKEN: body.run_token || "",
-    }),
+    // Workflow identity travels in the steps stub's props (ADR-184), not in the
+    // tenant env.
+    env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker,
+      { workflow: body.workflow, id: body.id, run: body.run_token || "" }),
     globalOutbound: env.OUTBOUND,
   }));
 }
@@ -245,13 +246,19 @@ function platformConsts(env) {
 // The internal token is NOT put here: it reaches platform wrappers via the
 // module-scope __cellhivePlatform const appended to their source (ADR-074 —
 // the tenant env must not carry internal/platform credentials).
-function tenantEnv(env, ctx, spec, vars, ns, worker) {
+function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
   for (const [name, b] of Object.entries(spec || {})) {
     const stub = bindingStub(ctx, b);
     if (stub !== undefined) out[name] = stub;
     else unmigrated[name] = b;
+  }
+  // All binding kinds are platform-side stubs now; a leftover entry means a
+  // new kind was added without a stub, and the old facade fallback has no
+  // transport any more — fail loudly instead of dropping the binding.
+  if (Object.keys(unmigrated).length > 0) {
+    console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
   }
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
@@ -265,16 +272,21 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
     if (b && b.kind === "workflow") hasWorkflow = true;
   }
   if (Object.keys(doSpecs).length > 0) {
-    out.CH_DO_SPEC = JSON.stringify(doSpecs);
+    // Names only: the platform stub owns the identity and the scoped token
+    // (ADR-184); the tenant side just needs to know which env entries to wrap.
+    out.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
     if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
   }
   // Data-only stubs for workflow step callbacks and the log ring (no transport
   // is exposed). Guard ctx.exports for callers without entrypoints.
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns, worker } });
+  if (ex && ex.WorkflowSteps) {
+    out.CH_WF_STEPS = ex.WorkflowSteps({ props: {
+      ns, worker,
+      workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
+    } });
+  }
   if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: { ns, worker } });
-  out.LOG_NS = ns || "";
-  out.LOG_WORKER = worker || "";
   return out;
 }
 

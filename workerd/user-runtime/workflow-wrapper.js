@@ -22,11 +22,11 @@ try {
       Object.defineProperty(__env, name, { value, writable: true, configurable: true, enumerable: true });
     }
   }
-  if (__env.CH_DO_SPEC && __env.CH_DO_CONNECT) {
-    for (const [name, spec] of Object.entries(JSON.parse(__env.CH_DO_SPEC))) {
+  if (__env.CH_DO_BINDINGS && __env.CH_DO_CONNECT) {
+    for (const name of JSON.parse(__env.CH_DO_BINDINGS)) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
-          value: makeDOFromStub(__env[name], spec, { connect: __env.CH_DO_CONNECT, cellUrl: __cellhivePlatform.cellUrl }),
+          value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
           writable: true, configurable: true, enumerable: true,
         });
       }
@@ -79,10 +79,6 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
 // (never a raw path) with the namespace forced to this worker — so the tenant
 // cannot turn it into a generic relay. Returns a Response-shaped view for the
 // step helpers below.
-function baseParams(env, id) {
-  return { workflow: env.WF_NAME, id, run: env.WF_RUN_TOKEN || "" };
-}
-
 function call(env, op, params, init) {
   const steps = env.CH_WF_STEPS;
   if (!steps || typeof steps.call !== "function") {
@@ -113,8 +109,9 @@ function retryDelayMs(retries, attempt) {
 }
 
 function makeStep(env, id) {
-  const base = () => baseParams(env, id);
-  const named = (name) => Object.assign(base(), { name });
+  // Identity (ns/workflow/id/run) is bound into the CH_WF_STEPS stub's props.
+  const base = () => ({});
+  const named = (name) => ({ name });
 
   async function getAttempt(name) {
     const r = await call(env, "attempt.get", named(name));
@@ -238,13 +235,13 @@ function makeStep(env, id) {
 }
 
 async function finish(env, id, output) {
-  await call(env, "finish", baseParams(env, id), {
+  await call(env, "finish", {}, {
     body: b64encode(JSON.stringify(output === undefined ? null : output)),
   });
 }
 
 async function finishError(env, id, message) {
-  await call(env, "finish.error", Object.assign(baseParams(env, id), { error: message }));
+  await call(env, "finish.error", { error: message });
 }
 
 export default {

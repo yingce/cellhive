@@ -2384,13 +2384,14 @@
 - **背景**：`PLATFORM`（指向 private-outbound 的 service binding）此前注入租户 env，供 DO/Workflow facade、vectorize facade 与 log-tail 出网。它虽无凭据，但让租户代码可以把它当通用私网出口（探测/扫描）。ADR-074 已把角色令牌移出租户 env；本 ADR 移出**传输本身**。
 - **决策**：
   1. **平台侧 stub**：`bindings.js` 新增 `DurableObjectNamespace`（`get(id)` 返回 `DOStubTarget extends RpcTarget`，显式 `fetch`/`rpc` 方法）、`WorkflowBinding`（create/get/sendEvent/list；get 返回 `WorkflowInstanceTarget`）、`Vectorize`、`WorkflowSteps`（`call(path,method,body)`）、`LogSink`（`send(ns,worker,batch)`）。`bindingStub` 增加 do/workflow/vectorize case，`CH_FACADE_SPEC` 因此恒为空。
-  2. **租户 env 只剩 stub 与数据**：`PLATFORM`/`CELL_URL` 不再注入；DO 的 `CH_DO_SPEC`（spec 数据，含 per-binding scoped token，符合 ADR-074）+ `CH_DO_CONNECT`（仅 DO worker）、`CH_WF_STEPS`/`CH_LOG_SINK`（数据型 stub）。
+  2. **租户 env 只剩 stub 与名字元数据**：`PLATFORM`/`CELL_URL` 不再注入；DO 只给 **`CH_DO_BINDINGS`（绑定名列表，无 token/spec）** + `CH_DO_CONNECT`（仅 DO worker），WS 的 owner 查询与 **shard ticket** 由平台侧 `connectInfo()` 提供（do-runtime 的 connect 只认 ticket，不需要 scope token）；workflow 身份（ns/workflow/id/run）与日志身份（ns/worker）绑进 `CH_WF_STEPS`/`CH_LOG_SINK` 的 **props**，不再以 `WF_*`/`LOG_NS`/`LOG_WORKER` 出现在 env。
   3. **DO WebSocket**（唯一不能跨 RPC 的场景）：租户侧 `makeDOFromStub` 的 Proxy 检测 `Upgrade` 并从 `CH_DO_CONNECT` 走 `/v1/do/connect`（owner 查询 + ticket），普通请求走平台 stub 的 RPC。`CELLHIVE_CAP_WS` 控制该绑定的 allow（未配置回落 public+private 兼容既有部署；生产应收窄到集群网段）。
   4. **workerLoader 语义（实测）**：`ctx.exports` 是**宿主 worker mainModule 的导出集** → 新增 stub 类必须同步 `export {...} from "bindings.js"`（user-runtime 的 loader.js/internal.js、do-runtime 的 host.js）；**方法返回值若是 Proxy，不被 RPC 认作 RpcTarget**（"receiver does not implement"）→ 平台侧只暴露显式方法，任意名由租户侧 Proxy 转成 `(method,args)`。
   5. DO 传输经**模块级缓存**（`doTransports`）跨 RPC 实例保持 owner hint（workerLoader 可能按调用实例化 entrypoint）。
   6. **stub 参数受限（安全边界）**：数据型 stub 不暴露原始 path/身份参数——`WorkflowSteps.call(op,params,body)` 的 `op` 走**固定表**（13 个 workflow 内部端点），`ns` 由 props 强制为调用方 worker 自己的命名空间（参数里的 `ns` 被忽略）；`LogSink.send(batch)` 的 ns/worker 同样来自 props；各 binding stub 的资源名/scope 由 props 固定。故租户即使直接调用这些 stub 也无法把 internal 角色令牌变成开放中继或跨租户操作。
 - **理由**：租户 env 不再含任何通用网络出口；私网可达面收敛为「DO WS 的 cluster-only 窄绑定」，其余全部在平台 worker 内完成。与 CF 的一致性提升（CF 租户也只有 namespace 语义的绑定）；与 WDL 的实现方式一致。
-- **代价/边界**：DO WebSocket 依赖窄绑定（需配置 `CELLHIVE_CAP_WS` 才真正收窄，未配置=public+private 回退）；`CH_DO_SPEC` 含 per-binding scoped token（与既有 `CH_FACADE_SPEC` 同为 ADR-074 允许的租户邻接 token）。
+- **代价/边界**：DO WebSocket 依赖窄绑定（需配置 `CELLHIVE_CAP_WS` 才真正收窄，未配置=public+private 回退）。**租户 env 中已无任何凭据**（scoped token 只经 `connectInfo()` 返回到平台 worker 内部使用；ticket 是短时、按分片绑定的一次性凭据）。
+- **残留**：`CH_FACADE_SPEC` 机制保留但**恒为空**（全部 kind 已 stub 化），作为"新 kind 未处理"的哨兵——非空时打 `console.error` 而非静默丢弃。
 - **验证**：`internal/userruntime`（DO fetch/RPC、DO owner hint 直连、vectorize、log tail、workflow 全套、`TestTenantEnvHasNoPlatformCredentials`=PLATFORM/CELL_URL 缺席、`TestTenantWsBindingNarrowed`=窄绑定 allow 生效）、`internal/doruntime`（DO/facet 全套）；`make build/vet/test` 54 包 + `make js-test` 全绿。
 
 ---

@@ -233,7 +233,7 @@ setServiceLoader(async (ctx, env, target) => {
 // tenantEnv builds the loaded worker env: vars + entrypoint stubs for migrated
 // bindings, and a CH_FACADE_SPEC fallback the wrapper turns into HTTP facades for
 // the rest (ADR-090 incremental migration).
-function tenantEnv(env, ctx, spec, vars, ns, worker) {
+function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
   const r2names = [];
@@ -243,6 +243,12 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
       out[name] = stub;
       if (b && b.kind === "r2") r2names.push(name);
     } else unmigrated[name] = b;
+  }
+  // All binding kinds are platform-side stubs now; a leftover entry means a
+  // new kind was added without a stub, and the old facade fallback has no
+  // transport any more — fail loudly instead of dropping the binding.
+  if (Object.keys(unmigrated).length > 0) {
+    console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
   }
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   out.CH_R2_BINDINGS = JSON.stringify(r2names);
@@ -257,16 +263,21 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
     if (b && b.kind === "workflow") hasWorkflow = true;
   }
   if (Object.keys(doSpecs).length > 0) {
-    out.CH_DO_SPEC = JSON.stringify(doSpecs);
+    // Names only: the platform stub owns the identity and the scoped token
+    // (ADR-184); the tenant side just needs to know which env entries to wrap.
+    out.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
     if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
   }
   // Data-only stubs for workflow step callbacks and the log ring (no transport
   // is exposed). ctx.exports may be absent on the assets-only path, so guard.
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns, worker } });
+  if (ex && ex.WorkflowSteps) {
+    out.CH_WF_STEPS = ex.WorkflowSteps({ props: {
+      ns, worker,
+      workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
+    } });
+  }
   if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: { ns, worker } });
-  out.LOG_NS = ns || "";
-  out.LOG_WORKER = worker || "";
   return out;
 }
 

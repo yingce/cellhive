@@ -43,11 +43,11 @@ try {
   // DO namespaces arrive as platform-side entrypoint stubs; wrap them so a
   // WebSocket upgrade (the one case that cannot cross RPC) routes through the
   // dedicated cluster-only WS binding.
-  if (__env.CH_DO_SPEC && __env.CH_DO_CONNECT) {
-    for (const [name, spec] of Object.entries(JSON.parse(__env.CH_DO_SPEC))) {
+  if (__env.CH_DO_BINDINGS && __env.CH_DO_CONNECT) {
+    for (const name of JSON.parse(__env.CH_DO_BINDINGS)) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
-          value: makeDOFromStub(__env[name], spec, { connect: __env.CH_DO_CONNECT, cellUrl: __cellhivePlatform.cellUrl }),
+          value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
           writable: true, configurable: true, enumerable: true,
         });
       }

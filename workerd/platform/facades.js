@@ -198,18 +198,23 @@ export function makeDO(platform, spec) {
   // upgrade opens a WebSocket to the DO's owner. A live socket cannot cross the
   // JSON invoke envelope, so ask the sharding router for the owner + ticket
   // (scoped token), then hand the upgrade to the owner's /v1/do/connect.
-  async function upgrade(id, req) {
+  async function connectInfo(id) {
     if (spec.deleted) throw new Error("do: class " + spec.class + " was deleted");
     const qs = q(identity(id));
     const look = await pfetch(platform, platform.url + "/v1/do/connect?" + qs, { headers: headers(platform, spec.token) });
     if (!look.ok) throw new Error("do: connect lookup " + look.status + " " + (await look.text()));
     const info = await look.json();
     const base = String(info.owner || "").startsWith("http") ? info.owner : "http://" + info.owner;
+    return { url: base.replace(/\/$/, "") + "/v1/do/connect?" + qs, ticket: info.ticket || "" };
+  }
+
+  async function upgrade(id, req) {
+    const info = await connectInfo(id);
     const h = Object.assign({}, headers(platform, spec.token));
     h["Upgrade"] = req.headers.get("Upgrade") || "websocket";
     h["Connection"] = "Upgrade";
     if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
-    return await pfetch(platform, base.replace(/\/$/, "") + "/v1/do/connect?" + qs, { headers: h });
+    return await pfetch(platform, info.url, { headers: h });
   }
 
   async function call(id, input, init) {
@@ -302,6 +307,10 @@ export function makeDO(platform, spec) {
     // (bindings.js DurableObjectNamespace, WDL alignment). Never tenant-visible.
     __call: (id, input, init) => call(id, input, init),
     __rpc: (id, method, args) => rpc(id, method, args),
+    // Owner lookup for the WebSocket upgrade: returns the ready connect URL
+    // plus the short-lived shard ticket, so the tenant side needs neither the
+    // scoped token nor the binding spec.
+    __connectInfo: (id) => connectInfo(id),
   };
 }
 
@@ -317,32 +326,19 @@ export function makeDOTransport(platform, spec) {
 // over RPC (the platform worker owns :7001 and the scoped token); the one case
 // that cannot cross RPC is a WebSocket upgrade, which is proxied through the
 // dedicated cluster-only service binding (`connect`).
-export function makeDOFromStub(stub, spec, transport) {
-  const cellUrl = String((transport && transport.cellUrl) || "").replace(/\/$/, "");
-  const connect = transport && transport.connect;
-  const auth = () => (spec.token ? { "x-cellhive-scope-token": spec.token } : {});
-  const connectURL = (base, id) => {
-    const b = String(base).replace(/\/$/, "");
-    return b + "/v1/do/connect?" + q({
-      namespace: spec.ns, worker: spec.worker, bundle_sha: spec.bundle_sha,
-      version: spec.version, storage_id: spec.storage_id || "",
-      class: spec.class, storage_class: spec.storage_class || spec.class, id: String(id),
-    });
-  };
+export function makeDOFromStub(stub, connect) {
+  // The platform-side stub owns the binding identity and the scoped token, and
+  // mints the short-lived shard ticket; the tenant side only needs a transport
+  // for the upgrade (the one case that cannot cross RPC) plus that ticket.
   async function upgrade(id, req) {
-    if (spec.deleted) throw new Error("do: class " + spec.class + " was deleted");
     if (!connect || typeof connect.fetch !== "function") {
       throw new Error("do: WebSocket upgrade needs the cluster WS binding (CH_DO_CONNECT)");
     }
-    const look = await connect.fetch(connectURL(cellUrl, id), { headers: auth() });
-    if (!look.ok) throw new Error("do: connect lookup " + look.status + " " + (await look.text()));
-    const info = await look.json();
-    const base = String(info.owner || "").startsWith("http") ? info.owner : "http://" + info.owner;
-    const h = Object.assign({}, auth());
-    h["Upgrade"] = req.headers.get("Upgrade") || "websocket";
-    h["Connection"] = "Upgrade";
+    const target = stub.get(String(id));
+    const info = await target.connectInfo();
+    const h = { "Upgrade": req.headers.get("Upgrade") || "websocket", "Connection": "Upgrade" };
     if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
-    return await connect.fetch(connectURL(base, id), { headers: h });
+    return await connect.fetch(info.url, { headers: h });
   }
   function wrap(id) {
     const target = stub.get(String(id));
@@ -372,27 +368,6 @@ export function makeDOFromStub(stub, spec, transport) {
     idFromString: (s) => String(s),
     get: (id) => wrap(id),
     getByName: (name) => wrap(String(name)),
-  };
-}
-
-function rowsToObjects(res) {
-  const cols = res.columns || [];
-  return (res.rows || []).map((row) => {
-    const o = {};
-    for (let i = 0; i < cols.length; i++) o[cols[i]] = row[i];
-    return o;
-  });
-}
-
-function d1Meta(res, readRows) {
-  const changes = res.rows_affected || 0;
-  return {
-    changes,
-    last_row_id: res.last_row_id || 0,
-    changed_db: changes > 0,
-    duration: res.duration_ms || 0,
-    rows_read: readRows ? (res.rows || []).length : 0,
-    rows_written: changes,
   };
 }
 

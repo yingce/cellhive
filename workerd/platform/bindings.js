@@ -647,6 +647,12 @@ class DOStubTarget extends RpcTarget {
     }
     return await this.#t.__rpc(this.#id, method, args);
   }
+  // Owner lookup for the tenant-side WebSocket upgrade: the platform worker
+  // performs the lookup with its own scoped token and returns the ready URL
+  // plus the shard ticket as data.
+  async connectInfo() {
+    return await this.#t.__connectInfo(this.#id);
+  }
 }
 
 // Module-level transport cache: workerLoader may instantiate the entrypoint
@@ -845,12 +851,17 @@ export class WorkflowSteps extends WorkerEntrypoint {
     const entry = WorkflowSteps.#OPS.get(String(op));
     if (!entry) throw new Error("workflow: unknown step op " + op);
     const [method, path] = entry;
-    // The namespace is the caller worker's own (bound in props); a tenant
-    // cannot address another namespace through this stub.
-    const ns = (this.ctx.props || {}).ns || "";
-    const qs = ["ns=" + encodeURIComponent(ns)];
+    // Identity (ns/workflow/id/run) is bound in props — the caller worker's own
+    // run — so a tenant cannot address another namespace or instance; params
+    // may only carry op-specific keys.
+    const props = this.ctx.props || {};
+    const qs = ["ns=" + encodeURIComponent(props.ns || "")];
+    for (const k of ["workflow", "id", "run"]) {
+      const v = props[k];
+      if (v !== undefined && v !== null && v !== "") qs.push(k + "=" + encodeURIComponent(String(v)));
+    }
     for (const [k, v] of Object.entries(params || {})) {
-      if (!WorkflowSteps.#PARAM_RE.test(k) || k === "ns") continue;
+      if (!WorkflowSteps.#PARAM_RE.test(k) || k === "ns" || k === "workflow" || k === "id" || k === "run") continue;
       if (v === undefined || v === null || v === "") continue;
       qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
     }

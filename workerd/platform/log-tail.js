@@ -26,7 +26,7 @@ export function installLogTail() {
   // The sink is a platform-side entrypoint stub (fixed path + internal token);
   // the tenant isolate holds no transport or role credential (ADR-074).
   const sink = env && env.CH_LOG_SINK;
-  if (!sink || typeof sink.send !== "function" || !env.LOG_NS || !env.LOG_WORKER) {
+  if (!sink || typeof sink.send !== "function") {
     return;
   }
   if (globalThis.__cellhiveLogTail) return;
