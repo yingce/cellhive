@@ -961,11 +961,6 @@ func (s *Server) handleControlSecretPut(w http.ResponseWriter, r *http.Request) 
 	if !s.authorizeNS(w, r, req.Namespace) {
 		return
 	}
-	if wranglercompat.ReservedEnvName(req.Key) {
-		writeErr(w, http.StatusBadRequest, "reserved_env_name",
-			"secret name "+req.Key+" is reserved by the platform (CH_*/CELL_*/__cellhive* and platform identity keys)")
-		return
-	}
 	val, err := base64.StdEncoding.DecodeString(req.Value)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_value", "value must be base64")

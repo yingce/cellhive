@@ -157,6 +157,37 @@ func TestControlAdminDeployAndSecretRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSecretFormerPlatformNameAllowed(t *testing.T) {
+	s := newControlServer(t)
+	admin := s.AdminHandler()
+	value := []byte("tenant-owned platform name")
+	encoded := base64.StdEncoding.EncodeToString(value)
+
+	put := adminDo(t, admin, http.MethodPost, "/v1/control/secret", "admin-tok",
+		`{"namespace":"acme","worker":"api","key":"CH_PLATFORM","value":"`+encoded+`"}`)
+	if put.Code != http.StatusOK {
+		t.Fatalf("put secret = %d: %s", put.Code, put.Body.String())
+	}
+
+	get := adminDo(t, admin, http.MethodGet, "/v1/control/secret?namespace=acme&worker=api&key=CH_PLATFORM", "admin-tok", "")
+	if get.Code != http.StatusOK {
+		t.Fatalf("get secret = %d: %s", get.Code, get.Body.String())
+	}
+	var got struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode secret response: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got.Value)
+	if err != nil {
+		t.Fatalf("decode secret value: %v", err)
+	}
+	if string(decoded) != string(value) {
+		t.Fatalf("secret value = %q, want %q", decoded, value)
+	}
+}
+
 // TestControlDeployInterception covers the server-side compatibility gate
 // (ADR-065): a permissive local dev runtime must not smuggle a deploy the
 // platform cannot run.
