@@ -795,7 +795,7 @@ func TestDoRuntimeLogTailUnavailable(t *testing.T) {
 		t.Skipf("workerd unavailable: %v", err)
 	}
 	var mu sync.Mutex
-	var msgs []string
+	var logRequests int
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/internal/bundle":
@@ -807,12 +807,8 @@ func TestDoRuntimeLogTailUnavailable(t *testing.T) {
 		case "/v1/internal/do/alarm/upsert":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/internal/logs":
-			var batch []map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&batch)
 			mu.Lock()
-			for _, b := range batch {
-				msgs = append(msgs, fmt.Sprint(b["message"]))
-			}
+			logRequests++
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
@@ -856,10 +852,10 @@ func TestDoRuntimeLogTailUnavailable(t *testing.T) {
 	}
 	time.Sleep(600 * time.Millisecond)
 	mu.Lock()
-	got := append([]string(nil), msgs...)
+	got := logRequests
 	mu.Unlock()
-	if len(got) != 0 {
-		t.Fatalf("platform log entries = %v, want none", got)
+	if got != 0 {
+		t.Fatalf("platform /v1/internal/logs requests = %d, want none", got)
 	}
 	cancel()
 	select {

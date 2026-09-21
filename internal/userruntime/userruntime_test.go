@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -2952,6 +2953,98 @@ export default {
 };
 `
 
+// TestWorkerLoaderNativeTail records the pinned stock workerd boundary for
+// native Tail Workers. The workerLoader callback really supplies the dynamic
+// `tails: [{name: "tenant-tail"}]` definition; on the pinned binary it is
+// rejected because the JS API expects a Fetcher, not a service designator.
+//
+// Keep this as a minimal, standalone config rather than hiding the attempted
+// tail behind user-runtime's normal loader: a future workerd upgrade must make
+// this test fail before platform log capture is reconsidered.
+func TestWorkerLoaderNativeTail(t *testing.T) {
+	workerd, err := FindWorkerd()
+	if err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	port := freePort(t)
+	files := map[string]string{
+		"host.js": `
+const tenant = 'export default { fetch() { console.log("native-tail-marker"); return new Response("tenant-ok"); } }';
+export default {
+  async fetch(_req, env) {
+    try {
+      const worker = env.LOADER.get("acme/web@1", () => ({
+        compatibilityDate: "2026-06-15",
+        mainModule: "tenant.js",
+        modules: { "tenant.js": tenant },
+        tails: [{ name: "tenant-tail" }],
+      }));
+      return await worker.getEntrypoint().fetch(new Request("http://tenant/"));
+    } catch (err) {
+      return new Response(String(err), { status: 500 });
+    }
+  },
+};
+`,
+		"tail.js": `export default { tail(_events) {} };`,
+		"workerd.capnp": fmt.Sprintf(`using Workerd = import "/workerd/workerd.capnp";
+const config :Workerd.Config = (
+  services = [
+    (name = "tenant-tail", worker = (
+      modules = [(name = "tail.js", esModule = embed "tail.js")],
+      compatibilityDate = "2026-06-15",
+    )),
+    (name = "main", worker = (
+      modules = [(name = "host.js", esModule = embed "host.js")],
+      compatibilityDate = "2026-06-15",
+      bindings = [(name = "LOADER", workerLoader = (id = "native-tail-spike"))],
+    )),
+  ],
+  sockets = [(name = "http", address = "*:%d", http = (), service = "main")],
+);`, port),
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, filepath.Join(dir, "workerd.capnp")) }()
+	client := noProxyClient()
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(base)
+		if err == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read spike response: %v", readErr)
+			}
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("dynamic tails status = %d body=%q, want 500 rejection", resp.StatusCode, body)
+			}
+			if !strings.Contains(string(body), "provided value is not of type 'Fetcher'") {
+				t.Fatalf("dynamic tails rejection = %q, want Fetcher type error", body)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("native-tail spike not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 // TestUserRuntimeLogTailUnavailable documents the approved fallback when the
 // pinned workerLoader rejects native tail service designators: tenant requests
 // still succeed, but console output is not sent to the platform log endpoint.
@@ -2965,7 +3058,7 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 		"workers":   []any{map[string]any{"worker": "web", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}}},
 	}}}
 	var mu sync.Mutex
-	var logs []map[string]any
+	var logRequests int
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -2973,15 +3066,13 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(logTailBundle))
 		case "/v1/internal/logs":
+			mu.Lock()
+			logRequests++
+			mu.Unlock()
 			if r.Header.Get("x-cellhive-internal-token") != "dev-log-token" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			var batch []map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&batch)
-			mu.Lock()
-			logs = append(logs, batch...)
-			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
 			http.NotFound(w, r)
@@ -3026,10 +3117,10 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 	// longer window than that path, then assert that nothing reached the stub.
 	time.Sleep(600 * time.Millisecond)
 	mu.Lock()
-	got := append([]map[string]any(nil), logs...)
+	got := logRequests
 	mu.Unlock()
-	if len(got) != 0 {
-		t.Fatalf("platform log entries = %v, want none", got)
+	if got != 0 {
+		t.Fatalf("platform /v1/internal/logs requests = %d, want none", got)
 	}
 	cancel()
 	select {

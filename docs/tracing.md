@@ -107,7 +107,7 @@ curl -s -u '<user>:<pass>' \
 
 4. 若没数据：确认启动日志有 `otel export enabled endpoint=… ratio=…`、`CELLHIVE_TRACES_SAMPLE_RATIO > 0`、Basic 头正确（`printf %s` 不要带换行）、`5080` 网络可达；OpenObserve 侧可看容器日志是否出现 `POST /api/<org>/v1/traces 200`（UA `OTel OTLP Exporter Go/…`）。
 
-> 只导出 **traces**；OpenObserve 的 logs/metrics 入口（`/api/<org>/v1/logs|metrics`）CellHive 暂不使用（日志走 `cellhive tail`，指标走 Prometheus `/metrics`）。
+> 只导出 **traces**；OpenObserve 的 logs/metrics 入口（`/api/<org>/v1/logs|metrics`）不在这条 trace 验收链路中。当前也不采集租户 console 日志；指标走 Prometheus `/metrics`。
 
 ## 4. 其他后端
 
@@ -126,7 +126,7 @@ CellHive 指向 `CELLHIVE_OTLP_ENDPOINT=http://collector:4318`（无 headers）�
 
 ## 4.5 日志关联与多租户（推荐）
 
-- **trace ↔ 日志**：租户日志行现在带 `trace_id`/`span_id`（`log-tail.js` 在 `console.*` 时取当前 `traceparent`，cell-agent 解析进 `logbuf` 并写入 OTLP log record）→ 在 OpenObserve/Tempo 里可从 trace 跳到同请求日志。
+- **trace ↔ 日志**：当前不采集租户 `console.*`（动态 `workerLoader` 的 native Tail Worker 配置在 pinned stock `workerd 2026-06-15` 上被拒绝，旧 `log-tail.js` 已删除），因此不能从 trace 跳到同请求的租户 console 日志。平台可信日志若带 trace 字段，仍可由后端关联。
 - **多租户**：节点 push 到**内网 Collector**（`deploy/observability/`），由 Collector 脱敏、按 `cellhive.namespace` 路由、tail-sample，再落 OpenObserve；租户查询走**后端 org/stream + 用户角色**，平台不暴露查询面，也不把 OTLP 凭据给租户。细节见 [`observability.md`](./observability.md) 的"多租户与对外查询"。
 
 ## 5. 边界与残余
