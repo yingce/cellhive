@@ -175,7 +175,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
-| `CELLHIVE_CAP_EGRESS` | 空（推荐默认） | capability 数据面出口（PLATFORM binding）额外放行的网络段（CIDR/类别，逗号分隔）。capability 走公网域名+TLS 时**无需配置**（allow=public，私网默认被拒=安全默认态）；仅当后续把 runtime-services 切到内网直连优化时才配其内网段 |
+| `CELLHIVE_CAP_EGRESS` | 空（推荐默认） | capability 数据面出口（PLATFORM binding）额外放行的网络段（CIDR/类别，逗号分隔，OR 关系）。capability 走公网域名+TLS 时**无需配置**（私网默认被拒=安全默认态）；runtime-services 要走内网直连时补其 CIDR 段（如 `10.20.0.0/16`）或单 IP（`10.20.1.5/32`） |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 空 | BYO AI 端点与密钥；空=不注入 |
 
 ## do-runtime
