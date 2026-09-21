@@ -2,9 +2,8 @@
 //
 // Imported FIRST by the platform wrapper (before the tenant module) so tenant
 // module-level console output is captured too. It patches console.*, buffers
-// lines, and ships them to cell-agent's bounded log buffer via the PLATFORM
-// service binding. Non-durable; the LOG_TOKEN only authorizes this endpoint.
-import { env } from "cloudflare:workers";
+// lines, and ships them to cell-agent's bounded log buffer through a dispatcher
+// supplied platform capability. Non-durable; the LOG_TOKEN only authorizes this endpoint.
 
 const levels = ["log", "info", "warn", "error", "debug"];
 const MAX_BATCH = 64;
@@ -20,12 +19,6 @@ function fmt(a) {
 }
 
 export function installLogTail() {
-  // LOG_TOKEN arrives via the module-scope __cellhivePlatform const (ADR-074):
-// role credentials never enter the tenant env. LOG_NS/LOG_WORKER stay in env
-// (plain labels, not secrets).
-  // The sink is a platform-side entrypoint stub (fixed path + internal token);
-  // the tenant isolate holds no transport or role credential (ADR-074).
-  const bridge = env && env.CH_PLATFORM;
   if (!bridge || typeof bridge.logSend !== "function") {
     return;
   }
@@ -73,4 +66,8 @@ export function installLogTail() {
   }
 }
 
-installLogTail();
+let bridge;
+export function setLogBridge(next) {
+  bridge = next;
+  installLogTail();
+}

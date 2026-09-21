@@ -547,11 +547,9 @@ func wsReadText(r *bufio.Reader) (string, error) {
 	return string(p), nil
 }
 
-// TestWorkflowStepsStubIsScoped asserts the security boundary of the
-// platform-side step stub (ADR-184): the tenant-visible CH_WF_STEPS accepts
-// only known op names (never a raw path, so the internal token cannot become an
-// open relay) and the namespace is forced to the caller worker's own — a tenant
-// cannot address another namespace.
+// TestWorkflowStepsStubIsScoped proves that workflow callbacks receive their
+// identity from the trusted dispatcher capability, not tenant-visible env or
+// event data (ADR-184).
 func TestWorkflowStepsStubIsScoped(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
@@ -560,42 +558,39 @@ func TestWorkflowStepsStubIsScoped(t *testing.T) {
 	var seen []string
 
 	const probe = `
-export default {
-  async fetch(req, env) {
-    const out = [];
-    // 1. a raw path (old API shape) must be rejected
-    try { await env.CH_PLATFORM.workflowStep("/v1/control/apps", "GET", null); out.push("rawpath:ACCEPTED"); }
-    catch (e) { out.push("rawpath:rejected"); }
-    // 2. an unknown op must be rejected
-    try { await env.CH_PLATFORM.workflowStep("control.apps", {}, null); out.push("badop:ACCEPTED"); }
-    catch (e) { out.push("badop:rejected"); }
-    // 3. a forged ns must be ignored (the stub binds the caller's namespace)
-    try { const r = await env.CH_PLATFORM.workflowStep("state.get", { ns: "evil", workflow: "MY_WF", id: "i1" }, null); out.push("forgedns:" + r.status); }
-    catch (e) { out.push("forgedns:threw"); }
-    return new Response(out.join(" | "));
+import { WorkflowEntrypoint } from "cloudflare:workers";
+export class Probe extends WorkflowEntrypoint {
+  async run(event, step) {
+    return step.do("secure", async () => "ok:" + event.payload.ns);
   }
-};
+}
 `
-
-	proj := map[string]any{"apps": []any{map[string]any{
-		"namespace": "acme",
-		"routes":    []any{map[string]any{"host": "steps.test", "worker": "probe"}},
-		"workers": []any{map[string]any{
-			"worker": "probe", "active": 1,
-			"version": map[string]any{"number": 1, "bundle_sha": "shaSteps"},
-		}},
-	}}}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
-			serveProjection(proj, w, r)
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(probe))
-		case "/v1/internal/workflow/state":
+		case "/v1/internal/workflow/state", "/v1/internal/workflow/step", "/v1/internal/workflow/attempt", "/v1/internal/workflow/finish":
 			mu.Lock()
 			seen = append(seen, r.URL.RawQuery)
 			mu.Unlock()
-			_, _ = w.Write([]byte(`{"status":"running"}`))
+			switch r.URL.Path {
+			case "/v1/internal/workflow/state":
+				_, _ = w.Write([]byte(`{"status":"running"}`))
+			case "/v1/internal/workflow/step":
+				if r.Method == http.MethodGet {
+					_, _ = w.Write([]byte(`{"found":false}`))
+				} else {
+					_, _ = w.Write([]byte(`{"ok":true}`))
+				}
+			case "/v1/internal/workflow/attempt":
+				if r.Method == http.MethodGet {
+					_, _ = w.Write([]byte(`{"attempts":0}`))
+				} else {
+					_, _ = w.Write([]byte(`{"ok":true}`))
+				}
+			default:
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -604,7 +599,7 @@ export default {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -618,10 +613,10 @@ export default {
 	go func() { done <- Run(ctx, workerd, capnpPath) }()
 
 	client := noProxyClient()
-	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	internal := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
 	deadline := time.Now().Add(25 * time.Second)
 	for {
-		resp, err := client.Get(public + "/healthz")
+		resp, err := client.Get(internal + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -632,8 +627,14 @@ export default {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	req, _ := http.NewRequest(http.MethodGet, public+"/probe", nil)
-	req.Host = "steps.test"
+	payload, _ := json.Marshal(map[string]any{
+		"namespace": "acme", "worker": "probe", "bundle_sha": "shaSteps",
+		"workflow": "MY_WF", "class_name": "Probe", "id": "i1", "run_token": "trusted-run",
+		"params": base64.StdEncoding.EncodeToString([]byte(`{"ns":"evil","workflow":"EVIL_WF","id":"evil-id","run":"evil-run"}`)),
+	})
+	req, _ := http.NewRequest(http.MethodPost, internal+"/v1/workflows/run", bytes.NewReader(payload))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("x-cellhive-internal-token", "tok")
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -641,10 +642,12 @@ export default {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{"rawpath:rejected", "badop:rejected", "forgedns:200"} {
-		if !strings.Contains(string(body), want) {
-			t.Fatalf("probe %q missing in: %s", want, body)
-		}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode workflow response %q: %v", body, err)
+	}
+	if out["status"] != "complete" {
+		t.Fatalf("workflow run = %+v", out)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -652,8 +655,12 @@ export default {
 		t.Fatal("workflow state endpoint was never reached")
 	}
 	for _, qs := range seen {
-		if !strings.Contains(qs, "ns=acme") || strings.Contains(qs, "evil") {
-			t.Fatalf("namespace not forced to the caller's own: %q", qs)
+		q, err := url.ParseQuery(qs)
+		if err != nil {
+			t.Fatalf("parse query %q: %v", qs, err)
+		}
+		if q.Get("ns") != "acme" || q.Get("workflow") != "MY_WF" || q.Get("id") != "i1" || q.Get("run") != "trusted-run" {
+			t.Fatalf("workflow capability identity was not dispatcher-bound: %q", qs)
 		}
 	}
 
@@ -676,12 +683,12 @@ func TestTenantEnvHasNoPlatformCredentials(t *testing.T) {
 	}
 
 	const leakProbe = `
+import { env as workerEnv } from "cloudflare:workers";
 export default {
   async fetch(req, env) {
     return Response.json({
-      cellToken: typeof env.CELL_TOKEN === "undefined" ? "absent" : "LEAKED",
-      cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED-URL",
-      platformBinding: typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT",
+      handler: { chPlatform: env.CH_PLATFORM === "user-value" ? "user-value" : typeof env.CH_PLATFORM, cellToken: typeof env.CELL_TOKEN === "undefined" ? "absent" : "LEAKED", cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED-URL", platform: typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT" },
+      imported: { chPlatform: workerEnv.CH_PLATFORM === "user-value" ? "user-value" : typeof workerEnv.CH_PLATFORM, cellToken: typeof workerEnv.CELL_TOKEN === "undefined" ? "absent" : "LEAKED", cellUrl: typeof workerEnv.CELL_URL === "undefined" ? "absent" : "LEAKED-URL", platform: typeof workerEnv.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT" },
       globalLeak: typeof globalThis.__cellhivePlatform === "undefined" ? "absent" : "LEAKED",
       logToken: typeof env.LOG_TOKEN === "undefined" ? "absent" : "LEAKED",
     });
@@ -695,7 +702,7 @@ export default {
 		"workers": []any{map[string]any{
 			"worker":  "probe",
 			"active":  1,
-			"version": map[string]any{"number": 1, "bundle_sha": "shaProbe"},
+			"version": map[string]any{"number": 1, "bundle_sha": "shaProbe", "vars": map[string]string{"CH_PLATFORM": "user-value"}},
 		}},
 	}}}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -751,17 +758,23 @@ export default {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var out struct {
-		CellToken       string `json:"cellToken"`
-		GlobalLeak      string `json:"globalLeak"`
-		LogToken        string `json:"logToken"`
-		CellURL         string `json:"cellUrl"`
-		PlatformBinding string `json:"platformBinding"`
+		Handler    map[string]string `json:"handler"`
+		Imported   map[string]string `json:"imported"`
+		GlobalLeak string            `json:"globalLeak"`
+		LogToken   string            `json:"logToken"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("decode %q: %v", body, err)
 	}
-	if out.CellToken != "absent" {
-		t.Fatalf("internal token leaked into tenant env")
+	for name, got := range map[string]map[string]string{"handler": out.Handler, "imported": out.Imported} {
+		if got["chPlatform"] != "user-value" {
+			t.Fatalf("%s env CH_PLATFORM = %q, want user-value", name, got["chPlatform"])
+		}
+		for key, want := range map[string]string{"cellToken": "absent", "cellUrl": "absent", "platform": "absent"} {
+			if got[key] != want {
+				t.Fatalf("%s env %s = %q, want %q", name, key, got[key], want)
+			}
+		}
 	}
 	if out.GlobalLeak != "absent" {
 		t.Fatalf("platform consts leaked into tenant global scope")
@@ -769,15 +782,6 @@ export default {
 	if out.LogToken != "absent" {
 		t.Fatalf("log token leaked into tenant env")
 	}
-	// DO/Workflow are platform-side stubs now, so no transport binding and no
-	// backend address reach the tenant env at all (WDL alignment).
-	if out.PlatformBinding != "absent" {
-		t.Fatalf("platform transport leaked into tenant env: %q", out.PlatformBinding)
-	}
-	if out.CellURL != "absent" {
-		t.Fatalf("backend address leaked into tenant env: %q", out.CellURL)
-	}
-
 	cancel()
 	select {
 	case <-done:

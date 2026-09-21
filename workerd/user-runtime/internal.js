@@ -82,7 +82,8 @@ async function dispatchQueues(req, env, ctx) {
   // the tenant-side wrapper build the CF MessageBatch (ADR-154).
   const payload = { messages: batch, queue, traceparent: body.traceparent };
   try {
-    const out = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
+    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker: body.worker } });
+    const out = await stub.getEntrypoint("CellHiveHost").handleQueue(payload, bridge);
     // The wrapper returns {result, ack, retry}; older returns are the raw value.
     const result = out && typeof out === "object" && "result" in out ? out.result : out;
     return json({
@@ -112,7 +113,8 @@ async function dispatchTimers(req, env, ctx) {
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
-    const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
+    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker } });
+    const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event, bridge);
     return json({ ok: true, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, result: result === undefined ? null : result });
   } catch (e) {
     return json({ error: "handler_failed", message: String(e) }, 500);
@@ -145,7 +147,9 @@ async function dispatchServiceFetch(req, env, ctx) {
   try {
     const host = stub.getEntrypoint("CellHiveHost");
     const req = new Request(targetURL || "http://service/", init);
-    const r = entrypoint ? await host.callMethod(entrypoint, "fetch", [req]) : await host.fetch(req);
+    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker: body.worker } });
+    if (entrypoint) await host.setLogging(bridge);
+    const r = entrypoint ? await host.callMethod(entrypoint, "fetch", [req]) : await host.handleFetch(req, bridge);
     return new Response(await r.arrayBuffer(), {
       status: r.status,
       headers: { "content-type": r.headers.get("content-type") || "text/plain" },
@@ -169,7 +173,10 @@ async function dispatchServiceRun(req, env, ctx) {
     return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
   }
   try {
-    const result = await stub.getEntrypoint("CellHiveHost").callMethod(entrypoint || "", method, args || [], body.traceparent);
+    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker } });
+    const host = stub.getEntrypoint("CellHiveHost");
+    await host.setLogging(bridge);
+    const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent);
     return json({ result: result === undefined ? null : result });
   } catch (e) {
     return json({ error: "service_failed", message: String(e) }, 500);
@@ -190,10 +197,17 @@ async function dispatchWorkflows(req, env, ctx) {
     return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
   }
   try {
+    const bridge = ctx.exports.PlatformBridge({ props: {
+      ns: body.namespace,
+      worker: body.worker,
+      workflow: body.workflow,
+      id: body.id,
+      run: body.run_token || "",
+    } });
     const out = await stub.getEntrypoint("CellHiveWorkflow").handleRun(class_name, {
       instanceId: id,
       event: { payload: decodeBody(body.params), instanceId: id, timestamp: new Date() },
-    });
+    }, bridge);
     return json({ ok: true, workflow, id, ...(out || {}) });
   } catch (e) {
     return json({ error: "workflow_failed", message: String(e) }, 500);
@@ -225,10 +239,7 @@ async function loadWorkflowWorker(env, ctx, body) {
       "rpc-codec.js": env.RPC_CODEC_SRC,
       "log-tail.js": platformConsts(env, spec && spec.bindings) + env.LOG_TAIL_SRC,
     },
-    // Workflow identity travels in the steps stub's props (ADR-184), not in the
-    // tenant env.
-    env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker,
-      { workflow: body.workflow, id: body.id, run: body.run_token || "" }),
+    env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
   }));
 }
@@ -242,12 +253,11 @@ function platformConsts(env, spec) {
   return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
-// tenantEnv builds the loaded env: vars + migrated entrypoint stubs, with
-// Platform keys: the DO WebSocket transport and the CH_PLATFORM bridge.
-// The internal token is NOT put here: it reaches platform wrappers via the
+// tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
+// internal token is NOT put here: it reaches platform wrappers via the
 // module-scope __cellhivePlatform const appended to their source (ADR-074 —
 // the tenant env must not carry internal/platform credentials).
-function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
+function tenantEnv(env, ctx, spec, vars) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
   for (const [name, b] of Object.entries(spec || {})) {
@@ -268,18 +278,6 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   // transport any more — fail loudly instead of dropping the binding.
   if (Object.keys(unmigrated).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
-  }
-  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
-  // alignment): no PLATFORM/CELL_URL enters the tenant env. The only platform
-  // key is the CH_PLATFORM bridge (workflow steps + log ring, identity bound
-  // in props); the DO WebSocket upgrade crosses RPC as the return value of the
-  // namespace entrypoint's fetch(request) method (ADR-184).
-  const ex = ctx && ctx.exports;
-  if (ex && ex.PlatformBridge) {
-    out.CH_PLATFORM = ex.PlatformBridge({ props: {
-      ns, worker,
-      workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
-    } });
   }
   return out;
 }

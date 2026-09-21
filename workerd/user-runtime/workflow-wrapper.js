@@ -4,7 +4,7 @@
 // calls the named WorkflowEntrypoint class's run(event, step). `step` calls back
 // to cell-agent to memoize step results and schedule sleeps, so a re-dispatched
 // attempt resumes from the last durable step.
-import "log-tail.js";
+import { setLogBridge } from "log-tail.js";
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError } from "cellhive-workflow.js";
@@ -41,36 +41,36 @@ function b64decode(s) {
 }
 
 export class CellHiveWorkflow extends WorkerEntrypoint {
-  async handleRun(className, eventJson) {
+  async handleRun(className, eventJson, workflowBridge) {
+    setLogBridge(workflowBridge);
     const cls = tenant[className];
     if (typeof cls !== "function") {
       throw new Error("no WorkflowEntrypoint class " + className + " exported by the bundle");
     }
     const env = this.env;
     const bindings = env;
-    const step = makeStep(env, eventJson.instanceId);
+    const step = makeStep(workflowBridge, eventJson.instanceId);
     const inst = new cls(this.ctx, bindings);
     try {
       const out = await inst.run(eventJson.event, step);
-      await finish(env, eventJson.instanceId, out);
+      await finish(workflowBridge, eventJson.instanceId, out);
       return { status: "complete" };
     } catch (e) {
       if (e instanceof SleepSignal) return { status: "sleeping" };
       if (e instanceof StopSignal) return { status: "stopped" };
-      await finishError(env, eventJson.instanceId, String(e && e.message ? e.message : e));
+      await finishError(workflowBridge, eventJson.instanceId, String(e && e.message ? e.message : e));
       return { status: "errored", error: String(e && e.message ? e.message : e) };
     }
   }
 }
 
 // call routes one workflow step callback to cell-agent through the
-// platform-side PlatformBridge entrypoint stub (env.CH_PLATFORM). The stub owns
+// platform-side PlatformBridge entrypoint stub passed by the dispatcher. The stub owns
 // the :7001 transport and the internal token, and it accepts a fixed op name
 // (never a raw path) with the namespace forced to this worker — so the tenant
 // cannot turn it into a generic relay. Returns a Response-shaped view for the
 // step helpers below.
-function call(env, op, params, init) {
-  const bridge = env.CH_PLATFORM;
+function call(bridge, op, params, init) {
   if (!bridge || typeof bridge.workflowStep !== "function") {
     return Promise.reject(new Error("workflow: step transport unavailable"));
   }
@@ -98,39 +98,39 @@ function retryDelayMs(retries, attempt) {
   }
 }
 
-function makeStep(env, id) {
-  // Identity (ns/workflow/id/run) is bound into the CH_PLATFORM stub's props.
+function makeStep(bridge, id) {
+  // Identity (ns/workflow/id/run) is bound into the dispatcher bridge's props.
   const base = () => ({});
   const named = (name) => ({ name });
 
   async function getAttempt(name) {
-    const r = await call(env, "attempt.get", named(name));
+    const r = await call(bridge, "attempt.get", named(name));
     if (!r.ok) return 0;
     return (await r.json()).attempts || 0;
   }
   async function setAttempt(name, attempts, message) {
-    await call(env, "attempt.put", Object.assign(named(name), { attempts, error: message || "" }));
+    await call(bridge, "attempt.put", Object.assign(named(name), { attempts, error: message || "" }));
   }
   async function clearAttempt(name) {
-    await call(env, "attempt.delete", named(name));
+    await call(bridge, "attempt.delete", named(name));
   }
 
   // Cooperative pause/terminate: at each step boundary, a fenced token (409) or a
   // paused/terminated status stops the run instead of advancing further.
   async function checkState() {
-    const r = await call(env, "state.get", base());
+    const r = await call(bridge, "state.get", base());
     if (r.status === 409) throw new StopSignal();
     if (!r.ok) return;
     const st = (await r.json()).status;
     if (st === "paused" || st === "terminated" || st === "complete") throw new StopSignal();
   }
   async function getStep(name) {
-    const r = await call(env, "step.get", named(name));
+    const r = await call(bridge, "step.get", named(name));
     if (!r.ok) throw new Error("step get " + r.status);
     return await r.json();
   }
   async function putStep(name, value) {
-    const r = await call(env, "step.put", named(name), {
+    const r = await call(bridge, "step.put", named(name), {
       body: b64encode(JSON.stringify(value === undefined ? null : value)),
     });
     if (!r.ok) throw new Error("step put " + r.status);
@@ -161,7 +161,7 @@ function makeStep(env, id) {
         if (next > limit) throw e;
         // Park; a timer re-dispatches after the backoff delay.
         const wake = Date.now() + retryDelayMs(retries, attempts);
-        await call(env, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
+        await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
         throw new SleepSignal();
       }
     },
@@ -175,7 +175,7 @@ function makeStep(env, id) {
       }
       const wake = Date.now() + (typeof durationMs === "number" ? durationMs : 0);
       await putStep(name, { wake_at_ms: wake });
-      const r = await call(env, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
+      const r = await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
       if (!r.ok) throw new Error("step sleep " + r.status);
       throw new SleepSignal();
     },
@@ -187,7 +187,7 @@ function makeStep(env, id) {
       if (got.found) return got.result ? JSON.parse(b64decode(got.result)) : undefined;
       const type = options.type || "";
       const consume = async () => {
-        const r = await call(env, "event.consume", Object.assign(named(name), { type }));
+        const r = await call(bridge, "event.consume", Object.assign(named(name), { type }));
         if (!r.ok) throw new Error("waitForEvent consume " + r.status);
         return await r.json();
       };
@@ -195,24 +195,24 @@ function makeStep(env, id) {
       if (found.found) {
         const val = found.event ? JSON.parse(b64decode(found.event)) : undefined;
         await putStep(name, val);
-        await call(env, "wait.delete", named(name));
+        await call(bridge, "wait.delete", named(name));
         return val;
       }
       const timeoutMs = typeof options.timeout === "number" ? options.timeout * 1000 : 0;
       const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
       // On resume, honor an elapsed timeout.
-      const wr = await call(env, "wait.get", named(name));
+      const wr = await call(bridge, "wait.get", named(name));
       if (wr.ok) {
         const wj = await wr.json();
         if (wj.found && wj.deadline_ms > 0 && Date.now() >= wj.deadline_ms) {
           await putStep(name, null);
-          await call(env, "wait.delete", named(name));
+          await call(bridge, "wait.delete", named(name));
           return undefined;
         }
       }
-      await call(env, "wait.put", Object.assign(named(name), { deadline_ms: deadline }));
+      await call(bridge, "wait.put", Object.assign(named(name), { deadline_ms: deadline }));
       if (deadline > 0) {
-        const sr = await call(env, "sleep", Object.assign(named(name), { wake_at_ms: deadline }));
+        const sr = await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: deadline }));
         if (!sr.ok) throw new Error("waitForEvent sleep " + sr.status);
       }
       throw new SleepSignal();
@@ -224,14 +224,14 @@ function makeStep(env, id) {
   };
 }
 
-async function finish(env, id, output) {
-  await call(env, "finish", {}, {
+async function finish(bridge, id, output) {
+  await call(bridge, "finish", {}, {
     body: b64encode(JSON.stringify(output === undefined ? null : output)),
   });
 }
 
-async function finishError(env, id, message) {
-  await call(env, "finish.error", { error: message });
+async function finishError(bridge, id, message) {
+  await call(bridge, "finish.error", { error: message });
 }
 
 export default {

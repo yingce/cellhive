@@ -11,7 +11,7 @@
 // the do-runtime host, so tenant DO classes extend this base class and get the
 // shimmed storage.
 
-import "log-tail.js";
+import { setLogBridge } from "log-tail.js";
 import { DurableObject as NativeDurableObject } from "cloudflare:workers";
 
 export * from "cloudflare:workers";
@@ -26,6 +26,7 @@ function define(target, name, value) {
 export class DurableObject extends NativeDurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    if (ctx && ctx.props && ctx.props.logBridge) setLogBridge(ctx.props.logBridge);
     const storage = ctx.storage;
     const rawGet = storage.get.bind(storage);
     const rawPut = storage.put.bind(storage);

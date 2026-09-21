@@ -163,7 +163,8 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     "cellhive.worker": worker,
   });
   try {
-    const res = await stub.getEntrypoint("CellHiveHost").fetch(traced);
+    const bridge = ctx.exports.PlatformBridge({ props: { ns: app.namespace, worker } });
+    const res = await stub.getEntrypoint("CellHiveHost").handleFetch(traced, bridge);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
     return res;
@@ -232,7 +233,7 @@ setServiceLoader(async (ctx, env, target) => {
 
 // tenantEnv builds the loaded worker env: vars + entrypoint stubs for migrated
 // bindings; every kind is a platform-side stub (ADR-184).
-function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
+function tenantEnv(env, ctx, spec, vars) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
   const r2names = [];
@@ -243,35 +244,11 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
       if (b && b.kind === "r2") r2names.push(name);
     } else unmigrated[name] = b;
   }
-  // A user var/binding in the platform's reserved namespace would be
-  // overwritten by (or shadow) a platform control key; deploys reject these,
-  // and this guards any legacy/other writer.
-  for (const name of [...Object.keys(vars || {}), ...Object.keys(spec || {})]) {
-    if (name.startsWith("CH_") || name.startsWith("CELL_") || name.startsWith("__cellhive") || name === "PLATFORM") {
-      console.error("cellhive: user env name collides with a platform key:", name);
-    }
-  }
   // All binding kinds are platform-side stubs now; a leftover entry means a
   // new kind was added without a stub, and the old facade fallback has no
   // transport any more — fail loudly instead of dropping the binding.
   if (Object.keys(unmigrated).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
-  }
-  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
-  // alignment): no PLATFORM/CELL_URL enters the tenant env, and the DO
-  // WebSocket upgrade travels as the return value of the namespace entrypoint's
-  // fetch(request) method (ADR-184), so no tenant-visible transport is needed.
-  //
-  // Data-only stubs for workflow step callbacks and the log ring (no transport
-  // is exposed). ctx.exports may be absent on the assets-only path, so guard.
-  const ex = ctx && ctx.exports;
-  if (ex && ex.PlatformBridge) {
-    // One reserved key carries both the workflow step op table and the log ring
-    // ingest; identity is bound here, never taken from the caller.
-    out.CH_PLATFORM = ex.PlatformBridge({ props: {
-      ns, worker,
-      workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
-    } });
   }
   return out;
 }

@@ -801,15 +801,10 @@ export class Vectorize extends WorkerEntrypoint {
   }
 }
 
-// PlatformBridge is the single platform-side bridge for the tenant wrappers
-// (workflow step callbacks + the log ring), so the tenant env needs one
-// reserved key (CH_PLATFORM) instead of several. Identity
-// (ns/worker/workflow/id/run) is bound in props, never taken from the caller.
+// PlatformBridge is the platform-side bridge for wrappers that receive an
+// explicit capability over JSRPC. Identity (ns/worker/workflow/id/run) is bound
+// in props, never taken from the caller.
 export class PlatformBridge extends WorkerEntrypoint {
-  // One platform-side bridge for the tenant wrappers, so the tenant env needs a
-  // single reserved key (CH_PLATFORM) instead of several. Identity
-  // (ns/worker/workflow/id/run) is bound in props, never taken from the caller.
-  //
   // Fixed op -> (method, path) table for workflow step callbacks: the wrapper
   // picks an op, never a raw path, so the internal token cannot be turned into
   // an open relay or a cross-tenant tool.

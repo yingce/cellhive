@@ -387,24 +387,11 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
       if (spec && spec.kind === "r2") r2names.push(name);
     } else facades[name] = spec; // DO/Workflow: local facades via bindings-wrapper
   }
-  for (const name of [...Object.keys(bs.vars || {}), ...Object.keys(bs.bindings || {})]) {
-    if (name.startsWith("CH_") || name.startsWith("CELL_") || name.startsWith("__cellhive") || name === "PLATFORM") {
-      console.error("cellhive: user env name collides with a platform key:", name);
-    }
-  }
   if (Object.keys(facades).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(facades).join(","));
   }
   // Facade metadata and binding-name lists travel in the wrapper module scope
-  // (platformConsts), not the facet env; the only platform key left is the
-  // CH_PLATFORM bridge (the DO WebSocket upgrade needs no tenant transport —
-  // ADR-184).
-  const ex = ctx && ctx.exports;
-  const facetNS = (spec && spec.namespace) || "";
-  const facetWorker = (spec && spec.worker) || "";
-  if (ex && ex.PlatformBridge) {
-    env.CH_PLATFORM = ex.PlatformBridge({ props: { ns: facetNS, worker: facetWorker } });
-  }
+  // (platformConsts), not the facet env.
   return env;
 }
 
@@ -875,7 +862,10 @@ export class Host extends DurableObject {
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
       }));
       const cls = loaded.getDurableObjectClass(spec.class, {
-        props: { namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard },
+        props: {
+          namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
+          logBridge: this.ctx.exports.PlatformBridge({ props: { ns: spec.namespace, worker: spec.worker } }),
+        },
       });
       return { class: cls, id: facetId };
     });

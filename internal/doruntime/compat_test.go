@@ -325,16 +325,22 @@ func TestDoRuntimeDeleteAllSQLCaptured(t *testing.T) {
 }
 
 const doBindingTenant = `
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, env as workerEnv } from "cloudflare:workers";
 export class Tenant extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     // CF documented param-style: the constructor's env argument.
     this.paramHasKV = !!(env && env.KV);
+    this.paramPlatform = env && env.CH_PLATFORM;
+    this.thisPlatform = this.env && this.env.CH_PLATFORM;
+    this.importedPlatform = workerEnv.CH_PLATFORM;
+    this.noPlatformKeys = [env, this.env, workerEnv].every((e) =>
+      typeof e.CELL_URL === "undefined" && typeof e.CELL_TOKEN === "undefined" && typeof e.PLATFORM === "undefined");
   }
   async fetch(req) {
     const p = new URL(req.url).pathname;
     if (p === "/param") return new Response("param-has-kv:" + (this.paramHasKV ? "yes" : "no"));
+    if (p === "/env") return new Response(JSON.stringify({ param: this.paramPlatform, thisEnv: this.thisPlatform, imported: this.importedPlatform, noPlatformKeys: this.noPlatformKeys }));
     if (p === "/kvput") { await this.env.KV.put("k", "v1"); return new Response("put"); }
     if (p === "/kvget") { const v = await this.env.KV.get("k"); return new Response("kv:" + v); }
     return new Response("has-kv:" + (this.env && this.env.KV ? "yes" : "no"));
@@ -363,7 +369,7 @@ func TestDoRuntimeBindingInsideDO(t *testing.T) {
 		case "/v1/internal/do/bindings":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "demo", "name": "KV", "token": "t"}},
-				"vars":     map[string]any{},
+				"vars":     map[string]any{"CH_PLATFORM": "user-value"},
 			})
 		case "/v1/internal/do/claim":
 			_ = json.NewEncoder(w).Encode(map[string]any{"epoch": 1, "expiry_ms": time.Now().Add(time.Minute).UnixMilli(), "node": "n1"})
@@ -443,6 +449,9 @@ func TestDoRuntimeBindingInsideDO(t *testing.T) {
 	// constructor-parameter env ALSO sees the binding (CF parity).
 	if _, body := invokeSpec(t, base, spec("/param")); body != "param-has-kv:yes" {
 		t.Fatalf("constructor-param env missing KV: %q", body)
+	}
+	if _, body := invokeSpec(t, base, spec("/env")); body != `{"param":"user-value","thisEnv":"user-value","imported":"user-value","noPlatformKeys":true}` {
+		t.Fatalf("DO env purity = %q", body)
 	}
 	if _, body := invokeSpec(t, base, spec("/kvput")); body != "put" {
 		t.Fatalf("kvput = %q", body)
