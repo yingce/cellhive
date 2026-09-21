@@ -2392,6 +2392,7 @@
 - **理由**：租户 env 不再含任何通用网络出口；私网可达面收敛为「DO WS 的 cluster-only 窄绑定」，其余全部在平台 worker 内完成。与 CF 的一致性提升（CF 租户也只有 namespace 语义的绑定）；与 WDL 的实现方式一致。
 - **代价/边界**：DO WebSocket 依赖窄绑定（需配置 `CELLHIVE_CAP_WS` 才真正收窄，未配置=public+private 回退）。**租户 env 中已无任何凭据**（scoped token 只经 `connectInfo()` 返回到平台 worker 内部使用；ticket 是短时、按分片绑定的一次性凭据）。
 - **残留**：`CH_FACADE_SPEC` 机制保留但**恒为空**（全部 kind 已 stub 化），作为"新 kind 未处理"的哨兵——非空时打 `console.error` 而非静默丢弃。
+- **保留命名空间（防用户命名冲突）**：加载 worker 的 env 仍需承载控制通道键（`CH_*`）——workerd 的 env 是 per-isolate 共享的，wrapper 与租户模块读同一对象，无法只给平台模块。故照 WDL 做法把 `CH_*`/`CELL_*`/`__cellhive*` 与平台身份键（`PLATFORM`/`LOG_NS`/`LOG_WORKER`/`LOG_TOKEN`/`WF_*`）声明为**保留名**：`wranglercompat.ReservedEnvName` 在部署期拒绝落在其中的 var/binding 名，secret 写入端点同样拒绝；tenantEnv/facetEnv 另加防御性 `console.error`。
 - **验证**：`internal/userruntime`（DO fetch/RPC、DO owner hint 直连、vectorize、log tail、workflow 全套、`TestTenantEnvHasNoPlatformCredentials`=PLATFORM/CELL_URL 缺席、`TestTenantWsBindingNarrowed`=窄绑定 allow 生效）、`internal/doruntime`（DO/facet 全套）；`make build/vet/test` 54 包 + `make js-test` 全绿。
 
 ---

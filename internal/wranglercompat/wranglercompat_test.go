@@ -27,6 +27,38 @@ func TestValidateOK(t *testing.T) {
 	}
 }
 
+// TestReservedEnvNamesRejected covers the platform's reserved env namespace
+// (ADR-184): a user var or binding named CH_*/CELL_*/__cellhive* (or a platform
+// identity key) would be silently overwritten by the control channels, so the
+// deploy gate rejects it.
+func TestReservedEnvNamesRejected(t *testing.T) {
+	res := Validate(Input{
+		BundleSHA:         "abc",
+		CompatibilityDate: "2026-06-15",
+		Bindings: []Binding{
+			{Type: "kv", Name: "CH_WF_STEPS"},
+			{Type: "do", Name: "PLATFORM"},
+			{Type: "kv", Name: "KV"}, // fine
+		},
+		Vars: map[string]string{
+			"CELL_TOKEN":  "x",
+			"__cellhiveX": "y",
+			"GREETING":    "hi", // fine
+		},
+		IsRegistered: func(kind, name string) bool { return true },
+	})
+	if res.OK() {
+		t.Fatalf("expected reserved-name errors, got none")
+	}
+	got := map[string]int{}
+	for _, f := range res.Errors {
+		got[f.Code]++
+	}
+	if got["reserved_env_name"] != 4 {
+		t.Fatalf("reserved_env_name findings = %d, want 4 (%+v)", got["reserved_env_name"], res.Errors)
+	}
+}
+
 func TestValidateErrors(t *testing.T) {
 	cases := []struct {
 		name  string

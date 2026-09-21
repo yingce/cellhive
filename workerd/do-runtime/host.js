@@ -386,6 +386,11 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
       if (spec && spec.kind === "r2") r2names.push(name);
     } else facades[name] = spec; // DO/Workflow: local facades via bindings-wrapper
   }
+  for (const name of [...Object.keys(bs.vars || {}), ...Object.keys(bs.bindings || {})]) {
+    if (name.startsWith("CH_") || name.startsWith("CELL_") || name.startsWith("__cellhive") || name === "PLATFORM") {
+      console.error("cellhive: user env name collides with a platform key:", name);
+    }
+  }
   if (Object.keys(facades).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(facades).join(","));
   }

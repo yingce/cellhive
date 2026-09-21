@@ -75,6 +75,41 @@ var RejectedBindingHints = map[string]string{
 
 // KnownCompatibilityFlags are accepted by the pinned workerd. Unknown flags
 // fail closed (workerd rejects them anyway; we surface a stable code first).
+// ReservedEnvPrefixes are env-name prefixes owned by the platform: the loaded
+// worker reads its control channels (CH_*: the platform stubs and per-kind
+// metadata) and platform identity keys (CELL_*) from env, and internal keys use
+// the __cellhive prefix. User vars/secrets/binding names in these namespaces
+// would either be silently overwritten by the platform or shadow a control
+// channel, so deploys reject them (WDL keeps the same reserved-namespace rule).
+var ReservedEnvPrefixes = []string{"CH_", "CELL_", "__cellhive"}
+
+// ReservedEnvNames are exact env keys owned by the platform (historical and
+// current) that carry no CH_/CELL_ prefix.
+var ReservedEnvNames = map[string]bool{
+	"PLATFORM":     true,
+	"LOG_NS":       true,
+	"LOG_WORKER":   true,
+	"LOG_TOKEN":    true,
+	"WF_NS":        true,
+	"WF_NAME":      true,
+	"WF_ID":        true,
+	"WF_RUN_TOKEN": true,
+}
+
+// ReservedEnvName reports whether an env key (var, secret or binding name) is
+// reserved by the platform.
+func ReservedEnvName(name string) bool {
+	if ReservedEnvNames[name] {
+		return true
+	}
+	for _, pfx := range ReservedEnvPrefixes {
+		if strings.HasPrefix(name, pfx) {
+			return true
+		}
+	}
+	return false
+}
+
 var KnownCompatibilityFlags = map[string]bool{
 	"nodejs_compat":                               true,
 	"nodejs_compat_v2":                            true,
@@ -128,6 +163,8 @@ type Input struct {
 	CompatibilityDate  string
 	CompatibilityFlags []string
 	Bindings           []Binding
+	// Vars are the worker's plain-text env vars (binding-name namespace too).
+	Vars map[string]string
 	// UnknownFields are top-level config keys the platform does not recognise.
 	UnknownFields []string
 	// IsRegistered reports whether a resource binding references a
@@ -172,6 +209,12 @@ func Validate(in Input) Result {
 	}
 
 	for i, b := range in.Bindings {
+		if ReservedEnvName(b.Name) {
+			res.Errors = append(res.Errors, Finding{
+				Severity: SeverityError, Code: "reserved_env_name", FieldPath: "bindings[" + strconv.Itoa(i) + "].name",
+				Message: "binding name " + b.Name + " is reserved by the platform (CH_*/CELL_*/__cellhive* and platform identity keys)",
+			})
+		}
 		path := "bindings[" + strconv.Itoa(i) + "].type"
 		if !SupportedBindingKinds[b.Type] {
 			msg := "binding type " + b.Type + " is not supported by the platform"
@@ -200,6 +243,15 @@ func Validate(in Input) Result {
 			res.Errors = append(res.Errors, Finding{
 				Severity: SeverityError, Code: "invalid_binding", FieldPath: "bindings[" + strconv.Itoa(i) + "].class_name",
 				Message: "workflow binding " + b.Name + " requires class_name (the exported WorkflowEntrypoint class)",
+			})
+		}
+	}
+
+	for name := range in.Vars {
+		if ReservedEnvName(name) {
+			res.Errors = append(res.Errors, Finding{
+				Severity: SeverityError, Code: "reserved_env_name", FieldPath: "vars." + name,
+				Message: "var name " + name + " is reserved by the platform (CH_*/CELL_*/__cellhive* and platform identity keys)",
 			})
 		}
 	}

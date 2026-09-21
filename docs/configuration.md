@@ -222,3 +222,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 - 桶角色与凭据：[`storage-and-s3.md`](./storage-and-s3.md)
 
 _最后更新：2026-09-19_
+
+## 保留 env 命名空间
+
+加载 worker 的 env 除用户 `vars`/绑定的 stub 外，还含平台的**控制通道**键：`CH_R2_BINDINGS`、`CH_DO_BINDINGS`、`CH_DO_CONNECT`、`CH_WF_STEPS`、`CH_LOG_SINK`（均无凭据，语义受限）。因此 `CH_*`/`CELL_*`/`__cellhive*` 前缀与 `PLATFORM`/`LOG_NS`/`LOG_WORKER`/`LOG_TOKEN`/`WF_*` 为**保留名**：用户的 var/secret/binding 名若落在其中，部署/写入被拒绝（`reserved_env_name`），避免被平台静默覆盖。

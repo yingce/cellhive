@@ -713,6 +713,7 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) wranglercomp
 		AssetsSHA:          req.AssetsSHA,
 		CompatibilityDate:  req.CompatibilityDate,
 		CompatibilityFlags: req.CompatibilityFlags,
+		Vars:               req.Vars,
 		IsRegistered: func(kind, name string) bool {
 			ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, name)
 			return err == nil && ok
@@ -958,6 +959,11 @@ func (s *Server) handleControlSecretPut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !s.authorizeNS(w, r, req.Namespace) {
+		return
+	}
+	if wranglercompat.ReservedEnvName(req.Key) {
+		writeErr(w, http.StatusBadRequest, "reserved_env_name",
+			"secret name "+req.Key+" is reserved by the platform (CH_*/CELL_*/__cellhive* and platform identity keys)")
 		return
 	}
 	val, err := base64.StdEncoding.DecodeString(req.Value)
