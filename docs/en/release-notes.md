@@ -31,10 +31,10 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - New **single issuance entry point** `cellhive token`; `--key` lets a delegate sign without root; field order `ns,kind,name,iss,exp_ms`, empty `iss` keeps the ADR-074 canonical bytes unchanged.
 - Boundary: token-derived resources (kv/vectorize/service/do) require a concrete name; the external data-plane listener and API-key management are not built.
 
-### Optional OTLP Export for Tenant Logs (ADR-172)
-- `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`): exports logs to the same OTLP endpoint/headers as traces (`/v1/logs`); `tail` exports only while the TTL subscription of `cellhive tail --worker` is active, and stops within ≤60s after exit.
-- Export is side-channel, best-effort, and batched in the background; it does not affect requests. The in-memory ring and `cellhive tail` behavior are unchanged.
-- **Fleet broadcast (ADR-173)**: subscriptions are broadcast to other cell-agent instances via the lease node list (internal endpoint + throttling), so `tail` gating covers the same-named worker served by any node (no need to switch to `all`).
+### Optional OTLP Export for Trusted Platform Logs (ADR-172)
+- `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`): exports logs from **trusted platform producers** to the same OTLP endpoint/headers as traces (`/v1/logs`); `tail` exports only while the TTL subscription of `cellhive tail --worker` is active, and stops within ≤60s after exit.
+- Export is side-channel, best-effort, and batched in the background; it does not affect requests. The in-memory ring and `cellhive tail` behavior likewise apply only to trusted platform producers. Under ADR-185, tenant `console.*` does not enter the ring, tail, or OTLP.
+- **Fleet broadcast (ADR-173)**: subscriptions for trusted platform producers are broadcast to other cell-agent instances via the lease node list (internal endpoint + throttling), so `tail` gating covers the same-named worker served by any node (no need to switch to `all`).
 
 ### Wake Index Fix (ADR-177)
 - The timer wake index is changed to **publish before commit** (the index may only be ahead, never behind); if index write fails, the timer is not committed (fail-closed).

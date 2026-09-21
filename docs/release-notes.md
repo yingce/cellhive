@@ -31,10 +31,10 @@
 - 新增**单一签发入口** `cellhive token`，`--key` 让委派方不持 root 也能签；字段序 `ns,kind,name,iss,exp_ms`，空 `iss` 保持 ADR-074 的 canonical 字节不变。
 - 边界：token 派生的资源（kv/vectorize/service/do）要求具体 name；对外数据面入口与 API key 管理未做。
 
-### 租户日志可选 OTLP 导出（ADR-172）
-- `CELLHIVE_OTLP_LOGS=off|tail|all`（默认 `off`）：用与 traces 相同的 OTLP 端点/headers 导出 logs（`/v1/logs`）；`tail` 只在 `cellhive tail --worker` 的 TTL 订阅有效期间导出，退出后 ≤60s 停。
-- 导出是旁路、best-effort、后台批量，不影响请求；内存 ring 与 `cellhive tail` 行为不变。
-- **fleet 广播（ADR-173）**：订阅会经 lease 节点名单广播到其它 cell-agent（内部端点 + 节流），因此 `tail` 门控覆盖任意节点服务的同名 worker（无需切 `all`）。
+### 可信平台日志可选 OTLP 导出（ADR-172）
+- `CELLHIVE_OTLP_LOGS=off|tail|all`（默认 `off`）：对**可信平台生产者**的日志用与 traces 相同的 OTLP 端点/headers 导出（`/v1/logs`）；`tail` 只在 `cellhive tail --worker` 的 TTL 订阅有效期间导出，退出后 ≤60s 停。
+- 导出是旁路、best-effort、后台批量，不影响请求；内存 ring 与 `cellhive tail` 的行为也只适用于可信平台生产者。ADR-185 下租户 `console.*` 不进入 ring、tail 或 OTLP。
+- **fleet 广播（ADR-173）**：可信平台生产者的订阅会经 lease 节点名单广播到其它 cell-agent（内部端点 + 节流），因此 `tail` 门控覆盖任意节点服务的同名 worker（无需切 `all`）。
 
 ### wake 索引修复（ADR-177）
 - timer 的 wake 索引改为**提交前先发布**（索引只会领先、不会落后）；索引写失败则 timer 不提交（fail-closed）。
