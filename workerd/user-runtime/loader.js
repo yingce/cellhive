@@ -258,21 +258,10 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
   }
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
-  // alignment): no PLATFORM/CELL_URL enters the tenant env. Two narrow
-  // exceptions — the DO WebSocket upgrade (cluster-only WS binding) and
-  // workflow step callbacks (data-only steps stub).
-  const doSpecs = {};
-  let hasWorkflow = false;
-  for (const [name, b] of Object.entries(spec || {})) {
-    if (b && b.kind === "do") doSpecs[name] = b;
-    if (b && b.kind === "workflow") hasWorkflow = true;
-  }
-  if (Object.keys(doSpecs).length > 0 && env.CH_DO_CONNECT) {
-    // The only tenant-visible platform key besides CH_PLATFORM (ADR-184):
-    // a cluster-only transport for the DO WebSocket upgrade. The stub identity
-    // and the scoped token stay in the platform worker.
-    out.CH_DO_CONNECT = env.CH_DO_CONNECT;
-  }
+  // alignment): no PLATFORM/CELL_URL enters the tenant env, and the DO
+  // WebSocket upgrade travels as the return value of the namespace entrypoint's
+  // fetch(request) method (ADR-184), so no tenant-visible transport is needed.
+  //
   // Data-only stubs for workflow step callbacks and the log ring (no transport
   // is exposed). ctx.exports may be absent on the assets-only path, so guard.
   const ex = ctx && ctx.exports;

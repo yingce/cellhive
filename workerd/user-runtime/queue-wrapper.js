@@ -30,14 +30,13 @@ import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 // bindings-wrapper (ADR-090). Migrated bindings are already entrypoint stubs.
 try {
 
-  // DO namespaces arrive as platform-side entrypoint stubs; wrap them so a
-  // WebSocket upgrade (the one case that cannot cross RPC) routes through the
-  // dedicated cluster-only WS binding.
-  if (__cellhivePlatform.doBindings.length > 0 && __env.CH_DO_CONNECT) {
+  // DO namespaces arrive as platform-side entrypoint stubs; rebuild the
+  // CF-shaped facade on top of them (fetch(request)/rpcObject; ADR-184).
+  if (__cellhivePlatform.doBindings.length > 0) {
     for (const name of __cellhivePlatform.doBindings) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
-          value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
+          value: makeDOFromStub(__env[name]),
           writable: true, configurable: true, enumerable: true,
         });
       }

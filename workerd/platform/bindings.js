@@ -12,7 +12,7 @@
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
-  RPC_METHOD_RE, RPC_RESERVED_METHODS,
+  RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 import { makeDOTransport } from "facades.js";
 
@@ -617,43 +617,20 @@ export class ServiceBinding extends WorkerEntrypoint {
   }
 }
 
-// --- Durable Objects (WDL alignment, ADR-090) ------------------------------
+// --- Durable Objects (WDL alignment, ADR-090/ADR-184) ----------------------
 //
 // The namespace entrypoint runs in the trusted platform worker: the :7001
 // transport, the per-binding scoped token, and the owner-hint cache all stay
 // here. Tenants only ever receive RPC stubs, so no platform transport (and no
-// generic network binding) is needed in the tenant env. The single exception
-// that cannot cross RPC is a WebSocket upgrade; the tenant-side facade routes
-// that one case through a dedicated cluster-only service binding.
-class DOStubTarget extends RpcTarget {
-  #t;
-  #id;
-  constructor(t, id) {
-    super();
-    this.#t = t;
-    this.#id = String(id);
-  }
-  // Explicit methods only: workerd RPC dispatches by name on the returned
-  // RpcTarget, so arbitrary DO methods are forwarded as (method, args) data by
-  // the tenant-side facade (facades.js makeDOFromStub) — a Proxy over the
-  // target is not recognised as an RpcTarget by the RPC layer.
-  async fetch(input, init) {
-    return await this.#t.__call(this.#id, input, init);
-  }
-  async rpc(method, args) {
-    if (typeof method !== "string" || !RPC_METHOD_RE.test(method) ||
-        method.startsWith("__ch") || RPC_RESERVED_METHODS.has(method)) {
-      throw new Error("do: rpc method " + method + " is not allowed");
-    }
-    return await this.#t.__rpc(this.#id, method, args);
-  }
-  // Owner lookup for the tenant-side WebSocket upgrade: the platform worker
-  // performs the lookup with its own scoped token and returns the ready URL
-  // plus the shard ticket as data.
-  async connectInfo() {
-    return await this.#t.__connectInfo(this.#id);
-  }
-}
+// generic network binding) is needed in the tenant env.
+//
+// The object id travels as an ARGUMENT to a method on this entrypoint, never
+// as an RpcTarget the tenant calls: a WebSocket upgrade can cross workerLoader
+// RPC only as the return value of an entrypoint-stub method. Returning the same
+// 101 from an RpcTarget instance fails ("Could not serialize object of type
+// WebSocket"; pinned-workerd experiment). WDL's do-client uses the same
+// fetch(request)/rpcObject shape; facades.js makeDOFromStub rebuilds the CF-shaped
+// env.NS.get(id).fetch(...) on the tenant side over these two methods.
 
 // Module-level transport cache: workerLoader may instantiate the entrypoint
 // per RPC call, so an instance field would drop the owner-hint cache between
@@ -677,8 +654,27 @@ export class DurableObjectNamespace extends WorkerEntrypoint {
   #transport() {
     return doTransportFor(this.env, this.ctx.props || {});
   }
-  async get(id) { return new DOStubTarget(this.#transport(), id); }
-  async getByName(id) { return new DOStubTarget(this.#transport(), id); }
+  // fetch performs the DO fetch — including a WebSocket upgrade — and returns
+  // the object's Response. The method MUST be named fetch and take the Request
+  // as its only argument: workerd preserves fetch semantics (streaming, 101 +
+  // WebSocket passthrough) only for that shape. With any other name, or with
+  // the id as a leading argument, the return is a generic RPC value and a
+  // WebSocket refuses to serialize. The object id therefore rides in a header
+  // (DO_ID_HEADER), stripped before the call so tenant DO code never sees it.
+  async fetch(request) {
+    const id = String(request.headers.get(DO_ID_HEADER) || "");
+    const clean = new Request(request);
+    clean.headers.delete(DO_ID_HEADER);
+    return await this.#transport().__call(id, clean);
+  }
+  // rpcObject forwards an arbitrary DO method as (method, args) data (ADR-162).
+  async rpcObject(id, method, args) {
+    if (typeof method !== "string" || !RPC_METHOD_RE.test(method) ||
+        method.startsWith("__ch") || RPC_RESERVED_METHODS.has(method)) {
+      throw new Error("do: rpc method " + method + " is not allowed");
+    }
+    return await this.#transport().__rpc(String(id), method, args);
+  }
   idFromName(name) { return String(name); }
   idFromString(s) { return String(s); }
   newUniqueId() { return crypto.randomUUID(); }

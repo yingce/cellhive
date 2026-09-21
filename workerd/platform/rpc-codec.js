@@ -16,6 +16,12 @@ const MAX_RPC_DEPTH = 256;
 // Method names allowed over RPC: identifiers only. Reserved names cover the DO
 // protocol itself and JS object internals, so a tenant cannot reach the
 // platform host methods or prototype plumbing through a stub.
+// DO_ID_HEADER carries the Durable Object id on the tenant -> platform
+// namespace call. It must ride on the Request (not as a second RPC argument):
+// workerd keeps fetch semantics — and therefore WebSocket passthrough — only
+// for a method named fetch whose first argument is the Request (ADR-184).
+export const DO_ID_HEADER = "x-cellhive-do-id";
+
 export const RPC_METHOD_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 export const RPC_RESERVED_METHODS = new Set([
   "fetch", "alarm",

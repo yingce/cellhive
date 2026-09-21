@@ -5,7 +5,7 @@
 
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
-  RPC_METHOD_RE, RPC_RESERVED_METHODS,
+  RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 
 function headers(platform, scopeToken) {
@@ -307,10 +307,6 @@ export function makeDO(platform, spec) {
     // (bindings.js DurableObjectNamespace, WDL alignment). Never tenant-visible.
     __call: (id, input, init) => call(id, input, init),
     __rpc: (id, method, args) => rpc(id, method, args),
-    // Owner lookup for the WebSocket upgrade: returns the ready connect URL
-    // plus the short-lived shard ticket, so the tenant side needs neither the
-    // scoped token nor the binding spec.
-    __connectInfo: (id) => connectInfo(id),
   };
 }
 
@@ -321,44 +317,36 @@ export function makeDOTransport(platform, spec) {
   return makeDO(platform, spec);
 }
 
-// makeDOFromStub wraps a platform-side DurableObjectNamespace entrypoint stub
-// into the CF-shaped namespace for the tenant isolate. Ordinary traffic goes
-// over RPC (the platform worker owns :7001 and the scoped token); the one case
-// that cannot cross RPC is a WebSocket upgrade, which is proxied through the
-// dedicated cluster-only service binding (`connect`).
-export function makeDOFromStub(stub, connect) {
-  // The platform-side stub owns the binding identity and the scoped token, and
-  // mints the short-lived shard ticket; the tenant side only needs a transport
-  // for the upgrade (the one case that cannot cross RPC) plus that ticket.
-  async function upgrade(id, req) {
-    if (!connect || typeof connect.fetch !== "function") {
-      throw new Error("do: WebSocket upgrade needs the cluster WS binding (CH_DO_CONNECT)");
-    }
-    const target = stub.get(String(id));
-    const info = await target.connectInfo();
-    const h = { "Upgrade": req.headers.get("Upgrade") || "websocket", "Connection": "Upgrade" };
-    if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
-    return await connect.fetch(info.url, { headers: h });
-  }
+// makeDOFromStub rebuilds the CF-shaped namespace (env.NS.get(id).fetch(...)
+// and env.NS.get(id).anyMethod(...)) on the TENANT side over the platform-side
+// DurableObjectNamespace entrypoint (bindings.js). Both calls target direct
+// methods of that entrypoint with the object id as an argument: a WebSocket
+// 101 can cross workerLoader RPC only as the return value of an entrypoint
+// method, never from an RpcTarget instance the tenant calls itself (verified on
+// the pinned workerd; WDL's do-client uses the same fetchObject shape). All
+// transport state — :7001, the scoped token, the owner-hint cache, the shard
+// ticket — stays in the platform worker, so the tenant env needs none of it.
+export function makeDOFromStub(stub) {
   function wrap(id) {
-    const target = stub.get(String(id));
     return new Proxy({}, {
       get(_, prop) {
         if (typeof prop !== "string" || prop === "then" || prop === "toJSON") return undefined;
         if (prop === "fetch") {
           return async (input, init) => {
             const req = input instanceof Request ? input : new Request(input, init);
-            if (String(req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
-              return await upgrade(id, req);
-            }
-            return await target.fetch(req);
+            // The id rides in the request (DO_ID_HEADER): the platform-side
+            // namespace implements it as fetch(request) — the only RPC shape
+            // workerd lets carry a WebSocket 101 back (ADR-184).
+            const h = new Headers(req.headers);
+            h.set(DO_ID_HEADER, String(id));
+            return await stub.fetch(new Request(req, { headers: h }));
           };
         }
         // Arbitrary DO methods: forwarded as (method, args) data over RPC.
         if (!RPC_METHOD_RE.test(prop) || prop.startsWith("__ch") || RPC_RESERVED_METHODS.has(prop)) {
           return undefined;
         }
-        return (...args) => target.rpc(prop, args);
+        return (...args) => stub.rpcObject(String(id), prop, args);
       },
     });
   }

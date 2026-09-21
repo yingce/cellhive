@@ -6,8 +6,8 @@
 
 ### 租户 env 零平台传输：DO/Workflow/Vectorize 平台侧 stub（ADR-184）
 - DO namespace、Workflow、Vectorize 改为**平台侧 entrypoint stub**（`ctx.exports.X({props})`）：`:7001` 传输与 per-binding scoped token 全部留在平台 worker，租户 isolate 只拿 RPC stub；`PLATFORM`/`CELL_URL` **不再注入租户 env**（此前可被租户当通用私网出口）。
-- DO WebSocket（唯一不能跨 workerLoader RPC 的场景）经**只通集群的窄 service binding `CH_DO_CONNECT`**（`CELLHIVE_CAP_WS` 控制 allow；未配置回落 public+private 兼容既有部署，生产应设集群网段）；owner 查询与 shard ticket 由平台侧 `connectInfo()` 提供，**租户 env 中不再有任何凭据**。workflow step 回调与租户日志 ring 改走数据型 `WorkflowSteps`/`LogSink` stub，其身份（ns/workflow/id/run、ns/worker）绑进 stub 的 props，`WF_*`/`LOG_NS`/`LOG_WORKER` 已从 env 移除。
-- **平台 env 键压到 2 个 + 保留命名空间**：绑定名清单（R2/DO）改经模块作用域常量注入、删除已死的 `CH_FACADE_SPEC`、workflow step 与日志上送合并为 `PlatformBridge`——租户 env 的平台键只剩 `CH_PLATFORM`（平台桥）与 DO worker 的 `CH_DO_CONNECT`（DO WebSocket 的 cluster-only 传输）。`CH_*`/`CELL_*`/`__cellhive*` 与平台身份键为保留名，用户 var/secret/binding 名落在其中会被部署/写入拒绝（`reserved_env_name`）。
+- DO WebSocket 也走平台侧 stub：`DurableObjectNamespace.fetch(request)`（fetch 形 RPC，DO id 经 `DO_ID_HEADER` 随 Request 传）——workerd 只对 fetch 形保留 101/WebSocket 回传，owner 查询与 shard ticket 全在平台 worker 内完成。**`CH_DO_CONNECT` 与 `CELLHIVE_CAP_WS` 已删除**（`cap-ws` 网络不再存在），**租户 env 中不再有任何凭据或租户可见传输**；任意 DO 方法仍走 `rpcObject` 数据通道（ADR-162）。workflow step 回调与租户日志 ring 合并为数据型 `PlatformBridge`（`CH_PLATFORM`）stub，其身份（ns/workflow/id/run、ns/worker）绑进 stub 的 props，`WF_*`/`LOG_NS`/`LOG_WORKER` 已从 env 移除。
+- **平台 env 键压到 2 个 + 保留命名空间**：绑定名清单（R2/DO）改经模块作用域常量注入、删除已死的 `CH_FACADE_SPEC`、workflow step 与日志上送合并为 `PlatformBridge`——租户 env 的平台键**只剩 `CH_PLATFORM`**（平台桥）。`CH_*`/`CELL_*`/`__cellhive*` 与平台身份键为保留名，用户 var/secret/binding 名落在其中会被部署/写入拒绝（`reserved_env_name`）。
 - 实测支持的 workerd 语义：`ctx.exports` = 宿主 worker mainModule 的导出集；方法返回的 Proxy 不被 RPC 认作 `RpcTarget`（故平台侧只暴露显式方法，任意 DO 方法名由租户侧 Proxy 转发为 `(method,args)`）。
 
 ### KV TTL 放开 60s 下限（ADR-183）

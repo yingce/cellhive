@@ -271,15 +271,9 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   }
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
   // alignment): no PLATFORM/CELL_URL enters the tenant env. The only platform
-  // keys are the cluster-only DO WebSocket transport and the CH_PLATFORM
-  // bridge (workflow steps + log ring, identity bound in props).
-  const doSpecs = {};
-  for (const [name, b] of Object.entries(spec || {})) {
-    if (b && b.kind === "do") doSpecs[name] = b;
-  }
-  if (Object.keys(doSpecs).length > 0 && env.CH_DO_CONNECT) {
-    out.CH_DO_CONNECT = env.CH_DO_CONNECT;
-  }
+  // key is the CH_PLATFORM bridge (workflow steps + log ring, identity bound
+  // in props); the DO WebSocket upgrade crosses RPC as the return value of the
+  // namespace entrypoint's fetch(request) method (ADR-184).
   const ex = ctx && ctx.exports;
   if (ex && ex.PlatformBridge) {
     out.CH_PLATFORM = ex.PlatformBridge({ props: {

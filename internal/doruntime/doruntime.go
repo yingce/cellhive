@@ -35,22 +35,6 @@ func (c Config) OutboundAllowList() string {
 	return strings.Join(parts, ", ")
 }
 
-// WsAllowList renders the facet DO-WebSocket binding's network policy (the
-// tenant-visible CH_DO_CONNECT binding). Empty falls back to public+private
-// for back-compat; production narrows it to the runtime cluster's addresses.
-func (c Config) WsAllowList() string {
-	parts := make([]string, 0, len(c.WsAllow))
-	for _, a := range c.WsAllow {
-		if a = strings.TrimSpace(a); a != "" {
-			parts = append(parts, strconv.Quote(a))
-		}
-	}
-	if len(parts) == 0 {
-		return `"public", "private"`
-	}
-	return strings.Join(parts, ", ")
-}
-
 // Config configures one do-runtime instance.
 type Config struct {
 	// CellURL/CellToken are the cell-agent base URL and internal-role token
@@ -77,9 +61,6 @@ type Config struct {
 	// DoLeaseS is the DO owner lease TTL in seconds (empty = runtime default 30).
 	// Longer reduces renew churn; shorter fails over faster.
 	DoLeaseS string
-	// WsAllow is the network policy for the tenant-visible CH_DO_CONNECT binding
-	// (DO WebSocket upgrades only). Empty falls back to public+private.
-	WsAllow []string
 	// OutboundAllow is the tenant DO facets' outbound network policy (ADR-130).
 	// Empty = ["public"]. Facets may reach the allowed ranges via
 	// `cloudflare:sockets connect()`; a Durable Object can hold the socket across
@@ -124,7 +105,6 @@ const config :Workerd.Config = (
         (name = "GATE_URL", text = "{{.GateURL}}"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "private-outbound"),
-        (name = "CH_DO_CONNECT", service = "cap-ws"),
         (name = "BINDINGS_WRAPPER_SRC", text = embed "bindings-wrapper.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "LOG_TAIL_SRC", text = embed "log-tail.js"),
@@ -146,7 +126,6 @@ const config :Workerd.Config = (
     (name = "do-disk", disk = (path = "{{.DiskDir}}", writable = true)),
     (name = "public-network", network = ( allow = [{{.OutboundAllowList}}] )),
     (name = "private-outbound", network = ( allow = ["public", "private"] )),
-    (name = "cap-ws", network = ( allow = [{{.WsAllowList}}] )),
   ],
   sockets = [ (name = "do", address = "{{.Addr}}", http = (), service = "do" ) ],
 );

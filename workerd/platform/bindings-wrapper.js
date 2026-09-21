@@ -13,13 +13,13 @@ import { env } from "cloudflare:workers";
 import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 
 try {
-  // DO namespaces are platform-side entrypoint stubs; wrap them so a WebSocket
-  // upgrade routes through the cluster-only WS binding.
-  if (__cellhivePlatform.doBindings.length > 0 && env.CH_DO_CONNECT) {
+  // DO namespaces are platform-side entrypoint stubs; rebuild the CF-shaped
+  // facade on top of them (fetch(request)/rpcObject; ADR-184).
+  if (__cellhivePlatform.doBindings.length > 0) {
     for (const name of __cellhivePlatform.doBindings) {
       if (env[name]) {
         Object.defineProperty(env, name, {
-          value: makeDOFromStub(env[name], env.CH_DO_CONNECT),
+          value: makeDOFromStub(env[name]),
           writable: true, configurable: true, enumerable: true,
         });
       }

@@ -1,8 +1,10 @@
 package userruntime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -318,32 +320,39 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	}
 }
 
-// TestTenantWsBindingNarrowed asserts the new DO transport model (WDL
-// alignment): no PLATFORM reaches the tenant env, DO/Workflow run as
-// platform-side stubs, and the single tenant-visible transport — the
-// cluster-only WS binding CH_DO_CONNECT, present only for DO workers — honours
-// its allow list (listed range reachable, other private ranges refused by
-// restrictPeers, public internet via the unchanged globalOutbound).
-func TestTenantWsBindingNarrowed(t *testing.T) {
+// TestTenantDoWebSocketCrossesRpc asserts the ADR-184 DO transport model after
+// dropping the tenant-visible WS binding: the tenant env holds NO platform
+// transport or credential (CH_DO_CONNECT/PLATFORM/CELL_URL all absent), yet a
+// Durable Object WebSocket upgrade still works end to end. The tenant-side
+// facade (facades.js makeDOFromStub) calls the platform-side namespace
+// entrypoint's fetch(request)/rpcObject methods (the DO id rides on the
+// request); the platform worker owns the :7001 scoped token and mints the
+// short-lived shard ticket, and the 101 + socket crosses workerLoader RPC as
+// the return value of the entrypoint method (verified on the pinned workerd:
+// the same 101 returned from an RpcTarget instance fails to serialize).
+func TestTenantDoWebSocketCrossesRpc(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	stubURL := ""
 	const probe = `
 export default {
   async fetch(req, env) {
     const out = [];
+    out.push("ws:" + (typeof env.CH_DO_CONNECT === "undefined" ? "absent" : "LEAKED"));
     out.push("platform:" + (typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED"));
     out.push("cellUrl:" + (typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED"));
-    out.push("ws:" + (typeof env.CH_DO_CONNECT === "undefined" ? "absent" : "present"));
-    try { const r = await env.CH_DO_CONNECT.fetch(WS_STUB + "/v1/control/routes"); out.push("listed:" + r.status); }
-    catch(e) { out.push("listed:BLOCKED"); }
-    try { const r = await env.CH_DO_CONNECT.fetch("http://10.1.2.3:9999/x"); out.push("other-private:" + r.status); }
-    catch(e) { out.push("other-private:BLOCKED"); }
-    try { const r = await fetch("http://example.com/"); out.push("public:" + r.status); }
-    catch(e) { out.push("public:BLOCKED"); }
+    const inv = await env.ROOM.get("obj1").fetch("https://do.test/hello", { method: "POST" });
+    out.push("http:" + inv.status + ":" + (await inv.text()));
+    const up = await env.ROOM.get("obj1").fetch(new Request("https://do.test/ws", { headers: { Upgrade: "websocket" } }));
+    if (!up.webSocket) return new Response(out.concat("wsStatus:" + up.status).join(" | "));
+    const ws = up.webSocket;
+    ws.accept();
+    const hello = await new Promise((res) => { ws.addEventListener("message", (e) => res(String(e.data))); setTimeout(() => res("TIMEOUT"), 8000); });
+    ws.send("from-tenant");
+    const echo = await new Promise((res) => { ws.addEventListener("message", (e) => res(String(e.data))); setTimeout(() => res("TIMEOUT"), 8000); });
+    out.push("status:" + up.status, "hello:" + hello, "echo:" + echo);
     return new Response(out.join(" | "));
-  }
+  },
 };
 `
 
@@ -359,12 +368,31 @@ export default {
 			},
 		}},
 	}}}
+	var connectTicket string
+	stubURL := ""
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
 			serveProjection(proj, w, r)
 		case "/v1/internal/bundle":
-			_, _ = w.Write([]byte(strings.Replace(probe, "WS_STUB", strconv.Quote(stubURL), 1)))
+			_, _ = w.Write([]byte(probe))
+		case "/v1/do/invoke":
+			_, _ = w.Write([]byte("handled"))
+		case "/v1/do/connect":
+			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				// The owner leg: the platform worker connects here with the
+				// ticket it minted, never with anything the tenant can see.
+				connectTicket = r.Header.Get("x-cellhive-do-ticket")
+				if _, err := wsHandshakeAndEcho(w, r); err != nil {
+					t.Errorf("ws owner: %v", err)
+				}
+				return
+			}
+			// The lookup leg (cell-agent): return this same server as the owner.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"owner":  strings.TrimPrefix(stubURL, "http://"),
+				"ticket": "tkt",
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -373,13 +401,12 @@ export default {
 	stubURL = stub.URL
 
 	internalPort, publicPort := freePort(t), freePort(t)
-	dir := t.TempDir()
-	// "local" covers the httptest stub (127.0.0.1); 10/8 deliberately NOT listed.
-	capnpPath, err := Render(dir, Config{
+	// cap-egress must reach the httptest stub (127.0.0.1 = "local").
+	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
-		WsAllow: []string{"local"},
+		EgressAllow: []string{"local"},
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -415,10 +442,17 @@ export default {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{"platform:absent", "cellUrl:absent", "ws:present", "listed:200", "other-private:BLOCKED", "public:200"} {
+	for _, want := range []string{
+		"ws:absent", "platform:absent", "cellUrl:absent",
+		"http:200:handled",
+		"status:101", "hello:owner-hello", "echo:owner-echo:from-tenant",
+	} {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("probe %q missing in: %s", want, body)
 		}
+	}
+	if connectTicket != "tkt" {
+		t.Fatalf("owner ticket = %q, want the platform-minted tkt", connectTicket)
 	}
 
 	cancel()
@@ -427,6 +461,90 @@ export default {
 	case <-time.After(10 * time.Second):
 		t.Fatal("workerd did not exit after cancel")
 	}
+}
+
+// wsHandshakeAndEcho completes a hand-rolled RFC 6455 handshake, sends one
+// text frame and echoes the one masked client frame it reads. Dependency-free:
+// the test only needs a single duplex exchange to prove the socket crossed the
+// RPC boundary alive.
+func wsHandshakeAndEcho(w http.ResponseWriter, r *http.Request) (string, error) {
+	key := r.Header.Get("Sec-WebSocket-Key")
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	conn, buf, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(buf,
+		"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
+		base64.StdEncoding.EncodeToString(sum[:])); err != nil {
+		return "", err
+	}
+	if err := wsWriteText(buf, "owner-hello"); err != nil {
+		return "", err
+	}
+	msg, err := wsReadText(buf.Reader)
+	if err != nil {
+		return "", err
+	}
+	return msg, wsWriteText(buf, "owner-echo:"+msg)
+}
+
+func wsWriteText(w *bufio.ReadWriter, s string) error {
+	b := []byte(s)
+	hdr := []byte{0x81, byte(len(b))}
+	if len(b) >= 126 {
+		return fmt.Errorf("test frame too large: %d", len(b))
+	}
+	if _, err := w.Write(hdr); err != nil {
+		return err
+	}
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+func wsReadText(r *bufio.Reader) (string, error) {
+	h := make([]byte, 2)
+	if _, err := io.ReadFull(r, h); err != nil {
+		return "", err
+	}
+	n := int(h[1] & 0x7f)
+	switch n {
+	case 126:
+		ext := make([]byte, 2)
+		if _, err := io.ReadFull(r, ext); err != nil {
+			return "", err
+		}
+		n = int(ext[0])<<8 | int(ext[1])
+	case 127:
+		ext := make([]byte, 8)
+		if _, err := io.ReadFull(r, ext); err != nil {
+			return "", err
+		}
+		n = int(ext[4])<<24 | int(ext[5])<<16 | int(ext[6])<<8 | int(ext[7])
+	}
+	var mask []byte
+	if h[1]&0x80 != 0 {
+		mask = make([]byte, 4)
+		if _, err := io.ReadFull(r, mask); err != nil {
+			return "", err
+		}
+	}
+	p := make([]byte, n)
+	if _, err := io.ReadFull(r, p); err != nil {
+		return "", err
+	}
+	if h[0]&0x0f == 0x8 {
+		return "", io.EOF
+	}
+	for i := range p {
+		if mask != nil {
+			p[i] ^= mask[i%4]
+		}
+	}
+	return string(p), nil
 }
 
 // TestWorkflowStepsStubIsScoped asserts the security boundary of the

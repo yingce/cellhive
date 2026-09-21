@@ -61,7 +61,6 @@ func main() {
 		DoDirect:         getenv("CELLHIVE_DO_DIRECT", ""),
 		OutboundAllow:    outboundAllow(),
 		EgressAllow:      egressAllow(),
-		WsAllow:          envList("CELLHIVE_CAP_WS"),
 	})
 	if err != nil {
 		log.Error("render config", "err", err)

@@ -396,15 +396,9 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(facades).join(","));
   }
   // Facade metadata and binding-name lists travel in the wrapper module scope
-  // (platformConsts), not the facet env; the only platform keys are the
-  // cluster-only DO WebSocket transport and the CH_PLATFORM bridge.
-  const doSpecs = {};
-  for (const [name, s] of Object.entries(bs.bindings || {})) {
-    if (s && s.kind === "do") doSpecs[name] = s;
-  }
-  if (Object.keys(doSpecs).length > 0 && hostEnv.CH_DO_CONNECT) {
-    env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
-  }
+  // (platformConsts), not the facet env; the only platform key left is the
+  // CH_PLATFORM bridge (the DO WebSocket upgrade needs no tenant transport —
+  // ADR-184).
   const ex = ctx && ctx.exports;
   const facetNS = (spec && spec.namespace) || "";
   const facetWorker = (spec && spec.worker) || "";

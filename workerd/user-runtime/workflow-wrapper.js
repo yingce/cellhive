@@ -12,11 +12,11 @@ import { buildBindings, makeDOFromStub } from "facades.js";
 
 try {
 
-  if (__cellhivePlatform.doBindings.length > 0 && __env.CH_DO_CONNECT) {
+  if (__cellhivePlatform.doBindings.length > 0) {
     for (const name of __cellhivePlatform.doBindings) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
-          value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
+          value: makeDOFromStub(__env[name]),
           writable: true, configurable: true, enumerable: true,
         });
       }
