@@ -24,7 +24,7 @@ import {
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans } from "telemetry.js";
 
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned
@@ -388,8 +388,23 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
   }
   env.CH_FACADE_SPEC = JSON.stringify(facades);
   env.CH_R2_BINDINGS = JSON.stringify(r2names);
-  env.CELL_URL = hostEnv.CELL_URL;
-  env.PLATFORM = hostEnv.PLATFORM;
+  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
+  // alignment): no PLATFORM/CELL_URL enters the facet env. The DO WebSocket
+  // upgrade keeps the cluster-only WS binding; workflow steps get the
+  // data-only steps stub.
+  const doSpecs = {};
+  let hasWorkflow = false;
+  for (const [name, s] of Object.entries(bs.bindings || {})) {
+    if (s && s.kind === "do") doSpecs[name] = s;
+    if (s && s.kind === "workflow") hasWorkflow = true;
+  }
+  if (Object.keys(doSpecs).length > 0) {
+    env.CH_DO_SPEC = JSON.stringify(doSpecs);
+    if (hostEnv.CH_DO_CONNECT) env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
+  }
+  const ex = ctx && ctx.exports;
+  if (ex && ex.WorkflowSteps) env.CH_WF_STEPS = ex.WorkflowSteps({ props: {} });
+  if (ex && ex.LogSink) env.CH_LOG_SINK = ex.LogSink({ props: {} });
   env.LOG_NS = (spec && spec.namespace) || hostEnv.LOG_NS || "";
   env.LOG_WORKER = (spec && spec.worker) || hostEnv.LOG_WORKER || "";
   return env;

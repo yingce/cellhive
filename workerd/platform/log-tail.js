@@ -23,8 +23,10 @@ export function installLogTail() {
   // LOG_TOKEN arrives via the module-scope __cellhivePlatform const (ADR-074):
 // role credentials never enter the tenant env. LOG_NS/LOG_WORKER stay in env
 // (plain labels, not secrets).
-  const logToken = (typeof __cellhivePlatform !== "undefined" && __cellhivePlatform.logToken) || env.LOG_TOKEN || "";
-  if (!logToken || !env || !env.CELL_URL || !env.LOG_NS || !env.LOG_WORKER) {
+  // The sink is a platform-side entrypoint stub (fixed path + internal token);
+  // the tenant isolate holds no transport or role credential (ADR-074).
+  const sink = env && env.CH_LOG_SINK;
+  if (!sink || typeof sink.send !== "function" || !env.LOG_NS || !env.LOG_WORKER) {
     return;
   }
   if (globalThis.__cellhiveLogTail) return;
@@ -39,19 +41,9 @@ export function installLogTail() {
     const batch = buf;
     buf = [];
     try {
-      const url =
-        env.CELL_URL.replace(/\/$/, "") +
-        "/v1/internal/logs?ns=" + encodeURIComponent(env.LOG_NS) +
-        "&worker=" + encodeURIComponent(env.LOG_WORKER);
-      const init = {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-cellhive-internal-token": logToken },
-        body: JSON.stringify(batch),
-      };
-      const sent = env.PLATFORM && typeof env.PLATFORM.fetch === "function"
-        ? env.PLATFORM.fetch(url, init)
-        : fetch(url, init);
-      const done = sent.catch(() => {});
+      const done = Promise.resolve(
+        sink.send(env.LOG_NS, env.LOG_WORKER, JSON.stringify(batch)),
+      ).catch(() => {});
       // Bind the send to the request lifetime: workerd cancels un-awaited work
       // once the response is returned (the ADR-115 lesson), which would drop logs.
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(done);

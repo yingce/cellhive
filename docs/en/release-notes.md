@@ -9,6 +9,11 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - Platform wrapper modules (queue/workflow wrappers, do-runtime bindings-wrapper, log-tail) receive their credentials as a **module-scope `__cellhivePlatform` const prepended to the module source** by loader.js/internal.js/host.js: module scope is isolated per module, so tenant code cannot read it — unlike `env`, which is shared. Non-credential surfaces (`CELL_URL`, the `PLATFORM` service binding, `LOG_NS`/`LOG_WORKER`) stay in env.
 - Verified with a real-workerd probe test (`TestTenantEnvHasNoPlatformCredentials`): `env.CELL_TOKEN`/`env.LOG_TOKEN` absent, the const absent from the tenant global scope, `PLATFORM`/`CELL_URL` present; workflow step callbacks, DO facades and log tail all still work.
 
+### Tenant env carries no platform transport: DO/Workflow/Vectorize platform-side stubs (ADR-184)
+- Durable Object namespaces, Workflows and Vectorize are now **platform-side entrypoint stubs** (`ctx.exports.X({props})`): the `:7001` transport and the per-binding scoped token stay in the platform worker, and the tenant isolate only holds RPC stubs. `PLATFORM`/`CELL_URL` **no longer enter the tenant env** (previously a tenant could use PLATFORM as a generic private-network egress).
+- DO WebSocket — the one case that cannot cross workerLoader RPC — goes through a **cluster-only service binding `CH_DO_CONNECT`** (`CELLHIVE_CAP_WS` controls its allow list; unset falls back to public+private for back-compat, production should set the cluster subnet). Workflow step callbacks and the tenant log ring move to data-only `WorkflowSteps`/`LogSink` stubs.
+- Verified workerd semantics: `ctx.exports` is the host worker's mainModule export set; a Proxy returned from a method is not recognised as an `RpcTarget` by RPC (so the platform side exposes explicit methods only, and arbitrary DO method names are forwarded as `(method,args)` data by a tenant-side Proxy).
+
 ### KV TTL: 60s Floor Removed (ADR-183)
 - `expirationTtl` now accepts any positive integer seconds (previously ≥60s, an artificial tightening to match Cloudflare); absolute `expiration` must still be in the future. Expiry takes effect lazily on read (second granularity); the timer sweep only reclaims space. Explicit divergence from Cloudflare Workers KV: CF rejects <60s, this platform accepts it.
 

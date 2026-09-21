@@ -61,6 +61,7 @@ func main() {
 		DoDirect:         getenv("CELLHIVE_DO_DIRECT", ""),
 		OutboundAllow:    outboundAllow(),
 		EgressAllow:      egressAllow(),
+		WsAllow:          envList("CELLHIVE_CAP_WS"),
 	})
 	if err != nil {
 		log.Error("render config", "err", err)
@@ -173,8 +174,9 @@ func outboundAllow() []string {
 // workerd categories) into the loader PLATFORM binding's capability-egress
 // policy. Empty keeps the legacy permissive posture (public+private) until
 // the deployment configures the runtime-services range.
-func egressAllow() []string {
-	raw := strings.TrimSpace(os.Getenv("CELLHIVE_CAP_EGRESS"))
+// envList parses a comma-separated environment variable into a list.
+func envList(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return nil
 	}
@@ -185,4 +187,8 @@ func egressAllow() []string {
 		}
 	}
 	return out
+}
+
+func egressAllow() []string {
+	return envList("CELLHIVE_CAP_EGRESS")
 }

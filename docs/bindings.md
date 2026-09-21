@@ -133,5 +133,5 @@ _最后更新：2026-09-19_
 - **ServiceBinding**：`env.SVC.fetch()` 与 `env.SVC.<method>()`（Proxy 转发）→ cell-agent `/v1/service/{fetch,run}`（scope kind=service）→ user-runtime `/v1/services/{fetch,run}` → 目标 worker / 其命名 entrypoint（同名空间）；`binding.entrypoint` 指定目标 entrypoint。
 - **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、尺寸来自 list 响应，ADR-145）。
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
-- **日志 tail**：加载 worker 内 `log-tail.js` 补丁 `console.*` → `PLATFORM` 服务绑定 POST cell-agent `/v1/internal/logs`（派生 `log` 角色令牌）→ 有界 ring buffer（`CELLHIVE_LOG_BUFFER=<entries>:<workers>`）→ `cellhive tail --worker`；日志令牌由 `CELLHIVE_ROOT_KEY` 派生（ADR-137）。
+- **日志 tail**：加载 worker 内 `log-tail.js` 补丁 `console.*` → 平台侧 `LogSink` entrypoint stub（平台 worker 持 `log` 角色令牌与传输）POST cell-agent `/v1/internal/logs` → 有界 ring buffer（`CELLHIVE_LOG_BUFFER=<entries>:<workers>`）→ `cellhive tail --worker`；日志令牌由 `CELLHIVE_ROOT_KEY` 派生（ADR-137）。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。

@@ -30,7 +30,7 @@
 
 ## 关键不变量
 
-- 租户 `globalOutbound` = **public-only**；facade 经 `PLATFORM` service binding 出网。
+- 租户 `globalOutbound` = **public-only**；capability binding 是平台侧 entrypoint stub（`:7001` 传输在平台 worker，ADR-184），租户 env 无 `PLATFORM`/`CELL_URL`。
 - env patch（`bindings-wrapper.js` / `queue-wrapper.js`）让 `this.env` 与构造形参 `env` 一致。
 - **不持桶凭据**；只拿 binding facade 与 scoped token。
 

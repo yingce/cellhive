@@ -10,6 +10,11 @@
 // with the scoped token carried in props.
 
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
+import {
+  decode, encode, encodedSize, MAX_RPC_BYTES,
+  RPC_METHOD_RE, RPC_RESERVED_METHODS,
+} from "rpc-codec.js";
+import { makeDOTransport } from "facades.js";
 
 function q(params) {
   return Object.entries(params)
@@ -612,6 +617,217 @@ export class ServiceBinding extends WorkerEntrypoint {
   }
 }
 
+// --- Durable Objects (WDL alignment, ADR-090) ------------------------------
+//
+// The namespace entrypoint runs in the trusted platform worker: the :7001
+// transport, the per-binding scoped token, and the owner-hint cache all stay
+// here. Tenants only ever receive RPC stubs, so no platform transport (and no
+// generic network binding) is needed in the tenant env. The single exception
+// that cannot cross RPC is a WebSocket upgrade; the tenant-side facade routes
+// that one case through a dedicated cluster-only service binding.
+class DOStubTarget extends RpcTarget {
+  #t;
+  #id;
+  constructor(t, id) {
+    super();
+    this.#t = t;
+    this.#id = String(id);
+  }
+  // Explicit methods only: workerd RPC dispatches by name on the returned
+  // RpcTarget, so arbitrary DO methods are forwarded as (method, args) data by
+  // the tenant-side facade (facades.js makeDOFromStub) — a Proxy over the
+  // target is not recognised as an RpcTarget by the RPC layer.
+  async fetch(input, init) {
+    return await this.#t.__call(this.#id, input, init);
+  }
+  async rpc(method, args) {
+    if (typeof method !== "string" || !RPC_METHOD_RE.test(method) ||
+        method.startsWith("__ch") || RPC_RESERVED_METHODS.has(method)) {
+      throw new Error("do: rpc method " + method + " is not allowed");
+    }
+    return await this.#t.__rpc(this.#id, method, args);
+  }
+}
+
+// Module-level transport cache: workerLoader may instantiate the entrypoint
+// per RPC call, so an instance field would drop the owner-hint cache between
+// calls. Keyed by the binding identity; bounded FIFO.
+const doTransports = new Map();
+const DO_TRANSPORT_MAX = 256;
+function doTransportFor(env, props) {
+  const key = [props.ns, props.worker, props.bundle_sha, props.version, props.class, props.storage_id || ""].join("\u0000");
+  let t = doTransports.get(key);
+  if (t === undefined) {
+    t = makeDOTransport({ url: env.CELL_URL, token: "", fetcher: env.PLATFORM }, props);
+    if (doTransports.size >= DO_TRANSPORT_MAX) {
+      doTransports.delete(doTransports.keys().next().value);
+    }
+    doTransports.set(key, t);
+  }
+  return t;
+}
+
+export class DurableObjectNamespace extends WorkerEntrypoint {
+  #transport() {
+    return doTransportFor(this.env, this.ctx.props || {});
+  }
+  async get(id) { return new DOStubTarget(this.#transport(), id); }
+  async getByName(id) { return new DOStubTarget(this.#transport(), id); }
+  idFromName(name) { return String(name); }
+  idFromString(s) { return String(s); }
+  newUniqueId() { return crypto.randomUUID(); }
+}
+
+// WorkflowInstanceTarget is the CF-shaped instance returned by get(id); every
+// method is data-only so it survives workerLoader RPC.
+class WorkflowInstanceTarget extends RpcTarget {
+  #b;
+  #id;
+  constructor(b, id) {
+    super();
+    this.#b = b;
+    this.#id = String(id);
+  }
+  async status() {
+    const s = await this.#b.__call("get", "GET", { id: this.#id });
+    return { status: s.status, error: s.error || undefined, output: WorkflowBinding.decode(s.output) };
+  }
+  async pause() { await this.#b.__call("pause", "POST", { id: this.#id }); }
+  async resume() { await this.#b.__call("resume", "POST", { id: this.#id }); }
+  async terminate() { await this.#b.__call("terminate", "POST", { id: this.#id }); }
+  async restart() { await this.#b.__call("restart", "POST", { id: this.#id }); }
+  async delete() { await this.#b.__call("delete", "POST", { id: this.#id }); }
+  async sendEvent(payload) { await this.#b.__call("event", "POST", { id: this.#id }, payload); }
+}
+
+// WorkflowBinding is the platform-side workflow namespace (create/get/...):
+// the tenant env holds only this stub.
+export class WorkflowBinding extends WorkerEntrypoint {
+  #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/workflow/"; }
+  #headers() {
+    const token = (this.ctx.props || {}).token;
+    return token ? { "x-cellhive-scope-token": token, "content-type": "application/json" } : { "content-type": "application/json" };
+  }
+  async __call(path, method, extra, body) {
+    const props = this.ctx.props || {};
+    const r = await this.env.PLATFORM.fetch(
+      this.#base() + path + "?" + q({ ns: props.ns, workflow: props.name, ...(extra || {}) }),
+      {
+        method: method || "GET",
+        headers: this.#headers(),
+        body: body === undefined ? undefined : JSON.stringify(body),
+      },
+    );
+    await must(r, "workflow." + path);
+    return await r.json();
+  }
+  static decode(b64) {
+    if (!b64) return undefined;
+    try { return JSON.parse(atob(b64)); } catch (e) { return undefined; }
+  }
+  async create(options = {}) {
+    const out = await this.__call("create", "POST", { id: options.id || undefined },
+      options.params === undefined ? undefined : options.params);
+    return { id: out.id };
+  }
+  async get(id) { return new WorkflowInstanceTarget(this, id); }
+  async sendEvent(id, payload) { await this.__call("event", "POST", { id }, payload); }
+  async list(options = {}) { return await this.__call("list", "GET", { limit: options.limit }); }
+}
+
+// Vectorize is the platform-side index binding (ADR-158): data-only methods,
+// so the tenant env needs no transport for it.
+export class Vectorize extends WorkerEntrypoint {
+  #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/vectorize/"; }
+  #hdrs() {
+    const token = (this.ctx.props || {}).token;
+    return token ? { "x-cellhive-scope-token": token } : {};
+  }
+  #qp(extra) {
+    const p = this.ctx.props || {};
+    return q(Object.assign({ ns: p.ns, index: p.index || p.name }, extra || {}));
+  }
+  async #json(path, body) {
+    const r = await this.env.PLATFORM.fetch(this.#base() + path + "?" + this.#qp(), {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, this.#hdrs()),
+      body: JSON.stringify(body),
+    });
+    await must(r, "vectorize." + path);
+    return await r.json();
+  }
+  static #queryBody(vector, options) {
+    const o = options || {};
+    const body = { vector };
+    if (o.topK !== undefined) body.topK = o.topK;
+    if (o.returnValues !== undefined) body.returnValues = o.returnValues;
+    if (o.returnMetadata !== undefined) body.returnMetadata = o.returnMetadata;
+    if (o.namespace !== undefined) body.namespace = o.namespace;
+    if (o.filter !== undefined) body.filter = o.filter;
+    return body;
+  }
+  async insert(vectors) { return await this.#json("insert", { vectors: vectors || [] }); }
+  async upsert(vectors) { return await this.#json("upsert", { vectors: vectors || [] }); }
+  async query(vector, options) { return await this.#json("query", Vectorize.#queryBody(vector, options)); }
+  async queryById(id, options) {
+    const body = Vectorize.#queryBody(undefined, options);
+    body.id = id;
+    return await this.#json("query", body);
+  }
+  async getByIds(ids) {
+    const r = await this.env.PLATFORM.fetch(this.#base() + "get?" + this.#qp(), {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, this.#hdrs()),
+      body: JSON.stringify({ ids: ids || [] }),
+    });
+    await must(r, "vectorize.getByIds");
+    return await r.json();
+  }
+  async deleteByIds(ids) { return await this.#json("delete", { ids: ids || [] }); }
+  async describe() {
+    const r = await this.env.PLATFORM.fetch(this.#base() + "describe?" + this.#qp(), { method: "GET", headers: this.#hdrs() });
+    await must(r, "vectorize.describe");
+    return await r.json();
+  }
+  async listVectors(options) {
+    const o = options || {};
+    const r = await this.env.PLATFORM.fetch(this.#base() + "list?" + this.#qp({ count: o.count, cursor: o.cursor }), {
+      method: "GET", headers: this.#hdrs(),
+    });
+    await must(r, "vectorize.listVectors");
+    return await r.json();
+  }
+}
+
+// LogSink ingests the tenant log ring into cell-agent from the platform worker
+// (fixed path and internal token; the tenant isolate holds no transport).
+export class LogSink extends WorkerEntrypoint {
+  async send(ns, worker, batch) {
+    const r = await this.env.PLATFORM.fetch(
+      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(ns) + "&worker=" + encodeURIComponent(worker),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-cellhive-internal-token": this.env.LOG_TOKEN || this.env.CELL_TOKEN || "" },
+        body: batch,
+      },
+    );
+    return r.status;
+  }
+}
+
+// WorkflowSteps carries the workflow wrapper's synchronous step callbacks to
+// cell-agent from the platform worker (the tenant wrapper cannot reach the
+// private address itself). Data-only: one call() per callback.
+export class WorkflowSteps extends WorkerEntrypoint {
+  async call(path, method, body) {
+    return await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + path, {
+      method: method || "GET",
+      headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" },
+      body: body === undefined || body === null ? undefined : body,
+    });
+  }
+}
+
 // bindingStub materializes a binding spec as a props-bound entrypoint stub, or
 // undefined when the kind is not yet migrated to this architecture.
 export function bindingStub(ctx, spec) {
@@ -631,6 +847,12 @@ export function bindingStub(ctx, spec) {
       return ctx.exports.AI({ props });
     case "hyperdrive":
       return Hyperdrive(props);
+    case "do":
+      return ctx.exports.DurableObjectNamespace({ props });
+    case "workflow":
+      return ctx.exports.WorkflowBinding({ props });
+    case "vectorize":
+      return ctx.exports.Vectorize({ props });
     default:
       return undefined;
   }

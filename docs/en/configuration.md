@@ -174,6 +174,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_SERVICE_NATIVE` | empty=enabled | `0` disables native service RPC |
 | `CELLHIVE_DO_DIRECT` | empty=enabled | `0` disables owner-hint direct access |
 | `CELLHIVE_TENANT_OUTBOUND` | empty→`public` | egress category `public`/`private`/`local` |
+| `CELLHIVE_CAP_WS` | empty→`public+private` | network policy (CIDR/categories) for the tenant DO-WebSocket-only binding (`CH_DO_CONNECT`). **Production should narrow it to the runtime cluster's addresses** (cell-agent + do-runtime); unset keeps the back-compat public+private fallback |
 | `CELLHIVE_CAP_EGRESS` | empty (recommended default) | extra network ranges (CIDR/categories, comma-separated, OR-combined) allowed for the capability data-plane egress (PLATFORM binding). **No configuration needed** when capability runs over the public domain + TLS (private denied by default = secure default); for intranet-direct runtime-services add its CIDR block (e.g. `10.20.0.0/16`) or single IP (`10.20.1.5/32`) |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | empty | BYO AI endpoint and key; empty=not injected |
 

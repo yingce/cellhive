@@ -12,7 +12,7 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
 
@@ -101,7 +101,7 @@ export default {
       const assetsCfg = version.assets || {};
       try {
         if (shouldRunWorkerFirst(assetsCfg, effURL.pathname)) {
-          const wres = await runWorker(effReq, env, app, route.worker, version, version.class_storage || {}, version.deleted_classes || []);
+          const wres = await runWorker(effReq, env, ctx, app, route.worker, version, version.class_storage || {}, version.deleted_classes || []);
           if (wres.status !== 404) return wres;
           const served = await serveAsset(effReq, env, app, route.worker, version, effURL);
           return served || wres;
@@ -246,8 +246,25 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
   }
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   out.CH_R2_BINDINGS = JSON.stringify(r2names);
-  out.CELL_URL = env.CELL_URL;
-  out.PLATFORM = env.PLATFORM;
+  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
+  // alignment): no PLATFORM/CELL_URL enters the tenant env. Two narrow
+  // exceptions — the DO WebSocket upgrade (cluster-only WS binding) and
+  // workflow step callbacks (data-only steps stub).
+  const doSpecs = {};
+  let hasWorkflow = false;
+  for (const [name, b] of Object.entries(spec || {})) {
+    if (b && b.kind === "do") doSpecs[name] = b;
+    if (b && b.kind === "workflow") hasWorkflow = true;
+  }
+  if (Object.keys(doSpecs).length > 0) {
+    out.CH_DO_SPEC = JSON.stringify(doSpecs);
+    if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
+  }
+  // Data-only stubs for workflow step callbacks and the log ring (no transport
+  // is exposed). ctx.exports may be absent on the assets-only path, so guard.
+  const ex = ctx && ctx.exports;
+  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: {} });
+  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: {} });
   out.LOG_NS = ns || "";
   out.LOG_WORKER = worker || "";
   return out;

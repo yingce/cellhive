@@ -4,6 +4,11 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
+### 租户 env 零平台传输：DO/Workflow/Vectorize 平台侧 stub（ADR-184）
+- DO namespace、Workflow、Vectorize 改为**平台侧 entrypoint stub**（`ctx.exports.X({props})`）：`:7001` 传输与 per-binding scoped token 全部留在平台 worker，租户 isolate 只拿 RPC stub；`PLATFORM`/`CELL_URL` **不再注入租户 env**（此前可被租户当通用私网出口）。
+- DO WebSocket（唯一不能跨 workerLoader RPC 的场景）经**只通集群的窄 service binding `CH_DO_CONNECT`**（`CELLHIVE_CAP_WS` 控制 allow；未配置回落 public+private 兼容既有部署，生产应设集群网段）；workflow step 回调与租户日志 ring 改走数据型 `WorkflowSteps`/`LogSink` stub。
+- 实测支持的 workerd 语义：`ctx.exports` = 宿主 worker mainModule 的导出集；方法返回的 Proxy 不被 RPC 认作 `RpcTarget`（故平台侧只暴露显式方法，任意 DO 方法名由租户侧 Proxy 转发为 `(method,args)`）。
+
 ### KV TTL 放开 60s 下限（ADR-183）
 - `expirationTtl` 接受任意正整数秒（原来 ≥60s，对齐 CF 的人为收紧）；`expiration` 仍须在未来。过期在读路径惰性生效（秒级），timer 清扫仅做空间回收。与 CF Workers KV 的显式差异：CF 拒 <60s，本平台接受。
 

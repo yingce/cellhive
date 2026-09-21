@@ -62,6 +62,22 @@ func (c Config) EgressAllowList() string {
 	return strings.Join(parts, ", ")
 }
 
+// WsAllowList renders the tenant DO-WebSocket binding's network policy.
+// Empty falls back to public+private (back-compat); production narrows it to
+// the runtime cluster's addresses.
+func (c Config) WsAllowList() string {
+	parts := make([]string, 0, len(c.WsAllow))
+	for _, a := range c.WsAllow {
+		if a = strings.TrimSpace(a); a != "" {
+			parts = append(parts, strconv.Quote(a))
+		}
+	}
+	if len(parts) == 0 {
+		return `"public", "private"`
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Config is the runtime configuration for one user-runtime instance.
 type Config struct {
 	CellURL      string
@@ -103,6 +119,12 @@ type Config struct {
 	// Empty = ["public"] (I-09). Adding "private"/"local" lets tenants reach
 	// private-network origins (e.g. a DB) at the cost of the public-only floor.
 	OutboundAllow []string
+	// WsAllow is the network policy for the tenant-visible CH_DO_CONNECT
+	// binding, used only for Durable Object WebSocket upgrades (the one case
+	// that cannot cross workerLoader RPC). It should name the runtime cluster's
+	// addresses (cell-agent + do-runtime); unset falls back to public+private
+	// so existing deployments keep working. Production should narrow it.
+	WsAllow []string
 	// EgressAllow names extra network ranges the loader worker's PLATFORM
 	// binding (cap-egress) may reach, on top of the fixed public+private
 	// fallback. The PLATFORM binding is cellhive's internal transport for its
@@ -122,6 +144,8 @@ const config :Workerd.Config = (
       modules = [
         (name = "internal.js", esModule = embed "internal.js"),
         (name = "bindings.js", esModule = embed "bindings.js"),
+        (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
+        (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
       ],
       compatibilityDate = "2026-06-15",
@@ -141,6 +165,7 @@ const config :Workerd.Config = (
         (name = "AI_KEY", text = "{{.AIKey}}"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "private-outbound"),
+        (name = "CH_DO_CONNECT", service = "cap-ws"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
       ],
@@ -151,6 +176,8 @@ const config :Workerd.Config = (
       modules = [
         (name = "loader.js", esModule = embed "loader.js"),
         (name = "bindings.js", esModule = embed "bindings.js"),
+        (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
+        (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
       ],
       compatibilityDate = "2026-06-15",
@@ -170,6 +197,7 @@ const config :Workerd.Config = (
         (name = "AI_KEY", text = "{{.AIKey}}"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "cap-egress"),
+        (name = "CH_DO_CONNECT", service = "cap-ws"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_TRACE_RATIO", text = "{{.TraceSampleRatio}}"),
@@ -183,6 +211,7 @@ const config :Workerd.Config = (
     (name = "public-network", network = ( allow = [{{.OutboundAllowList}}] )),
     (name = "private-outbound", network = ( allow = ["public", "private"] )),
     (name = "cap-egress", network = ( allow = [{{.EgressAllowList}}] )),
+    (name = "cap-ws", network = ( allow = [{{.WsAllowList}}] )),
   ],
   sockets = [
     (name = "internal", address = "*:{{.InternalPort}}", http = (), service = "internal" ),

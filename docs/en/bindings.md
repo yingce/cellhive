@@ -25,7 +25,7 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 
 - Each binding generates a **binding-scoped facade** at load time, with immutable props (`ns` + binding type/id);
 - Tenant code only gets the facade; it **cannot access** internal tokens, backend addresses, or a generic Fetcher;
-- The facade calls `cell-agent` (`:7001` REST/JSON) to execute the corresponding operation; the tenant loaded worker’s `globalOutbound` is public-only, and the facade egresses through the platform **`PLATFORM` service binding** (private network) (ADR-073, `pfetch` in `facades.js`);
+- The facade calls `cell-agent` (`:7001` REST/JSON) to execute the corresponding operation; the tenant loaded worker’s `globalOutbound` is public-only, and capability bindings run as **platform-side entrypoint stubs** (the `:7001` transport stays in the platform worker; ADR-184);
 - The facade only carries **`x-cellhive-scope-token`** (computed locally with HMAC at platform load time, no expiration, ADR-074); `ns/kind/name` are inside the same token, and cell-agent verifies the signature + `HasBinding`. A broad-privilege internal token is **no longer carried**.
 
 ## Synchronous vs Async
@@ -133,5 +133,5 @@ Tenant bindings are no longer HTTP facades: the platform worker exports `WorkerE
 - **ServiceBinding**: `env.SVC.fetch()` and `env.SVC.<method>()` (Proxy forwarding) → cell-agent `/v1/service/{fetch,run}` (scope kind=service) → user-runtime `/v1/services/{fetch,run}` → target worker / its named entrypoint (same namespace); `binding.entrypoint` specifies the target entrypoint.
 - **R2 list**: `env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` returns `{objects,truncated,cursor}` (cursor is exclusive; sizes come from the list response, ADR-145).
 - **R2 presign**: `env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet` (self-hosted backend returns a short-lived read URL).
-- **Log tail**: loaded worker `log-tail.js` patches `console.*` → `PLATFORM` service binding POSTs to cell-agent `/v1/internal/logs` (derived `log` role token) → bounded ring buffer (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`) → `cellhive tail --worker`; log tokens are derived from `CELLHIVE_ROOT_KEY` (ADR-137).
+- **Log tail**: loaded worker `log-tail.js` patches `console.*` → the platform-side `LogSink` entrypoint stub (the platform worker holds the `log` role token and transport) POSTs to cell-agent `/v1/internal/logs` → bounded ring buffer (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`) → `cellhive tail --worker`; log tokens are derived from `CELLHIVE_ROOT_KEY` (ADR-137).
 - **AI (BYO)**: `env.AI.run(model, inputs)` → `<AI_URL>/chat/completions` (OpenAI-compatible, `AI_KEY` Bearer), returns `{response,model,usage}`; `inputs.messages` or `{prompt}`.

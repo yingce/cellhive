@@ -23,7 +23,7 @@ function setTraceContext(tp) {
 }
 
 const tenant = tenantMod.default;
-import { buildBindings, wrapR2Metadata } from "facades.js";
+import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 
 // Patch the importable env with local facades for bindings whose CF API cannot
 // cross RPC (DO namespaces, Workflows) — same mechanism as the do-runtime
@@ -38,6 +38,19 @@ try {
     );
     for (const [name, value] of Object.entries(facades)) {
       Object.defineProperty(__env, name, { value, writable: true, configurable: true, enumerable: true });
+    }
+  }
+  // DO namespaces arrive as platform-side entrypoint stubs; wrap them so a
+  // WebSocket upgrade (the one case that cannot cross RPC) routes through the
+  // dedicated cluster-only WS binding.
+  if (__env.CH_DO_SPEC && __env.CH_DO_CONNECT) {
+    for (const [name, spec] of Object.entries(JSON.parse(__env.CH_DO_SPEC))) {
+      if (__env[name]) {
+        Object.defineProperty(__env, name, {
+          value: makeDOFromStub(__env[name], spec, { connect: __env.CH_DO_CONNECT, cellUrl: __cellhivePlatform.cellUrl }),
+          writable: true, configurable: true, enumerable: true,
+        });
+      }
     }
   }
   // R2ObjectBody.writeHttpMetadata must run in the tenant isolate to mutate the

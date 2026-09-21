@@ -298,6 +298,80 @@ export function makeDO(platform, spec) {
     idFromString: (s) => String(s),
     getByName: (name) => stub(String(name)),
     get: (id) => stub(id),
+    // Internal transport hooks for the platform-side namespace entrypoint
+    // (bindings.js DurableObjectNamespace, WDL alignment). Never tenant-visible.
+    __call: (id, input, init) => call(id, input, init),
+    __rpc: (id, method, args) => rpc(id, method, args),
+  };
+}
+
+// makeDOTransport builds makeDO's :7001 transport for the platform-side
+// namespace entrypoint: the DO transport (owner hint cache, scoped token,
+// invoke/rpc envelopes) lives entirely in the trusted platform worker.
+export function makeDOTransport(platform, spec) {
+  return makeDO(platform, spec);
+}
+
+// makeDOFromStub wraps a platform-side DurableObjectNamespace entrypoint stub
+// into the CF-shaped namespace for the tenant isolate. Ordinary traffic goes
+// over RPC (the platform worker owns :7001 and the scoped token); the one case
+// that cannot cross RPC is a WebSocket upgrade, which is proxied through the
+// dedicated cluster-only service binding (`connect`).
+export function makeDOFromStub(stub, spec, transport) {
+  const cellUrl = String((transport && transport.cellUrl) || "").replace(/\/$/, "");
+  const connect = transport && transport.connect;
+  const auth = () => (spec.token ? { "x-cellhive-scope-token": spec.token } : {});
+  const connectURL = (base, id) => {
+    const b = String(base).replace(/\/$/, "");
+    return b + "/v1/do/connect?" + q({
+      namespace: spec.ns, worker: spec.worker, bundle_sha: spec.bundle_sha,
+      version: spec.version, storage_id: spec.storage_id || "",
+      class: spec.class, storage_class: spec.storage_class || spec.class, id: String(id),
+    });
+  };
+  async function upgrade(id, req) {
+    if (spec.deleted) throw new Error("do: class " + spec.class + " was deleted");
+    if (!connect || typeof connect.fetch !== "function") {
+      throw new Error("do: WebSocket upgrade needs the cluster WS binding (CH_DO_CONNECT)");
+    }
+    const look = await connect.fetch(connectURL(cellUrl, id), { headers: auth() });
+    if (!look.ok) throw new Error("do: connect lookup " + look.status + " " + (await look.text()));
+    const info = await look.json();
+    const base = String(info.owner || "").startsWith("http") ? info.owner : "http://" + info.owner;
+    const h = Object.assign({}, auth());
+    h["Upgrade"] = req.headers.get("Upgrade") || "websocket";
+    h["Connection"] = "Upgrade";
+    if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
+    return await connect.fetch(connectURL(base, id), { headers: h });
+  }
+  function wrap(id) {
+    const target = stub.get(String(id));
+    return new Proxy({}, {
+      get(_, prop) {
+        if (typeof prop !== "string" || prop === "then" || prop === "toJSON") return undefined;
+        if (prop === "fetch") {
+          return async (input, init) => {
+            const req = input instanceof Request ? input : new Request(input, init);
+            if (String(req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+              return await upgrade(id, req);
+            }
+            return await target.fetch(req);
+          };
+        }
+        // Arbitrary DO methods: forwarded as (method, args) data over RPC.
+        if (!RPC_METHOD_RE.test(prop) || prop.startsWith("__ch") || RPC_RESERVED_METHODS.has(prop)) {
+          return undefined;
+        }
+        return (...args) => target.rpc(prop, args);
+      },
+    });
+  }
+  return {
+    idFromName: (name) => String(name),
+    newUniqueId: () => crypto.randomUUID(),
+    idFromString: (s) => String(s),
+    get: (id) => wrap(id),
+    getByName: (name) => wrap(String(name)),
   };
 }
 

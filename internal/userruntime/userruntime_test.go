@@ -318,28 +318,28 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	}
 }
 
-// TestCapEgressRestrictsTenantReach asserts the capability-egress narrowing
-// (vwork-migration review): the loader worker's PLATFORM binding points at a
-// dedicated network whose allow list is configurable. With EgressAllow set to
-// a narrow range, a tenant-adjacent PLATFORM fetch to a non-listed private
-// address is refused by workerd (restrictPeers), while listed addresses and
-// plain public internet still work via the unchanged globalOutbound.
-func TestCapEgressRestrictsTenantReach(t *testing.T) {
+// TestTenantWsBindingNarrowed asserts the new DO transport model (WDL
+// alignment): no PLATFORM reaches the tenant env, DO/Workflow run as
+// platform-side stubs, and the single tenant-visible transport — the
+// cluster-only WS binding CH_DO_CONNECT, present only for DO workers — honours
+// its allow list (listed range reachable, other private ranges refused by
+// restrictPeers, public internet via the unchanged globalOutbound).
+func TestTenantWsBindingNarrowed(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-
+	stubURL := ""
 	const probe = `
 export default {
   async fetch(req, env) {
     const out = [];
-    // 1. listed (allow) range: the projection stub itself runs on 127.0.0.1
-    try { const r = await env.PLATFORM.fetch(env.CELL_URL + "/v1/control/routes"); out.push("listed:" + r.status); }
+    out.push("platform:" + (typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED"));
+    out.push("cellUrl:" + (typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED"));
+    out.push("ws:" + (typeof env.CH_DO_CONNECT === "undefined" ? "absent" : "present"));
+    try { const r = await env.CH_DO_CONNECT.fetch(WS_STUB + "/v1/control/routes"); out.push("listed:" + r.status); }
     catch(e) { out.push("listed:BLOCKED"); }
-    // 2. non-listed private address: refused by restrictPeers
-    try { const r = await env.PLATFORM.fetch("http://10.1.2.3:9999/x"); out.push("other-private:" + r.status); }
+    try { const r = await env.CH_DO_CONNECT.fetch("http://10.1.2.3:9999/x"); out.push("other-private:" + r.status); }
     catch(e) { out.push("other-private:BLOCKED"); }
-    // 3. plain public internet: unchanged via globalOutbound (public)
     try { const r = await fetch("http://example.com/"); out.push("public:" + r.status); }
     catch(e) { out.push("public:BLOCKED"); }
     return new Response(out.join(" | "));
@@ -349,11 +349,14 @@ export default {
 
 	proj := map[string]any{"apps": []any{map[string]any{
 		"namespace": "acme",
-		"routes":    []any{map[string]any{"host": "egress.test", "worker": "probe"}},
+		"routes":    []any{map[string]any{"host": "ws.test", "worker": "probe"}},
 		"workers": []any{map[string]any{
-			"worker":  "probe",
-			"active":  1,
-			"version": map[string]any{"number": 1, "bundle_sha": "shaEgress"},
+			"worker": "probe",
+			"active": 1,
+			"version": map[string]any{
+				"number": 1, "bundle_sha": "shaWs",
+				"bindings": []any{map[string]any{"type": "do", "name": "ROOM", "id": "Room"}},
+			},
 		}},
 	}}}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -361,20 +364,22 @@ export default {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
 			serveProjection(proj, w, r)
 		case "/v1/internal/bundle":
-			_, _ = w.Write([]byte(probe))
+			_, _ = w.Write([]byte(strings.Replace(probe, "WS_STUB", strconv.Quote(stubURL), 1)))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer stub.Close()
+	stubURL = stub.URL
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	dir := t.TempDir()
 	// "local" covers the httptest stub (127.0.0.1); 10/8 deliberately NOT listed.
 	capnpPath, err := Render(dir, Config{
-		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
-		EgressAllow: []string{"local"},
+		WsAllow: []string{"local"},
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -402,7 +407,7 @@ export default {
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, public+"/probe", nil)
-	req.Host = "egress.test"
+	req.Host = "ws.test"
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -410,14 +415,10 @@ export default {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "listed:200") {
-		t.Fatalf("listed range should be reachable, got: %s", body)
-	}
-	if !strings.Contains(string(body), "other-private:BLOCKED") {
-		t.Fatalf("non-listed private range should be blocked, got: %s", body)
-	}
-	if !strings.Contains(string(body), "public:200") {
-		t.Fatalf("plain public internet should be unchanged, got: %s", body)
+	for _, want := range []string{"platform:absent", "cellUrl:absent", "ws:present", "listed:200", "other-private:BLOCKED", "public:200"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("probe %q missing in: %s", want, body)
+		}
 	}
 
 	cancel()
@@ -443,8 +444,8 @@ export default {
   async fetch(req, env) {
     return Response.json({
       cellToken: typeof env.CELL_TOKEN === "undefined" ? "absent" : "LEAKED",
-      cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "present",
-      platformBinding: typeof env.PLATFORM === "undefined" ? "absent" : "present",
+      cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED-URL",
+      platformBinding: typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT",
       globalLeak: typeof globalThis.__cellhivePlatform === "undefined" ? "absent" : "LEAKED",
       logToken: typeof env.LOG_TOKEN === "undefined" ? "absent" : "LEAKED",
     });
@@ -532,10 +533,13 @@ export default {
 	if out.LogToken != "absent" {
 		t.Fatalf("log token leaked into tenant env")
 	}
-	// Non-credential platform surfaces stay: the transport binding (PLATFORM)
-	// and the backend address (CELL_URL) are functional, not secrets.
-	if out.PlatformBinding != "present" || out.CellURL != "present" {
-		t.Fatalf("platform transport missing: %+v", out)
+	// DO/Workflow are platform-side stubs now, so no transport binding and no
+	// backend address reach the tenant env at all (WDL alignment).
+	if out.PlatformBinding != "absent" {
+		t.Fatalf("platform transport leaked into tenant env: %q", out.PlatformBinding)
+	}
+	if out.CellURL != "absent" {
+		t.Fatalf("backend address leaked into tenant env: %q", out.CellURL)
 	}
 
 	cancel()

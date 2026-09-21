@@ -8,7 +8,7 @@ import "log-tail.js";
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError } from "cellhive-workflow.js";
-import { buildBindings } from "facades.js";
+import { buildBindings, makeDOFromStub } from "facades.js";
 
 try {
   if (__env.CH_FACADE_SPEC) {
@@ -20,6 +20,16 @@ try {
     );
     for (const [name, value] of Object.entries(facades)) {
       Object.defineProperty(__env, name, { value, writable: true, configurable: true, enumerable: true });
+    }
+  }
+  if (__env.CH_DO_SPEC && __env.CH_DO_CONNECT) {
+    for (const [name, spec] of Object.entries(JSON.parse(__env.CH_DO_SPEC))) {
+      if (__env[name]) {
+        Object.defineProperty(__env, name, {
+          value: makeDOFromStub(__env[name], spec, { connect: __env.CH_DO_CONNECT, cellUrl: __cellhivePlatform.cellUrl }),
+          writable: true, configurable: true, enumerable: true,
+        });
+      }
     }
   }
 } catch (e) {
@@ -63,11 +73,23 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
   }
 }
 
-// call routes a platform step callback through the PLATFORM service binding so it
-// can reach the private cell-agent without widening the tenant's globalOutbound.
-// The internal token comes from the module-scope __cellhivePlatform const
-// (injected into this module's source, ADR-074) — never from the tenant env.
+// call routes a platform step callback to cell-agent. The platform-side
+// WorkflowSteps entrypoint stub (env.CH_WF_STEPS) owns the :7001 transport and
+// the internal token, so no platform binding enters the tenant env; the data
+// returned is re-wrapped as a Response for the step helpers below.
 function call(env, path, init) {
+  const steps = env.CH_WF_STEPS;
+  if (steps && typeof steps.call === "function") {
+    return (async () => {
+      const res = await steps.call(path, (init && init.method) || "GET",
+        init && init.body !== undefined ? init.body : null);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { "content-type": res.contentType || "text/plain" },
+      });
+    })();
+  }
+  // Fallback (CH_WF_STEPS not configured): the module-scope platform consts.
   const url = __cellhivePlatform.cellUrl.replace(/\/$/, "") + path;
   const withToken = { ...(init || {}) };
   withToken.headers = { ...(withToken.headers || {}), "x-cellhive-internal-token": __cellhivePlatform.cellToken };

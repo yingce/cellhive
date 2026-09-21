@@ -1,6 +1,6 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub } from "bindings.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -254,8 +254,25 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
     else unmigrated[name] = b;
   }
   out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
-  out.CELL_URL = env.CELL_URL;
-  out.PLATFORM = env.PLATFORM;
+  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
+  // alignment): no PLATFORM/CELL_URL enters the tenant env. Two narrow
+  // exceptions — the DO WebSocket upgrade (cluster-only WS binding) and
+  // workflow step callbacks (data-only steps stub).
+  const doSpecs = {};
+  let hasWorkflow = false;
+  for (const [name, b] of Object.entries(spec || {})) {
+    if (b && b.kind === "do") doSpecs[name] = b;
+    if (b && b.kind === "workflow") hasWorkflow = true;
+  }
+  if (Object.keys(doSpecs).length > 0) {
+    out.CH_DO_SPEC = JSON.stringify(doSpecs);
+    if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
+  }
+  // Data-only stubs for workflow step callbacks and the log ring (no transport
+  // is exposed). Guard ctx.exports for callers without entrypoints.
+  const ex = ctx && ctx.exports;
+  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: {} });
+  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: {} });
   out.LOG_NS = ns || "";
   out.LOG_WORKER = worker || "";
   return out;

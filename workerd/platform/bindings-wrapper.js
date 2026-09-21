@@ -10,7 +10,7 @@
 // patched facades.
 import "log-tail.js";
 import { env } from "cloudflare:workers";
-import { buildBindings, wrapR2Metadata } from "facades.js";
+import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 
 try {
   const specText = env.CH_FACADE_SPEC;
@@ -23,6 +23,18 @@ try {
     );
     for (const [name, value] of Object.entries(facades)) {
       Object.defineProperty(env, name, { value, writable: true, configurable: true, enumerable: true });
+    }
+  }
+  // DO namespaces are platform-side entrypoint stubs; wrap them so a WebSocket
+  // upgrade routes through the cluster-only WS binding.
+  if (env.CH_DO_SPEC && env.CH_DO_CONNECT) {
+    for (const [name, spec] of Object.entries(JSON.parse(env.CH_DO_SPEC))) {
+      if (env[name]) {
+        Object.defineProperty(env, name, {
+          value: makeDOFromStub(env[name], spec, { connect: env.CH_DO_CONNECT, cellUrl: __cellhivePlatform.cellUrl }),
+          writable: true, configurable: true, enumerable: true,
+        });
+      }
     }
   }
   // R2ObjectBody.writeHttpMetadata mutates the caller's Headers, so it must run

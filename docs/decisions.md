@@ -2379,6 +2379,21 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
+## ADR-184 租户 env 零平台传输：DO/Workflow/Vectorize 平台侧 stub（WDL 对齐）✅实现
+
+- **背景**：`PLATFORM`（指向 private-outbound 的 service binding）此前注入租户 env，供 DO/Workflow facade、vectorize facade 与 log-tail 出网。它虽无凭据，但让租户代码可以把它当通用私网出口（探测/扫描）。ADR-074 已把角色令牌移出租户 env；本 ADR 移出**传输本身**。
+- **决策**：
+  1. **平台侧 stub**：`bindings.js` 新增 `DurableObjectNamespace`（`get(id)` 返回 `DOStubTarget extends RpcTarget`，显式 `fetch`/`rpc` 方法）、`WorkflowBinding`（create/get/sendEvent/list；get 返回 `WorkflowInstanceTarget`）、`Vectorize`、`WorkflowSteps`（`call(path,method,body)`）、`LogSink`（`send(ns,worker,batch)`）。`bindingStub` 增加 do/workflow/vectorize case，`CH_FACADE_SPEC` 因此恒为空。
+  2. **租户 env 只剩 stub 与数据**：`PLATFORM`/`CELL_URL` 不再注入；DO 的 `CH_DO_SPEC`（spec 数据，含 per-binding scoped token，符合 ADR-074）+ `CH_DO_CONNECT`（仅 DO worker）、`CH_WF_STEPS`/`CH_LOG_SINK`（数据型 stub）。
+  3. **DO WebSocket**（唯一不能跨 RPC 的场景）：租户侧 `makeDOFromStub` 的 Proxy 检测 `Upgrade` 并从 `CH_DO_CONNECT` 走 `/v1/do/connect`（owner 查询 + ticket），普通请求走平台 stub 的 RPC。`CELLHIVE_CAP_WS` 控制该绑定的 allow（未配置回落 public+private 兼容既有部署；生产应收窄到集群网段）。
+  4. **workerLoader 语义（实测）**：`ctx.exports` 是**宿主 worker mainModule 的导出集** → 新增 stub 类必须同步 `export {...} from "bindings.js"`（user-runtime 的 loader.js/internal.js、do-runtime 的 host.js）；**方法返回值若是 Proxy，不被 RPC 认作 RpcTarget**（"receiver does not implement"）→ 平台侧只暴露显式方法，任意名由租户侧 Proxy 转成 `(method,args)`。
+  5. DO 传输经**模块级缓存**（`doTransports`）跨 RPC 实例保持 owner hint（workerLoader 可能按调用实例化 entrypoint）。
+- **理由**：租户 env 不再含任何通用网络出口；私网可达面收敛为「DO WS 的 cluster-only 窄绑定」，其余全部在平台 worker 内完成。与 CF 的一致性提升（CF 租户也只有 namespace 语义的绑定）；与 WDL 的实现方式一致。
+- **代价/边界**：DO WebSocket 依赖窄绑定（需配置 `CELLHIVE_CAP_WS` 才真正收窄，未配置=public+private 回退）；`CH_DO_SPEC` 含 per-binding scoped token（与既有 `CH_FACADE_SPEC` 同为 ADR-074 允许的租户邻接 token）。
+- **验证**：`internal/userruntime`（DO fetch/RPC、DO owner hint 直连、vectorize、log tail、workflow 全套、`TestTenantEnvHasNoPlatformCredentials`=PLATFORM/CELL_URL 缺席、`TestTenantWsBindingNarrowed`=窄绑定 allow 生效）、`internal/doruntime`（DO/facet 全套）；`make build/vet/test` 54 包 + `make js-test` 全绿。
+
+---
+
 ## ADR-181 凭据收敛与能力令牌委派（a+b 已实现，收敛设计）✅部分实现
 
 > 状态：**凭据收敛的 (a)+(b) 已实现（2026-09-20）；8 凭据收敛/非对称（档 1–3）仍为设计，
@@ -2452,6 +2467,7 @@
 - ADR-133：域名不做 DNS 校验（登记即授权）：删 `domain verify`/验证循环/`CELLHIVE_DOMAIN_VERIFY`·`CELLHIVE_DNS_RESOLVER`；host 唯一性/409/审计/`domain rm` 保留，校验字段与状态机保留备用。
 - ADR-183：KV TTL 放开 60s 下限（平台要求，vwork 迁移开放项 3）：`expirationTtl` 接受任意正整数秒，`expiration` 仍须在未来；技术依据——过期是**双机制**：读路径惰性过滤（`expires_ms > now`，get/put-if/incr/list 全部带该条件，过期即刻不可见）+ timer 清扫（`kv-expire` 按最近到期武装、`CELLHIVE_TIMER_INTERVAL` 秒级）只负责空间回收，故 60s 下限从来不是技术必需（ADR-176 是对齐 CF 的人为收紧）。影响：与 CF Workers KV 的显式差异（CF 拒 <60s），wranglercompat 不含该校验（已核实），JS facade 直传；`internal/server TestKVTTLAndMetadataE2E` 用例更新（59s 接受）。
 - ADR-182：KV 条件写与原子自增（超 CF API 的能力）。**条件写是原子存在性判定（`absent`/`present`），不是版本 CAS**——先后否证两版：① cell txid 守卫（cell 级计数器，无关 key 写入也推进，伪冲突）；② per-key version 列（实现对，但评审发现 vwork `onlyIf` 只有 `"absent"|"present"` 两个字面量，无值/版本比对，version 令牌是过度设计——`sqlite` 单写者 + 同事务 `EXISTS` 判定即原子）。终版：`put?if_exists=absent|present`（`cellstore.PutTxIf` + `PutTxCondition`，存在性判定与写入同事务，条件不满足整体回滚不推进 txid 不捕获，HTTP `200 {applied:false}` 对齐 vwork 布尔语义而非错误码）；过期行计为 absent（锁 + TTL 过期后可重新获取）。`POST /v1/kv/incr?by=`（默认 1，可负）单事务读-加-写（`IncrTx`/`IncrTxIn`，溢出/非整数 `400 not_integer`，纯加保留原 metadata），支持可选 `if_exists` 守卫。动机：vwork 平台适配层需要 `put(onlyIf)`/`incr` 语义（锁/幂等/计数器），SQLite 单写者 + `writeMu` 使事务内判定天然原子。schema 零变更（version 列已从终版移除）。
+- ADR-184：租户 env 零平台传输（WDL 对齐）：DO/Workflow/Vectorize 改为**平台侧 entrypoint stub**（`ctx.exports.X({props})`，:7001 传输与 scoped token 全在平台 worker）；DO WebSocket 是唯一不能跨 workerLoader RPC 的场景，经**cluster-only 窄绑定 `CH_DO_CONNECT`**（`CELLHIVE_CAP_WS` 控制 allow，默认 public+private 回退）；workflow step 回调与租户日志 ring 分别走数据型 `WorkflowSteps`/`LogSink` stub；`PLATFORM`/`CELL_URL` 不再进入租户 env。关键实现事实：workerLoader 的 `ctx.exports` = **宿主 worker mainModule 的导出集**（新增 stub 类须同步 `loader.js/internal.js/host.js` 的 re-export）；**方法返回的 Proxy 不被 RPC 认作 RpcTarget**，故平台侧只暴露显式方法，任意 DO 方法名由**租户侧 Proxy**（`facades.js makeDOFromStub`）转发为 `(method,args)` 数据。
 - ADR-181：凭据收敛与能力令牌委派（**a+b 已实现**：scoped token 段级 glob + `iss`/`IssuerKey`/`VerifyIssuer` 委派签发，`scopeAuth` 对外部令牌强制 exp/跳 HasBinding，CLI `creds issuer <name>`；**8 凭据收敛/非对称仍设计**）：按信任边界分三类凭据；对称不能合角色、非对称才能合；最小分发；per-issuer kill switch vs 换 root 取舍；log 独立、secrets-root 移出 root；分档 1→1.5→2→3。
 - ADR-179：指标按命名空间归属（ns 维度，有界标签）+ 绑定 span 带租户属性。
 - ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。
