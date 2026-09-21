@@ -183,7 +183,7 @@ const config :Workerd.Config = (
 
     (name = "public-network", network = ( allow = [{{.OutboundAllowList}}] )),
     (name = "private-outbound", network = ( allow = ["public", "private"] )),
-    (name = "cap-egress", network = ( allow = ["public", {{.EgressAllowList}}] )),
+    (name = "cap-egress", network = ( allow = [{{.EgressAllowList}}] )),
   ],
   sockets = [
     (name = "internal", address = "*:{{.InternalPort}}", http = (), service = "internal" ),
