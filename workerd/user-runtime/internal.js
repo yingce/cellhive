@@ -226,7 +226,7 @@ async function loadWorkflowWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "workflow-wrapper.js",
     modules: {
-      "workflow-wrapper.js": platformConsts(env, spec && spec.bindings) + env.WF_WRAPPER_SRC,
+      "workflow-wrapper.js": platformConsts(spec && spec.bindings) + env.WF_WRAPPER_SRC,
       "cellhive-workflow.js": env.WF_BASE_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
@@ -237,19 +237,16 @@ async function loadWorkflowWorker(env, ctx, body) {
   }));
 }
 
-// platformConsts renders the platform-only credentials as a module-scope const
-// PREPENDED to a wrapper module's source (same mechanism as loader.js; ADR-074):
-// module scope is isolated per module, so tenant.js cannot read it — unlike
-// `env`, which is shared with tenant code.
-function platformConsts(env, spec) {
+// platformConsts renders only non-secret binding-name metadata. Platform
+// URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
+function platformConsts(spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
-// internal token is NOT put here: it reaches platform wrappers via the
-// module-scope __cellhivePlatform const appended to their source (ADR-074 —
-// the tenant env must not carry internal/platform credentials).
+// Platform credentials remain in the trusted host and are neither placed here
+// nor rendered into the module-scope __cellhivePlatform metadata (ADR-186).
 function tenantEnv(env, ctx, spec, vars) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
@@ -278,7 +275,7 @@ async function loadWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": platformConsts(env, spec && spec.bindings) + env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(spec && spec.bindings) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,

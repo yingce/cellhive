@@ -366,13 +366,11 @@ async function connect(req, env, url, ticket) {
 
 // buildFacetEnv materializes the worker's bindings as props-bound entrypoint
 // stubs (ADR-090) plus vars, so the tenant DO's env is complete natively.
-// platformConsts renders the platform-only credentials as a module-scope const
-// PREPENDED to a wrapper module's source (same mechanism as user-runtime's
-// loader.js/internal.js; ADR-074): module scope is isolated per module, so the
-// tenant DO class cannot read it — unlike `env`, which is shared.
-function platformConsts(env, spec) {
+// platformConsts renders only non-secret binding-name metadata. Platform
+// URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
+function platformConsts(spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
@@ -848,9 +846,9 @@ export class Host extends DurableObject {
         modules: Object.assign(
           facetSrc ? { "cellhive-facet.js": facetSrc } : {},
           {
-            // The internal token reaches the wrapper via a module-scope const
-            // appended to its source (ADR-074) — never via the tenant env.
-            "bindings-wrapper.js": platformConsts(this.env, bs.bindings) + this.env.BINDINGS_WRAPPER_SRC,
+            // Only binding-name metadata enters the wrapper; platform secrets
+            // remain in the host worker (ADR-186).
+            "bindings-wrapper.js": platformConsts(bs.bindings) + this.env.BINDINGS_WRAPPER_SRC,
             "tenant.js": bundle,
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,

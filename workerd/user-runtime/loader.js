@@ -188,7 +188,7 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
     compatibilityFlags: version.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": platformConsts(env, spec) + env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(spec) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
@@ -251,18 +251,15 @@ function tenantEnv(env, ctx, spec, vars) {
   return out;
 }
 
-// platformConsts renders the platform-only credentials as a module-scope const
-// appended to a wrapper module's source. It is how platform JS (queue/workflow
-// wrappers, do-runtime bindings-wrapper) gets the internal token WITHOUT it
-// ever entering the tenant env object (ADR-074: the internal token must not be
-// visible to tenant code). Module scope is isolated per module, so tenant.js
-// cannot read a const defined in wrapper.js — unlike `env`, which is shared.
-function platformConsts(env, spec) {
+// platformConsts renders only non-secret binding-name metadata into the trusted
+// wrapper module. Platform URLs/tokens stay in the host worker and never enter
+// the dynamic WorkerCode (ADR-186).
+function platformConsts(spec) {
   // PREPENDED to the wrapper source: the wrapper's top-level code runs before
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // --- assets ---------------------------------------------------------------

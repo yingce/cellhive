@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,22 @@ import (
 	"cellhive/internal/dosupervisor"
 	"cellhive/internal/replica"
 )
+
+func TestDynamicWorkerCodeContainsNoPlatformCredential(t *testing.T) {
+	b, err := os.ReadFile("../../workerd/do-runtime/host.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, leaked := range []string{
+		`cellUrl: ${JSON.stringify(env.CELL_URL`,
+		`cellToken: ${JSON.stringify(env.CELL_TOKEN`,
+	} {
+		if strings.Contains(s, leaked) {
+			t.Errorf("host.js renders a platform credential into final WorkerCode: %s", leaked)
+		}
+	}
+}
 
 // compatTenant exercises the CF DO surface the platform must preserve: sync
 // SQLite (`ctx.storage.sql`) and `transactionSync`.

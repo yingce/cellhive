@@ -42,6 +42,27 @@ export default {
 };
 `
 
+func TestDynamicWorkerCodeContainsNoPlatformCredential(t *testing.T) {
+	for _, path := range []string{
+		"../../workerd/user-runtime/loader.js",
+		"../../workerd/user-runtime/internal.js",
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for _, leaked := range []string{
+			`cellUrl: ${JSON.stringify(env.CELL_URL`,
+			`cellToken: ${JSON.stringify(env.CELL_TOKEN`,
+		} {
+			if strings.Contains(s, leaked) {
+				t.Errorf("%s renders a platform credential into final WorkerCode: %s", path, leaked)
+			}
+		}
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
