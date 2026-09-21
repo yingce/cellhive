@@ -24,7 +24,7 @@ import {
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans } from "telemetry.js";
 
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize, PlatformBridge } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned

@@ -1,6 +1,6 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
-import { bindingStub } from "bindings.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, PlatformBridge } from "bindings.js";
+import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -191,13 +191,13 @@ async function dispatchWorkflows(req, env, ctx) {
     return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
   }
   try {
-    const bridge = ctx.exports.PlatformBridge({ props: {
+    const bridge = new WorkflowBridgeTarget(env, {
       ns: body.namespace,
       worker: body.worker,
       workflow: body.workflow,
       id: body.id,
       run: body.run_token || "",
-    } });
+    });
     const out = await stub.getEntrypoint("CellHiveWorkflow").handleRun(class_name, {
       instanceId: id,
       event: { payload: decodeBody(body.params), instanceId: id, timestamp: new Date() },

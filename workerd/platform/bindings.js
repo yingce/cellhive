@@ -804,10 +804,11 @@ export class Vectorize extends WorkerEntrypoint {
   }
 }
 
-// PlatformBridge is the platform-side bridge for wrappers that receive an
-// explicit capability over JSRPC. Identity (ns/worker/workflow/id/run) is bound
-// in props, never taken from the caller.
-export class PlatformBridge extends WorkerEntrypoint {
+// WorkflowBridgeTarget is created by the trusted workflow dispatcher and
+// transferred to the loaded workflow as an RpcTarget capability. It retains
+// the trusted host env and dispatcher-bound identity in its originating
+// isolate; neither is serialized into the loaded worker or its tenant env.
+export class WorkflowBridgeTarget extends RpcTarget {
   // Fixed op -> (method, path) table for workflow step callbacks: the wrapper
   // picks an op, never a raw path, so the internal token cannot be turned into
   // an open relay or a cross-tenant tool.
@@ -829,26 +830,35 @@ export class PlatformBridge extends WorkerEntrypoint {
   static #PARAM_RE = /^[a-z_]+$/;
   static #IDENTITY_KEYS = new Set(["ns", "workflow", "id", "run"]);
 
+  #env;
+  #props;
+
+  constructor(env, props) {
+    super();
+    this.#env = env;
+    this.#props = Object.freeze(Object.assign({}, props));
+  }
+
   async workflowStep(op, params, body) {
-    const entry = PlatformBridge.#OPS.get(String(op));
+    const entry = WorkflowBridgeTarget.#OPS.get(String(op));
     if (!entry) throw new Error("workflow: unknown step op " + op);
     const [method, path] = entry;
-    const props = this.ctx.props || {};
+    const props = this.#props;
     const qs = ["ns=" + encodeURIComponent(props.ns || "")];
     for (const k of ["workflow", "id", "run"]) {
       const v = props[k];
       if (v !== undefined && v !== null && v !== "") qs.push(k + "=" + encodeURIComponent(String(v)));
     }
     for (const [k, v] of Object.entries(params || {})) {
-      if (!PlatformBridge.#PARAM_RE.test(k) || PlatformBridge.#IDENTITY_KEYS.has(k)) continue;
+      if (!WorkflowBridgeTarget.#PARAM_RE.test(k) || WorkflowBridgeTarget.#IDENTITY_KEYS.has(k)) continue;
       if (v === undefined || v === null || v === "") continue;
       qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
     }
-    const r = await this.env.PLATFORM.fetch(
-      this.env.CELL_URL.replace(/\/$/, "") + path + "?" + qs.join("&"),
+    const r = await this.#env.PLATFORM.fetch(
+      this.#env.CELL_URL.replace(/\/$/, "") + path + "?" + qs.join("&"),
       {
         method,
-        headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" },
+        headers: { "x-cellhive-internal-token": this.#env.CELL_TOKEN || "" },
         body: body === undefined || body === null ? undefined : body,
       },
     );

@@ -63,8 +63,8 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
 }
 
 // call routes one workflow step callback to cell-agent through the
-// platform-side PlatformBridge entrypoint stub passed by the dispatcher. The stub owns
-// the :7001 transport and the internal token, and it accepts a fixed op name
+// trusted WorkflowBridgeTarget RpcTarget passed by the dispatcher. The target
+// owns the :7001 transport and the internal token, and it accepts a fixed op name
 // (never a raw path) with the namespace forced to this worker — so the tenant
 // cannot turn it into a generic relay. Returns a Response-shaped view for the
 // step helpers below.

@@ -4,7 +4,12 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
-### 租户 env 零平台传输：DO/Workflow/Vectorize 平台侧 stub（ADR-184）
+### 租户 env 完全由用户拥有（ADR-185）
+- tenant Worker 与 DO facet 的 `env` 现在只有用户声明的 vars/bindings；平台键为 0，`CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称均归用户所有。
+- Workflow dispatcher 以可信 `WorkflowBridgeTarget extends RpcTarget` 把固定 op 回调能力作为 JSRPC 参数传入动态 workflow wrapper；宿主 env、私网 transport、凭据与 dispatcher-bound 身份留在可信 internal host。pinned stock workerd `1.20260615.1` 已实测 step/retry/wait/pause/error 全链路；未使用跨动态 loader 不兼容的 `ServiceStub`，也未开启 experimental flag。
+- 动态 loaded Worker 的原生 Tail Worker 在当前 pin 不支持，因此租户 console 平台采集暂时关闭；不以 env transport 回退。
+
+### 租户 env 零平台传输：DO/Workflow/Vectorize 平台侧 stub（ADR-184，env 结论由 ADR-185 取代）
 - DO namespace、Workflow、Vectorize 改为**平台侧 entrypoint stub**（`ctx.exports.X({props})`）：`:7001` 传输与 per-binding scoped token 全部留在平台 worker，租户 isolate 只拿 RPC stub；`PLATFORM`/`CELL_URL` **不再注入租户 env**（此前可被租户当通用私网出口）。
 - DO WebSocket 也走平台侧 stub：`DurableObjectNamespace.fetch(request)`（fetch 形 RPC，DO id 经 `DO_ID_HEADER` 随 Request 传）——workerd 只对 fetch 形保留 101/WebSocket 回传，owner 查询与 shard ticket 全在平台 worker 内完成。**`CH_DO_CONNECT` 与 `CELLHIVE_CAP_WS` 已删除**（`cap-ws` 网络不再存在），**租户 env 中不再有任何凭据或租户可见传输**；任意 DO 方法仍走 `rpcObject` 数据通道（ADR-162）。workflow step 回调与租户日志 ring 合并为数据型 `PlatformBridge`（`CH_PLATFORM`）stub，其身份（ns/workflow/id/run、ns/worker）绑进 stub 的 props，`WF_*`/`LOG_NS`/`LOG_WORKER` 已从 env 移除。
 - **平台 env 键压到 2 个 + 保留命名空间**：绑定名清单（R2/DO）改经模块作用域常量注入、删除已死的 `CH_FACADE_SPEC`、workflow step 与日志上送合并为 `PlatformBridge`——租户 env 的平台键**只剩 `CH_PLATFORM`**（平台桥）。`CH_*`/`CELL_*`/`__cellhive*` 与平台身份键为保留名，用户 var/secret/binding 名落在其中会被部署/写入拒绝（`reserved_env_name`）。

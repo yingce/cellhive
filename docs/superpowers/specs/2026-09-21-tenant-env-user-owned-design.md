@@ -46,12 +46,14 @@ Workflow 不再从 `env.CH_PLATFORM` 取得 step transport。
 
 可信的 user-runtime internal host 在派发 workflow 时：
 
-1. 用 `ctx.exports.PlatformBridge({props})` 创建身份已绑定的 capability；
-2. props 固定 `namespace`、`worker`、`workflow`、`id` 和 `run`；
+1. 创建 `WorkflowBridgeTarget extends RpcTarget`；target 留存在可信 internal host，持有宿主 env；
+2. 构造时固定 `namespace`、`worker`、`workflow`、`id` 和 `run`；
 3. 通过原生 JSRPC，把 capability 作为 `CellHiveWorkflow.handleRun()` 的参数传给 workflow wrapper；
 4. wrapper 用闭包构造传给租户 `run(event, step)` 的 `step` 对象。
 
-capability 不进入租户 `env`，也不直接交给租户 workflow 类。租户只拿到 Cloudflare 形状的 `step` 对象。`PlatformBridge` 继续使用固定 op 表，拒绝原始路径、身份覆盖和跨租户参数。
+capability 不进入租户 `env`，也不直接交给租户 workflow 类。租户只拿到 Cloudflare 形状的 `step` 对象。`WorkflowBridgeTarget` 继续使用固定 op 表，拒绝原始路径、身份覆盖和跨租户参数。
+
+这里不能改用 `ctx.exports.X({props})` 生成的 `ServiceStub`：真实 pinned stock workerd `1.20260615.1` 在把该 stub 作为参数跨动态 `workerLoader` RPC 边界时返回 `DataCloneError: ServiceStub serialization requires the 'experimental' compat flag.`。原生 `RpcTarget` capability 参数在同一 pin 上通过 step、retry、wait、pause、non-retryable 与身份伪造测试，无需 experimental flag。
 
 JSRPC capability 参数必须在 pinned workerd `1.20260615.1` 上做真实测试，覆盖 step get/put、sleep、waitForEvent、finish、错误完成以及身份伪造拒绝。
 

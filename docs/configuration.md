@@ -222,6 +222,6 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 _最后更新：2026-09-19_
 
-## 保留 env 命名空间
+## 租户 env 命名空间
 
-加载 worker 的 env 除用户 `vars`/绑定的 stub 外，仅剩平台的**控制通道**键：`CH_PLATFORM`（平台桥：workflow step op 表 + 日志上送，身份绑 props）——无凭据、语义受限。DO 的 WebSocket 升级与普通调用都经平台侧 stub（ADR-184），不需要租户可见的传输。`CH_*`/`CELL_*`/`__cellhive*` 前缀与 `PLATFORM`/`LOG_NS`/`LOG_WORKER`/`LOG_TOKEN`/`WF_*` 为**保留名**：用户的 var/secret/binding 名若落在其中，部署/写入被拒绝（`reserved_env_name`），避免被平台静默覆盖。
+加载 worker 与 DO facet 的 `env` 只包含用户声明的 `vars`、secrets 和 binding stub；平台键为 **0**。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 都是用户可用名称，不会因平台保留名而被部署或 secret 写入拒绝。DO 的 WebSocket 升级与普通调用仍经平台侧 stub（ADR-184），不需要租户可见的私网传输。Workflow step 回调则由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数传给 wrapper；它不是 `ctx.exports.X({props})` 创建的 `ServiceStub`，也不进入 tenant env（ADR-185）。
