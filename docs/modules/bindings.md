@@ -21,7 +21,7 @@ cell-agent 上的 `/v1/kv/*`、`/v1/d1/*`、`/v1/r2/*`、`/v1/queue/*`、`/v1/wo
 ## 关键不变量
 
 - binding 名 = 已登记资源名（无自动 provisioning）。
-- **保留 env 命名空间**：`CH_*`/`CELL_*`/`__cellhive*` 前缀与平台身份键（`PLATFORM`/`LOG_NS`/`LOG_WORKER`/`LOG_TOKEN`/`WF_*`）由平台占用（加载 worker 的控制通道：各 binding stub、`CH_R2_BINDINGS`/`CH_DO_BINDINGS`/`CH_DO_CONNECT`/`CH_WF_STEPS`/`CH_LOG_SINK`）；**用户的 var/secret/binding 名落在这些命名空间会被部署期拒绝**（`reserved_env_name`），避免静默覆盖或与平台键冲突（ADR-184）。
+- **平台 env 键已压到最小**：租户 env 里的平台键只剩 **`CH_PLATFORM`**（平台桥：workflow step op 表 + 日志上送，身份绑 props）与 DO worker 的 **`CH_DO_CONNECT`**（仅 DO WebSocket 的 cluster-only 传输）；绑定名清单（R2/DO）经模块作用域常量 `__cellhivePlatform.*` 注入，不占 env 名。**保留命名空间**：`CH_*`/`CELL_*`/`__cellhive*` 与平台身份键（`PLATFORM`/`LOG_NS`/`LOG_WORKER`/`LOG_TOKEN`/`WF_*`）仍保留，用户的 var/secret/binding 名落在其中会被部署期拒绝（`reserved_env_name`），避免静默覆盖（ADR-184）。
 - 每个 binding 一个 scoped token（HMAC）。
 - 读**强一致**（转发 owner）。
 - 对 CF 拒绝项**显式拒绝**（Cache API、Sessions、SSE-C…），未知字段/flag 部署期拒绝。

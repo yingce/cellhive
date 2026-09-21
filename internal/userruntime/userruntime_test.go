@@ -446,13 +446,13 @@ export default {
   async fetch(req, env) {
     const out = [];
     // 1. a raw path (old API shape) must be rejected
-    try { await env.CH_WF_STEPS.call("/v1/control/apps", "GET", null); out.push("rawpath:ACCEPTED"); }
+    try { await env.CH_PLATFORM.workflowStep("/v1/control/apps", "GET", null); out.push("rawpath:ACCEPTED"); }
     catch (e) { out.push("rawpath:rejected"); }
     // 2. an unknown op must be rejected
-    try { await env.CH_WF_STEPS.call("control.apps", {}, null); out.push("badop:ACCEPTED"); }
+    try { await env.CH_PLATFORM.workflowStep("control.apps", {}, null); out.push("badop:ACCEPTED"); }
     catch (e) { out.push("badop:rejected"); }
-    // 3. a forged ns must be ignored (stub binds the caller's namespace)
-    try { const r = await env.CH_WF_STEPS.call("state.get", { ns: "evil", workflow: "MY_WF", id: "i1" }, null); out.push("forgedns:" + r.status); }
+    // 3. a forged ns must be ignored (the stub binds the caller's namespace)
+    try { const r = await env.CH_PLATFORM.workflowStep("state.get", { ns: "evil", workflow: "MY_WF", id: "i1" }, null); out.push("forgedns:" + r.status); }
     catch (e) { out.push("forgedns:threw"); }
     return new Response(out.join(" | "));
   }

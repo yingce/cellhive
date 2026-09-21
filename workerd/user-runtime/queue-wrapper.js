@@ -29,22 +29,12 @@ import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 // cross RPC (DO namespaces, Workflows) — same mechanism as the do-runtime
 // bindings-wrapper (ADR-090). Migrated bindings are already entrypoint stubs.
 try {
-  if (__env.CH_FACADE_SPEC) {
-    // __cellhivePlatform is injected as a module-scope const in this module's
-    // source (loader.js/internal.js platformConsts) — never in the tenant env.
-    const facades = buildBindings(
-      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: __env.PLATFORM },
-      JSON.parse(__env.CH_FACADE_SPEC),
-    );
-    for (const [name, value] of Object.entries(facades)) {
-      Object.defineProperty(__env, name, { value, writable: true, configurable: true, enumerable: true });
-    }
-  }
+
   // DO namespaces arrive as platform-side entrypoint stubs; wrap them so a
   // WebSocket upgrade (the one case that cannot cross RPC) routes through the
   // dedicated cluster-only WS binding.
-  if (__env.CH_DO_BINDINGS && __env.CH_DO_CONNECT) {
-    for (const name of JSON.parse(__env.CH_DO_BINDINGS)) {
+  if (__cellhivePlatform.doBindings.length > 0 && __env.CH_DO_CONNECT) {
+    for (const name of __cellhivePlatform.doBindings) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
           value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
@@ -55,8 +45,8 @@ try {
   }
   // R2ObjectBody.writeHttpMetadata must run in the tenant isolate to mutate the
   // caller's Headers (RPC serializes arguments by value): wrap each R2 binding.
-  if (__env.CH_R2_BINDINGS) {
-    for (const name of JSON.parse(__env.CH_R2_BINDINGS)) {
+  if (__cellhivePlatform.r2Bindings.length > 0) {
+    for (const name of __cellhivePlatform.r2Bindings) {
       if (__env[name]) {
         Object.defineProperty(__env, name, { value: wrapR2Metadata(__env[name]), writable: true, configurable: true, enumerable: true });
       }

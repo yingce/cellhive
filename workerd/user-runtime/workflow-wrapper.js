@@ -11,19 +11,9 @@ import { NonRetryableError } from "cellhive-workflow.js";
 import { buildBindings, makeDOFromStub } from "facades.js";
 
 try {
-  if (__env.CH_FACADE_SPEC) {
-    // __cellhivePlatform is injected as a module-scope const in this module's
-    // source (internal.js platformConsts) — never in the tenant env.
-    const facades = buildBindings(
-      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: __env.PLATFORM },
-      JSON.parse(__env.CH_FACADE_SPEC),
-    );
-    for (const [name, value] of Object.entries(facades)) {
-      Object.defineProperty(__env, name, { value, writable: true, configurable: true, enumerable: true });
-    }
-  }
-  if (__env.CH_DO_BINDINGS && __env.CH_DO_CONNECT) {
-    for (const name of JSON.parse(__env.CH_DO_BINDINGS)) {
+
+  if (__cellhivePlatform.doBindings.length > 0 && __env.CH_DO_CONNECT) {
+    for (const name of __cellhivePlatform.doBindings) {
       if (__env[name]) {
         Object.defineProperty(__env, name, {
           value: makeDOFromStub(__env[name], __env.CH_DO_CONNECT),
@@ -74,19 +64,19 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
 }
 
 // call routes one workflow step callback to cell-agent through the
-// platform-side WorkflowSteps entrypoint stub (env.CH_WF_STEPS). The stub owns
+// platform-side PlatformBridge entrypoint stub (env.CH_PLATFORM). The stub owns
 // the :7001 transport and the internal token, and it accepts a fixed op name
 // (never a raw path) with the namespace forced to this worker — so the tenant
 // cannot turn it into a generic relay. Returns a Response-shaped view for the
 // step helpers below.
 function call(env, op, params, init) {
-  const steps = env.CH_WF_STEPS;
-  if (!steps || typeof steps.call !== "function") {
+  const bridge = env.CH_PLATFORM;
+  if (!bridge || typeof bridge.workflowStep !== "function") {
     return Promise.reject(new Error("workflow: step transport unavailable"));
   }
   const body = init && init.body !== undefined ? init.body : null;
   return (async () => {
-    const res = await steps.call(op, params || {}, body);
+    const res = await bridge.workflowStep(op, params || {}, body);
     return {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
@@ -109,7 +99,7 @@ function retryDelayMs(retries, attempt) {
 }
 
 function makeStep(env, id) {
-  // Identity (ns/workflow/id/run) is bound into the CH_WF_STEPS stub's props.
+  // Identity (ns/workflow/id/run) is bound into the CH_PLATFORM stub's props.
   const base = () => ({});
   const named = (name) => ({ name });
 

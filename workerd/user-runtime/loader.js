@@ -12,7 +12,7 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, PlatformBridge } from "bindings.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
 
@@ -188,15 +188,15 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
     compatibilityFlags: version.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": platformConsts(env) + env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(env, spec) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env, spec) + env.LOG_TAIL_SRC,
     },
     // ADR-090: migrated bindings become props-bound entrypoint stubs in env;
-    // not-yet-migrated ones stay as HTTP facades via CH_FACADE_SPEC (the wrapper
-    // merges them), so this is a safe incremental migration.
+    // all kinds are platform-side stubs (ADR-184), so the wrapper only wraps
+    // R2 (local metadata) and DO (WebSocket) bindings.
     env: tenantEnv(env, ctx, spec, version.vars, app.namespace, worker),
     globalOutbound: env.OUTBOUND,
   }));
@@ -231,8 +231,7 @@ setServiceLoader(async (ctx, env, target) => {
 });
 
 // tenantEnv builds the loaded worker env: vars + entrypoint stubs for migrated
-// bindings, and a CH_FACADE_SPEC fallback the wrapper turns into HTTP facades for
-// the rest (ADR-090 incremental migration).
+// bindings; every kind is a platform-side stub (ADR-184).
 function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   const out = Object.assign({}, vars || {});
   const unmigrated = {};
@@ -258,8 +257,6 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   if (Object.keys(unmigrated).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
   }
-  out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
-  out.CH_R2_BINDINGS = JSON.stringify(r2names);
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
   // alignment): no PLATFORM/CELL_URL enters the tenant env. Two narrow
   // exceptions — the DO WebSocket upgrade (cluster-only WS binding) and
@@ -270,22 +267,23 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
     if (b && b.kind === "do") doSpecs[name] = b;
     if (b && b.kind === "workflow") hasWorkflow = true;
   }
-  if (Object.keys(doSpecs).length > 0) {
-    // Names only: the platform stub owns the identity and the scoped token
-    // (ADR-184); the tenant side just needs to know which env entries to wrap.
-    out.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
-    if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
+  if (Object.keys(doSpecs).length > 0 && env.CH_DO_CONNECT) {
+    // The only tenant-visible platform key besides CH_PLATFORM (ADR-184):
+    // a cluster-only transport for the DO WebSocket upgrade. The stub identity
+    // and the scoped token stay in the platform worker.
+    out.CH_DO_CONNECT = env.CH_DO_CONNECT;
   }
   // Data-only stubs for workflow step callbacks and the log ring (no transport
   // is exposed). ctx.exports may be absent on the assets-only path, so guard.
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) {
-    out.CH_WF_STEPS = ex.WorkflowSteps({ props: {
+  if (ex && ex.PlatformBridge) {
+    // One reserved key carries both the workflow step op table and the log ring
+    // ingest; identity is bound here, never taken from the caller.
+    out.CH_PLATFORM = ex.PlatformBridge({ props: {
       ns, worker,
       workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
     } });
   }
-  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: { ns, worker } });
   return out;
 }
 
@@ -295,11 +293,12 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
 // ever entering the tenant env object (ADR-074: the internal token must not be
 // visible to tenant code). Module scope is isolated per module, so tenant.js
 // cannot read a const defined in wrapper.js — unlike `env`, which is shared.
-function platformConsts(env) {
+function platformConsts(env, spec) {
   // PREPENDED to the wrapper source: the wrapper's top-level code runs before
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
+  const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // --- assets ---------------------------------------------------------------

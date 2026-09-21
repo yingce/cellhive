@@ -1,6 +1,6 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub } from "bindings.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, PlatformBridge } from "bindings.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -218,12 +218,12 @@ async function loadWorkflowWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "workflow-wrapper.js",
     modules: {
-      "workflow-wrapper.js": platformConsts(env) + env.WF_WRAPPER_SRC,
+      "workflow-wrapper.js": platformConsts(env, spec && spec.bindings) + env.WF_WRAPPER_SRC,
       "cellhive-workflow.js": env.WF_BASE_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env, spec && spec.bindings) + env.LOG_TAIL_SRC,
     },
     // Workflow identity travels in the steps stub's props (ADR-184), not in the
     // tenant env.
@@ -237,12 +237,13 @@ async function loadWorkflowWorker(env, ctx, body) {
 // PREPENDED to a wrapper module's source (same mechanism as loader.js; ADR-074):
 // module scope is isolated per module, so tenant.js cannot read it — unlike
 // `env`, which is shared with tenant code.
-function platformConsts(env) {
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
+function platformConsts(env, spec) {
+  const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs, with
-// CH_FACADE_SPEC carrying not-yet-migrated bindings for the wrapper facades.
+// Platform keys: the DO WebSocket transport and the CH_PLATFORM bridge.
 // The internal token is NOT put here: it reaches platform wrappers via the
 // module-scope __cellhivePlatform const appended to their source (ADR-074 —
 // the tenant env must not carry internal/platform credentials).
@@ -268,33 +269,24 @@ function tenantEnv(env, ctx, spec, vars, ns, worker, wf) {
   if (Object.keys(unmigrated).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(unmigrated).join(","));
   }
-  out.CH_FACADE_SPEC = JSON.stringify(unmigrated);
   // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
-  // alignment): no PLATFORM/CELL_URL enters the tenant env. Two narrow
-  // exceptions — the DO WebSocket upgrade (cluster-only WS binding) and
-  // workflow step callbacks (data-only steps stub).
+  // alignment): no PLATFORM/CELL_URL enters the tenant env. The only platform
+  // keys are the cluster-only DO WebSocket transport and the CH_PLATFORM
+  // bridge (workflow steps + log ring, identity bound in props).
   const doSpecs = {};
-  let hasWorkflow = false;
   for (const [name, b] of Object.entries(spec || {})) {
     if (b && b.kind === "do") doSpecs[name] = b;
-    if (b && b.kind === "workflow") hasWorkflow = true;
   }
-  if (Object.keys(doSpecs).length > 0) {
-    // Names only: the platform stub owns the identity and the scoped token
-    // (ADR-184); the tenant side just needs to know which env entries to wrap.
-    out.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
-    if (env.CH_DO_CONNECT) out.CH_DO_CONNECT = env.CH_DO_CONNECT;
+  if (Object.keys(doSpecs).length > 0 && env.CH_DO_CONNECT) {
+    out.CH_DO_CONNECT = env.CH_DO_CONNECT;
   }
-  // Data-only stubs for workflow step callbacks and the log ring (no transport
-  // is exposed). Guard ctx.exports for callers without entrypoints.
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) {
-    out.CH_WF_STEPS = ex.WorkflowSteps({ props: {
+  if (ex && ex.PlatformBridge) {
+    out.CH_PLATFORM = ex.PlatformBridge({ props: {
       ns, worker,
       workflow: (wf && wf.workflow) || "", id: (wf && wf.id) || "", run: (wf && wf.run) || "",
     } });
   }
-  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: { ns, worker } });
   return out;
 }
 
@@ -309,11 +301,11 @@ async function loadWorker(env, ctx, body) {
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": platformConsts(env) + env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(env, spec && spec.bindings) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env) + env.LOG_TAIL_SRC,
+      "log-tail.js": platformConsts(env, spec && spec.bindings) + env.LOG_TAIL_SRC,
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,

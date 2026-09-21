@@ -805,32 +805,18 @@ export class Vectorize extends WorkerEntrypoint {
   }
 }
 
-// LogSink ingests the tenant log ring into cell-agent from the platform worker
-// (fixed path and internal token; the tenant isolate holds no transport).
-export class LogSink extends WorkerEntrypoint {
-  // ns/worker come from props (the loaded worker's own identity), so a tenant
-  // cannot forge log entries for another namespace.
-  async send(batch) {
-    const props = this.ctx.props || {};
-    const r = await this.env.PLATFORM.fetch(
-      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(props.ns || "") +
-        "&worker=" + encodeURIComponent(props.worker || ""),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-cellhive-internal-token": this.env.LOG_TOKEN || this.env.CELL_TOKEN || "" },
-        body: batch,
-      },
-    );
-    return r.status;
-  }
-}
-
-// WorkflowSteps carries the workflow wrapper's synchronous step callbacks to
-// cell-agent from the platform worker (the tenant wrapper cannot reach the
-// private address itself). Data-only: one call() per callback.
-export class WorkflowSteps extends WorkerEntrypoint {
-  // Fixed op -> (method, path) table: the tenant wrapper picks an op, never a
-  // raw path, so the internal token cannot be turned into an open relay.
+// PlatformBridge is the single platform-side bridge for the tenant wrappers
+// (workflow step callbacks + the log ring), so the tenant env needs one
+// reserved key (CH_PLATFORM) instead of several. Identity
+// (ns/worker/workflow/id/run) is bound in props, never taken from the caller.
+export class PlatformBridge extends WorkerEntrypoint {
+  // One platform-side bridge for the tenant wrappers, so the tenant env needs a
+  // single reserved key (CH_PLATFORM) instead of several. Identity
+  // (ns/worker/workflow/id/run) is bound in props, never taken from the caller.
+  //
+  // Fixed op -> (method, path) table for workflow step callbacks: the wrapper
+  // picks an op, never a raw path, so the internal token cannot be turned into
+  // an open relay or a cross-tenant tool.
   static #OPS = new Map([
     ["attempt.get", ["GET", "/v1/internal/workflow/attempt"]],
     ["attempt.put", ["PUT", "/v1/internal/workflow/attempt"]],
@@ -847,13 +833,12 @@ export class WorkflowSteps extends WorkerEntrypoint {
     ["finish.error", ["POST", "/v1/internal/workflow/finish"]],
   ]);
   static #PARAM_RE = /^[a-z_]+$/;
-  async call(op, params, body) {
-    const entry = WorkflowSteps.#OPS.get(String(op));
+  static #IDENTITY_KEYS = new Set(["ns", "workflow", "id", "run"]);
+
+  async workflowStep(op, params, body) {
+    const entry = PlatformBridge.#OPS.get(String(op));
     if (!entry) throw new Error("workflow: unknown step op " + op);
     const [method, path] = entry;
-    // Identity (ns/workflow/id/run) is bound in props — the caller worker's own
-    // run — so a tenant cannot address another namespace or instance; params
-    // may only carry op-specific keys.
     const props = this.ctx.props || {};
     const qs = ["ns=" + encodeURIComponent(props.ns || "")];
     for (const k of ["workflow", "id", "run"]) {
@@ -861,7 +846,7 @@ export class WorkflowSteps extends WorkerEntrypoint {
       if (v !== undefined && v !== null && v !== "") qs.push(k + "=" + encodeURIComponent(String(v)));
     }
     for (const [k, v] of Object.entries(params || {})) {
-      if (!WorkflowSteps.#PARAM_RE.test(k) || k === "ns" || k === "workflow" || k === "id" || k === "run") continue;
+      if (!PlatformBridge.#PARAM_RE.test(k) || PlatformBridge.#IDENTITY_KEYS.has(k)) continue;
       if (v === undefined || v === null || v === "") continue;
       qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
     }
@@ -875,6 +860,22 @@ export class WorkflowSteps extends WorkerEntrypoint {
     );
     const text = await r.text();
     return { status: r.status, body: text, contentType: r.headers.get("content-type") || "text/plain" };
+  }
+
+  // Log ring ingest: ns/worker come from props, so a tenant cannot forge
+  // entries for another namespace.
+  async logSend(batch) {
+    const props = this.ctx.props || {};
+    const r = await this.env.PLATFORM.fetch(
+      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(props.ns || "") +
+        "&worker=" + encodeURIComponent(props.worker || ""),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-cellhive-internal-token": this.env.LOG_TOKEN || this.env.CELL_TOKEN || "" },
+        body: batch,
+      },
+    );
+    return r.status;
   }
 }
 

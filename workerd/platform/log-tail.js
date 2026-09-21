@@ -25,8 +25,8 @@ export function installLogTail() {
 // (plain labels, not secrets).
   // The sink is a platform-side entrypoint stub (fixed path + internal token);
   // the tenant isolate holds no transport or role credential (ADR-074).
-  const sink = env && env.CH_LOG_SINK;
-  if (!sink || typeof sink.send !== "function") {
+  const bridge = env && env.CH_PLATFORM;
+  if (!bridge || typeof bridge.logSend !== "function") {
     return;
   }
   if (globalThis.__cellhiveLogTail) return;
@@ -41,7 +41,7 @@ export function installLogTail() {
     const batch = buf;
     buf = [];
     try {
-      const done = Promise.resolve(sink.send(JSON.stringify(batch))).catch(() => {});
+      const done = Promise.resolve(bridge.logSend(JSON.stringify(batch))).catch(() => {});
       // Bind the send to the request lifetime: workerd cancels un-awaited work
       // once the response is returned (the ADR-115 lesson), which would drop logs.
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(done);

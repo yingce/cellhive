@@ -13,22 +13,10 @@ import { env } from "cloudflare:workers";
 import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 
 try {
-  const specText = env.CH_FACADE_SPEC;
-  if (specText) {
-    // __cellhivePlatform is injected as a module-scope const in this module's
-    // source (host.js platformConsts) — never in the facet env (ADR-074).
-    const facades = buildBindings(
-      { url: __cellhivePlatform.cellUrl, token: __cellhivePlatform.cellToken, fetcher: env.PLATFORM },
-      JSON.parse(specText),
-    );
-    for (const [name, value] of Object.entries(facades)) {
-      Object.defineProperty(env, name, { value, writable: true, configurable: true, enumerable: true });
-    }
-  }
   // DO namespaces are platform-side entrypoint stubs; wrap them so a WebSocket
   // upgrade routes through the cluster-only WS binding.
-  if (env.CH_DO_BINDINGS && env.CH_DO_CONNECT) {
-    for (const name of JSON.parse(env.CH_DO_BINDINGS)) {
+  if (__cellhivePlatform.doBindings.length > 0 && env.CH_DO_CONNECT) {
+    for (const name of __cellhivePlatform.doBindings) {
       if (env[name]) {
         Object.defineProperty(env, name, {
           value: makeDOFromStub(env[name], env.CH_DO_CONNECT),
@@ -39,8 +27,8 @@ try {
   }
   // R2ObjectBody.writeHttpMetadata mutates the caller's Headers, so it must run
   // in this isolate (RPC would serialize the argument by value).
-  if (env.CH_R2_BINDINGS) {
-    for (const name of JSON.parse(env.CH_R2_BINDINGS)) {
+  if (__cellhivePlatform.r2Bindings.length > 0) {
+    for (const name of __cellhivePlatform.r2Bindings) {
       if (env[name]) {
         Object.defineProperty(env, name, { value: wrapR2Metadata(env[name]), writable: true, configurable: true, enumerable: true });
       }

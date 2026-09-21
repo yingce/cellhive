@@ -24,7 +24,7 @@ import {
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans } from "telemetry.js";
 
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, WorkflowSteps, Vectorize, LogSink } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize, PlatformBridge } from "bindings.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned
@@ -370,8 +370,9 @@ async function connect(req, env, url, ticket) {
 // PREPENDED to a wrapper module's source (same mechanism as user-runtime's
 // loader.js/internal.js; ADR-074): module scope is isolated per module, so the
 // tenant DO class cannot read it — unlike `env`, which is shared.
-function platformConsts(env) {
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")} });\n`;
+function platformConsts(env, spec) {
+  const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
@@ -394,28 +395,22 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
   if (Object.keys(facades).length > 0) {
     console.error("cellhive: binding kinds without a platform stub:", Object.keys(facades).join(","));
   }
-  env.CH_FACADE_SPEC = JSON.stringify(facades);
-  env.CH_R2_BINDINGS = JSON.stringify(r2names);
-  // DO namespaces and Workflows are platform-side entrypoint stubs (WDL
-  // alignment): no PLATFORM/CELL_URL enters the facet env. The DO WebSocket
-  // upgrade keeps the cluster-only WS binding; workflow steps get the
-  // data-only steps stub.
+  // Facade metadata and binding-name lists travel in the wrapper module scope
+  // (platformConsts), not the facet env; the only platform keys are the
+  // cluster-only DO WebSocket transport and the CH_PLATFORM bridge.
   const doSpecs = {};
-  let hasWorkflow = false;
   for (const [name, s] of Object.entries(bs.bindings || {})) {
     if (s && s.kind === "do") doSpecs[name] = s;
-    if (s && s.kind === "workflow") hasWorkflow = true;
   }
-  if (Object.keys(doSpecs).length > 0) {
-    // Names only (ADR-184): the platform stub owns the identity/scoped token.
-    env.CH_DO_BINDINGS = JSON.stringify(Object.keys(doSpecs));
-    if (hostEnv.CH_DO_CONNECT) env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
+  if (Object.keys(doSpecs).length > 0 && hostEnv.CH_DO_CONNECT) {
+    env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
   }
   const ex = ctx && ctx.exports;
-  const facetNS = (spec && spec.namespace) || env.LOG_NS || "";
-  const facetWorker = (spec && spec.worker) || env.LOG_WORKER || "";
-  if (ex && ex.WorkflowSteps) env.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns: facetNS, worker: facetWorker } });
-  if (ex && ex.LogSink) env.CH_LOG_SINK = ex.LogSink({ props: { ns: facetNS, worker: facetWorker } });
+  const facetNS = (spec && spec.namespace) || "";
+  const facetWorker = (spec && spec.worker) || "";
+  if (ex && ex.PlatformBridge) {
+    env.CH_PLATFORM = ex.PlatformBridge({ props: { ns: facetNS, worker: facetWorker } });
+  }
   return env;
 }
 
@@ -874,11 +869,11 @@ export class Host extends DurableObject {
           {
             // The internal token reaches the wrapper via a module-scope const
             // appended to its source (ADR-074) — never via the tenant env.
-            "bindings-wrapper.js": platformConsts(this.env) + this.env.BINDINGS_WRAPPER_SRC,
+            "bindings-wrapper.js": platformConsts(this.env, bs.bindings) + this.env.BINDINGS_WRAPPER_SRC,
             "tenant.js": bundle,
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,
-            "log-tail.js": platformConsts(this.env) + this.env.LOG_TAIL_SRC,
+            "log-tail.js": platformConsts(this.env, bs.bindings) + this.env.LOG_TAIL_SRC,
             "rpc-codec.js": this.env.RPC_CODEC_SRC,
           },
         ),
