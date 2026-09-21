@@ -103,14 +103,13 @@ type Config struct {
 	// Empty = ["public"] (I-09). Adding "private"/"local" lets tenants reach
 	// private-network origins (e.g. a DB) at the cost of the public-only floor.
 	OutboundAllow []string
-	// EgressAllow names the network ranges the loader worker's PLATFORM
-	// binding (capability data-plane egress, cap-egress) may reach — the
-	// addresses runtime-services resolves to (CIDR blocks or workerd
-	// categories). "public" is always allowed. Empty keeps the legacy
-	// permissive posture (public+private) until configured; when set, other
-	// private addresses (e.g. cell-agent :7001) are refused by restrictPeers
-	// (migration review: the tenant-facing egress must not be an
-	// unrestricted private-network relay).
+	// EgressAllow names extra network ranges the loader worker's PLATFORM
+	// binding (cap-egress) may reach, on top of the fixed public+private
+	// fallback. The PLATFORM binding is cellhive's internal transport for its
+	// own binding facades (cell-agent :7001) — narrowing it breaks every
+	// facade call (verified by userruntime e2e), so it is deployment plumbing
+	// rather than a tenant-facing security knob: private-network safety rests
+	// on role credentials (ADR-074), never on this allowlist.
 	EgressAllow []string
 }
 
