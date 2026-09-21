@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -464,6 +465,115 @@ func TestDoRuntimeBindingInsideDO(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("workerd did not exit")
+	}
+}
+
+// TestDoRuntimeEnvUserOwned proves a tenant Durable Object receives precisely
+// the user-declared env on both constructor surfaces. The chosen names are
+// former platform names, so this catches a loader env collision rather than a
+// handler-level filter.
+func TestDoRuntimeEnvUserOwned(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	names := []string{"CH_PLATFORM", "CELL_URL", "CELL_TOKEN", "PLATFORM", "LOG_NS", "LOG_WORKER", "LOG_TOKEN", "WF_NS", "WF_NAME", "WF_ID", "WF_RUN_TOKEN", "__cellhive_test"}
+	vars := make(map[string]any, len(names))
+	for _, name := range names {
+		vars[name] = "tenant-value:" + name
+	}
+	const probe = `
+import { DurableObject, env as workerEnv } from "cloudflare:workers";
+const names = ["CH_PLATFORM", "CELL_URL", "CELL_TOKEN", "PLATFORM", "LOG_NS", "LOG_WORKER", "LOG_TOKEN", "WF_NS", "WF_NAME", "WF_ID", "WF_RUN_TOKEN", "__cellhive_test"];
+function snapshot(env) {
+  return { keys: Object.keys(env).sort(), values: Object.fromEntries(names.map((name) => [name, env[name]])) };
+}
+export class Tenant extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.param = snapshot(env);
+    this.self = snapshot(this.env);
+    this.imported = snapshot(workerEnv);
+  }
+  fetch() { return Response.json({ param: this.param, thisEnv: this.self, imported: this.imported }); }
+}
+export default { async fetch() { return new Response("tenant"); } };
+`
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(probe))
+		case "/v1/internal/do/bindings":
+			_ = json.NewEncoder(w).Encode(map[string]any{"bindings": map[string]any{}, "vars": vars})
+		case "/v1/internal/do/claim":
+			_ = json.NewEncoder(w).Encode(map[string]any{"epoch": 1, "expiry_ms": time.Now().Add(time.Minute).UnixMilli(), "node": "n1"})
+		case "/v1/internal/do/alarm/upsert":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	port := freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-env-user-owned", PreventEviction: true,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := noProxyClient()
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(base + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	_, body := invokeSpec(t, base, map[string]any{
+		"namespace": "demo", "worker": "probe", "bundle_sha": "shaEnvUserOwned", "storage_id": "env-owned",
+		"class": "Tenant", "id": "one", "request": map[string]any{"path": "/"},
+	})
+	var surfaces map[string]struct {
+		Keys   []string          `json:"keys"`
+		Values map[string]string `json:"values"`
+	}
+	if err := json.Unmarshal([]byte(body), &surfaces); err != nil {
+		t.Fatalf("decode DO env %q: %v", body, err)
+	}
+	wantKeys := append([]string(nil), names...)
+	sort.Strings(wantKeys)
+	for surface, got := range surfaces {
+		if strings.Join(got.Keys, "\x00") != strings.Join(wantKeys, "\x00") {
+			t.Fatalf("%s env keys = %q, want exactly %q", surface, got.Keys, wantKeys)
+		}
+		for _, name := range names {
+			want := vars[name].(string)
+			if got.Values[name] != want {
+				t.Fatalf("%s env %s = %q, want %q", surface, name, got.Values[name], want)
+			}
+		}
+	}
+	if len(surfaces) != 3 {
+		t.Fatalf("DO env surfaces = %d, want param, thisEnv, imported", len(surfaces))
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
 	}
 }
 

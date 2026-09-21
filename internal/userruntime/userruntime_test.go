@@ -11,13 +11,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -783,6 +786,189 @@ export default {
 	if out.LogToken != "absent" {
 		t.Fatalf("log token leaked into tenant env")
 	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
+// TestUserRuntimeEnvUserOwned exercises every user-runtime execution surface
+// against pinned workerd.  These names intentionally collide with former
+// platform env names: a tenant owns both their presence and their values.
+func TestUserRuntimeEnvUserOwned(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	names := []string{"CH_PLATFORM", "CELL_URL", "CELL_TOKEN", "PLATFORM", "LOG_NS", "LOG_WORKER", "LOG_TOKEN", "WF_NS", "WF_NAME", "WF_ID", "WF_RUN_TOKEN", "__cellhive_test"}
+	vars := make(map[string]string, len(names))
+	for _, name := range names {
+		vars[name] = "tenant-value:" + name
+	}
+
+	const probe = `
+import { env as workerEnv, WorkflowEntrypoint } from "cloudflare:workers";
+const names = ["CH_PLATFORM", "CELL_URL", "CELL_TOKEN", "PLATFORM", "LOG_NS", "LOG_WORKER", "LOG_TOKEN", "WF_NS", "WF_NAME", "WF_ID", "WF_RUN_TOKEN", "__cellhive_test"];
+function snapshot(env) {
+  return { keys: Object.keys(env).sort(), values: Object.fromEntries(names.map((name) => [name, env[name]])) };
+}
+export class Api {
+  constructor(ctx, env) { this.param = snapshot(env); this.self = snapshot(this.env = env); }
+  probe() { return { param: this.param, self: this.self, imported: snapshot(workerEnv) }; }
+}
+export class ProbeWorkflow extends WorkflowEntrypoint {
+  constructor(ctx, env) { super(ctx, env); this.param = snapshot(env); this.self = snapshot(this.env); }
+  run() { return { param: this.param, self: this.self, imported: snapshot(workerEnv) }; }
+}
+export default {
+  fetch(req, env) { return Response.json({ handler: snapshot(env), imported: snapshot(workerEnv) }); },
+  queue(batch, env) { return snapshot(env); },
+  scheduled(event, env) { return snapshot(env); },
+};
+`
+
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "app.test", "worker": "probe"}},
+		"workers": []any{map[string]any{"worker": "probe", "active": 1, "version": map[string]any{
+			"number": 1, "bundle_sha": "shaEnvUserOwned", "vars": vars,
+		}}},
+	}}}
+	var workflowOutput string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(probe))
+		case "/v1/internal/workflow/finish":
+			body, _ := io.ReadAll(r.Body)
+			decoded, _ := base64.StdEncoding.DecodeString(string(body))
+			workflowOutput = string(decoded)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "platform-token", DispatchToken: "platform-token", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	client := noProxyClient()
+	internal := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	assertSnapshot := func(surface, raw string) {
+		t.Helper()
+		var got struct {
+			Keys   []string          `json:"keys"`
+			Values map[string]string `json:"values"`
+		}
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("%s decode snapshot %q: %v", surface, raw, err)
+		}
+		wantKeys := append([]string(nil), names...)
+		sort.Strings(wantKeys)
+		if !slices.Equal(got.Keys, wantKeys) {
+			t.Fatalf("%s env keys = %q, want exactly %q", surface, got.Keys, wantKeys)
+		}
+		if !reflect.DeepEqual(got.Values, vars) {
+			t.Fatalf("%s env values = %#v, want %#v", surface, got.Values, vars)
+		}
+	}
+	assertSnapshots := func(surface, raw string, wantCount int) {
+		t.Helper()
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("%s decode snapshots %q: %v", surface, raw, err)
+		}
+		if len(got) != wantCount {
+			t.Fatalf("%s snapshots = %d, want %d", surface, len(got), wantCount)
+		}
+		for name, snapshot := range got {
+			assertSnapshot(surface+"/"+name, string(snapshot))
+		}
+	}
+	assertSnapshotValue := func(surface string, value any) {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("%s marshal snapshot: %v", surface, err)
+		}
+		assertSnapshot(surface, string(raw))
+	}
+	post := func(path string, payload map[string]any) map[string]any {
+		t.Helper()
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, internal+path, bytes.NewReader(body))
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("x-cellhive-internal-token", "platform-token")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ = io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s = %d: %s", path, resp.StatusCode, body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("POST %s decode %q: %v", path, body, err)
+		}
+		return out
+	}
+
+	resp, body := fetchHost(t, client, public, "/")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public fetch = %d: %s", resp.StatusCode, body)
+	}
+	assertSnapshots("public-fetch", body, 2)
+	common := map[string]any{"namespace": "acme", "worker": "probe", "bundle_sha": "shaEnvUserOwned", "version": 1, "bindings": map[string]any{}, "vars": vars}
+	queue := maps.Clone(common)
+	queue["queue"] = "q"
+	queue["messages"] = []any{map[string]any{"id": "m1", "body": "eA==", "content_type": "text/plain", "attempts": 1}}
+	assertSnapshotValue("queue", post("/v1/queues/dispatch", queue)["result"])
+	timer := maps.Clone(common)
+	timer["kind"], timer["scheduled_time_ms"] = "cron", int64(1)
+	assertSnapshotValue("scheduled", post("/v1/timers/dispatch", timer)["result"])
+	service := maps.Clone(common)
+	service["entrypoint"], service["method"] = "Api", "probe"
+	serviceResult, _ := json.Marshal(post("/v1/services/run", service)["result"])
+	assertSnapshots("service-rpc", string(serviceResult), 3)
+	workflow := maps.Clone(common)
+	workflow["workflow"], workflow["class_name"], workflow["id"], workflow["run_token"] = "wf", "ProbeWorkflow", "i1", "run1"
+	workflow["params"] = base64.StdEncoding.EncodeToString([]byte(`{}`))
+	if out := post("/v1/workflows/run", workflow); out["status"] != "complete" {
+		t.Fatalf("workflow = %#v", out)
+	}
+	assertSnapshots("workflow-constructor", workflowOutput, 3)
+
 	cancel()
 	select {
 	case <-done:
