@@ -139,6 +139,8 @@ canary URL/token 均不得出现。非秘密 binding 名称可以出现，但必
 2. 不允许用 2026-06 的 Miniflare 搭配 2026-09 的 workerd 作为完成态，也不允许去掉 override 后使用 Miniflare 自带的其他 workerd；
 3. 若同期候选不通过，第一阶段不得宣告完成，文档记录 CLI 阻塞，不能静默版本漂移。
 
+真实 smoke 已确认 Miniflare 5 的内建 asset router 无法同时表达 CellHive 的 `404-page`/SPA 与 user-worker fallback：`has_user_worker=true` 在 miss 时绕过 not-found handling，`false` 又拒绝 `run_worker_first`。因此允许在 `cli/` 内增加一个 dev-only 入口 router worker，以 service binding 分别调用 Miniflare 原生 asset service和用户 worker，并严格复现 ADR-071 的顺序。该 worker 与二者处于同一 Miniflare/workerd 实例，不增加网络 listener、独立进程、平台凭据或生产组件；不得复用为生产 gateway。同期版本只有在 module/KV/D1/R2、`_headers`、`_redirects`、`404-page`、SPA、`run_worker_first`（bool/path）、asset miss fallback 与 hot reload 全部通过后才能采用。
+
 ### 5.5 compatibility 日期与 flag 自动生成
 
 新增一个 Go 生成器，输入是与 `1.20260916.1` 对应的 workerd 上游源码中的 compatibility 定义文件，输出一个带以下元数据的 checked-in manifest：

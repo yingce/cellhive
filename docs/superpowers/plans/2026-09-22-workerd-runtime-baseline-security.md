@@ -341,8 +341,11 @@ git commit -m "feat(runtime): generate compatibility rules for pinned workerd"
 **Files:**
 - Modify: `cli/package.json`
 - Modify: `cli/bun.lock`
+- Modify: `cli/src/dev.ts`
 - Modify: `cli/src/index.test.ts`
 - Modify: `cli/src/validate.test.ts`
+- Modify: `cli/test/assets.test.ts`
+- Modify: `cli/test/dev-assets-e2e.test.ts`
 
 **Interfaces:**
 - Produces: exact Miniflare/workerd pair with no transitive version drift.
@@ -365,13 +368,17 @@ Run: `cd cli && bun test`
 
 Expected: FAIL on current `4.20260616.0` / `1.20260615.1` assertions.
 
-- [ ] **Step 3: Update exact dependencies and lockfile**
+- [ ] **Step 3: Specify the dev-only assets router with failing tests**
+
+Add tests for `_headers`, `_redirects`, `404-page`, SPA, asset miss fallback, and `run_worker_first` bool/path (including worker 404 falling back to an existing asset). The expected topology is one dev-only entry worker with service bindings to the Miniflare-native asset service and user worker. It must remain inside the same Miniflare instance, add no listener/process/credential/state, and never become a production gateway. Observe the expected failures on the Miniflare 5 candidate before implementation.
+
+- [ ] **Step 4: Update exact dependencies and implement the router**
 
 Run: `cd cli && bun add --exact miniflare@5.20260916.0-alpha && bun install`
 
 Set `overrides.workerd` exactly to `1.20260916.1`; inspect the lockfile to prove no second workerd version is resolved.
 
-- [ ] **Step 4: Run all CLI tests and resolved-version audit**
+- [ ] **Step 5: Run all CLI tests and resolved-version audit**
 
 Run:
 
@@ -380,9 +387,9 @@ cd cli && bun test
 cd cli && bun pm ls | rg 'miniflare|workerd'
 ```
 
-Expected: all tests PASS, exactly the approved pair is listed. If the alpha cannot pass the existing smoke, stop this phase and record the blocker; do not retain a cross-date pair.
+Expected: all tests PASS, exactly the approved pair is listed. Also run a real hot-reload smoke through the entry router. If the alpha cannot pass module/KV/D1/R2 plus the complete assets matrix, stop this phase and record the blocker; do not retain a cross-date pair.
 
-- [ ] **Step 5: Commit the dev-runtime alignment**
+- [ ] **Step 6: Commit the dev-runtime alignment**
 
 ```bash
 git add cli/package.json cli/bun.lock cli/src

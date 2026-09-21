@@ -113,7 +113,7 @@ _最后更新：2026-09-19_
 - **pin 规则（重要修正）**：Miniflare 版本必须与平台 pinned workerd **同期对齐**；**不能**把较新 Miniflare（如 4.20260714.0）的 workerd override 到更旧的 `1.20260615.1`——其内部 control worker **硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），旧 workerd（上限 2026-06-22）启动即失败。现采用 **`miniflare@4.20260616.0` + `overrides.workerd=1.20260615.1`**（已实测可用）。之前"只 `require`/`dispatchFetch`"的 spike 漏掉了 dev-server 模式才实例化的 control 服务。
 - **M2 已实现并验证（2026-09-15）✅**：Go `internal/wranglercompat`（绑定矩阵/`compat_date`/flags/资源登记/未知字段 + 稳定码 + 单元测试）；`/v1/control/deploy` 服务端拦截接线（`deploy_rejected` + findings + bundle 存在性点查）；CLI 预检与同一套码对齐；`internal/server` 拦截用例通过。
 - `images:{binding:"IMAGES"}` 本地可构造且**无凭据**启动 → dev 会真的"能用"平台拒绝的 `env.IMAGES`（正是服务端拦截要兜的）。剩余待测：Miniflare 本地 `ai`/`browser` 的实际行为（是否需 CF 凭据）。
-- dev：热重载/Queue/`rules`/assets/`--strict-build`（Go+esbuild `internal/bundler` + `cellhive bundle build`）已实现；**assets `_headers`/`_redirects`/`not_found_handling` + worker 回退已对齐生产 loader（ADR-114，`make cli-test`）**。
+- dev：热重载/Queue/`rules`/assets/`--strict-build`（Go+esbuild `internal/bundler` + `cellhive bundle build`）已实现；旧 Miniflare 组合下 assets `_headers`/`_redirects`/`not_found_handling` + worker 回退已对齐生产 loader。**升级 Miniflare 5 时其内建 router 的 `has_user_worker` 无法同时满足 not-found handling 与 worker fallback；ADR-114 已批准仅在 `cli/` 内增加同实例、无额外 listener 的 dev-only service-binding router，升级在完整 assets/hot-reload smoke 通过前仍属实施中。**
 
 详见 [`dev-mode.md`](./dev-mode.md)。
 

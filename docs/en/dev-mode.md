@@ -88,6 +88,7 @@ cellhive dev  (Bun, one process, zero Go)
 
 - **Bundling**: Two paths—(a) Default: Miniflare/wrangler semantics (`.js` loaded directly; `.ts` built with `Bun.build`); (b) `--strict-build`: call the **platform Go+esbuild bundler** (`internal/bundler` + `cellhive bundle build <entry> --out f`, ADR-005), so dev and deploy use the same artifact. Requires the `cellhive` Go binary (`make build` produces `bin/cellhive`; `CELLHIVE_BIN` can specify it); if not found, error and print guidance. **Implemented and verified ✅**.
 - `tsconfig`/`rules`/`no_bundle`/`find_additional_modules`/`base_dir`/`minify`/`keep_names`/`define` are handled according to wrangler-compat.md; pass through to Miniflare directly where possible.
+- **Miniflare 5 assets routing boundary (ADR-114)**: the built-in router incorrectly couples not-found handling and user-worker fallback through `has_user_worker`. The upgraded dev CLI uses one entry worker in the same Miniflare instance, with service bindings that orchestrate the native asset service and the user worker in production order. It adds no listener, process, credential, or state, remains development-only, and must never enter the production ingress or become a gateway. The Miniflare 5 upgrade remains in progress until the complete assets and hot-reload smoke passes.
 
 ## 5. Data Directory and Persistence
 

@@ -88,6 +88,7 @@ cellhive dev  (Bun, 一个进程，零 Go)
 
 - **打包**：两条路——(a) 默认：Miniflare/wrangler 语义（`.js` 直载；`.ts` 用 `Bun.build`）；(b) `--strict-build`：调用**平台 Go+esbuild 打包器**（`internal/bundler` + `cellhive bundle build <entry> --out f`，ADR-005），dev 与 deploy 同产物。需要 `cellhive` Go 二进制（`make build` 产出 `bin/cellhive`；`CELLHIVE_BIN` 可指定），未找到时报错并提示。**已实现并验证 ✅**。
 - `tsconfig`/`rules`/`no_bundle`/`find_additional_modules`/`base_dir`/`minify`/`keep_names`/`define` 按 wrangler-compat.md 处理，能直传 Miniflare 就直传。
+- **Miniflare 5 assets 路由边界（ADR-114）**：内建 router 把 not-found handling 与 user-worker fallback 错误耦合到 `has_user_worker`。升级后的 dev CLI 在同一 Miniflare 实例内使用一个入口 worker，通过 service binding 编排原生 asset service 与用户 worker，复现生产顺序；它无额外 listener/进程/凭据/状态，仅属开发工具，绝不进入生产入口或成为 gateway。完整 assets 与 hot-reload smoke 通过前，Miniflare 5 升级状态为实施中。
 
 ## 5. 数据目录与持久化
 

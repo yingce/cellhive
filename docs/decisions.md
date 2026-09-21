@@ -1393,7 +1393,7 @@
 
 ---
 
-## ADR-114 dev CLI assets 与生产 loader 对齐（`_headers`/`_redirects`/`not_found_handling`/worker 回退）✅
+## ADR-114 dev CLI assets 与生产 loader 对齐（`_headers`/`_redirects`/`not_found_handling`/worker 回退）✅（Miniflare 5 路由适配实施中）
 
 - **背景**：`cellhive dev`（Bun + Miniflare）此前只把 `assets.directory` 交给 Miniflare，worker 与 assets 的交互未接线（打印 `assets_worker_interop ... pending`），`_headers`/`_redirects`/`not_found_handling` 未验证。
 - **决策**：新增纯映射 `assetsOptions(assets, projectDir)`（`cli/src/dev.ts`，可单测）把 wrangler `assets` 配置译为 Miniflare 资产路由配置，使 dev 行为对齐生产 loader（ADR-069/071）：
@@ -1407,6 +1407,7 @@
   - CLI 冒烟（真实 `cellhive dev` + curl）：同一组行为逐条确认。
 - **入口**：`make cli-test`（`cd cli && bun test`）；`make js-test` 不变。
 - **边界（如实）**：Miniflare 的路由按"资产是否存在"决定，而生产 loader 在 `run_worker_first` 下是"**worker 返回 404 再回退资产**"——两者在"worker 对存在的路径返回 404"这一细节上可能不同（dev 不再单独模拟该细节）；`html_handling` 未解析（保持 Miniflare 默认）。
+- **Miniflare 5 修订（2026-09-22）**：同期候选 `miniflare@5.20260916.0-alpha` 把“资产 miss 是否回退用户 worker”和“是否执行 `404-page`/SPA”同时耦合到 `has_user_worker`：`true` 会在 miss 时绕过 not-found handling，`false` 又拒绝 `run_worker_first` 的用户路由；`5.20260921.0-alpha` 仍是同一核心逻辑，无法只用原生 router config 同时满足 ADR-071。dev CLI 因此允许一个**仅开发态、同一 Miniflare 实例内**的入口 router worker，通过 service binding 分别调用原生 asset service 与用户 worker，并按 ADR-071 明确编排：匹配 `run_worker_first` 时先 worker、worker 404 再资产；否则先资产（含 `_headers`/`_redirects`/`404-page`/SPA），仅 `none` 的 miss 回退 worker。该适配不新增端口、进程、凭据或持久状态，不进入生产镜像，不改变生产 `user-runtime`，也不构成独立 gateway。升级必须以 module/KV/D1/R2、全部 assets 语义和 hot reload 真实 smoke 同时通过为准。
 
 ---
 
