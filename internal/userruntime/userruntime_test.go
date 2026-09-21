@@ -3377,6 +3377,132 @@ func TestUserRuntimeServiceBindingNativeRPC(t *testing.T) {
 	}
 }
 
+const serviceNativeLogCallerBundle = `
+export default {
+  async fetch(req, env) { return await env.SVC.fetch("http://service/"); },
+};
+`
+
+const serviceNativeTargetLogBundle = `
+export default {
+  async fetch() {
+    console.log("native-service-target");
+    return new Response("target");
+  },
+};
+`
+
+// TestUserRuntimeServiceBindingNativeTargetLogTail proves that a native service
+// target receives a bridge scoped to the target, rather than inheriting the
+// caller's ring or silently dropping its console output.
+func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
+		"workers": []any{
+			map[string]any{"worker": "web", "active": 1, "version": map[string]any{
+				"number": 1, "bundle_sha": "shaA",
+				"bindings": []any{map[string]any{"type": "service", "name": "SVC", "id": "api"}},
+			}},
+			map[string]any{"worker": "api", "active": 1, "version": map[string]any{
+				"number": 1, "bundle_sha": "shaB",
+			}},
+		},
+	}}}
+
+	var mu sync.Mutex
+	var logScopes []string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			if r.URL.Query().Get("sha") == "shaB" {
+				_, _ = w.Write([]byte(serviceNativeTargetLogBundle))
+			} else {
+				_, _ = w.Write([]byte(serviceNativeLogCallerBundle))
+			}
+		case "/v1/internal/logs":
+			if r.Header.Get("x-cellhive-internal-token") != "dev-log-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var batch []map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&batch)
+			for _, entry := range batch {
+				if strings.Contains(fmt.Sprint(entry["message"]), "native-service-target") {
+					mu.Lock()
+					logScopes = append(logScopes, r.URL.Query().Get("ns")+"/"+r.URL.Query().Get("worker"))
+					mu.Unlock()
+				}
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret", LogToken: "dev-log-token",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("loader not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	resp, body := fetchHost(t, client, public, "/")
+	if resp.StatusCode != 200 || body != "target" {
+		t.Fatalf("native fetch = %d %q (want target)", resp.StatusCode, body)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]string(nil), logScopes...)
+		mu.Unlock()
+		if len(got) > 0 {
+			if len(got) != 1 || got[0] != "acme/api" {
+				t.Fatalf("target log scopes = %v, want [acme/api]", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("native service target log was not received")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 const doHintBundle = `
 export default {
   async fetch(req, env) {

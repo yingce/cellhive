@@ -156,6 +156,7 @@ export class CellHiveHost extends WorkerEntrypoint {
       return await inst[method](...(args || []));
     } finally {
       setTraceContext(undefined);
+      try { if (globalThis.__cellhiveLogFlush) globalThis.__cellhiveLogFlush(this.ctx); } catch (e) { /* ignore */ }
     }
   }
 }

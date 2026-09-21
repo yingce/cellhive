@@ -528,6 +528,14 @@ function parseConnectionString(cs) {
 let serviceLoader = null;
 export function setServiceLoader(fn) { serviceLoader = fn; }
 
+// Native service calls stay within this workerd instance, so they do not pass
+// through the loader's request dispatcher that normally creates the target
+// log bridge. Construct the capability here from binding-controlled target
+// identity and pass it over JSRPC; it never enters the tenant environment.
+function serviceLogBridge(ctx, props) {
+  return ctx.exports.PlatformBridge({ props: { ns: props.ns, worker: props.target } });
+}
+
 // ServiceBinding lets a tenant worker call another worker (same namespace):
 // env.SVC.fetch() and, via a Proxy, env.SVC.<method>(...) RPC to the target's
 // named entrypoint. With a loader injected, RPC is native and same-instance;
@@ -540,6 +548,7 @@ function serviceRpc(ctx, env, props) {
       // RpcTarget/streams/typed values survive. No cell-agent hop, no JSON.
       const stub = await serviceLoader(ctx, env, { ns: props.ns, worker: props.target, version: props.version });
       const host = stub.getEntrypoint("CellHiveHost");
+      await host.setLogging(serviceLogBridge(ctx, props));
       return await host.callMethod(props.entrypoint || "", method, args, globalThis.__cellhiveTraceparent);
     }
     // props.ns is the (possibly cross-namespace) target; the scope token stays
@@ -590,7 +599,12 @@ export class ServiceBinding extends WorkerEntrypoint {
       for (const k of [...clean.headers.keys()]) {
         if (k.toLowerCase().startsWith("x-cellhive-")) clean.headers.delete(k);
       }
-      return p.entrypoint ? await host.callMethod(p.entrypoint, "fetch", [clean]) : await host.fetch(clean);
+      const bridge = serviceLogBridge(this.ctx, p);
+      if (p.entrypoint) {
+        await host.setLogging(bridge);
+        return await host.callMethod(p.entrypoint, "fetch", [clean]);
+      }
+      return await host.handleFetch(clean, bridge);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
     const body = hasBody ? await req.arrayBuffer() : undefined;

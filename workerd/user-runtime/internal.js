@@ -265,14 +265,6 @@ function tenantEnv(env, ctx, spec, vars) {
     if (stub !== undefined) out[name] = stub;
     else unmigrated[name] = b;
   }
-  // A user var/binding in the platform's reserved namespace would be
-  // overwritten by (or shadow) a platform control key; deploys reject these,
-  // and this guards any legacy/other writer.
-  for (const name of [...Object.keys(vars || {}), ...Object.keys(spec || {})]) {
-    if (name.startsWith("CH_") || name.startsWith("CELL_") || name.startsWith("__cellhive") || name === "PLATFORM") {
-      console.error("cellhive: user env name collides with a platform key:", name);
-    }
-  }
   // All binding kinds are platform-side stubs now; a leftover entry means a
   // new kind was added without a stub, and the old facade fallback has no
   // transport any more — fail loudly instead of dropping the binding.
