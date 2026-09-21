@@ -14,7 +14,7 @@ import (
 // PinnedVersion is the stock workerd release CellHive is built and tested
 // against (ADR-001). The compatibility flags/date in wranglercompat pair with
 // it, and tests assert the two stay in sync (ADR-153).
-const PinnedVersion = "1.20260615.1"
+const PinnedVersion = "1.20260916.1"
 
 // Find locates the workerd binary: CELLHIVE_WORKERD, then PATH, then
 // CELLHIVE_WORKERD_DIR (a local dev package store searched for

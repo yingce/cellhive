@@ -12,15 +12,16 @@ import (
 
 	"cellhive/internal/cron"
 	"cellhive/internal/workerdbin"
+	"cellhive/internal/workerdcompat"
 )
 
 // PinnedWorkerdVersion re-exports the stock workerd pin this validator targets
 // (ADR-153), so a bump on one side without the other fails a test.
 const PinnedWorkerdVersion = workerdbin.PinnedVersion
 
-// MaxCompatibilityDate is the newest compatibility date the pinned workerd
-// supports (verified 2026-06-22). Deploys above it are rejected.
-const MaxCompatibilityDate = "2026-06-22"
+// MaxCompatibilityDate is generated from the exact pinned upstream workerd
+// source. Deploys above it are rejected.
+var MaxCompatibilityDate = workerdcompat.MaxCompatibilityDate()
 
 // SupportedBindingKinds are the binding types the platform can actually serve
 // (docs/bindings.md). Anything else is rejected.
@@ -73,22 +74,15 @@ var RejectedBindingHints = map[string]string{
 	"pipelines":           "not supported",
 }
 
-var KnownCompatibilityFlags = map[string]bool{
-	"nodejs_compat":                               true,
-	"nodejs_compat_v2":                            true,
-	"nodejs_compat_populate_process_env":          true,
-	"no_handle_cross_request_promise_resolution":  true,
-	"global_fetch_strictly_public":                true,
-	"disable_fetch_stream_teeing":                 true,
-	"streams_enable_constructors":                 true,
-	"transformstream_enable_standard_constructor": true,
-	"export_commonjs_default":                     true,
-	"export_commonjs_namespace":                   true,
-	"disable_nodejs_process_v2":                   true,
-	"enable_ctx_exports":                          true,
-	"deployment_id_header":                        true,
-	"require_custom_ports_development":            true,
-}
+var KnownCompatibilityFlags = func() map[string]bool {
+	flags := map[string]bool{}
+	for _, flag := range workerdcompat.Manifest().Flags {
+		if flag.CellHiveAllowed && !flag.Experimental {
+			flags[flag.Name] = true
+		}
+	}
+	return flags
+}()
 
 // Severity is a finding level.
 type Severity string

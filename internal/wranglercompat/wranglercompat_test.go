@@ -4,6 +4,8 @@ import (
 	"os"
 	"regexp"
 	"testing"
+
+	"cellhive/internal/workerdcompat"
 )
 
 func codes(fs []Finding) map[string]string {
@@ -67,7 +69,7 @@ func TestValidateErrors(t *testing.T) {
 		},
 		{
 			name:  "compat date too new",
-			in:    Input{BundleSHA: "x", CompatibilityDate: "2026-08-01"},
+			in:    Input{BundleSHA: "x", CompatibilityDate: "2026-10-01"},
 			code:  "compat_date_too_new",
 			field: "compatibility_date",
 		},
@@ -229,17 +231,17 @@ func TestVendorMatrixContract(t *testing.T) {
 // TestKnownFlagsMatchDevCLI: the Go validator and the Bun dev CLI must accept
 // exactly the same compatibility flags (ADR-153); a one-sided edit fails here.
 func TestKnownFlagsMatchDevCLI(t *testing.T) {
-	raw, err := os.ReadFile("../../cli/src/validate.ts")
+	raw, err := os.ReadFile("../../cli/src/workerd-compat.generated.ts")
 	if err != nil {
 		t.Fatalf("read cli validator: %v", err)
 	}
 	re := regexp.MustCompile(`(?s)KNOWN_COMPAT_FLAGS = new Set<string>\(\[(.*?)\]\)`)
 	m := re.FindSubmatch(raw)
 	if m == nil {
-		t.Fatal("KNOWN_COMPAT_FLAGS not found in cli/src/validate.ts")
+		t.Fatal("KNOWN_COMPAT_FLAGS not found in generated CLI compatibility data")
 	}
 	cli := map[string]bool{}
-	for _, q := range regexp.MustCompile(`"([a-z0-9_]+)"`).FindAllStringSubmatch(string(m[1]), -1) {
+	for _, q := range regexp.MustCompile(`"([a-z0-9_-]+)"`).FindAllStringSubmatch(string(m[1]), -1) {
 		cli[q[1]] = true
 	}
 	if len(cli) == 0 {
@@ -255,15 +257,27 @@ func TestKnownFlagsMatchDevCLI(t *testing.T) {
 			t.Errorf("flag %q is accepted by the dev CLI but not the server", f)
 		}
 	}
+	manifestAllowed := 0
+	for _, flag := range workerdcompat.Manifest().Flags {
+		if flag.CellHiveAllowed && !flag.Experimental {
+			manifestAllowed++
+			if !cli[flag.Name] {
+				t.Errorf("manifest-allowed flag %q is missing from the dev CLI", flag.Name)
+			}
+		}
+	}
+	if len(cli) != manifestAllowed {
+		t.Errorf("CLI flags=%d manifest allowed=%d", len(cli), manifestAllowed)
+	}
 }
 
 // TestPinPairsWithCompatibilityDate: the workerd pin and the compatibility
 // ceiling are one decision; bumping one without the other fails (ADR-153).
 func TestPinPairsWithCompatibilityDate(t *testing.T) {
-	if PinnedWorkerdVersion != "1.20260615.1" {
+	if PinnedWorkerdVersion != "1.20260916.1" {
 		t.Fatalf("pinned workerd changed to %q: re-verify MaxCompatibilityDate (%s) against the new release and update this test", PinnedWorkerdVersion, MaxCompatibilityDate)
 	}
-	if MaxCompatibilityDate != "2026-06-22" {
+	if MaxCompatibilityDate != "2026-09-23" {
 		t.Fatalf("compatibility ceiling changed to %q: re-verify against pinned workerd %s", MaxCompatibilityDate, PinnedWorkerdVersion)
 	}
 }

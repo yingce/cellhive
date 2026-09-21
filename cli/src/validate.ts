@@ -1,12 +1,12 @@
 import type { WranglerConfig } from "./config.ts";
+import { COMPAT_DATE_MAX, KNOWN_COMPAT_FLAGS, PINNED_WORKERD } from "./workerd-compat.generated.ts";
+
+export { COMPAT_DATE_MAX, KNOWN_COMPAT_FLAGS, PINNED_WORKERD } from "./workerd-compat.generated.ts";
 
 // NOTE: the authoritative gate lives server-side in
 // internal/wranglercompat (ADR-065). This file mirrors it for fast preflight;
 // keep codes/flags in sync. The server re-validates and can reject even if dev
 // allowed it (e.g. Miniflare emulating a platform-unsupported binding).
-export const COMPAT_DATE_MAX = "2026-06-22";
-export const PINNED_WORKERD = "1.20260615.1";
-
 // Bindings the platform rejects (ADR-014). Miniflare may support these locally,
 // so `dev` must warn and `deploy` must reject server-side (ADR-065). `ai`
 // (BYO OpenAI-compatible) and `workflows` (self-built engine) ARE supported and
@@ -25,25 +25,6 @@ export const UNSUPPORTED_BINDINGS: { key: string; kind: string }[] = [
   { key: "vpc_networks", kind: "vpc" },
   { key: "artifacts", kind: "artifacts" },
 ];
-
-// Flags accepted by the pinned workerd. Unknown flags must fail closed.
-// Mirrors internal/wranglercompat.KnownCompatibilityFlags.
-export const KNOWN_COMPAT_FLAGS = new Set<string>([
-  "nodejs_compat",
-  "nodejs_compat_v2",
-  "nodejs_compat_populate_process_env",
-  "no_handle_cross_request_promise_resolution",
-  "global_fetch_strictly_public",
-  "disable_fetch_stream_teeing",
-  "streams_enable_constructors",
-  "transformstream_enable_standard_constructor",
-  "export_commonjs_default",
-  "export_commonjs_namespace",
-  "disable_nodejs_process_v2",
-  "enable_ctx_exports",
-  "deployment_id_header",
-  "require_custom_ports_development",
-]);
 
 export type Diagnostic = { severity: "error" | "warning"; code: string; field_path: string; message: string };
 

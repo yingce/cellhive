@@ -1,0 +1,1663 @@
+{
+  "workerd_version": "1.20260916.1",
+  "upstream_revision": "adda2635656d09e541b0feeea796da9d2a8bc10e",
+  "source_sha256": "0afd3511f55c5d6718f46d5ca5acdd8130c04ea7b4c68225d2538a6b5c7a4a1a",
+  "max_compatibility_date": "2026-09-23",
+  "flags": [
+    {
+      "name": "add_nodejs_compat_eol",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "add_nodejs_compat_eol_v22",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "add_nodejs_compat_eol_v23",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "add_nodejs_compat_eol_v24",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "allow_custom_ports",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "allow_eval_during_startup",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "allow_importable_env",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "allow_insecure_inefficient_logged_eval",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "allow_irrevocable_stub_storage",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "assets_navigation_has_no_effect",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "assets_navigation_prefers_asset_serving",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "auto_grpc_convert",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "auto_inject_python_workers",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "bind_asynclocalstorage_snapshot_to_request",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "blob_legacy_mime_type",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "blob_standard_mime_type",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "brotli_content_encoding",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_api_compat_flags",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_api_request_cf_overrides_cache_rules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_no_cache_disabled",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_no_cache_enabled",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_option_disabled",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_option_enabled",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cache_reload_disabled",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "cache_reload_enabled",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "capture_async_api_throws",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cf_botmanagement_default",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "connect_pass_through",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "containers_pid_namespace",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "cots_on_external_fetch",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "crypto_preserve_public_exponent",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "d1_binding_jsrpc",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "delete_all_deletes_alarm",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "delete_all_preserves_alarm",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "diagnostics_channel_has_subscribers_getter",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_ctx_exports",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_email_sending_queuing",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_fast_jsg_struct",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_global_performance_classes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_navigator_language",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_child_process_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_cluster_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_console_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_dgram_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_domain_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_fs_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_http2_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_http_modules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_http_server_modules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_inspector_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_os_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_perf_hooks_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_process_v2",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_punycode_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_readline_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_repl_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_sqlite_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_stream_wrap_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_trace_events_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_tty_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_v8_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_vm_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_wasi_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_nodejs_worker_threads_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_check_rng_state",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_dedicated_snapshot",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_external_sdk",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_no_global_handlers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_process_pth_files",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_request_headers_preserve_commas",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_python_workflows",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_request_signal",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_streams_nodejs_v24_compat",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_text_decoder_cjk_decoder",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_text_decoder_replace_surrogates",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_top_level_await_in_require",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_validate_workflow_entrypoint",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disable_weak_ref",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disallow_eval_during_startup",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "disallow_importable_env",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "do_not_bind_asynclocalstorage_snapshot_to-request",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "do_not_capture_async_api_throws",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "do_not_set_tostring_tag",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "do_not_strip_bom_in_read_all_text",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "dont_substitute_null_on_type_error",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "durable_object_alarms",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "durable_object_fetch_allows_relative_url",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "durable_object_fetch_requires_full_url",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "durable_object_get_existing",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "durable_object_rename",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "dynamic_dispatch_treat_exceptions_as_500",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "dynamic_dispatch_tunnel_exceptions",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_abortsignal_rpc",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "enable_ctx_exports",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_ctx_version_metadata",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "enable_d1_with_sessions_api",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "enable_email_sending_queuing",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_fast_jsg_struct",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_global_performance_classes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_navigator_language",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_child_process_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_cluster_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_console_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_dgram_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_domain_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_fs_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_global_timers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_http2_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_http_modules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_http_server_modules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_inspector_local_dev",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "enable_nodejs_inspector_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_os_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_perf_hooks_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_process_v2",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_punycode_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_readline_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_repl_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_sqlite_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_stream_wrap_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_trace_events_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_tty_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_v8_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_vm_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_wasi_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_nodejs_worker_threads_module",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_python_external_sdk",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_request_signal",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_streams_nodejs_v24_compat",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_top_level_await_in_require",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_validate_workflow_entrypoint",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_version_api",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "enable_weak_ref",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enable_web_file_system",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "encoder_stream_spec_compliant_backpressure",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "enhanced_error_serialization",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "env_module_nullable_support",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "experimental",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "export_commonjs_default",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "export_commonjs_namespace",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "expose_draining_reader",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "expose_global_message_channel",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_iterable_type_support",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_iterable_type_support_override_adjustment",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_legacy_url",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_refuses_unknown_protocols",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_standard_url",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetch_treats_unknown_protocols_as_http",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetcher_has_get_put_delete",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fetcher_no_get_put_delete",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "fixup-transform-stream-backpressure",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "formdata_parser_converts_files_to_strings",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "formdata_parser_supports_files",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "global_fetch_private_origin",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "global_fetch_strictly_public",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "global_importscripts",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "global_navigator",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "handle_cross_request_promise_resolution",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "html_rewriter_treats_esi_include_as_void_tag",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "http_headers_getsetcookie",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "ignore_custom_ports",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "ignore_unrecognized_import_assertion",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "immutable_api_prototypes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "increase_websocket_message_size",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "internal_stream_byob_return_undefined",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "internal_stream_byob_return_view",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "internal_writable_stream_abort_clears_queue",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "internal_writable_stream_abort_does_not_clear_queue",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "js_rpc",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "kv_direct_binding",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "legacy_error_serialization",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "legacy_module_registry",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "memory_cache_delete",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "minimal_subrequests",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "mutable_api_prototypes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "new_module_registry",
+      "experimental": false,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "no_auto_inject_python_workers",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "no_brotli_content_encoding",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_cache_api_compat_flags",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_cache_api_request_cf_overrides_cache_rules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_cf_botmanagement_default",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_containers_pid_namespace",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_cots_on_external_fetch",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_crypto_preserve_public_exponent",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_diagnostics_channel_has_subscribers_getter",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_encoder_stream_spec_compliant_backpressure",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_env_module_nullable_support",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_expose_global_message_channel",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_fetch_iterable_type_support",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_fetch_iterable_type_support_override_adjustment",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_global_importscripts",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_global_navigator",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_handle_cross_request_promise_resolution",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_http_headers_getsetcookie",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_minimal_subrequests",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_nodejs_als",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_nodejs_compat",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_nodejs_compat_v2",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_nodejs_global_timers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_nodejs_zlib",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_precise_timers",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "no_python_workers_20250116",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_python_workers_20260610",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_python_workers_314",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_python_workflows_implicit_dependencies",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_queue_expose_error_codes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_queues_json_messages",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_request_cf_overrides_cache_rules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_request_signal_passthrough",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_resizable_array_buffer_in_blob",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_rpc",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_set_event_target_this",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_spec_compliant_dispatch_exceptions",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_spec_compliant_property_attributes",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "no_strict_compression_checks",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_strict_crypto_checks",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_throw_on_not_implemented_tls_options",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_unhandled_rejection_after_microtask_checkpoint",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_unwrap_custom_thenables",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_upper_case_all_http_methods",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_urlsearchparams_delete_has_value_arg",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_web_socket_compression",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_websocket_close_reason_byte_limit",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_websocket_standard_binary_type",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "no_writable_stream_spec_compliant_writer",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_als",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_compat",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_compat_do_not_populate_process_env",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_compat_populate_process_env",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_compat_v2",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "nodejs_zlib",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "non_pedantic_wpt",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "original-transform-stream-backpressure",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "pedantic_wpt",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "precise_timers",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "python_check_rng_state",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_dedicated_snapshot",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_external_packages",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_no_global_handlers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_process_pth_files",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_request_headers_preserve_commas",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workers_20250116",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workers_20260610",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workers_314",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workers_development",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "python_workers_durable_objects",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "python_workers_force_new_vendor_path",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workflows",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "python_workflows_implicit_dependencies",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "queue_consumer_no_wait_for_wait_until",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "queue_consumer_wait_for_wait_until",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "queue_expose_error_codes",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "queues_json_messages",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "r2_internal_beta_bindings",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "r2_list_honor_include",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "r2_public_beta_bindings",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "remove_nodejs_compat_eol",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "remove_nodejs_compat_eol_v22",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "remove_nodejs_compat_eol_v23",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "remove_nodejs_compat_eol_v24",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "replica_routing",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "request_cf_overrides_cache_rules",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "request_signal_passthrough",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "require_returns_default_export",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "require_returns_namespace",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "resizable_array_buffer_in_blob",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "response_redirect_url_original",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "response_redirect_url_standard",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "retain_authorization_on_cross_origin_redirect",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "rpc",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "rpc_params_dup_stubs",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "rpc_params_transfer_stubs",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "rtti_api",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "service_binding_extra_handlers",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "set_event_target_this",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "set_forwardable_email_full_headers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "set_forwardable_email_single_headers",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "set_tostring_tag",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "spec_compliant_dispatch_exceptions",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "spec_compliant_property_attributes",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "streaming_tail_worker",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "streams_auto_allocate_chunk_size_default",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "streams_byob_reader_detaches_buffer",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "streams_byob_reader_does_not_detach_buffer",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "streams_disable_constructors",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "streams_enable_constructors",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "streams_no_default_auto_allocate_chunk_size",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "strict_compression_checks",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "strict_crypto_checks",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "strip_authorization_on_cross_origin_redirect",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "strip_bom_in_read_all_text",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "substitute_null_on_type_error",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "tail_worker_user_spans",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "tcp_sockets_support",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "text_decoder_cjk_decoder",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "text_decoder_replace_surrogates",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "throw_on_not_implemented_tls_options",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "throw_on_unrecognized_import_assertion",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "transformstream_disable_standard_constructor",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "transformstream_enable_standard_constructor",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "typescript_implemented_streams",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "typescript_strip_types",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "unhandled_rejection_after_microtask_checkpoint",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "unsafe_module",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "unsupported_process_actual_platform",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "unwrap_custom_thenables",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "upper_case_all_http_methods",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "url_original",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "url_standard",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "urlpattern_original",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "urlpattern_standard",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "urlsearchparams_delete_has_value_arg",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "vectorize_query_metadata_optional",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "vectorize_query_original",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "wasm_memory_discard",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "web_socket_auto_reply_to_close",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "web_socket_compression",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "web_socket_manual_reply_to_close",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "webgpu",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "websocket_close_reason_byte_limit",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "websocket_standard_binary_type",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workers_api_getters_setters_on_instance",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workers_api_getters_setters_on_prototype",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workflows_bindings_rpc",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "workflows_disable_fast_engine_creation",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workflows_enable_fast_engine_creation",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workflows_preserve_non_retryable_error_message",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workflows_replace_non_retryable_error_message",
+      "experimental": false,
+      "cellhive_allowed": true
+    },
+    {
+      "name": "workflows_step_rollback",
+      "experimental": true,
+      "cellhive_allowed": false
+    },
+    {
+      "name": "writable_stream_spec_compliant_writer",
+      "experimental": false,
+      "cellhive_allowed": true
+    }
+  ]
+}
