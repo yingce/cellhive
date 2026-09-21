@@ -12,9 +12,9 @@
     "test": "bun test"
   },
   "dependencies": {
-    "miniflare": "4.20260616.0"
+    "miniflare": "5.20260916.0-alpha"
   },
   "overrides": {
-    "workerd": "1.20260615.1"
+    "workerd": "1.20260916.1"
   }
 }

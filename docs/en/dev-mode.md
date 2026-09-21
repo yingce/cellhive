@@ -60,15 +60,15 @@ cellhive dev  (Bun, one process, zero Go)
 
 | Component | Version | Description |
 |---|---|---|
-| Platform pinned workerd | **1.20260615.1** | Production/contract baseline (compatibility-date upper bound 2026-06-22, already tested) |
-| **Selected Miniflare** | **4.20260616.0** | Same period as the platform workerd; its bundled workerd = `1.20260616.1` |
+| Platform pinned workerd | **1.20260916.1** | Production/contract baseline (compatibility-date upper bound 2026-09-23; real-binary probe passed) |
+| **Selected Miniflare** | **5.20260916.0-alpha** | Same period as the platform workerd; override exactly pins `1.20260916.1` |
 | Miniflare 4.20260714.0 (previously tried) | workerd `1.20260714.1` | ❌ Internal control worker hardcodes `2026-07-08`, incompatible with the pinned version |
 
 - **Pinning rule (corrected, tested on 2026-09-15)**: The **Miniflare version must be aligned with the platform pinned workerd from the same period**, then override its own `workerd` dependency to the pinned version.
   - ❗ **Do not** forcibly override the workerd of a "newer Miniflare" (such as 4.20260714.0) to an older pinned version — Miniflare's internal control worker (`MINIFLARE_DEV_CONTROL`) **hardcodes** `compatibilityDate` (4.20260714.0 = `2026-07-08`), while pinned workerd `1.20260615.1` only supports up to `2026-06-22`, so startup fails immediately: `This Worker requires compatibility date "2026-07-08", but the newest date supported by this server binary is "2026-06-22"`.
   - The previous spike that "only did `require`/`dispatchFetch` without a port" would **miss** this issue (the control service is only instantiated in dev server mode)—now corrected.
-- Implementation: `cli/package.json` depends on `miniflare@4.20260616.0` + `overrides: { "workerd": "1.20260615.1" }` (both Bun/pnpm support `overrides`) → installed result is `miniflare@4.20260616.0` + `workerd@1.20260615.1` (already tested).
-- **Verified ✅**: With this combination, `bun` starts the dev server, and KV/D1/R2/`vars` all pass over HTTP (see §14 M1 for details).
+- Implementation: `cli/package.json` depends on `miniflare@5.20260916.0-alpha` + `overrides: { "workerd": "1.20260916.1" }`; lockfile and installed-package tests reject a second workerd version.
+- **Verified ✅ (2026-09-22)**: real module fetch, KV/D1/R2, Text module rules, the complete assets matrix, and `setOptions` hot reload pass; `bun test` is 18/18.
 - The workerd binary comes from Miniflare's `workerd` dependency (`@cloudflare/workerd-linux-64`); no system installation is required.
 
 ## 4. Config Translation (wrangler → Miniflare)
@@ -88,7 +88,7 @@ cellhive dev  (Bun, one process, zero Go)
 
 - **Bundling**: Two paths—(a) Default: Miniflare/wrangler semantics (`.js` loaded directly; `.ts` built with `Bun.build`); (b) `--strict-build`: call the **platform Go+esbuild bundler** (`internal/bundler` + `cellhive bundle build <entry> --out f`, ADR-005), so dev and deploy use the same artifact. Requires the `cellhive` Go binary (`make build` produces `bin/cellhive`; `CELLHIVE_BIN` can specify it); if not found, error and print guidance. **Implemented and verified ✅**.
 - `tsconfig`/`rules`/`no_bundle`/`find_additional_modules`/`base_dir`/`minify`/`keep_names`/`define` are handled according to wrangler-compat.md; pass through to Miniflare directly where possible.
-- **Miniflare 5 assets routing boundary (ADR-114)**: the built-in router incorrectly couples not-found handling and user-worker fallback through `has_user_worker`. The upgraded dev CLI uses one entry worker in the same Miniflare instance, with service bindings that orchestrate the native asset service and the user worker in production order. It adds no listener, process, credential, or state, remains development-only, and must never enter the production ingress or become a gateway. The Miniflare 5 upgrade remains in progress until the complete assets and hot-reload smoke passes.
+- **Miniflare 5 assets routing boundary (ADR-114)**: the built-in router incorrectly couples not-found handling and user-worker fallback through `has_user_worker`. The dev CLI now uses one entry worker in the same Miniflare instance, with service bindings that orchestrate the native asset service and the user worker in production order. It adds no listener, process, credential, or state, remains development-only, and must never enter the production ingress or become a gateway. The complete assets and hot-reload smoke passes.
 
 ## 5. Data Directory and Persistence
 
@@ -189,7 +189,7 @@ cellhive dev — DEV (Bun + Miniflare; single worker, local simulation)
 worker: api    namespace: acme    env: default
 bindings: KV(kv) DB(d1) BUCKET(r2) QUEUE(queue)
 url:      http://localhost:8787/        (host form: http://api.acme.localhost:8787/)
-workerd:  1.20260615.1 (pinned; Miniflare bundled version overridden)
+workerd:  1.20260916.1 (pinned; Miniflare bundled version overridden)
 persist:  ./.cellhive-dev/miniflare
 warning:  binding "IMAGES" is not supported by the CellHive platform; deploy will be rejected.
 ```
@@ -226,7 +226,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
   - `cli/src/dev.ts`: translate wrangler → Miniflare options, start Miniflare, print banner/URL, watch prompts;
   - `cli/src/config.ts`: jsonc/toml parsing + **client-side call/replica** of the shared validation library;
   - `cli/src/deploy.ts`, etc.: HTTP client calls admin API;
-  - `cli/package.json`: depends on `miniflare` (+ optional `wrangler`), **pin workerd to 1.20260615.1**; can use `bun build --compile` to produce a single file.
+  - `cli/package.json`: exactly depends on `miniflare@5.20260916.0-alpha` and **pins workerd to 1.20260916.1**; can use `bun build --compile` to produce a single file.
 - **Do not do**: Do not implement local startup for the Go backend; do not replicate cell-agent in dev.
 - **Need to add** (Go side, for §8/§9): a shared **compatibility validation library** (`internal/wranglercompat`) for CLI preflight and the `deploy` endpoint to share; and a golden set for binding contract differential testing.
 - **Milestones**:
@@ -241,7 +241,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 2. `curl` examples for KV/D1/R2/Queue/DO work; after stopping and restarting, `persist` data is retained (`--clean` resets it).
 3. Edit `main` → Miniflare hot reload takes effect; syntax errors do not crash it, and the previous version is retained.
 4. When using a binding **not supported** by the platform (such as `IMAGES`): dev **warns**; `cellhive deploy` is **rejected by the server side** and returns a stable error code + field path.
-5. `compatibility_date` after 2026-06-22 / unknown flag: CLI preflight + server-side rejection.
+5. `compatibility_date` after 2026-09-23 / unknown flag: CLI preflight + server-side rejection.
 6. dev workerd version = platform pinned (override effective), or the banner clearly states drift.
 7. The §9 differential test set passes on Miniflare and the platform cell-agent (or all differences are classified as intentional differences in §12).
 
@@ -250,7 +250,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 - Hosting AI/Browser on Miniflare outside `--sim` (requires CF credentials) — explicitly reject and prompt.
 - Direct compatibility layer for `wrangler dev` (if the user has wrangler installed, `cellhive dev --wrangler` passthrough).
 - **Fallback evaluation**: If the cost of self-developed wrangler config translation/bundling is unacceptable, evaluate switching to **`@cloudflare/vite-plugin`** (CF official programmatic dev server; **do not** use the deprecated `unstable_startWorker`/`unstable_dev`).
-- ~~Complete Bun+Miniflare startup spike~~ **Completed (2026-09-15)**: Bun 1.4.0 + Miniflare 4.20260714.0 + pinned workerd 1.20260615.1 starts service, KV/D1/R2 pass; results have been backfilled into §2/§3/§7/§13. Remaining to test: actual behavior of local Miniflare `images`/`ai`/`browser` (whether credentials are required).
+- ~~Complete Bun+Miniflare startup spike~~ **Completed and revalidated on 2026-09-22**: Bun 1.4.0 + Miniflare 5.20260916.0-alpha + pinned workerd 1.20260916.1 pass module/KV/D1/R2, rules, assets, and hot reload. Remaining to test: actual local behavior of Miniflare `images`/`ai`/`browser` (whether credentials are required).
 - CI gate paired with §9 differential testing (contract tests go into `docs/testing.md`).
 
 _Last updated: 2026-09-15_

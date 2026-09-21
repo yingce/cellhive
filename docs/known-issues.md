@@ -103,17 +103,17 @@ _最后更新：2026-09-19_
 状态：**M1/M2 已实现**（`cli/` Bun dev + `internal/wranglercompat` 服务端拦截，2026-09-15，见下）；剩余见下。要点：
 
 - **dev = Bun CLI + Miniflare**：Miniflare 起真实 workerd + 本地模拟绑定；**dev 机器零 Go 后端进程**（ADR-065）。生产仍 Go workerd + cell-agent。
-- **版本 pin**：Miniflare 自带 workerd（4.20260714.0 → 1.20260714.1）**override 到平台 pinned 1.20260615.1**；无法 override 则记录漂移。
+- **版本 pin**：`miniflare@5.20260916.0-alpha` 的 workerd 精确 override 到平台 pinned `1.20260916.1`；lockfile/安装版本测试拒绝漂移。
 - **零外部依赖**：无需 Docker/MinIO/Traefik；数据在 `./.cellhive-dev/`（Miniflare persist）。
 - **标准 CF 形态**：`wrangler.jsonc` + KV/D1/R2/Queue/DO/`vars`/`secrets`/assets；热重载/inspector/persist 用 Miniflare 自带。
 - **契约对拍**：Miniflare 作为 CF 语义 oracle，golden 对拍约束我们 Go 侧行为（ADR-014 思路）。
 - **deploy 服务端功能/兼容性拦截（ADR-065）**：服务端权威校验（bundle/日期/flag/绑定矩阵/资源已登记/DO 生命周期/未知字段）；**Miniflare 支持的 `images/ai/browser/vectorize/...` 平台拒绝** → CLI/dev 用同一校验库提前警告。
 - **用户代码兼容是平台责任**：补齐 facade 缺口（KV list metadata、R2 `R2Object` 字段、D1 `meta.last_row_id`、错误形状）。
 - **M1 已实现并验证（2026-09-15）✅**：`cli/`（Bun）已建；`cellhive dev` 读 wrangler 配置子集 → 起 Miniflare dev server，**KV/D1/R2/`vars` 经 HTTP 全通**；preflight 正确拒绝 `compat_date_too_new`/`unknown_flag` 并对 `images`/`ai` 等给 `unsupported_binding` 警告。
-- **pin 规则（重要修正）**：Miniflare 版本必须与平台 pinned workerd **同期对齐**；**不能**把较新 Miniflare（如 4.20260714.0）的 workerd override 到更旧的 `1.20260615.1`——其内部 control worker **硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），旧 workerd（上限 2026-06-22）启动即失败。现采用 **`miniflare@4.20260616.0` + `overrides.workerd=1.20260615.1`**（已实测可用）。之前"只 `require`/`dispatchFetch`"的 spike 漏掉了 dev-server 模式才实例化的 control 服务。
+- **pin 规则（重要修正）**：Miniflare 与平台 pinned workerd 必须同期精确对齐。当前采用 **`miniflare@5.20260916.0-alpha` + `overrides.workerd=1.20260916.1`**，module/KV/D1/R2 与版本读回已实测。
 - **M2 已实现并验证（2026-09-15）✅**：Go `internal/wranglercompat`（绑定矩阵/`compat_date`/flags/资源登记/未知字段 + 稳定码 + 单元测试）；`/v1/control/deploy` 服务端拦截接线（`deploy_rejected` + findings + bundle 存在性点查）；CLI 预检与同一套码对齐；`internal/server` 拦截用例通过。
 - `images:{binding:"IMAGES"}` 本地可构造且**无凭据**启动 → dev 会真的"能用"平台拒绝的 `env.IMAGES`（正是服务端拦截要兜的）。剩余待测：Miniflare 本地 `ai`/`browser` 的实际行为（是否需 CF 凭据）。
-- dev：热重载/Queue/`rules`/assets/`--strict-build`（Go+esbuild `internal/bundler` + `cellhive bundle build`）已实现；旧 Miniflare 组合下 assets `_headers`/`_redirects`/`not_found_handling` + worker 回退已对齐生产 loader。**升级 Miniflare 5 时其内建 router 的 `has_user_worker` 无法同时满足 not-found handling 与 worker fallback；ADR-114 已批准仅在 `cli/` 内增加同实例、无额外 listener 的 dev-only service-binding router，升级在完整 assets/hot-reload smoke 通过前仍属实施中。**
+- dev：热重载/Queue/`rules`/assets/`--strict-build` 已实现。Miniflare 5 内建 router 的 `has_user_worker` 无法同时满足 not-found handling 与 worker fallback；ADR-114 的同实例、无额外 listener 的 dev-only service-binding router 已实现，`_headers`/`_redirects`/404-page/SPA/worker fallback/`run_worker_first`/binding/hot reload 均真实通过。
 
 详见 [`dev-mode.md`](./dev-mode.md)。
 

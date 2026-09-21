@@ -351,7 +351,7 @@ git commit -m "feat(runtime): generate compatibility rules for pinned workerd"
 - Produces: exact Miniflare/workerd pair with no transitive version drift.
 - Candidate: `miniflare@5.20260916.0-alpha` with override `workerd@1.20260916.1`.
 
-- [ ] **Step 1: Add a failing installed-version test**
+- [x] **Step 1: Add a failing installed-version test**
 
 The Bun test reads the resolved package metadata and asserts:
 
@@ -362,23 +362,23 @@ expect(pkg.overrides.workerd).toBe("1.20260916.1");
 
 It also starts the existing Miniflare smoke and runs module fetch plus KV/D1/R2 operations.
 
-- [ ] **Step 2: Run the test and observe old-version failure**
+- [x] **Step 2: Run the test and observe old-version failure**
 
 Run: `cd cli && bun test`
 
 Expected: FAIL on current `4.20260616.0` / `1.20260615.1` assertions.
 
-- [ ] **Step 3: Specify the dev-only assets router with failing tests**
+- [x] **Step 3: Specify the dev-only assets router with failing tests**
 
 Add tests for `_headers`, `_redirects`, `404-page`, SPA, asset miss fallback, and `run_worker_first` bool/path (including worker 404 falling back to an existing asset). The expected topology is one dev-only entry worker with service bindings to the Miniflare-native asset service and user worker. It must remain inside the same Miniflare instance, add no listener/process/credential/state, and never become a production gateway. Observe the expected failures on the Miniflare 5 candidate before implementation.
 
-- [ ] **Step 4: Update exact dependencies and implement the router**
+- [x] **Step 4: Update exact dependencies and implement the router**
 
 Run: `cd cli && bun add --exact miniflare@5.20260916.0-alpha && bun install`
 
 Set `overrides.workerd` exactly to `1.20260916.1`; inspect the lockfile to prove no second workerd version is resolved.
 
-- [ ] **Step 5: Run all CLI tests and resolved-version audit**
+- [x] **Step 5: Run all CLI tests and resolved-version audit**
 
 Run:
 

@@ -1,6 +1,14 @@
 import { existsSync, mkdirSync, rmSync, watch } from "node:fs";
 import { join, resolve, extname, relative } from "node:path";
-import { Miniflare, type MiniflareOptions } from "miniflare";
+import {
+  Miniflare,
+  convertV4MiniflareOptions,
+  type MiniflareOptions,
+  type V4ModuleDefinition,
+  type V4MiniflareOptions,
+  type V4SourceOptions,
+  type V4WorkerOptions,
+} from "miniflare";
 import { loadConfig, type WranglerConfig } from "./config.ts";
 import { validate, devUnsupportedBindings, PINNED_WORKERD, COMPAT_DATE_MAX, type Diagnostic } from "./validate.ts";
 
@@ -57,33 +65,115 @@ function printDiagnostics(diags: Diagnostic[]): boolean {
   return fatal;
 }
 
-// assetsOptions maps the wrangler `assets` config to Miniflare's asset plugin so
-// dev behaves like the production loader (ADR-069/071): `_headers`/`_redirects`
-// are read from the directory, `not_found_handling` is applied, and asset misses
-// fall back to the user worker (has_user_worker). `run_worker_first` (bool or
-// path list) routes those requests to the worker first.
+// assetsOptions configures the native Miniflare asset service only. User-worker
+// ordering is deliberately handled by devAssetWorkers' entry router because
+// Miniflare 5 cannot express ADR-071 with its built-in router (ADR-114).
 export function assetsOptions(
   a: WranglerConfig["assets"],
   projectDir: string,
-): NonNullable<MiniflareOptions["assets"]> | undefined {
+): V4WorkerOptions["assets"] | undefined {
   if (!a) return undefined;
-  const routerConfig: Record<string, unknown> = { has_user_worker: true };
-  if (a.runWorkerFirstPaths && a.runWorkerFirstPaths.length > 0) {
-    // Path list: only those paths run the worker first; all others are served
-    // from assets (falling back to the worker on a miss). Setting the global
-    // invoke_user_worker_ahead_of_assets here would be wrong.
-    routerConfig.static_routing = { user_worker: a.runWorkerFirstPaths };
-  } else if (a.invokeUserWorkerAhead) {
-    routerConfig.invoke_user_worker_ahead_of_assets = true;
-  }
   const assetConfig: Record<string, unknown> = {};
   if (a.notFoundHandling) assetConfig.not_found_handling = a.notFoundHandling;
   return {
     directory: resolve(projectDir, a.directory),
     binding: a.binding,
-    routerConfig: routerConfig as NonNullable<MiniflareOptions["assets"]>["routerConfig"],
-    assetConfig: assetConfig as NonNullable<MiniflareOptions["assets"]>["assetConfig"],
+    routerConfig: { has_user_worker: false },
+    assetConfig,
   };
+}
+
+const DEV_ENTRY_WORKER = "__cellhive_dev_entry";
+const DEV_ASSET_WORKER = "__cellhive_dev_assets";
+const DEV_NATIVE_ASSET_BINDING = "ASSETS";
+
+// Miniflare 5's built-in router couples user-worker fallback to not-found
+// handling. This tiny dev-only worker keeps the native asset service but makes
+// the ADR-071 order explicit. It runs in the same workerd instance and adds no
+// listener, process, credentials, or persistent state.
+const DEV_ASSET_ROUTER_SOURCE = `
+function workerFirst(config, pathname) {
+  if (config.runWorkerFirst) return true;
+  for (const pattern of config.runWorkerFirstPaths || []) {
+    if (!pattern) continue;
+    if (pattern.endsWith("*") ? pathname.startsWith(pattern.slice(0, -1))
+      : pathname === pattern || pathname.startsWith(pattern + "/")) return true;
+  }
+  return false;
+}
+
+function asset404IsFinal(config) {
+  return config.notFoundHandling === "404-page" && config.has404Page;
+}
+
+export default {
+  async fetch(request, env) {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return env.USER_WORKER.fetch(request);
+    }
+    const pathname = new URL(request.url).pathname;
+    if (workerFirst(env.ROUTING, pathname)) {
+      const workerResponse = await env.USER_WORKER.fetch(request);
+      if (workerResponse.status !== 404) return workerResponse;
+      const assetResponse = await env.ASSET_WORKER.fetch(request);
+      if (assetResponse.status !== 404 || asset404IsFinal(env.ROUTING)) return assetResponse;
+      return workerResponse;
+    }
+    const assetResponse = await env.ASSET_WORKER.fetch(request);
+    if (assetResponse.status !== 404 || asset404IsFinal(env.ROUTING)) return assetResponse;
+    return env.USER_WORKER.fetch(request);
+  }
+};
+`;
+
+const DEV_ASSET_SERVICE_SOURCE = `
+export default { fetch(request, env) { return env.${DEV_NATIVE_ASSET_BINDING}.fetch(request); } };
+`;
+
+export function devAssetWorkers(
+  userWorker: V4WorkerOptions,
+  assets: NonNullable<WranglerConfig["assets"]>,
+  projectDir: string,
+): V4WorkerOptions[] {
+  const userName = userWorker.name || "worker";
+  const compatibilityDate = userWorker.compatibilityDate ?? COMPAT_DATE_MAX;
+  const assetBinding = assets.binding;
+  const user = assetBinding
+    ? {
+        ...userWorker,
+        serviceBindings: {
+          ...userWorker.serviceBindings,
+          [assetBinding]: DEV_ASSET_WORKER,
+        },
+      }
+    : userWorker;
+  const routing = {
+    runWorkerFirst: Boolean(assets.invokeUserWorkerAhead && !assets.runWorkerFirstPaths?.length),
+    runWorkerFirstPaths: assets.runWorkerFirstPaths ?? [],
+    notFoundHandling: assets.notFoundHandling ?? "none",
+    has404Page: existsSync(join(resolve(projectDir, assets.directory), "404.html")),
+  };
+  return [
+    {
+      name: DEV_ENTRY_WORKER,
+      modules: true,
+      script: DEV_ASSET_ROUTER_SOURCE,
+      compatibilityDate,
+      bindings: { ROUTING: routing },
+      serviceBindings: { ASSET_WORKER: DEV_ASSET_WORKER, USER_WORKER: userName },
+    },
+    user,
+    {
+      name: DEV_ASSET_WORKER,
+      modules: true,
+      script: DEV_ASSET_SERVICE_SOURCE,
+      compatibilityDate,
+      assets: {
+        ...assetsOptions(assets, projectDir)!,
+        binding: DEV_NATIVE_ASSET_BINDING,
+      },
+    },
+  ];
 }
 
 function describeBindings(cfg: WranglerConfig, extraVars: Record<string, string>): string {
@@ -139,6 +229,35 @@ async function bundleIfNeeded(
   return { script: await built.outputs[0].text() };
 }
 
+async function sourceOptions(
+  entry: { scriptPath?: string; script?: string },
+  cfg: WranglerConfig,
+  projectDir: string,
+): Promise<V4SourceOptions> {
+  if (cfg.rules.length === 0) return { modules: true, ...entry };
+
+  // Miniflare 5's v4 compatibility converter cannot translate modulesRules.
+  // Materialise the declared additional modules instead, preserving their
+  // type and keeping the entry module first (which defines mainModule).
+  const entryPath = entry.scriptPath ?? "__cellhive_dev_entry.mjs";
+  const modules: V4ModuleDefinition[] = [
+    { type: "ESModule", path: entryPath, ...(entry.script === undefined ? {} : { contents: entry.script }) },
+  ];
+  const seen = new Set([resolve(projectDir, entryPath)]);
+  for (const rule of cfg.rules) {
+    for (const pattern of rule.globs) {
+      const glob = new Bun.Glob(pattern);
+      for await (const path of glob.scan({ cwd: projectDir, onlyFiles: true })) {
+        const absolute = resolve(projectDir, path);
+        if (seen.has(absolute)) continue;
+        seen.add(absolute);
+        modules.push({ type: rule.type as V4ModuleDefinition["type"], path });
+      }
+    }
+  }
+  return { modules, modulesRoot: projectDir };
+}
+
 // bundleStrict uses the platform Go+esbuild bundler (ADR-005) so dev and deploy
 // produce the same artifact. Requires the `cellhive` Go binary.
 async function bundleStrict(
@@ -170,7 +289,7 @@ async function bundleStrict(
   return { scriptPath: relative(projectDir, out) };
 }
 
-async function buildOptions(args: Args): Promise<{ options: MiniflareOptions; cfg: WranglerConfig }> {
+export async function buildOptions(args: Args): Promise<{ options: MiniflareOptions; cfg: WranglerConfig }> {
   const cfg = loadConfig(args.projectDir, args.env);
 
   if (cfg.assets) {
@@ -183,9 +302,11 @@ async function buildOptions(args: Args): Promise<{ options: MiniflareOptions; cf
     );
   }
   const entry = await bundleIfNeeded(cfg, args.projectDir, args.strictBuild);
-  const options: MiniflareOptions = {
-    modules: true,
-    ...entry,
+  const source = await sourceOptions(entry, cfg, args.projectDir);
+  const userWorker: V4WorkerOptions = {
+    name: cfg.name,
+    rootPath: args.projectDir,
+    ...source,
     compatibilityDate: cfg.compatibilityDate ?? COMPAT_DATE_MAX,
     compatibilityFlags: cfg.compatibilityFlags,
     bindings: { ...cfg.vars, ...args.vars },
@@ -206,17 +327,14 @@ async function buildOptions(args: Args): Promise<{ options: MiniflareOptions; cf
         { maxBatchSize: c.maxBatchSize, maxBatchTimeout: c.maxBatchTimeout },
       ]),
     ),
-    modulesRules: cfg.rules.map((r) => ({
-      type: r.type as "ESModule" | "CommonJS" | "Text" | "Data" | "CompiledWasm",
-      include: r.globs,
-      fallthrough: r.fallthrough,
-    })),
-    ...(assetsOptions(cfg.assets, args.projectDir)
-      ? { assets: assetsOptions(cfg.assets, args.projectDir) }
-      : {}),
-    port: args.port,
-    defaultPersistRoot: join(args.dataDir, "miniflare"),
   };
+  const legacyOptions: V4MiniflareOptions = {
+    rootPath: args.projectDir,
+    port: args.port,
+    resourcePersistencePath: join(args.dataDir, "miniflare"),
+    workers: cfg.assets ? devAssetWorkers(userWorker, cfg.assets, args.projectDir) : [userWorker],
+  };
+  const options = convertV4MiniflareOptions(legacyOptions);
   return { options, cfg };
 }
 

@@ -60,15 +60,15 @@ cellhive dev  (Bun, 一个进程，零 Go)
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| 平台 pinned workerd | **1.20260615.1** | 生产/契约基线（兼容日期上限 2026-06-22，已实测） |
-| **选用的 Miniflare** | **4.20260616.0** | 与平台 workerd 同期；其自带 workerd = `1.20260616.1` |
+| 平台 pinned workerd | **1.20260916.1** | 生产/契约基线（兼容日期上限 2026-09-23，真实二进制探针已通过） |
+| **选用的 Miniflare** | **5.20260916.0-alpha** | 与平台 workerd 同期；override 精确锁定 `1.20260916.1` |
 | Miniflare 4.20260714.0（曾试用） | workerd `1.20260714.1` | ❌ 内部 control worker 硬编码 `2026-07-08`，与 pinned 不兼容 |
 
 - **pin 规则（已修正，2026-09-15 实测）**：**Miniflare 版本必须与平台 pinned workerd 同期对齐**，然后把它自己的 `workerd` 依赖 override 到 pinned 版本。
   - ❗ **不能**把"更新的 Miniflare"（如 4.20260714.0）的 workerd 强行 override 到旧的 pinned —— Miniflare 内部 control worker（`MINIFLARE_DEV_CONTROL`）**硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），pinned workerd `1.20260615.1` 只支持到 `2026-06-22`，启动直接失败：`This Worker requires compatibility date "2026-07-08", but the newest date supported by this server binary is "2026-06-22"`。
   - 之前"只做 `require`/`dispatchFetch` 不带端口"的 spike 会**漏掉**这个问题（control 服务在 dev server 模式下才实例化）——已修正。
-- 实现：`cli/package.json` 依赖 `miniflare@4.20260616.0` + `overrides: { "workerd": "1.20260615.1" }`（Bun/pnpm 均支持 `overrides`）→ 装出来 `miniflare@4.20260616.0` + `workerd@1.20260615.1`（已实测）。
-- **已验证 ✅**：该组合下 `bun` 起 dev server，KV/D1/R2/`vars` 经 HTTP 全通（详见 §14 M1）。
+- 实现：`cli/package.json` 依赖 `miniflare@5.20260916.0-alpha` + `overrides: { "workerd": "1.20260916.1" }`；lockfile 与安装包版本测试拒绝第二个 workerd 版本。
+- **已验证 ✅（2026-09-22）**：module fetch、KV/D1/R2、Text module rule、assets 全矩阵与 `setOptions` 热更新真实通过；`bun test` 18/18。
 - workerd 二进制来自 Miniflare 的 `workerd` 依赖（`@cloudflare/workerd-linux-64`），无需系统安装。
 
 ## 4. 配置翻译（wrangler → Miniflare）
@@ -88,7 +88,7 @@ cellhive dev  (Bun, 一个进程，零 Go)
 
 - **打包**：两条路——(a) 默认：Miniflare/wrangler 语义（`.js` 直载；`.ts` 用 `Bun.build`）；(b) `--strict-build`：调用**平台 Go+esbuild 打包器**（`internal/bundler` + `cellhive bundle build <entry> --out f`，ADR-005），dev 与 deploy 同产物。需要 `cellhive` Go 二进制（`make build` 产出 `bin/cellhive`；`CELLHIVE_BIN` 可指定），未找到时报错并提示。**已实现并验证 ✅**。
 - `tsconfig`/`rules`/`no_bundle`/`find_additional_modules`/`base_dir`/`minify`/`keep_names`/`define` 按 wrangler-compat.md 处理，能直传 Miniflare 就直传。
-- **Miniflare 5 assets 路由边界（ADR-114）**：内建 router 把 not-found handling 与 user-worker fallback 错误耦合到 `has_user_worker`。升级后的 dev CLI 在同一 Miniflare 实例内使用一个入口 worker，通过 service binding 编排原生 asset service 与用户 worker，复现生产顺序；它无额外 listener/进程/凭据/状态，仅属开发工具，绝不进入生产入口或成为 gateway。完整 assets 与 hot-reload smoke 通过前，Miniflare 5 升级状态为实施中。
+- **Miniflare 5 assets 路由边界（ADR-114）**：内建 router 把 not-found handling 与 user-worker fallback 错误耦合到 `has_user_worker`。dev CLI 已在同一 Miniflare 实例内使用一个入口 worker，通过 service binding 编排原生 asset service 与用户 worker，复现生产顺序；它无额外 listener/进程/凭据/状态，仅属开发工具，绝不进入生产入口或成为 gateway。完整 assets 与 hot-reload smoke 已通过。
 
 ## 5. 数据目录与持久化
 
@@ -189,7 +189,7 @@ cellhive dev — DEV (Bun + Miniflare; single worker, local simulation)
 worker: api    namespace: acme    env: default
 bindings: KV(kv) DB(d1) BUCKET(r2) QUEUE(queue)
 url:      http://localhost:8787/        (host form: http://api.acme.localhost:8787/)
-workerd:  1.20260615.1 (pinned; Miniflare bundled version overridden)
+workerd:  1.20260916.1 (pinned; Miniflare bundled version overridden)
 persist:  ./.cellhive-dev/miniflare
 warning:  binding "IMAGES" is not supported by the CellHive platform; deploy will be rejected.
 ```
@@ -226,7 +226,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
   - `cli/src/dev.ts`：翻译 wrangler → Miniflare options、起 Miniflare、打印横幅/URL、watch 提示；
   - `cli/src/config.ts`：jsonc/toml 解析 + 共享校验库的**客户端调用/复刻**；
   - `cli/src/deploy.ts` 等：HTTP 客户端调 admin API；
-  - `cli/package.json`：依赖 `miniflare`（+ 可选 `wrangler`），**pin workerd 到 1.20260615.1**；可用 `bun build --compile` 出单文件。
+  - `cli/package.json`：精确依赖 `miniflare@5.20260916.0-alpha`，**pin workerd 到 1.20260916.1**；可用 `bun build --compile` 出单文件。
 - **不做**：不实现 Go 后端本地启动；不在 dev 复刻 cell-agent。
 - **需要补**（Go 侧，供 §8/§9）：一个共享的**兼容性校验库**（`internal/wranglercompat`），CLI preflight 与 `deploy` 端点共用；以及 binding 契约对拍的 golden 集。
 - **里程碑**：
@@ -241,7 +241,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 2. `curl` 示例 KV/D1/R2/Queue/DO 可用；停止再起，`persist` 数据保留（`--clean` 重置）。
 3. 编辑 `main` → Miniflare 热重载生效；语法错误不崩、保留上一版。
 4. 使用平台**不支持**的绑定（如 `IMAGES`）：dev **警告**；`cellhive deploy` 由**服务端拒绝**并给出稳定 error code + 字段路径。
-5. `compatibility_date` 超 2026-06-22 / 未知 flag：CLI 预检 + 服务端拒绝。
+5. `compatibility_date` 超 2026-09-23 / 未知 flag：CLI 预检 + 服务端拒绝。
 6. dev 用 workerd 版本 = 平台 pinned（override 生效）或横幅明确漂移。
 7. §9 对拍集在 Miniflare 与平台 cell-agent 上通过（或差异全部归入 §12 有意差异）。
 
@@ -250,7 +250,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 - 用 Miniflare 承载 `--sim` 之外的 AI/Browser（需 CF 凭据）——明确拒绝并提示。
 - `wrangler dev` 直接兼容层（若用户已装 wrangler，`cellhive dev --wrangler` 透传）。
 - **回退评估**：若自研 wrangler 配置翻译/打包成本不可接受，评估改用 **`@cloudflare/vite-plugin`**（CF 官方 programmatic dev server；**不要**用已废弃的 `unstable_startWorker`/`unstable_dev`）。
-- ~~Bun+Miniflare 完整启动 spike~~ **已完成（2026-09-15）**：Bun 1.4.0 + Miniflare 4.20260714.0 + pinned workerd 1.20260615.1 起服务、KV/D1/R2 通过；结果已回填 §2/§3/§7/§13。剩余待测：Miniflare 本地 `images`/`ai`/`browser` 的实际行为（是否需凭据）。
+- ~~Bun+Miniflare 完整启动 spike~~ **已完成并在 2026-09-22 升级复验**：Bun 1.4.0 + Miniflare 5.20260916.0-alpha + pinned workerd 1.20260916.1 的 module/KV/D1/R2、rules、assets 与热更新通过。剩余待测：Miniflare 本地 `images`/`ai`/`browser` 的实际行为（是否需凭据）。
 - 与 §9 对拍配套的 CI 门（契约测试进 `docs/testing.md`）。
 
-_最后更新：2026-09-15_
+_最后更新：2026-09-22_

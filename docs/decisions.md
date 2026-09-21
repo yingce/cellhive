@@ -657,7 +657,7 @@
 - **决策**：
   1. **dev 运行时 = Bun CLI + Miniflare**：`cellhive dev` 用 Bun 写，内部用 Miniflare 起真实 workerd + 本地模拟绑定；**dev 机器上不跑任何 Go 后端进程**（不 require/spawn cell-agent）。生产 = Go workerd + cell-agent（**不变**）。
   2. **修订 ADR-005**：平台**服务**仍全 Go、单二进制；**dev 工具**允许 Bun/JS 承载（Miniflare；必要时 `@cloudflare/vite-plugin`）。生产产物不引入 JS 运行时。
-  3. **版本 pin（已修正，2026-09-15 实测）**：**Miniflare 版本必须与平台 pinned workerd 同期对齐；不能把 Miniflare 的 `workerd` 依赖 override 到更旧的版本**。原因：Miniflare 内部 control worker（`MINIFLARE_DEV_CONTROL`）**硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），而 pinned workerd `1.20260615.1` 支持上限 2026-06-22 → 启动即失败（`requires compatibility date "2026-07-08"`）。做法：选与平台 workerd 同期的 Miniflare release（如 **`miniflare@4.20260616.0`**，其内部最大 compat date 为 `2026-01-01`），再把其 `workerd` override 到 pinned `1.20260615.1`（该项目 `cli/package.json` 的 `overrides`）。无法对齐时记录漂移，并在 pinned 上跑契约测试。
+  3. **版本 pin（2026-09-22 更新）**：**Miniflare 版本必须与平台 pinned workerd 同期对齐；不能把 Miniflare 的 `workerd` 依赖 override 到跨期版本**。当前精确组合为 **`miniflare@5.20260916.0-alpha` + `workerd@1.20260916.1`**，lockfile/安装版本测试与 module/KV/D1/R2 真实 smoke 已通过。历史 `4.20260714.0` → 旧 pin 的失败仍证明了该规则。
   4. **契约对拍（Miniflare 作为 CF oracle）**：固定 golden 请求/响应在 Miniflare 与平台 cell-agent 上 diff，差异要么修我们（偏离 CF=bug），要么记入"有意差异"（RPO=0 延迟/scope/quota）。沿用 ADR-014 的 pinned 基线思路。
   5. **dev 不覆盖平台特性**：versions/routes/secrets/deploy/scope/RPO=0 不在 dev → 走真实平台（`cellhive deploy` 是 HTTP 客户端）。
   6. **deploy 服务端功能/兼容性拦截（权威）**：`POST /v1/control/deploy` 服务端校验 bundle 存在、`compatibility_date` ≤ 支持上限（2026-06-22）、`compatibility_flags` 已知、绑定在支持矩阵内（**拒绝 `images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`**；`vectorize`/`hyperdrive` 已支持，见 ADR-158/129）、资源已登记、DO 生命周期合法、未知字段显式拒绝；CLI/dev **preflight 复用同一校验库**提前警告。理由：Miniflare 的绑定"认识面"远宽于平台（实测其插件含 images/ai/browser/vectorize/hyperdrive…），若只在 CLI 拦截会被绕过。
@@ -1393,10 +1393,10 @@
 
 ---
 
-## ADR-114 dev CLI assets 与生产 loader 对齐（`_headers`/`_redirects`/`not_found_handling`/worker 回退）✅（Miniflare 5 路由适配实施中）
+## ADR-114 dev CLI assets 与生产 loader 对齐（`_headers`/`_redirects`/`not_found_handling`/worker 回退）✅
 
 - **背景**：`cellhive dev`（Bun + Miniflare）此前只把 `assets.directory` 交给 Miniflare，worker 与 assets 的交互未接线（打印 `assets_worker_interop ... pending`），`_headers`/`_redirects`/`not_found_handling` 未验证。
-- **决策**：新增纯映射 `assetsOptions(assets, projectDir)`（`cli/src/dev.ts`，可单测）把 wrangler `assets` 配置译为 Miniflare 资产路由配置，使 dev 行为对齐生产 loader（ADR-069/071）：
+- **历史 Miniflare 4 决策**：原纯映射 `assetsOptions(assets, projectDir)` 曾把 wrangler `assets` 配置直接译为 Miniflare 资产路由配置：
   1. `routerConfig.has_user_worker=true` → 资产未命中**回退 worker**（生产："未命中回退 worker"）。
   2. `run_worker_first: true` → `invoke_user_worker_ahead_of_assets=true`（worker 先于资产）；`run_worker_first: [paths]` → `static_routing.user_worker=paths`（**只**这些路径走 worker；注意**不**设全局 invoke-ahead，否则所有路径都走 worker）。
   3. `assetConfig.not_found_handling` 透传（`404-page`/`single-page-application`/`none`）；`_headers`/`_redirects` 由 Miniflare 从资产目录读取。
@@ -1406,8 +1406,8 @@
   - e2e `cli/test/dev-assets-e2e.test.ts`（真实 Miniflare/workerd）：`/`→index、`/asset.txt` 带 `_headers` 的 `x-custom`、`/old`→**302** `_redirects`（`redirect:"manual"`）、`/nope`→**404** + 404.html、`/api/hi`→worker。
   - CLI 冒烟（真实 `cellhive dev` + curl）：同一组行为逐条确认。
 - **入口**：`make cli-test`（`cd cli && bun test`）；`make js-test` 不变。
-- **边界（如实）**：Miniflare 的路由按"资产是否存在"决定，而生产 loader 在 `run_worker_first` 下是"**worker 返回 404 再回退资产**"——两者在"worker 对存在的路径返回 404"这一细节上可能不同（dev 不再单独模拟该细节）；`html_handling` 未解析（保持 Miniflare 默认）。
-- **Miniflare 5 修订（2026-09-22）**：同期候选 `miniflare@5.20260916.0-alpha` 把“资产 miss 是否回退用户 worker”和“是否执行 `404-page`/SPA”同时耦合到 `has_user_worker`：`true` 会在 miss 时绕过 not-found handling，`false` 又拒绝 `run_worker_first` 的用户路由；`5.20260921.0-alpha` 仍是同一核心逻辑，无法只用原生 router config 同时满足 ADR-071。dev CLI 因此允许一个**仅开发态、同一 Miniflare 实例内**的入口 router worker，通过 service binding 分别调用原生 asset service 与用户 worker，并按 ADR-071 明确编排：匹配 `run_worker_first` 时先 worker、worker 404 再资产；否则先资产（含 `_headers`/`_redirects`/`404-page`/SPA），仅 `none` 的 miss 回退 worker。该适配不新增端口、进程、凭据或持久状态，不进入生产镜像，不改变生产 `user-runtime`，也不构成独立 gateway。升级必须以 module/KV/D1/R2、全部 assets 语义和 hot reload 真实 smoke 同时通过为准。
+- **历史边界（已由下述 Miniflare 5 修订解决）**：Miniflare 4 的路由在 worker 对现有路径返回 404 时可能偏离生产；新入口 router 已覆盖“worker 404 → 资产”真实测试。`html_handling` 仍未解析（保持 Miniflare 默认）。
+- **Miniflare 5 修订（2026-09-22，已实现）**：`miniflare@5.20260916.0-alpha` 把“资产 miss 是否回退用户 worker”和“是否执行 `404-page`/SPA”同时耦合到 `has_user_worker`：`true` 会在 miss 时绕过 not-found handling，`false` 又拒绝 `run_worker_first` 的用户路由；`5.20260921.0-alpha` 仍是同一核心逻辑，无法只用原生 router config 同时满足 ADR-071。dev CLI 因此使用一个**仅开发态、同一 Miniflare 实例内**的入口 router worker，通过 service binding 分别调用原生 asset service 与用户 worker，并按 ADR-071 明确编排：匹配 `run_worker_first` 时先 worker、worker 404 再资产；否则先资产（含 `_headers`/`_redirects`/`404-page`/SPA），仅 `none` 的 miss 回退 worker。`assetsOptions` 现在只配置 `has_user_worker=false` 的原生 asset service。该适配不新增端口、进程、凭据或持久状态，不进入生产镜像，不改变生产 `user-runtime`，也不构成独立 gateway。module/KV/D1/R2、Text rules、全部 assets 语义、binding 与 hot reload 共 18 项 Bun 测试已通过。
 
 ---
 
