@@ -41,9 +41,7 @@ export function installLogTail() {
     const batch = buf;
     buf = [];
     try {
-      const done = Promise.resolve(
-        sink.send(env.LOG_NS, env.LOG_WORKER, JSON.stringify(batch)),
-      ).catch(() => {});
+      const done = Promise.resolve(sink.send(JSON.stringify(batch))).catch(() => {});
       // Bind the send to the request lifetime: workerd cancels un-awaited work
       // once the response is returned (the ADR-115 lesson), which would drop logs.
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(done);

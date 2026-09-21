@@ -429,6 +429,124 @@ export default {
 	}
 }
 
+// TestWorkflowStepsStubIsScoped asserts the security boundary of the
+// platform-side step stub (ADR-184): the tenant-visible CH_WF_STEPS accepts
+// only known op names (never a raw path, so the internal token cannot become an
+// open relay) and the namespace is forced to the caller worker's own — a tenant
+// cannot address another namespace.
+func TestWorkflowStepsStubIsScoped(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	var mu sync.Mutex
+	var seen []string
+
+	const probe = `
+export default {
+  async fetch(req, env) {
+    const out = [];
+    // 1. a raw path (old API shape) must be rejected
+    try { await env.CH_WF_STEPS.call("/v1/control/apps", "GET", null); out.push("rawpath:ACCEPTED"); }
+    catch (e) { out.push("rawpath:rejected"); }
+    // 2. an unknown op must be rejected
+    try { await env.CH_WF_STEPS.call("control.apps", {}, null); out.push("badop:ACCEPTED"); }
+    catch (e) { out.push("badop:rejected"); }
+    // 3. a forged ns must be ignored (stub binds the caller's namespace)
+    try { const r = await env.CH_WF_STEPS.call("state.get", { ns: "evil", workflow: "MY_WF", id: "i1" }, null); out.push("forgedns:" + r.status); }
+    catch (e) { out.push("forgedns:threw"); }
+    return new Response(out.join(" | "));
+  }
+};
+`
+
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "steps.test", "worker": "probe"}},
+		"workers": []any{map[string]any{
+			"worker": "probe", "active": 1,
+			"version": map[string]any{"number": 1, "bundle_sha": "shaSteps"},
+		}},
+	}}}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(probe))
+		case "/v1/internal/workflow/state":
+			mu.Lock()
+			seen = append(seen, r.URL.RawQuery)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"running"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("loader not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	req, _ := http.NewRequest(http.MethodGet, public+"/probe", nil)
+	req.Host = "steps.test"
+	resp, err := client.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"rawpath:rejected", "badop:rejected", "forgedns:200"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("probe %q missing in: %s", want, body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("workflow state endpoint was never reached")
+	}
+	for _, qs := range seen {
+		if !strings.Contains(qs, "ns=acme") || strings.Contains(qs, "evil") {
+			t.Fatalf("namespace not forced to the caller's own: %q", qs)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 // TestTenantEnvHasNoPlatformCredentials asserts the ADR-074 boundary with real
 // workerd: the tenant env object carries no internal/platform credential —
 // env.CELL_TOKEN must be absent — and the wrapper's module-scope

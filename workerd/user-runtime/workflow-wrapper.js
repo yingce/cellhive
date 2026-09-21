@@ -73,28 +73,31 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
   }
 }
 
-// call routes a platform step callback to cell-agent. The platform-side
-// WorkflowSteps entrypoint stub (env.CH_WF_STEPS) owns the :7001 transport and
-// the internal token, so no platform binding enters the tenant env; the data
-// returned is re-wrapped as a Response for the step helpers below.
-function call(env, path, init) {
+// call routes one workflow step callback to cell-agent through the
+// platform-side WorkflowSteps entrypoint stub (env.CH_WF_STEPS). The stub owns
+// the :7001 transport and the internal token, and it accepts a fixed op name
+// (never a raw path) with the namespace forced to this worker — so the tenant
+// cannot turn it into a generic relay. Returns a Response-shaped view for the
+// step helpers below.
+function baseParams(env, id) {
+  return { workflow: env.WF_NAME, id, run: env.WF_RUN_TOKEN || "" };
+}
+
+function call(env, op, params, init) {
   const steps = env.CH_WF_STEPS;
-  if (steps && typeof steps.call === "function") {
-    return (async () => {
-      const res = await steps.call(path, (init && init.method) || "GET",
-        init && init.body !== undefined ? init.body : null);
-      return new Response(res.body, {
-        status: res.status,
-        headers: { "content-type": res.contentType || "text/plain" },
-      });
-    })();
+  if (!steps || typeof steps.call !== "function") {
+    return Promise.reject(new Error("workflow: step transport unavailable"));
   }
-  // Fallback (CH_WF_STEPS not configured): the module-scope platform consts.
-  const url = __cellhivePlatform.cellUrl.replace(/\/$/, "") + path;
-  const withToken = { ...(init || {}) };
-  withToken.headers = { ...(withToken.headers || {}), "x-cellhive-internal-token": __cellhivePlatform.cellToken };
-  if (env.PLATFORM && typeof env.PLATFORM.fetch === "function") return env.PLATFORM.fetch(url, withToken);
-  return fetch(url, withToken);
+  const body = init && init.body !== undefined ? init.body : null;
+  return (async () => {
+    const res = await steps.call(op, params || {}, body);
+    return {
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      text: async () => res.body,
+      json: async () => JSON.parse(res.body),
+    };
+  })();
 }
 
 // retryDelayMs computes the backoff for a step.do retries config. CF's `delay`
@@ -110,40 +113,38 @@ function retryDelayMs(retries, attempt) {
 }
 
 function makeStep(env, id) {
-  const qbase = () =>
-    "ns=" + encodeURIComponent(env.WF_NS) + "&workflow=" + encodeURIComponent(env.WF_NAME) +
-    "&id=" + encodeURIComponent(id) + "&run=" + encodeURIComponent(env.WF_RUN_TOKEN || "");
-  const q = (name) => qbase() + "&name=" + encodeURIComponent(name);
+  const base = () => baseParams(env, id);
+  const named = (name) => Object.assign(base(), { name });
 
   async function getAttempt(name) {
-    const r = await call(env, "/v1/internal/workflow/attempt?" + q(name), { method: "GET" });
+    const r = await call(env, "attempt.get", named(name));
     if (!r.ok) return 0;
     return (await r.json()).attempts || 0;
   }
   async function setAttempt(name, attempts, message) {
-    await call(env, "/v1/internal/workflow/attempt?" + q(name) + "&attempts=" + attempts + "&error=" + encodeURIComponent(message || ""), { method: "PUT" });
+    await call(env, "attempt.put", Object.assign(named(name), { attempts, error: message || "" }));
   }
   async function clearAttempt(name) {
-    await call(env, "/v1/internal/workflow/attempt?" + q(name), { method: "DELETE" });
+    await call(env, "attempt.delete", named(name));
   }
 
   // Cooperative pause/terminate: at each step boundary, a fenced token (409) or a
   // paused/terminated status stops the run instead of advancing further.
   async function checkState() {
-    const r = await call(env, "/v1/internal/workflow/state?" + qbase(), { method: "GET" });
+    const r = await call(env, "state.get", base());
     if (r.status === 409) throw new StopSignal();
     if (!r.ok) return;
     const st = (await r.json()).status;
     if (st === "paused" || st === "terminated" || st === "complete") throw new StopSignal();
   }
   async function getStep(name) {
-    const r = await call(env, "/v1/internal/workflow/step?" + q(name));
+    const r = await call(env, "step.get", named(name));
     if (!r.ok) throw new Error("step get " + r.status);
     return await r.json();
   }
   async function putStep(name, value) {
-    const r = await call(env, "/v1/internal/workflow/step?" + q(name), {
-      method: "PUT", body: b64encode(JSON.stringify(value === undefined ? null : value)),
+    const r = await call(env, "step.put", named(name), {
+      body: b64encode(JSON.stringify(value === undefined ? null : value)),
     });
     if (!r.ok) throw new Error("step put " + r.status);
   }
@@ -173,7 +174,7 @@ function makeStep(env, id) {
         if (next > limit) throw e;
         // Park; a timer re-dispatches after the backoff delay.
         const wake = Date.now() + retryDelayMs(retries, attempts);
-        await call(env, "/v1/internal/workflow/sleep?" + q(name) + "&wake_at_ms=" + wake, { method: "POST" });
+        await call(env, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
         throw new SleepSignal();
       }
     },
@@ -187,9 +188,7 @@ function makeStep(env, id) {
       }
       const wake = Date.now() + (typeof durationMs === "number" ? durationMs : 0);
       await putStep(name, { wake_at_ms: wake });
-      const r = await call(env, "/v1/internal/workflow/sleep?" + q(name) + "&wake_at_ms=" + wake, {
-        method: "POST",
-      });
+      const r = await call(env, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
       if (!r.ok) throw new Error("step sleep " + r.status);
       throw new SleepSignal();
     },
@@ -201,7 +200,7 @@ function makeStep(env, id) {
       if (got.found) return got.result ? JSON.parse(b64decode(got.result)) : undefined;
       const type = options.type || "";
       const consume = async () => {
-        const r = await call(env, "/v1/internal/workflow/event/consume?" + q(name) + "&type=" + encodeURIComponent(type), { method: "POST" });
+        const r = await call(env, "event.consume", Object.assign(named(name), { type }));
         if (!r.ok) throw new Error("waitForEvent consume " + r.status);
         return await r.json();
       };
@@ -209,24 +208,24 @@ function makeStep(env, id) {
       if (found.found) {
         const val = found.event ? JSON.parse(b64decode(found.event)) : undefined;
         await putStep(name, val);
-        await call(env, "/v1/internal/workflow/wait?" + q(name), { method: "DELETE" });
+        await call(env, "wait.delete", named(name));
         return val;
       }
       const timeoutMs = typeof options.timeout === "number" ? options.timeout * 1000 : 0;
       const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
       // On resume, honor an elapsed timeout.
-      const wr = await call(env, "/v1/internal/workflow/wait?" + q(name), { method: "GET" });
+      const wr = await call(env, "wait.get", named(name));
       if (wr.ok) {
         const wj = await wr.json();
         if (wj.found && wj.deadline_ms > 0 && Date.now() >= wj.deadline_ms) {
           await putStep(name, null);
-          await call(env, "/v1/internal/workflow/wait?" + q(name), { method: "DELETE" });
+          await call(env, "wait.delete", named(name));
           return undefined;
         }
       }
-      await call(env, "/v1/internal/workflow/wait?" + q(name) + "&deadline_ms=" + deadline, { method: "POST" });
+      await call(env, "wait.put", Object.assign(named(name), { deadline_ms: deadline }));
       if (deadline > 0) {
-        const sr = await call(env, "/v1/internal/workflow/sleep?" + q(name) + "&wake_at_ms=" + deadline, { method: "POST" });
+        const sr = await call(env, "sleep", Object.assign(named(name), { wake_at_ms: deadline }));
         if (!sr.ok) throw new Error("waitForEvent sleep " + sr.status);
       }
       throw new SleepSignal();
@@ -239,16 +238,13 @@ function makeStep(env, id) {
 }
 
 async function finish(env, id, output) {
-  const q = "ns=" + encodeURIComponent(env.WF_NS) + "&workflow=" + encodeURIComponent(env.WF_NAME) + "&id=" + encodeURIComponent(id) + "&run=" + encodeURIComponent(env.WF_RUN_TOKEN || "");
-  await call(env, "/v1/internal/workflow/finish?" + q, {
-    method: "POST", body: b64encode(JSON.stringify(output === undefined ? null : output)),
+  await call(env, "finish", baseParams(env, id), {
+    body: b64encode(JSON.stringify(output === undefined ? null : output)),
   });
 }
 
 async function finishError(env, id, message) {
-  const q = "ns=" + encodeURIComponent(env.WF_NS) + "&workflow=" + encodeURIComponent(env.WF_NAME) +
-    "&id=" + encodeURIComponent(id) + "&error=" + encodeURIComponent(message) + "&run=" + encodeURIComponent(env.WF_RUN_TOKEN || "");
-  await call(env, "/v1/internal/workflow/finish?" + q, { method: "POST" });
+  await call(env, "finish.error", Object.assign(baseParams(env, id), { error: message }));
 }
 
 export default {

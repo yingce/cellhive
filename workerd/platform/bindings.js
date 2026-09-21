@@ -802,9 +802,13 @@ export class Vectorize extends WorkerEntrypoint {
 // LogSink ingests the tenant log ring into cell-agent from the platform worker
 // (fixed path and internal token; the tenant isolate holds no transport).
 export class LogSink extends WorkerEntrypoint {
-  async send(ns, worker, batch) {
+  // ns/worker come from props (the loaded worker's own identity), so a tenant
+  // cannot forge log entries for another namespace.
+  async send(batch) {
+    const props = this.ctx.props || {};
     const r = await this.env.PLATFORM.fetch(
-      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(ns) + "&worker=" + encodeURIComponent(worker),
+      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(props.ns || "") +
+        "&worker=" + encodeURIComponent(props.worker || ""),
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-cellhive-internal-token": this.env.LOG_TOKEN || this.env.CELL_TOKEN || "" },
@@ -819,12 +823,47 @@ export class LogSink extends WorkerEntrypoint {
 // cell-agent from the platform worker (the tenant wrapper cannot reach the
 // private address itself). Data-only: one call() per callback.
 export class WorkflowSteps extends WorkerEntrypoint {
-  async call(path, method, body) {
-    return await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + path, {
-      method: method || "GET",
-      headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" },
-      body: body === undefined || body === null ? undefined : body,
-    });
+  // Fixed op -> (method, path) table: the tenant wrapper picks an op, never a
+  // raw path, so the internal token cannot be turned into an open relay.
+  static #OPS = new Map([
+    ["attempt.get", ["GET", "/v1/internal/workflow/attempt"]],
+    ["attempt.put", ["PUT", "/v1/internal/workflow/attempt"]],
+    ["attempt.delete", ["DELETE", "/v1/internal/workflow/attempt"]],
+    ["state.get", ["GET", "/v1/internal/workflow/state"]],
+    ["step.get", ["GET", "/v1/internal/workflow/step"]],
+    ["step.put", ["PUT", "/v1/internal/workflow/step"]],
+    ["sleep", ["POST", "/v1/internal/workflow/sleep"]],
+    ["wait.get", ["GET", "/v1/internal/workflow/wait"]],
+    ["wait.put", ["POST", "/v1/internal/workflow/wait"]],
+    ["wait.delete", ["DELETE", "/v1/internal/workflow/wait"]],
+    ["event.consume", ["POST", "/v1/internal/workflow/event/consume"]],
+    ["finish", ["POST", "/v1/internal/workflow/finish"]],
+    ["finish.error", ["POST", "/v1/internal/workflow/finish"]],
+  ]);
+  static #PARAM_RE = /^[a-z_]+$/;
+  async call(op, params, body) {
+    const entry = WorkflowSteps.#OPS.get(String(op));
+    if (!entry) throw new Error("workflow: unknown step op " + op);
+    const [method, path] = entry;
+    // The namespace is the caller worker's own (bound in props); a tenant
+    // cannot address another namespace through this stub.
+    const ns = (this.ctx.props || {}).ns || "";
+    const qs = ["ns=" + encodeURIComponent(ns)];
+    for (const [k, v] of Object.entries(params || {})) {
+      if (!WorkflowSteps.#PARAM_RE.test(k) || k === "ns") continue;
+      if (v === undefined || v === null || v === "") continue;
+      qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
+    }
+    const r = await this.env.PLATFORM.fetch(
+      this.env.CELL_URL.replace(/\/$/, "") + path + "?" + qs.join("&"),
+      {
+        method,
+        headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" },
+        body: body === undefined || body === null ? undefined : body,
+      },
+    );
+    const text = await r.text();
+    return { status: r.status, body: text, contentType: r.headers.get("content-type") || "text/plain" };
   }
 }
 

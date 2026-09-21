@@ -403,8 +403,10 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
     if (hostEnv.CH_DO_CONNECT) env.CH_DO_CONNECT = hostEnv.CH_DO_CONNECT;
   }
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) env.CH_WF_STEPS = ex.WorkflowSteps({ props: {} });
-  if (ex && ex.LogSink) env.CH_LOG_SINK = ex.LogSink({ props: {} });
+  const facetNS = (spec && spec.namespace) || env.LOG_NS || "";
+  const facetWorker = (spec && spec.worker) || env.LOG_WORKER || "";
+  if (ex && ex.WorkflowSteps) env.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns: facetNS, worker: facetWorker } });
+  if (ex && ex.LogSink) env.CH_LOG_SINK = ex.LogSink({ props: { ns: facetNS, worker: facetWorker } });
   env.LOG_NS = (spec && spec.namespace) || hostEnv.LOG_NS || "";
   env.LOG_WORKER = (spec && spec.worker) || hostEnv.LOG_WORKER || "";
   return env;

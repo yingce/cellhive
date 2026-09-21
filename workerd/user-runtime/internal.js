@@ -271,8 +271,8 @@ function tenantEnv(env, ctx, spec, vars, ns, worker) {
   // Data-only stubs for workflow step callbacks and the log ring (no transport
   // is exposed). Guard ctx.exports for callers without entrypoints.
   const ex = ctx && ctx.exports;
-  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: {} });
-  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: {} });
+  if (ex && ex.WorkflowSteps) out.CH_WF_STEPS = ex.WorkflowSteps({ props: { ns, worker } });
+  if (ex && ex.LogSink) out.CH_LOG_SINK = ex.LogSink({ props: { ns, worker } });
   out.LOG_NS = ns || "";
   out.LOG_WORKER = worker || "";
   return out;
