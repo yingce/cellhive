@@ -43,7 +43,7 @@ func (c Config) OutboundAllowList() string {
 // EgressAllowList renders the capability-data-plane egress policy for the
 // loader worker's PLATFORM binding (cap-egress network). Entries are CIDR
 // blocks or workerd categories naming the addresses runtime-services resolves
-// to (e.g. "10.20.0.0/16" for the vwork capability subnet); "public" is always
+// to (e.g. "10.20.0.0/16" for the capability data-plane subnet); "public" is always
 // included so a cross-network runtime-services endpoint (public domain) also
 // works. Empty defaults to the legacy permissive posture (public+private) so
 // existing deployments and dev keep working until EgressAllow is configured.
@@ -109,7 +109,7 @@ type Config struct {
 	// categories). "public" is always allowed. Empty keeps the legacy
 	// permissive posture (public+private) until configured; when set, other
 	// private addresses (e.g. cell-agent :7001) are refused by restrictPeers
-	// (vwork-migration review: the tenant-facing egress must not be an
+	// (migration review: the tenant-facing egress must not be an
 	// unrestricted private-network relay).
 	EgressAllow []string
 }
