@@ -219,4 +219,8 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 - Security boundaries and credential layering: [`security.md`](security.md)
 - Bucket roles and credentials: [`storage-and-s3.md`](storage-and-s3.md)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_
+
+## Tenant env namespace
+
+The loaded Worker and DO-facet `env` contain only user-declared `vars` and user-named binding stubs; there are **zero** platform keys. Secrets can be encrypted, stored, and managed, but are **not yet injected into runtime env**. `CH_*`, `CELL_*`, `__cellhive*`, `PLATFORM`, `LOG_*`, and `WF_*` are all available to users and are not rejected as reserved during deploy or secret writes. DO WebSocket upgrades and ordinary calls still use platform-side stubs (ADR-184), with no tenant-visible private transport. A trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` for workflow steps and passes it as a JSRPC argument to the wrapper; it is not a `ctx.exports.X({props})` `ServiceStub` and never enters tenant env (ADR-185).

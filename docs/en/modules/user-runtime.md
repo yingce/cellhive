@@ -30,13 +30,14 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 
 ## Key Invariants
 
-- Tenant `globalOutbound` = **public-only**; the facade accesses outbound services via the `PLATFORM` service binding.
+- Tenant `globalOutbound` = **public-only**; binding stubs keep their transport in the trusted platform host, not in tenant env.
 - The env patch (`bindings-wrapper.js` / `queue-wrapper.js`) keeps `this.env` consistent with the constructor parameter `env`.
 - **Does not hold bucket credentials**; only obtains the binding facade and scoped tokens.
+- Workflow callbacks cross `workerLoader` as a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, never as a `ServiceStub` or tenant-env value. Pin `1.20260615.1` rejects Tail Workers for dynamically loaded Workers (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
 
 ## Source Locations
 
-`cmd/user-runtime/`; `internal/userruntime/`; `workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`; `workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,log-tail.js,telemetry.js,rpc-codec.js}`.
+`cmd/user-runtime/`; `internal/userruntime/`; `workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`; `workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js}`.
 
 ## Test Anchors
 
@@ -46,4 +47,4 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 
 [`routing.md`](../routing.md), [`bindings.md`](../bindings.md), [`workerd-integration.md`](../workerd-integration.md)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_

@@ -18,7 +18,7 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 | **Durable Objects** | do-runtime native facet | **Synchronous SQL**; bindings `env.DO.get(...).fetch()` and **`getByName(...).method(...)` DO RPC** (ADR-080 shard/owner/hint/WS 1012; ADR-162 RPC tagged JSON + native JSRPC) | workerd actor SQLite (working replica) → cell-agent replication | **do-runtime node** |
 | **ASSETS** | Object storage (versioned) | Async | `assets/<ns>/<worker>/<token>/...` | Object storage |
 | **Service bindings** | workerd JSRPC | Sync/async | — | Target Worker |
-| **Vars / Secrets** | Injected into `env` at load time | — | secrets in control cell (ciphertext) | cell-agent |
+| **Vars / Secrets** | Vars and user-named binding stubs injected into `env` at load time; secrets not yet injected | — | secrets in control cell (ciphertext) | cell-agent |
 | **AI** | BYO OpenAI-compatible endpoint (`env.AI.run`) | Async | — | cell-agent (`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`; no platform-hosted catalog) |
 
 ## host adapter Model
@@ -133,5 +133,5 @@ Tenant bindings are no longer HTTP facades: the platform worker exports `WorkerE
 - **ServiceBinding**: `env.SVC.fetch()` and `env.SVC.<method>()` (Proxy forwarding) → cell-agent `/v1/service/{fetch,run}` (scope kind=service) → user-runtime `/v1/services/{fetch,run}` → target worker / its named entrypoint (same namespace); `binding.entrypoint` specifies the target entrypoint.
 - **R2 list**: `env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` returns `{objects,truncated,cursor}` (cursor is exclusive; sizes come from the list response, ADR-145).
 - **R2 presign**: `env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet` (self-hosted backend returns a short-lived read URL).
-- **Log tail**: loaded worker `log-tail.js` patches `console.*` → the platform-side `LogSink` entrypoint stub (the platform worker holds the `log` role token and transport) POSTs to cell-agent `/v1/internal/logs` → bounded ring buffer (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`) → `cellhive tail --worker`; log tokens are derived from `CELLHIVE_ROOT_KEY` (ADR-137).
+- **Log tail (historical)**: this `log-tail.js`/`LogSink` path was superseded and removed by ADR-185. Pin `1.20260615.1` rejects a native Tail Worker for dynamic loaded Workers (`provided value is not of type 'Fetcher'`), so tenant `console.*` does not enter the platform ring/OTLP and must not fall back to tenant env.
 - **AI (BYO)**: `env.AI.run(model, inputs)` → `<AI_URL>/chat/completions` (OpenAI-compatible, `AI_KEY` Bearer), returns `{response,model,usage}`; `inputs.messages` or `{prompt}`.

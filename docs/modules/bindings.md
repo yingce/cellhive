@@ -21,7 +21,7 @@ cell-agent 上的 `/v1/kv/*`、`/v1/d1/*`、`/v1/r2/*`、`/v1/queue/*`、`/v1/wo
 ## 关键不变量
 
 - binding 名 = 已登记资源名（无自动 provisioning）。
-- **租户 env 完全由用户拥有**：tenant Worker 与 DO facet 的 env 只有用户声明的 vars、secrets 与 binding stub，平台键为 **0**；`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 均可由用户命名（ADR-185）。DO 的 WebSocket 升级与普通调用仍经平台侧 stub 的 `fetch(request)`/`rpcObject(...)`（DO id 经 `DO_ID_HEADER` 随 Request 传，见 ADR-184），**不需要租户可见的 WS 或私网传输**。Workflow 固定-op step 回调由可信 internal host 以带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数交给 wrapper；它不是跨动态 loader 不可序列化的 `ServiceStub`，也不进入 env。绑定名清单（R2/DO）经模块作用域常量 `__cellhivePlatform.*` 注入，不占 env 名。
+- **租户 env 完全由用户拥有**：tenant Worker 与 DO facet 的 env 只有用户声明的 vars 与用户命名的 binding stub，平台键为 **0**；secret 虽可存储/管理但尚未注入 runtime env。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 均可由用户命名（ADR-185）。DO 的 WebSocket 升级与普通调用仍经平台侧 stub 的 `fetch(request)`/`rpcObject(...)`（DO id 经 `DO_ID_HEADER` 随 Request 传，见 ADR-184），**不需要租户可见的 WS 或私网传输**。Workflow 固定-op step 回调由可信 internal host 以带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数交给 wrapper；它不是跨动态 loader 不可序列化的 `ServiceStub`，也不进入 env。绑定名清单（R2/DO）经模块作用域常量 `__cellhivePlatform.*` 注入，不占 env 名。
 - 每个 binding 一个 scoped token（HMAC）。
 - 读**强一致**（转发 owner）。
 - 对 CF 拒绝项**显式拒绝**（Cache API、Sessions、SSE-C…），未知字段/flag 部署期拒绝。
@@ -39,4 +39,4 @@ cell-agent 上的 `/v1/kv/*`、`/v1/d1/*`、`/v1/r2/*`、`/v1/queue/*`、`/v1/wo
 
 [`bindings.md`](../bindings.md)、[`compatibility-matrix.md`](../compatibility-matrix.md)、[`wrangler-compat.md`](../wrangler-compat.md)
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_

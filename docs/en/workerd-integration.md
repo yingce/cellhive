@@ -34,12 +34,14 @@ user-runtime loader:
        · bundle is fetched from object storage by content address (SHA-256) (scoped read-only credentials, ADR-030)
   3. Generate wrapper (JS layer):
        · wrap tenant module exports (fetch/scheduled/queue/alarm/RPC)
-       · construct tenant env: vars < namespace secrets < worker secrets; inject binding facades
+       · construct tenant env from user-declared vars and user-named binding stubs only; zero platform keys (ADR-185)
        · preserve built-in modules such as `cloudflare:workers`; shim modules such as `cloudflare:workflows`
   4. Invoke handler
 ```
 
 - **env budget**: workerd serialized env limit (about 1 MiB); the control plane validates it on deploy/secret changes (including V8 double-byte overhead).
+- **Secret boundary**: secrets can be encrypted, stored, and managed, but are not yet injected into the runtime env; they are not an env source above. A future injection path must retain zero platform keys and no reserved names.
+- **Workflow / logging boundary**: a trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` and passes it as a JSRPC parameter across `workerLoader` to the wrapper. It is neither a `ServiceStub` nor tenant env. Native Tail Workers for dynamically loaded Workers are rejected on pin `1.20260615.1` (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled and must not fall back to env transport.
 - **Reserved module prefixes**: platform-generated module names use reserved prefixes (such as `__cellhive-`); tenants must not occupy them.
 
 ## host adapter and Networking
@@ -70,4 +72,4 @@ user-runtime loader:
 - Wrapper generation details and reserved module name prefixes;
 - Compatibility flag table (following the pinned workerd).
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-22_

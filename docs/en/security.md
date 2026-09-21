@@ -17,7 +17,7 @@
 3. **Scope declaration validation**: When the host adapter calls cell-agent, it declares `(ns, binding type/id)`; cell-agent validates it and rejects any overreach. The binding itself is uniquely bound to a specific cell by immutable props in the adapter.
 4. **Defense in depth**: Per-binding signed scoped token (namespace + binding type/id), so even if isolation is bypassed, only that binding can be accessed (**ADR-074**). **Computed locally by the platform, no expiration**: revocation relies on `HasBinding` validation on every request + `SCOPE_SECRET` rotation; the **broadly privileged internal token does not enter the tenant loaded worker**, and the facade only carries a scoped token.
 
-> Secrets: Control-plane cells store **envelope ciphertext**; the root key is outside the cell (env/KMS); it is decrypted inside cell-agent during loading and injected into `env`, with plaintext only entering the load envelope + workerd env.
+> Secrets: Control-plane cells store **envelope ciphertext** and the root key is outside the cell (env/KMS). Secrets can be stored and managed, but runtime-env injection is not yet implemented; a future path must preserve ADR-185's zero-platform-key tenant env.
 
 ## Admin Backend (ADR-036/131)
 

@@ -220,8 +220,8 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 - 安全边界与凭据分层：[`security.md`](./security.md)
 - 桶角色与凭据：[`storage-and-s3.md`](./storage-and-s3.md)
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_
 
 ## 租户 env 命名空间
 
-加载 worker 与 DO facet 的 `env` 只包含用户声明的 `vars`、secrets 和 binding stub；平台键为 **0**。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 都是用户可用名称，不会因平台保留名而被部署或 secret 写入拒绝。DO 的 WebSocket 升级与普通调用仍经平台侧 stub（ADR-184），不需要租户可见的私网传输。Workflow step 回调则由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数传给 wrapper；它不是 `ctx.exports.X({props})` 创建的 `ServiceStub`，也不进入 tenant env（ADR-185）。
+加载 worker 与 DO facet 的 `env` 只包含用户声明的 `vars` 和用户命名的 binding stub；平台键为 **0**。secrets 可加密存储和管理，但**尚未注入 runtime env**。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 都是用户可用名称，不会因平台保留名而被部署或 secret 写入拒绝。DO 的 WebSocket 升级与普通调用仍经平台侧 stub（ADR-184），不需要租户可见的私网传输。Workflow step 回调则由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数传给 wrapper；它不是 `ctx.exports.X({props})` 创建的 `ServiceStub`，也不进入 tenant env（ADR-185）。

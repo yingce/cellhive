@@ -61,9 +61,9 @@ None: the "planned" metrics previously listed in `docs/observability.md` have al
 - **Do not** log: secrets in plaintext, internal token, raw bucket response bodies;
 - Key events: `owner_acquired`, `epoch_bumped`, `takeover_started/finished`, `drain_started/finished`, `waker_fire`, `do_restore_started/finished`, `output_gate_timeout`.
 
-### Tenant logs: in-memory tail + optional OTLP export (ADR-172)
+### Platform logs: in-memory tail + optional OTLP export (ADR-172)
 
-- Tenant `console.*` is collected by `workerd/platform/log-tail.js` → `POST /v1/internal/logs` → cell-agent's **bounded in-memory ring** (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`, default `1000:200`) → `cellhive tail --worker <ns>/<worker>` polls `GET /v1/control/logs`. The ring is **non-persistent and single-node**; when busy, it drops the oldest entries.
+- `workerd/platform/log-tail.js` has been removed. Pinned stock `workerd 1.20260615.1` rejects `tails: [{name:"tenant-tail"}]` for a dynamic `workerLoader` Worker with `provided value is not of type 'Fetcher'`; therefore tenant `console.*` does **not** enter `/v1/internal/logs`, the ring, or OTLP. Do not restore this path through tenant env. `/v1/internal/logs`, the **bounded in-memory ring** (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`, default `1000:200`), and `cellhive tail --worker <ns>/<worker>` remain available to trusted platform producers; the ring is non-persistent and single-node and drops oldest entries under load.
 - **Optional OTLP/HTTP logs export** (standard protocol; changing backends only requires changing environment variables; shares endpoint/headers/resource with traces, path `/v1/logs`): `CELLHIVE_OTLP_LOGS=off|tail|all` (default **off**).
   - `all`: export every entry (centralized collection; high volume).
   - `tail`: **export only when there is an active subscription for `(ns,worker)`**—each `cellhive tail --worker` poll POSTs `/v1/control/logs/subscribe` (TTL 60s, auto-renewed), and export stops within ≤60s after tail exits.
@@ -85,7 +85,7 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 ## Multi-tenancy and external querying (push logs/traces, pull metrics internally)
 
 - **Push logs and traces**: nodes only push to an **internal OTLP endpoint** (`CELLHIVE_OTLP_ENDPOINT` / `_HEADERS`; `CELLHIVE_OTLP_LOGS=off|tail|all`). The platform exposes no query surface — storage, retention, query and **tenant auth** belong to the backend (OpenObserve/Tempo/Collector).
-- **Unified resource attributes**: every record carries `service.name`, `service.instance.id` (= node id), `cellhive.namespace`, `cellhive.worker`; tenant log lines emitted inside a traced request carry `trace_id`/`span_id` (`logbuf.Entry` + per-line `traceparent` from `log-tail.js`, parsed by cell-agent) so backends can jump **metrics → trace → logs**.
+- **Unified resource attributes**: every trusted platform log record carries `service.name`, `service.instance.id` (= node id), `cellhive.namespace`, and `cellhive.worker`; it may carry `trace_id`/`span_id`. Tenant console records are not currently captured (ADR-185).
 - **The only tenant-facing hop is the backend**: map each namespace to a backend **org/stream** (e.g. OpenObserve `logs-<ns>`) and give the tenant a read-only user for exactly that scope; do **not** rely on the `cellhive.namespace` attribute alone for row-level isolation (most backends cannot filter by arbitrary attributes).
 - **Reference pipeline**: [`../../deploy/observability/otel-collector.yaml`](../../deploy/observability/otel-collector.yaml) (OTLP in → redact/route/tail-sample → OpenObserve) plus [`../../deploy/observability/README.md`](../../deploy/observability/README.md); compose with `--profile observability` (OpenObserve is in the `tracing` profile).
 - **Reproducible smokes**:

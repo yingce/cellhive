@@ -33,10 +33,11 @@
 - 租户 `globalOutbound` = **public-only**；capability binding 是平台侧 entrypoint stub（`:7001` 传输在平台 worker，ADR-184），租户 env 无 `PLATFORM`/`CELL_URL`。
 - env patch（`bindings-wrapper.js` / `queue-wrapper.js`）让 `this.env` 与构造形参 `env` 一致。
 - **不持桶凭据**；只拿 binding facade 与 scoped token。
+- Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。pin `1.20260615.1` 拒绝动态 loaded-worker Tail Worker（`provided value is not of type 'Fetcher'`），所以租户 `console.*` 平台采集关闭。
 
 ## 源码位置
 
-`cmd/user-runtime/`；`internal/userruntime/`；`workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`；`workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,log-tail.js,telemetry.js,rpc-codec.js}`。
+`cmd/user-runtime/`；`internal/userruntime/`；`workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`；`workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js}`。
 
 ## 测试锚点
 
@@ -46,4 +47,4 @@
 
 [`routing.md`](../routing.md)、[`bindings.md`](../bindings.md)、[`workerd-integration.md`](../workerd-integration.md)
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_

@@ -18,7 +18,7 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 | **Durable Objects** | do-runtime 原生 facet | **同步 SQL**；绑定 `env.DO.get(...).fetch()` 与 **`getByName(...).method(...)` DO RPC**（ADR-080 shard/owner/hint/WS 1012；ADR-162 RPC tagged JSON + 原生 JSRPC） | workerd actor SQLite（工作副本）→ cell-agent 复制 | **do-runtime 节点** |
 | **ASSETS** | 对象存储（版本化） | 异步 | `assets/<ns>/<worker>/<token>/...` | 对象存储 |
 | **Service bindings** | workerd JSRPC | 同步/异步 | — | 目标 Worker |
-| **Vars / Secrets** | 加载期注入 `env` | — | secrets 在 control cell（密文） | cell-agent |
+| **Vars / Secrets** | vars 与用户命名 binding stub 在加载期注入 `env`；secret 尚未注入 | — | secrets 在 control cell（密文） | cell-agent |
 | **AI** | BYO OpenAI 兼容端点（`env.AI.run`） | 异步 | — | cell-agent（`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`；无平台托管目录） |
 
 ## host adapter 模型
@@ -124,7 +124,7 @@ cell-agent 的 `queue.Runner` 周期性从**控制面登记的 queue 资源**取
 
 _最后更新：2026-09-19_
 
-## 绑定实现（ADR-090，RPC entrypoint env）
+## 绑定实现（ADR-090，RPC entrypoint env；ADR-185 已取代其平台 env 结论）
 
 租户 bindings 不再是 HTTP facade：平台 worker 导出 `WorkerEntrypoint` 能力类，`ctx.exports.X({props})` 生成 props 绑定 stub 放进**被加载租户 worker 的 env**。
 
@@ -133,5 +133,5 @@ _最后更新：2026-09-19_
 - **ServiceBinding**：`env.SVC.fetch()` 与 `env.SVC.<method>()`（Proxy 转发）→ cell-agent `/v1/service/{fetch,run}`（scope kind=service）→ user-runtime `/v1/services/{fetch,run}` → 目标 worker / 其命名 entrypoint（同名空间）；`binding.entrypoint` 指定目标 entrypoint。
 - **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、尺寸来自 list 响应，ADR-145）。
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
-- **日志 tail**：加载 worker 内 `log-tail.js` 补丁 `console.*` → 平台侧 `LogSink` entrypoint stub（平台 worker 持 `log` 角色令牌与传输）POST cell-agent `/v1/internal/logs` → 有界 ring buffer（`CELLHIVE_LOG_BUFFER=<entries>:<workers>`）→ `cellhive tail --worker`；日志令牌由 `CELLHIVE_ROOT_KEY` 派生（ADR-137）。
+- **日志 tail（历史）**：本 ADR 的 `log-tail.js`/`LogSink` 传输已由 ADR-185 取代并删除。pin `1.20260615.1` 拒绝动态 loaded-worker 原生 Tail Worker（`provided value is not of type 'Fetcher'`），因此当前 tenant `console.*` 不进入平台 ring/OTLP，且不得以 tenant env 回退。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。

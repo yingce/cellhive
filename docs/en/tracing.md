@@ -126,7 +126,7 @@ Point CellHive to `CELLHIVE_OTLP_ENDPOINT=http://collector:4318` (no headers).
 
 ## 4.5 Log correlation and multi-tenancy (recommended)
 
-- **trace <-> logs**: tenant log lines now carry `trace_id`/`span_id` (`log-tail.js` reads the current `traceparent` at each `console.*` call; cell-agent parses it into `logbuf` and the OTLP log record), so a backend can jump from a trace to the logs of the same request.
+- **trace <-> logs**: trusted platform log records may carry `trace_id`/`span_id`. Tenant `console.*` capture is currently unavailable because pin `1.20260615.1` rejects Tail Workers for dynamic `workerLoader` Workers; see `observability.md` and ADR-185.
 - **Multi-tenancy**: nodes push to an **internal Collector** (`deploy/observability/`), which redacts, routes by `cellhive.namespace` and tail-samples before sending to OpenObserve; tenants query through **backend org/stream + user roles**, so the platform exposes no query surface and never hands OTLP credentials to a tenant. Details in [`observability.md`](./observability.md) -> "Multi-tenancy and external querying".
 
 ## 5. Boundaries and remaining gaps

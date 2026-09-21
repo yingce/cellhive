@@ -34,12 +34,14 @@ user-runtime loader：
        · bundle 由内容寻址（SHA-256）从对象存储拉取（scoped 只读凭据，ADR-030）
   3. 生成 wrapper（JS 层）：
        · 包装租户模块导出（fetch/scheduled/queue/alarm/RPC）
-       · 构造租户 env：vars < namespace secrets < worker secrets；注入 binding facades
+       · 构造租户 env：只放用户声明的 vars 与用户命名的 binding stub；平台键为 0（ADR-185）
        · 保留 `cloudflare:workers` 等内建模块；对 `cloudflare:workflows` 等做 shim
   4. 调用 handler
 ```
 
 - **env 预算**：workerd 的序列化 env 上限（约 1 MiB）；控制面在 deploy/secret 变更时校验（含 V8 双字节开销）。
+- **secret 边界**：secret 可加密存储和管理，但尚未注入 runtime env；因此不能把它计作上述 env 的一个来源。补齐注入时仍不得引入平台键或保留名称。
+- **Workflow / 日志边界**：workflow 固定 op 回调由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 经 JSRPC 参数跨 `workerLoader` 传给 wrapper；它不是 `ServiceStub`，也不进入 tenant env。pin `1.20260615.1` 的动态 loaded worker Tail Worker 被拒绝（`provided value is not of type 'Fetcher'`），故租户 `console.*` 平台采集当前关闭，不能以 env 传输回退。
 - **模块前缀保留**：平台生成的模块名使用保留前缀（如 `__cellhive-`），租户不得占用。
 
 ## host adapter 与网络
@@ -70,4 +72,4 @@ user-runtime loader：
 - wrapper 生成细节与保留模块名前缀；
 - 兼容 flag 表（跟随 pinned workerd）。
 
-_最后更新：2026-09-14_
+_最后更新：2026-09-22_

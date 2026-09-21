@@ -21,6 +21,7 @@ Map each type of Cloudflare binding to platform resources and host adapters, and
 ## Key Invariants
 
 - binding name = registered resource name (no automatic provisioning).
+- **Tenant env is entirely user-owned**: Tenant Worker and DO-facet env contains only user-declared vars and user-named binding stubs, with **zero** platform keys; secrets can be stored/managed but are not yet injected into runtime env. `CH_*`, `CELL_*`, `__cellhive*`, `PLATFORM`, `LOG_*`, and `WF_*` are user names (ADR-185). DO WebSocket upgrades and calls use platform-side `fetch(request)`/`rpcObject(...)` stubs, with no tenant-visible private transport. A trusted internal host passes its dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` as a JSRPC argument to the wrapper; it is neither a cross-loader `ServiceStub` nor env.
 - One scoped token per binding (HMAC).
 - Reads are **strongly consistent** (forwarded to owner).
 - Cloudflare rejected items are **explicitly rejected** (Cache API, Sessions, SSE-C, etc.); unknown fields/flags are rejected at deployment time.
@@ -37,4 +38,4 @@ Map each type of Cloudflare binding to platform resources and host adapters, and
 
 [`bindings.md`](../bindings.md), [`compatibility-matrix.md`](../compatibility-matrix.md), [`wrangler-compat.md`](../wrangler-compat.md)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_

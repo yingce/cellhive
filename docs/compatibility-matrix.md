@@ -18,7 +18,8 @@
 | ASSETS | Supported | 对象存储 + 版本化；完整资产管道 |
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
-| Vars / Secrets | Supported | secrets 信封加密 |
+| Vars / Secrets | Partial | vars 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secrets 可信封加密存储/管理，但**尚未注入 runtime env** |
+| 租户 `console.*` 平台采集 | Partial | pin `workerd 1.20260615.1` 的动态 `workerLoader` Tail Worker 被拒绝：`provided value is not of type 'Fetcher'`；因此当前不采集到 ring/OTLP，不能以 tenant env 回退 |
 | `nodejs_compat` | Supported | 随 workerd；需开启 |
 | Cache API | Rejected | 无边缘缓存 |
 | Vectorize / AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供（Hyperdrive 已支持，见下） |
@@ -56,4 +57,4 @@
 - **框架预构建产物验收**：`internal/wrangler TestFrameworkPrebuiltLayouts` 覆盖 OpenNext（`.open-next/worker.js` + `.open-next/assets`）、SvelteKit（`.svelte-kit/cloudflare/_worker.js` + 同目录资产）、Astro（`dist/_worker.js/index.js` + `dist/client`）：配置映射 + `bundler.Build` 打包。
 - **不做的项**：见"Rejected"行的原因说明（Cache API/浏览器渲染/Email/Python 等）；Vectorize 已支持（ADR-158/159）。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_

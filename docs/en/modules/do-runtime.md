@@ -34,6 +34,7 @@ do-runtime `:8788`: `/v1/do/invoke`, `/v1/do/connect` (WS), `/v1/do/{claim,renew
 - alarm must be shimmed (stock workerd does not implement native alarm for SQLite facets).
 - WS migration/restart closes with **1012**, and clients reconnect (no resume).
 - **Do not return ack before gate confirmation**.
+- The facet tenant env follows ADR-185: user vars and user-named binding stubs only, with zero platform keys; secrets are not yet injected into runtime env. Pin `1.20260615.1` also rejects a Tail Worker for dynamic loaded DO facets (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
 
 ## Source Locations
 
@@ -47,4 +48,4 @@ do-runtime `:8788`: `/v1/do/invoke`, `/v1/do/connect` (WS), `/v1/do/{claim,renew
 
 [`durable-objects.md`](../durable-objects.md), [`workerd-integration.md`](../workerd-integration.md)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_

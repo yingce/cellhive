@@ -34,6 +34,7 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 - alarm 必须 shim（stock workerd 对 SQLite facet 不实现原生 alarm）。
 - WS 迁移/重启以 **1012** 关闭，客户端重连（不做 resume）。
 - **门确认前不回 ack**。
+- facet 的 tenant env 遵循 ADR-185：只有用户 vars 与用户命名 binding stub，零平台键；secret 尚未注入 runtime env。动态 loaded DO facet 的 Tail Worker 同样被 pin `1.20260615.1` 拒绝（`provided value is not of type 'Fetcher'`），故 tenant `console.*` 平台采集关闭。
 
 ## 源码位置
 
@@ -47,4 +48,4 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 
 [`durable-objects.md`](../durable-objects.md)、[`workerd-integration.md`](../workerd-integration.md)
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_
