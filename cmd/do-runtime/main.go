@@ -55,7 +55,6 @@ func main() {
 
 	capnpPath, err := doruntime.Render(runtimeDir, doruntime.Config{
 		CellURL:         cellURL,
-		LogToken:        creds.Log,
 		DoTicketSecret:  creds.DoTicket,
 		DoLeaseS:        doLeaseSeconds(),
 		DOObjectIndex:   envTrue("CELLHIVE_DO_OBJECT_INDEX"),

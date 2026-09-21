@@ -53,8 +53,6 @@ type Config struct {
 	// AIURL/AIKey configure the BYO OpenAI-compatible AI binding endpoint.
 	AIURL string
 	AIKey string
-	// LogToken authorizes the bounded log-ingest endpoint (loaded workers).
-	LogToken string
 	// DoTicketSecret verifies short-lived DO owner tickets (ADR-105). Empty
 	// disables ticket auth (internal token only).
 	DoTicketSecret string
@@ -107,9 +105,7 @@ const config :Workerd.Config = (
         (name = "PLATFORM", service = "private-outbound"),
         (name = "BINDINGS_WRAPPER_SRC", text = embed "bindings-wrapper.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
-        (name = "LOG_TAIL_SRC", text = embed "log-tail.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "LOG_TOKEN", text = "{{.LogToken}}"),
         (name = "DO_TICKET_SECRET", text = "{{.DoTicketSecret}}"),
         (name = "DO_LEASE_S", text = "{{.DoLeaseS}}"),
         (name = "DO_OBJECT_INDEX", text = "{{if .DOObjectIndex}}1{{end}}"),
@@ -162,7 +158,6 @@ func Render(dir string, cfg Config) (string, error) {
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "facades.js"), "facades.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "bindings.js"), "bindings.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "bindings-wrapper.js"), "bindings-wrapper.js"},
-		{filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), "log-tail.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "rpc-codec.js"), "rpc-codec.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), "telemetry.js"},
 	} {

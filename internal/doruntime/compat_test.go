@@ -788,8 +788,9 @@ export class Tenant extends DurableObject {
 export default { async fetch() { return new Response("t"); } };
 `
 
-// TestDoRuntimeLogTail covers the bounded log tail for DO facets (this.env path).
-func TestDoRuntimeLogTail(t *testing.T) {
+// TestDoRuntimeLogTailUnavailable verifies the no-platform-tail fallback for
+// DO facets: a tenant request succeeds without forwarding console output.
+func TestDoRuntimeLogTailUnavailable(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -823,7 +824,6 @@ func TestDoRuntimeLogTail(t *testing.T) {
 	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-log", PreventEviction: true,
-		LogToken: "dev-log-token",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -854,18 +854,12 @@ func TestDoRuntimeLogTail(t *testing.T) {
 	}); body != "ok" {
 		t.Fatalf("do fetch = %q", body)
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		joined := strings.Join(msgs, "|")
-		mu.Unlock()
-		if strings.Contains(joined, "do-tail-line") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("do log tail not received: %v", msgs)
-		}
-		time.Sleep(100 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	got := append([]string(nil), msgs...)
+	mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("platform log entries = %v, want none", got)
 	}
 	cancel()
 	select {

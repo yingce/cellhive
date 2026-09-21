@@ -2945,16 +2945,17 @@ func TestUserRuntimeAIBinding(t *testing.T) {
 const logTailBundle = `
 export default {
   async fetch(req, env) {
-    console.log("hello-tail", { n: 1 });
+    console.log("native-tail-marker", { n: 1 });
     console.warn("warned");
     return new Response("ok");
   },
 };
 `
 
-// TestUserRuntimeLogTail covers the bounded log tail: tenant console output is
-// captured by the loaded worker and shipped to cell-agent's log endpoint.
-func TestUserRuntimeLogTail(t *testing.T) {
+// TestUserRuntimeLogTailUnavailable documents the approved fallback when the
+// pinned workerLoader rejects native tail service designators: tenant requests
+// still succeed, but console output is not sent to the platform log endpoint.
+func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -2991,7 +2992,6 @@ func TestUserRuntimeLogTail(t *testing.T) {
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
-		LogToken:     "dev-log-token",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3022,23 +3022,14 @@ func TestUserRuntimeLogTail(t *testing.T) {
 	if resp.StatusCode != 200 || body != "ok" {
 		t.Fatalf("fetch = %d %q", resp.StatusCode, body)
 	}
-	// Wait for the flush to reach the stub.
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		got := append([]map[string]any(nil), logs...)
-		mu.Unlock()
-		joined := ""
-		for _, l := range got {
-			joined += fmt.Sprint(l["message"]) + "|"
-		}
-		if strings.Contains(joined, "hello-tail") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("log tail not received: %v", got)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// The former bridge used a microtask to send this asynchronously. Leave a
+	// longer window than that path, then assert that nothing reached the stub.
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	got := append([]map[string]any(nil), logs...)
+	mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("platform log entries = %v, want none", got)
 	}
 	cancel()
 	select {
@@ -3392,10 +3383,9 @@ export default {
 };
 `
 
-// TestUserRuntimeServiceBindingNativeTargetLogTail proves that a native service
-// target receives a bridge scoped to the target, rather than inheriting the
-// caller's ring or silently dropping its console output.
-func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
+// TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable verifies that a
+// native service target still runs while its console output stays local.
+func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -3414,7 +3404,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 	}}}
 
 	var mu sync.Mutex
-	var logScopes []string
+	var logCalls int
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -3426,19 +3416,9 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 				_, _ = w.Write([]byte(serviceNativeLogCallerBundle))
 			}
 		case "/v1/internal/logs":
-			if r.Header.Get("x-cellhive-internal-token") != "dev-log-token" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			var batch []map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&batch)
-			for _, entry := range batch {
-				if strings.Contains(fmt.Sprint(entry["message"]), "native-service-target") {
-					mu.Lock()
-					logScopes = append(logScopes, r.URL.Query().Get("ns")+"/"+r.URL.Query().Get("worker"))
-					mu.Unlock()
-				}
-			}
+			mu.Lock()
+			logCalls++
+			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
 			http.NotFound(w, r)
@@ -3448,7 +3428,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret", LogToken: "dev-log-token",
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3479,21 +3459,12 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 	if resp.StatusCode != 200 || body != "target" {
 		t.Fatalf("native fetch = %d %q (want target)", resp.StatusCode, body)
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		got := append([]string(nil), logScopes...)
-		mu.Unlock()
-		if len(got) > 0 {
-			if len(got) != 1 || got[0] != "acme/api" {
-				t.Fatalf("target log scopes = %v, want [acme/api]", got)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("native service target log was not received")
-		}
-		time.Sleep(100 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	got := logCalls
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("platform log calls = %d, want 0", got)
 	}
 	cancel()
 	select {

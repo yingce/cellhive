@@ -47,7 +47,6 @@ func main() {
 	capnpPath, err := userruntime.Render(dataDir, userruntime.Config{
 		CellURL:          cellURL,
 		CellToken:        cellToken,
-		LogToken:         creds.Log,
 		AIURL:            getenv("CELLHIVE_AI_URL", ""),
 		AIKey:            getenv("CELLHIVE_AI_KEY", ""),
 		InternalPort:     internalPort,

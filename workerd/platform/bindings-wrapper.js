@@ -8,7 +8,6 @@
 // hands the same env object to the tenant's fetch handler and to Durable Object
 // constructors, `this.env.X` AND the constructor-parameter `env.X` both see the
 // patched facades.
-import "log-tail.js";
 import { env } from "cloudflare:workers";
 import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
 

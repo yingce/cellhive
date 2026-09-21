@@ -80,8 +80,6 @@ type Config struct {
 	// AIURL/AIKey configure the BYO OpenAI-compatible AI binding endpoint.
 	AIURL string
 	AIKey string
-	// LogToken authorizes the bounded log-ingest endpoint (loaded workers).
-	LogToken string
 	// ServiceNative ("0" disables) selects the same-instance native service
 	// binding path (ADR-102); empty = enabled.
 	ServiceNative string
@@ -137,8 +135,6 @@ const config :Workerd.Config = (
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "LOG_TAIL_SRC", text = embed "log-tail.js"),
-        (name = "LOG_TOKEN", text = "{{.LogToken}}"),
         (name = "AI_URL", text = "{{.AIURL}}"),
         (name = "AI_KEY", text = "{{.AIKey}}"),
         (name = "OUTBOUND", service = "public-network"),
@@ -168,8 +164,6 @@ const config :Workerd.Config = (
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
         (name = "FACADES_SRC", text = embed "facades.js"),
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
-        (name = "LOG_TAIL_SRC", text = embed "log-tail.js"),
-        (name = "LOG_TOKEN", text = "{{.LogToken}}"),
         (name = "AI_URL", text = "{{.AIURL}}"),
         (name = "AI_KEY", text = "{{.AIKey}}"),
         (name = "OUTBOUND", service = "public-network"),
@@ -224,9 +218,6 @@ func Render(dir string, cfg Config) (string, error) {
 		return "", err
 	}
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "bindings.js"), filepath.Join(dir, "bindings.js")); err != nil {
-		return "", err
-	}
-	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), filepath.Join(dir, "log-tail.js")); err != nil {
 		return "", err
 	}
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), filepath.Join(dir, "telemetry.js")); err != nil {

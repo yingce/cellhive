@@ -163,8 +163,7 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     "cellhive.worker": worker,
   });
   try {
-    const bridge = ctx.exports.PlatformBridge({ props: { ns: app.namespace, worker } });
-    const res = await stub.getEntrypoint("CellHiveHost").handleFetch(traced, bridge);
+    const res = await stub.getEntrypoint("CellHiveHost").handleFetch(traced);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
     return res;
@@ -193,7 +192,6 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env, spec) + env.LOG_TAIL_SRC,
     },
     // ADR-090: migrated bindings become props-bound entrypoint stubs in env;
     // all kinds are platform-side stubs (ADR-184), so the wrapper only wraps
@@ -264,7 +262,7 @@ function platformConsts(env, spec) {
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // --- assets ---------------------------------------------------------------

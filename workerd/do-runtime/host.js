@@ -372,7 +372,7 @@ async function connect(req, env, url, ticket) {
 // tenant DO class cannot read it — unlike `env`, which is shared.
 function platformConsts(env, spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
@@ -854,7 +854,6 @@ export class Host extends DurableObject {
             "tenant.js": bundle,
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,
-            "log-tail.js": platformConsts(this.env, bs.bindings) + this.env.LOG_TAIL_SRC,
             "rpc-codec.js": this.env.RPC_CODEC_SRC,
           },
         ),
@@ -864,7 +863,6 @@ export class Host extends DurableObject {
       const cls = loaded.getDurableObjectClass(spec.class, {
         props: {
           namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
-          logBridge: this.ctx.exports.PlatformBridge({ props: { ns: spec.namespace, worker: spec.worker } }),
         },
       });
       return { class: cls, id: facetId };

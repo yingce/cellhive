@@ -528,14 +528,6 @@ function parseConnectionString(cs) {
 let serviceLoader = null;
 export function setServiceLoader(fn) { serviceLoader = fn; }
 
-// Native service calls stay within this workerd instance, so they do not pass
-// through the loader's request dispatcher that normally creates the target
-// log bridge. Construct the capability here from binding-controlled target
-// identity and pass it over JSRPC; it never enters the tenant environment.
-function serviceLogBridge(ctx, props) {
-  return ctx.exports.PlatformBridge({ props: { ns: props.ns, worker: props.target } });
-}
-
 // ServiceBinding lets a tenant worker call another worker (same namespace):
 // env.SVC.fetch() and, via a Proxy, env.SVC.<method>(...) RPC to the target's
 // named entrypoint. With a loader injected, RPC is native and same-instance;
@@ -548,7 +540,6 @@ function serviceRpc(ctx, env, props) {
       // RpcTarget/streams/typed values survive. No cell-agent hop, no JSON.
       const stub = await serviceLoader(ctx, env, { ns: props.ns, worker: props.target, version: props.version });
       const host = stub.getEntrypoint("CellHiveHost");
-      await host.setLogging(serviceLogBridge(ctx, props));
       return await host.callMethod(props.entrypoint || "", method, args, globalThis.__cellhiveTraceparent);
     }
     // props.ns is the (possibly cross-namespace) target; the scope token stays
@@ -599,12 +590,10 @@ export class ServiceBinding extends WorkerEntrypoint {
       for (const k of [...clean.headers.keys()]) {
         if (k.toLowerCase().startsWith("x-cellhive-")) clean.headers.delete(k);
       }
-      const bridge = serviceLogBridge(this.ctx, p);
       if (p.entrypoint) {
-        await host.setLogging(bridge);
         return await host.callMethod(p.entrypoint, "fetch", [clean]);
       }
-      return await host.handleFetch(clean, bridge);
+      return await host.handleFetch(clean);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
     const body = hasBody ? await req.arrayBuffer() : undefined;
@@ -867,21 +856,6 @@ export class PlatformBridge extends WorkerEntrypoint {
     return { status: r.status, body: text, contentType: r.headers.get("content-type") || "text/plain" };
   }
 
-  // Log ring ingest: ns/worker come from props, so a tenant cannot forge
-  // entries for another namespace.
-  async logSend(batch) {
-    const props = this.ctx.props || {};
-    const r = await this.env.PLATFORM.fetch(
-      this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs?ns=" + encodeURIComponent(props.ns || "") +
-        "&worker=" + encodeURIComponent(props.worker || ""),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-cellhive-internal-token": this.env.LOG_TOKEN || this.env.CELL_TOKEN || "" },
-        body: batch,
-      },
-    );
-    return r.status;
-  }
 }
 
 // bindingStub materializes a binding spec as a props-bound entrypoint stub, or

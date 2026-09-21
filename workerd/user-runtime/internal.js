@@ -82,8 +82,7 @@ async function dispatchQueues(req, env, ctx) {
   // the tenant-side wrapper build the CF MessageBatch (ADR-154).
   const payload = { messages: batch, queue, traceparent: body.traceparent };
   try {
-    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker: body.worker } });
-    const out = await stub.getEntrypoint("CellHiveHost").handleQueue(payload, bridge);
+    const out = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
     // The wrapper returns {result, ack, retry}; older returns are the raw value.
     const result = out && typeof out === "object" && "result" in out ? out.result : out;
     return json({
@@ -113,8 +112,7 @@ async function dispatchTimers(req, env, ctx) {
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
-    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker } });
-    const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event, bridge);
+    const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
     return json({ ok: true, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, result: result === undefined ? null : result });
   } catch (e) {
     return json({ error: "handler_failed", message: String(e) }, 500);
@@ -147,9 +145,7 @@ async function dispatchServiceFetch(req, env, ctx) {
   try {
     const host = stub.getEntrypoint("CellHiveHost");
     const req = new Request(targetURL || "http://service/", init);
-    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker: body.worker } });
-    if (entrypoint) await host.setLogging(bridge);
-    const r = entrypoint ? await host.callMethod(entrypoint, "fetch", [req]) : await host.handleFetch(req, bridge);
+    const r = entrypoint ? await host.callMethod(entrypoint, "fetch", [req]) : await host.handleFetch(req);
     return new Response(await r.arrayBuffer(), {
       status: r.status,
       headers: { "content-type": r.headers.get("content-type") || "text/plain" },
@@ -173,9 +169,7 @@ async function dispatchServiceRun(req, env, ctx) {
     return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
   }
   try {
-    const bridge = ctx.exports.PlatformBridge({ props: { ns: body.namespace, worker } });
     const host = stub.getEntrypoint("CellHiveHost");
-    await host.setLogging(bridge);
     const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent);
     return json({ result: result === undefined ? null : result });
   } catch (e) {
@@ -237,7 +231,6 @@ async function loadWorkflowWorker(env, ctx, body) {
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env, spec && spec.bindings) + env.LOG_TAIL_SRC,
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
@@ -250,7 +243,7 @@ async function loadWorkflowWorker(env, ctx, body) {
 // `env`, which is shared with tenant code.
 function platformConsts(env, spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, logToken: ${JSON.stringify(env.LOG_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ cellUrl: ${JSON.stringify(env.CELL_URL || "")}, cellToken: ${JSON.stringify(env.CELL_TOKEN || "")}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
@@ -289,7 +282,6 @@ async function loadWorker(env, ctx, body) {
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
-      "log-tail.js": platformConsts(env, spec && spec.bindings) + env.LOG_TAIL_SRC,
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,

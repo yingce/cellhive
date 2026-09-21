@@ -4,7 +4,6 @@
 // calls the named WorkflowEntrypoint class's run(event, step). `step` calls back
 // to cell-agent to memoize step results and schedule sleeps, so a re-dispatched
 // attempt resumes from the last durable step.
-import { setLogBridge } from "log-tail.js";
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError } from "cellhive-workflow.js";
@@ -42,7 +41,6 @@ function b64decode(s) {
 
 export class CellHiveWorkflow extends WorkerEntrypoint {
   async handleRun(className, eventJson, workflowBridge) {
-    setLogBridge(workflowBridge);
     const cls = tenant[className];
     if (typeof cls !== "function") {
       throw new Error("no WorkflowEntrypoint class " + className + " exported by the bundle");

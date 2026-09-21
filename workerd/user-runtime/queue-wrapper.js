@@ -4,7 +4,6 @@
 // handlers (queue/scheduled) are reached by wrapping the tenant in a
 // WorkerEntrypoint class the platform can call. The tenant never sees platform
 // values: it receives only binding facades built from a cloneable spec.
-import { setLogBridge } from "log-tail.js";
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenantMod from "tenant.js";
 
@@ -56,7 +55,6 @@ try {
 }
 
 export class CellHiveHost extends WorkerEntrypoint {
-  #setLogBridge(logBridge) { if (logBridge) setLogBridge(logBridge); }
   #bindings() {
     // env is now complete: vars + entrypoint stubs + patched local facades.
     return this.env;
@@ -69,19 +67,14 @@ export class CellHiveHost extends WorkerEntrypoint {
       return await tenant.fetch(req, this.#bindings(), this.ctx);
     } finally {
       setTraceContext(undefined);
-      try { if (globalThis.__cellhiveLogFlush) globalThis.__cellhiveLogFlush(this.ctx); } catch (e) { /* ignore */ }
     }
   }
 
-  async handleFetch(req, logBridge) {
-    this.#setLogBridge(logBridge);
+  async handleFetch(req) {
     return this.fetch(req);
   }
 
-  setLogging(logBridge) { this.#setLogBridge(logBridge); }
-
-  async handleQueue(payload, logBridge) {
-    this.#setLogBridge(logBridge);
+  async handleQueue(payload) {
     if (typeof tenant.queue !== "function") throw new Error("worker has no queue() handler");
     // CF MessageBatch parity (ADR-154): the batch is array-like (length/index,
     // what the platform has always passed) and also exposes .messages/.queue/
@@ -129,8 +122,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     }
   }
 
-  async handleScheduled(event, logBridge) {
-    this.#setLogBridge(logBridge);
+  async handleScheduled(event) {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
     setTraceContext(traceOf(event));
     try {
@@ -156,7 +148,6 @@ export class CellHiveHost extends WorkerEntrypoint {
       return await inst[method](...(args || []));
     } finally {
       setTraceContext(undefined);
-      try { if (globalThis.__cellhiveLogFlush) globalThis.__cellhiveLogFlush(this.ctx); } catch (e) { /* ignore */ }
     }
   }
 }
