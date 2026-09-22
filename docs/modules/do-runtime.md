@@ -34,7 +34,7 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 - alarm 必须 shim（stock workerd 对 SQLite facet 不实现原生 alarm）。
 - WS 迁移/重启以 **1012** 关闭，客户端重连（不做 resume）。
 - **门确认前不回 ack**。
-- facet 的 tenant env 遵循 ADR-185：只有用户 vars 与用户命名 binding stub，零平台键；secret 尚未注入 runtime env。动态 loaded DO facet 的 Tail Worker 同样被 pin `1.20260916.1` 拒绝（`provided value is not of type 'Fetcher'`），故 tenant `console.*` 平台采集关闭。
+- facet 的 tenant env 遵循 ADR-185：只有用户 vars、当前 managed secrets 与用户命名 binding stub，零平台键；secret 在 control cell 信封加密并由 cell-agent 在加载视图中解密注入。动态 loaded DO facet 的 Tail Worker 同样被 pin `1.20260916.1` 拒绝（`provided value is not of type 'Fetcher'`），故 tenant `console.*` 平台采集关闭。
 - facet WorkerCode（64 MiB）与估算 env（1016 KiB）在 `workerLoader.get()` 前复核；跨 DO 边界丢失自定义 Error 字段时，仅解析并重新校验平台规范 LimitError，再返回 code/actual/max。
 
 ## 源码位置

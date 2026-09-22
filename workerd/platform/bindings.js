@@ -735,6 +735,13 @@ export class WorkflowBinding extends WorkerEntrypoint {
       options.params === undefined ? undefined : options.params);
     return { id: out.id };
   }
+  async createBatch(items = []) {
+    const out = await this.__call("create-batch", "POST", {}, items.map((item) => ({
+      id: item && item.id ? item.id : undefined,
+      params: item ? item.params : undefined,
+    })));
+    return (out.instances || []).map((instance) => ({ id: instance.id }));
+  }
   async get(id) { return new WorkflowInstanceTarget(this, id); }
   async sendEvent(id, payload) { await this.__call("event", "POST", { id }, payload); }
   async list(options = {}) { return await this.__call("list", "GET", { limit: options.limit }); }

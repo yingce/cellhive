@@ -171,6 +171,8 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 - 门 `GET :18901/status` 可用；
 - runtime-baseline 在镜像内执行 `cellhive app create` + TypeScript 源码 deploy；公开 `user-runtime :8081` 的随机 loopback 端口由 Bun 客户端完成真实 WebSocket 101 与双向消息。共享 `Counter` DO 的持久计数为 HTTP `1` → WS `2` → 重启 gated do-runtime → WS `3` → HTTP `4`，并产生权威 bucket LTX。
 
+- 同一隔离 Compose E2E 还从镜像内源码部署验证版本化静态资产读取、Queue 消费与 DLQ/运维重放、分钟级 Cron、Workflow `step.do`→`sleep`→恢复后的结果和 `createBatch`；发布第二版本后公开入口读取新配置，`rollback` 恢复前版，删除 worker 后路由返回 404。2026-09-22 实际运行 `PATH=/usr/local/go/bin:/root/.bun/bin:$PATH bash scripts/runtime-baseline-e2e.sh`：`RUNTIME-BASELINE-E2E: PASS`。
+
 ## 部署产物校验（ADR-139）
 
 不是 `go test` 的一部分，手动/CI 跑：
@@ -199,11 +201,11 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 - 性能基准的可重复环境（固定机型/内核/workerd pin）；
 - 混沌注入工具与场景库（目前靠 `internal/owner` 仿真 + `make rpo-test`）。
 
-## S3 集成测试（本地 MinIO/rustfs）
+## S3 集成测试（本地 MinIO/rustfs；完整契约目前失败）
 
 一条命令即可（无需云凭据）：`make s3-test`（= `bash scripts/s3-integration.sh`）。脚本在未设 `CELLHIVE_S3_TEST_ENDPOINT` 时自动起一个 MinIO 容器（`S3_IMAGE` 可换 rustfs），跑完清理；也可指向已有 S3 端点。
 
-覆盖：`s3init`（建桶 + presign）、`s3probe`（conditional create / reject-create / CAS / reject-stale / ranged read）、`TestS3BucketIntegration`、`TestS3ReplicationRestoreChain`（snapshot→Restore→ApplyFile + Compact→PageFetcher ranged→Materialize）。
+覆盖：`s3init`（建桶 + presign）、`s3probe`（四项条件写 + ranged read，**不包含条件删除**）、`TestS3BucketIntegration`（新增旧版本条件删除拒绝 / 当前版本删除断言）、`TestS3ReplicationRestoreChain`（复制恢复与分页读取）。2026-09-22 固定 MinIO 镜像运行 `GO=/usr/local/go/bin/go bash scripts/s3-integration.sh`：四条件写/range 与复制恢复通过，**旧版本 `DeleteObject If-Match` 返回 nil，完整 S3 集成失败**。该镜像不能用作当前权威桶；不得将 `s3probe` 的成功当作验收。
 
 ```bash
 make s3-test
@@ -211,9 +213,9 @@ make s3-test
 CELLHIVE_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make s3-test
 ```
 
-- `TestS3BucketIntegration`：conditional create / reject-create / CAS / reject-stale / ranged / presign。
+- `TestS3BucketIntegration`：conditional create / reject-create / CAS / reject-stale / ranged / presign / **条件删除（stale 必须拒绝、current 必须删除）**；固定 MinIO 镜像在 stale 删除断言上失败。
 - `TestS3ReplicationRestoreChain`：snapshot→Restore→ApplyFile + Compact→PageFetcher（ranged）→Materialize。
-- 无 `CELLHIVE_S3_TEST_ENDPOINT` 时自动 skip（CI 默认绿）。
+- 未设置 `CELLHIVE_S3_TEST_ENDPOINT` 时**单独运行 Go 包测试会 skip**；`make s3-test` 会自动启动 MinIO 并真实运行，不会 skip。
 
 ## DO 兼容套件（ADR-083/084）
 

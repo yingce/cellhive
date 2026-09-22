@@ -14,15 +14,15 @@
 | Queues | Partial | 至少一次 + DLQ；`max_concurrency` **支持**（ADR-112，批次并发上限）；`contentType=v8` 拒绝 |
 | Cron | Supported | 分钟对齐、best-effort、不补跑 |
 | Durable Objects | Partial | 原生 facet + 同步 SQL；**DO 内 bindings ✅（ADR-090）**；仅同 worker class；部署默认**惰性重启**（可 `do_eager_restart`/`session_policy`）；WS 迁移/重启 1012；**DO RPC ✅（ADR-162）**：`env.NS.get(id|name).method(...)`，tagged JSON + host→facet 原生 JSRPC（≤8 MiB；无函数/stub/流）；**legacy（未 `extends DurableObject`）类由 facet 包装支持（ADR-174）**；**DO `fetch` 的非 2xx 原样返回（状态/content-type，ADR-174）** |
-| Workflows | Partial | 自研引擎；支持 create/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；不支持跨 worker；`locationHint` 接受但忽略 |
+| Workflows | Partial | 自研引擎；支持 create/createBatch/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；create/createBatch payload 总量 ≤1 MiB、batch 1..100；不支持跨 worker、step 历史列举/progress 回调；`locationHint` 接受但忽略 |
 | ASSETS | Supported | 对象存储 + 版本化；完整资产管道 |
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
-| Vars / Secrets | Partial | vars 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secrets 可信封加密存储/管理，但**尚未注入 runtime env** |
+| Vars / Secrets | Supported | vars、managed secrets 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secrets 在 control cell 信封加密，运行时由 cell-agent 解密注入 Worker/DO；同名 secret 覆盖 var |
 | 租户 `console.*` 平台采集 | Partial | pin `workerd 1.20260916.1` 的动态 `workerLoader` Tail Worker 被拒绝：`provided value is not of type 'Fetcher'`；因此当前不采集到 ring/OTLP，不能以 tenant env 回退 |
 | `nodejs_compat` | Supported | 随 workerd；需开启 |
 | Cache API | Rejected | 无边缘缓存 |
-| Vectorize / AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供（Hyperdrive 已支持，见下） |
+| AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供；Vectorize 由 CellHive 的 SQLite vec1 facade 提供（见下，ADR-158/159），Hyperdrive 已支持 |
 | Python Workers | Rejected | 不支持 |
 
 ## Wrangler 配置面

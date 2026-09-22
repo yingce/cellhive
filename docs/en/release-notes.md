@@ -4,6 +4,11 @@
 
 This release closes out the remaining items in roadmap P3–P5, all backed by real runtime/test evidence.
 
+### Documentation/runtime consistency closure
+- Bundle, asset, user-runtime, and DO bundle reads now ask cell-agent for a short-lived presigned URL and then read object storage directly. Local-filesystem/unsupported-presign backends retain an authenticated internal point-read fallback; runtimes still hold no long-lived bucket credentials.
+- Managed secrets now enter Worker and DO-facet tenant env. The control cell stores envelope ciphertext only; cell-agent decrypts values while serving an execution view, and a same-named secret overrides a var. Secret writes and deploys include current secrets in the 1016 KiB env budget and reject before mutation when over limit.
+- Workflows add `createBatch` (1..100 instances in one cell transaction) and a 1 MiB total request budget for create/createBatch. Remaining boundaries are cross-worker execution, step-history listing, and progress callbacks; `locationHint` remains accepted but ignored.
+
 ### Stock-workerd Runtime Baseline Hardening (ADR-186)
 - The production and contract baseline is exactly pinned to stock workerd `1.20260916.1` and esbuild `0.28.2`. The dev CLI uses contemporaneous Miniflare `5.20260916.0-alpha`, with its workerd override also fixed at `1.20260916.1`. The image build verifies registry SHA-512 values and ships workerd/esbuild license texts.
 - Platform URLs/tokens no longer enter final WorkerCode or rendered capnp. Trusted host bindings use `fromEnvironment`, and user-runtime, do-runtime, and do-supervisor start workerd with an explicit environment. Tenant env still has zero platform keys, so users may use valid names such as `CELL_*` and `CH_*`.

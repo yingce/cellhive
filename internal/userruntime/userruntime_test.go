@@ -82,6 +82,80 @@ func noProxyClient() *http.Client {
 	}
 }
 
+// TestUserRuntimeFetchesBundleThroughPresignedURL proves the runtime uses the
+// cell-agent only to mint a short-lived URL; bundle bytes come from the signed
+// target and never traverse the internal streaming endpoint.
+func TestUserRuntimeFetchesBundleThroughPresignedURL(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	var signedHits, internalHits atomic.Int32
+	var agent *httptest.Server
+	agent = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/bundle-url":
+			_ = json.NewEncoder(w).Encode(map[string]any{"url": agent.URL + "/signed/bundle"})
+		case "/signed/bundle":
+			signedHits.Add(1)
+			_, _ = w.Write([]byte(tenantBundle))
+		case "/v1/internal/bundle":
+			internalHits.Add(1)
+			http.Error(w, "streaming endpoint must not be used", http.StatusTeapot)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer agent.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: agent.URL, CellToken: "test-token", DispatchToken: "test-token",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Run(ctx, workerd, capnpPath) }()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+	client := noProxyClient()
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(base + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("user-runtime did not become healthy: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"namespace": "demo", "worker": "consumer", "bundle_sha": "sha1", "queue": "jobs",
+		"messages": []map[string]any{{"id": "m1", "body": base64.StdEncoding.EncodeToString([]byte("hello")), "content_type": "text/plain", "attempts": 1}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(body))
+	req.Header.Set("x-cellhive-internal-token", "test-token")
+	req.Header.Set("content-type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("dispatch = %d: %s", resp.StatusCode, b)
+	}
+	if signedHits.Load() != 1 || internalHits.Load() != 0 {
+		t.Fatalf("artifact reads signed=%d internal=%d, want 1/0", signedHits.Load(), internalHits.Load())
+	}
+}
+
 // TestUserRuntimeDispatchesQueueToTenantHandler is an end-to-end test against a
 // real pinned workerd: a queue dispatch is loaded via workerLoader and delivered
 // to the tenant's queue() handler.
@@ -1351,6 +1425,8 @@ func TestUserRuntimePublicLoaderServesAssets(t *testing.T) {
 			serveProjection(proj, w, r)
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(workerWithFallback))
+		case "/v1/internal/asset-url":
+			w.WriteHeader(http.StatusNotImplemented)
 		case "/v1/internal/asset":
 			path := strings.TrimPrefix(r.URL.Query().Get("path"), "/")
 			seen = append(seen, path)
@@ -1556,6 +1632,8 @@ func startLoader(t *testing.T, proj map[string]any, assets map[string]string, bu
 			serveProjection(proj, w, r)
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(bundle))
+		case "/v1/internal/asset-url":
+			w.WriteHeader(http.StatusNotImplemented)
 		case "/v1/internal/asset":
 			body, ok := assets[strings.TrimPrefix(r.URL.Query().Get("path"), "/")]
 			if !ok {
@@ -2398,12 +2476,16 @@ func (a *workflowAgentStub) handler(bundle string) http.HandlerFunc {
 	}
 }
 
-func runWorkflow(t *testing.T, base, class, id string) map[string]any {
+func runWorkflow(t *testing.T, base, class, id string, params ...string) map[string]any {
 	t.Helper()
+	input := "p"
+	if len(params) > 0 {
+		input = params[0]
+	}
 	payload := map[string]any{
 		"namespace": "demo", "worker": "wf", "bundle_sha": "sha1",
 		"workflow": "MY_WF", "class_name": class, "id": id,
-		"params": base64.StdEncoding.EncodeToString([]byte("p")),
+		"params": base64.StdEncoding.EncodeToString([]byte(input)),
 	}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/workflows/run", bytes.NewReader(body))
@@ -2475,6 +2557,22 @@ func TestUserRuntimeRunsWorkflow(t *testing.T) {
 	}
 	if decoded != "A:p:B" {
 		t.Fatalf("workflow output = %q (want A:p:B)", decoded)
+	}
+
+	agent.mu.Lock()
+	agent.steps = map[string]string{}
+	agent.mu.Unlock()
+
+	// A resumed step must receive the original UTF-8 input, not byte-wise mojibake.
+	if out := runWorkflow(t, base, "MyWF", "unicode", `"José"`); out["status"] != "complete" {
+		t.Fatalf("unicode workflow run = %+v", out)
+	}
+	agent.mu.Lock()
+	unicodeOutput := agent.finished["unicode"]
+	agent.mu.Unlock()
+	unicodeBytes, err := base64.StdEncoding.DecodeString(unicodeOutput)
+	if err != nil || string(unicodeBytes) != `"A:José:B"` {
+		t.Fatalf("unicode output = %q, decode err=%v", unicodeBytes, err)
 	}
 
 	// First sleep attempt parks; re-dispatch after the memoized wake resumes.
@@ -2992,11 +3090,12 @@ export class W extends WorkflowEntrypoint { async run(e, s) { return "x"; } }
 export default {
   async fetch(req, env) {
     const created = await env.WF.create({ params: { n: 1 } });
+    const batch = await env.WF.createBatch([{ id: "b1", params: { n: 2 } }, { id: "b2", params: { n: 3 } }]);
     const inst = await env.WF.get(created.id);
     const st = await inst.status();
     await inst.pause();
     const st2 = await inst.status();
-    return new Response("wf:" + st.status + "/" + st2.status);
+    return new Response("wf:" + st.status + "/" + st2.status + "/" + batch.map((item) => item.id).join(","));
   },
 };
 `
@@ -3026,6 +3125,8 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/workflow/create":
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "status": "queued"})
+		case "/v1/workflow/create-batch":
+			_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{map[string]any{"id": "b1"}, map[string]any{"id": "b2"}}})
 		case "/v1/workflow/get":
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "status": status, "output": ""})
 		case "/v1/workflow/pause":
@@ -3069,8 +3170,8 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 	// (This test drives the internal dispatch path via a direct workflow binding
 	// in the loaded env, so use the public loader with a route.)
 	resp, body := fetchHost(t, client, public, "/")
-	if resp.StatusCode != 200 || body != "wf:queued/paused" {
-		t.Fatalf("workflow lifecycle = %d %q (want wf:queued/paused)", resp.StatusCode, body)
+	if resp.StatusCode != 200 || body != "wf:queued/paused/b1,b2" {
+		t.Fatalf("workflow lifecycle/batch = %d %q (want wf:queued/paused/b1,b2)", resp.StatusCode, body)
 	}
 	cancel()
 	select {

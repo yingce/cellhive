@@ -14,15 +14,15 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 | Queues | Partial | At-least-once + DLQ; `max_concurrency` **supported** (ADR-112, per-batch concurrency limit); `contentType=v8` rejected |
 | Cron | Supported | Minute-aligned, best-effort, no catch-up runs |
 | Durable Objects | Partial | Native facet + synchronous SQL; **bindings inside DO ✅ (ADR-090)**; only same worker class; deployments default to **lazy restart** (configurable via `do_eager_restart`/`session_policy`); WS migration/restart 1012; **DO RPC ✅ (ADR-162)**: `env.NS.get(id|name).method(...)`, tagged JSON + host→facet native JSRPC (≤8 MiB; no functions/stubs/streams); **legacy classes (not `extends DurableObject`) supported via facet wrapping (ADR-174)**; **non-2xx DO `fetch` responses are returned unchanged (status/content-type, ADR-174)** |
-| Workflows | Partial | Self-built engine; supports create/get/status/lifecycle/delete/list + `step.do` (including `retries{limit,delay,backoff}`)/`sleep`/`waitForEvent` + `sendEvent`; does not support cross-worker; `locationHint` accepted but ignored |
+| Workflows | Partial | Self-built engine; supports create/createBatch/get/status/lifecycle/delete/list + `step.do` (including `retries{limit,delay,backoff}`)/`sleep`/`waitForEvent` + `sendEvent`; total create/createBatch payload ≤1 MiB, batch size 1..100; no cross-worker instances, step-history listing, or progress callbacks; `locationHint` accepted but ignored |
 | ASSETS | Supported | Object storage + versioning; complete asset pipeline |
 | AI | Partial (optional) | **BYO OpenAI-compatible endpoint** (`env.AI.run`, `CELLHIVE_AI_URL/_KEY`); no platform-hosted catalog, no workers-ai catalog models |
 | Service / Platform bindings | Supported | Version pinning + ACL; **worker↔worker RPC = same-instance native JSRPC (ADR-102)**; **DO RPC = owner-routed JSON+tagged (ADR-162)** |
-| Vars / Secrets | Partial | Vars and user-named binding stubs enter tenant env; tenant env has zero platform keys and no reserved prefixes (ADR-185). Secrets can be envelope-encrypted, stored, and managed, but are **not yet injected into runtime env** |
+| Vars / Secrets | Supported | Vars, managed secrets, and user-named binding stubs enter tenant env; tenant env has zero platform keys and no reserved prefixes (ADR-185). Secrets are envelope-encrypted in the control cell and decrypted by cell-agent for Worker/DO runtime injection; a same-named secret overrides a var |
 | Platform capture of tenant `console.*` | Partial | A Tail Worker for dynamic `workerLoader` Workers is rejected by pinned `workerd 1.20260916.1`: `provided value is not of type 'Fetcher'`; no ring/OTLP capture currently and no tenant-env fallback |
 | `nodejs_compat` | Supported | Provided by workerd; must be enabled |
 | Cache API | Rejected | No edge cache |
-| Vectorize / AI Search / Browser / Email / Analytics Engine | Rejected | Not provided by workerd (Hyperdrive is already supported; see below) |
+| AI Search / Browser / Email / Analytics Engine | Rejected | Not provided by workerd; Vectorize is supplied by CellHive's SQLite vec1 facade (see below, ADR-158/159), while Hyperdrive is supported |
 | Python Workers | Rejected | Not supported |
 
 ## Wrangler Configuration Surface

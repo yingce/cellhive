@@ -107,8 +107,8 @@ func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, str
 	fh := httptest.NewServer(follower.Handler())
 
 	// Owner node: full deps, sharing the fleet bucket.
-	lm := lease.NewManager(shared, "owner", "s-owner", "127.0.0.1:7000", "http://127.0.0.1:7001", 10*time.Second)
-	om := &owner.Manager{B: shared, NodeID: "owner", Session: "s-owner", Advertise: "127.0.0.1:7000", Role: cell.RoleCellAgent, OwnerTTL: 60 * time.Second}
+	lm := lease.NewManager(shared, "owner", "s-owner", "127.0.0.1:7001", "http://127.0.0.1:7001", 10*time.Second)
+	om := &owner.Manager{B: shared, NodeID: "owner", Session: "s-owner", Advertise: "127.0.0.1:7001", Role: cell.RoleCellAgent, OwnerTTL: 60 * time.Second}
 	ownerSpool, _ := peer.NewSpool(filepath.Join(dir, "owner-spool"))
 	pm := peer.NewManager(peer.NewHTTPTransport("tok", nil))
 	nl := nodelog.New(shared, "owner")

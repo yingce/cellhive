@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,8 @@ type WorkflowDispatcher struct {
 	Token string
 	// Target resolves a workflow definition to its worker + entrypoint class.
 	Target func(ctx context.Context, ns, name string) (control.WorkflowTarget, bool)
+	// Params reads the durable instance input for every run and timer resume.
+	Params func(ctx context.Context, ns, name, id string) ([]byte, error)
 	// Claim acquires a run lease for the instance (nil = dispatch without lease).
 	Claim func(ctx context.Context, ns, name, id string) (token string, generation uint64, ok bool, err error)
 	// Next receives non-workflow timer kinds.
@@ -54,9 +57,17 @@ func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken str
 	if !ok {
 		return fmt.Errorf("workflow: no active definition %s/%s", ns, name)
 	}
+	if d.Params == nil {
+		return fmt.Errorf("workflow: instance params reader not configured")
+	}
+	params, err := d.Params(ctx, ns, name, id)
+	if err != nil {
+		return fmt.Errorf("workflow: read instance %s/%s/%s: %w", ns, name, id, err)
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": t.Worker, "bundle_sha": t.BundleSHA, "version": t.Version,
 		"workflow": name, "class_name": t.ClassName, "id": id, "run_token": runToken,
+		"params": base64.StdEncoding.EncodeToString(params),
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(d.URL, "/")+"/v1/workflows/run", bytes.NewReader(payload))

@@ -1,6 +1,5 @@
-# do-runtime: native Durable Objects on a disposable local disk. The Service is
-# headless so owner records advertise reachable pod IPs; cell-agent places DOs
-# with CELLHIVE_DO_RUNTIMES=do-runtime:8788.
+# The static DO shard list contains this Service name once. With multiple
+# backends DNS can route a shard to different pods, so default to one replica.
 apiVersion: v1
 kind: Service
 metadata:
@@ -20,7 +19,8 @@ metadata:
   namespace: cellhive
   labels: {app: do-runtime, app.kubernetes.io/part-of: cellhive}
 spec:
-  replicas: 2
+  replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: do-runtime}
   template:
@@ -41,8 +41,9 @@ spec:
           command: ["/usr/local/bin/do-runtime"]
           envFrom:
             - configMapRef: {name: cellhive-config}
-            - secretRef: {name: cellhive-secrets}
           env:
+            - name: CELLHIVE_ROOT_KEY
+              valueFrom: {secretKeyRef: {name: cellhive-secrets, key: CELLHIVE_ROOT_KEY}}
             - name: POD_IP
               valueFrom: {fieldRef: {fieldPath: status.podIP}}
             - name: CELLHIVE_DO_NODE

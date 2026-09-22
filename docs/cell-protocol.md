@@ -251,15 +251,18 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 1. **条件创建**（不存在时写才成功）；
 2. **条件覆盖**（读后被改则写失败）；
 3. **read-after-write 一致性**；
-4. **ranged read**（返回请求的字节范围）。
+4. **ranged read**（返回请求的字节范围）；
+5. **条件删除**（旧版本不得删除新 owner/lease；S3 用 `If-Match`，原生追加式 provider 用当前位置的 tombstone）。
 
 | 供应商 | 是否合格 |
 |---|---|
-| 主流 S3 兼容对象存储 | ✅（需支持条件创建/条件覆盖/ranged read；部署前用 `diagnose` 探针确认） |
-| 不支持所需条件写的存储 | ❌ |
-| MinIO（社区版） | 通过测试，但官方未认证生产；**避开 RELEASE.2025-09-06T17-38-46Z**（条件创建返回 NoSuchKey 会导致首次 deploy 失败）；其他版本需运行 `diagnose` 探针确认 |
+| S3 API 对象存储 | 逐实例验证条件创建、目标 CAS、条件删除与 ranged read；不能仅凭协议名称判定合格 |
+| 本仓固定 MinIO `RELEASE.2025-02-18T16-25-55Z` | ❌ 2026-09-22 实测忽略 stale `DeleteObject If-Match`；旧四条件写通过不等于 owner fencing 可用 |
+| 实测 COS/OSS S3 端点 | ❌ 实测普通 S3 条件创建不成立；不能将其用于 owner/lease |
+| 原生 `oss://` | OSS 北京测试桶的追加式并发 claim、owner 接管与启动探针通过；其它桶逐实例验收 |
+| 原生 `cos://` | COS 香港 `cell-1376795072` 测试桶的追加式并发 claim、CAS/条件删除与启动探针通过；原 `vwork-hk-1376795072` 桶返回 405；其它桶逐实例验收 |
 
-**启动探针**：每个节点启动时执行 4 次条件写（create/reject-create/update/reject-stale）与一次 ranged read 校验；不满足则停止。运维可用 `diagnose`（只读模式需无写权限凭据）对生产 bucket 验证。
+**启动探针**：每个节点运行条件创建、重复拒绝、CAS、旧版本拒绝、ranged read，以及旧版本条件删除拒绝 / 当前版本删除；任一失败即退出。运维的 `cellhive diagnose` 在已启动节点上再次执行该**写入式**探针，不是只读检查。详情见 `storage-and-s3.md` / ADR-188。
 
 ### 桶角色（拓扑）
 

@@ -62,6 +62,9 @@ type Runner struct {
 	// so it is captured and proven durable before the runner proceeds (RPO=0).
 	// nil means plain local writes (tests / capture disabled).
 	Commit func(ctx context.Context, ns, name string, fn func() error) error
+	// DeadLetterSend routes a dead letter through the destination queue's owner.
+	// nil is only for local, non-replicated runners.
+	DeadLetterSend func(ctx context.Context, ns, name string, m Message) error
 }
 
 // commit runs fn through the Commit hook when configured.
@@ -249,10 +252,19 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 // dedupes against any still-live twin (ADR-182 review fix).
 func (r *Runner) deadLetter(ctx context.Context, ref Ref, m Message, cause error) {
 	if ref.DeadLetterQueue != "" {
-		if err := r.commit(ctx, ref.Namespace, ref.DeadLetterQueue, func() error {
-			_, e := r.Store.Send(ctx, ref.Namespace, ref.DeadLetterQueue, m.Body, m.ContentType, 0, m.IdempotencyKey)
-			return e
-		}); err != nil {
+		send := func() error {
+			return r.commit(ctx, ref.Namespace, ref.DeadLetterQueue, func() error {
+				_, e := r.Store.Send(ctx, ref.Namespace, ref.DeadLetterQueue, m.Body, m.ContentType, 0, m.IdempotencyKey)
+				return e
+			})
+		}
+		var err error
+		if r.DeadLetterSend != nil {
+			err = r.DeadLetterSend(ctx, ref.Namespace, ref.DeadLetterQueue, m)
+		} else {
+			err = send()
+		}
+		if err != nil {
 			r.log().Warn("queue dead-letter send failed", "ns", ref.Namespace, "queue", ref.Name,
 				"dlq", ref.DeadLetterQueue, "id", m.ID, "err", err)
 			return

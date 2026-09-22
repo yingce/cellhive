@@ -250,15 +250,18 @@ Object storage must provide:
 1. **Conditional create** (write succeeds only when the object does not exist);
 2. **Conditional overwrite** (write fails if the object was modified after it was read);
 3. **read-after-write consistency**;
-4. **ranged read** (returns the requested byte range).
+4. **ranged read** (returns the requested byte range);
+5. **conditional delete** (a stale version must not delete a newer owner/lease; S3 uses `If-Match`, native append providers use a position-checked tombstone).
 
 | Provider | Qualified |
 |---|---|
-| Mainstream S3-compatible object storage | ✅ (must support conditional create/conditional overwrite/ranged read; confirm with the `diagnose` probe before deployment) |
-| Storage that does not support the required conditional writes | ❌ |
-| MinIO (Community Edition) | Passes tests, but is not officially certified for production; **avoid RELEASE.2025-09-06T17-38-46Z** (conditional create returns NoSuchKey and causes the first deploy to fail); other versions must be confirmed by running the `diagnose` probe |
+| S3 API object storage | Verify conditional create, target CAS, conditional delete, and ranged read per instance; the protocol name alone is insufficient |
+| Pinned MinIO `RELEASE.2025-02-18T16-25-55Z` | ❌ 2026-09-22: stale `DeleteObject If-Match` was ignored despite four successful write checks |
+| Tested COS/OSS S3 endpoints | ❌ Ordinary S3 conditional create failed; not valid for owner/lease |
+| Native `oss://` | Isolated concurrent claims, owner takeover and startup probe passed on the tested Beijing bucket; verify other buckets separately |
+| Native `cos://` | Concurrent append claims, CAS/conditional delete, and the startup probe passed on the tested Hong Kong `cell-1376795072` bucket; the earlier `vwork-hk-1376795072` bucket returned 405; verify other buckets separately |
 
-**Startup probe**: when each node starts, it performs 4 conditional write checks (create/reject-create/update/reject-stale) and one ranged read verification; it stops if any requirement is not met. Operations can use `diagnose` (read-only mode requires credentials without write permissions) to validate the production bucket.
+**Startup probe**: Every node checks create/reject-create/CAS/reject-stale, ranged read, rejection of stale conditional delete, and successful current-version delete; any failure terminates startup. `cellhive diagnose` repeats this **write-based** probe on a running node; it is not read-only. See `storage-and-s3.md` / ADR-188.
 
 ### Bucket roles (topology)
 

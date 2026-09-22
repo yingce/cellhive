@@ -35,49 +35,47 @@ docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:dev --version
 ## Docker Compose
 
 ```bash
-export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)   # 唯一必配的 secret（ADR-137）
-docker compose -f deploy/compose/docker-compose.yml up --build
-# 或
-make compose-up
+export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)
+python3 scripts/deploy-preflight.py compose
+docker compose -f deploy/compose/docker-compose.yml up --build -d
 ```
 
-- 服务：`cell-agent`（FS 桶 `/data/bucket`，healthcheck `/readyz`）+ `user-runtime` + `do-runtime`（都 `depends_on: service_healthy`）；`restart: unless-stopped`；
-- `rpo0` profile 额外起 `do-runtime-gated`；此时把 `CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788` 传给 compose（放置只用 gated，无门 `do-runtime` 变为 idle 可忽略）；
-- profiles：`s3`（MinIO，配 `CELLHIVE_BUCKET=s3://cellhive` + `AWS_*`）、`edge`（Traefik，运维自配路由）；
-- `.env.example` 是模板：**只有 `CELLHIVE_ROOT_KEY` 必需**（其余角色凭据由它派生）。
+- 默认是**单节点开发/验证拓扑**：cell-agent 的命名卷存 SQLite 与权威 FS bucket；user-runtime 与 DO runtime 用各自工作卷（不共享 localDisk）。暴露业务入口/Admin 要由运维单独配置边缘代理。
+- `rpo0` profile 使用 gated DO：`export CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788` 后先跑 `python3 scripts/deploy-preflight.py compose --profile rpo0`，再运行 `docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up --build -d cell-agent user-runtime do-runtime-gated`。不选定服务的 `--profile rpo0 up` 会同时启动默认无门 DO；preflight 会拒绝未切换放置目标的配置。
+- S3：先启动 `--profile s3 up -d minio`、用 `bin/s3init -endpoint http://127.0.0.1:9000 -access ... -secret ... -bucket cellhive` 创建桶，再设置 `CELLHIVE_BUCKET=s3://cellhive`、`AWS_ENDPOINT_URL=http://minio:9000` 与同一组 `AWS_*` 启动栈。MinIO 镜像已固定版本；`latest` 不应作为部署基线。
 
-校验（不起容器）：`make compose-config`。
+> **状态权威限制（2026-09-22）**：上述 Compose/MinIO 固定镜像 `RELEASE.2025-02-18T16-25-55Z` 经真实条件删除探针发现忽略 `DeleteObject If-Match`；新版 cell-agent 会在启动时拒绝该桶，不能把此示例当成可运行的 S3 状态权威。须换满足完整 `make s3-test` 契约的对象存储再启动；不要关闭启动探针或使用非原子 `HEAD+DELETE` 替代。
+- `.env.example` 为参数模板，根密钥在任何启动时必配；真实密钥不可提交。
+
+静态拓扑校验：`python3 scripts/deploy-preflight.py compose`。完整真实运行验收：`bash scripts/runtime-baseline-e2e.sh`。
 
 ## Kubernetes
 
-`deploy/k8s/` 提供 kustomize manifests（客户端渲染，无需集群）：
-
-| 资源 | 说明 |
-|---|---|
-| `cell-agent` StatefulSet（2 副本，headless Service） | `CELLHIVE_NODE_ID=$(POD_NAME)`、`CELLHIVE_ADVERTISE=$(POD_IP):7001`（downward API）；`terminationGracePeriodSeconds: 120`；PVC 20Gi；readiness `/readyz` |
-| `user-runtime` Deployment（2 副本）+ Service + HPA | 无状态，CPU 70% 扩到 10；`grace 30s` |
-| `do-runtime` Deployment（2 副本，headless Service） | `CELLHIVE_DO_ADVERTISE=$(POD_IP):8788`；盘用 `emptyDir`（本地工作副本，权威在桶/cell-agent） |
-| `cellhive-config` ConfigMap / `cellhive-secrets` Secret | 非敏感配置 + `CELLHIVE_ROOT_KEY`（示例见 `secret.example.yaml`） |
-
-Secret 也可以用**文件挂载**代替内联 env（Docker/K8s `_FILE` 惯例，ADR-150）：挂载一个 secret volume 到 `/run/secrets` 并设 `CELLHIVE_ROOT_KEY_FILE=/run/secrets/root-key`；`rootKey`/`existingSecret` 仍是 Helm 的两种方式。
+`deploy/k8s/` 提供 Kustomize base 与 `overlays/rpo0`；默认 base 是**单 cell-agent + 单 DO runtime**，避免每个 PVC 内的独立 FS bucket 被误当成共享桶，也避免将一个 headless Service 的随机 Pod DNS 结果当作稳定 DO 分片地址。user-runtime 可按 HPA 水平扩展。`CELLHIVE_CELL_URL` 固定指向 `cell-agent-0.cell-agent.cellhive.svc.cluster.local:7001`；节点租约的 `CELLHIVE_PEER_URL` 则使用 Pod IP，而非 loopback。DO Deployment 使用 `Recreate`，避免滚动发布期间单地址同时指向新旧 Pod。
 
 ```bash
-make k8s-render        # kubectl kustomize deploy/k8s（本地校验）
-kubectl create ns cellhive
+python3 scripts/deploy-preflight.py k8s --path deploy/k8s/overlays/rpo0
+kubectl create namespace cellhive --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cellhive create secret generic cellhive-secrets \
   --from-literal=CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)"
-kubectl apply -k deploy/k8s
+# 改为仓库外已发布的镜像（镜像版本/架构须匹配节点）；不要用本地 cellhive:dev。
+kubectl apply -k deploy/k8s/overlays/rpo0
+kubectl -n cellhive rollout status statefulset/cell-agent
+kubectl -n cellhive rollout status deployment/do-runtime-gated
+kubectl -n cellhive rollout status deployment/user-runtime
 ```
 
-网络策略：按 [`security.md`](./security.md) 只放行列出的内部链路；`cell-agent :7001/:8082` 不对外。持久化：只有 `cell-agent` 需要（PVC + state 桶）；do-runtime 无需 PV。
+多 cell-agent 节点必须**先**将 `CELLHIVE_BUCKET=s3://...` 与凭据提供给所有节点，确认 bucket 条件创建、CAS、条件删除、range read、presign 均通过，再扩副本。单一 `CELLHIVE_DO_RUNTIMES=do-runtime:8788` 仍只能对应一个 DO Pod；扩 DO 需要稳定逐实例地址列表和配置/放置更新，不能直接调 `replicas: 2`。`scripts/deploy-preflight.py` 对这两种误配失败关闭。`kubectl kustomize`/`helm template` 是客户端渲染，不等于真实集群验证。
+
+NetworkPolicy 将 user-runtime `:8088` 限为 cell-agent Pod；公开 `:8081` 由运维入口接入；gated DO overlay 也有单独的 NetworkPolicy。集群需支持 NetworkPolicy，实际云端 S3 端点、DNS 与代理入站需按网络环境配置。
 
 ## DO 输出门 / RPO=0（`do-runtime-gated`，ADR-140）
 
 生产用 `do-runtime-gated` 取代无门的 `do-runtime`：`do-runtime -render-only` 渲染 capnp，`do-supervisor` 托管 workerd 并把每个响应门控在 cell-agent 的持久性证明上（同时负责续租与 drain）。
 
 ```bash
-# compose
-docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d
+# compose（先设置 CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 并运行 preflight）
+docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d cell-agent user-runtime do-runtime-gated
 # k8s
 kubectl apply -k deploy/k8s/overlays/rpo0
 ```

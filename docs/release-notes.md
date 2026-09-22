@@ -4,6 +4,11 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
+### 文档/运行时一致性收口
+- bundle、assets 与 DO/user-runtime 的 bundle 加载改为先向 cell-agent 申请短期 presigned URL，再由 runtime 直连对象存储；本地 FS/不支持 presign 时保留内部鉴权点查回退。runtime 继续不持长期桶凭据。
+- managed secrets 现在进入 Worker 与 DO facet 的 tenant env：control cell 仅存信封密文，cell-agent 在执行视图读取时解密；同名 secret 覆盖 var。secret put 与 deploy 都把当前 secrets 计入 1016 KiB env 预算，超限先拒绝、不会写入。
+- Workflows 增加 `createBatch`（1..100 个实例、单 cell transaction）与 create/createBatch 1 MiB 请求预算。仍未实现的边界仅为跨 worker、step 历史列举/progress 回调；`locationHint` 继续接受但忽略。
+
 ### stock workerd 运行时基线加固（ADR-186）
 - 生产与契约基线精确固定为 stock workerd `1.20260916.1`、esbuild `0.28.2`；dev CLI 使用同期 Miniflare `5.20260916.0-alpha`，其 workerd override 同样固定为 `1.20260916.1`。镜像构建校验 npm registry SHA-512，并携带 workerd/esbuild 许可证。
 - 平台 URL/token 不再进入最终 WorkerCode 或渲染 capnp；可信宿主 binding 改用 `fromEnvironment`，user-runtime、do-runtime 与 do-supervisor 以显式环境启动 workerd。tenant env 仍为零平台键，用户可使用 `CELL_*`、`CH_*` 等任意合法名称。
@@ -281,9 +286,9 @@
 ### 已知边界
 - C 类环境验证缺环境（云端对象存储条件写与条件删除、真实跨主机 RTT、多主机混沌/接管、真实扩缩容编排）——如实记录，不伪造。
 - S3 兼容存储忽略 `If-Match` 时条件删除退化为无条件删除（owner/lease fence 依赖它）；`cellhive diagnose` 含自检探测。
-- async 上传只有有界重试（3 次退避）+ `dropped` 计数告警，**无持久化重试队列**。
-- 跨节点 purge 的 cell-data/桶清理 hook 仍未闭环（ADR-131 遗留）。
-- Workflows Partial（不支持 pause/resume/terminate/restart、retry 配置、waitForEvent、delete/locationHint/跨 worker）。
-- 运行期 SQLite VFS 懒读不可行于 stock workerd（ADR-085）。
+- async 上传已有持久化 spool（写前落盘、失败 deferred、重启 replay；ADR-143/171）；只有 spool 自身落盘失败且上传失败时才计 `dropped`。
+- 跨节点 purge 的 cell-data/桶清理 hook 已闭环，并以有界分页分轮执行（ADR-142/169）。
+- Workflows 保持 Partial：已支持 pause/resume/terminate/restart、retry、waitForEvent、delete/list；仍不支持跨 worker，`locationHint` 接受但忽略。
+- cell-agent 的运行期 SQLite VFS 懒读已实现（ADR-160）；stock workerd 的 DO 文件仍由 do-supervisor 做对象级恢复/分页物化。
 
 **验证**：`gofmt` / `go vet` / `go test ./...` 全绿；`make build`。

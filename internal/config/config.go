@@ -99,15 +99,21 @@ type Config struct {
 	// background upload (RPO>0). Forced true when Durability is "fleet".
 	BucketWait bool
 
-	// Object storage. If BucketURL is set (e.g. s3://bucket), S3-compatible
-	// storage is used; otherwise the filesystem bucket at BucketDir.
-	BucketURL   string
-	BucketDir   string
-	S3Endpoint  string
-	S3Region    string
-	S3AccessKey string
-	S3SecretKey string
-	S3PathStyle bool
+	// S3 and native OSS/COS authority providers; empty uses local filesystem.
+	// Unsupported schemes fail startup.
+	BucketURL    string
+	BucketDir    string
+	S3Endpoint   string
+	S3Region     string
+	S3AccessKey  string
+	S3SecretKey  string
+	S3PathStyle  bool
+	OSSEndpoint  string
+	OSSAccessKey string
+	OSSSecretKey string
+	COSEndpoint  string
+	COSAccessKey string
+	COSSecretKey string
 
 	// Follower spool for replicated segments.
 	PeerSpoolDir string
@@ -485,6 +491,12 @@ func FromEnv() Config {
 		S3AccessKey:              env("AWS_ACCESS_KEY_ID", ""),
 		S3SecretKey:              env("AWS_SECRET_ACCESS_KEY", ""),
 		S3PathStyle:              envBool("CELLHIVE_S3_PATH_STYLE", s3Endpoint != ""),
+		OSSEndpoint:              env("OSS_ENDPOINT", ""),
+		OSSAccessKey:             env("OSS_ACCESS_KEY_ID", env("AWS_ACCESS_KEY_ID", "")),
+		OSSSecretKey:             env("OSS_ACCESS_KEY_SECRET", env("AWS_SECRET_ACCESS_KEY", "")),
+		COSEndpoint:              env("COS_ENDPOINT", ""),
+		COSAccessKey:             env("COS_SECRET_ID", env("AWS_ACCESS_KEY_ID", "")),
+		COSSecretKey:             env("COS_SECRET_KEY", env("AWS_SECRET_ACCESS_KEY", "")),
 		PeerSpoolDir:             filepath.Join(dataDir, "peer-spool"),
 		PeerLatency:              envDuration("CELLHIVE_PEER_LATENCY", 0),
 		PeerPipeline:             envInt("CELLHIVE_PEER_PIPELINE", 4),

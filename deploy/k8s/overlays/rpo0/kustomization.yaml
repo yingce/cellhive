@@ -6,6 +6,7 @@ kind: Kustomization
 resources:
   - ../../base
   - do-runtime-gated.yaml
+  - gated-networkpolicy.yaml
 
 patches:
   - target: {kind: ConfigMap, name: cellhive-config}

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -30,6 +31,7 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 	next := &recorder{}
 	d := &WorkflowDispatcher{
 		URL: srv.URL, Token: "tok", Next: next,
+		Params: func(context.Context, string, string, string) ([]byte, error) { return []byte(`{"seed":20}`), nil },
 		Claim: func(context.Context, string, string, string) (string, uint64, bool, error) {
 			return "tok2", 2, true, nil
 		},
@@ -43,6 +45,9 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 	if got["worker"] != "api" || got["class_name"] != "MyWF" || got["id"] != "i1" || got["workflow"] != "MY_WF" {
 		t.Fatalf("payload = %+v", got)
 	}
+	if got["params"] != base64.StdEncoding.EncodeToString([]byte(`{"seed":20}`)) {
+		t.Fatalf("workflow input lost on first dispatch: %+v", got)
+	}
 
 	// A KindWorkflowSleep timer resumes the instance.
 	if err := d.Dispatch(context.Background(), timer.New(1, timer.KindWorkflowSleep, "acme/__workflow__/MY_WF", "i2")); err != nil {
@@ -50,6 +55,9 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if got["params"] != base64.StdEncoding.EncodeToString([]byte(`{"seed":20}`)) {
+		t.Fatalf("workflow input lost on timer resume: %+v", got)
 	}
 	// Other kinds pass through.
 	if err := d.Dispatch(context.Background(), timer.New(1, timer.KindCron, "acme/__cron__/api", "x")); err != nil {

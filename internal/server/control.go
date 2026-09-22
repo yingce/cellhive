@@ -617,6 +617,7 @@ func (s *Server) handleControlWorker(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "worker_not_found", "worker has no active version")
 		return
 	}
+	view.Vars = s.runtimeVars(r.Context(), ns, worker, view.Vars)
 	body, err := json.Marshal(view)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "marshal_failed", err.Error())
@@ -840,7 +841,9 @@ func (s *Server) checkDeployBudgets(ctx context.Context, req deployReq, bundleSi
 	if err := workerbudget.CheckCode(deployCodeInput(req, bundleSize)); err != nil {
 		return err
 	}
-	return workerbudget.CheckEnv(s.deployEnvEstimate(ctx, req))
+	envReq := req
+	envReq.Vars = s.runtimeVars(ctx, req.Namespace, req.Worker, req.Vars)
+	return workerbudget.CheckEnv(s.deployEnvEstimate(ctx, envReq))
 }
 
 func writeDeployBudgetError(w http.ResponseWriter, err error) bool {
@@ -1084,6 +1087,23 @@ func (s *Server) handleControlSecretPut(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_value", "value must be base64")
 		return
+	}
+	if view, ok, viewErr := s.Control.VersionEnv(r.Context(), req.Namespace, req.Worker, 0); viewErr != nil {
+		writeErr(w, http.StatusBadRequest, "secret_env_check_failed", viewErr.Error())
+		return
+	} else if ok {
+		vars := s.runtimeVars(r.Context(), req.Namespace, req.Worker, view.Vars)
+		vars[req.Key] = string(val)
+		envReq := deployReq{
+			Namespace: req.Namespace, Worker: req.Worker, BundleSHA: view.BundleSHA,
+			Bindings: view.Bindings, Vars: vars,
+		}
+		if err := workerbudget.CheckEnv(s.deployEnvEstimate(r.Context(), envReq)); err != nil {
+			if !writeDeployBudgetError(w, err) {
+				writeErr(w, http.StatusBadRequest, "secret_env_check_failed", err.Error())
+			}
+			return
+		}
 	}
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
 		return s.Control.PutSecret(r.Context(), req.Namespace, req.Worker, req.Key, val, "admin")

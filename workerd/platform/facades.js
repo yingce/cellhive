@@ -531,6 +531,13 @@ export function makeWorkflow(platform, ns, name, scopeToken) {
       const out = await call("create", "POST", { id: options.id || undefined }, options.params === undefined ? undefined : options.params);
       return { id: out.id };
     },
+    async createBatch(items = []) {
+      const out = await call("create-batch", "POST", {}, items.map((item) => ({
+        id: item && item.id ? item.id : undefined,
+        params: item ? item.params : undefined,
+      })));
+      return (out.instances || []).map((instance) => ({ id: instance.id }));
+    },
     // CF-shaped instance: get(id) -> object with methods.
     async get(id) {
       return {

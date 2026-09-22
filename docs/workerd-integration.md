@@ -45,10 +45,10 @@ worker id = <ns>:<worker>:<version>   （不可变）
 user-runtime loader：
   1. 从路由投影得到 worker id
   2. workerLoader.get(id, () => fetchBundle(id))
-       · bundle 由内容寻址（SHA-256）从对象存储拉取（scoped 只读凭据，ADR-030）
+       · bundle 由内容寻址（SHA-256）；runtime 向 cell-agent 申请短期 presigned URL 后直连对象存储，本地 FS/不支持 presign 时回退内部鉴权点查
   3. 生成 wrapper（JS 层）：
        · 包装租户模块导出（fetch/scheduled/queue/alarm/RPC）
-       · 构造租户 env：只放用户声明的 vars 与用户命名的 binding stub；平台键为 0（ADR-185）
+       · 构造租户 env：用户声明的 vars、当前 managed secrets 与用户命名的 binding stub；平台键为 0（ADR-185）
        · 保留 `cloudflare:workers` 等内建模块；对 `cloudflare:workflows` 等做 shim
   4. 调用 handler
 ```
@@ -56,7 +56,7 @@ user-runtime loader：
 - **env 预算（ADR-186，已实现）**：上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**；按完整实际 env 校验并计入 V8 双字节开销。超限返回 `worker_env_too_large`，只含 `actual_bytes`/`max_bytes`。
 - **WorkerCode 预算（ADR-186，已实现）**：传给 `workerLoader` 的最终形态（用户模块 + wrapper + 平台注入模块）上限 **64 MiB**；控制面在事务/active pointer 前拒绝，运行时在唯一共享 `checkedWorkerGet()` 中复核。超限返回 `worker_code_too_large`。
 - **宿主秘密（ADR-186，已实现）**：平台 URL/token 通过 capnp `fromEnvironment` 只进入可信宿主 binding；user-runtime、do-runtime 与 do-supervisor 都给 workerd 构造显式子进程环境，不继承父进程环境。秘密不得出现在渲染 capnp、最终 WorkerCode、租户 env、参数或日志。
-- **secret 边界**：secret 可加密存储和管理，但尚未注入 runtime env；因此不能把它计作上述 env 的一个来源。补齐注入时仍不得引入平台键或保留名称。
+- **secret 边界**：secret 在 control cell 以信封密文保存，运行时读取执行视图时由 cell-agent 解密，与 vars 合并后注入 Worker/DO env；明文不进入 bundle、binding spec props、渲染 capnp、参数或日志。secret 与同名 var 冲突时 secret 覆盖 var；已加载 isolate/facet 的 env 不原地变更，新加载/重建时取当前 secret。
 - **Workflow / 日志边界**：workflow 固定 op 回调由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 经 JSRPC 参数跨 `workerLoader` 传给 wrapper；它不是 `ServiceStub`，也不进入 tenant env。已在 pin `1.20260916.1` 重跑动态 Tail spike，仍被拒绝（`provided value is not of type 'Fetcher'`），故租户 `console.*` 平台采集当前关闭，不能以 env 传输回退。
 - **模块前缀保留**：平台生成的模块名使用保留前缀（如 `__cellhive-`），租户不得占用。
 
@@ -84,9 +84,9 @@ user-runtime loader：
 
 ## 待细化
 
-- capnp 配置的具体片段（user-runtime / do-runtime）；
-- wrapper 生成细节与保留模块名前缀；
-- 兼容 flag 表（跟随 pinned workerd）。
+- capnp 配置的文档化片段（运行期模板权威在 `internal/userruntime` / `internal/doruntime`）；
+- wrapper 的逐模块生成说明（现行实现见 `workerd/user-runtime/*-wrapper.js` 与 `workerd/platform/bindings-wrapper.js`）；
+- 兼容 flag 的人类可读表（机器权威为生成的 `internal/workerdcompat/manifest.json`）。
 
 ## 升级与回滚
 

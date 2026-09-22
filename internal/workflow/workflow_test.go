@@ -44,6 +44,36 @@ func TestCreateGetAndStatus(t *testing.T) {
 	}
 }
 
+func TestCreateBatchCommitsOnceAndPreservesOrder(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	before, err := s.cell(ctx, "acme", "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := before.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.CreateBatch(ctx, "acme", "wf", []Instance{
+		{ID: "b1", Params: []byte(`{"n":1}`)},
+		{ID: "b2", Params: []byte(`{"n":2}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "b1" || got[1].ID != "b2" {
+		t.Fatalf("batch = %#v", got)
+	}
+	end, err := before.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end != start+1 {
+		t.Fatalf("batch txid advanced by %d, want 1", end-start)
+	}
+}
+
 func TestStepsMemoizedAndEvents(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

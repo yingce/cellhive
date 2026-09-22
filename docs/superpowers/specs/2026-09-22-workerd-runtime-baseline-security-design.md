@@ -196,9 +196,9 @@ Go 控制面在创建不可变版本、切换 active pointer 之前按一份显�
 - `WorkerEnvHeadroomBytes = 8 * 1024`；
 - `WorkerEnvMaxBytes = 1016 * 1024`。
 
-估算完整动态 env：用户 vars、当前用户命名 binding stub 的可序列化 props，以及未来接入后用户 secrets。平台秘密和系统键本就不应在该 env 中，不能以预算为由重新加入。
+估算完整动态 env：用户 vars、当前 managed secrets、当前用户命名 binding stub 的可序列化 props。平台秘密和系统键本就不应在该 env 中，不能以预算为由重新加入。
 
-字符串估算使用 UTF-8 JSON 字节数，并对包含非 Latin-1 字符的 V8 双字节表示补罚；对象键和值都计入。控制面在部署和任何会改变实际 binding props 的操作上复算，超限返回 `worker_env_too_large`。当前 secrets 尚未进入 runtime env，因此 secret put 不虚构计费；未来接入 secrets 时，secret 变更必须在同一事务边界内先复算再生效。运行时在 workerLoader 前复核，失败关闭，不删除字段、不截断值。
+字符串估算使用 UTF-8 JSON 字节数，并对包含非 Latin-1 字符的 V8 双字节表示补罚；对象键和值都计入。控制面在部署和 secret put 时复算完整 env，超限返回 `worker_env_too_large`；secret put 在写入前拒绝，deploy 在版本事务前拒绝。运行时在 workerLoader 前复核，失败关闭，不删除字段、不截断值。
 
 边界测试覆盖 ASCII、中文/emoji、长键名、大量小 binding、`limit-1/limit/limit+1`，并通过真实 workerd 构造接近边界的 env 验证估算不会接受必然失败的配置。
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +13,35 @@ import (
 	"cellhive/internal/timer"
 	"cellhive/internal/workflow"
 )
+
+const maxWorkflowPayloadBytes = 1 << 20
+
+const maxWorkflowResultBytes = 8 << 20
+
+// The wire body is base64; cap the decoded value without truncating the wire
+// body into another valid base64 value that could be committed as a result.
+func readWorkflowResult(w http.ResponseWriter, r *http.Request, badCode string) ([]byte, bool) {
+	limit := base64.StdEncoding.EncodedLen(maxWorkflowResultBytes)
+	encoded, err := io.ReadAll(io.LimitReader(r.Body, int64(limit+1)))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+		return nil, false
+	}
+	if len(encoded) > limit {
+		writeErr(w, http.StatusRequestEntityTooLarge, "workflow_result_too_large", "workflow result exceeds 8 MiB")
+		return nil, false
+	}
+	body, err := base64.StdEncoding.DecodeString(string(encoded))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, badCode, err.Error())
+		return nil, false
+	}
+	if len(body) > maxWorkflowResultBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "workflow_result_too_large", "workflow result exceeds 8 MiB")
+		return nil, false
+	}
+	return body, true
+}
 
 func (s *Server) requireWorkflows(w http.ResponseWriter) bool {
 	if s.Workflows == nil {
@@ -76,9 +106,13 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	if s.workflowGate(w, r, ns, name) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWorkflowPayloadBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+		return
+	}
+	if len(body) > maxWorkflowPayloadBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "workflow_payload_too_large", "workflow payload exceeds 1 MiB")
 		return
 	}
 	var in workflow.Instance
@@ -92,6 +126,46 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.dispatchWorkflowAsync(ns, name, in.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": in.ID, "status": in.Status})
+}
+
+type workflowBatchItem struct {
+	ID     string          `json:"id"`
+	Params json.RawMessage `json:"params"`
+}
+
+func (s *Server) handleWorkflowCreateBatch(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkflows(w) {
+		return
+	}
+	ns, name, _ := s.workflowParams(r)
+	if s.workflowGate(w, r, ns, name) {
+		return
+	}
+	var items []workflowBatchItem
+	if !decodeLimit(w, r, &items, maxWorkflowPayloadBytes+1) {
+		return
+	}
+	if len(items) == 0 || len(items) > 100 {
+		writeErr(w, http.StatusBadRequest, "workflow_batch_size", "workflow batch must contain 1..100 instances")
+		return
+	}
+	batch := make([]workflow.Instance, 0, len(items))
+	for _, item := range items {
+		batch = append(batch, workflow.Instance{ID: item.ID, Params: item.Params})
+	}
+	var instances []workflow.Instance
+	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
+		var err error
+		instances, err = s.Workflows.CreateBatch(r.Context(), ns, name, batch)
+		return err
+	}); err != nil {
+		writeErr(w, http.StatusBadRequest, "workflow_create_batch_failed", err.Error())
+		return
+	}
+	for _, in := range instances {
+		s.dispatchWorkflowAsync(ns, name, in.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"instances": instances})
 }
 
 // handleWorkflowGet returns instance state (status/output/error).
@@ -444,9 +518,8 @@ func (s *Server) handleWorkflowStepPut(w http.ResponseWriter, r *http.Request) {
 	if !s.fenceRun(w, r, q.Get("ns"), q.Get("workflow"), q.Get("id")) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+	body, ok := readWorkflowResult(w, r, "bad_step")
+	if !ok {
 		return
 	}
 	if err := s.capturedWorkflow(r.Context(), q.Get("ns"), q.Get("workflow"), func() error {
@@ -515,9 +588,8 @@ func (s *Server) handleWorkflowFinish(w http.ResponseWriter, r *http.Request) {
 	if !s.fenceRun(w, r, q.Get("ns"), q.Get("workflow"), q.Get("id")) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+	body, ok := readWorkflowResult(w, r, "bad_output")
+	if !ok {
 		return
 	}
 	if errText := q.Get("error"); errText != "" {

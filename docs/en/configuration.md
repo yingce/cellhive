@@ -39,13 +39,15 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_BUCKET` | Empty | Use S3-compatible storage with `s3://<bucket>`; empty means use a filesystem bucket |
+| `CELLHIVE_BUCKET` | Empty | Empty uses local FS; `s3://<bucket>` requires atomic conditional writes/deletes. Native `oss://<bucket>` / `cos://<bucket>` use AppendObject frames for mutable authority keys and S3 API for other objects. All providers fail startup if the conformance probe fails; COS support is per bucket (`cell-1376795072` passed, the earlier `vwork-hk-1376795072` returned 405) |
 | `CELLHIVE_BUCKET_DIR` | `./.cellhive/bucket` | Filesystem bucket directory. Required |
 | `AWS_ENDPOINT_URL` | Empty | S3 endpoint (MinIO/cloud; standard AWS variable name) |
 | `AWS_REGION` | `us-east-1` | Region |
 | `AWS_ACCESS_KEY_ID` | Empty | Access credential |
 | `AWS_SECRET_ACCESS_KEY` | Empty | Secret key |
 | `CELLHIVE_S3_PATH_STYLE` | Custom endpoint present→`true`, otherwise `false` | path-style; by default inferred from whether a custom endpoint is present (local/compatible storage commonly uses path-style, cloud commonly uses virtual-host) |
+| `OSS_ENDPOINT`, `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET` | Empty (credentials fall back to AWS variables) | OSS native append and ordinary S3 object endpoint; `https://` may be omitted |
+| `COS_ENDPOINT`, `COS_SECRET_ID`, `COS_SECRET_KEY` | Empty (credentials fall back to AWS variables) | `COS_ENDPOINT` is the complete HTTPS bucket URL (e.g. `https://bucket-appid.cos.ap-hongkong.myqcloud.com`); the `cos://` bucket name must exactly match its host prefix. The regional service URL for ordinary objects is derived from it; this bucket must actually support AppendObject |
 
 ## cell-agent: Processes and Listening
 
@@ -225,4 +227,4 @@ _Last updated: 2026-09-22_
 
 ## Tenant env namespace
 
-The loaded Worker and DO-facet `env` contain only user-declared `vars` and user-named binding stubs; there are **zero** platform keys. Secrets can be encrypted, stored, and managed, but are **not yet injected into runtime env**. `CH_*`, `CELL_*`, `__cellhive*`, `PLATFORM`, `LOG_*`, and `WF_*` are all available to users and are not rejected as reserved during deploy or secret writes. DO WebSocket upgrades and ordinary calls still use platform-side stubs (ADR-184), with no tenant-visible private transport. A trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` for workflow steps and passes it as a JSRPC argument to the wrapper; it is not a `ctx.exports.X({props})` `ServiceStub` and never enters tenant env (ADR-185).
+The loaded Worker and DO-facet `env` contain only user-declared `vars`, current managed secrets, and user-named binding stubs; there are **zero** platform keys. Secrets are envelope-encrypted in the control cell and decrypted by cell-agent at runtime; a same-named secret overrides a var. Already-loaded isolates/facets are not mutated in place; a new load/rebuild reads current secrets. `CH_*`, `CELL_*`, `__cellhive*`, `PLATFORM`, `LOG_*`, and `WF_*` are all available to users and are not rejected as reserved during deploy or secret writes. DO WebSocket upgrades and ordinary calls still use platform-side stubs (ADR-184), with no tenant-visible private transport. A trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` for workflow steps and passes it as a JSRPC argument to the wrapper; it is not a `ctx.exports.X({props})` `ServiceStub` and never enters tenant env (ADR-185).

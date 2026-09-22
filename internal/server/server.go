@@ -282,6 +282,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/r2/multipart/complete", s.scopeAuth("r2")(s.admit(s.handleR2MultipartComplete)))
 	mux.HandleFunc("DELETE /v1/r2/multipart", s.scopeAuth("r2")(s.admit(s.handleR2MultipartAbort)))
 	mux.HandleFunc("POST /v1/workflow/create", s.scopeAuth("workflow")(s.admit(s.handleWorkflowCreate)))
+	mux.HandleFunc("POST /v1/workflow/create-batch", s.scopeAuth("workflow")(s.admit(s.handleWorkflowCreateBatch)))
 	mux.HandleFunc("GET /v1/workflow/get", s.scopeAuth("workflow")(s.handleWorkflowGet))
 	mux.HandleFunc("POST /v1/workflow/event", s.scopeAuth("workflow")(s.admit(s.handleWorkflowEvent)))
 	mux.HandleFunc("POST /v1/workflow/pause", s.scopeAuth("workflow")(s.admit(s.handleWorkflowLifecycle("pause"))))

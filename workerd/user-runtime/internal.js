@@ -201,7 +201,7 @@ async function dispatchWorkflows(req, env, ctx) {
     });
     const out = await stub.getEntrypoint("CellHiveWorkflow").handleRun(class_name, {
       instanceId: id,
-      event: { payload: decodeBody(body.params), instanceId: id, timestamp: new Date() },
+      event: { payload: decodeBody(body.params, "application/json"), instanceId: id, timestamp: new Date() },
     }, bridge);
     return json({ ok: true, workflow, id, ...(out || {}) });
   } catch (e) {
@@ -382,32 +382,43 @@ async function readJSON(req) {
 }
 
 async function fetchBundle(env, sha) {
-  const r = await fetch(env.CELL_URL + "/v1/internal/bundle?sha=" + encodeURIComponent(sha), {
-    headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-  });
+  const q = "?sha=" + encodeURIComponent(sha);
+  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
+  if (signed.ok) {
+    const { url } = await signed.json();
+    if (url && !url.startsWith("file:")) {
+      const direct = await fetch(url);
+      if (!direct.ok) throw new Error("GET bundle " + sha + " -> " + direct.status);
+      return await direct.text();
+    }
+  } else if (signed.status !== 404 && signed.status !== 501) {
+    throw new Error("GET bundle URL " + sha + " -> " + signed.status);
+  }
+  const r = await fetch(env.CELL_URL + "/v1/internal/bundle" + q, { headers });
   if (!r.ok) throw new Error("GET bundle " + sha + " -> " + r.status);
   return await r.text();
 }
 
 function decodeBody(b64, contentType) {
   if (!b64) return "";
-  let text;
+  let bytes;
   try {
-    text = atob(b64);
+    const raw = atob(b64);
+    bytes = Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
   } catch {
     return "";
   }
   const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
   if (ct === "application/json" || ct.endsWith("+json")) {
+    const text = new TextDecoder().decode(bytes);
     try {
       return JSON.parse(text);
     } catch {
       return text;
     }
   }
-  if (ct === "" || ct.startsWith("text/")) return text;
-  const bytes = new Uint8Array(text.length);
-  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
+  if (ct === "" || ct.startsWith("text/")) return new TextDecoder().decode(bytes);
   return bytes;
 }
 

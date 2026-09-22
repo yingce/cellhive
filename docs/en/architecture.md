@@ -143,7 +143,7 @@ All are unified as timers: due entries are stored in the SQLite of their owning 
 - `do-runtime` is private-network only; it does not hold object-storage credentials.
 - `cell-agent`: `:7001` internal data/resolution (shared by Go↔Go and workerd bindings) is **private-network only**; `:8082` admin goes through the edge, credentials = static operations token or OIDC/JWT (`cellhive_ns` restricts ns, ADR-131); data-plane paths cannot reach control-plane handlers.
 - **Tenant isolation**: the `globalOutbound` of a tenant loaded worker = **public Internet only** (excluding RFC1918 / cell-agent); the internal token exists only in the host adapter and **never enters the tenant env**; each worker is configured with `limits` (cpu/subrequests) and a V8 heap limit. See the planned `security.md` for details.
-- Tenant secrets: the control-plane cell stores envelope ciphertext and the root key is outside the cell. They can be stored and managed, but are not yet injected into runtime env.
+- Tenant secrets: the control-plane cell stores envelope ciphertext and the root key remains outside the cell; cell-agent decrypts current values when constructing Worker/DO runtime env. Plaintext only enters the load envelope and workerd env.
 - All internal calls carry the shared internal token; none are exposed to the public Internet.
 
 ## State Ownership

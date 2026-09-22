@@ -1,3 +1,9 @@
+{{- if and (gt (int .Values.cellAgent.replicas) 1) (not (hasPrefix "s3://" (.Values.config.bucket | default ""))) -}}
+{{- fail "cellAgent.replicas > 1 requires config.bucket=s3://... shared by all agents" -}}
+{{- end -}}
+{{- if gt (int .Values.doRuntime.replicas) 1 -}}
+{{- fail "doRuntime.replicas > 1 behind one Service DNS name is unsafe; configure stable per-instance placement" -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,6 +11,13 @@ metadata:
   labels:
     {{- include "cellhive.labels" . | nindent 4 }}
 data:
+  CELLHIVE_CELL_URL: {{ printf "http://%s-cell-agent-0.%s-cell-agent.%s.svc.cluster.local:7001" .Release.Name .Release.Name .Release.Namespace | quote }}
+  CELLHIVE_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  CELLHIVE_RUNTIME_DIR: {{ .Values.config.runtimeDir | quote }}
+  CELLHIVE_WORKERD: "/usr/local/bin/workerd"
+  CELLHIVE_USER_RUNTIME_JS: "/app/workerd/user-runtime"
+  CELLHIVE_DO_RUNTIME_JS: "/app/workerd/do-runtime"
+  CELLHIVE_FACADES_JS: "/app/workerd/platform/facades.js"
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"
   CELLHIVE_BUCKET_DIR: {{ .Values.config.bucketDir | quote }}

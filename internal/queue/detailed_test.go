@@ -153,6 +153,38 @@ func TestRunnerRetryExhaustedGoesToDLQ(t *testing.T) {
 	}
 }
 
+func TestRunnerDeadLetterUsesOwnerAwareSend(t *testing.T) {
+	ctx := context.Background()
+	st := newInternalStore(t)
+	id := send(t, st, "poison", 0)
+	var sent Message
+	r := &Runner{
+		Store: st, Dispatch: &detailedDispatcher{res: DispatchResult{Retry: []RetrySpec{{ID: id}}}}, Batch: 1,
+		Queues: func(context.Context) ([]Ref, error) {
+			return []Ref{{Namespace: "demo", Name: "q", MaxRetries: 1, DeadLetterQueue: "dlq"}}, nil
+		},
+		DeadLetterSend: func(_ context.Context, ns, name string, m Message) error {
+			if ns != "demo" || name != "dlq" {
+				t.Fatalf("destination %s/%s", ns, name)
+			}
+			sent = m
+			return nil
+		},
+	}
+	if _, err := r.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if string(sent.Body) != "poison" {
+		t.Fatalf("owner send body = %q", sent.Body)
+	}
+	if depth, err := st.Depth(ctx, "demo", "q"); err != nil || depth != 0 {
+		t.Fatalf("source depth = %d, %v", depth, err)
+	}
+	if depth, err := st.Depth(ctx, "demo", "dlq"); err != nil || depth != 0 {
+		t.Fatalf("bypassed owner send: local depth = %d, %v", depth, err)
+	}
+}
+
 // TestStatusCounts: Status reports depth/visible/leased without listing bodies
 // (ADR-156).
 func TestStatusCounts(t *testing.T) {

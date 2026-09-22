@@ -25,6 +25,7 @@ metadata:
     app: do-runtime
 spec:
   replicas: {{ .Values.doRuntime.replicas }}
+  strategy: {type: Recreate}
   selector:
     matchLabels:
       app: do-runtime
@@ -52,8 +53,9 @@ spec:
           {{- end }}
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
-            - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            - name: CELLHIVE_ROOT_KEY
+              valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_ROOT_KEY}}
             - name: POD_IP
               valueFrom: {fieldRef: {fieldPath: status.podIP}}
             - name: CELLHIVE_DO_NODE

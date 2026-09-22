@@ -1,7 +1,8 @@
 // Package artifacts stores content-addressed worker bundles and versioned assets
 // in the object store (ADR-030). Bundles are deduplicated by SHA-256; assets are
-// addressed by (ns, worker, content-hash, path). The tenant read path uses
-// short-lived presigned/scoped URLs, so the data plane never serves these bytes.
+// addressed by (ns, worker, content-hash, path). Runtimes obtain short-lived
+// presigned URLs from cell-agent and read bytes directly from object storage;
+// authenticated point reads remain as the local-filesystem/unsupported-presign fallback.
 package artifacts
 
 import (
@@ -252,5 +253,9 @@ func (s *Store) PresignAsset(ctx context.Context, ns, worker, token, path string
 	if err != nil {
 		return "", err
 	}
-	return objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts).PresignGet(ctx, key, ttl)
+	objects := objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts)
+	if _, _, err := objects.Stat(ctx, key); err != nil {
+		return "", err
+	}
+	return objects.PresignGet(ctx, key, ttl)
 }

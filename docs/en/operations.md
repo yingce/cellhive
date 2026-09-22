@@ -3,15 +3,14 @@
 ## Startup
 
 ```bash
-# 单节点（本地）
-CELLHIVE_NODE_ID=node-1 CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
-
-# 多节点（生产）：每节点独立 node 名 + 同一 bucket
-CELLHIVE_NODE_ID=cell-agent-a CELLHIVE_ADVERTISE=10.0.0.11:7001 \
-CELLHIVE_BUCKET_DIR=/data/bucket ./bin/cell-agent
+# Single local node; keep the generated root key durable and private.
+CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)" CELLHIVE_NODE_ID=node-1 \
+  CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
 ```
 
-Startup order: `cell-agent` (≥2) → `do-runtime` → `user-runtime` → edge proxy (provided by operations; the platform does not distribute configuration, ADR-132).
+Run `python3 scripts/deploy-preflight.py compose|k8s|helm` with the same root key/profile before deployment; see [`deployment.md`](deployment.md) for Compose, cluster rollout and S3 bucket initialization. Multiple cell-agent nodes cannot each use a private `/data/bucket`: they require the same S3 bucket with validated conditional writes/deletes, unique node IDs, and a Pod-reachable `CELLHIVE_PEER_URL`. A single DO Service target supports only one Pod until placement has stable per-instance addresses. Without a working Kubernetes API, rendering is not live-cluster validation.
+
+Startup order: bucket provisioned and probed → cell-agent → gated do-runtime → user-runtime → operator edge. With one replica, a PDB `minAvailable:1` prevents voluntary eviction; schedule downtime for node maintenance and never casually delete the authoritative PVC.
 
 ## Diagnostics
 

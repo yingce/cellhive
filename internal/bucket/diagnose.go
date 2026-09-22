@@ -13,8 +13,13 @@ import (
 //
 // It returns an error naming the first failing property.
 func Diagnose(ctx context.Context, b Bucket) error {
+	if preflight, ok := b.(interface{ diagnosePreflight(context.Context) error }); ok {
+		if err := preflight.diagnosePreflight(ctx); err != nil {
+			return fmt.Errorf("bucket preflight failed: %w", err)
+		}
+	}
 	base := fmt.Sprintf("probe/%d", time.Now().UnixNano())
-	createKey := base + "/create"
+	createKey := "nodes/" + base + "/create.json"
 	rangeKey := base + "/range"
 
 	// 1. conditional create on an absent object must succeed.
@@ -57,7 +62,7 @@ func Diagnose(ctx context.Context, b Bucket) error {
 	// must delete. Some S3-compatible stores accept If-Match on PutObject but
 	// ignore it on DeleteObject, which would silently degrade the owner/lease
 	// fence (ADR-134); the probe names that failure.
-	delKey := base + "/delete"
+	delKey := "nodes/" + base + "/delete.json"
 	e3, err := b.ConditionalCreate(ctx, delKey, []byte("del"))
 	if err != nil {
 		return fmt.Errorf("bucket conditional delete (setup) failed: %w", err)

@@ -18,7 +18,7 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 | **Durable Objects** | do-runtime native facet | **Synchronous SQL**; bindings `env.DO.get(...).fetch()` and **`getByName(...).method(...)` DO RPC** (ADR-080 shard/owner/hint/WS 1012; ADR-162 RPC tagged JSON + native JSRPC) | workerd actor SQLite (working replica) → cell-agent replication | **do-runtime node** |
 | **ASSETS** | Object storage (versioned) | Async | `assets/<ns>/<worker>/<token>/...` | Object storage |
 | **Service bindings** | workerd JSRPC | Sync/async | — | Target Worker |
-| **Vars / Secrets** | Vars and user-named binding stubs injected into `env` at load time; secrets not yet injected | — | secrets in control cell (ciphertext) | cell-agent |
+| **Vars / Secrets** | Vars, current managed secrets, and user-named binding stubs are injected into `env` at load time; a secret overrides a same-named var | — | secrets in control cell (envelope ciphertext) | cell-agent |
 | **AI** | BYO OpenAI-compatible endpoint (`env.AI.run`) | Async | — | cell-agent (`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`; no platform-hosted catalog) |
 
 ## host adapter Model
@@ -122,7 +122,7 @@ export default {
 
 cell-agent's `queue.Runner` periodically obtains the polling set from **queue resources registered in the control plane** (`control.ResourcesByKind("queue")`, cold path), `Claim`s a batch (lease) for each queue, and POSTs it to **`/v1/queues/dispatch`** at `CELLHIVE_DISPATCH_URL`; on success it `Ack`s, and on failure it `Retry`s the entire batch (**at-least-once**). The body contains `(namespace, queue, worker, bundle_sha, version, messages)` (worker/bundle/version are resolved by `Projection.QueueTargets()`, ADR-067/112/127). user-runtime directly loads that active version and calls its `queue()` handler. The body does not carry bindings; on load, user-runtime calls `GET /v1/internal/worker/bindings` with `(ns, worker, version)` to fetch that version's binding spec and inject it into env (ADR-128, fail-open), so the env for `queue(batch, env)` is consistent with fetch. Configuration: `CELLHIVE_QUEUE_INTERVAL` (default 1s, 0 disables). **Implemented**: user-runtime `/v1/queues/dispatch` (ADR-067); retry limit + dead letter (`DeadLetterQueue`, ADR-072, `internal/queue/runner.go`).
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_
 
 ## Binding implementation (ADR-090, RPC entrypoint env)
 

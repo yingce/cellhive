@@ -35,49 +35,44 @@ Health checks: `GET http://127.0.0.1:7001/readyz` (no auth; returns 503 when ove
 ## Docker Compose
 
 ```bash
-export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)   # the only required secret (ADR-137)
-docker compose -f deploy/compose/docker-compose.yml up --build
-# or
-make compose-up
+export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)
+python3 scripts/deploy-preflight.py compose
+docker compose -f deploy/compose/docker-compose.yml up --build -d
 ```
 
-- Services: `cell-agent` (FS bucket `/data/bucket`, healthcheck `/readyz`) + `user-runtime` + `do-runtime` (both `depends_on: service_healthy`); `restart: unless-stopped`;
-- The `rpo0` profile additionally starts `do-runtime-gated`; in this case, pass `CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788` to compose (placement uses only the gated runtime; the ungated `do-runtime` becomes idle and can be ignored);
-- Profiles: `s3` (MinIO, with `CELLHIVE_BUCKET=s3://cellhive` + `AWS_*`), `edge` (Traefik, ops-configured routes);
-- `.env.example` is a template: **only `CELLHIVE_ROOT_KEY` is required** (other role credentials are derived from it).
+The default is a **single-node** stack: the cell-agent named volume holds SQLite and the authoritative filesystem bucket. User and DO runtimes have separate working volumes. An operator-managed edge must publish the public and admin endpoints.
 
-Validation (without starting containers): `make compose-config`.
+For gated DO, set `CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788`, check `python3 scripts/deploy-preflight.py compose --profile rpo0` with the same environment, then run `docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d cell-agent user-runtime do-runtime-gated`. A bare `--profile rpo0 up` also starts the default ungated DO; without the placement override, requests still use it. To use MinIO, start `--profile s3 up -d minio`, create the bucket using `bin/s3init -endpoint http://127.0.0.1:9000 -access ... -secret ... -bucket cellhive`, and configure `CELLHIVE_BUCKET=s3://cellhive`, `AWS_ENDPOINT_URL=http://minio:9000`, and matching `AWS_*` credentials before starting cell-agent. Never commit actual keys to `.env.example`.
+
+**Authority warning (2026-09-22):** The pinned Compose MinIO `RELEASE.2025-02-18T16-25-55Z` ignores `DeleteObject If-Match` in the real conditional-delete probe. The updated cell-agent refuses to start with that bucket; this MinIO example is not a working authority deployment. Use a store that passes the complete `make s3-test` contract instead. Do not disable the startup probe or replace atomic deletion with `HEAD+DELETE`.
+
+The actual runtime exercise is `bash scripts/runtime-baseline-e2e.sh`; static Compose rendering is not an E2E test.
 
 ## Kubernetes
 
-`deploy/k8s/` provides kustomize manifests (client-side rendering, no cluster required):
-
-| Resource | Description |
-|---|---|
-| `cell-agent` StatefulSet (2 replicas, headless Service) | `CELLHIVE_NODE_ID=$(POD_NAME)`, `CELLHIVE_ADVERTISE=$(POD_IP):7001` (downward API); `terminationGracePeriodSeconds: 120`; PVC 20Gi; readiness `/readyz` |
-| `user-runtime` Deployment (2 replicas) + Service + HPA | Stateless, scales to 10 at CPU 70%; `grace 30s` |
-| `do-runtime` Deployment (2 replicas, headless Service) | `CELLHIVE_DO_ADVERTISE=$(POD_IP):8788`; disk uses `emptyDir` (local working copy; authoritative state is in the bucket/cell-agent) |
-| `cellhive-config` ConfigMap / `cellhive-secrets` Secret | Non-sensitive configuration + `CELLHIVE_ROOT_KEY` (see `secret.example.yaml` for an example) |
-
-Secrets can also use **file mounts** instead of inline env (Docker/K8s `_FILE` convention, ADR-150): mount a secret volume to `/run/secrets` and set `CELLHIVE_ROOT_KEY_FILE=/run/secrets/root-key`; `rootKey`/`existingSecret` remain the two Helm options.
+The Kustomize base is **one cell-agent and one DO runtime**. Independent agent PVCs are not a shared filesystem bucket, while DNS for a headless Service with multiple DO Pods cannot be a stable shard identifier. The user-runtime can scale via HPA. `CELLHIVE_CELL_URL` names the stable StatefulSet Pod; agent leases advertise their own Pod IP via `CELLHIVE_PEER_URL`. DO Deployment updates use `Recreate` to avoid overlapping old/new shards.
 
 ```bash
-make k8s-render        # kubectl kustomize deploy/k8s (local validation)
-kubectl create ns cellhive
+python3 scripts/deploy-preflight.py k8s --path deploy/k8s/overlays/rpo0
+kubectl create namespace cellhive --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cellhive create secret generic cellhive-secrets \
   --from-literal=CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)"
-kubectl apply -k deploy/k8s
+# Replace cellhive:dev with a published image available to the cluster.
+kubectl apply -k deploy/k8s/overlays/rpo0
+kubectl -n cellhive rollout status statefulset/cell-agent
+kubectl -n cellhive rollout status deployment/do-runtime-gated
+kubectl -n cellhive rollout status deployment/user-runtime
 ```
 
-Network policies: per [`security.md`](security.md), only the listed internal paths are allowed; `cell-agent :7001/:8082` is not exposed externally. Persistence: only `cell-agent` needs it (PVC + state bucket); do-runtime does not need a PV.
+Scale cell-agent beyond one Pod **only after** provisioning a shared S3 bucket and validating conditional create/CAS/delete, ranged reads, and presign. A single `CELLHIVE_DO_RUNTIMES=do-runtime:8788` likewise supports only one DO Pod; multiple DO instances require stable per-instance targets and an updated placement list. `scripts/deploy-preflight.py` rejects either unsafe manifest topology. Kustomize/Helm rendering does not prove in-cluster availability; no live cluster was available for this review. NetworkPolicy limits user-runtime port 8088 to agent Pods; the gated overlay adds a DO policy. Configure real registry images, storage, ingress, CNI enforcement, and egress for your environment.
 
 ## DO Output Gate / RPO=0 (`do-runtime-gated`, ADR-140)
 
 In production, use `do-runtime-gated` instead of the ungated `do-runtime`: `do-runtime -render-only` renders capnp, and `do-supervisor` manages workerd and gates each response on a durability proof from cell-agent (also handling lease renewal and drain).
 
 ```bash
-# compose
-docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d
+# compose (set CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 and run preflight first)
+docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d cell-agent user-runtime do-runtime-gated
 # k8s
 kubectl apply -k deploy/k8s/overlays/rpo0
 ```

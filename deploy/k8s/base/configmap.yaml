@@ -8,7 +8,7 @@ metadata:
   name: cellhive-config
   namespace: cellhive
 data:
-  CELLHIVE_CELL_URL: http://cell-agent:7001
+  CELLHIVE_CELL_URL: http://cell-agent-0.cell-agent.cellhive.svc.cluster.local:7001
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"
   CELLHIVE_DATA_DIR: /data/state

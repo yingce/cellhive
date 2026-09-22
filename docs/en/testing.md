@@ -170,6 +170,8 @@ Backend end-to-end: `bash scripts/openobserve-e2e.sh` (needs docker plus an `ope
 - Gate `GET :18901/status` is available;
 - Runtime-baseline runs `cellhive app create` plus a TypeScript source deploy inside the image. A Bun client reaches an ephemeral loopback publication of public `user-runtime :8081` and completes a real WebSocket 101 plus duplex messages. The shared `Counter` DO persists HTTP `1` → WS `2` → gated do-runtime restart → WS `3` → HTTP `4`, with authoritative bucket LTX produced.
 
+- The same isolated Compose E2E also checks versioned static assets from an in-image source deployment, Queue consumption and DLQ/operator replay, minute-aligned Cron, Workflow `step.do` → `sleep` → resumed result and `createBatch`. A second release becomes visible on the public route, `rollback` restores the previous one, and deleting the worker yields a 404. Actual run on 2026-09-22: `PATH=/usr/local/go/bin:/root/.bun/bin:$PATH bash scripts/runtime-baseline-e2e.sh` ended with `RUNTIME-BASELINE-E2E: PASS`.
+
 ## Deployment Artifact Validation (ADR-139)
 
 Not part of `go test`; run manually/in CI:
@@ -198,11 +200,11 @@ Not part of `go test`; run manually/in CI:
 - Reproducible environment for performance benchmarks (fixed machine type/kernel/workerd pin);
 - Chaos injection tooling and scenario library (currently relies on `internal/owner` simulation + `make rpo-test`).
 
-## S3 Integration Test (Local MinIO/rustfs)
+## S3 Integration Test (Local MinIO/rustfs; Complete Contract Currently Fails)
 
 One command is enough (no cloud credentials required): `make s3-test` (= `bash scripts/s3-integration.sh`). If `CELLHIVE_S3_TEST_ENDPOINT` is not set, the script automatically starts a MinIO container (`S3_IMAGE` can be changed to rustfs), then cleans it up after the run; it can also point to an existing S3 endpoint.
 
-Coverage: `s3init` (create bucket + presign), `s3probe` (conditional create / reject-create / CAS / reject-stale / ranged read), `TestS3BucketIntegration`, `TestS3ReplicationRestoreChain` (snapshot→Restore→ApplyFile + Compact→PageFetcher ranged→Materialize).
+Coverage: `s3init` (bucket + presign), `s3probe` (four conditional-write checks and ranged read, **not conditional delete**), `TestS3BucketIntegration` (now also rejects stale conditional delete and checks successful current-version deletion), and `TestS3ReplicationRestoreChain`. On 2026-09-22 `GO=/usr/local/go/bin/go bash scripts/s3-integration.sh` passed writes/range/replication but **failed because the pinned MinIO returned success for stale `DeleteObject If-Match`**. This image cannot be the authority; a successful `s3probe` alone is insufficient.
 
 ```bash
 make s3-test
@@ -210,9 +212,9 @@ make s3-test
 CELLHIVE_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make s3-test
 ```
 
-- `TestS3BucketIntegration`: conditional create / reject-create / CAS / reject-stale / ranged / presign.
+- `TestS3BucketIntegration`: create/reject-create/CAS/reject-stale/range/presign/**conditional delete**. The pinned MinIO fails the stale delete assertion.
 - `TestS3ReplicationRestoreChain`: snapshot→Restore→ApplyFile + Compact→PageFetcher (ranged)→Materialize.
-- Automatically skipped when `CELLHIVE_S3_TEST_ENDPOINT` is absent (CI green by default).
+- An isolated Go package test skips without `CELLHIVE_S3_TEST_ENDPOINT`; `make s3-test` starts MinIO and runs the probe, and does not skip.
 
 ## DO Compatibility Suite (ADR-083/084)
 

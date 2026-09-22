@@ -162,10 +162,15 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// enqueueToQueueOwner re-enqueues one message onto (ns, queue), local if this
-// node owns it, otherwise by calling the owner's internal send endpoint with a
-// freshly minted queue-scope token (the queue must be declared, like any
-// producer binding).
+// EnqueueToQueueOwner sends to the destination queue's owner, claiming it if
+// unowned. A remote owner receives an authenticated scoped send.
+// The content type and idempotency key survive DLQ delivery and replay.
+func (s *Server) EnqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
+	return s.enqueueToQueueOwner(ctx, ns, queue, m)
+}
+
+// enqueueToQueueOwner is shared by the operator replay and queue runner.
+
 func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
 	sc := queuepkg.Scope(ns, queue)
 	if s.Owner == nil {
@@ -174,29 +179,32 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 	}
 	now := time.Now()
 	addr := ""
+	owned := false
 	if o, _, err := s.Owner.Resolve(ctx, sc); err == nil && !o.Expired(now) {
-		if o.Node != s.Cfg.NodeID && o.Address != "" {
+		if o.Node == s.Cfg.NodeID {
+			owned = true
+		} else if o.Address != "" {
 			addr = o.Address
 		}
 	}
-	if addr == "" {
+	if !owned && addr == "" {
 		if _, err := s.Owner.Claim(ctx, sc, now); err != nil {
-			// Lost the race to a peer: fall through to the remote path below.
+			// Lost the race to a peer: route to its current owner.
 			if o, _, rerr := s.Owner.Resolve(ctx, sc); rerr == nil && o.Node != s.Cfg.NodeID && o.Address != "" {
 				addr = o.Address
 			} else {
 				return fmt.Errorf("queue owner unavailable: %v", err)
 			}
 		} else {
+			owned = true
 			s.registerPendingTimers(context.Background(), sc)
-			if err := s.capturedWrite(ctx, sc, func() error {
-				_, e := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
-				return e
-			}); err != nil {
-				return err
-			}
-			return nil
 		}
+	}
+	if owned {
+		return s.capturedWrite(ctx, sc, func() error {
+			_, e := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
+			return e
+		})
 	}
 	tok, err := scopedtoken.Mint(s.scopeSecret(), scopedtoken.Claims{Namespace: ns, Kind: "queue", Name: queue})
 	if err != nil {

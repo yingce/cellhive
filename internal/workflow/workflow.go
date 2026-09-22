@@ -488,6 +488,44 @@ func (s *Store) Create(ctx context.Context, ns, name, id string, params []byte) 
 	return s.Get(ctx, ns, name, id)
 }
 
+// CreateBatch inserts every instance in one cell transaction. A failure leaves
+// the batch unchanged; non-empty IDs retain Create's idempotent semantics.
+func (s *Store) CreateBatch(ctx context.Context, ns, name string, instances []Instance) ([]Instance, error) {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UnixMilli()
+	ids := make([]string, len(instances))
+	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		for i, in := range instances {
+			id := in.ID
+			if id == "" {
+				id = NewID()
+			}
+			ids[i] = id
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO instances(id, params, status, created_ms, updated_ms) VALUES(?,?,?,?,?)
+				 ON CONFLICT(id) DO NOTHING`,
+				id, in.Params, string(StatusQueued), now, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	out := make([]Instance, 0, len(ids))
+	for _, id := range ids {
+		in, err := s.Get(ctx, ns, name, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, in)
+	}
+	return out, nil
+}
+
 // Get returns one instance.
 func (s *Store) Get(ctx context.Context, ns, name, id string) (Instance, error) {
 	c, err := s.cell(ctx, ns, name)

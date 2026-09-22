@@ -23,6 +23,6 @@
 - [x] `user-runtime.capnp`（**由 `cmd/user-runtime` 运行期渲染**，见 `internal/userruntime`）：内部派发 `:8088` 已实现（queue/scheduled handler via workerLoader + wrapper RPC）；公开 loader `:8081` 已实现（路由投影拉取 + 版本加载 + facade env + 清头 + 静态资产，ADR-068/069）；`:8088` 支持 queue()/scheduled()（ADR-067/070）。
 - [x] do-runtime：host actor（facets + `getDurableObjectClass`）+ localDisk + 归属栅栏/排空/驻留（**ADR-077/078**；`cmd/do-runtime` 运行期渲染，真实 workerd e2e）。
 - [x] alarm shim（**ADR-079**）、**DO 协议端到端**（**ADR-080**）、**存储生命周期**（**ADR-081**）与 **migrations v2**（**ADR-082**），**do-supervisor + 输出门**（**ADR-083**）与 **跨节点冷激活/恢复**（**ADR-084**：可逆 scope + manifest + RestoreAll；双 runtime e2e）。
-- [ ] `adapters/`：binding host adapter（KV/D1/R2/Queue/Workflows/Cron/DO）。
+- [x] binding host adapter：KV/D1/R2/Queue/Workflows/DO 等能力由 `workerd/platform/bindings.js` 的 props-bound `WorkerEntrypoint` stubs + `bindings-wrapper.js` 提供；Cron 走 user-runtime 内部 scheduled dispatch。
 - [x] `wrapper/groupcommit.js`：DO 组提交 + 输出门（`workerd/wrapper/README.md`，ADR-051）。
-- [ ] wrapper 生成（模块包装 + env 构造 + 保留模块前缀）——参考 WDL `runtime/load/wrapper-generate.js`（加载期重写模块、透明注入平台 shim，租户代码不改）。
+- [x] wrapper 生成：`user-runtime` / `do-runtime` 在加载期组合租户模块、`queue-wrapper.js` / `workflow-wrapper.js` / `bindings-wrapper.js` 与 facade，构造 tenant-owned env，并保留/重写平台模块前缀（ADR-090/184/185）。

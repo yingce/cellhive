@@ -1028,7 +1028,7 @@
   - **持久重试（跨崩溃）**：`step_attempts` 表存 `attempts/last_error`；失败不 inline sleep，而是记 attempt + 排 timer 重派发（park→wake 续跑同 attempt/backoff）；超 `limit` → errored。验证 `TestUserRuntimeWorkflowStepRetries`（跨重派发到 `ok:3`）。
   - **retention/TTL**：`CELLHIVE_WORKFLOW_RETENTION`（0=关）；cell-agent 周期 `Prune` 终态旧实例并级联 steps/attempts/events/waits。验证 `TestPruneTerminalOlderThanRetention`。
   - **NonRetryableError**：`cellhive-workflow.js` 导出；重写 `cloudflare:workflows` 导入；`step.do` 遇该错**不重试**。验证 `TestUserRuntimeWorkflowNonRetryable`（`errored`）。
-- **仍未做（Partial 边界）**：`delete()`（实例删除 API）、`locationHint`、跨 worker、`createBatch`、step 历史列举/progress 回调、payload 字节预算（与 `compatibility-matrix.md` 一致；跨 worker 不做）。
+- **当前 Partial 边界**：`locationHint`（接受但忽略）、跨 worker、step 历史列举/progress 回调（跨 worker 有意不做）。`createBatch(items)` 已接 `/v1/workflow/create-batch`（1..100 个实例），create/createBatch 请求总 payload 上限 1 MiB；`delete()` 已实现为幂等实例删除 API。
 
 ---
 
@@ -2380,6 +2380,23 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
+## ADR-188 权威桶必须原子化且启动失败关闭（2026-09-22）✅实现
+
+- **背景**：`CELLHIVE_BUCKET=cos://...` / `oss://...` 以前被 `openBucket` 静默当本地目录；启动时的 `bucket.Diagnose` 即使发现条件删除等探针失败也仅告警，节点仍服务。owner/epoch 栅栏依赖条件创建、目标版本 CAS 和条件删除全部原子成立。
+- **决策（S3 路径；原生追加路径见 ADR-189）**：空配置用本地 FS，`s3://<bucket>` 必须通过全部权威条件写探针；未知 scheme 立即拒绝。`cell-agent` 启动运行 `bucket.Diagnose`，失败直接退出。COS/OSS 对普通目标对象不提供本协议要求的原子 CAS/条件删除，不做 `HEAD+PUT/DELETE` 适配；ADR-189 另以其原生追加 API 构造条件对象，并同样受启动探针约束。
+- **证据/边界**：2026-09-22 对可用 COS 桶通过 S3 API 测得重复 `If-None-Match:*` PUT 成功；对可用 OSS 桶首个相同 PUT 返回 `NotImplemented`。仓库固定的 MinIO `RELEASE.2025-02-18T16-25-55Z` 虽通过条件创建/CAS/range，却把 stale 条件删除当成功，**不能作为当前 owner/lease 权威桶**；`scripts/s3-integration.sh` 因新增真实条件删除断言失败。上述实测均不能推广到未测试云端实例；`Diagnose` 检查序列语义，不证明并发线性化或 presigned URL。测试键位于独立 `itest/` 前缀，未触碰真实状态。
+- **验证**：`cmd/cell-agent TestOpenBucketRejectsUnsupportedAuthorityProvider`、`internal/bucket TestDiagnoseDetectsConditionalDeleteIgnored` 和 S3 集成探针覆盖 S3 拒绝行为；原生追加式方案的实桶结论另见 ADR-189。
+
+## ADR-189 OSS 追加式权威对象；COS 需逐桶验证（2026-09-22）🚧验证中
+
+- **背景**：ADR-188 正确拒绝了 COS/OSS 对目标对象 `PUT/DELETE If-Match` 的非原子模拟。原生 `AppendObject(position=N)` 在支持该操作的桶中可作为条件写原语，但不能从 SDK 存在推断任意实际桶可用。2026-09-22 隔离键实测：OSS 北京桶的并发 position=0 只有一个赢家；原 COS 香港桶 `vwork-hk-1376795072` 的 `POST ?append&position=0` 返回 `405 MethodNotAllowed`。2026-09-22 复测新 COS 香港桶 `cell-1376795072`：并发首次追加只有一个赢家，输家返回 COS 实际错误码 `409 AppendPositionErr`；修正该错误码到 `ErrPrecondition` 的映射后，共享并发 claim/CAS/条件删除契约及完整 `bucket.Diagnose` 均通过。失败桶仍须拒绝启动，不能退回非原子 `HEAD+PUT`。
+- **决策**：新增 `cos://<bucket>` 与 `oss://<bucket>` provider。不可变数据（LTX、快照、bundle、assets）仍使用普通对象 API；权威可变键（owner、owner-gen、node lease、node-log、fleet lease/token）存为带长度、操作类型和 CRC 的 append-only 帧。逻辑版本令牌是成功追加后的对象长度：首次条件创建要求位置 0，tombstone 后重建要求当前长度，CAS/条件删除要求调用方读到的位置，删除追加 tombstone 而不物理删除；无条件 Put/Delete 先读长度并在冲突后重试，因此仍有一个明确线性化点。现有 `bucket.Bucket` 调用方与 owner/epoch 协议不分叉。
+- **安全边界**：解析遇到坏 magic、长度越界或 CRC 错误必须失败关闭；AppendObject 的超时结果未知，调用方重读后判断，不盲目假定失败；热路径不 LIST。追加对象不能被普通 Put 覆盖。日志轮换尚未实现；上线前需监控追加对象增长与供应商容量限制。
+- **配置**：`oss://` 使用 `OSS_ENDPOINT`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`；`cos://` 使用 `COS_ENDPOINT`、`COS_SECRET_ID`、`COS_SECRET_KEY`。若未提供 provider 专用凭据变量，则兼容读取现有 AWS 变量；endpoint 必须是 HTTPS，OSS 可省略 scheme。供应商普通对象的 S3 适配器关闭 SDK 可选 trailer checksum（测试 OSS 桶不接受该编码）。
+- **验证状态**：共享条件对象契约覆盖创建竞争、陈旧 CAS、陈旧删除、tombstone 后重建、损坏尾部拒绝；OSS 北京实桶与 COS 香港 `cell-1376795072` 实桶的独立键并发 claim、CAS/删除及完整 `bucket.Diagnose` 通过。2026-09-22 又以两套独立 `cell-agent` 进程、共享各自云桶、`CELLHIVE_DURABILITY=bucket`、6s 租约执行真实进程级 `SIGKILL`/新本地目录接管：COS 192 并发 5000 次写全 ACK，最终冷恢复核对 6488 条已 ACK 键，missing=0/wrong=0，SQLite `integrity_check=ok`；OSS 192 并发 5000 次写全 ACK，最终冷恢复核对 6470 条已 ACK 键，missing=0/wrong=0，`integrity_check=ok`。两桶还在 24 并发流中取得 ≥30 个 ACK 后杀死 owner，接管后所有已 ACK 值精确匹配；断连请求为结果未知，不计入 ACK。原 COS 香港 `vwork-hk-1376795072` 桶追加探针失败（405）；供应商支持须逐桶验证。此结果是**同宿主多进程 + 真实云桶**，不是跨主机网络分区或长期混沌证明。
+
+---
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
@@ -2394,6 +2411,16 @@
 - **阶段边界**：本 ADR 只覆盖秘密隔离、固定工具链、compatibility authority 与 code/env 预算。冷加载治理、invocation-scoped context、isolate 淘汰、DO mid-flight fence/restart generation、原生 Tail/OTLP 和多模块 artifact 后续分阶段实施。Tenant Tail 当前仍关闭，不以 env transport 回退。
 - **验收**：单元测试先红后绿；真实 workerd 覆盖 `fromEnvironment`、env/KV/D1/R2/Queue/Workflow/Service/DO；真实 Docker Compose 覆盖镜像内 esbuild 打包、用户同名 env、KV、gated DO、重启持久性和秘密扫描；最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 无相关隐式 SKIP。
 - **详细设计/计划**：`docs/superpowers/specs/2026-09-22-workerd-runtime-baseline-security-design.md`、`docs/superpowers/plans/2026-09-22-workerd-runtime-baseline-security.md`。
+
+## ADR-187 文档/运行时一致性收口：artifact 直读、managed secret env、Workflow batch ✅
+
+- **背景**：审计发现三类文档/代码不一致：ADR-030 已定直连但 runtime 仍流经 cell-agent；secret 已可信存储但未进入执行 env；Workflow 文档将 `createBatch`/payload 预算列为缺口。
+- **决策**：
+  1. user-runtime 的 fetch/dispatch、do-runtime bundle 与 user-runtime assets 路径先调用内部 `bundle-url`/`asset-url` 获取短期 URL，再由可信宿主直连对象存储；本地 FS 或后端返回不支持 presign 时才回退内部点查。runtime 不持长期桶凭据。
+  2. `runtimeVars` 将当前 managed secrets 解密后覆盖同名 version var，并统一供公开 loader、queue/scheduled/workflow/service 与 DO binding view 使用。明文不进入 bundle、binding props、capnp、参数或日志；已加载 isolate/facet 不原地热改。deploy 与 secret put 都把当前 secrets 纳入 1016 KiB env 预算，secret 超限在写入前拒绝。
+  3. Workflow binding 增加 `createBatch(items)`；服务端限制 batch 1..100、请求总量 1 MiB，并在一个 workflow-cell transaction 中创建整批后再派发。create 同样限制 1 MiB。
+- **保留边界**：Workflow 仍不支持跨 worker、step 历史列举/progress 回调；`locationHint` 接受但忽略。云对象存储的 presigned 行为仍属供应商矩阵环境验证，本地 FS E2E 走明确回退。
+- **验证**：`internal/server` 覆盖 Worker/DO 执行视图 secret、secret env 超限拒绝且不落库、workflow payload/batch；`internal/workflow` 断言 batch 只推进一个 txid；真实 workerd 覆盖 presigned bundle 字节不经过内部 streaming endpoint 与 `env.WF.createBatch` facade；Docker runtime baseline 覆盖 Worker/DO managed secret、KV、gated DO 重启持久性和隔离扫描。
 
 ---
 

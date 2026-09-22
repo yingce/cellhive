@@ -3,15 +3,14 @@
 ## 启动
 
 ```bash
-# 单节点（本地）
-CELLHIVE_NODE_ID=node-1 CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
-
-# 多节点（生产）：每节点独立 node 名 + 同一 bucket
-CELLHIVE_NODE_ID=cell-agent-a CELLHIVE_ADVERTISE=10.0.0.11:7001 \
-CELLHIVE_BUCKET_DIR=/data/bucket ./bin/cell-agent
+# 本机单节点：必须提供持久根密钥。
+CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)" CELLHIVE_NODE_ID=node-1 \
+  CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
 ```
 
-启动顺序：`cell-agent`（≥2）→ `do-runtime` → `user-runtime` → 边缘代理（运维自备，平台不下发配置，ADR-132）。
+Compose/K8s/Helm 启动前先运行 `python3 scripts/deploy-preflight.py compose|k8s|helm`（root key、profile 与实际部署一致）；执行步骤和 S3 初始化见 [`deployment.md`](deployment.md)。多 cell-agent 节点不可各用自己的 `/data/bucket`；必须共用经过条件写/删探针的外部 S3，并配置唯一 node ID、Pod 可达的 `CELLHIVE_PEER_URL`。单个 DO Service 名只能部署单 Pod；否则先实现稳定逐实例地址/放置后再扩副本。无实时 K8s 控制面时只完成渲染，不能声称已集群验收。
+
+启动顺序：权威桶已创建/探针通过 → `cell-agent` → gated `do-runtime` → `user-runtime` → 运维入口。缩容单节点时 PDB `minAvailable:1` 会阻止普通 eviction，先安排维护停机；不要直接删除权威 PVC。
 
 ## 诊断
 

@@ -44,3 +44,15 @@ func TestDerivedSecretKeyDecodes(t *testing.T) {
 		t.Fatalf("derived secret key does not decode to 32 bytes: len=%d err=%v", len(key), err)
 	}
 }
+
+func TestOpenBucketRejectsUnsupportedAuthorityProvider(t *testing.T) {
+	_, err := openBucket(t.Context(), config.Config{BucketURL: "ftp://bucket", BucketDir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "unsupported bucket scheme") {
+		t.Fatalf("openBucket ftp error = %v", err)
+	}
+	for _, rawURL := range []string{"cos://bucket-appid", "oss://bucket"} {
+		if _, err := openBucket(t.Context(), config.Config{BucketURL: rawURL}); err == nil {
+			t.Fatalf("openBucket(%q) accepted missing endpoint", rawURL)
+		}
+	}
+}

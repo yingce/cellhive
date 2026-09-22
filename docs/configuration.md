@@ -39,13 +39,15 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_BUCKET` | 空 | `s3://<bucket>` 用 S3 兼容存储；空则用文件系统桶 |
+| `CELLHIVE_BUCKET` | 空 | 空值为单节点本地 FS；`s3://<bucket>` 需原子条件写/删除；`oss://<bucket>`、`cos://<bucket>` 使用原生 AppendObject 帧保存 owner/lease 等可变权威对象，其他对象走 S3 API。任何 provider 未通过启动探针均拒绝服务；COS 支持须逐桶验证（`cell-1376795072` 通过，原 `vwork-hk-1376795072` 返回 405） |
 | `CELLHIVE_BUCKET_DIR` | `./.cellhive/bucket` | 文件系统桶目录。必填 |
 | `AWS_ENDPOINT_URL` | 空 | S3 端点（MinIO/云；标准 AWS 变量名） |
 | `AWS_REGION` | `us-east-1` | 区域 |
 | `AWS_ACCESS_KEY_ID` | 空 | 访问凭据 |
 | `AWS_SECRET_ACCESS_KEY` | 空 | 密钥 |
 | `CELLHIVE_S3_PATH_STYLE` | 有自定义端点→`true`，否则 `false` | path-style；默认按是否有自定义端点推断（本地/兼容存储常用 path-style，云端常用 virtual-host） |
+| `OSS_ENDPOINT`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | 空（凭据回退 AWS 变量） | OSS 原生追加与普通对象 S3 API 端点；endpoint 可省略 `https://` |
+| `COS_ENDPOINT`、`COS_SECRET_ID`、`COS_SECRET_KEY` | 空（凭据回退 AWS 变量） | `COS_ENDPOINT` 为完整 HTTPS 桶 URL（例如 `https://bucket-appid.cos.ap-hongkong.myqcloud.com`），`cos://` 后的桶名须与主机前缀完全一致；普通对象请求从中推导区域服务端点；该桶必须实际支持 AppendObject |
 
 ## cell-agent：进程与监听
 
@@ -226,4 +228,4 @@ _最后更新：2026-09-22_
 
 ## 租户 env 命名空间
 
-加载 worker 与 DO facet 的 `env` 只包含用户声明的 `vars` 和用户命名的 binding stub；平台键为 **0**。secrets 可加密存储和管理，但**尚未注入 runtime env**。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 都是用户可用名称，不会因平台保留名而被部署或 secret 写入拒绝。DO 的 WebSocket 升级与普通调用仍经平台侧 stub（ADR-184），不需要租户可见的私网传输。Workflow step 回调则由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数传给 wrapper；它不是 `ctx.exports.X({props})` 创建的 `ServiceStub`，也不进入 tenant env（ADR-185）。
+加载 worker 与 DO facet 的 `env` 只包含用户声明的 `vars`、当前 managed secrets 和用户命名的 binding stub；平台键为 **0**。secrets 在 control cell 信封加密，运行时由 cell-agent 解密；同名 secret 覆盖 var，已加载 isolate/facet 不热改，新加载/重建时生效。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*` 与 `WF_*` 都是用户可用名称，不会因平台保留名而被部署或 secret 写入拒绝。DO 的 WebSocket 升级与普通调用仍经平台侧 stub（ADR-184），不需要租户可见的私网传输。Workflow step 回调则由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数传给 wrapper；它不是 `ctx.exports.X({props})` 创建的 `ServiceStub`，也不进入 tenant env（ADR-185）。

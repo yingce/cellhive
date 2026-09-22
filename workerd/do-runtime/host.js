@@ -906,9 +906,20 @@ export class Host extends DurableObject {
 }
 
 async function fetchBundle(env, sha) {
-  const r = await fetch(env.CELL_URL + "/v1/internal/bundle?sha=" + encodeURIComponent(sha), {
-    headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-  });
+  const q = "?sha=" + encodeURIComponent(sha);
+  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
+  if (signed.ok) {
+    const { url } = await signed.json();
+    if (url && !url.startsWith("file:")) {
+      const direct = await fetch(url);
+      if (!direct.ok) throw new Error("GET bundle " + sha + " -> " + direct.status);
+      return await direct.text();
+    }
+  } else if (signed.status !== 404 && signed.status !== 501) {
+    throw new Error("GET bundle URL " + sha + " -> " + signed.status);
+  }
+  const r = await fetch(env.CELL_URL + "/v1/internal/bundle" + q, { headers });
   if (!r.ok) throw new Error("GET bundle " + sha + " -> " + r.status);
   return await r.text();
 }

@@ -65,7 +65,13 @@ metadata:
 spec:
   podSelector:
     matchLabels: {app: user-runtime, app.kubernetes.io/instance: {{ $inst }}}
-  policyTypes: [Egress]
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8081}]
+    - from:
+        - podSelector:
+            matchLabels: {app: cell-agent, app.kubernetes.io/instance: {{ $inst }}}
+      ports: [{protocol: TCP, port: 8088}]
   egress:
     - to:
         - podSelector:

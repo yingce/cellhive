@@ -1,6 +1,5 @@
-# cell-agent is a StatefulSet: it has a stable identity (owner/handoff key) and
-# owns the local SQLite working directory. Run >=2 replicas for HA; the headless
-# Service returns pod IPs so peers and runtimes can reach it directly.
+# A filesystem bucket is local to this StatefulSet PVC. Keep one cell-agent
+# unless all replicas use the same externally provisioned S3 bucket.
 apiVersion: v1
 kind: Service
 metadata:
@@ -22,7 +21,7 @@ metadata:
   labels: {app: cell-agent, app.kubernetes.io/part-of: cellhive}
 spec:
   serviceName: cell-agent
-  replicas: 2
+  replicas: 1
   podManagementPolicy: Parallel
   selector:
     matchLabels: {app: cell-agent}
@@ -54,6 +53,8 @@ spec:
               value: $(POD_NAME)
             - name: CELLHIVE_ADVERTISE
               value: $(POD_IP):7001
+            - name: CELLHIVE_PEER_URL
+              value: http://$(POD_IP):7001
           ports:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}

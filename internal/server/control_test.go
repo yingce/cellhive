@@ -2,10 +2,10 @@ package server
 
 import (
 	"bytes"
-	"cellhive/internal/queue"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,13 +13,19 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/artifacts"
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/owner"
+	"cellhive/internal/queue"
+	"cellhive/internal/scopedtoken"
 	"cellhive/internal/workerbudget"
+	"cellhive/internal/workflow"
 )
 
 func newControlServer(t *testing.T) *Server {
@@ -40,9 +46,10 @@ func newControlServer(t *testing.T) *Server {
 		Cfg: config.Config{
 			NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok",
 		},
-		Bucket:  b,
-		Control: control.New(cs, env),
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bucket:    b,
+		Control:   control.New(cs, env),
+		Workflows: workflow.New(cs),
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 }
 
@@ -467,10 +474,56 @@ func TestBundleAssetUploadAndRead(t *testing.T) {
 	if ag.Code != http.StatusOK || ag.Body.String() != "<html>" {
 		t.Fatalf("asset get = %d %q", ag.Code, ag.Body.String())
 	}
+	// Optional asset metadata files (_redirects/_headers) are probed before the
+	// requested asset. A missing object must be a normal 404, not a presign 500.
+	missingURL := do(t, s.Handler(), http.MethodGet, "/v1/internal/asset-url?ns=acme&worker=api&token="+aout.Token+"&path=_redirects", "tok", nil)
+	if missingURL.Code != http.StatusNotFound {
+		t.Fatalf("missing asset URL = %d: %s; want 404", missingURL.Code, missingURL.Body.String())
+	}
 	// Manual path traversal is rejected.
 	bad := adminDo(t, admin, http.MethodPost, "/v1/control/asset?ns=acme&worker=api&path=../x", "admin-tok", "x")
 	if bad.Code == http.StatusOK {
 		t.Fatalf("unsafe asset path accepted")
+	}
+}
+
+// presignWithoutLookup models cloud signing, which does not check that a key exists.
+type presignWithoutLookup struct {
+	bucket.Bucket
+	bucket.Statter
+}
+
+func (presignWithoutLookup) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
+	return "https://example.invalid/" + key, nil
+}
+
+func TestAssetURLRejectsUnsafePath(t *testing.T) {
+	s := newControlServer(t)
+	rr := do(t, s.Handler(), http.MethodGet, "/v1/internal/asset-url?ns=acme&worker=api&token=version&path=../other", "tok", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe asset URL = %d: %s; want 400", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAssetURLDoesNotSignMissingCloudObject(t *testing.T) {
+	s := newControlServer(t)
+	s.Bucket = presignWithoutLookup{Bucket: s.Bucket, Statter: s.Bucket.(bucket.Statter)}
+	put := adminDo(t, s.AdminHandler(), http.MethodPost, "/v1/control/asset?ns=acme&worker=api&path=index.html", "admin-tok", "<html>")
+	if put.Code != http.StatusOK {
+		t.Fatalf("asset upload = %d: %s", put.Code, put.Body.String())
+	}
+	var asset struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(put.Body.Bytes(), &asset); err != nil {
+		t.Fatal(err)
+	}
+	url := "/v1/internal/asset-url?ns=acme&worker=api&path=index.html&token="
+	if rr := do(t, s.Handler(), http.MethodGet, url+asset.Token, "tok", nil); rr.Code != http.StatusOK {
+		t.Fatalf("existing asset URL = %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := do(t, s.Handler(), http.MethodGet, url+"unknown", "tok", nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("missing asset URL = %d: %s; want 404", rr.Code, rr.Body.String())
 	}
 }
 
@@ -794,6 +847,118 @@ func TestControlHostAndWorkerEndpoints(t *testing.T) {
 	_ = v1
 }
 
+func TestInternalBindingsIncludeManagedSecrets(t *testing.T) {
+	ctx := context.Background()
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(ctx, "acme", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.Deploy(ctx, "acme", "api", control.DeploySpec{
+		BundleSHA: "sha1", Vars: map[string]string{"MODE": "prod"},
+	}, "me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Control.PutSecret(ctx, "acme", "api", "TOKEN", []byte("s3cr3t"), "me"); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/internal/worker/bindings?ns=acme&worker=api", nil)
+	req.Header.Set("x-cellhive-internal-token", "tok")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bindings = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Vars map[string]string `json:"vars"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Vars["MODE"] != "prod" || got.Vars["TOKEN"] != "s3cr3t" {
+		t.Fatalf("runtime env = %#v", got.Vars)
+	}
+}
+
+func TestWorkerExecutionViewIncludesManagedSecrets(t *testing.T) {
+	ctx := context.Background()
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(ctx, "acme", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.Deploy(ctx, "acme", "api", control.DeploySpec{
+		BundleSHA: "sha1", Vars: map[string]string{"MODE": "prod"},
+	}, "me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Control.PutSecret(ctx, "acme", "api", "TOKEN", []byte("s3cr3t"), "me"); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/control/worker?ns=acme&worker=api", nil)
+	req.Header.Set("x-cellhive-internal-token", "tok")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("worker view = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got control.WorkerView
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Vars["MODE"] != "prod" || got.Vars["TOKEN"] != "s3cr3t" {
+		t.Fatalf("runtime env = %#v", got.Vars)
+	}
+}
+
+func TestSecretPutRejectsRuntimeEnvOverBudget(t *testing.T) {
+	ctx := context.Background()
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(ctx, "acme", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.Deploy(ctx, "acme", "api", control.DeploySpec{BundleSHA: "sha1"}, "me"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(secretPutReq{
+		Namespace: "acme", Worker: "api", Key: "TOKEN",
+		Value: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, int(workerbudget.EnvMaxBytes+1))),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/control/secret", bytes.NewReader(body))
+	req.Header.Set("x-cellhive-admin-token", "admin-tok")
+	rr := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), `"error":"worker_env_too_large"`) {
+		t.Fatalf("oversized secret = %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, err := s.Control.GetSecret(ctx, "acme", "api", "TOKEN"); !errors.Is(err, control.ErrNotFound) {
+		t.Fatalf("rejected secret was stored: %v", err)
+	}
+}
+
+func TestWorkflowCreateRejectsPayloadOverLimit(t *testing.T) {
+	s := newControlServer(t)
+	ctx := context.Background()
+	if _, err := s.Control.CreateApp(ctx, "acme", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.CreateResource(ctx, "acme", "workflow", "WF", "acme/__workflow__/WF", "me"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "WF"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflow/create?ns=acme&workflow=WF", bytes.NewReader(bytes.Repeat([]byte{'x'}, (1<<20)+1)))
+	req.Header.Set("x-cellhive-scope-token", tok)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized workflow payload = %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // TestInternalBindingsVersionPin covers ADR-128: the binding-spec endpoint (used
 // by queue/scheduled/workflow dispatch and the do-runtime) resolves an exact
 // version so a loaded worker's env cannot drift from the code the dispatcher
@@ -1088,6 +1253,16 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 		}
 	}
 
+	// Production replay runs with an owner manager: the main queue may already
+	// have a live lease on this same node after normal consumer activity.
+	om := &owner.Manager{B: s.Bucket, NodeID: s.Cfg.NodeID, Session: "replay-test", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
+	s.Owner = om
+	if _, err := om.Claim(ctx, queue.Scope("acme", "q"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := om.Claim(ctx, queue.Scope("acme", "qdlq"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	rr := mustAdmin(t, admin, http.MethodPost, "/v1/control/queue/replay-dlq?namespace=acme&queue=q&limit=10", "")
 	if !strings.Contains(rr.Body.String(), `"replayed":2`) {
 		t.Fatalf("replay = %s", rr.Body.String())

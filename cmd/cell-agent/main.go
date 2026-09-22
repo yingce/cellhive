@@ -100,12 +100,13 @@ func main() {
 		log.Info("otel export enabled", "endpoint", cfg.OTLPEndpoint, "ratio", cfg.TraceSampleRatio)
 	}
 
-	// Startup storage conformance probe.
+	// The bucket is the authority for owner election and epoch fencing. Serving
+	// after a failed conformance probe could admit two owners, so fail closed.
 	if err := bucket.Diagnose(ctx, b); err != nil {
-		log.Warn("storage diagnose failed", "err", err)
-	} else {
-		log.Info("storage diagnose ok")
+		log.Error("storage diagnose failed", "err", err)
+		os.Exit(1)
 	}
+	log.Info("storage diagnose ok")
 
 	lm := lease.NewManager(b, cfg.NodeID, cfg.SessionID, cfg.Advertise, cfg.PeerURL, cfg.LeaseTTL)
 	lm.AZ = cfg.PlacementAZ
@@ -309,6 +310,13 @@ func main() {
 	var ctrlRef *control.Store
 	wfDisp := &dispatch.WorkflowDispatcher{
 		URL: cfg.DispatchURL, Token: cfg.TokenDispatch, Log: log, Next: dispatcher,
+		Params: func(cctx context.Context, ns, name, id string) ([]byte, error) {
+			instance, err := workflowStore.Get(cctx, ns, name, id)
+			if err != nil {
+				return nil, err
+			}
+			return instance.Params, nil
+		},
 		Claim: func(cctx context.Context, ns, name, id string) (string, uint64, bool, error) {
 			tok, gen, _, ok, err := workflowStore.ClaimRun(cctx, ns, name, id, workflowLeaseMs)
 			return tok, gen, ok, err
@@ -571,6 +579,7 @@ func main() {
 					Commit: func(cctx context.Context, ns, name string, fn func() error) error {
 						return srv.CaptureWrite(cctx, queue.Scope(ns, name), fn)
 					},
+					DeadLetterSend: srv.EnqueueToQueueOwner,
 					Queues: func(qctx context.Context) ([]queue.Ref, error) {
 						queues, err := ctrl.ResourcesByKind(qctx, "queue")
 						if err != nil {
@@ -1107,9 +1116,13 @@ func runAuditPruneLoop(ctx context.Context, log *slog.Logger, ctrl *control.Stor
 	}
 }
 
-// openBucket selects S3-compatible storage when CELLHIVE_BUCKET is set,
-// otherwise the filesystem bucket.
+// openBucket selects the explicitly configured authority storage. An empty
+// CELLHIVE_BUCKET uses the local filesystem; unknown schemes must fail closed
+// rather than turning a cloud URL into a local path.
 func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
+	if cfg.BucketURL == "" {
+		return bucket.NewFSBucket(cfg.BucketDir)
+	}
 	if strings.HasPrefix(cfg.BucketURL, "s3://") {
 		name := strings.TrimPrefix(cfg.BucketURL, "s3://")
 		return bucket.NewS3Bucket(ctx, bucket.S3Options{
@@ -1121,7 +1134,53 @@ func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
 			PathStyle: cfg.S3PathStyle,
 		})
 	}
-	return bucket.NewFSBucket(cfg.BucketDir)
+	if strings.HasPrefix(cfg.BucketURL, "oss://") || strings.HasPrefix(cfg.BucketURL, "cos://") {
+		name := cfg.BucketURL[6:]
+		if name == "" || strings.Contains(name, "/") {
+			return nil, fmt.Errorf("invalid provider bucket name %q", name)
+		}
+		endpoint, access, secret := cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey
+		var appender bucket.PositionAppender
+		var err error
+		if strings.HasPrefix(cfg.BucketURL, "oss://") {
+			if cfg.OSSEndpoint == "" {
+				return nil, fmt.Errorf("OSS_ENDPOINT is required")
+			}
+			endpoint = cfg.OSSEndpoint
+			if !strings.Contains(endpoint, "://") {
+				endpoint = "https://" + endpoint
+			}
+			access, secret = cfg.OSSAccessKey, cfg.OSSSecretKey
+			appender, err = bucket.NewOSSAppender(endpoint, name, access, secret)
+		} else {
+			endpoint = cfg.COSEndpoint
+			access, secret = cfg.COSAccessKey, cfg.COSSecretKey
+			if cfg.COSEndpoint == "" {
+				return nil, fmt.Errorf("COS_ENDPOINT is required")
+			}
+			appender, err = bucket.NewCOSAppender(endpoint, access, secret)
+		}
+		if err != nil {
+			return nil, err
+		}
+		region := cfg.S3Region
+		if strings.HasPrefix(cfg.BucketURL, "cos://") {
+			endpoint, region, err = bucket.COSServiceEndpoint(endpoint, name)
+			if err != nil {
+				return nil, err
+			}
+		}
+		data, err := bucket.NewS3Bucket(ctx, bucket.S3Options{Endpoint: endpoint, Region: region, AccessKey: access, SecretKey: secret, Bucket: name, PathStyle: false, DisableOptionalChecksums: true})
+		if err != nil {
+			return nil, err
+		}
+		return bucket.NewProviderBucket(data, appender), nil
+	}
+	scheme := cfg.BucketURL
+	if i := strings.Index(scheme, "://"); i >= 0 {
+		scheme = scheme[:i]
+	}
+	return nil, fmt.Errorf("unsupported bucket scheme %q: authority storage must implement atomic create, CAS, and conditional delete", scheme)
 }
 
 // cronEnricher resolves a cron timer's dispatch target (worker + active bundle)

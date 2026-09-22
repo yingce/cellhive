@@ -2,22 +2,25 @@
 
 ## Hard Requirements (All Required)
 
-1. **Conditional create** (`If-None-Match: *`);
-2. **Conditional overwrite** (`If-Match: <etag>`, CAS);
+1. **Atomic conditional create** (S3 `If-None-Match: *`; native AppendObject at position 0 or current length after a tombstone);
+2. **Conditional overwrite** (S3 `If-Match: <etag>`; native append of a new frame at the current length);
 3. **read-after-write consistency**;
 4. **ranged read** (returning the requested byte range with correct bytes);
 5. **presigned URL / short-lived scoped credentials** (for direct bundle/assets reads, ADR-030);
-6. **Conditional delete** (`DeleteObject` + `If-Match: <etag>`): conditional release of owner/lease depends on it (ADR-134); compatible storage that ignores this header will **degrade to unconditional delete**, a known residual risk.
+6. **Atomic conditional delete** (S3 `DeleteObject` + `If-Match: <etag>`; native append of a tombstone at the current length): owner/lease release depends on it (ADR-134/189).
 
-**Startup probe**: On each node startup, perform 4 conditional writes + one ranged read verification; stop if requirements are not met. Operators use `cellhive diagnose` (read-only) — covering conditional create/reject-create/CAS/reject-stale/ranged read/**conditional delete** (stale etag must be rejected + correct etag must delete + object must disappear, ADR-135).
+**Startup probe**: Each node first runs provider-specific preflight. For COS, it reads `X-Cos-Bucket-Az-Type` from `HEAD Bucket` and explicitly rejects `MAZ`, because Tencent COS does not support APPEND Object on multi-AZ buckets. It then verifies conditional create, duplicate-create rejection, CAS, stale-CAS rejection, ranged reads, stale conditional-delete rejection, and current conditional delete. Any failure terminates startup. `cellhive diagnose` repeats the same **write-based** probe on a running node; it is not read-only. This probe does not replace independent concurrency/linearizability or presigned-URL qualification.
 
 ## Providers
 
-| Provider | Conditional Writes | Notes |
+| Provider / interface | Authority status | Notes |
 |---|---|---|
-| S3-compatible object storage | ✅ | Must support conditional create/conditional overwrite/read-after-write/ranged read; confirm with the `cellhive diagnose` probe before deployment |
-| **Local S3-compatible (MinIO Community Edition)** | ✅ | **Tested and passed in this repository** (RELEASE.2025-04-22, four conditional writes + ranged read); not officially certified for production; avoid `RELEASE.2025-09-06T17-38-46Z` (conditional create anomaly can cause the initial deploy to fail); run `diagnose` to confirm other versions |
-| Storage that does not support the required conditional writes | ❌ | Stop if the startup probe fails |
+| Local filesystem (empty `CELLHIVE_BUCKET`) | Local single-node development | Not a cloud multi-node authority |
+| S3 API (`s3://<bucket>`) | Verify each instance | "S3-compatible" alone does not guarantee atomic owner CAS and delete |
+| Pinned local MinIO (`RELEASE.2025-02-18T16-25-55Z`) | ❌ | 2026-09-22: create/CAS/range passed but stale `DeleteObject If-Match` returned success; the complete integration probe fails |
+| Native OSS (`oss://`) | Tested Beijing bucket passed; verify each other bucket | Isolated concurrent claim/CAS/delete and startup diagnose passed. Same-host process `SIGKILL` followed by fresh-directory takeover: 5,000/5,000 writes ACKed at 192 clients; 6,470 ACKed values recovered exactly (missing=0, wrong=0), SQLite integrity=ok. |
+| Native COS (`cos://`) | Tested Hong Kong `cell-1376795072` bucket passed; verify each other bucket | Isolated concurrent claim/CAS/delete and startup diagnose passed. Same-host process `SIGKILL` followed by fresh-directory takeover: 5,000/5,000 writes ACKed at 192 clients; 6,488 ACKed values recovered exactly (missing=0, wrong=0), SQLite integrity=ok. Earlier `vwork-hk-1376795072` returned 405 for AppendObject and remains unqualified. |
+| COS/OSS S3 endpoints tested on 2026-09-22 | ❌ for those configurations | COS accepted duplicate `If-None-Match:*` PUT; OSS returned `NotImplemented` on the first PUT. Do not generalize to untested accounts/endpoints |
 
 ## Bucket Roles (Default Single Bucket + Prefix, Splittable)
 
@@ -51,7 +54,7 @@ r2/<ns>/<bucket_name>/<object-key>
 
 - **Long-lived credentials are only in `cell-agent`**;
 - `do-runtime`/`user-runtime` **do not hold** long-lived credentials;
-- bundle/assets reads: cell-agent issues **short-lived read-only** presigned/scoped credentials by `(ns, worker, version)` (ADR-030);
+- Bundle/assets reads: a runtime first asks cell-agent for a short-lived read-only presigned URL, then reads bytes directly from object storage; local-filesystem or unsupported-presign backends fall back to the authenticated internal point-read path without giving the runtime long-lived credentials (ADR-030);
 - The admin backend never touches bucket credentials (only via cell-agent).
 
 ## Lifecycle and GC
@@ -73,6 +76,6 @@ r2/<ns>/<bucket_name>/<object-key>
 - Compatibility and TTL of presigned URLs across providers;
 - Lifecycle rules and cost model;
 - Snapshot/archive strategy for the backup role;
-- Empirical testing of cloud conditional writes/conditional deletes (Class C environments, see [`testing.md`](testing.md)).
+- Other cloud stores/accounts: atomic write/delete semantics, concurrent races, and presigned reads (Class C environment).
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_

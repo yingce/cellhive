@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -172,8 +173,12 @@ func (s *Server) handleBundleURL(w http.ResponseWriter, r *http.Request) {
 	ttl := ttlFromQuery(r, 5*time.Minute)
 	url, err := st.PresignBundle(r.Context(), r.URL.Query().Get("sha"), ttl)
 	if err != nil {
-		if err == bucket.ErrNotSupported {
+		if errors.Is(err, bucket.ErrNotSupported) {
 			writeErr(w, http.StatusNotImplemented, "no_presign", "bucket does not support presign")
+			return
+		}
+		if errors.Is(err, bucket.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "not_found", err.Error())
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "presign_failed", err.Error())
@@ -211,8 +216,16 @@ func (s *Server) handleAssetURL(w http.ResponseWriter, r *http.Request) {
 	ttl := ttlFromQuery(r, 5*time.Minute)
 	url, err := st.PresignAsset(r.Context(), q.Get("ns"), q.Get("worker"), q.Get("token"), q.Get("path"), ttl)
 	if err != nil {
-		if err == bucket.ErrNotSupported {
+		if errors.Is(err, artifacts.ErrBadPath) {
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if errors.Is(err, bucket.ErrNotSupported) {
 			writeErr(w, http.StatusNotImplemented, "no_presign", "bucket does not support presign")
+			return
+		}
+		if errors.Is(err, bucket.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "not_found", err.Error())
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "presign_failed", err.Error())

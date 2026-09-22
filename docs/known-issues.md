@@ -2,7 +2,7 @@
 
 本文件记录系统评审发现的全部问题，以及**每条问题的解决决议**。原始分级见文末附录。设计文档（architecture / cell-protocol / durable-objects / networking / decisions）已按此同步。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_
 
 ---
 
@@ -11,7 +11,7 @@ _最后更新：2026-09-19_
 | ID | 主题 | 决议状态 |
 |---|---|---|
 | C-01 | DO owner claim flow | ✅ 定稿（durable-objects.md） |
-| C-02 | bundle/assets 读取路径 | ✅ 定稿：短期 scoped 凭据直连对象存储（decisions.md 待定#1） |
+| C-02 | bundle/assets 读取路径 | ✅ 已实现：runtime 向 cell-agent 申请短期只读 presigned URL 后直连对象存储；本地 FS/后端不支持 presign 时回退内部鉴权点查（ADR-030） |
 | C-03 | node-log / recovery | ✅ **完整实现**（ADR-057：`RecoverNode` 列节点+fast path；优雅停止 seal；E2E kill -9 恢复 128 段、时延 0.04s、RPO=0/keys=1000。**ADR-066**：节点死亡自动编排已接线） |
 | C-04 | DO 冷激活 / restore | ✅ 定稿（durable-objects.md） |
 | C-05 | DO alarm 恢复 | ✅ 定稿（见下） |
@@ -163,7 +163,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | fleet 跨网络 RTT | ✅ ADR-048：capture 级有序 pipelining 已实现（自适应，loopback 走串行） | 20ms 单向 c=1024 **8.6k → 13.3k TPS（+55%）**；5ms c=1024 24.0k → 29.3k（+22%）；loopback 持平。受控 checkpoint 仍待 snapshot/link apply |
 | 单节点 commit 模式 | ✅ 已实现：`CELLHIVE_DURABILITY`=`auto`\|`fleet`\|`bucket` + `CELLHIVE_BUCKET_WAIT`（默认 true）。`fleet` 无 peer 时退化为等 bucket 并告警，不静默 ack；`fleet`+`WAIT=false` 启动拒绝 | FS c=64（3 轮）：async 中位 ~38.5k / batch ~29.2k RPS（async ~1.3x）；**MinIO loopback 噪声 ±3x，两者基本打平**，单轮排名不可信 |
 | 云对象存储尾延迟 | ⚠️ 实测：远端对象存储单节点 batch p50 可达数百 ms–秒级、偶发超时；async 低 p50 但 RPO>0 | 桶提交仅后台；上 ≥2 节点走 fleet；同区/就近 |
-| **S3 条件写/range 语义** | ✅ **可重复脚本 `make s3-test`（本地 MinIO）**：`s3probe` 四项全 OK（conditional create / reject-create / CAS / reject-stale）+ ranged read；`TestS3BucketIntegration`、**`TestS3ReplicationRestoreChain`**（snapshot→Restore→ApplyFile 500 行；Compact→PageFetcher **ranged**→Materialize 500 行）| 用本地 `minio`/`rustfs`：见 `docs/testing.md`「S3 集成测试」。剩余：云厂商/区域差异未测 |
+| **S3 权威桶条件语义** | ❌ 2026-09-22 `make s3-test` 固定 MinIO：`s3probe` 四条件写 + range 通过、复制恢复链通过，但新增 `TestS3BucketIntegration` 检出 stale `DeleteObject If-Match` 未拒绝（返回 nil） | 完整权威契约失败；不能用该 MinIO 镜像上线。需支持目标 CAS、条件删除的对象存储并逐实例验证；不可仅凭旧四项通过推断可用 |
 | 跨节点"捕获→cell-agent→证明" p50/p99 | ✅ 真实多进程 + 真实 TCP（loopback）已测；◐ 云/跨主机未测 | 评估 FUSE 或调整放置 |
 | do-runtime 冷激活/恢复时间 | ◐ 未验证（restore 500 段 5ms，非 workerd actor） | paging/常驻策略 |
 | 兼容日期/flag 表与 pinned workerd | ✅ 已实测（workerd 2026-09-16）：支持 `compatibilityDate` 上限 **2026-09-23**（更新会硬报错"newest date supported ... 2026-09-23"）；未知 `compatibilityFlags` 硬报错 `No such compatibility flag: <x>`，已知 flag（如 `nodejs_compat`）通过配置校验 | 探测方式：临时 capnp 设未来日期/伪 flag + `workerd serve`。含义：pinned workerd 的 flag 集必须在加载时逐项验证，不能盲信 wrangler 默认 |
@@ -185,7 +185,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 ### 已确认的推荐（用户交互确认，2026-09-14）
 
-- **ADR-030**：bundle/assets 用**短期 scoped 凭据直连对象存储**（不经 cell-agent 代理）。
+- **ADR-030**：bundle/assets 目标态为**短期 scoped 凭据直连对象存储**（不经 cell-agent 代理）；presign 接口已实现，当前 runtime 仍走 cell-agent 内部鉴权点查。
 - **ADR-031**：路由投影**纯拉取 + 5–10s TTL（无 push）**。
 - **ADR-028**：端口划分 `:7001` 内部 REST（Go↔Go 与 JS↔cell 共用；`:7000` gRPC 平面已取消，ADR-136）/ `:8082` admin。
 - **ADR-035**：限流/配额/admission **P1 实现**，保守默认 + 可配。
@@ -267,7 +267,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 - **删除/purge**：软删 + `purges` 作业 + `RunPurgeLoop` 已落地（ADR-131），并且 purge 只对**仍处于软删状态**的实体生效、deploy/create 会取消作业（ADR-135）；**数据侧 hook 已接线（ADR-142）**：worker 删除清该 worker 的 DO 段与 assets、app 删除清整个 ns 的 `cells/`+`assets/`，每个 cell-agent 都执行（跨节点本地副本 drain + 桶删除幂等），hook 可续跑（有界删除/轮，`done=false` 保留 pending）。**已补（ADR-169）**：数据侧改为 `objectstore.Objects.ListPage` + `bucket.PagedLister` 游标分页删除（S3 `StartAfter`；内存有界）；`Purger.delete` 边删边推进、预算用尽下一轮续跑。**残余**：每轮从目标前缀起点重扫（未持久化跨轮 cursor，冷路径）；FS dev 每页仍走树（内存有界）。
 - **async bucket 上传**：已有**持久化重试队列**（ADR-143）：写前 spool（`<DATA_DIR>/upload-spool`）+ 启动/周期重放，失败计 `deferred`（不再丢，只有落盘失败+上传失败才 `dropped`），`/metrics` 暴露 spool/deferred/dropped。**已补（ADR-171）**：spool 改原子写（tmp fsync → rename → 目录 fsync，目录链记忆化），**断电安全**；`Remove` 不 fsync（replay 幂等，安全）。
-- **S3 条件删除**：`ConditionalDelete` 依赖 `DeleteObject` 的 `If-Match`；忽略该头的兼容存储会退化为无条件删除（owner/lease fence 依赖它）。**自检方式**：`cellhive diagnose` 现在包含该探测（stale etag 必须被拒 + 正确 etag 必须删除 + 对象必须消失），失败信息会点名 "conditional delete (reject-stale)"；FS/本地桶已由单测覆盖，云端属 C 类环境待实测。
+- **对象存储状态权威兼容性**：S3 `ConditionalDelete` 依赖 `DeleteObject If-Match`；忽略该头会无条件删除新 owner/lease，故启动探针失败时 `cell-agent` 直接退出。`CELLHIVE_BUCKET` 接受空值（本地）、`s3://`，以及原生追加式 `oss://` / `cos://`；其余 scheme 拒绝。原生 provider 以 `AppendObject(position)` 和 tombstone 帧提供可变权威对象的 CAS/条件删除，不以 `HEAD+PUT/DELETE` 假装原子。2026-09-22 OSS 北京桶及 COS 香港 `cell-1376795072` 桶的隔离键并发 claim、CAS/条件删除、启动诊断通过；同宿主双进程共享真实云桶的 `SIGKILL`/新目录接管与高并发数据精确核对亦通过（见 ADR-189）。原 COS 香港 `vwork-hk-1376795072` 桶 AppendObject 返回 405，仍不能作为权威桶。COS/OSS 的普通 S3 API 在所测桶不满足权威条件写（ADR-188）。其他供应商/桶仍须分别验收；跨主机分区及长时混沌未测。
 - **`r2.List`**：已 cursor 分页 + 尺寸化（ADR-145）：`bucket.PagedLister`（S3 `StartAfter`+`MaxKeys`、FS 有界选择），`/v1/r2/list` 返回 `truncated`/`cursor`，facade 透传。**已补（ADR-168）**：`include=httpMetadata,customMetadata`（显式才逐对象读 sidecar）与 `delimiter`/`delimitedPrefixes`（扫描上限 10000，超出 `truncated`+cursor）。**残余**：FS 后端算 etag 仍读对象体（dev 后端）；仍未实现 object versioning/SSE-C/conditional put。
 
 ## 删除/清理（ADR-131/142，已实现）
@@ -295,10 +295,10 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 ## P2 Workflows 绑定（ADR-086，Partial）
 
-**已实现（真实 workerd e2e）**：`internal/workflow`（`__workflow__` cell：instances/steps/events，step 记忆化）；facade `env.WF.create/get/sendEvent`；cell-agent API（租户 create/get/event，内部 step/sleep/finish）；user-runtime `/v1/workflows/run` + `cellhive-workflow.js` base + `step.do/sleep`（shim：改写 `cloudflare:workers`，平台自构造，因 workerd 的 `WorkflowEntrypoint` 引擎外不可构造）；sleep 复用统一 timer（`KindWorkflowSleep`）；CLI `workflow create`；`wranglercompat` 要求 `class_name`。
+**已实现（真实 workerd e2e）**：`internal/workflow`（`__workflow__` cell：instances/steps/events，step 记忆化）；facade `env.WF.create/createBatch/get/sendEvent`；cell-agent API（租户 create/create-batch/get/event，内部 step/sleep/finish）；user-runtime `/v1/workflows/run` + `cellhive-workflow.js` base + `step.do/sleep`（shim：改写 `cloudflare:workers`，平台自构造，因 workerd 的 `WorkflowEntrypoint` 引擎外不可构造）；sleep 复用统一 timer（`KindWorkflowSleep`）；CLI `workflow create`；`wranglercompat` 要求 `class_name`。create/createBatch 请求总 payload 上限 1 MiB，batch 为 1..100 个实例。
 
-**Partial 边界（未做）**：跨 worker 实例；`locationHint` 被接受但**忽略**（best-effort 放置提示，无效果）。
-**已实现**（曾误列为未做）：`pause`/`resume`/`terminate`/`restart`（`internal/server/workflow.go:126` + facade）、`waitForEvent`（`handleWorkflowWait` + `env.WF.sendEvent`）、实例列举（`handleWorkflowList` + `env.WF.list`）、`instance.delete()`（`Store.Delete` + `/v1/workflow/delete` + facade）、每步 `retries{limit,delay,backoff}`（`workerd/user-runtime/workflow-wrapper.js:74-152`，durable attempt）。
+**Partial 边界（未做）**：跨 worker 实例；`locationHint` 被接受但**忽略**（best-effort 放置提示，无效果）；step 历史列举与 progress 回调。
+**已实现**：`pause`/`resume`/`terminate`/`restart`（`internal/server/workflow.go` + facade）、`waitForEvent`（`handleWorkflowWait` + `env.WF.sendEvent`）、实例列举（`handleWorkflowList` + `env.WF.list`）、`instance.delete()`、每步 `retries{limit,delay,backoff}`、`createBatch` 与 payload 预算。
 
 ## backend-A 捕获与冷恢复（ADR-092）
 

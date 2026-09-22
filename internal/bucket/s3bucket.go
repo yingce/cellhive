@@ -26,6 +26,8 @@ type S3Options struct {
 	Bucket    string
 	PathStyle bool
 	Debug     bool
+	// Legacy provider S3 gateways do not accept SDK trailer checksums.
+	DisableOptionalChecksums bool
 }
 
 // S3Bucket is an S3-compatible Bucket implementation (AWS S3 / R2 / MinIO).
@@ -56,6 +58,9 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+	if o.DisableOptionalChecksums {
+		cfg.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 	}
 	if o.Debug {
 		cfg.ClientLogMode = aws.LogRequestWithBody | aws.LogResponseWithBody

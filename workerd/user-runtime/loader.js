@@ -348,9 +348,19 @@ async function asset(env, app, worker, token, path) {
   const key = `${app.namespace}/${worker}/${token}/${path}`;
   if (assetCache.has(key)) return assetCache.get(key);
   const q = new URLSearchParams({ ns: app.namespace, worker, token, path });
-  const r = await fetch(env.CELL_URL + "/v1/internal/asset?" + q, {
-    headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-  });
+  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const signed = await fetch(env.CELL_URL + "/v1/internal/asset-url?" + q, { headers });
+  let r;
+  if (signed.ok) {
+    const { url } = await signed.json();
+    if (url && !url.startsWith("file:")) r = await fetch(url);
+  } else if (signed.status === 404) {
+    assetCache.set(key, null);
+    return null;
+  } else if (signed.status !== 501) {
+    throw new Error("GET asset URL " + path + " -> " + signed.status);
+  }
+  if (!r) r = await fetch(env.CELL_URL + "/v1/internal/asset?" + q, { headers });
   if (r.status === 404) {
     assetCache.set(key, null);
     return null;
@@ -818,9 +828,17 @@ async function bundle(env, sha) {
   if (running) return running;
   const p = (async () => {
     try {
-      const r = await fetch(env.CELL_URL + "/v1/internal/bundle?sha=" + encodeURIComponent(sha), {
-        headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-      });
+      const q = "?sha=" + encodeURIComponent(sha);
+      const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+      const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
+      let r;
+      if (signed.ok) {
+        const { url } = await signed.json();
+        if (url && !url.startsWith("file:")) r = await fetch(url);
+      } else if (signed.status !== 404 && signed.status !== 501) {
+        throw new Error("GET bundle URL " + sha + " -> " + signed.status);
+      }
+      if (!r) r = await fetch(env.CELL_URL + "/v1/internal/bundle" + q, { headers });
       if (!r.ok) throw new Error("GET bundle " + sha + " -> " + r.status);
       const src = await r.text();
       bundleCache.set(sha, src);

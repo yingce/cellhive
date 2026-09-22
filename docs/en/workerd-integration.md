@@ -45,10 +45,10 @@ worker id = <ns>:<worker>:<version>   (immutable)
 user-runtime loader:
   1. Obtain worker id from the routing projection
   2. workerLoader.get(id, () => fetchBundle(id))
-       · bundle is fetched from object storage by content address (SHA-256) (scoped read-only credentials, ADR-030)
+       · the bundle is content-addressed (SHA-256); the runtime asks cell-agent for a short-lived presigned URL and then reads object storage directly, falling back to authenticated internal point reads for local-filesystem/unsupported-presign backends
   3. Generate wrapper (JS layer):
        · wrap tenant module exports (fetch/scheduled/queue/alarm/RPC)
-       · construct tenant env from user-declared vars and user-named binding stubs only; zero platform keys (ADR-185)
+       · construct tenant env from user-declared vars, current managed secrets, and user-named binding stubs; zero platform keys (ADR-185)
        · preserve built-in modules such as `cloudflare:workers`; shim modules such as `cloudflare:workflows`
   4. Invoke handler
 ```
@@ -56,7 +56,7 @@ user-runtime loader:
 - **Env budget (ADR-186, implemented)**: 1 MiB upstream limit with 8 KiB headroom, giving a **1016 KiB** CellHive limit, including V8 two-byte string cost. Rejections use `worker_env_too_large` and expose only `actual_bytes`/`max_bytes`.
 - **WorkerCode budget (ADR-186, implemented)**: the final form passed to `workerLoader` (tenant modules, wrapper and platform-injected modules) is limited to **64 MiB**. The control plane rejects before its transaction/active-pointer change, and the runtime rechecks through the single shared `checkedWorkerGet()` path. Rejections use `worker_code_too_large`.
 - **Host secrets (ADR-186, implemented)**: platform URLs/tokens enter trusted host bindings only through Cap'n Proto `fromEnvironment`. user-runtime, do-runtime, and do-supervisor construct an explicit workerd child environment rather than inheriting the parent environment. Secrets must not appear in rendered capnp, final WorkerCode, tenant env, arguments, or logs.
-- **Secret boundary**: secrets can be encrypted, stored, and managed, but are not yet injected into the runtime env; they are not an env source above. A future injection path must retain zero platform keys and no reserved names.
+- **Secret boundary**: secrets remain envelope-encrypted in the control cell; cell-agent decrypts them when serving the runtime execution view and merges them with vars for Worker/DO env injection. Plaintext never enters bundles, binding-spec props, rendered capnp, arguments, or logs. A same-named secret overrides a var; already-loaded isolates/facets change only on a new load/rebuild.
 - **Workflow / logging boundary**: a trusted internal host creates a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` and passes it as a JSRPC parameter across `workerLoader` to the wrapper. It is neither a `ServiceStub` nor tenant env. The dynamic-Tail spike was rerun on pin `1.20260916.1` and remains rejected (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled and must not fall back to env transport.
 - **Reserved module prefixes**: platform-generated module names use reserved prefixes (such as `__cellhive-`); tenants must not occupy them.
 

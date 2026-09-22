@@ -93,7 +93,22 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			spec[b.Name] = map[string]any{"kind": "service", "ns": targetNS, "caller_ns": ns, "name": b.Name, "target": target, "entrypoint": b.Entrypoint, "token": token}
 		}
 	}
-	return spec, v.Vars
+	return spec, s.runtimeVars(ctx, ns, worker, v.Vars)
+}
+
+func (s *Server) runtimeVars(ctx context.Context, ns, worker string, declared map[string]string) map[string]string {
+	vars := make(map[string]string, len(declared))
+	for k, val := range declared {
+		vars[k] = val
+	}
+	if metas, err := s.Control.ListSecrets(ctx, ns, worker); err == nil {
+		for _, meta := range metas {
+			if val, err := s.Control.GetSecret(ctx, ns, worker, meta.Key); err == nil {
+				vars[meta.Key] = string(val)
+			}
+		}
+	}
+	return vars
 }
 
 // handleInternalBindings returns the binding spec a runtime injects into a

@@ -43,7 +43,9 @@ spec:
           command: ["user-runtime"]
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
-            - secretRef: {name: {{ include "cellhive.secretName" . }}}
+          env:
+            - name: CELLHIVE_ROOT_KEY
+              valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_ROOT_KEY}}
           ports:
             - {name: public, containerPort: 8081}
             - {name: internal, containerPort: 8088}

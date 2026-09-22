@@ -17,7 +17,7 @@
 3. **scope 声明校验**：host adapter 调 cell-agent 时声明 `(ns, binding 类型/id)`；cell-agent 校验，越权即拒。binding 本身由 adapter 不可变 props 唯一绑定到具体 cell。
 4. **纵深防御**：per-binding 签名 scoped token（namespace + binding 类型/id），即使隔离被绕也只能碰该绑定（**ADR-074**）。**平台本地计算、无过期**：撤销靠 `HasBinding` 每请求校验 + `SCOPE_SECRET` 轮换；**广权限 internal token 不进租户 loaded worker**，facade 只带 scoped token。
 
-> 密钥：控制面 cell 存**信封密文**，根密钥在 cell 之外（env/KMS）；加载期在 cell-agent 内解密注入 `env`，明文只进 load envelope + workerd env。
+> 密钥：控制面 cell 存**信封密文**，根密钥在 cell 之外（env/KMS）；运行时读取执行视图时由 cell-agent 解密并注入 Worker/DO `env`，明文只进入该 load envelope 与 workerd env，不进入 bundle、渲染配置、参数或日志。同名 secret 覆盖 var。
 
 ## 管理后台（ADR-036/131）
 

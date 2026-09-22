@@ -39,7 +39,9 @@ spec:
           command: ["/usr/local/bin/user-runtime"]
           envFrom:
             - configMapRef: {name: cellhive-config}
-            - secretRef: {name: cellhive-secrets}
+          env:
+            - name: CELLHIVE_ROOT_KEY
+              valueFrom: {secretKeyRef: {name: cellhive-secrets, key: CELLHIVE_ROOT_KEY}}
           ports:
             - {name: public, containerPort: 8081}
             - {name: internal, containerPort: 8088}

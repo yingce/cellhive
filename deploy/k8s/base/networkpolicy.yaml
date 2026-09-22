@@ -1,7 +1,5 @@
-# In-cluster isolation: cell-agent and do-runtime accept traffic only from this
-# namespace's pods; the public entry (user-runtime) is open for the
-# operator-provided edge (ADR-132). Egress: in-cluster + DNS + public internet
-# (tenant outbound, cloud object storage), other private ranges excluded.
+# Internal listeners accept only CellHive pods; the public user-runtime port
+# remains available to an operator-managed edge. DNS egress uses port 53.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -45,7 +43,11 @@ metadata:
   namespace: cellhive
 spec:
   podSelector: {matchLabels: {app: user-runtime}}
-  policyTypes: [Egress]
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8081}]
+    - from: [{podSelector: {matchLabels: {app: cell-agent}}}]
+      ports: [{protocol: TCP, port: 8088}]
   egress:
     - to: [{podSelector: {}}]
     - to:

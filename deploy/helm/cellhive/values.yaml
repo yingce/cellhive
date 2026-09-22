@@ -1,5 +1,5 @@
-# CellHive Helm values. Only `rootKey` (or `existingSecret`) is required: every
-# role credential is HKDF-derived from it (ADR-137).
+# CellHive Helm values. Single node uses its PVC as the authoritative filesystem
+# bucket. Multiple cell-agent replicas require a shared externally managed S3.
 
 image:
   repository: cellhive
@@ -22,7 +22,7 @@ config:
   # awsEndpoint / awsRegion / awsAccessKey / awsSecretKey -> put in the Secret.
 
 cellAgent:
-  replicas: 2
+  replicas: 1
   storage: 20Gi
   resources:
     requests: {cpu: 250m, memory: 256Mi}
@@ -38,7 +38,7 @@ userRuntime:
     limits: {memory: 2Gi}
 
 doRuntime:
-  replicas: 2
+  replicas: 1
   # gate=true deploys do-runtime-gated (ADR-083/140: DO RPO=0 via the output
   # gate); false deploys the ungated runtime.
   gate: true

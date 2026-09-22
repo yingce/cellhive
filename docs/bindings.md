@@ -18,7 +18,7 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 | **Durable Objects** | do-runtime 原生 facet | **同步 SQL**；绑定 `env.DO.get(...).fetch()` 与 **`getByName(...).method(...)` DO RPC**（ADR-080 shard/owner/hint/WS 1012；ADR-162 RPC tagged JSON + 原生 JSRPC） | workerd actor SQLite（工作副本）→ cell-agent 复制 | **do-runtime 节点** |
 | **ASSETS** | 对象存储（版本化） | 异步 | `assets/<ns>/<worker>/<token>/...` | 对象存储 |
 | **Service bindings** | workerd JSRPC | 同步/异步 | — | 目标 Worker |
-| **Vars / Secrets** | vars 与用户命名 binding stub 在加载期注入 `env`；secret 尚未注入 | — | secrets 在 control cell（密文） | cell-agent |
+| **Vars / Secrets** | vars、当前 managed secrets 与用户命名 binding stub 在加载期注入 `env`；secret 与同名 var 冲突时覆盖 var | — | secrets 在 control cell（信封密文） | cell-agent |
 | **AI** | BYO OpenAI 兼容端点（`env.AI.run`） | 异步 | — | cell-agent（`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`；无平台托管目录） |
 
 ## host adapter 模型
@@ -122,7 +122,7 @@ export default {
 
 cell-agent 的 `queue.Runner` 周期性从**控制面登记的 queue 资源**取轮询集（`control.ResourcesByKind("queue")`，冷路径），对每个队列 `Claim` 一批（lease），POST 到 `CELLHIVE_DISPATCH_URL` 的 **`/v1/queues/dispatch`**；成功 `Ack`、失败整批 `Retry`（**at-least-once**）。body 含 `(namespace, queue, worker, bundle_sha, version, messages)`（worker/bundle/version 由 `Projection.QueueTargets()` 解析，ADR-067/112/127），user-runtime 直接加载该活跃版本并调用其 `queue()` handler。body 不带 bindings；user-runtime 在加载时按 `(ns, worker, version)` 调 `GET /v1/internal/worker/bindings` 取该版本的 binding spec 注入 env（ADR-128，失败开放），故 `queue(batch, env)` 与 fetch 的 env 一致。配置：`CELLHIVE_QUEUE_INTERVAL`（默认 1s，0 关闭）。**已实现**：user-runtime `/v1/queues/dispatch`（ADR-067）；重试上限 + 死信（`DeadLetterQueue`，ADR-072，`internal/queue/runner.go`）。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_
 
 ## 绑定实现（ADR-090，RPC entrypoint env；ADR-185 已取代其平台 env 结论）
 
