@@ -1,0 +1,52 @@
+{
+  "env": [
+    {"name": "empty env", "value": {}, "want": 2},
+    {"name": "ASCII", "value": {"A": "alpha", "B": "beta"}, "want": 24},
+    {"name": "Chinese key and value", "value": {"键": "中文中文"}, "want": 22},
+    {"name": "emoji and mixed width", "value": {"face": "😀", "mixed": "aaaaĀ"}, "want": 36},
+    {"name": "mixed ASCII and emoji", "value": {"mixed": "aaaa😀"}, "want": 24},
+    {"name": "line separator uses JSON stringify bytes", "value": {"k": " "}, "want": 11},
+    {"name": "literal unicode escape stays escaped", "value": {"k": "\\u2028"}, "want": 15},
+    {"name": "long key", "value": {"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk": "v"}, "want": 40},
+    {
+      "name": "many binding-shaped objects",
+      "value": {
+        "KV": {"kind": "kv", "props": {"namespace": "ns", "id": "one"}},
+        "ASSETS": {"kind": "assets", "props": {"namespace": "ns", "bucket": "site"}},
+        "SERVICE": {"kind": "service", "props": {"namespace": "other", "worker": "api"}}
+      },
+      "want": 202
+    },
+    {"name": "env limit minus one", "repeat": {"key": "v", "char": "x", "count": 1040375}, "want": 1040383, "overLimit": false},
+    {"name": "env exact limit", "repeat": {"key": "v", "char": "x", "count": 1040376}, "want": 1040384, "overLimit": false},
+    {"name": "env limit plus one", "repeat": {"key": "v", "char": "x", "count": 1040377}, "want": 1040385, "overLimit": true}
+  ],
+  "code": [
+    {"name": "limit minus one", "moduleBytes": 67108863, "want": 67108863, "ok": true},
+    {"name": "exact limit", "moduleBytes": 67108864, "want": 67108864, "ok": true},
+    {"name": "limit plus one", "moduleBytes": 67108865, "want": 67108865, "ok": false},
+    {
+      "name": "binary module",
+      "mainModule": "main.js",
+      "modules": [{"name": "blob.bin", "dataBase64": "AAEC/w=="}],
+      "want": 19,
+      "ok": true
+    },
+    {
+      "name": "long module name",
+      "mainModule": "m.js",
+      "modules": [{"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.js", "text": "export default 1;"}],
+      "want": 88,
+      "ok": true
+    },
+    {
+      "name": "wrapper and fixed injection",
+      "mainModule": "wrapper.js",
+      "generatedWrapper": "wrap",
+      "fixedInjectedSources": ["facade", "codec"],
+      "moduleBytes": 3,
+      "want": 28,
+      "ok": true
+    }
+  ]
+}

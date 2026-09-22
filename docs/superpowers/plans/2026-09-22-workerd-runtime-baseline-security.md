@@ -450,7 +450,7 @@ docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:runtime-baseline --
 
 Expected: `2026-09-16` and `0.28.2` respectively.
 
-- [ ] **Step 5: Commit container tooling**
+- [x] **Step 5: Commit container tooling**
 
 ```bash
 git add deploy/Dockerfile deploy/dockerfile_test.go docs/deployment.md third_party THIRD_PARTY_NOTICES.md
@@ -471,7 +471,7 @@ git commit -m "build: ship pinned workerd and esbuild binaries"
 - Produces: `EstimateEnv(any) (int64, error)`, `CheckEnv(any) error`.
 - Typed error: `LimitError{Code, Actual, Max int64}` with codes `worker_code_too_large` and `worker_env_too_large`.
 
-- [ ] **Step 1: Write Go boundary tests first**
+- [x] **Step 1: Write Go boundary tests first**
 
 ```go
 func TestCheckCodeBoundary(t *testing.T) {
@@ -488,21 +488,21 @@ func TestEstimateEnvChargesTwoByteStrings(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run and verify missing-package failure**
+- [x] **Step 2: Run and verify missing-package failure**
 
 Run: `go test ./internal/workerbudget -count=1 -v`
 
 Expected: FAIL because the package is absent.
 
-- [ ] **Step 3: Implement deterministic Go estimators**
+- [x] **Step 3: Implement deterministic Go estimators**
 
 `EstimateCode` sums every module name byte, text/binary payload byte, main module byte, generated wrapper byte, and fixed injected source byte exactly once. `EstimateEnv` JSON-encodes the complete env, adds the V8 two-byte penalty for every non-Latin-1 key/value string, rejects unsupported/cyclic values, and uses the exact constants in Global Constraints.
 
-- [ ] **Step 4: Create cross-language golden vectors**
+- [x] **Step 4: Create cross-language golden vectors**
 
 Vectors must include empty env, ASCII, Chinese, emoji, long keys, many binding-shaped objects, code at limit −1/limit/limit +1, binary modules, and long module names. JS tests load the same JSON and assert byte-for-byte equality with recorded Go results.
 
-- [ ] **Step 5: Implement the JS runtime guard and run both suites**
+- [x] **Step 5: Implement the JS runtime guard and run both suites**
 
 Run:
 
@@ -513,7 +513,7 @@ node --test workerd/platform/budget.test.mjs
 
 Expected: PASS with identical estimates.
 
-- [ ] **Step 6: Commit budget primitives**
+- [x] **Step 6: Commit budget primitives**
 
 ```bash
 git add internal/workerbudget workerd/platform/budget.js workerd/platform/budget.test.mjs
