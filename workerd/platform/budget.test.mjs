@@ -61,3 +61,67 @@ test("env rejects unsupported and cyclic values", () => {
     assert.throws(() => budget.estimateEnv(value));
   }
 });
+
+test("binding env estimate preserves user names and complete props", () => {
+  const vars = { CELL_URL: "user-owned", plain: "value" };
+  const specs = {
+    KV: { kind: "kv", ns: "acme", name: "KV", token: "scope-token" },
+  };
+  const estimated = budget.estimatedWorkerEnv(vars, specs);
+  assert.deepEqual(estimated, {
+    CELL_URL: "user-owned",
+    plain: "value",
+    KV: {
+      __cellhiveBinding: "kv",
+      props: { kind: "kv", ns: "acme", name: "KV", token: "scope-token" },
+    },
+  });
+  assert.equal(budget.assertEstimatedWorkerEnvBudget(vars, specs), budget.estimateEnv(estimated));
+});
+
+test("checkedWorkerGet never invokes loader after a code or env budget failure", () => {
+  let calls = 0;
+  const loader = { get() { calls++; throw new Error("loader callback must remain unreachable"); } };
+  const oversizedCode = {
+    mainModule: "tenant.js",
+    modules: { "tenant.js": new Uint8Array(64 * 1024 * 1024) },
+    env: {},
+  };
+  assert.throws(
+    () => budget.checkedWorkerGet(loader, "code", oversizedCode, {}, {}, "user"),
+    (error) => error.code === "worker_code_too_large",
+  );
+  const oversizedEnv = { huge: "x".repeat(1016 * 1024) };
+  const smallCode = { mainModule: "tenant.js", modules: { "tenant.js": "export default {}" }, env: oversizedEnv };
+  assert.throws(
+    () => budget.checkedWorkerGet(loader, "env", smallCode, oversizedEnv, {}, "do"),
+    (error) => error.code === "worker_env_too_large",
+  );
+  assert.equal(calls, 0);
+  assert.deepEqual(budget.budgetFailureCounts(), {
+    user: { code: 1, env: 0 },
+    do: { code: 0, env: 1 },
+  });
+});
+
+test("budget errors expose only bounded aggregate fields", () => {
+  const error = new budget.LimitError("worker_env_too_large", 1040385, 1040384);
+  assert.deepEqual(budget.budgetErrorBody(error), {
+    error: "worker_env_too_large",
+    actual_bytes: 1040385,
+    max_bytes: 1040384,
+  });
+  assert.deepEqual(
+    budget.budgetErrorBody({
+      toString() {
+        return "LimitError: worker_env_too_large: 1040395 bytes exceeds 1040384-byte limit";
+      },
+    }),
+    {
+      error: "worker_env_too_large",
+      actual_bytes: 1040395,
+      max_bytes: 1040384,
+    },
+  );
+  assert.equal(budget.budgetErrorBody(new Error("unrelated")), null);
+});

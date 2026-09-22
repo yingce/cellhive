@@ -23,6 +23,7 @@ import {
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans } from "telemetry.js";
+import { budgetErrorBody, checkedWorkerGet } from "budget.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 
@@ -243,6 +244,8 @@ async function invoke(req, env, ticket) {
     if (env.ADVERTISE) hdrs["x-cellhive-do-owner"] = String(env.ADVERTISE);
     return new Response(body, { status: res.status, headers: hdrs });
   } catch (e) {
+    const budget = budgetErrorBody(e);
+    if (budget) return json(budget, 500);
     return json({ error: "invoke_failed", message: String(e) }, 500);
   } finally {
     inflight--;
@@ -673,7 +676,14 @@ export class Host extends DurableObject {
         storage_class: q.get("storage_class") || "",
         version: q.get("version") ?? undefined,
       };
-      const facet = await this.#facet(spec);
+      let facet;
+      try {
+        facet = await this.#facet(spec);
+      } catch (e) {
+        const body = budgetErrorBody(e);
+        if (body) return json(body, 500);
+        throw e;
+      }
       return facet.fetch(req); // 101 + webSocket preserved
     }
     if (url.pathname === "/v1/do/abort") {
@@ -713,7 +723,14 @@ export class Host extends DurableObject {
       return new Response("ok");
     }
     const spec = await req.json();
-    const facet = await this.#facet(spec);
+    let facet;
+    try {
+      facet = await this.#facet(spec);
+    } catch (e) {
+      const body = budgetErrorBody(e);
+      if (body) return json(body, 500);
+      throw e;
+    }
     globalThis.__cellhiveTraceparent = spec.traceparent || "";
     const span = startSpan("do.invoke", {
       kind: "server",
@@ -839,7 +856,7 @@ export class Host extends DurableObject {
         }
       }
       const facetSrc = renderFacetModule(doClasses);
-      const loaded = this.env.LOADER.get(loaderId, () => ({
+      const workerCode = {
         compatibilityDate: spec.compat_date || "2026-06-15",
         compatibilityFlags: spec.compat_flags || [],
         mainModule: facetSrc ? "cellhive-facet.js" : "bindings-wrapper.js",
@@ -857,7 +874,8 @@ export class Host extends DurableObject {
         ),
         env: buildFacetEnv(this.ctx, this.env, bs, spec),
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
-      }));
+      };
+      const loaded = checkedWorkerGet(this.env.LOADER, loaderId, workerCode, bs.vars, bs.bindings, "do");
       const cls = loaded.getDurableObjectClass(spec.class, {
         props: {
           namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,

@@ -12,6 +12,7 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
+import { budgetErrorBody, checkedWorkerGet } from "budget.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
@@ -154,7 +155,19 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   } catch (e) {
     return text("binding setup failed: " + e, 502);
   }
-  const stub = workerStub(env, ctx, app, worker, version, source, spec);
+  let stub;
+  try {
+    stub = workerStub(env, ctx, app, worker, version, source, spec);
+  } catch (e) {
+    const body = budgetErrorBody(e);
+    if (body) {
+      return new Response(JSON.stringify(body), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw e;
+  }
   const traced = cleanRequest(withTraceparent(req, env));
   const span = startSpan("http.server", {
     kind: "server",
@@ -183,7 +196,7 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
   // not just the bundle sha: a binding/vars-only deploy keeps the same sha but
   // is a new version, and reusing the old isolate would keep the old env.
   const id = `${app.namespace}/${worker}@${version.version}-${version.bundle_sha}`;
-  return env.LOADER.get(id, () => ({
+  const workerCode = {
     compatibilityDate: version.compat_date || "2026-06-15",
     compatibilityFlags: version.compat_flags || [],
     mainModule: "wrapper.js",
@@ -198,7 +211,8 @@ function workerStub(env, ctx, app, worker, version, source, spec) {
     // R2 (local metadata) and DO (WebSocket) bindings.
     env: tenantEnv(env, ctx, spec, version.vars, app.namespace, worker),
     globalOutbound: env.OUTBOUND,
-  }));
+  };
+  return checkedWorkerGet(env.LOADER, id, workerCode, version.vars, spec, "user");
 }
 
 // The service loader is registered once: ServiceBinding (bindings.js) calls it

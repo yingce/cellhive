@@ -76,6 +76,7 @@ type ownerStub struct {
 	alarms    []int64           // due_ms values reported by the host
 	bundles   map[string]string // sha -> source (overrides the single bundle)
 	bindings  map[string]any    // facet binding spec served by /v1/internal/do/bindings
+	vars      map[string]any    // tenant vars served by /v1/internal/do/bindings
 	self      atomic.Value      // string: this runtime's base URL, for DO->DO proxying
 	ownerMu   sync.Mutex        // guards live/lease/forwardTo (mutated while serving)
 	spanMu    sync.Mutex        // guards spans
@@ -167,11 +168,18 @@ func (o *ownerStub) handler(bundle string) http.HandlerFunc {
 			return
 		case "/v1/internal/do/bindings":
 			w.Header().Set("content-type", "application/json")
-			if o.bindings == nil {
+			if o.bindings == nil && o.vars == nil {
 				_, _ = w.Write([]byte(`{"bindings":{},"vars":{}}`))
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"bindings": o.bindings, "vars": map[string]any{}})
+			bindings, vars := o.bindings, o.vars
+			if bindings == nil {
+				bindings = map[string]any{}
+			}
+			if vars == nil {
+				vars = map[string]any{}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"bindings": bindings, "vars": vars})
 			return
 		case "/v1/do/invoke":
 			self, _ := o.self.Load().(string)
@@ -280,6 +288,43 @@ func invokeSpec(t *testing.T, base string, spec map[string]any) (*http.Response,
 	buf := new(bytes.Buffer)
 	_, _ = buf.ReadFrom(resp.Body)
 	return resp, buf.String()
+}
+
+// TestRuntimeRejectsDOEnvOverBudget catches an old/corrupt version reaching a
+// DO runtime without control-plane preflight. The host must reject its vars
+// before workerLoader creates the facet worker.
+func TestRuntimeRejectsDOEnvOverBudget(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	o := &ownerStub{
+		live: map[string]bool{},
+		vars: map[string]any{"huge": strings.Repeat("x", 1016*1024)},
+	}
+	base, stop := startRuntime(t, o)
+	defer stop()
+
+	resp, body := invokeSpec(t, base, map[string]any{
+		"namespace": "demo", "worker": "counter", "bundle_sha": "sha1",
+		"class": "Tenant", "id": "oversized",
+		"request": map[string]any{"path": "/count"},
+	})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode response %q: %v", body, err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError || got["error"] != "worker_env_too_large" {
+		t.Fatalf("oversized invoke = %d %#v, want 500 worker_env_too_large", resp.StatusCode, got)
+	}
+	if got["max_bytes"] != float64(1040384) {
+		t.Fatalf("max_bytes = %#v, want 1040384", got["max_bytes"])
+	}
+	if actual, ok := got["actual_bytes"].(float64); !ok || actual <= 1040384 {
+		t.Fatalf("actual_bytes = %#v, want > 1040384", got["actual_bytes"])
+	}
+	if len(got) != 3 {
+		t.Fatalf("budget response leaked extra fields: %#v", got)
+	}
 }
 
 // TestDoRuntimeOwnershipFenceAndDrain covers ADR-078: ownership claim on first
@@ -411,10 +456,16 @@ func TestRenderUsesEnvironmentBindings(t *testing.T) {
 	for _, want := range []string{
 		`(name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL")`,
 		`(name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN")`,
+		`embed "budget.js"`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("capnp missing %q", want)
 		}
+	}
+	if copied, err := os.ReadFile(filepath.Join(dir, "budget.js")); err != nil {
+		t.Fatalf("read copied budget module: %v", err)
+	} else if source, err := os.ReadFile("../../workerd/platform/budget.js"); err != nil || !bytes.Equal(copied, source) {
+		t.Fatalf("copied budget module differs from platform source: %v", err)
 	}
 }
 

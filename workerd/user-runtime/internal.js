@@ -1,5 +1,6 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
+import { budgetErrorBody, checkedWorkerGet } from "budget.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
@@ -66,7 +67,7 @@ async function dispatchQueues(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
+    return workerLoadFailure(e);
   }
   const batch = messages.map((m) => ({
     id: m.id,
@@ -107,7 +108,7 @@ async function dispatchTimers(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
+    return workerLoadFailure(e);
   }
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
@@ -130,7 +131,7 @@ async function dispatchServiceFetch(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, bindings: bindings || {}, vars: vars || {} });
   } catch (e) {
-    return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
+    return workerLoadFailure(e);
   }
   const m = method || "GET";
   const init = { method: m };
@@ -166,7 +167,7 @@ async function dispatchServiceRun(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, bindings: bindings || {}, vars: vars || {} });
   } catch (e) {
-    return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
+    return workerLoadFailure(e);
   }
   try {
     const host = stub.getEntrypoint("CellHiveHost");
@@ -188,7 +189,7 @@ async function dispatchWorkflows(req, env, ctx) {
   try {
     stub = await loadWorkflowWorker(env, ctx, body);
   } catch (e) {
-    return json({ error: "bundle_fetch_failed", message: String(e) }, 502);
+    return workerLoadFailure(e);
   }
   try {
     const bridge = new WorkflowBridgeTarget(env, {
@@ -221,7 +222,7 @@ async function loadWorkflowWorker(env, ctx, body) {
   // but must not reuse the old isolate/env (see loader.js workerStub).
   const wfVer = body.version != null ? `${body.version}-` : "";
   const spec = await specFor(env, body);
-  return env.LOADER.get(`${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}~wf`, () => ({
+  const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "workflow-wrapper.js",
@@ -234,7 +235,15 @@ async function loadWorkflowWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
-  }));
+  };
+  return checkedWorkerGet(
+    env.LOADER,
+    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}~wf`,
+    workerCode,
+    spec.vars,
+    spec.bindings,
+    "user",
+  );
 }
 
 // platformConsts renders only non-secret binding-name metadata. Platform
@@ -270,7 +279,7 @@ async function loadWorker(env, ctx, body) {
   // Same id format as loader.js workerStub (ADR-126/127): a worker's fetch and
   // queue/scheduled/service handlers share one isolate per (worker, version).
   const ver = body.version != null ? `${body.version}-` : "";
-  return env.LOADER.get(`${body.namespace}/${body.worker}@${ver}${body.bundle_sha}`, () => ({
+  const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: body.compat_flags || spec.compat_flags || [],
     mainModule: "wrapper.js",
@@ -282,7 +291,15 @@ async function loadWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,
-  }));
+  };
+  return checkedWorkerGet(
+    env.LOADER,
+    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}`,
+    workerCode,
+    spec.vars,
+    spec.bindings,
+    "user",
+  );
 }
 
 // --- cold-path caches -------------------------------------------------------
@@ -399,4 +416,9 @@ function json(o, status) {
     status: status || 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+function workerLoadFailure(error) {
+  const body = budgetErrorBody(error);
+  return body ? json(body, 500) : json({ error: "bundle_fetch_failed", message: String(error) }, 502);
 }

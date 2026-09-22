@@ -583,25 +583,25 @@ git commit -m "feat(control): reject oversized dynamic workers before deploy"
 - Consumes: `workerd/platform/budget.js` embedded as `budget.js` or `BUDGET_SRC` in each trusted host.
 - Runtime behavior: old/corrupt/bypassed versions fail closed before `workerLoader.get()` and emit a bounded error code.
 
-- [ ] **Step 1: Add failing bypass/corrupt-data tests**
+- [x] **Step 1: Add failing bypass/corrupt-data tests**
 
 Mock the control responses directly (bypassing deploy), return an over-budget bundle/env, invoke public fetch, internal dispatch, service load, and DO facet load, and assert `worker_code_too_large` / `worker_env_too_large`; assert the loader callback was never invoked.
 
-- [ ] **Step 2: Run and verify callbacks are currently invoked**
+- [x] **Step 2: Run and verify callbacks are currently invoked**
 
 Run: `go test ./internal/userruntime ./internal/doruntime -run 'RuntimeRejects.*OverBudget' -count=1 -p 1 -v`
 
 Expected: FAIL because current loaders have no budget guard.
 
-- [ ] **Step 3: Embed and call the runtime budget module**
+- [x] **Step 3: Embed and call the runtime budget module**
 
 Add `budget.js` to trusted host module lists. Build the complete WorkerCode object first, call `assertWorkerCodeBudget(workerCode)` and `assertWorkerEnvBudget(workerCode.env)`, then pass the already-validated object to `workerLoader.get()`. Apply the same helper to public, internal, service, workflow, queue/scheduled and DO paths rather than duplicating formulas.
 
-- [ ] **Step 4: Add bounded metrics/errors without tenant data**
+- [x] **Step 4: Add bounded metrics/errors without tenant data**
 
 Count failures by `{kind="code|env",surface="user|do"}` only. Error bodies include code/actual/max, not module source, env keys, namespace values, URLs, or tokens.
 
-- [ ] **Step 5: Run JS syntax and all real-runtime package tests**
+- [x] **Step 5: Run JS syntax and all real-runtime package tests**
 
 Run:
 
@@ -615,7 +615,7 @@ go test ./internal/userruntime ./internal/doruntime -count=1 -p 1 -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit runtime defense-in-depth**
+- [x] **Step 6: Commit runtime defense-in-depth**
 
 ```bash
 git add internal/userruntime internal/doruntime workerd/user-runtime workerd/do-runtime workerd/platform/budget.js

@@ -129,6 +129,7 @@ const config :Workerd.Config = (
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
+        (name = "budget.js", esModule = embed "budget.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -158,6 +159,7 @@ const config :Workerd.Config = (
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
+        (name = "budget.js", esModule = embed "budget.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -231,6 +233,9 @@ func Render(dir string, cfg Config) (string, error) {
 		return "", err
 	}
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), filepath.Join(dir, "telemetry.js")); err != nil {
+		return "", err
+	}
+	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), filepath.Join(dir, "budget.js")); err != nil {
 		return "", err
 	}
 	tpl, err := template.New("capnp").Parse(capnpTemplate)

@@ -154,3 +154,74 @@ export function checkEnv(value) {
 }
 
 export const assertWorkerEnvBudget = checkEnv;
+
+export function estimatedWorkerEnv(vars, specs) {
+  const env = Object.assign({}, vars || {});
+  for (const [name, spec] of Object.entries(specs || {})) {
+    if (!spec || typeof spec !== "object") continue;
+    env[name] = {
+      __cellhiveBinding: typeof spec.kind === "string" ? spec.kind : "",
+      props: Object.assign({}, spec),
+    };
+  }
+  return env;
+}
+
+export function assertEstimatedWorkerEnvBudget(vars, specs) {
+  return assertWorkerEnvBudget(estimatedWorkerEnv(vars, specs));
+}
+
+const failureCounts = {
+  user: { code: 0, env: 0 },
+  do: { code: 0, env: 0 },
+};
+
+export function checkedWorkerGet(loader, id, workerCode, vars, specs, surface = "user") {
+  const target = surface === "do" ? failureCounts.do : failureCounts.user;
+  try {
+    assertWorkerCodeBudget(workerCode);
+  } catch (error) {
+    if (error instanceof LimitError) target.code++;
+    throw error;
+  }
+  try {
+    assertEstimatedWorkerEnvBudget(vars, specs);
+  } catch (error) {
+    if (error instanceof LimitError) target.env++;
+    throw error;
+  }
+  return loader.get(id, () => workerCode);
+}
+
+export function budgetFailureCounts() {
+  return {
+    user: { ...failureCounts.user },
+    do: { ...failureCounts.do },
+  };
+}
+
+export function budgetErrorBody(error) {
+  if (error instanceof LimitError) {
+    return {
+      error: error.code,
+      actual_bytes: error.actual,
+      max_bytes: error.max,
+    };
+  }
+
+  // workerd preserves the exact error string, but not custom Error fields,
+  // when a facet-construction failure crosses the Durable Object boundary.
+  // Accept only our canonical LimitError form and revalidate every number so
+  // arbitrary tenant errors cannot add fields to the platform response.
+  const match = /^LimitError: (worker_(code|env)_too_large): ([0-9]+) bytes exceeds ([0-9]+)-byte limit$/.exec(String(error));
+  if (!match) return null;
+  const actual = Number(match[3]);
+  const max = Number(match[4]);
+  const expectedMax = match[2] === "code" ? CODE_MAX_BYTES : ENV_MAX_BYTES;
+  if (!Number.isSafeInteger(actual) || actual <= max || max !== expectedMax) return null;
+  return {
+    error: match[1],
+    actual_bytes: actual,
+    max_bytes: max,
+  };
+}

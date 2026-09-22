@@ -96,6 +96,7 @@ const config :Workerd.Config = (
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
+        (name = "budget.js", esModule = embed "budget.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -170,6 +171,7 @@ func Render(dir string, cfg Config) (string, error) {
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "bindings-wrapper.js"), "bindings-wrapper.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "rpc-codec.js"), "rpc-codec.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), "telemetry.js"},
+		{filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), "budget.js"},
 	} {
 		data, err := os.ReadFile(pair[0])
 		if err != nil {

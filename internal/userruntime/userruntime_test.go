@@ -201,6 +201,107 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	}
 }
 
+// TestRuntimeRejectsUserEnvOverBudget catches a bypass of the control-plane
+// preflight: a directly supplied oversized vars map must fail in the trusted
+// host before workerLoader creates a tenant isolate.
+func TestRuntimeRejectsUserEnvOverBudget(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/internal/bundle" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(tenantBundle))
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL:       stub.URL,
+		CellToken:     "test-token",
+		DispatchToken: "test-token",
+		InternalPort:  internalPort,
+		PublicPort:    publicPort,
+		PlatformJS:    "../../workerd/user-runtime",
+		FacadesJS:     "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+	client := noProxyClient()
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, getErr := client.Get(base + "/healthz")
+		if getErr == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("user-runtime did not become healthy: %v", getErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	payload := map[string]any{
+		"namespace":  "demo",
+		"worker":     "consumer",
+		"bundle_sha": "sha1",
+		"queue":      "jobs",
+		"bindings":   map[string]any{},
+		"vars":       map[string]any{"huge": strings.Repeat("x", 1016*1024)},
+		"messages":   []any{},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("x-cellhive-internal-token", "test-token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError || got["error"] != "worker_env_too_large" {
+		t.Fatalf("oversized dispatch = %d %#v, want 500 worker_env_too_large", resp.StatusCode, got)
+	}
+	if got["max_bytes"] != float64(1040384) {
+		t.Fatalf("max_bytes = %#v, want 1040384", got["max_bytes"])
+	}
+	if actual, ok := got["actual_bytes"].(float64); !ok || actual <= 1040384 {
+		t.Fatalf("actual_bytes = %#v, want > 1040384", got["actual_bytes"])
+	}
+	if len(got) != 3 {
+		t.Fatalf("budget response leaked extra fields: %#v", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 // TestRenderSubstitutesConfig checks host secrets are environment-backed while
 // non-secret structural settings remain rendered (no workerd required).
 func TestRenderSubstitutesConfig(t *testing.T) {
@@ -225,11 +326,16 @@ func TestRenderSubstitutesConfig(t *testing.T) {
 	for _, want := range []string{
 		`(name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL")`,
 		`(name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN")`,
-		":18088", ":18081", `embed "internal.js"`,
+		":18088", ":18081", `embed "internal.js"`, `embed "budget.js"`,
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("capnp missing %q:\n%s", want, data)
 		}
+	}
+	if copied, err := os.ReadFile(filepath.Join(dir, "budget.js")); err != nil {
+		t.Fatalf("read copied budget module: %v", err)
+	} else if source, err := os.ReadFile("../../workerd/platform/budget.js"); err != nil || !bytes.Equal(copied, source) {
+		t.Fatalf("copied budget module differs from platform source: %v", err)
 	}
 }
 
