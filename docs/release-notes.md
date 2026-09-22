@@ -17,6 +17,7 @@
 
 ### ADR-184 平台侧 stub（历史；env 结论由 ADR-185 取代）
 - ADR-184 的平台侧 DO/Workflow/Vectorize stub、DO `fetch(request)` WebSocket 路径和 `rpcObject(...)` 数据通道仍适用；`:7001` 传输与 scoped token 留在可信平台 host。
+- 修复公开 WebSocket 最后一跳：user-runtime loader 现在以 `CellHiveHost.fetch(Request)` 而非普通 `handleFetch` RPC 取回租户响应，避免 101 内的 WebSocket 被结构化序列化。公开端口→tenant→DO 的 101/双向帧与 gated do-runtime 重启续数均已真实验证；未恢复 `CH_DO_CONNECT`。
 - 其 `CH_PLATFORM`/`PlatformBridge`、平台 env 键和保留命名空间的历史结论已由 ADR-185 取代：tenant env 现为零平台键、零保留名。workflow 改用 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC 参数；动态 Tail Worker 未获当前 pin 支持，租户 console 平台采集关闭。
 - 实测支持的 workerd 语义：`ctx.exports` = 宿主 worker mainModule 的导出集；方法返回的 Proxy 不被 RPC 认作 `RpcTarget`（故平台侧只暴露显式方法，任意 DO 方法名由租户侧 Proxy 转发为 `(method,args)`）。
 

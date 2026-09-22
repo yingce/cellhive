@@ -169,7 +169,7 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 - `ps`：`cell-agent Up (healthy)`、`user-runtime`、`do-runtime-gated`（+ 无门 `do-runtime` idle）全部 Up；
 - `cell-agent /readyz` = `{"status":"ready"}`；user-runtime `:8081` 可连（`/`→404 正常）；
 - 门 `GET :18901/status` 可用；
-- 容器内 CLI `app create` + `bundle put` 后 `POST http://do-runtime-gated:8788/v1/do/invoke` ×3 → `count:1/2/3`（状态经输出门持久），门 `/status` 出现 `Counter/c1`，桶内 `cells/workerd/__do__/.../*.ltx` 有 4 段。
+- runtime-baseline 在镜像内执行 `cellhive app create` + TypeScript 源码 deploy；公开 `user-runtime :8081` 的随机 loopback 端口由 Bun 客户端完成真实 WebSocket 101 与双向消息。共享 `Counter` DO 的持久计数为 HTTP `1` → WS `2` → 重启 gated do-runtime → WS `3` → HTTP `4`，并产生权威 bucket LTX。
 
 ## 部署产物校验（ADR-139）
 
@@ -230,6 +230,7 @@ CELLHIVE_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make s3-test
 | 跨节点冷激活 | `TestDoRuntimeCrossNodeColdActivation` |
 | 按对象冷启动 | `TestDoRuntimePerObjectColdStart`（只恢复 `storage_id/class/name` → 状态延续） |
 | WS 跨节点转发 | `TestDoRuntimeWebSocketCrossNodeForward`（B 代理到 owner A；abort→`CLOSE:1012` 透传） |
+| 公开入口→tenant→DO WebSocket | `TestTenantDoWebSocketPassesThroughPublicLoader`（真实 workerd：公开 101 + 双向帧 + 零 tenant 平台键）；runtime-baseline Docker 在 gated do-runtime 重启前后各连一次 |
 | DO 内 bindings | `TestDoRuntimeBindingInsideDO`（DO 内 `env.KV` 往返） |
 | deleteAll | `TestDoRuntimeDeleteAllCaptured`（KV）、`TestDoRuntimeDeleteAllSQLCaptured`（SQL + 冷启动为空） |
 | migrations transfer | `wranglercompat` 同一 worker `{from,to}` 接受、`script_name` 拒绝 |

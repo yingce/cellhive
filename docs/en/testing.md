@@ -168,7 +168,7 @@ Backend end-to-end: `bash scripts/openobserve-e2e.sh` (needs docker plus an `ope
 - `ps`: `cell-agent Up (healthy)`, `user-runtime`, `do-runtime-gated` (+ gate-free `do-runtime` idle) are all Up;
 - `cell-agent /readyz` = `{"status":"ready"}`; user-runtime `:8081` is reachable (`/`→404 is normal);
 - Gate `GET :18901/status` is available;
-- After running CLI `app create` + `bundle put` inside the container, `POST http://do-runtime-gated:8788/v1/do/invoke` ×3 → `count:1/2/3` (state persists via the output gate), gate `/status` shows `Counter/c1`, and there are 4 segments under `cells/workerd/__do__/.../*.ltx` in the bucket.
+- Runtime-baseline runs `cellhive app create` plus a TypeScript source deploy inside the image. A Bun client reaches an ephemeral loopback publication of public `user-runtime :8081` and completes a real WebSocket 101 plus duplex messages. The shared `Counter` DO persists HTTP `1` → WS `2` → gated do-runtime restart → WS `3` → HTTP `4`, with authoritative bucket LTX produced.
 
 ## Deployment Artifact Validation (ADR-139)
 
@@ -229,6 +229,7 @@ Real workerd e2e (`internal/doruntime`), progressively summarizing all aspects o
 | Cross-node cold activation | `TestDoRuntimeCrossNodeColdActivation` |
 | Per-object cold start | `TestDoRuntimePerObjectColdStart` (only restores `storage_id/class/name` → state continues) |
 | WS cross-node forwarding | `TestDoRuntimeWebSocketCrossNodeForward` (B proxies to owner A; abort→`CLOSE:1012` passthrough) |
+| Public entry→tenant→DO WebSocket | `TestTenantDoWebSocketPassesThroughPublicLoader` (real workerd: public 101 + duplex frames + zero tenant platform keys); runtime-baseline Docker connects before and after a gated do-runtime restart |
 | Bindings inside DO | `TestDoRuntimeBindingInsideDO` (`env.KV` round trip inside DO) |
 | deleteAll | `TestDoRuntimeDeleteAllCaptured` (KV), `TestDoRuntimeDeleteAllSQLCaptured` (SQL + empty after cold start) |
 | migrations transfer | `wranglercompat` same worker `{from,to}` accepted, `script_name` rejected |

@@ -17,6 +17,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 
 ### ADR-184 platform-side stubs (historical; env conclusions superseded by ADR-185)
 - ADR-184's platform-side DO/Workflow/Vectorize stubs, DO `fetch(request)` WebSocket path, and `rpcObject(...)` data path remain current; their `:7001` transport and scoped tokens stay in the trusted platform host.
+- Fixed the final public-WebSocket hop: user-runtime now obtains the tenant response through `CellHiveHost.fetch(Request)` rather than ordinary `handleFetch` RPC, so the WebSocket carried by a 101 is not structured-cloned. Public port→tenant→DO duplex frames and gated-do-runtime restart continuity are verified without restoring `CH_DO_CONNECT`.
 - Its historical `CH_PLATFORM`/`PlatformBridge`, platform-env-key, and reserved-namespace conclusions are superseded by ADR-185: tenant env now has zero platform keys and zero reserved names. Workflow uses a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, and dynamic Tail Workers are unsupported on the current pin, so platform capture of tenant console output is disabled.
 - Verified workerd semantics: `ctx.exports` is the host worker's mainModule export set; a Proxy returned from a method is not recognised as an `RpcTarget` by RPC (so the platform side exposes explicit methods only, and arbitrary DO method names are forwarded as `(method,args)` data by a tenant-side Proxy).
 
