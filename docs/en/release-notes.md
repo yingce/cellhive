@@ -8,7 +8,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - The production and contract baseline is exactly pinned to stock workerd `1.20260916.1` and esbuild `0.28.2`. The dev CLI uses contemporaneous Miniflare `5.20260916.0-alpha`, with its workerd override also fixed at `1.20260916.1`. The image build verifies registry SHA-512 values and ships workerd/esbuild license texts.
 - Platform URLs/tokens no longer enter final WorkerCode or rendered capnp. Trusted host bindings use `fromEnvironment`, and user-runtime, do-runtime, and do-supervisor start workerd with an explicit environment. Tenant env still has zero platform keys, so users may use valid names such as `CELL_*` and `CH_*`.
 - Compatibility authority is generated from a fixed upstream workerd revision (current ceiling `2026-09-23`). The Go control plane and Bun CLI consume the same generated manifest; a real-binary probe verifies the maximum date, every allowed flag, and unknown-flag rejection.
-- Final WorkerCode is limited to 64 MiB. workerLoader env uses the 1 MiB upstream limit minus 8 KiB headroom, for a 1016 KiB limit. The control plane checks before its release transaction, and every dynamic-load path rechecks through one shared guard; errors expose only code/actual/max. Until Task 11's Docker Compose/no-skip acceptance passes, this entry claims implemented code paths and real-workerd package tests only.
+- Final WorkerCode is limited to 64 MiB. workerLoader env uses the 1 MiB upstream limit minus 8 KiB headroom, for a 1016 KiB limit. The control plane checks before its release transaction, and every dynamic-load path rechecks through one shared guard; errors expose only code/actual/max. Isolated Docker Compose proves in-image source bundling, env/KV, gated-DO bucket durability and restart continuity; the final no-skip gate is **GATE: PASS 14/14**.
 
 ### Tenant Env Is Entirely User-Owned (ADR-185)
 - Tenant Worker and DO-facet `env` objects now contain only user-declared vars/bindings. There are zero platform keys; `CH_*`, `CELL_*`, `__cellhive*`, and historical platform names all belong to the user.
@@ -231,7 +231,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - `do-runtime -render-only` + `do-supervisor` takes over the workerd lifecycle (lease renewal/drain); compose profile `rpo0`, k8s `overlays/rpo0`; container end-to-end verification that DO calls go through the gate and land in the bucket.
 
 ### Deployment hardening and gates (ADR-141)
-- Run as non-root (UID/GID 65532 + fsGroup), ServiceAccount/PDB/NetworkPolicy/startup probes; Helm chart (`deploy/helm/cellhive`, `doRuntime.gate` toggles RPO=0); `scripts/ci.sh`/`make ci` one-command gates + GitHub Actions (go/js/cli/deploy four jobs). Latest run: `GATE: PASS 13/13`.
+- Run as non-root (UID/GID 65532 + fsGroup), ServiceAccount/PDB/NetworkPolicy/startup probes; Helm chart (`deploy/helm/cellhive`, `doRuntime.gate` toggles RPO=0); `scripts/ci.sh`/`make ci` one-command gates + GitHub Actions (go/js/cli/deploy four jobs). After ADR-186 added runtime-baseline E2E, the latest run is `GATE: PASS 14/14`.
 
 ### purge closure (ADR-142)
 - The data-side hook for `RunPurgeLoop` has been wired: deleting a worker clears that worker's DO storage and assets, deleting an app clears the entire ns; executed by every cell-agent (cross-node local replica drain + idempotent bucket deletion), resumable (bounded deletes/round). Fixed a portability bug where the FS bucket could not list keys by in-segment prefixes.

@@ -153,13 +153,13 @@
 OTLP/collector end-to-end: `bash scripts/otlp-collector-smoke.sh` (needs docker plus the `otel/opentelemetry-collector-contrib` image; starts a real collector + cell-agent + user-runtime + a probe worker and asserts spans/logs/`ns` metrics, ADR-179).
 Backend end-to-end: `bash scripts/openobserve-e2e.sh` (needs docker plus an `openobserve` image; real OpenObserve behind the repo's reference collector config, asserting logs/traces land in OO and are queryable by ns/trace_id).
 
-`make ci` (`scripts/ci.sh`) chains all checks: gofmt, `go vet`, `go test`, `make build`, `js-test`, `cli-test`, `perf-test`, `rpo-test`, `s3-test`, `docker-build`, `compose-config`, `k8s-render`, `helm-lint`; missing tools are skipped (`REQUIRE_ALL=1` turns them into hard failures). A historical baseline reported **GATE: PASS 13/13**; it is not current acceptance until ADR-186's runtime-baseline E2E is added and passes.
+`make ci` (`scripts/ci.sh`) chains all checks: gofmt, `go vet`, `go test`, `make build`, `js-test`, `cli-test`, `perf-test`, `rpo-test`, `s3-test`, `docker-build`, `compose-config`, `runtime-baseline-e2e`, `k8s-render`, and `helm-lint`; missing tools are skipped (`REQUIRE_ALL=1` turns them into hard failures). Current acceptance on 2026-09-22 is **GATE: PASS 14/14**; runtime-baseline E2E ends with `RUNTIME-BASELINE-E2E: PASS` and has no actual skipped checks.
 
 ### ADR-186 Runtime Baseline Acceptance
 
 - Focused: `go test ./internal/runtimeenv ./internal/workerdcompat ./internal/workerbudget ./internal/wranglercompat -count=1 -v`, `make js-test`, and `make cli-test`.
 - Real binary: `CELLHIVE_WORKERD="$(command -v workerd)" bash scripts/workerd-compat-probe.sh`.
-- Final gate (Task 11): `bash scripts/runtime-baseline-e2e.sh` must end with `RUNTIME-BASELINE-E2E: PASS`, followed by `REQUIRE_ALL=1 bash scripts/ci.sh`. Any `SKIP`/`SKIPPED` or missing tool is not a pass.
+- Final gate: `bash scripts/runtime-baseline-e2e.sh` ended with `RUNTIME-BASELINE-E2E: PASS`, followed by `GATE: PASS` from `REQUIRE_ALL=1 bash scripts/ci.sh`. Any actual `SKIP`/`SKIPPED` or missing tool remains a failure (`skipped 0` in TAP means zero skipped tests).
 - The E2E must verify image versions, in-image esbuild source packaging, visibility of user-defined `CELL_URL`/`CELL_TOKEN` while host canaries stay absent, fetch/KV, gated-DO count continuity after restart, capnp/final-WorkerCode secret scans, and near-limit code/env probes.
 ## compose Stack Startup Smoke (C, ADR-140/153)
 

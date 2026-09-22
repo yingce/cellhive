@@ -8,7 +8,7 @@
 - 生产与契约基线精确固定为 stock workerd `1.20260916.1`、esbuild `0.28.2`；dev CLI 使用同期 Miniflare `5.20260916.0-alpha`，其 workerd override 同样固定为 `1.20260916.1`。镜像构建校验 npm registry SHA-512，并携带 workerd/esbuild 许可证。
 - 平台 URL/token 不再进入最终 WorkerCode 或渲染 capnp；可信宿主 binding 改用 `fromEnvironment`，user-runtime、do-runtime 与 do-supervisor 以显式环境启动 workerd。tenant env 仍为零平台键，用户可使用 `CELL_*`、`CH_*` 等任意合法名称。
 - compatibility authority 从固定 workerd 上游 revision 生成 manifest（当前上限 `2026-09-23`）；Go 控制面与 Bun CLI 消费同一生成清单，真实二进制探针验证最大日期、全部允许 flag 与未知 flag 拒绝。
-- 最终 WorkerCode 限制 64 MiB；workerLoader env 按 1 MiB 减 8 KiB headroom，限制 1016 KiB。控制面在发布事务前检查，所有动态加载路径在共享 guard 中复核；错误只返回 code/actual/max。Task 11 的 Docker Compose/no-skip 验收完成前，本条只表示代码路径与真实 workerd 包测试已实现。
+- 最终 WorkerCode 限制 64 MiB；workerLoader env 按 1 MiB 减 8 KiB headroom，限制 1016 KiB。控制面在发布事务前检查，所有动态加载路径在共享 guard 中复核；错误只返回 code/actual/max。隔离 Docker Compose 已验证镜像内源码打包、env/KV、gated DO 桶持久化与重启续数；最终 no-skip 门禁为 **GATE: PASS 14/14**。
 
 ### 租户 env 完全由用户拥有（ADR-185）
 - tenant Worker 与 DO facet 的 `env` 现在只有用户声明的 vars/bindings；平台键为 0，`CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称均归用户所有。
@@ -231,7 +231,7 @@
 - `do-runtime -render-only` + `do-supervisor` 接管 workerd 生命周期（续租/drain）；compose profile `rpo0`、k8s `overlays/rpo0`；容器端到端验证 DO 调用经门并落桶。
 
 ### 部署加固与门禁（ADR-141）
-- 非 root 运行（UID/GID 65532 + fsGroup）、ServiceAccount/PDB/NetworkPolicy/startup 探针；Helm chart（`deploy/helm/cellhive`，`doRuntime.gate` 切换 RPO=0）；`scripts/ci.sh`/`make ci` 一键门禁 + GitHub Actions（go/js/cli/deploy 四个 job）。最近一次 `GATE: PASS 13/13`。
+- 非 root 运行（UID/GID 65532 + fsGroup）、ServiceAccount/PDB/NetworkPolicy/startup 探针；Helm chart（`deploy/helm/cellhive`，`doRuntime.gate` 切换 RPO=0）；`scripts/ci.sh`/`make ci` 一键门禁 + GitHub Actions（go/js/cli/deploy 四个 job）。ADR-186 加入 runtime-baseline E2E 后，最近一次为 `GATE: PASS 14/14`。
 
 ### purge 闭环（ADR-142）
 - `RunPurgeLoop` 的数据侧 hook 已接线：worker 删除清该 worker 的 DO 存储与 assets，app 删除清整个 ns；每个 cell-agent 执行（跨节点本地副本 drain + 桶删除幂等），可续跑（有界删除/轮）。修 FS 桶按段内前缀无法列键的可移植性 bug。

@@ -153,13 +153,13 @@
 OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker 与 `otel/opentelemetry-collector-contrib` 镜像；起真实 collector + cell-agent + user-runtime + 探针 worker，验 span/log/`ns` 指标，见 ADR-179）。
 后端端到端：`bash scripts/openobserve-e2e.sh`（需 docker 与 `openobserve` 镜像；真实 OpenObserve + 仓库参考 collector 配置，验日志/trace 进 OO 且可按 ns/trace_id 查询）。
 
-`make ci`（`scripts/ci.sh`）串起全部检查：gofmt、`go vet`、`go test`、`make build`、`js-test`、`cli-test`、`perf-test`、`rpo-test`、`s3-test`、`docker-build`、`compose-config`、`k8s-render`、`helm-lint`；缺工具则 skip（`REQUIRE_ALL=1` 转硬失败）。历史基线曾为 **GATE: PASS 13/13**；ADR-186 的新 runtime-baseline E2E 加入并通过前，不把该历史结果当作现行验收。
+`make ci`（`scripts/ci.sh`）串起全部检查：gofmt、`go vet`、`go test`、`make build`、`js-test`、`cli-test`、`perf-test`、`rpo-test`、`s3-test`、`docker-build`、`compose-config`、`runtime-baseline-e2e`、`k8s-render`、`helm-lint`；缺工具则 skip（`REQUIRE_ALL=1` 转硬失败）。2026-09-22 现行验收：**GATE: PASS 14/14**；runtime-baseline E2E 末行 `RUNTIME-BASELINE-E2E: PASS`，无实际跳过项。
 
 ### ADR-186 runtime baseline 验收
 
 - 聚焦：`go test ./internal/runtimeenv ./internal/workerdcompat ./internal/workerbudget ./internal/wranglercompat -count=1 -v`、`make js-test`、`make cli-test`。
 - 真实二进制：`CELLHIVE_WORKERD="$(command -v workerd)" bash scripts/workerd-compat-probe.sh`。
-- 最终门禁（Task 11）：`bash scripts/runtime-baseline-e2e.sh` 必须以 `RUNTIME-BASELINE-E2E: PASS` 结束，再跑 `REQUIRE_ALL=1 bash scripts/ci.sh`；任何 `SKIP`/`SKIPPED` 或缺工具都不算通过。
+- 最终门禁：`bash scripts/runtime-baseline-e2e.sh` 已以 `RUNTIME-BASELINE-E2E: PASS` 结束，随后 `REQUIRE_ALL=1 bash scripts/ci.sh` 为 `GATE: PASS`；任何实际 `SKIP`/`SKIPPED` 或缺工具仍不算通过（TAP 的 `skipped 0` 仅表示零跳过）。
 - E2E 必须验证镜像版本、镜像内 esbuild 源码打包、用户自定义 `CELL_URL`/`CELL_TOKEN` 可见而 host canary 不可见、fetch/KV、gated DO 重启后继续计数、capnp/最终 WorkerCode secret 扫描、code/env 近限探针。
 
 ## compose 起栈 smoke（C，ADR-140/153）

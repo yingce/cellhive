@@ -690,7 +690,7 @@ git commit -m "docs: publish runtime baseline migration and verification"
 **Interfaces:**
 - Produces: one repeatable acceptance script for image versions, in-container bundling, env isolation, KV, gated DO, restart persistence and credential scans.
 
-- [ ] **Step 1: Add the E2E script to CI in required mode and observe initial failure**
+- [x] **Step 1: Add the E2E script to CI in required mode and observe initial failure**
 
 Add a `runtime-baseline-e2e` gate that is optional in ordinary local CI but mandatory under `REQUIRE_ALL=1`. Initially run:
 
@@ -700,7 +700,7 @@ REQUIRE_ALL=1 bash scripts/ci.sh
 
 Expected: FAIL because `scripts/runtime-baseline-e2e.sh` or its acceptance output is absent.
 
-- [ ] **Step 2: Implement isolated Docker acceptance with trap cleanup**
+- [x] **Step 2: Implement isolated Docker acceptance with trap cleanup**
 
 The script must use a unique Compose project name and temporary directories, install a trap before starting containers, and perform these exact assertions:
 
@@ -713,7 +713,7 @@ The script must use a unique Compose project name and temporary directories, ins
 7. compatibility probe and near-limit code/env probes pass;
 8. no relevant test line contains `SKIP`, `SKIPPED`, or an unexecuted marker.
 
-- [ ] **Step 3: Run focused unit and real-workerd suites before the expensive gate**
+- [x] **Step 3: Run focused unit and real-workerd suites before the expensive gate**
 
 Run:
 
@@ -725,19 +725,19 @@ make cli-test
 
 Expected: PASS with no relevant skip.
 
-- [ ] **Step 4: Run the real Docker E2E**
+- [x] **Step 4: Run the real Docker E2E**
 
 Run: `bash scripts/runtime-baseline-e2e.sh`
 
 Expected terminal line: `RUNTIME-BASELINE-E2E: PASS`; exit code 0.
 
-- [ ] **Step 5: Run the complete official gate with skips forbidden**
+- [x] **Step 5: Run the complete official gate with skips forbidden**
 
 Run: `REQUIRE_ALL=1 bash scripts/ci.sh`
 
 Expected: every official gate PASS, including Docker build/Compose and the new runtime baseline E2E; final exit code 0.
 
-- [ ] **Step 6: Audit the first-phase completion evidence**
+- [x] **Step 6: Audit the first-phase completion evidence**
 
 Run:
 
@@ -751,7 +751,7 @@ docker image inspect cellhive:runtime-baseline --format '{{json .RepoDigests}} {
 
 Classify every approved-spec requirement as complete/contradicted/unverified. Do not call the phase complete on an empty search alone; cite the corresponding tests and live requests.
 
-- [ ] **Step 7: Commit the acceptance harness and verified status**
+- [x] **Step 7: Commit the acceptance harness and verified status**
 
 ```bash
 git add scripts/runtime-baseline-e2e.sh scripts/ci.sh docs/testing.md docs/decisions.md docs/release-notes.md

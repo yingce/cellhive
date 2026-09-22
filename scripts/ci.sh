@@ -85,6 +85,22 @@ if require_or_skip "docker-build" docker; then
   step "docker-build" make docker-build
   step "compose-config" make compose-config
 fi
+if [ ! -x scripts/runtime-baseline-e2e.sh ]; then
+  if [ "$REQUIRE_ALL" = "1" ]; then
+    printf '\n\033[1m== runtime-baseline-e2e ==\033[0m\n'
+    echo "FAIL: scripts/runtime-baseline-e2e.sh is missing or not executable"
+    RESULTS+=("FAIL  runtime-baseline-e2e (missing executable script)")
+    FAILED=1
+  else
+    skip "runtime-baseline-e2e" "acceptance script not installed"
+  fi
+elif [ "$REQUIRE_ALL" = "1" ] || [ "${RUN_RUNTIME_BASELINE_E2E:-0}" = "1" ]; then
+  if require_or_skip "runtime-baseline-e2e" docker; then
+    step "runtime-baseline-e2e" bash scripts/runtime-baseline-e2e.sh
+  fi
+else
+  skip "runtime-baseline-e2e" "set RUN_RUNTIME_BASELINE_E2E=1 (mandatory with REQUIRE_ALL=1)"
+fi
 if require_or_skip "k8s-render (kubectl)" kubectl; then
   step "k8s-render" make k8s-render
 fi

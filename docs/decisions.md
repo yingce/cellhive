@@ -2380,7 +2380,7 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
-## ADR-186 stock workerd 运行时基线与安全加固（代码已实现，Docker 全门禁待验收）
+## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
 - **决策**：
@@ -2390,7 +2390,7 @@
   4. 从对应 pin 的 workerd 上游 compatibility 定义生成带 revision/source SHA-256 的单一 manifest；Go 控制面与 Bun CLI 消费同一清单，真实二进制探测允许 flag、未知 flag 和最大 compatibility date；实验 flag 默认 fail-closed。
   5. 最终 WorkerCode 上限 **64 MiB**；workerLoader env 上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**。控制面在 active pointer 切换前拒绝超限，运行时在 `workerLoader.get()` 前复核；不截断、不删字段、不暴露源码或 secret。
 - **升级/回滚**：reader-before-writer；新 pin 先证明能读取旧 artifact/DO working copy，再开放新 date/flag。manifest 与二进制成对回滚；若存在旧 pin 无法加载的 active version，则拒绝回滚。schema、cell/owner/epoch/RPO=0 协议不变。
-- **当前实现证据（2026-09-22）**：stock workerd `1.20260916.1`、esbuild `0.28.2`、Miniflare `5.20260916.0-alpha` 已精确固定；host binding 已改为 `fromEnvironment` 且子进程使用显式环境；compatibility manifest 由上游 revision `adda2635656d09e541b0feeea796da9d2a8bc10e` 生成；控制面和所有动态 `workerLoader.get()` 路径已执行 64 MiB / 1016 KiB 双层预算。Go/JS 单测与真实 user-runtime/do-runtime workerd 套件已通过。镜像内打包、Compose KV/gated-DO 重启持久性与 `REQUIRE_ALL=1` 仍由 Task 11 验收，因此此处不提前标记阶段完成。
+- **当前实现证据（2026-09-22）**：stock workerd `1.20260916.1`、esbuild `0.28.2`、Miniflare `5.20260916.0-alpha` 已精确固定；host binding 已改为 `fromEnvironment` 且子进程使用显式环境；compatibility manifest 由上游 revision `adda2635656d09e541b0feeea796da9d2a8bc10e` 生成；控制面和所有动态 `workerLoader.get()` 路径已执行 64 MiB / 1016 KiB 双层预算。Go/JS 单测与真实 user-runtime/do-runtime workerd 套件通过；`scripts/runtime-baseline-e2e.sh` 又验证镜像内 TypeScript 打包、用户自定义 `CELL_URL`/`CELL_TOKEN`、host canary 隔离、真实 fetch/KV、gated DO 桶 LTX、runtime 重启后 `count:1→2`、capnp/WorkerCode 扫描、精确预算边界与 288 个 compatibility flag。最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 为 **GATE: PASS 14/14**，无实际跳过项。
 - **阶段边界**：本 ADR 只覆盖秘密隔离、固定工具链、compatibility authority 与 code/env 预算。冷加载治理、invocation-scoped context、isolate 淘汰、DO mid-flight fence/restart generation、原生 Tail/OTLP 和多模块 artifact 后续分阶段实施。Tenant Tail 当前仍关闭，不以 env transport 回退。
 - **验收**：单元测试先红后绿；真实 workerd 覆盖 `fromEnvironment`、env/KV/D1/R2/Queue/Workflow/Service/DO；真实 Docker Compose 覆盖镜像内 esbuild 打包、用户同名 env、KV、gated DO、重启持久性和秘密扫描；最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 无相关隐式 SKIP。
 - **详细设计/计划**：`docs/superpowers/specs/2026-09-22-workerd-runtime-baseline-security-design.md`、`docs/superpowers/plans/2026-09-22-workerd-runtime-baseline-security.md`。
