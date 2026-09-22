@@ -23,7 +23,7 @@
 | `CELLHIVE_USER_RUNTIME_INTERNAL_PORT` | `8088` | 内部派发 |
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_USER_RUNTIME_PORT` | `8081` | 公开入口 |
-| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260615.1`） |
+| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260916.1`） |
 
 
 > 解析规则（字符串/布尔/时长/字节/列表）见 [`../configuration.md`](../configuration.md#解析规则)。
@@ -33,11 +33,12 @@
 - 租户 `globalOutbound` = **public-only**；capability binding 是平台侧 entrypoint stub（`:7001` 传输在平台 worker，ADR-184），租户 env 无 `PLATFORM`/`CELL_URL`。
 - env patch（`bindings-wrapper.js` / `queue-wrapper.js`）让 `this.env` 与构造形参 `env` 一致。
 - **不持桶凭据**；只拿 binding facade 与 scoped token。
-- Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。pin `1.20260615.1` 拒绝动态 loaded-worker Tail Worker（`provided value is not of type 'Fetcher'`），所以租户 `console.*` 平台采集关闭。
+- Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。pin `1.20260916.1` 拒绝动态 loaded-worker Tail Worker（`provided value is not of type 'Fetcher'`），所以租户 `console.*` 平台采集关闭。
+- 最终 WorkerCode（64 MiB）和估算 workerLoader env（1016 KiB）在每次动态加载前经共享 `workerd/platform/budget.js` 复核；控制面检查不能替代运行时防御。
 
 ## 源码位置
 
-`cmd/user-runtime/`；`internal/userruntime/`；`workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`；`workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js}`。
+`cmd/user-runtime/`；`internal/userruntime/`；`workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`；`workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js,budget.js}`。
 
 ## 测试锚点
 

@@ -23,7 +23,7 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 | `CELLHIVE_USER_RUNTIME_INTERNAL_PORT` | `8088` | Internal dispatch |
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_USER_RUNTIME_PORT` | `8081` | Public entry |
-| `CELLHIVE_WORKERD` | auto-discovered | workerd path (prefers pinned `1.20260615.1`) |
+| `CELLHIVE_WORKERD` | auto-discovered | workerd path (prefers pinned `1.20260916.1`) |
 
 
 > For parsing rules (strings/booleans/durations/bytes/lists), see [`../configuration.md`](../configuration.md#parsing-rules).
@@ -33,11 +33,12 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 - Tenant `globalOutbound` = **public-only**; binding stubs keep their transport in the trusted platform host, not in tenant env.
 - The env patch (`bindings-wrapper.js` / `queue-wrapper.js`) keeps `this.env` consistent with the constructor parameter `env`.
 - **Does not hold bucket credentials**; only obtains the binding facade and scoped tokens.
-- Workflow callbacks cross `workerLoader` as a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, never as a `ServiceStub` or tenant-env value. Pin `1.20260615.1` rejects Tail Workers for dynamically loaded Workers (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
+- Workflow callbacks cross `workerLoader` as a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, never as a `ServiceStub` or tenant-env value. Pin `1.20260916.1` rejects Tail Workers for dynamically loaded Workers (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
+- Final WorkerCode (64 MiB) and estimated workerLoader env (1016 KiB) are rechecked before every dynamic load through shared `workerd/platform/budget.js`; the control-plane check does not replace this runtime defense.
 
 ## Source Locations
 
-`cmd/user-runtime/`; `internal/userruntime/`; `workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`; `workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js}`.
+`cmd/user-runtime/`; `internal/userruntime/`; `workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`; `workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js,budget.js}`.
 
 ## Test Anchors
 

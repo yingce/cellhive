@@ -4,9 +4,15 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
+### stock workerd 运行时基线加固（ADR-186）
+- 生产与契约基线精确固定为 stock workerd `1.20260916.1`、esbuild `0.28.2`；dev CLI 使用同期 Miniflare `5.20260916.0-alpha`，其 workerd override 同样固定为 `1.20260916.1`。镜像构建校验 npm registry SHA-512，并携带 workerd/esbuild 许可证。
+- 平台 URL/token 不再进入最终 WorkerCode 或渲染 capnp；可信宿主 binding 改用 `fromEnvironment`，user-runtime、do-runtime 与 do-supervisor 以显式环境启动 workerd。tenant env 仍为零平台键，用户可使用 `CELL_*`、`CH_*` 等任意合法名称。
+- compatibility authority 从固定 workerd 上游 revision 生成 manifest（当前上限 `2026-09-23`）；Go 控制面与 Bun CLI 消费同一生成清单，真实二进制探针验证最大日期、全部允许 flag 与未知 flag 拒绝。
+- 最终 WorkerCode 限制 64 MiB；workerLoader env 按 1 MiB 减 8 KiB headroom，限制 1016 KiB。控制面在发布事务前检查，所有动态加载路径在共享 guard 中复核；错误只返回 code/actual/max。Task 11 的 Docker Compose/no-skip 验收完成前，本条只表示代码路径与真实 workerd 包测试已实现。
+
 ### 租户 env 完全由用户拥有（ADR-185）
 - tenant Worker 与 DO facet 的 `env` 现在只有用户声明的 vars/bindings；平台键为 0，`CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称均归用户所有。
-- Workflow dispatcher 以可信 `WorkflowBridgeTarget extends RpcTarget` 把固定 op 回调能力作为 JSRPC 参数传入动态 workflow wrapper；宿主 env、私网 transport、凭据与 dispatcher-bound 身份留在可信 internal host。pinned stock workerd `1.20260615.1` 已实测 step/retry/wait/pause/error 全链路；未使用跨动态 loader 不兼容的 `ServiceStub`，也未开启 experimental flag。
+- Workflow dispatcher 以可信 `WorkflowBridgeTarget extends RpcTarget` 把固定 op 回调能力作为 JSRPC 参数传入动态 workflow wrapper；宿主 env、私网 transport、凭据与 dispatcher-bound 身份留在可信 internal host。pinned stock workerd `1.20260916.1` 已实测 step/retry/wait/pause/error 全链路；未使用跨动态 loader 不兼容的 `ServiceStub`，也未开启 experimental flag。
 - 动态 loaded Worker 的原生 Tail Worker 在当前 pin 不支持，因此租户 console 平台采集暂时关闭；不以 env transport 回退。
 
 ### ADR-184 平台侧 stub（历史；env 结论由 ADR-185 取代）
@@ -219,7 +225,7 @@
 - 官方 wrangler 改 `CLOUDFLARE_API_BASE_URL` 直连（CF API 子集）作为备选，未实现。
 
 ### 可部署产物（ADR-139）
-- 单镜像（5 个二进制 + **pinned workerd 1.20260615.1** + `workerd/` JS，glibc 基础镜像），`deploy/entrypoint.sh` 按短名分发服务；`deploy/compose/docker-compose.yml`（cell-agent + user-runtime + do-runtime，`s3`/`edge` profiles，只需 `CELLHIVE_ROOT_KEY`）；`deploy/k8s/` kustomize manifests（StatefulSet/Deployment/HPA/ConfigMap/Secret 示例）；Makefile `docker-build`/`compose-config`/`compose-up`/`k8s-render`。
+- 单镜像（5 个二进制 + **pinned workerd 1.20260916.1** + `workerd/` JS，glibc 基础镜像），`deploy/entrypoint.sh` 按短名分发服务；`deploy/compose/docker-compose.yml`（cell-agent + user-runtime + do-runtime，`s3`/`edge` profiles，只需 `CELLHIVE_ROOT_KEY`）；`deploy/k8s/` kustomize manifests（StatefulSet/Deployment/HPA/ConfigMap/Secret 示例）；Makefile `docker-build`/`compose-config`/`compose-up`/`k8s-render`。
 
 ### DO 输出门部署（ADR-140）
 - `do-runtime -render-only` + `do-supervisor` 接管 workerd 生命周期（续租/drain）；compose profile `rpo0`、k8s `overlays/rpo0`；容器端到端验证 DO 调用经门并落桶。
@@ -262,7 +268,7 @@
 
 ### 兼容矩阵收口（ADR-153）
 - **修 bug**：平台 bundler 现在默认外置 `cloudflare:*`（`node:*` 仅 nodejs_compat），OpenNext 等框架预构建产物可正常 `deploy --config`。
-- `compatibility_flags` 精确列表与 dev CLI 镜像并由测试强制；pin `1.20260615.1` ↔ 兼容上限 `2026-06-22` 绑定；OpenNext/SvelteKit/Astro 布局验收；D1 sessions/bookmarks 显式拒绝。
+- `compatibility_flags` 精确列表与 dev CLI 镜像并由测试强制；pin `1.20260916.1` ↔ 兼容上限 `2026-09-23` 绑定；OpenNext/SvelteKit/Astro 布局验收；D1 sessions/bookmarks 显式拒绝。
 
 ### dispatch 缺陷修复（ADR-154）
 - 修：timer body 缺 `namespace`（cron/scheduled 一直 400）、部署产物未配 `CELLHIVE_DISPATCH_URL`（队列/定时循环静默不启动）、`event.cron` 为空、queue 批次非 CF 形状（`.messages`/`.queue`/`ackAll`/`retryAll`）且跨 isolate 丢属性/丢 trace。

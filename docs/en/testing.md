@@ -153,7 +153,14 @@
 OTLP/collector end-to-end: `bash scripts/otlp-collector-smoke.sh` (needs docker plus the `otel/opentelemetry-collector-contrib` image; starts a real collector + cell-agent + user-runtime + a probe worker and asserts spans/logs/`ns` metrics, ADR-179).
 Backend end-to-end: `bash scripts/openobserve-e2e.sh` (needs docker plus an `openobserve` image; real OpenObserve behind the repo's reference collector config, asserting logs/traces land in OO and are queryable by ns/trace_id).
 
-`make ci` (`scripts/ci.sh`) chains all checks: gofmt, `go vet`, `go test`, `make build`, `js-test`, `cli-test`, `perf-test`, `rpo-test`, `s3-test`, `docker-build`, `compose-config`, `k8s-render`, `helm-lint`; missing tools are skipped (`REQUIRE_ALL=1` turns them into hard failures). Most recent run: **GATE: PASS 13/13**.
+`make ci` (`scripts/ci.sh`) chains all checks: gofmt, `go vet`, `go test`, `make build`, `js-test`, `cli-test`, `perf-test`, `rpo-test`, `s3-test`, `docker-build`, `compose-config`, `k8s-render`, `helm-lint`; missing tools are skipped (`REQUIRE_ALL=1` turns them into hard failures). A historical baseline reported **GATE: PASS 13/13**; it is not current acceptance until ADR-186's runtime-baseline E2E is added and passes.
+
+### ADR-186 Runtime Baseline Acceptance
+
+- Focused: `go test ./internal/runtimeenv ./internal/workerdcompat ./internal/workerbudget ./internal/wranglercompat -count=1 -v`, `make js-test`, and `make cli-test`.
+- Real binary: `CELLHIVE_WORKERD="$(command -v workerd)" bash scripts/workerd-compat-probe.sh`.
+- Final gate (Task 11): `bash scripts/runtime-baseline-e2e.sh` must end with `RUNTIME-BASELINE-E2E: PASS`, followed by `REQUIRE_ALL=1 bash scripts/ci.sh`. Any `SKIP`/`SKIPPED` or missing tool is not a pass.
+- The E2E must verify image versions, in-image esbuild source packaging, visibility of user-defined `CELL_URL`/`CELL_TOKEN` while host canaries stay absent, fetch/KV, gated-DO count continuity after restart, capnp/final-WorkerCode secret scans, and near-limit code/env probes.
 ## compose Stack Startup Smoke (C, ADR-140/153)
 
 `CELLHIVE_ROOT_KEY=<32B> CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d`:
@@ -170,7 +177,7 @@ Not part of `go test`; run manually/in CI:
 - `make docker-build` — image build (including pinned workerd);
 - `make compose-config` — `docker compose config` syntax/variable validation;
 - `make k8s-render` — `kubectl kustomize deploy/k8s` (client-side render, no cluster required);
-- Observed evidence: in-container `workerd --version`=`2026-06-15`, cell-agent `/readyz`=`ready`, user-runtime :8081/:8088 and do-runtime :8788 can listen.
+- Historical ADR-139 evidence: the container then reported workerd `2026-06-15` and the services listened. The ADR-186 image must read back `2026-09-16` and esbuild `0.28.2`, then be reaccepted through the runtime-baseline E2E; the historical evidence cannot be reused.
 
 ## DO Output Gate Deployment (ADR-140)
 

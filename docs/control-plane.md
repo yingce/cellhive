@@ -76,7 +76,7 @@ CLI 只是**快速反馈**；`deploy` 的校验以**服务端为权威**（防�
 `POST /v1/control/deploy`（含 bundle 上传）校验：
 
 1. **bundle**：`bundle_sha` 的内容寻址对象存在；`assets` 引用存在。
-2. **兼容日期**：`compatibility_date` ≤ 平台支持上限（已知 **2026-06-22**，实测）；超限报错并给出上限。
+2. **兼容日期**：`compatibility_date` ≤ 平台支持上限（已知 **2026-09-23**，实测）；超限报错并给出上限。
 3. **compatibility_flags**：必须为 pinned workerd 的已知集（未知 flag 报错）。
 4. **绑定**：type 必须在**支持矩阵**内；不在则拒绝（`images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`；`vectorize`/`hyperdrive` 已支持，vectorize 的资源引用 = `index_name`，ADR-158）。
 5. **资源引用**：binding 指向的 KV/D1/R2/Queue/… 必须已由控制面登记（**拒绝自动 provisioning**，ADR-014）；否则提示对应 `cellhive <kind> create`。

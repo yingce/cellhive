@@ -14,7 +14,8 @@ CellHive 的状态模型、运行时接入方式与部分工程手法，参考�
 
 一个基于 stock workerd 的自建多租户 Workers 平台（独立服务族 + 外部状态存储）。
 
-- **借鉴的模式与工程手法**：`workerLoader` **多租户动态加载**不可变版本；**binding host adapter**（平台 worker 导出入口类，`ctx.exports.X({props})` 生成 props 绑定的 RPC stub）；版本/回滚；**双 socket 特权分离**；DO 的 **host actor + facets** 组织方式与 supervisor 生命周期；**alarm shim** 思路（stock workerd 对 SQLite facet 不实现原生 alarm）；以及**按模块组织文档 + 给出阅读路径**的文档方式（本仓 `docs/modules/` 与 `docs/contributing.md`）。
+- **借鉴的模式与工程手法**：`workerLoader` **多租户动态加载**不可变版本；**binding host adapter**（平台 worker 导出入口类，`ctx.exports.X({props})` 生成 props 绑定的 RPC stub）；版本/回滚；**双 socket 特权分离**；DO 的 **host actor + facets** 组织方式与 supervisor 生命周期；**alarm shim** 思路（stock workerd 对 SQLite facet 不实现原生 alarm）；以及**按模块组织文档 + 给出阅读路径**的文档方式（本仓 `docs/modules/` 与 `docs/contributing.md`）。ADR-186 还参考固定提交 `dc70da6cc04acee7d31d80fc0caf8f323bbacf21` 的方法边界：host `fromEnvironment`、最终 WorkerCode 与 env headroom 预算、从固定 workerd 源生成 compatibility authority、镜像内固定二进制并读回版本。
+- **ADR-186 代码审计结论**：逐份对照该提交的 `runtime/load/code-budget.js`、`control/{worker-code-budget,env-budget}.js` 与 `scripts/extract-workerd-experimental-compat-flags.mjs` 后，CellHive 的 `internal/workerbudget`、`workerd/platform/budget.js` 与 `cmd/workerd-compat-gen` 为针对自身 Go/JS 数据模型的独立实现；未复制或实质改编 WDL 源码，也未把 WDL 包或构建产物带入产品。相同的 64 MiB、1 MiB/8 KiB 数值与 `fromEnvironment` 用法属于明确记录的设计/上游 workerd 边界。
 - **未借鉴**：WDL 的 **Redis/Valkey 状态模型**（CellHive 用 bucket + SQLite + 条件写）、**独立 gateway 组件**（CellHive 用 Traefik + user-runtime loader）、以及把 **scheduler / workflows 拆成独立 Rust 服务**（CellHive 在 `cell-agent` 内统一计时与派发）。
 
 ## LiteFS / `superfly/ltx`
@@ -26,4 +27,4 @@ Go 侧 SQLite 复制与 LTX 格式的**实现参照**：`internal/ltx`、`intern
 - 复用任何 **Apache-2.0** 许可的第三方代码或设计时，须保留对应的 `LICENSE`/`NOTICE` 与署名（见 [`decisions.md`](./decisions.md) 的复制/许可相关 ADR）。
 - 本文档仅说明**设计来源与致谢**，不构成与上述项目的隶属、赞助或背书关系。感谢这些项目的作者与社区公开他们的设计与经验。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-22_

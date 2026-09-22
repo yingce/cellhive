@@ -63,7 +63,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 
 ### 平台日志：内存 tail + 可选 OTLP 导出（ADR-172）
 
-- `workerd/platform/log-tail.js` 已删除。当前 pinned stock `workerd 2026-06-15` 的动态 `workerLoader` 会拒绝 `tails: [{name:"tenant-tail"}]`（要求 `Fetcher`），因此**租户 `console.*` 不会写入** `/v1/internal/logs`、ring 或 OTLP；不得通过 tenant env 恢复该传输。`/v1/internal/logs`、ring 与 `cellhive tail --worker` 仍可承载平台可信生产者写入的日志。未来升级 pin 后，必须先重跑真实动态-tail spike 并验证可信脚本身份，才可重新启用租户 tail。
+- `workerd/platform/log-tail.js` 已删除。当前 pinned stock `workerd 2026-09-16` 的动态 `workerLoader` 会拒绝 `tails: [{name:"tenant-tail"}]`（要求 `Fetcher`），因此**租户 `console.*` 不会写入** `/v1/internal/logs`、ring 或 OTLP；不得通过 tenant env 恢复该传输。`/v1/internal/logs`、ring 与 `cellhive tail --worker` 仍可承载平台可信生产者写入的日志。未来升级 pin 后，必须先重跑真实动态-tail spike 并验证可信脚本身份，才可重新启用租户 tail。
 - **可选 OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
   - `all`：每条都导出（集中采集；量大）。
   - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续），tail 退出后 ≤60s 停止导出。

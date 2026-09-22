@@ -23,7 +23,7 @@ do-runtime `:8788`: `/v1/do/invoke`, `/v1/do/connect` (WS), `/v1/do/{claim,renew
 | `CELLHIVE_DO_RUNTIME_JS` | `workerd/do-runtime` | host actor JS |
 | `CELLHIVE_ESBUILD` | auto-detect | esbuild path |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | Runtime directory (subdirectory `do-runtime/`) |
-| `CELLHIVE_WORKERD` | auto-detect | workerd path (prefer pinned `1.20260615.1`) |
+| `CELLHIVE_WORKERD` | auto-detect | workerd path (prefer pinned `1.20260916.1`) |
 
 
 > For parsing rules (strings/booleans/durations/bytes/lists), see [`../configuration.md`](../configuration.md#parsing-rules).
@@ -34,11 +34,12 @@ do-runtime `:8788`: `/v1/do/invoke`, `/v1/do/connect` (WS), `/v1/do/{claim,renew
 - alarm must be shimmed (stock workerd does not implement native alarm for SQLite facets).
 - WS migration/restart closes with **1012**, and clients reconnect (no resume).
 - **Do not return ack before gate confirmation**.
-- The facet tenant env follows ADR-185: user vars and user-named binding stubs only, with zero platform keys; secrets are not yet injected into runtime env. Pin `1.20260615.1` also rejects a Tail Worker for dynamic loaded DO facets (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
+- The facet tenant env follows ADR-185: user vars and user-named binding stubs only, with zero platform keys; secrets are not yet injected into runtime env. Pin `1.20260916.1` also rejects a Tail Worker for dynamic loaded DO facets (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
+- Facet WorkerCode (64 MiB) and estimated env (1016 KiB) are rechecked before `workerLoader.get()`. When a DO boundary drops custom Error fields, only the platform's canonical LimitError string is parsed and revalidated before returning code/actual/max.
 
 ## Source Locations
 
-`cmd/do-runtime/`, `cmd/do-supervisor/`; `internal/doruntime/`, `internal/dosupervisor/`; `workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`.
+`cmd/do-runtime/`, `cmd/do-supervisor/`; `internal/doruntime/`, `internal/dosupervisor/`; `workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`; `workerd/platform/budget.js`.
 
 ## Test Anchors
 

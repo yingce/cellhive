@@ -64,13 +64,11 @@
 - **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive releases`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`d1 execute`/`r2 object`/`kv key`→Worker 绑定 + `cellhive dev`、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
 - **真 wrangler 兼容（备选，未做）**：实测 wrangler 4.133.0 读 `CLOUDFLARE_API_BASE_URL`（旧名 `CF_API_BASE_URL`）与 SDK 的 `CLOUDFLARE_BASE_URL`，故可实现 CF API 子集让其原样运行；代价是跟随 CF API 漂移 + `content/v2` multipart 上传格式对拍，作为独立 spike，不在本条范围。
 
-## `compatibility_flags` 支持列表（ADR-153）
+## `compatibility_flags` authority（ADR-153/186）
 
-跟随 pinned workerd（`internal/workerdbin.PinnedVersion`，当前 `1.20260615.1`），部署期验证（`unknown_flag` 失败关闭），Go 校验器与 dev CLI 列表镜像并由测试强制一致：
+跟随 pinned workerd（`internal/workerdbin.PinnedVersion`，当前 `1.20260916.1`），部署期验证；未知 flag 与上游标记为 experimental 的 flag 均失败关闭。完整列表不再手写在文档或校验器中：`cmd/workerd-compat-gen` 从固定 revision 的 `compatibility-date.capnp` 生成 `internal/workerdcompat/manifest.json`，再生成 Bun 使用的 `cli/src/workerd-compat.generated.ts`。Go 控制面直接消费 manifest；契约测试逐项比对两个 consumer。
 
-`nodejs_compat`、`nodejs_compat_v2`、`nodejs_compat_populate_process_env`、`no_handle_cross_request_promise_resolution`、`global_fetch_strictly_public`、`disable_fetch_stream_teeing`、`streams_enable_constructors`、`transformstream_enable_standard_constructor`、`export_commonjs_default`、`export_commonjs_namespace`、`disable_nodejs_process_v2`、`enable_ctx_exports`、`deployment_id_header`、`require_custom_ports_development`。
-
-兼容上限 `2026-06-22` 与该 pin 绑定（`TestPinPairsWithCompatibilityDate`）。**框架预构建产物**（OpenNext/SvelteKit/Astro）逐项验收见 `internal/wrangler TestFrameworkPrebuiltLayouts`。
+兼容上限 `2026-09-23` 与该 pin/manifest 绑定，并由 `scripts/workerd-compat-probe.sh` 对真实二进制验证最大日期、下一日拒绝、全部允许 flag 与未知 flag 拒绝。**框架预构建产物**（OpenNext/SvelteKit/Astro）逐项验收见 `internal/wrangler TestFrameworkPrebuiltLayouts`。
 
 ## 拒绝策略
 

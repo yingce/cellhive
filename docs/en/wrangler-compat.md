@@ -64,13 +64,11 @@ Goal: allow users to keep using standard `wrangler.jsonc`/`wrangler.toml` and th
 - **Subcommand-level alternatives**: `versions upload`→`cellhive deploy` (atomic release), `versions view`→`cellhive releases`, `triggers deploy`→`cellhive deploy --config` (crons are applied atomically with the version), `queues consumer`→`queues.consumers` + `deploy` (use `queue status` for backlog), `workflows status\|describe\|trigger`→`env.WF` (instances are runtime entities), `d1 execute`/`r2 object`/`kv key`→Worker binding + `cellhive dev`, `types`/`init`→unsupported (write your own `Env` interface / create your own wrangler.jsonc);
 - **True wrangler compatibility (alternative, not implemented)**: testing shows wrangler 4.133.0 reads `CLOUDFLARE_API_BASE_URL` (old name `CF_API_BASE_URL`) and the SDK's `CLOUDFLARE_BASE_URL`, so a subset of the CF API could be implemented to let it run unchanged; the cost is tracking CF API drift + matching the `content/v2` multipart upload format. This is an independent spike and outside the scope of this item.
 
-## Supported `compatibility_flags` List (ADR-153)
+## `compatibility_flags` Authority (ADR-153/186)
 
-Track pinned workerd (`internal/workerdbin.PinnedVersion`, currently `1.20260615.1`), validate at deploy time (`unknown_flag` fails closed), and keep the Go validator and dev CLI list mirrored and enforced by tests:
+The platform follows pinned workerd (`internal/workerdbin.PinnedVersion`, currently `1.20260916.1`) and validates at deploy time; unknown flags and flags marked experimental upstream fail closed. The complete list is no longer handwritten in documentation or validators. `cmd/workerd-compat-gen` reads `compatibility-date.capnp` from a fixed upstream revision, emits `internal/workerdcompat/manifest.json`, then renders `cli/src/workerd-compat.generated.ts` for Bun. The Go control plane consumes the manifest directly, and contract tests compare both consumers item by item.
 
-`nodejs_compat`, `nodejs_compat_v2`, `nodejs_compat_populate_process_env`, `no_handle_cross_request_promise_resolution`, `global_fetch_strictly_public`, `disable_fetch_stream_teeing`, `streams_enable_constructors`, `transformstream_enable_standard_constructor`, `export_commonjs_default`, `export_commonjs_namespace`, `disable_nodejs_process_v2`, `enable_ctx_exports`, `deployment_id_header`, `require_custom_ports_development`.
-
-The compatibility upper bound `2026-06-22` is bound to this pin (`TestPinPairsWithCompatibilityDate`). Acceptance for **framework prebuilt artifacts** (OpenNext/SvelteKit/Astro) is covered item by item in `internal/wrangler TestFrameworkPrebuiltLayouts`.
+The compatibility ceiling `2026-09-23` is bound to this pin/manifest. `scripts/workerd-compat-probe.sh` verifies the maximum date, rejection of the following day, every allowed flag, and unknown-flag rejection against the real binary. Acceptance for **framework prebuilt artifacts** (OpenNext/SvelteKit/Astro) is covered item by item in `internal/wrangler TestFrameworkPrebuiltLayouts`.
 
 ## Rejection Policy
 

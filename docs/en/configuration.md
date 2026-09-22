@@ -155,10 +155,12 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_WORKERD` | auto-discover | workerd path (prefer pinned `1.20260615.1`) |
+| `CELLHIVE_WORKERD` | auto-discover | workerd path (prefer pinned `1.20260916.1`) |
 | `CELLHIVE_WORKERD_DIR` | empty | local package store dir (searched for `@cloudflare+workerd-linux-64@*`, pinned preferred) |
 | `CELLHIVE_ESBUILD` | auto-discover | esbuild path |
 | `CELLHIVE_ESBUILD_DIR` | empty | local package store dir (searched for `esbuild@*`) |
+
+The production baseline pins esbuild `0.28.2`. Platform secrets do not travel through user-visible env: runtimes map them to Cap'n Proto host bindings using `fromEnvironment` and construct a strict workerd child environment; unrelated parent-process variables are not inherited. Tenant env remains entirely owned by user vars/bindings.
 
 ## user-runtime
 

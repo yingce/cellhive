@@ -4,9 +4,15 @@
 
 This release closes out the remaining items in roadmap P3–P5, all backed by real runtime/test evidence.
 
+### Stock-workerd Runtime Baseline Hardening (ADR-186)
+- The production and contract baseline is exactly pinned to stock workerd `1.20260916.1` and esbuild `0.28.2`. The dev CLI uses contemporaneous Miniflare `5.20260916.0-alpha`, with its workerd override also fixed at `1.20260916.1`. The image build verifies registry SHA-512 values and ships workerd/esbuild license texts.
+- Platform URLs/tokens no longer enter final WorkerCode or rendered capnp. Trusted host bindings use `fromEnvironment`, and user-runtime, do-runtime, and do-supervisor start workerd with an explicit environment. Tenant env still has zero platform keys, so users may use valid names such as `CELL_*` and `CH_*`.
+- Compatibility authority is generated from a fixed upstream workerd revision (current ceiling `2026-09-23`). The Go control plane and Bun CLI consume the same generated manifest; a real-binary probe verifies the maximum date, every allowed flag, and unknown-flag rejection.
+- Final WorkerCode is limited to 64 MiB. workerLoader env uses the 1 MiB upstream limit minus 8 KiB headroom, for a 1016 KiB limit. The control plane checks before its release transaction, and every dynamic-load path rechecks through one shared guard; errors expose only code/actual/max. Until Task 11's Docker Compose/no-skip acceptance passes, this entry claims implemented code paths and real-workerd package tests only.
+
 ### Tenant Env Is Entirely User-Owned (ADR-185)
 - Tenant Worker and DO-facet `env` objects now contain only user-declared vars/bindings. There are zero platform keys; `CH_*`, `CELL_*`, `__cellhive*`, and historical platform names all belong to the user.
-- The workflow dispatcher passes a trusted `WorkflowBridgeTarget extends RpcTarget` fixed-op callback as a JSRPC argument to the dynamic workflow wrapper. The host env, private transport, credentials, and dispatcher-bound identity stay in the trusted internal host. Step/retry/wait/pause/error paths pass on pinned stock workerd `1.20260615.1`; the implementation neither transfers the incompatible `ServiceStub` across the dynamic-loader boundary nor enables the experimental flag.
+- The workflow dispatcher passes a trusted `WorkflowBridgeTarget extends RpcTarget` fixed-op callback as a JSRPC argument to the dynamic workflow wrapper. The host env, private transport, credentials, and dispatcher-bound identity stay in the trusted internal host. Step/retry/wait/pause/error paths pass on pinned stock workerd `1.20260916.1`; the implementation neither transfers the incompatible `ServiceStub` across the dynamic-loader boundary nor enables the experimental flag.
 - Native Tail Workers for dynamically loaded Workers are unsupported on the current pin, so platform capture of tenant console output is temporarily disabled instead of restoring an env transport.
 
 ### ADR-184 platform-side stubs (historical; env conclusions superseded by ADR-185)
@@ -219,7 +225,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - Official wrangler using `CLOUDFLARE_API_BASE_URL` to connect directly (CF API subset) is an alternative, not implemented.
 
 ### Deployable artifacts (ADR-139)
-- Single image (5 binaries + **pinned workerd 1.20260615.1** + `workerd/` JS, glibc base image), `deploy/entrypoint.sh` dispatches services by short name; `deploy/compose/docker-compose.yml` (cell-agent + user-runtime + do-runtime, `s3`/`edge` profiles, only requires `CELLHIVE_ROOT_KEY`); `deploy/k8s/` kustomize manifests (StatefulSet/Deployment/HPA/ConfigMap/Secret examples); Makefile `docker-build`/`compose-config`/`compose-up`/`k8s-render`.
+- Single image (5 binaries + **pinned workerd 1.20260916.1** + `workerd/` JS, glibc base image), `deploy/entrypoint.sh` dispatches services by short name; `deploy/compose/docker-compose.yml` (cell-agent + user-runtime + do-runtime, `s3`/`edge` profiles, only requires `CELLHIVE_ROOT_KEY`); `deploy/k8s/` kustomize manifests (StatefulSet/Deployment/HPA/ConfigMap/Secret examples); Makefile `docker-build`/`compose-config`/`compose-up`/`k8s-render`.
 
 ### DO output-gate deployment (ADR-140)
 - `do-runtime -render-only` + `do-supervisor` takes over the workerd lifecycle (lease renewal/drain); compose profile `rpo0`, k8s `overlays/rpo0`; container end-to-end verification that DO calls go through the gate and land in the bucket.
@@ -262,7 +268,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 
 ### Compatibility matrix closure (ADR-153)
 - **Bug fix**: the platform bundler now externals `cloudflare:*` by default (`node:*` only with nodejs_compat), so prebuilt artifacts from frameworks such as OpenNext can `deploy --config` normally.
-- Precise list of `compatibility_flags`, mirrored with the dev CLI and enforced by tests; pin `1.20260615.1` ↔ compatibility ceiling `2026-06-22` binding; OpenNext/SvelteKit/Astro layout acceptance; D1 sessions/bookmarks explicitly rejected.
+- Precise list of `compatibility_flags`, mirrored with the dev CLI and enforced by tests; pin `1.20260916.1` ↔ compatibility ceiling `2026-09-23` binding; OpenNext/SvelteKit/Astro layout acceptance; D1 sessions/bookmarks explicitly rejected.
 
 ### dispatch defect fixes (ADR-154)
 - Fixed: timer body missing `namespace` (cron/scheduled always 400), deployment artifact missing `CELLHIVE_DISPATCH_URL` (queue/timer loops silently not starting), empty `event.cron`, queue batch not in CF shape (`.messages`/`.queue`/`ackAll`/`retryAll`) and properties/trace lost across isolates.

@@ -65,7 +65,7 @@ cellhive dev  (Bun, one process, zero Go)
 | Miniflare 4.20260714.0 (previously tried) | workerd `1.20260714.1` | ❌ Internal control worker hardcodes `2026-07-08`, incompatible with the pinned version |
 
 - **Pinning rule (corrected, tested on 2026-09-15)**: The **Miniflare version must be aligned with the platform pinned workerd from the same period**, then override its own `workerd` dependency to the pinned version.
-  - ❗ **Do not** forcibly override the workerd of a "newer Miniflare" (such as 4.20260714.0) to an older pinned version — Miniflare's internal control worker (`MINIFLARE_DEV_CONTROL`) **hardcodes** `compatibilityDate` (4.20260714.0 = `2026-07-08`), while pinned workerd `1.20260615.1` only supports up to `2026-06-22`, so startup fails immediately: `This Worker requires compatibility date "2026-07-08", but the newest date supported by this server binary is "2026-06-22"`.
+  - ❗ **Historical failure on the old pin**: Miniflare 4.20260714.0 was once forced onto workerd `1.20260615.1`; its control Worker hardcoded `2026-07-08`, beyond that old binary's `2026-06-22` ceiling, so startup failed. The current pair is `5.20260916.0-alpha` + `1.20260916.1`; do not infer the current ceiling from this historical record.
   - The previous spike that "only did `require`/`dispatchFetch` without a port" would **miss** this issue (the control service is only instantiated in dev server mode)—now corrected.
 - Implementation: `cli/package.json` depends on `miniflare@5.20260916.0-alpha` + `overrides: { "workerd": "1.20260916.1" }`; lockfile and installed-package tests reject a second workerd version.
 - **Verified ✅ (2026-09-22)**: real module fetch, KV/D1/R2, Text module rules, the complete assets matrix, and `setOptions` hot reload pass; `bun test` is 18/18.
@@ -132,7 +132,7 @@ cellhive dev  (Bun, one process, zero Go)
 
 The server validates the following in `POST /v1/control/deploy` (and bundle upload):
 1. **bundle**: `bundle_sha` exists in object storage (content-addressed object exists), and `assets` references exist.
-2. **Compatibility date**: `compatibility_date` ≤ the platform-supported upper bound (known **2026-06-22**, empirically verified); report an error and provide the upper bound if exceeded.
+2. **Compatibility date**: `compatibility_date` ≤ the manifest-defined platform ceiling (currently **2026-09-23**, verified against the real binary); report an error and provide the ceiling if exceeded.
 3. **compatibility_flags**: Must be within the known set of the pinned workerd (unknown flags report an error like `No such compatibility flag`; known flags such as `nodejs_compat` are allowed).
 4. **Bindings**: The type of each binding must be in the **support matrix**; otherwise reject it (`images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`). Bindings supported by the platform but not simulatable in dev (currently only `vectorize`) are **explicitly errored** on dev startup.
 5. **Resource references**: Resources referenced by bindings (KV/D1/R2/Queue…) must already be registered in the control plane (automatic provisioning is rejected, ADR-014); otherwise the error suggests the corresponding `cellhive <kind> create`.
@@ -217,7 +217,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 | Miniflare cannot start on Bun (Node compatibility layer) | **Spike has passed** (Miniflare works normally since Bun 1.4.0); if a future Bun version regresses, fallback: run Miniflare with system Node (still zero Go), or `--platform` (connect to a real local cell-agent) |
 | Miniflare workerd version ≠ pinned | Override according to §3; if override is impossible, warn about drift in the banner + run contract tests on pinned |
 | Platform-unsupported binding (such as `IMAGES`) | dev warning; `cellhive deploy` server-side rejection (§8), error includes field path |
-| `compatibility_date` exceeds upper bound | CLI preflight + server-side rejection (≤ 2026-06-22) |
+| `compatibility_date` exceeds upper bound | CLI preflight + server-side rejection (currently ≤ 2026-09-23) |
 | Port occupied | Clear error + occupying PID |
 
 ## 14. Implementation Plan (Bun Project; Do Not Touch the Go Platform)

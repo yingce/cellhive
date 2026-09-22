@@ -133,5 +133,5 @@ _最后更新：2026-09-19_
 - **ServiceBinding**：`env.SVC.fetch()` 与 `env.SVC.<method>()`（Proxy 转发）→ cell-agent `/v1/service/{fetch,run}`（scope kind=service）→ user-runtime `/v1/services/{fetch,run}` → 目标 worker / 其命名 entrypoint（同名空间）；`binding.entrypoint` 指定目标 entrypoint。
 - **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、尺寸来自 list 响应，ADR-145）。
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
-- **日志 tail（历史）**：本 ADR 的 `log-tail.js`/`LogSink` 传输已由 ADR-185 取代并删除。pin `1.20260615.1` 拒绝动态 loaded-worker 原生 Tail Worker（`provided value is not of type 'Fetcher'`），因此当前 tenant `console.*` 不进入平台 ring/OTLP，且不得以 tenant env 回退。
+- **日志 tail（历史）**：本 ADR 的 `log-tail.js`/`LogSink` 传输已由 ADR-185 取代并删除。pin `1.20260916.1` 拒绝动态 loaded-worker 原生 Tail Worker（`provided value is not of type 'Fetcher'`），因此当前 tenant `console.*` 不进入平台 ring/OTLP，且不得以 tenant env 回退。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。

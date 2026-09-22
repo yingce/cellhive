@@ -13,3 +13,13 @@ The Docker build verifies the registry-published SHA-512 digest before extractin
 - `/usr/share/licenses/cellhive/esbuild/LICENSE`
 
 Repository copies are in `third_party/workerd/LICENSE` and `third_party/esbuild/LICENSE`.
+
+## Design Reference Not Shipped
+
+CellHive's stock-workerd runtime design references methods described by WDL
+(`wdl-dev/wdl`, Apache-2.0), including fixed commit
+`dc70da6cc04acee7d31d80fc0caf8f323bbacf21`. CellHive does not copy,
+substantially adapt, package, link, or ship WDL source code or build artifacts.
+The corresponding CellHive compatibility generator and code/env budget
+implementations are independent. This attribution records the design-method
+reference and does not add WDL as a runtime or distribution dependency.

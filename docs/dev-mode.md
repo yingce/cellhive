@@ -65,7 +65,7 @@ cellhive dev  (Bun, 一个进程，零 Go)
 | Miniflare 4.20260714.0（曾试用） | workerd `1.20260714.1` | ❌ 内部 control worker 硬编码 `2026-07-08`，与 pinned 不兼容 |
 
 - **pin 规则（已修正，2026-09-15 实测）**：**Miniflare 版本必须与平台 pinned workerd 同期对齐**，然后把它自己的 `workerd` 依赖 override 到 pinned 版本。
-  - ❗ **不能**把"更新的 Miniflare"（如 4.20260714.0）的 workerd 强行 override 到旧的 pinned —— Miniflare 内部 control worker（`MINIFLARE_DEV_CONTROL`）**硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），pinned workerd `1.20260615.1` 只支持到 `2026-06-22`，启动直接失败：`This Worker requires compatibility date "2026-07-08", but the newest date supported by this server binary is "2026-06-22"`。
+  - ❗ **历史失败记录（旧 pin）**：曾把 Miniflare 4.20260714.0 的 workerd 强行 override 到 `1.20260615.1`；其 control worker 硬编码 `2026-07-08`，超过旧二进制上限 `2026-06-22`，因此启动失败。现行组合是 `5.20260916.0-alpha` + `1.20260916.1`，不得从这段历史记录反推当前上限。
   - 之前"只做 `require`/`dispatchFetch` 不带端口"的 spike 会**漏掉**这个问题（control 服务在 dev server 模式下才实例化）——已修正。
 - 实现：`cli/package.json` 依赖 `miniflare@5.20260916.0-alpha` + `overrides: { "workerd": "1.20260916.1" }`；lockfile 与安装包版本测试拒绝第二个 workerd 版本。
 - **已验证 ✅（2026-09-22）**：module fetch、KV/D1/R2、Text module rule、assets 全矩阵与 `setOptions` 热更新真实通过；`bun test` 18/18。
@@ -132,7 +132,7 @@ cellhive dev  (Bun, 一个进程，零 Go)
 
 服务端在 `POST /v1/control/deploy`（及 bundle 上传）校验：
 1. **bundle**：`bundle_sha` 在对象存储存在（内容寻址对象存在），`assets` 引用存在。
-2. **兼容日期**：`compatibility_date` ≤ 平台支持上限（已知 **2026-06-22**，实测）；超限报错并给出上限。
+2. **兼容日期**：`compatibility_date` ≤ manifest 给出的平台支持上限（当前 **2026-09-23**，真实二进制探针已验证）；超限报错并给出上限。
 3. **compatibility_flags**：必须在 pinned workerd 的已知集内（未知 flag 报 `No such compatibility flag` 类错误；`nodejs_compat` 等已知放行）。
 4. **绑定**：每个 binding 的 type 必须在**支持矩阵**内；不在则拒绝（`images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`）。平台支持但 dev 无法模拟的（当前仅 `vectorize`）在 dev 启动时**明确报错**。
 5. **资源引用**：binding 指向的资源（KV/D1/R2/Queue…）必须已在控制面登记（拒绝自动 provisioning，ADR-014）；否则错误提示对应 `cellhive <kind> create`。
@@ -217,7 +217,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 | Bun 上 Miniflare 起不来（Node 兼容层） | **已 spike 通过**（Bun 1.4.0 起 Miniflare 正常）；若未来 Bun 版本回归，回退：用系统 Node 跑 Miniflare（仍零 Go），或 `--platform`（连本机真实 cell-agent） |
 | Miniflare workerd 版本 ≠ pinned | 按 §3 override；若无法 override，横幅警告漂移 + 契约测试在 pinned 上跑 |
 | 平台不支持的绑定（如 `IMAGES`） | dev 警告；`cellhive deploy` 服务端拒绝（§8），错误含字段路径 |
-| `compatibility_date` 超上限 | CLI 预检 + 服务端拒绝（≤ 2026-06-22） |
+| `compatibility_date` 超上限 | CLI 预检 + 服务端拒绝（当前 ≤ 2026-09-23） |
 | 端口占用 | 明确报错 + 占用 PID |
 
 ## 14. 实现计划（Bun 工程；不碰 Go 平台）

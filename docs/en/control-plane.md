@@ -76,7 +76,7 @@ The CLI is only for **fast feedback**; `deploy` validation treats the **server s
 `POST /v1/control/deploy` (including bundle upload) validation:
 
 1. **bundle**: the content-addressed object for `bundle_sha` exists; `assets` references exist.
-2. **Compatibility date**: `compatibility_date` ≤ platform-supported upper bound (known **2026-06-22**, verified); if exceeded, return an error and provide the upper bound.
+2. **Compatibility date**: `compatibility_date` ≤ platform-supported upper bound (known **2026-09-23**, verified); if exceeded, return an error and provide the upper bound.
 3. **compatibility_flags**: must be in the known set of the pinned workerd (unknown flag returns an error).
 4. **Bindings**: type must be in the **support matrix**; otherwise reject (`images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`; `vectorize`/`hyperdrive` are supported, and the resource reference for vectorize = `index_name`, ADR-158).
 5. **Resource references**: KV/D1/R2/Queue/… pointed to by a binding must have been registered by the control plane (**reject automatic provisioning**, ADR-014); otherwise suggest the corresponding `cellhive <kind> create`.

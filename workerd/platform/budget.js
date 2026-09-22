@@ -102,47 +102,64 @@ export function assertWorkerCodeBudget(workerCode) {
   return actual;
 }
 
-function validateJSONValue(value, ancestors) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (Number.isFinite(value)) return;
-    throw new TypeError("worker env contains a non-finite number");
+function v8StringExtraBytes(value) {
+  let wide = false;
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 0xff) {
+      wide = true;
+      break;
+    }
   }
-  if (typeof value !== "object") {
-    throw new TypeError(`worker env contains unsupported ${typeof value}`);
-  }
-  if (ancestors.has(value)) throw new TypeError("worker env contains a cycle");
-  if (Object.getOwnPropertySymbols(value).length > 0) {
-    throw new TypeError("worker env contains a symbol key");
-  }
-  ancestors.add(value);
-  for (const key of Object.keys(value)) validateJSONValue(value[key], ancestors);
-  ancestors.delete(value);
+  return wide ? Math.max(0, (value.length * 2) - byteLength(value)) : 0;
 }
 
-const nonLatin1 = /[\u0100-\uffff]/;
-
-function twoByteStringPenalty(value) {
-  if (!nonLatin1.test(value)) return 0;
-  return Math.max(0, (2 * value.length) - byteLength(value));
-}
-
-function envStringPenalty(value) {
-  if (typeof value === "string") return twoByteStringPenalty(value);
-  if (!value || typeof value !== "object") return 0;
-  let total = 0;
-  for (const key of Object.keys(value)) {
-    total += twoByteStringPenalty(key);
-    total += envStringPenalty(value[key]);
+// Walk iteratively so validation and V8 string accounting are one explicit
+// pass. Exit markers make the WeakSet track only ancestors, allowing repeated
+// references while still rejecting cycles before JSON.stringify sees them.
+function inspectEnv(value) {
+  let extraBytes = 0;
+  const ancestors = new WeakSet();
+  const stack = [{ value, exit: false }];
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    const current = frame.value;
+    if (frame.exit) {
+      ancestors.delete(current);
+      continue;
+    }
+    if (current === null || typeof current === "boolean") continue;
+    if (typeof current === "string") {
+      extraBytes += v8StringExtraBytes(current);
+      continue;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw new TypeError("worker env contains a non-finite number");
+      continue;
+    }
+    if (typeof current !== "object") {
+      throw new TypeError(`worker env contains unsupported ${typeof current}`);
+    }
+    if (ancestors.has(current)) throw new TypeError("worker env contains a cycle");
+    if (Object.getOwnPropertySymbols(current).length > 0) {
+      throw new TypeError("worker env contains a symbol key");
+    }
+    ancestors.add(current);
+    stack.push({ value: current, exit: true });
+    const keys = Object.keys(current);
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const key = keys[i];
+      extraBytes += v8StringExtraBytes(key);
+      stack.push({ value: current[key], exit: false });
+    }
   }
-  return total;
+  return extraBytes;
 }
 
 export function estimateEnv(value) {
-  validateJSONValue(value, new WeakSet());
+  const extraBytes = inspectEnv(value);
   const json = JSON.stringify(value);
   if (json === undefined) throw new TypeError("worker env is not JSON serializable");
-  return byteLength(json) + envStringPenalty(value);
+  return byteLength(json) + extraBytes;
 }
 
 export function checkEnv(value) {

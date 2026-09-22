@@ -23,7 +23,7 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 | `CELLHIVE_DO_RUNTIME_JS` | `workerd/do-runtime` | host actor JS |
 | `CELLHIVE_ESBUILD` | 自动查找 | esbuild 路径 |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `do-runtime/`） |
-| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260615.1`） |
+| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260916.1`） |
 
 
 > 解析规则（字符串/布尔/时长/字节/列表）见 [`../configuration.md`](../configuration.md#解析规则)。
@@ -34,11 +34,12 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 - alarm 必须 shim（stock workerd 对 SQLite facet 不实现原生 alarm）。
 - WS 迁移/重启以 **1012** 关闭，客户端重连（不做 resume）。
 - **门确认前不回 ack**。
-- facet 的 tenant env 遵循 ADR-185：只有用户 vars 与用户命名 binding stub，零平台键；secret 尚未注入 runtime env。动态 loaded DO facet 的 Tail Worker 同样被 pin `1.20260615.1` 拒绝（`provided value is not of type 'Fetcher'`），故 tenant `console.*` 平台采集关闭。
+- facet 的 tenant env 遵循 ADR-185：只有用户 vars 与用户命名 binding stub，零平台键；secret 尚未注入 runtime env。动态 loaded DO facet 的 Tail Worker 同样被 pin `1.20260916.1` 拒绝（`provided value is not of type 'Fetcher'`），故 tenant `console.*` 平台采集关闭。
+- facet WorkerCode（64 MiB）与估算 env（1016 KiB）在 `workerLoader.get()` 前复核；跨 DO 边界丢失自定义 Error 字段时，仅解析并重新校验平台规范 LimitError，再返回 code/actual/max。
 
 ## 源码位置
 
-`cmd/do-runtime/`、`cmd/do-supervisor/`；`internal/doruntime/`、`internal/dosupervisor/`；`workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`。
+`cmd/do-runtime/`、`cmd/do-supervisor/`；`internal/doruntime/`、`internal/dosupervisor/`；`workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`；`workerd/platform/budget.js`。
 
 ## 测试锚点
 

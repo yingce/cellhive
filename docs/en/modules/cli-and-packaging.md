@@ -25,7 +25,7 @@ CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`,
 | `CELLHIVE_ROOT_KEY` | required | Derives admin (`CELLHIVE_ADMIN_TOKEN` can override) and internal tokens |
 | `CELLHIVE_S3_TEST_ACCESS` / `_SECRET` / `_BUCKET` | `minioadmin`/`minioadmin`/`cellhive` | S3 integration test credentials |
 | `CELLHIVE_S3_TEST_ENDPOINT` | empty | Points to an existing S3; if empty, `make s3-test` attempts to start MinIO, and skips if docker is unavailable |
-| `CELLHIVE_WORKERD` | auto-discovered | workerd path (prefers pinned `1.20260615.1`) |
+| `CELLHIVE_WORKERD` | auto-discovered | workerd path (prefers pinned `1.20260916.1`) |
 | `TEST_BYTES` | — | Used by `internal/config` unit tests |
 
 
@@ -35,11 +35,13 @@ CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`,
 
 - Production packaging is **Go + esbuild, no Node**.
 - The dev CLI is not part of production artifacts, and Miniflare/workerd must stay in sync with the pinned version.
-- Unknown wrangler fields/flags or overly new compatibility dates are **rejected at deployment time**.
+- The current exact dev pair is Miniflare `5.20260916.0-alpha` with workerd override `1.20260916.1`.
+- Unknown wrangler fields/flags or overly new compatibility dates are **rejected at deployment time**. Go and Bun both consume generated authority from `internal/workerdcompat/manifest.json` (rendered as `workerd-compat.generated.ts` for Bun), rather than maintaining a second handwritten flag table.
+- Final WorkerCode 64 MiB and env 1016 KiB budgets are enforced before packaging/dynamic loading; an over-budget release creates no version and does not move the active pointer.
 
 ## Source Locations
 
-`cmd/cellhive/`; `internal/{bundler,wrangler,wranglercompat,workerdbin}`; `cli/`.
+`cmd/cellhive/`, `cmd/workerd-compat-gen/`; `internal/{bundler,wrangler,wranglercompat,workerdbin,workerdcompat,workerbudget}`; `cli/`; `scripts/workerd-compat-probe.sh`.
 
 ## Test Anchors
 

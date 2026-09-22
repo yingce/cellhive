@@ -19,7 +19,7 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 | AI | Partial (optional) | **BYO OpenAI-compatible endpoint** (`env.AI.run`, `CELLHIVE_AI_URL/_KEY`); no platform-hosted catalog, no workers-ai catalog models |
 | Service / Platform bindings | Supported | Version pinning + ACL; **worker↔worker RPC = same-instance native JSRPC (ADR-102)**; **DO RPC = owner-routed JSON+tagged (ADR-162)** |
 | Vars / Secrets | Partial | Vars and user-named binding stubs enter tenant env; tenant env has zero platform keys and no reserved prefixes (ADR-185). Secrets can be envelope-encrypted, stored, and managed, but are **not yet injected into runtime env** |
-| Platform capture of tenant `console.*` | Partial | A Tail Worker for dynamic `workerLoader` Workers is rejected by pinned `workerd 1.20260615.1`: `provided value is not of type 'Fetcher'`; no ring/OTLP capture currently and no tenant-env fallback |
+| Platform capture of tenant `console.*` | Partial | A Tail Worker for dynamic `workerLoader` Workers is rejected by pinned `workerd 1.20260916.1`: `provided value is not of type 'Fetcher'`; no ring/OTLP capture currently and no tenant-env fallback |
 | `nodejs_compat` | Supported | Provided by workerd; must be enabled |
 | Cache API | Rejected | No edge cache |
 | Vectorize / AI Search / Browser / Email / Analytics Engine | Rejected | Not provided by workerd (Hyperdrive is already supported; see below) |
@@ -53,7 +53,7 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 
 ## Finalized (ADR-153)
 
-- **Exact list of `compatibility_flags`**: see `internal/wranglercompat.KnownCompatibilityFlags` (mirror of `KNOWN_COMPAT_FLAGS` in `cli/src/validate.ts`); unknown flags fail closed at deployment time with `unknown_flag`. `TestKnownFlagsMatchDevCLI` ensures both sides stay consistent; `TestPinPairsWithCompatibilityDate` ties the workerd pin (`1.20260615.1`) and compatibility upper bound (`2026-06-22`) into a single decision.
+- **Exact `compatibility_flags` list**: authority is `internal/workerdcompat/manifest.json`, generated from a fixed upstream revision. Go's `KnownCompatibilityFlags` and Bun's `workerd-compat.generated.ts` both consume it. Unknown/experimental flags fail closed at deployment time; contract tests and the real-binary probe bind workerd pin `1.20260916.1`, compatibility ceiling `2026-09-23`, and the allowed list into one decision.
 - **Framework prebuilt artifact acceptance**: `internal/wrangler TestFrameworkPrebuiltLayouts` covers OpenNext (`.open-next/worker.js` + `.open-next/assets`), SvelteKit (`.svelte-kit/cloudflare/_worker.js` + colocated assets), Astro (`dist/_worker.js/index.js` + `dist/client`): configuration mapping + `bundler.Build` packaging.
 - **Out of scope**: see the rationale in the "Rejected" rows (Cache API/browser rendering/Email/Python, etc.); Vectorize is already supported (ADR-158/159).
 

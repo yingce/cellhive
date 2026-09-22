@@ -25,7 +25,7 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、
 | `CELLHIVE_ROOT_KEY` | 必填 | 派生 admin（`CELLHIVE_ADMIN_TOKEN` 可覆盖）与 internal 令牌 |
 | `CELLHIVE_S3_TEST_ACCESS` / `_SECRET` / `_BUCKET` | `minioadmin`/`minioadmin`/`cellhive` | S3 集成测试凭据 |
 | `CELLHIVE_S3_TEST_ENDPOINT` | 空 | 指向既有 S3；空则 `make s3-test` 尝试起 MinIO，docker 不可用则 skip |
-| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260615.1`） |
+| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260916.1`） |
 | `TEST_BYTES` | — | `internal/config` 单测用 |
 
 
@@ -35,11 +35,13 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、
 
 - 生产打包 **Go + esbuild，无 Node**。
 - dev CLI 不属生产产物，且 Miniflare/workerd 必须与 pinned 版本同期。
-- 未知 wrangler 字段/flag/过新兼容日期**部署期拒绝**。
+- dev CLI 当前精确组合为 Miniflare `5.20260916.0-alpha` + workerd override `1.20260916.1`。
+- 未知 wrangler 字段/flag/过新兼容日期**部署期拒绝**；Go 与 Bun 都消费 `internal/workerdcompat/manifest.json` 的生成 authority（Bun 侧为 `workerd-compat.generated.ts`），不维护第二份手写 flag 表。
+- 打包/动态加载前执行最终 WorkerCode 64 MiB 与 env 1016 KiB 预算；超限发布不创建版本、不移动 active pointer。
 
 ## 源码位置
 
-`cmd/cellhive/`；`internal/{bundler,wrangler,wranglercompat,workerdbin}`；`cli/`。
+`cmd/cellhive/`、`cmd/workerd-compat-gen/`；`internal/{bundler,wrangler,wranglercompat,workerdbin,workerdcompat,workerbudget}`；`cli/`；`scripts/workerd-compat-probe.sh`。
 
 ## 测试锚点
 

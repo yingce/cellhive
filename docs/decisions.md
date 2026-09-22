@@ -652,7 +652,7 @@
 
 > 状态：**M1 + M2 已实现并验证（2026-09-15）**（完整设计见 [`dev-mode.md`](./dev-mode.md)）。修订 ADR-005（"无 Node/JS"边界）与 ADR-064（原"真实 Go 栈 dev"方案）。
 > 验证结论：`cli/` 的 `cellhive dev`（Bun + Miniflare）起真实 workerd，KV/D1/R2/`vars` 经 HTTP 全通；preflight 正确拒绝 `compat_date_too_new`/`unknown_flag` 并对 `images`/`ai` 等给出 `unsupported_binding` 警告。
-> **重要修正（原 spike 结论有误）**：不能把 Miniflare 的 `workerd` 任意 override 到更旧版本——Miniflare 内部 control worker **硬编码** `compatibilityDate`（4.20260714.0 = `2026-07-08`），pinned workerd `1.20260615.1`（支持上限 2026-06-22）会拒绝启动。**正确做法见决策 3**。
+> **重要修正（历史旧 pin 的原 spike 结论有误）**：不能把 Miniflare 的 `workerd` 任意 override 到更旧版本——当时 Miniflare 4.20260714.0 的 control worker 硬编码 `2026-07-08`，旧 pinned workerd `1.20260615.1`（上限 `2026-06-22`）会拒绝启动。现行精确组合见决策 3 与 ADR-186。
 
 - **决策**：
   1. **dev 运行时 = Bun CLI + Miniflare**：`cellhive dev` 用 Bun 写，内部用 Miniflare 起真实 workerd + 本地模拟绑定；**dev 机器上不跑任何 Go 后端进程**（不 require/spawn cell-agent）。生产 = Go workerd + cell-agent（**不变**）。
@@ -660,7 +660,7 @@
   3. **版本 pin（2026-09-22 更新）**：**Miniflare 版本必须与平台 pinned workerd 同期对齐；不能把 Miniflare 的 `workerd` 依赖 override 到跨期版本**。当前精确组合为 **`miniflare@5.20260916.0-alpha` + `workerd@1.20260916.1`**，lockfile/安装版本测试与 module/KV/D1/R2 真实 smoke 已通过。历史 `4.20260714.0` → 旧 pin 的失败仍证明了该规则。
   4. **契约对拍（Miniflare 作为 CF oracle）**：固定 golden 请求/响应在 Miniflare 与平台 cell-agent 上 diff，差异要么修我们（偏离 CF=bug），要么记入"有意差异"（RPO=0 延迟/scope/quota）。沿用 ADR-014 的 pinned 基线思路。
   5. **dev 不覆盖平台特性**：versions/routes/secrets/deploy/scope/RPO=0 不在 dev → 走真实平台（`cellhive deploy` 是 HTTP 客户端）。
-  6. **deploy 服务端功能/兼容性拦截（权威）**：`POST /v1/control/deploy` 服务端校验 bundle 存在、`compatibility_date` ≤ 支持上限（2026-06-22）、`compatibility_flags` 已知、绑定在支持矩阵内（**拒绝 `images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`**；`vectorize`/`hyperdrive` 已支持，见 ADR-158/129）、资源已登记、DO 生命周期合法、未知字段显式拒绝；CLI/dev **preflight 复用同一校验库**提前警告。理由：Miniflare 的绑定"认识面"远宽于平台（实测其插件含 images/ai/browser/vectorize/hyperdrive…），若只在 CLI 拦截会被绕过。
+  6. **deploy 服务端功能/兼容性拦截（权威）**：`POST /v1/control/deploy` 服务端校验 bundle 存在、`compatibility_date` ≤ manifest 上限（当前 `2026-09-23`）、`compatibility_flags` 已知且非 experimental、绑定在支持矩阵内（**拒绝 `images/browser-rendering/send_email/ai_search/dispatch_namespaces/secrets_store/containers/...`**；`vectorize`/`hyperdrive` 已支持，见 ADR-158/129）、资源已登记、DO 生命周期合法、未知字段显式拒绝；CLI/dev **preflight 复用同一生成清单**提前警告。理由：Miniflare 的绑定"认识面"远宽于平台（实测其插件含 images/ai/browser/vectorize/hyperdrive…），若只在 CLI 拦截会被绕过。
   7. **用户代码兼容是平台责任**：补齐 facade 字段缺口（KV list metadata/expiration、R2 `R2Object` 字段、D1 `meta.last_row_id`、错误形状），使用户代码在 CF/Miniflare/我们 dev/我们 prod 间可移植。
   8. **工具层选择**：`cellhive dev` **直接嵌 Miniflare**（= wrangler 内部同一引擎），不使用 `wrangler dev` CLI（重、语义旁落），也不使用**已废弃**的 `unstable_startWorker`/`unstable_dev`。若日后自研 wrangler 配置翻译/打包的保真成本不可接受，**回退首选 `@cloudflare/vite-plugin`**（CF 官方推荐的 programmatic dev server；配 Vite `createServer()`，底层仍是 Miniflare/workerd），而非 wrangler 的废弃 API。测试场景可用 `createTestHarness()`（wraps Miniflare，可直接读 wrangler 配置）复用配置解析。
 - **理由**：用户明确"dev 不该管后端存储实现"；Miniflare 已提供成熟 DX（热重载/inspector/persist/绑定面），自造 dev 栈收益低。且 **Miniflare 即是 wrangler 的引擎**（`wrangler` 依赖 `miniflare`+`workerd`，同属 workers-sdk），"Miniflare 过时"是误解（过时的是 v2 独立 CLI；v3/v4 是库）。代价用"pin 版本 + 契约对拍 + 服务端拦截"兜住。
@@ -1633,7 +1633,7 @@
 
 ## ADR-130 本地连接复用 = 在 Durable Object 内持有连接（实证 + 接线）✅
 
-- **背景**：用户决定「不做外部组件，本地复用连接即可」（不引入 pgbouncer/池化代理）。ADR-125 曾写「isolate 内由驱动池化」，但这是**未经验证的假设**。对 pinned workerd（1.20260615.1）实测：
+- **背景**：用户决定「不做外部组件，本地复用连接即可」（不引入 pgbouncer/池化代理）。ADR-125 曾写「isolate 内由驱动池化」，但这是**未经验证的假设**。该行为已在现行 pinned workerd `1.20260916.1` 的真实套件重验：
   1. **普通 worker 做不到**：模块作用域的 socket 对象跨请求存活，但其 streams 锁在创建它的请求上（第二次请求报 `This WritableStream is currently locked to a writer.`）→ 请求级 I/O 隔离，普通 handler 无法跨请求持有连接，「模块级连接池」不成立。
   2. **Durable Object 可以**：DO 的 fetch 里把 `connect()` 的 socket + writer/reader 存到实例字段，后续请求复用同一连接（实测 3 次请求 → 服务端只 accept 1 次、每次都正确收发）。这正是 CF「用 DO 持有长连接」的语义。
 - **决策**：
@@ -1798,7 +1798,7 @@
 
 - **背景**：部署产物停在 P0 骨架且已过期：`deploy/Dockerfile` 只 `COPY go.mod`（缺 `go.sum`，有真实依赖 → 构建失败）、只构建 2 个二进制、运行镜像无 workerd/JS；compose 引用**已删除**的 `CELLHIVE_GRPC_ADDR`/`CELLHIVE_INTERNAL_TOKEN` 与死端口 `:7000`，且有 placeholder 镜像；k8s/Helm 只有文档。
 - **决策**：提供"能真跑"的最小部署面：
-  1. **单镜像**：多阶段；`go.mod+go.sum` + `go mod download`；构建 5 个服务二进制；运行阶段 `debian:bookworm-slim`（workerd 需 glibc）+ `ca-certificates/curl`，**构建期从 npm 拉 pinned workerd `1.20260615.1`**（`--build-arg` 可改），复制 `workerd/` JS；`/data/{state,runtime,bucket}`。
+  1. **单镜像**：多阶段；`go.mod+go.sum` + `go mod download`；构建 5 个服务二进制；运行阶段 `debian:bookworm-slim`（workerd 需 glibc）+ `ca-certificates/curl`，**构建期从 npm 拉 pinned workerd `1.20260916.1` 与 esbuild `0.28.2`**并校验 registry SHA-512，复制 `workerd/` JS；`/data/{state,runtime,bucket}`。
   2. **entrypoint dispatcher**：Docker 的 `command:` 只覆盖 CMD，若 ENTRYPOINT 固定为 `cell-agent` 则 compose 换服务**静默失效**；改为 `deploy/entrypoint.sh` 按短名/路径分发，缺省 cell-agent。
   3. **compose**：cell-agent(FS 桶 + `/readyz` healthcheck) + user-runtime + do-runtime（`depends_on: service_healthy`）；profile `s3`(MinIO)/`edge`(Traefik)；只要求 `CELLHIVE_ROOT_KEY`。
   4. **k8s**：`deploy/k8s/` kustomize——cell-agent StatefulSet(headless svc, downward API 的 node/advertise, PVC, grace 120, `/readyz`)；user-runtime Deployment+svc+HPA；do-runtime Deployment(headless, `emptyDir`)；ConfigMap + Secret 示例。
@@ -1996,7 +1996,7 @@
 - **背景**：`compatibility-matrix.md` 的"待细化"（`compatibility_flags` 精确列表、框架适配逐项验收）与 D1 "无 sessions/bookmark" 都只是口头结论；探索框架验收时发现**真 bug**：平台 bundler 从不把 `cloudflare:*`/`node:*` 标为 external，凡是 import `cloudflare:workers` 的框架预构建产物（OpenNext 等）在 `deploy --config` 时**打包失败**。
 - **决策/修复**：
   1. **bundler 修复**：`Build` 默认 `--external:cloudflare:*`，`NodeJSCompat` 时再加 `--external:node:*`（workerd 运行时提供；否则 esbuild unresolved import 直接失败）。回归测试 `TestBuildExternalizesPlatformModules`（含 node:* 在无 nodejs_compat 时必须失败关闭）。
-  2. **flag 列表与 pin 绑定**：`wranglercompat.PinnedWorkerdVersion`（= `workerdbin.PinnedVersion`）；`TestKnownFlagsMatchDevCLI` 解析 `cli/src/validate.ts` 的 `KNOWN_COMPAT_FLAGS` 与 Go 列表逐项比对（单边新增即失败）；`TestPinPairsWithCompatibilityDate` 把 pin 与 `MaxCompatibilityDate=2026-06-22` 绑成一个决定。
+  2. **flag 列表与 pin 绑定（由 ADR-186 升级）**：`internal/workerdcompat/manifest.json` 从固定上游 revision 生成；Go 与 Bun 消费同一清单，`TestKnownFlagsMatchDevCLI`/`TestPinPairsWithCompatibilityDate` 把 pin `1.20260916.1`、上限 `2026-09-23` 和生成产物绑成一个决定。
   3. **框架验收**：`internal/wrangler TestFrameworkPrebuiltLayouts`（OpenNext/SvelteKit/Astro 三种预构建布局：配置映射 + 平台打包；esbuild 缺失则 skip）。
   4. **D1 sessions/bookmarks 显式拒绝**：`bindings.js` 的 `D1Database.session()`/`withSession()` 抛 `d1 sessions are not supported by CellHive (no read replication or bookmarks)`；真实 workerd e2e（`TestUserRuntimePublicLoaderD1R2Queue`）断言该错误文案。矩阵 D1 行标注。
 - **验证**：新增 4 个测试（bundler 外置、flag 镜像、pin 配对、三框架验收）+ 既有 e2e 的 sessions 断言；`go test ./...` 50 包全绿。
@@ -2308,7 +2308,7 @@
 - **legacy DO 类**：只实现 `fetch/alarm/webSocket*`、未 `extends DurableObject` 的类，workerd 不允许以 facet stub 调用（`does not support RPC`）。do-runtime 现在按 worker 的 DO binding 生成 facet 入口模块（`renderFacetModule`）：已继承平台基类的类原样导出；legacy 类包装成 `extends cellhive-do.js DurableObject` 的子类，把 `fetch/alarm/webSocketMessage/Close/Error` 转给内部实例（`new Inner(ctx, env)`），从而沿用平台 storage/alarm shim。`TestDoRuntimeClassicDOAndStatus`。
 - **DO 响应透传**：`env.DO.get(id).fetch(req)` 此前对任何非 2xx 抛错（边缘变 500），且 cell-agent 代理强制 `content-type: application/json`。现在 do-runtime 的 facet 响应与其顶层 sharding 包装都标记 `x-cellhive-do-app: 1` 并保留 tenant 的 content-type；cell-agent 透传该标记、状态与 content-type（facade 仅在**无标记**的平台错误包络上抛错）。`TestDOProxyForwardsTenantResponse` + `TestDoRuntimeClassicDOAndStatus`。
 - **R2ObjectBody**：补 `body`（ReadableStream）与 `writeHttpMetadata`。**边界**：`writeHttpMetadata(headers)` 依赖修改调用方 Headers，而 props-bound binding 走 workerd RPC（参数按值序列化），跨 entrypoint 的修改会丢失——列为 known-issues；`httpMetadata` 字段与 `head()` 正常。
-- **未通过的示例**（策略/已登记缺口，非回归）：workflow/wsclient 因 `compatibility_date` 超过平台上限 `2026-06-22` 被拒；facets 的 `worker_loaders`、vectordb 的 `sqlite_vec` 为未登记字段/flag 被拒；**wsecho 的完整 WS echo 不可用**——`env.DO.get(id).fetch(升级请求)` 未接 do-runtime 的 `/v1/do/connect`（known-issues）；alarm 需 do-supervisor gate 才会被调度（本矩阵未起 gate）。
+- **历史未通过示例**（当时策略/已登记缺口，非现行回归）：workflow/wsclient 曾因 `compatibility_date` 超过旧平台上限 `2026-06-22` 被拒；facets 的 `worker_loaders`、vectordb 的 `sqlite_vec` 为未登记字段/flag 被拒；当时 wsecho 与 alarm 的其余缺口随后由 ADR-175 等修复。
 - **验证**：三个新测试；运行矩阵含 Hono 4.13.8 从 `node_modules` 打包 + 多路径 + `--path` 挂载 + KV binding 全 PASS。
 - **文档**：`docs/compatibility-matrix.md`、`docs/known-issues.md`、`docs/durable-objects.md`、`docs/testing.md`、`docs/release-notes.md`。
 
@@ -2380,9 +2380,9 @@
 - **代价/边界**：每次绑定请求多一次（1s 缓存的）owner 解析；无人拥有的 scope 首次访问会多一次 hydrate；`handleClaim` 路径强制 hydrate 会放大既有的 control cell 冷恢复时序窗口（torture cycle 3 偶发一次空 control，重跑稳定复现不了）。
 - **验证**：`internal/server TestInvalidateStaleLocal`（外部过期/无人拥有 → 删除本地；自己持有 → 保留）；真实两节点 e2e 复现脚本（`/tmp/stale*.sh`）：重启后读 `MODIFIED20`/`v150`、在陈旧副本上写后全新节点恢复 `k20/k150/k201` 全部正确；`scripts/rpo-zero-fault.sh` PASS；`/tmp/torture.sh` 11/11 PASS；`go test ./...`、`make build`/`vet`、`gofmt` 全绿；`-race ./internal/server` 干净。
 
-## ADR-186 stock workerd 运行时基线与安全加固（设计批准，实施中）
+## ADR-186 stock workerd 运行时基线与安全加固（代码已实现，Docker 全门禁待验收）
 
-- **背景**：当前 pin 仍为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
+- **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
 - **决策**：
   1. 固定升级到 stock workerd `1.20260916.1`；固定 **esbuild 0.28.2**。校验下载完整性、随附许可证，并在构建和真实镜像内读回版本。dev CLI 只接受同期间、真实 smoke 通过的精确 Miniflare/workerd 组合。
   2. 宿主平台配置改用 capnp `fromEnvironment`；workerd 子进程从空环境构造显式白名单。渲染 capnp、进程参数与日志不含秘密；user-runtime、do-runtime 与 do-supervisor 托管路径遵守同一契约。
@@ -2390,6 +2390,7 @@
   4. 从对应 pin 的 workerd 上游 compatibility 定义生成带 revision/source SHA-256 的单一 manifest；Go 控制面与 Bun CLI 消费同一清单，真实二进制探测允许 flag、未知 flag 和最大 compatibility date；实验 flag 默认 fail-closed。
   5. 最终 WorkerCode 上限 **64 MiB**；workerLoader env 上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**。控制面在 active pointer 切换前拒绝超限，运行时在 `workerLoader.get()` 前复核；不截断、不删字段、不暴露源码或 secret。
 - **升级/回滚**：reader-before-writer；新 pin 先证明能读取旧 artifact/DO working copy，再开放新 date/flag。manifest 与二进制成对回滚；若存在旧 pin 无法加载的 active version，则拒绝回滚。schema、cell/owner/epoch/RPO=0 协议不变。
+- **当前实现证据（2026-09-22）**：stock workerd `1.20260916.1`、esbuild `0.28.2`、Miniflare `5.20260916.0-alpha` 已精确固定；host binding 已改为 `fromEnvironment` 且子进程使用显式环境；compatibility manifest 由上游 revision `adda2635656d09e541b0feeea796da9d2a8bc10e` 生成；控制面和所有动态 `workerLoader.get()` 路径已执行 64 MiB / 1016 KiB 双层预算。Go/JS 单测与真实 user-runtime/do-runtime workerd 套件已通过。镜像内打包、Compose KV/gated-DO 重启持久性与 `REQUIRE_ALL=1` 仍由 Task 11 验收，因此此处不提前标记阶段完成。
 - **阶段边界**：本 ADR 只覆盖秘密隔离、固定工具链、compatibility authority 与 code/env 预算。冷加载治理、invocation-scoped context、isolate 淘汰、DO mid-flight fence/restart generation、原生 Tail/OTLP 和多模块 artifact 后续分阶段实施。Tenant Tail 当前仍关闭，不以 env transport 回退。
 - **验收**：单元测试先红后绿；真实 workerd 覆盖 `fromEnvironment`、env/KV/D1/R2/Queue/Workflow/Service/DO；真实 Docker Compose 覆盖镜像内 esbuild 打包、用户同名 env、KV、gated DO、重启持久性和秘密扫描；最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 无相关隐式 SKIP。
 - **详细设计/计划**：`docs/superpowers/specs/2026-09-22-workerd-runtime-baseline-security-design.md`、`docs/superpowers/plans/2026-09-22-workerd-runtime-baseline-security.md`。
@@ -2401,8 +2402,8 @@
 - **背景**：ADR-184 把传输与凭据收敛到平台侧 stub，但仍把 `CH_PLATFORM` 写入 loaded Worker 的 `env`，并因此保留 `CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称。平台键即使没有直接暴露凭据，仍占用用户命名空间，也允许租户代码直接触达平台能力。
 - **决策**：
   1. **零平台键、全部名称归用户**：tenant Worker 与 DO facet 的 `env` 只包含用户声明的 version `vars`、用户命名的 binding stub，以及未来以同一规则注入的 secrets；不注入任何平台系统键，不保留任何名称或前缀。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*`、`WF_*` 等任意合法名称均属用户。控制面删除 `ReservedEnvPrefixes`、`ReservedEnvNames`、`ReservedEnvName`，deploy 的 var/binding 与 secret put 不再返回 `reserved_env_name`；保留名称格式、重复用户 binding、配置 schema、资源登记和不支持 binding type 等无关校验。
-  2. **Workflow 以 capability 参数传递**：可信 user-runtime internal host 创建 `WorkflowBridgeTarget extends RpcTarget`，由该 target 留存宿主 env，并固定 `namespace`、`worker`、`workflow`、`id`、`run`；再经原生 JSRPC 作为 `CellHiveWorkflow.handleRun()` 参数传给 wrapper。不能用 `ctx.exports.X({props})` 生成的 `ServiceStub`：pinned stock workerd `1.20260615.1` 会在跨动态 `workerLoader` 边界时拒绝序列化（需要 experimental）。wrapper 用闭包构造交给租户 `run(event, step)` 的 Cloudflare 形状 `step`；capability 不进入 tenant `env`，不直接交给租户 workflow 类，固定 op 表继续拒绝原始路径、身份覆盖和跨租户参数。
-  3. **日志优先 stock workerd Tail Worker**：先在 pinned workerd `1.20260615.1` 做真实 spike；通过后，user-runtime 与 do-runtime 的动态 loaded Worker 指向可信 tail service，由它持有平台日志凭据和 private transport，并以不可伪造的 loaded Worker 标识映射回 namespace/worker/version。日志仍 best-effort，不影响租户请求。
+  2. **Workflow 以 capability 参数传递**：可信 user-runtime internal host 创建 `WorkflowBridgeTarget extends RpcTarget`，由该 target 留存宿主 env，并固定 `namespace`、`worker`、`workflow`、`id`、`run`；再经原生 JSRPC 作为 `CellHiveWorkflow.handleRun()` 参数传给 wrapper。不能用 `ctx.exports.X({props})` 生成的 `ServiceStub`：pinned stock workerd `1.20260916.1` 会在跨动态 `workerLoader` 边界时拒绝序列化（需要 experimental）。wrapper 用闭包构造交给租户 `run(event, step)` 的 Cloudflare 形状 `step`；capability 不进入 tenant `env`，不直接交给租户 workflow 类，固定 op 表继续拒绝原始路径、身份覆盖和跨租户参数。
+  3. **日志优先 stock workerd Tail Worker**：已在 pinned workerd `1.20260916.1` 重跑真实 spike，动态 loaded Worker 的 service designator 仍被拒绝；因此继续采用第 4 条回退。未来 pin 若通过，同样只能由可信 tail service 持平台日志凭据和 private transport，并以不可伪造的 loaded Worker 标识映射回 namespace/worker/version。日志仍 best-effort，不影响租户请求。
   4. **无 Tail 能力时宁可无平台日志**：若动态 Worker 不支持 Tail Worker，删除平台日志捕获并在兼容矩阵明确标记暂不支持；不得恢复向 tenant `env` 注入 log sink、token、URL 或其他系统键。Workflow JSRPC capability 方案不受此回退影响。
 - **边界**：可信宿主 Worker 自己的 env 可以持有 `CELL_URL`、角色凭据、private outbound 和 loader；它们不得复制、枚举或暴露给 loaded Worker。租户 global outbound 仍为 public-only；不修改/fork workerd，RPO=0 与既有 binding 权限边界不变。
 - **取代范围**：仅取代 ADR-184 中「保留命名空间（防用户命名冲突）+ 平台键压到 2 个」这项，以及其中 tenant env 保留 `CH_PLATFORM`、部署/secret 拒绝保留名的结论；ADR-184 的平台侧 stub、DO fetch 形 RPC、workerLoader 与固定-op 安全边界继续有效，除与本 ADR 冲突者外不变。

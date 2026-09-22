@@ -156,10 +156,12 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260615.1`） |
+| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260916.1`） |
 | `CELLHIVE_WORKERD_DIR` | 空 | 本地包存储目录（按 `@cloudflare+workerd-linux-64@*` 搜索，pin 优先） |
 | `CELLHIVE_ESBUILD` | 自动查找 | esbuild 路径 |
 | `CELLHIVE_ESBUILD_DIR` | 空 | 本地包存储目录（按 `esbuild@*` 搜索） |
+
+生产基线固定 esbuild `0.28.2`。平台 secret 不通过用户可见 env 传递：runtime 把它们映射到 Cap'n Proto `fromEnvironment` 的宿主 binding，并为 workerd 构造严格的子进程环境；父进程其它 env 不继承。tenant env 仍完全由用户 vars/bindings 拥有。
 
 ## user-runtime
 

@@ -643,7 +643,7 @@ git commit -m "feat(runtime): enforce dynamic load budgets at execution"
 **Interfaces:**
 - Produces: current-state documentation with exact commands and honest Tail/secret/multi-module boundaries.
 
-- [ ] **Step 1: Run stale-reference audit and save the exact hit list**
+- [x] **Step 1: Run stale-reference audit and save the exact hit list**
 
 Run:
 
@@ -653,15 +653,15 @@ rg -n "1\.20260615\.1|2026-06-22|动态.*Tail|缺少 esbuild|text = \"\{\{\.Cell
 
 Expected: hits requiring current-state updates are present.
 
-- [ ] **Step 2: Update ADR-186 from “实施中” to the evidenced implementation state**
+- [x] **Step 2: Update ADR-186 from “实施中” to the evidenced implementation state**
 
 Document exact pins, manifest generation/probe command, budget formulas and errors, direct/supervised `fromEnvironment` launch, migration/rollback rules, Miniflare pair, and the fact that Tail remains a later phase even though its upgraded-pin spike is rerun.
 
-- [ ] **Step 3: Audit WDL-derived code and notices**
+- [x] **Step 3: Audit WDL-derived code and notices**
 
 Compare every new generator/budget source file against WDL commit `dc70da6cc04acee7d31d80fc0caf8f323bbacf21`. This plan requires an independent implementation: no WDL source is copied or substantially adapted. Record WDL as a design-method reference in both acknowledgements files and state in `THIRD_PARTY_NOTICES.md` that WDL code is not shipped. If the audit contradicts that statement, stop before this commit and replace the affected implementation with an independent one; do not silently rely on missing NOTICE text.
 
-- [ ] **Step 4: Run bilingual and stale-reference checks**
+- [x] **Step 4: Run bilingual and stale-reference checks**
 
 Run:
 
@@ -673,7 +673,7 @@ git diff --check
 
 Expected: only explicitly historical old-pin references remain; current Chinese/English docs agree.
 
-- [ ] **Step 5: Commit documentation and notices**
+- [x] **Step 5: Commit documentation and notices**
 
 ```bash
 git add docs THIRD_PARTY_NOTICES.md
