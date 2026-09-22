@@ -660,6 +660,136 @@ export default {
 	}
 }
 
+// TestTenantDoWebSocketPassesThroughPublicLoader covers the outer workerLoader
+// RPC boundary that a browser hits: the tenant returns the DO's 101 Response
+// directly to user-runtime's public port, and the socket remains duplex. This
+// is distinct from TestTenantDoWebSocketCrossesRpc, where tenant code consumes
+// the socket and returns an ordinary HTTP response.
+func TestTenantDoWebSocketPassesThroughPublicLoader(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	const probe = `
+export default {
+  async fetch(req, env) {
+    for (const key of ["CH_DO_CONNECT", "PLATFORM", "CELL_URL"]) {
+      if (typeof env[key] !== "undefined") return new Response("leaked:" + key, { status: 500 });
+    }
+    return env.ROOM.get("obj1").fetch(req);
+  },
+};
+`
+
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "ws-public.test", "worker": "probe"}},
+		"workers": []any{map[string]any{
+			"worker": "probe",
+			"active": 1,
+			"version": map[string]any{
+				"number": 1, "bundle_sha": "shaPublicWs",
+				"bindings": []any{map[string]any{"type": "do", "name": "ROOM", "id": "Room"}},
+			},
+		}},
+	}}}
+	var connectTicket string
+	stubURL := ""
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(probe))
+		case "/v1/do/connect":
+			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				connectTicket = r.Header.Get("x-cellhive-do-ticket")
+				if _, err := wsHandshakeAndEcho(w, r); err != nil {
+					t.Errorf("ws owner: %v", err)
+				}
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"owner":  strings.TrimPrefix(stubURL, "http://"),
+				"ticket": "public-tkt",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+	stubURL = stub.URL
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		EgressAllow: []string{"local"},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+
+	public := fmt.Sprintf("127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := noProxyClient().Get("http://" + public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("public loader not healthy: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	conn, err := net.DialTimeout("tcp", public, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial public loader: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := fmt.Fprintf(conn,
+		"GET /socket HTTP/1.1\r\nHost: ws-public.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"); err != nil {
+		t.Fatalf("write public handshake: %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read public handshake: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("public handshake = %d %q, want 101", resp.StatusCode, body)
+	}
+	if got, err := wsReadText(reader); err != nil || got != "owner-hello" {
+		t.Fatalf("public ws hello = %q, %v", got, err)
+	}
+	if err := wsWriteMaskedText(conn, "from-public"); err != nil {
+		t.Fatalf("write public ws frame: %v", err)
+	}
+	if got, err := wsReadText(reader); err != nil || got != "owner-echo:from-public" {
+		t.Fatalf("public ws echo = %q, %v", got, err)
+	}
+	if connectTicket != "public-tkt" {
+		t.Fatalf("owner ticket = %q, want public-tkt", connectTicket)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
 // wsHandshakeAndEcho completes a hand-rolled RFC 6455 handshake, sends one
 // text frame and echoes the one masked client frame it reads. Dependency-free:
 // the test only needs a single duplex exchange to prove the socket crossed the
@@ -700,6 +830,23 @@ func wsWriteText(w *bufio.ReadWriter, s string) error {
 		return err
 	}
 	return w.Flush()
+}
+
+func wsWriteMaskedText(w io.Writer, s string) error {
+	b := []byte(s)
+	if len(b) >= 126 {
+		return fmt.Errorf("test frame too large: %d", len(b))
+	}
+	mask := [4]byte{0x12, 0x34, 0x56, 0x78}
+	frame := make([]byte, 6+len(b))
+	frame[0] = 0x81
+	frame[1] = 0x80 | byte(len(b))
+	copy(frame[2:6], mask[:])
+	for i := range b {
+		frame[6+i] = b[i] ^ mask[i%len(mask)]
+	}
+	_, err := w.Write(frame)
+	return err
 }
 
 func wsReadText(r *bufio.Reader) (string, error) {

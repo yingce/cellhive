@@ -176,7 +176,7 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     "cellhive.worker": worker,
   });
   try {
-    const res = await stub.getEntrypoint("CellHiveHost").handleFetch(traced);
+    const res = await stub.getEntrypoint("CellHiveHost").fetch(traced);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
     return res;
