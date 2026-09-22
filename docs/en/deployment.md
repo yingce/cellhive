@@ -16,12 +16,14 @@
 A single image contains all services (`deploy/Dockerfile`):
 
 - Go binaries: `cell-agent`, `cellhive`, `user-runtime`, `do-runtime`, `do-supervisor`;
-- **pinned stock workerd** (`1.20260615.1`, fetched from npm at build time; can be changed with `--build-arg WORKERD_VERSION=`) — the runtime is `debian:bookworm-slim` (workerd requires glibc);
+- **pinned stock workerd `1.20260916.1`** and **esbuild `0.28.2`**: fetched from exact npm platform tarballs and verified against checked-in SHA-512 digests before extraction. They are installed at `/usr/local/bin/workerd` and `/usr/local/bin/esbuild`; the latter is exposed as `CELLHIVE_ESBUILD` for production bundling. Overriding a version also requires the matching `*_INTEGRITY_SHA512`; changing only the version must fail closed;
 - Platform JS: `workerd/` → `/app/workerd/` (`CELLHIVE_*_JS` already points there).
+- Licenses and notices: `/usr/share/licenses/cellhive/{workerd,esbuild}/LICENSE` and `/usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md`.
 
 ```bash
 make docker-build                     # docker build -f deploy/Dockerfile -t cellhive:dev .
 docker run --rm cellhive:dev workerd --version
+docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:dev --version
 ```
 
 **Selecting a service**: `ENTRYPOINT` is a dispatcher (`deploy/entrypoint.sh`) — `command: ["user-runtime"]` (short name) or the full path both work; if no command is given, it runs `cell-agent`. This is required: Docker `command:` only overrides CMD. If ENTRYPOINT is set directly to `cell-agent`, changing it to `user-runtime` in compose will silently continue running cell-agent.

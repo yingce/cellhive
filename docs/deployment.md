@@ -16,12 +16,14 @@
 单个镜像包含全部服务（`deploy/Dockerfile`）：
 
 - Go 二进制：`cell-agent`、`cellhive`、`user-runtime`、`do-runtime`、`do-supervisor`；
-- **pinned stock workerd**（`1.20260615.1`，构建期从 npm 拉取，可用 `--build-arg WORKERD_VERSION=` 改）——运行时是 `debian:bookworm-slim`（workerd 需 glibc）；
+- **pinned stock workerd `1.20260916.1`** 与 **esbuild `0.28.2`**：构建期从精确 npm platform tarball 获取，并用 checked-in SHA-512 校验后才解包；镜像内分别为 `/usr/local/bin/workerd` 与 `/usr/local/bin/esbuild`，后者通过 `CELLHIVE_ESBUILD` 供生产打包路径使用。若显式覆盖版本，必须同时提供对应的 `*_INTEGRITY_SHA512`，不能只改版本号；
 - 平台 JS：`workerd/` → `/app/workerd/`（`CELLHIVE_*_JS` 已指向那里）。
+- 许可证与 notices：`/usr/share/licenses/cellhive/{workerd,esbuild}/LICENSE`、`/usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md`。
 
 ```bash
 make docker-build                     # docker build -f deploy/Dockerfile -t cellhive:dev .
 docker run --rm cellhive:dev workerd --version
+docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:dev --version
 ```
 
 **选择服务**：`ENTRYPOINT` 是一个 dispatcher（`deploy/entrypoint.sh`）——`command: ["user-runtime"]`（短名）或完整路径都行；不给命令则跑 `cell-agent`。这是必须的：Docker 的 `command:` 只覆盖 CMD，若把 ENTRYPOINT 直接设成 `cell-agent`，compose 里换成 `user-runtime` 会静默继续跑 cell-agent。

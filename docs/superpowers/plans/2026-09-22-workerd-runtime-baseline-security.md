@@ -409,7 +409,7 @@ git commit -m "chore(cli): align miniflare with pinned workerd"
 **Interfaces:**
 - Produces: `/usr/local/bin/esbuild` at `0.28.2` and `CELLHIVE_ESBUILD=/usr/local/bin/esbuild`.
 
-- [ ] **Step 1: Add a failing Dockerfile contract test**
+- [x] **Step 1: Add a failing Dockerfile contract test**
 
 ```go
 func TestDockerfilePinsRuntimeTools(t *testing.T) {
@@ -426,19 +426,19 @@ func TestDockerfilePinsRuntimeTools(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `go test ./deploy -run TestDockerfilePinsRuntimeTools -count=1 -v`
 
 Expected: FAIL because esbuild and new workerd pin are missing.
 
-- [ ] **Step 3: Add a pinned esbuild extraction stage**
+- [x] **Step 3: Add a pinned esbuild extraction stage**
 
 Download the exact platform npm tarball, verify a checked-in SHA-512/integrity value or exact registry integrity before extraction, copy only the native binary, and execute `/out/esbuild --version`. Do the same integrity verification for workerd rather than trusting only HTTPS and a versioned URL.
 
 Copy the official workerd Apache-2.0 license and esbuild MIT license into `/usr/share/licenses/cellhive/{workerd,esbuild}/LICENSE`. `THIRD_PARTY_NOTICES.md` records the exact packaged versions, upstream URLs and license identifiers. The image contract test must assert both paths exist in the final stage.
 
-- [ ] **Step 4: Build and inspect the real image**
+- [x] **Step 4: Build and inspect the real image**
 
 Run:
 
