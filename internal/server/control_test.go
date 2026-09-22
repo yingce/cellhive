@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/workerbudget"
 )
 
 func newControlServer(t *testing.T) *Server {
@@ -157,6 +159,154 @@ func TestControlAdminDeployAndSecretRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDeployRejectsFinalWorkerCodeOverBudget(t *testing.T) {
+	s := newControlServer(t)
+	admin := s.AdminHandler()
+	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+
+	// The tenant module alone is exactly the upstream WorkerCode limit. Module
+	// names and trusted wrapper/facade sources necessarily make the final object
+	// larger, even though the uploaded object itself remains a legal artifact.
+	sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, int(workerbudget.CodeMaxBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok",
+		`{"namespace":"acme","worker":"api","bundle_sha":"`+sha+`"}`)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"error":"worker_code_too_large"`) ||
+		!strings.Contains(rr.Body.String(), `"actual_bytes":`) ||
+		!strings.Contains(rr.Body.String(), `"max_bytes":67108864`) {
+		t.Fatalf("response lacks bounded code budget details: %s", rr.Body.String())
+	}
+	if releases, err := s.Control.Releases(context.Background(), "acme", "api"); err != nil || len(releases) != 0 {
+		t.Fatalf("rejected deploy releases = %+v, err=%v", releases, err)
+	}
+}
+
+func TestDeployRejectsWorkerEnvOverBudget(t *testing.T) {
+	s := newControlServer(t)
+	admin := s.AdminHandler()
+	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+	bundle := mustAdmin(t, admin, http.MethodPost, "/v1/control/bundle", "export default {}")
+	var uploaded struct {
+		Sha string `json:"sha"`
+	}
+	if err := json.Unmarshal(bundle.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"namespace":  "acme",
+		"worker":     "api",
+		"bundle_sha": uploaded.Sha,
+		"vars":       map[string]string{"large": strings.Repeat("x", int(workerbudget.EnvMaxBytes))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok", string(body))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"error":"worker_env_too_large"`) ||
+		!strings.Contains(rr.Body.String(), `"actual_bytes":`) ||
+		!strings.Contains(rr.Body.String(), `"max_bytes":1040384`) {
+		t.Fatalf("response lacks bounded env budget details: %s", rr.Body.String())
+	}
+	if releases, err := s.Control.Releases(context.Background(), "acme", "api"); err != nil || len(releases) != 0 {
+		t.Fatalf("rejected deploy releases = %+v, err=%v", releases, err)
+	}
+}
+
+func TestDeployBudgetExactBoundaries(t *testing.T) {
+	t.Run("code exact limit accepted", func(t *testing.T) {
+		s := newControlServer(t)
+		admin := s.AdminHandler()
+		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+		// Empty binding metadata renders to 79 bytes; the fixed runtime reserve is
+		// 64 KiB. This literal is independently derived from that public contract.
+		const bundleBytes = 67108864 - 65536 - 79
+		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok",
+			`{"namespace":"acme","worker":"api","bundle_sha":"`+sha+`"}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("exact code limit = %d: %.500s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("code limit plus one rejected in dry run", func(t *testing.T) {
+		s := newControlServer(t)
+		admin := s.AdminHandler()
+		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+		const bundleBytes = 67108864 - 65536 - 79 + 1
+		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok",
+			`{"namespace":"acme","worker":"api","bundle_sha":"`+sha+`","dry_run":true}`)
+		if rr.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rr.Body.String(), `"actual_bytes":67108865`) {
+			t.Fatalf("code limit+1 = %d: %s", rr.Code, rr.Body.String())
+		}
+		if releases, err := s.Control.Releases(context.Background(), "acme", "api"); err != nil || len(releases) != 0 {
+			t.Fatalf("rejected dry-run releases = %+v, err=%v", releases, err)
+		}
+	})
+
+	t.Run("env exact limit accepted", func(t *testing.T) {
+		s := newControlServer(t)
+		admin := s.AdminHandler()
+		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+		bundle := mustAdmin(t, admin, http.MethodPost, "/v1/control/bundle", "export default {}")
+		var uploaded struct {
+			Sha string `json:"sha"`
+		}
+		if err := json.Unmarshal(bundle.Body.Bytes(), &uploaded); err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(map[string]any{
+			"namespace": "acme", "worker": "api", "bundle_sha": uploaded.Sha,
+			// {"v":"..."} contributes eight JSON bytes outside the ASCII value.
+			"vars": map[string]string{"v": strings.Repeat("x", int(workerbudget.EnvMaxBytes)-8)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok", string(body))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("exact env limit = %d: %.500s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
+func TestControlFixedRuntimeBudgetCoversInjectedSources(t *testing.T) {
+	paths := []string{
+		"../../workerd/user-runtime/queue-wrapper.js",
+		"../../workerd/user-runtime/workflow-wrapper.js",
+		"../../workerd/user-runtime/cellhive-workflow.js",
+		"../../workerd/platform/facades.js",
+		"../../workerd/platform/rpc-codec.js",
+		"../../workerd/platform/bindings-wrapper.js",
+		"../../workerd/do-runtime/cellhive-do.js",
+	}
+	var total int64
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += info.Size()
+	}
+	if total > controlFixedRuntimeCodeBytes {
+		t.Fatalf("injected sources total %d bytes, exceeding fixed control reserve %d", total, controlFixedRuntimeCodeBytes)
+	}
+}
+
 func TestSecretFormerPlatformNameAllowed(t *testing.T) {
 	s := newControlServer(t)
 	admin := s.AdminHandler()
@@ -217,7 +367,7 @@ func TestControlDeployInterception(t *testing.T) {
 		},
 		{
 			name:   "compat date too new",
-			body:   `{"namespace":"acme","worker":"api","bundle_sha":"` + sha + `","compatibility_date":"2026-08-01"}`,
+			body:   `{"namespace":"acme","worker":"api","bundle_sha":"` + sha + `","compatibility_date":"2026-10-01"}`,
 			code:   "compat_date_too_new",
 			status: http.StatusBadRequest,
 		},

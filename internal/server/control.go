@@ -19,6 +19,7 @@ import (
 	"cellhive/internal/auth"
 	"cellhive/internal/bucket"
 	"cellhive/internal/control"
+	"cellhive/internal/workerbudget"
 	"cellhive/internal/wranglercompat"
 )
 
@@ -705,7 +706,7 @@ type deployReq struct {
 
 // validateDeploy applies the platform compatibility gate server-side (ADR-065).
 // It returns the findings; the caller rejects the deploy when any are errors.
-func (s *Server) validateDeploy(ctx context.Context, req deployReq) wranglercompat.Result {
+func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercompat.Result, int64) {
 	in := wranglercompat.Input{
 		Namespace:          req.Namespace,
 		Worker:             req.Worker,
@@ -730,8 +731,11 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) wranglercomp
 	// Bundle must exist in the object store (content-addressed). Deploy is an
 	// infrequent admin path, so a point-read here is acceptable; a future
 	// bucket Stat primitive can make this cheap (docs/dev-mode.md).
+	bundleSize := int64(0)
 	if in.BundleSHA != "" && s.Bucket != nil {
-		if _, err := s.artifactStore().GetBundle(ctx, in.BundleSHA); errors.Is(err, bucket.ErrNotFound) {
+		var err error
+		bundleSize, err = s.artifactStore().BundleSize(ctx, in.BundleSHA)
+		if errors.Is(err, bucket.ErrNotFound) {
 			res.Errors = append(res.Errors, wranglercompat.Finding{
 				Severity: wranglercompat.SeverityError, Code: "missing_bundle", FieldPath: "bundle_sha",
 				Message: "bundle " + in.BundleSHA + " not found in the object store",
@@ -743,7 +747,115 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) wranglercomp
 			})
 		}
 	}
-	return res
+	return res, bundleSize
+}
+
+// controlFixedRuntimeCodeBytes is a conservative manifest for every fixed
+// source/name byte that any current user-runtime, workflow or do-runtime
+// WorkerCode path can inject. The checked-in sources total less than 64 KiB;
+// generated binding metadata and facet classes are charged separately below.
+const controlFixedRuntimeCodeBytes int64 = 64 * 1024
+
+func deployPlatformConsts(bindings []control.Binding) string {
+	r2Names := make([]string, 0)
+	doNames := make([]string, 0)
+	for _, binding := range bindings {
+		switch binding.Type {
+		case "r2":
+			r2Names = append(r2Names, binding.Name)
+		case "do":
+			doNames = append(doNames, binding.Name)
+		}
+	}
+	r2JSON, _ := json.Marshal(r2Names)
+	doJSON, _ := json.Marshal(doNames)
+	return ";const __cellhivePlatform = Object.freeze({ r2Bindings: " + string(r2JSON) +
+		", doBindings: " + string(doJSON) + " });\n"
+}
+
+func deployCodeInput(req deployReq, bundleSize int64) workerbudget.CodeInput {
+	fixedBytes := controlFixedRuntimeCodeBytes
+	// do-runtime may generate a facet wrapper per exported DO class. This
+	// intentionally overcharges its fixed statements plus repeated class name.
+	for _, binding := range req.Bindings {
+		if binding.Type == "do" {
+			fixedBytes += 256 + int64(3*len(binding.ClassName))
+		}
+	}
+	return workerbudget.CodeInput{
+		ModuleBytes:        bundleSize,
+		FixedInjectedBytes: fixedBytes,
+		GeneratedWrapper:   deployPlatformConsts(req.Bindings),
+	}
+}
+
+func deployBindingTokenPlaceholder(req deployReq, binding control.Binding) string {
+	// Scoped tokens encode all three identity strings plus fixed claims/signature.
+	// Two bytes per input byte is deliberately conservative over base64url.
+	n := 128 + 2*(len(req.Namespace)+len(binding.Type)+len(binding.Name))
+	return strings.Repeat("t", n)
+}
+
+func (s *Server) deployEnvEstimate(ctx context.Context, req deployReq) map[string]any {
+	env := make(map[string]any, len(req.Vars)+len(req.Bindings))
+	for key, value := range req.Vars {
+		env[key] = value
+	}
+	for _, binding := range req.Bindings {
+		token := deployBindingTokenPlaceholder(req, binding)
+		props := map[string]any{
+			"kind": binding.Type, "ns": req.Namespace, "name": binding.Name,
+			"id": binding.ID, "class_name": binding.ClassName,
+			"entrypoint": binding.Entrypoint, "version": binding.Version,
+			"token": token,
+		}
+		switch binding.Type {
+		case "do":
+			props["worker"] = req.Worker
+			props["bundle_sha"] = req.BundleSHA
+			props["storage_id"] = strings.Repeat("s", 35)
+			props["storage_class"] = binding.ClassName
+			props["deleted"] = false
+			props["version"] = "9999999999999999999"
+		case "vectorize":
+			props["index"] = binding.ID
+		case "service":
+			props["target"] = binding.ID
+			props["caller_ns"] = req.Namespace
+		case "hyperdrive":
+			if resolved, ok := s.hyperdriveSpec(ctx, req.Namespace, binding.Name, binding.ID); ok {
+				for key, value := range resolved {
+					props[key] = value
+				}
+			}
+		}
+		// Mirrors WDL's serializable runtime-context stand-in: the real value is
+		// a props-bound WorkerEntrypoint stub, whose user-controlled payload is props.
+		env[binding.Name] = map[string]any{"__cellhiveBinding": binding.Type, "props": props}
+	}
+	return env
+}
+
+func (s *Server) checkDeployBudgets(ctx context.Context, req deployReq, bundleSize int64) error {
+	if err := workerbudget.CheckCode(deployCodeInput(req, bundleSize)); err != nil {
+		return err
+	}
+	return workerbudget.CheckEnv(s.deployEnvEstimate(ctx, req))
+}
+
+func writeDeployBudgetError(w http.ResponseWriter, err error) bool {
+	var limitErr *workerbudget.LimitError
+	if !errors.As(err, &limitErr) {
+		return false
+	}
+	status := http.StatusBadRequest
+	if limitErr.Code == workerbudget.CodeTooLarge {
+		status = http.StatusRequestEntityTooLarge
+	}
+	writeJSON(w, status, map[string]any{
+		"error": limitErr.Code, "actual_bytes": limitErr.Actual, "max_bytes": limitErr.Max,
+	})
+	return true
 }
 
 func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
@@ -757,7 +869,8 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	if !decodeControl(w, r, &req) {
 		return
 	}
-	if res := s.validateDeploy(r.Context(), req); !res.OK() {
+	res, bundleSize := s.validateDeploy(r.Context(), req)
+	if !res.OK() {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":    "deploy_rejected",
 			"findings": res.Errors,
@@ -765,6 +878,12 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeNS(w, r, req.Namespace) {
+		return
+	}
+	if err := s.checkDeployBudgets(r.Context(), req, bundleSize); err != nil {
+		if !writeDeployBudgetError(w, err) {
+			writeErr(w, http.StatusBadRequest, "worker_budget_invalid", err.Error())
+		}
 		return
 	}
 	if req.DryRun {

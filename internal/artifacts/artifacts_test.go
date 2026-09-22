@@ -3,6 +3,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,26 @@ func TestBundleContentAddressed(t *testing.T) {
 	// The key is content-addressed.
 	if k := BundleKey(sha); k != "bundles/sha256/"+sha[:2]+"/"+sha {
 		t.Fatalf("bundle key = %q", k)
+	}
+}
+
+func TestBundleSizeUsesPointLookup(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	data := []byte("bundle-size-without-list")
+	sha, _, err := s.PutBundle(ctx, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, err := s.BundleSize(ctx, sha)
+	if err != nil || size != int64(len(data)) {
+		t.Fatalf("BundleSize() = %d, %v", size, err)
+	}
+	if _, err := s.BundleSize(ctx, "bad"); err == nil {
+		t.Fatal("BundleSize(bad sha) error = nil")
+	}
+	if _, err := s.BundleSize(ctx, strings.Repeat("0", 64)); !errors.Is(err, bucket.ErrNotFound) {
+		t.Fatalf("BundleSize(missing) error = %v", err)
 	}
 }
 

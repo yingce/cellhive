@@ -48,6 +48,7 @@ type Module struct {
 type CodeInput struct {
 	MainModule           string
 	ModuleBytes          int64
+	FixedInjectedBytes   int64
 	Modules              []Module
 	GeneratedWrapper     string
 	FixedInjectedSources []string
@@ -71,6 +72,7 @@ func EstimateCode(input CodeInput) int64 {
 
 	add(int64(len(input.MainModule)))
 	add(input.ModuleBytes)
+	add(input.FixedInjectedBytes)
 	add(int64(len(input.GeneratedWrapper)))
 	for _, module := range input.Modules {
 		add(int64(len(module.Name)))

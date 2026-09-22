@@ -33,6 +33,7 @@ export function estimateCode(input) {
   let total = 0;
   total = addSize(total, byteLength(input.mainModule || ""));
   total = addSize(total, input.moduleBytes || 0);
+  total = addSize(total, input.fixedInjectedBytes || 0);
   total = addSize(total, byteLength(input.generatedWrapper || ""));
   for (const module of input.modules || []) {
     total = addSize(total, byteLength(module.name || ""));

@@ -43,9 +43,10 @@ func TestCheckCodeBoundary(t *testing.T) {
 
 func TestEstimateCodeCountsEveryComponentOnce(t *testing.T) {
 	input := CodeInput{
-		MainModule:       "入口.js",
-		ModuleBytes:      11,
-		GeneratedWrapper: "wrap",
+		MainModule:         "入口.js",
+		ModuleBytes:        11,
+		FixedInjectedBytes: 7,
+		GeneratedWrapper:   "wrap",
 		Modules: []Module{
 			{Name: "a.js", Text: "中文"},
 			{Name: "data.bin", Data: []byte{0, 1, 2}},
@@ -53,9 +54,9 @@ func TestEstimateCodeCountsEveryComponentOnce(t *testing.T) {
 		FixedInjectedSources: []string{"fixed"},
 	}
 
-	// UTF-8 bytes: main 9 + aggregate 11 + wrapper 4 + names 4+8 + text 6
-	// + data 3 + fixed source 5.
-	const want int64 = 50
+	// UTF-8 bytes: main 9 + aggregate 11 + fixed bytes 7 + wrapper 4 +
+	// names 4+8 + text 6 + data 3 + fixed source 5.
+	const want int64 = 57
 	if got := EstimateCode(input); got != want {
 		t.Fatalf("EstimateCode() = %d, want %d", got, want)
 	}
@@ -124,6 +125,7 @@ func TestSharedGoldenVectors(t *testing.T) {
 		Modules              []moduleVector `json:"modules"`
 		GeneratedWrapper     string         `json:"generatedWrapper"`
 		FixedInjectedSources []string       `json:"fixedInjectedSources"`
+		FixedInjectedBytes   int64          `json:"fixedInjectedBytes"`
 		Want                 int64          `json:"want"`
 		OK                   bool           `json:"ok"`
 	}
@@ -182,6 +184,7 @@ func TestSharedGoldenVectors(t *testing.T) {
 				ModuleBytes:          vector.ModuleBytes,
 				GeneratedWrapper:     vector.GeneratedWrapper,
 				FixedInjectedSources: vector.FixedInjectedSources,
+				FixedInjectedBytes:   vector.FixedInjectedBytes,
 			}
 			for _, rawModule := range vector.Modules {
 				data, err := base64.StdEncoding.DecodeString(rawModule.DataBase64)

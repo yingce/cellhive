@@ -142,6 +142,20 @@ func (o *Objects) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, err
 }
 
+// Stat returns an object's size and etag through a point lookup. It never
+// falls back to List or a full-body read when the backend lacks Stat support.
+func (o *Objects) Stat(ctx context.Context, key string) (int64, string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return 0, "", err
+	}
+	statter, ok := o.B.(bucket.Statter)
+	if !ok {
+		return 0, "", bucket.ErrNotSupported
+	}
+	return statter.Stat(ctx, k)
+}
+
 // Put stores an object and returns its etag.
 func (o *Objects) Put(ctx context.Context, key string, data []byte) (string, error) {
 	k, err := o.key(key)

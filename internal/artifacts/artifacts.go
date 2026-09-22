@@ -194,6 +194,17 @@ func (s *Store) GetBundle(ctx context.Context, sha string) ([]byte, error) {
 	return objectstore.NewOwned(s.B, objectstore.PrefixBundles, objectstore.OwnerArtifacts).Get(ctx, key)
 }
 
+// BundleSize returns the immutable bundle size through a point Stat. It never
+// lists the bucket and never allocates the bundle body.
+func (s *Store) BundleSize(ctx context.Context, sha string) (int64, error) {
+	key := BundleKey(sha)
+	if key == "" {
+		return 0, fmt.Errorf("artifacts: bad sha")
+	}
+	size, _, err := objectstore.NewOwned(s.B, objectstore.PrefixBundles, objectstore.OwnerArtifacts).Stat(ctx, key)
+	return size, err
+}
+
 // PresignBundle returns a short-lived read URL for a bundle.
 func (s *Store) PresignBundle(ctx context.Context, sha string, ttl time.Duration) (string, error) {
 	key := BundleKey(sha)

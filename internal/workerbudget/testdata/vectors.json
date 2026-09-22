@@ -44,8 +44,9 @@
       "mainModule": "wrapper.js",
       "generatedWrapper": "wrap",
       "fixedInjectedSources": ["facade", "codec"],
+      "fixedInjectedBytes": 65536,
       "moduleBytes": 3,
-      "want": 28,
+      "want": 65564,
       "ok": true
     }
   ]

@@ -533,25 +533,25 @@ git commit -m "feat(runtime): define WorkerCode and env budgets"
 - Consumes: `workerbudget.CheckCode`, `workerbudget.CheckEnv`, stored bundle bytes, normalized `control.DeploySpec`.
 - Produces: stable HTTP errors carrying `worker_code_too_large` or `worker_env_too_large`, `actual_bytes`, and `max_bytes` without source/secrets.
 
-- [ ] **Step 1: Add failing HTTP deployment tests**
+- [x] **Step 1: Add failing HTTP deployment tests**
 
 Create a bundle just over the effective final-code limit and an env just over `EnvMaxBytes`; POST each to `/v1/control/deploy`. Assert HTTP 413 for `worker_code_too_large`, HTTP 400 for `worker_env_too_large`, stable error code, actual/max fields, and no active version created. Add exact-limit acceptance tests.
 
-- [ ] **Step 2: Run and verify deploy currently accepts oversized input**
+- [x] **Step 2: Run and verify deploy currently accepts oversized input**
 
 Run: `go test ./internal/server -run 'TestDeployRejectsFinalWorkerCodeOverBudget|TestDeployRejectsWorkerEnvOverBudget' -count=1 -v`
 
 Expected: FAIL because deployment succeeds or returns no budget code.
 
-- [ ] **Step 3: Add bundle stat/limited-read support without List**
+- [x] **Step 3: Add bundle stat/limited-read support without List**
 
 Use point `GetBundle`/`Stat` only. Do not add bucket List. Read at most the maximum plus one byte when the object store supports bounded reads; otherwise reject after `Stat` before allocating an oversized buffer.
 
-- [ ] **Step 4: Validate before `Control.Deploy`**
+- [x] **Step 4: Validate before `Control.Deploy`**
 
 In `handleDeploy`, after compatibility and resource validation but before `s.Control.Deploy`, load/measure the immutable bundle, add fixed/dynamic runtime injection costs, construct the exact current tenant env shape, and call both checks. Dry-run executes identical checks. Map `LimitError` to the stable response without exposing payloads.
 
-- [ ] **Step 5: Prove transactional non-activation and run server tests**
+- [x] **Step 5: Prove transactional non-activation and run server tests**
 
 Run:
 
@@ -561,7 +561,7 @@ go test ./internal/artifacts ./internal/server ./internal/control -count=1 -v
 
 Expected: PASS; rejected deployments leave version count and active pointer unchanged.
 
-- [ ] **Step 6: Commit control-plane enforcement**
+- [x] **Step 6: Commit control-plane enforcement**
 
 ```bash
 git add internal/server internal/artifacts
