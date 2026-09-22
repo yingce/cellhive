@@ -85,6 +85,8 @@ services:
     image: $IMAGE
     environment:
       CELLHIVE_CELL_URL: http://$HOST_URL_CANARY:7001
+    ports:
+      - "127.0.0.1::8081"
   do-runtime-gated:
     image: $IMAGE
     environment:
@@ -121,11 +123,25 @@ export class Counter extends DurableObject {
     });
   }
 
-  async fetch(): Promise<Response> {
+  increment(): number {
     const sql = this.ctx.storage.sql;
     sql.exec("INSERT INTO counter(id,n) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET n=n+1");
     const rows = [...sql.exec("SELECT n FROM counter WHERE id=1")];
-    return Response.json({ count: Number(rows[0]?.n || 0) });
+    return Number(rows[0]?.n || 0);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    if ((request.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      this.ctx.acceptWebSocket(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    return Response.json({ count: this.increment() });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    ws.send(JSON.stringify({ echo: String(message), count: this.increment() }));
   }
 }
 
@@ -142,6 +158,9 @@ export default {
     }
     if (path === "/do") {
       return env.COUNTER.getByName("counter-1").fetch("https://counter.invalid/increment");
+    }
+    if (path === "/ws") {
+      return env.COUNTER.getByName("counter-1").fetch(req);
     }
     return new Response("fetch-ok:" + builtInImage);
   }
@@ -177,6 +196,35 @@ fetch_path() {
   compose exec -T cell-agent curl -fsS -H 'Host: e2e-api.cell.test' "http://user-runtime:8081$path"
 }
 
+PUBLIC_ADDR=$(compose port user-runtime 8081 | tail -n 1)
+PUBLIC_PORT=${PUBLIC_ADDR##*:}
+[[ "$PUBLIC_PORT" =~ ^[0-9]+$ ]] || fail "could not resolve the public user-runtime port"
+
+websocket_roundtrip() {
+  local message=$1 expected_count=$2
+  bun -e '
+const [url, host, message, expectedText] = process.argv.slice(-4);
+const expected = Number(expectedText);
+const timer = setTimeout(() => { console.error("websocket timeout"); process.exit(2); }, 8000);
+const ws = new WebSocket(url, { headers: { Host: host } });
+ws.onopen = () => ws.send(message);
+ws.onmessage = (event) => {
+  let value;
+  try { value = JSON.parse(String(event.data)); }
+  catch (error) { console.error("invalid websocket JSON", error); process.exit(3); }
+  if (value.echo !== message || value.count !== expected) {
+    console.error("unexpected websocket response", JSON.stringify(value));
+    process.exit(4);
+  }
+  console.log(JSON.stringify(value));
+  clearTimeout(timer);
+  ws.close(1000, "done");
+};
+ws.onclose = (event) => process.exit(event.code === 1000 ? 0 : 5);
+ws.onerror = (event) => { console.error("websocket error", event && event.message ? event.message : event); process.exit(6); };
+' "ws://127.0.0.1:$PUBLIC_PORT/ws" "e2e-api.cell.test" "$message" "$expected_count"
+}
+
 LIVE=""
 if ! retry_capture LIVE fetch_path /; then
   echo "-- routing projection --" >&2
@@ -205,14 +253,22 @@ assert_not_contains "$ENV_JSON" "$INTERNAL_TOKEN" "tenant env"
 echo "== gated DO durability and restart =="
 DO1=$(fetch_path /do)
 assert_eq '{"count":1}' "$DO1" "first gated DO increment"
+WS1=""
+retry_capture WS1 websocket_roundtrip before-restart 2 \
+  || fail "public DO WebSocket failed before runtime restart"
+assert_eq '{"echo":"before-restart","count":2}' "$WS1" "public DO WebSocket before restart"
 LTX_PROOF=$(compose exec -T cell-agent sh -c "find /data/bucket/cells -type f -name '*.ltx' -print -quit" 2>/dev/null || true)
 [[ -n "$LTX_PROOF" ]] || fail "gated DO produced no authoritative bucket LTX object"
 compose restart do-runtime-gated >/dev/null
 retry_capture READY compose exec -T cell-agent curl -fsS http://do-runtime-gated:8788/ready \
   || fail "gated do-runtime did not recover after restart"
+WS2=""
+retry_capture WS2 websocket_roundtrip after-restart 3 \
+  || fail "public DO WebSocket failed after runtime restart"
+assert_eq '{"echo":"after-restart","count":3}' "$WS2" "public DO WebSocket after restart"
 DO2=""
 retry_capture DO2 fetch_path /do || fail "DO invoke failed after runtime restart"
-assert_eq '{"count":2}' "$DO2" "gated DO count after restart"
+assert_eq '{"count":4}' "$DO2" "gated DO count after restart"
 
 echo "== rendered config and live boundary scans =="
 if compose exec -T user-runtime grep -R -F -e "$HOST_URL_CANARY" -e "$CELLHIVE_ROOT_KEY" -e "$INTERNAL_TOKEN" /data/runtime; then
