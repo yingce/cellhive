@@ -32,20 +32,28 @@ export function traceparent(sampled) {
   return "00-" + randomHex(16) + "-" + randomHex(8) + "-" + (sampled ? "01" : "00");
 }
 
+// traceparentForSpan continues propagation from a platform span rather than
+// from that span's parent.
+export function traceparentForSpan(span) {
+  if (!span) return "";
+  return "00-" + span.trace_id + "-" + span.span_id + "-01";
+}
+
 // sampled reports whether the active trace should be recorded.
 export function sampled() {
   const p = parseTraceparent(globalThis.__cellhiveTraceparent);
   return p.sampled;
 }
 
-// startSpan begins a span; returns null when the trace is not sampled.
-export function startSpan(name, attrs = {}) {
+// startSpan begins a span; returns null when the trace is not sampled. parent
+// may be another platform span when work is nested in this isolate.
+export function startSpan(name, attrs = {}, parent = null) {
   const p = parseTraceparent(globalThis.__cellhiveTraceparent);
   if (!p.sampled) return null;
   const span = {
-    trace_id: p.traceId,
+    trace_id: parent ? parent.trace_id : p.traceId,
     span_id: randomHex(8),
-    parent_span_id: p.spanId,
+    parent_span_id: parent ? parent.span_id : p.spanId,
     name,
     kind: attrs.kind || "internal",
     start_unix_nano: Date.now() * 1e6,

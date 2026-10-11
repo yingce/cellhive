@@ -90,6 +90,37 @@ func TestObjectScopesAndRestoreObject(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dirB, "cellhive-do-host", hash+".sqlite")); err != nil {
 		t.Fatalf("host actor file not restored: %v", err)
 	}
+	// Another Pod captures a disjoint host into the same authoritative bucket.
+	// Its manifest write must not erase this host's restore index.
+	const otherHash = "cafebabe00"
+	dirOther := t.TempDir()
+	otherFiles := filepath.Join(dirOther, "cellhive-do-host")
+	if err := os.MkdirAll(otherFiles, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkSQLiteWithRow(t, filepath.Join(otherFiles, otherHash+".sqlite"), 11)
+	mkSQLiteWithRow(t, filepath.Join(otherFiles, otherHash+".1.sqlite"), 13)
+	if err := os.WriteFile(filepath.Join(otherFiles, otherHash+".facets"), facetsBytes("Tenant/c2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := &Supervisor{Dir: dirOther, Committer: &bucketCommitter{rep: rep, epoch: 1}, Epoch: 1, ScopePrefix: "workerd/__do__", Bucket: fsb}
+	other.Bind("ds_other/shard0", otherHash, "ds_other", "Tenant")
+	if _, err := other.SyncAll(context.Background()); err != nil {
+		t.Fatalf("sync other host: %v", err)
+	}
+
+	// A runtime claim restores the complete original host actor before workerd opens it.
+	dirC := t.TempDir()
+	n, err := other.RestoreHost(context.Background(), dirC, hostID)
+	if err != nil {
+		t.Fatalf("restore host after other Pod capture: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("restored host files = %d, want 3", n)
+	}
+	if got := queryRow(t, filepath.Join(dirC, "cellhive-do-host", hash+".1.sqlite")); got != 7 {
+		t.Fatalf("restored host facet row = %d, want 7", got)
+	}
 }
 
 // TestRefreshFacetsPicksUpNewFacet guards the incremental facet cache: adding a

@@ -469,6 +469,23 @@ func TestRenderUsesEnvironmentBindings(t *testing.T) {
 	}
 }
 
+func TestRenderDisablesTenantLogCapture(t *testing.T) {
+	path, err := Render(t.TempDir(), Config{
+		CellURL: "http://cell:7001", CellToken: "tok", Addr: "*:8788", DiskDir: t.TempDir(),
+		PlatformJS: "../../workerd/do-runtime", DisableTenantLogs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `(name = "CH_LOG_CAPTURE", text = "0")`) {
+		t.Fatal("disabled capture binding missing")
+	}
+}
+
 // TestDoRuntimeAlarmShim covers ADR-079: setAlarm is shimmed into the object's
 // storage, the host reports the due time to cell-agent, an alarm invocation runs
 // the tenant alarm() and re-reports, and deleteAlarm clears it.
@@ -651,7 +668,9 @@ func TestDoRuntimeOwnerForwardAndResultUnknown(t *testing.T) {
 	}))
 	defer target.Close()
 
-	o := &ownerStub{live: map[string]bool{}, forwardTo: target.URL}
+	// K8s advertises Pod IPs as host:port. The runtime must normalize that
+	// owner-record form before forwarding from a non-owner Pod.
+	o := &ownerStub{live: map[string]bool{}, forwardTo: strings.TrimPrefix(target.URL, "http://")}
 	base, stop := startRuntime(t, o)
 	defer stop()
 
@@ -762,7 +781,7 @@ func TestDoRuntimeWebSocketCrossNodeForward(t *testing.T) {
 		"request": map[string]any{"path": "/"},
 	})
 	o.setLive("Tenant")
-	o.setForwardTo(baseA)
+	o.setForwardTo(strings.TrimPrefix(baseA, "http://"))
 
 	wsURL := baseB + "/v1/do/connect?namespace=demo&worker=counter&class=Tenant&id=a1&bundle_sha=sha1"
 	wait, stopWS := wsClient(t, wsURL, "tok")
@@ -1030,7 +1049,11 @@ func TestDoRuntimeOutputGate(t *testing.T) {
 	o := &ownerStub{live: map[string]bool{}}
 	diskDir := t.TempDir()
 	gc := &gateCommitter{}
-	sup := &dosupervisor.Supervisor{Dir: diskDir, Committer: gc, Epoch: 1, ScopePrefix: "workerd/__do__"}
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	sup := &dosupervisor.Supervisor{Dir: diskDir, Committer: gc, Bucket: b, Epoch: 1, ScopePrefix: "workerd/__do__"}
 	gate := httptest.NewServer(sup.Handler())
 	defer gate.Close()
 
@@ -1053,6 +1076,10 @@ func TestDoRuntimeOutputGate(t *testing.T) {
 
 	// Failing gate -> result_unknown.
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/do/restore-host" {
+			_, _ = w.Write([]byte(`{"restored":0}`))
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer bad.Close()
@@ -1104,6 +1131,40 @@ func startRuntimeGate(t *testing.T, o *ownerStub, diskDir, gateURL string) (base
 		case <-time.After(10 * time.Second):
 			t.Error("workerd did not exit after cancel")
 		}
+	}
+}
+
+func TestDoRuntimeRestoresClaimedHostBeforeDispatch(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	var restored atomic.Bool
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/do/restore-host":
+			restored.Store(true)
+			_, _ = w.Write([]byte(`{"restored":0}`))
+		case "/internal/do/bind":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/sync-all":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gate.Close()
+	o := &ownerStub{live: map[string]bool{}}
+	base, stop := startRuntimeGate(t, o, t.TempDir(), gate.URL)
+	defer stop()
+	resp, body := invokeSpec(t, base, map[string]any{
+		"namespace": "demo", "worker": "counter", "bundle_sha": "sha1", "storage_id": "ds_restore",
+		"class": "Tenant", "id": "t1", "request": map[string]any{"path": "/count"},
+	})
+	if resp.StatusCode != http.StatusOK || body != "tenant-do:1" {
+		t.Fatalf("invoke = %d %q", resp.StatusCode, body)
+	}
+	if !restored.Load() {
+		t.Fatal("claimed host dispatched before supervisor restore")
 	}
 }
 
@@ -1318,6 +1379,8 @@ func TestDoRuntimeMetricsReportedToSupervisor(t *testing.T) {
 	var okAlarms, gateErrs int64
 	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/internal/do/restore-host":
+			_, _ = w.Write([]byte(`{"restored":0}`))
 		case "/sync-all":
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/internal/do/stats":
@@ -1366,14 +1429,29 @@ func TestDoRuntimeMetricsReportedToSupervisor(t *testing.T) {
 	}
 }
 
-// TestDoRuntimeSpanExport covers ADR-167: a sampled invoke makes the host report
-// a do.invoke span to cell-agent's telemetry endpoint.
+// TestDoRuntimeSpanExport covers ADR-167 end to end: a sampled invoke reports
+// the exact JS span identities, nests do.gate under do.invoke, and propagates
+// the gate span (not the original caller) to the supervisor.
 func TestDoRuntimeSpanExport(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
+	var gateMu sync.Mutex
+	var gateTraceparent string
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync-all" {
+			gateMu.Lock()
+			gateTraceparent = r.Header.Get("traceparent")
+			gateMu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer gate.Close()
+
 	o := &ownerStub{live: map[string]bool{}}
-	base, stop := startRuntime(t, o)
+	base, stop := startRuntimeGate(t, o, t.TempDir(), gate.URL)
 	defer stop()
 
 	resp, body := invokeSpec(t, base, map[string]any{
@@ -1387,19 +1465,33 @@ func TestDoRuntimeSpanExport(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		o.spanMu.Lock()
-		found := false
+		byName := map[string]map[string]any{}
 		for _, s := range o.spans {
-			if s["name"] == "do.invoke" {
-				found = true
+			if name, _ := s["name"].(string); name != "" {
+				byName[name] = s
 			}
 		}
 		o.spanMu.Unlock()
-		if found {
+		invoke, invokeOK := byName["do.invoke"]
+		gateSpan, gateOK := byName["do.gate"]
+		if invokeOK && gateOK {
+			if invoke["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" || invoke["parent_span_id"] != "00f067aa0ba902b7" {
+				t.Fatalf("do.invoke identity = %#v", invoke)
+			}
+			if gateSpan["trace_id"] != invoke["trace_id"] || gateSpan["parent_span_id"] != invoke["span_id"] {
+				t.Fatalf("do.gate = %#v, want child of %#v", gateSpan, invoke)
+			}
+			gateMu.Lock()
+			gotTP := gateTraceparent
+			gateMu.Unlock()
+			wantTP := "00-" + gateSpan["trace_id"].(string) + "-" + gateSpan["span_id"].(string) + "-01"
+			if gotTP != wantTP {
+				t.Fatalf("gate traceparent = %q, want %q", gotTP, wantTP)
+			}
 			return
 		}
 		if time.Now().After(deadline) {
-			o.spanMu.Lock()
-			t.Fatalf("no do.invoke span reported: %v", o.spans)
+			t.Fatalf("reported spans = %v, want do.invoke and do.gate", byName)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

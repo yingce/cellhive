@@ -22,17 +22,18 @@
 | 原生 COS（`cos://`） | COS 香港 `cell-1376795072` 测试桶通过；其它桶逐实例验证 | 隔离键并发 claim/CAS/删除与启动诊断通过；同宿主进程 `SIGKILL`→新目录接管，192 并发 5000 次写全 ACK，冷恢复核对 6488 个已 ACK 值，missing=0/wrong=0，SQLite integrity=ok。原 `vwork-hk-1376795072` 桶的 AppendObject 返回 405，仍不合格。 |
 | COS / OSS 的 S3 API | ❌（实测配置） | 2026-09-22 对可用桶以独立 `itest/` 键探测：COS 对重复 `If-None-Match:*` PUT 返回成功，OSS 对首个该 PUT 返回 `NotImplemented`；均不满足 owner 选举。未对其它账户/端点作普遍结论 |
 
-## 桶角色（默认单桶 + 前缀，可拆）
+## 桶命名空间（当前单桶）
 
-| 角色 | 默认 | 内容 | 可拆独立桶 |
-|---|---|---|---|
-| `state` | 主桶 | cell 复制、owner/lease、nodes、node-logs、drain-token | ✅ |
-| `code` | 主桶 `bundles/`、`deploys/` | Worker bundle（内容寻址）+ 版本指针 | ✅ |
-| `assets` | 主桶 `assets/` | 静态资产（可挂 CDN） | ✅ |
-| `r2` | 主桶 `r2/` | 租户 R2 虚拟桶 | ✅ |
-| `backup` | 无 | 可选归档 | ✅ |
+当前实现只配置一个 `CELLHIVE_BUCKET`（及同一组 endpoint/region/credentials）；以下保留前缀在同一 bucket 内隔离，尚不能拆成独立桶：
 
-配置：每个角色可各自指定 `bucket / endpoint / region / credentials / prefix`；不填则回落主桶 + 前缀。
+| 前缀 | 内容 |
+|---|---|
+| `cells/`、`nodes/`、`node-logs/`、`fleet/` | cell 复制、owner/lease、节点日志与控制记录 |
+| `bundles/`、`deploys/` | Worker bundle（内容寻址）与版本指针 |
+| `assets/` | 静态资产 |
+| `r2/` | 租户 R2 虚拟桶 |
+
+独立 `state/code/assets/r2/backup` 桶角色与各角色凭据配置尚未实现；备份/归档也没有独立写入路径。
 
 ## Key 布局（示例）
 
@@ -75,7 +76,7 @@ r2/<ns>/<bucket_name>/<object-key>
 
 - 各供应商 presigned URL 的兼容性与 TTL；
 - lifecycle 规则与成本模型；
-- backup 角色的快照/归档策略；
+- 独立桶角色、凭据与 backup 快照/归档策略；
 - 云端对象存储其它供应商及不同账户的原子条件语义、presigned URL 和并发竞争测试（C 类环境；COS/OSS 上述实测不等于全部云供应商）。
 
-_最后更新：2026-09-22_
+_最后更新：2026-09-25_

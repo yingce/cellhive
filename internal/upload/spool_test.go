@@ -60,6 +60,38 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func statU64(b *Batcher, key string) uint64 { return b.Stats()[key] }
 
+// TestSpoolSyncsDirectoryForEveryMutation protects the power-loss contract:
+// every rename that publishes an entry and every unlink that completes one
+// must be followed by a directory fsync. Syncing only the first mutation does
+// not make later directory entries durable.
+func TestSpoolSyncsDirectoryForEveryMutation(t *testing.T) {
+	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
+	id1, err := sp.Append(sc, 1, [][]byte{[]byte("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := sp.Append(sc, 1, [][]byte{[]byte("b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sp.Stats()["dir_syncs"]; got != 3 {
+		t.Fatalf("directory syncs after two appends = %d, want 3 (parent once, leaf per publish)", got)
+	}
+	if err := sp.Remove(id1); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Remove(id2); err != nil {
+		t.Fatal(err)
+	}
+	if got := sp.Stats()["dir_syncs"]; got != 5 {
+		t.Fatalf("directory syncs after two removes = %d, want 5", got)
+	}
+}
+
 // TestSpoolDefersFailedUploadAndReplays: an async upload that fails is kept on
 // disk (deferred, not dropped) and a later replay uploads and clears it.
 func TestSpoolDefersFailedUploadAndReplays(t *testing.T) {
@@ -201,8 +233,8 @@ func TestSpoolRoundTrip(t *testing.T) {
 }
 
 // TestSpoolDurableAppendSyncs covers ADR-171: each append fsyncs the temp file
-// before rename, and the directory chain is fsynced once per process
-// (memoized), like celld.
+// before rename and then fsyncs the changed leaf directory; the parent directory
+// is synced once per process because only spool-directory creation changes it.
 func TestSpoolDurableAppendSyncs(t *testing.T) {
 	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), 0)
 	if err != nil {
@@ -228,8 +260,8 @@ func TestSpoolDurableAppendSyncs(t *testing.T) {
 	if st["file_syncs"] != 2 {
 		t.Fatalf("file_syncs = %d, want 2", st["file_syncs"])
 	}
-	if st["dir_syncs"] != dirSyncs {
-		t.Fatalf("dir_syncs grew to %d (want memoized at %d)", st["dir_syncs"], dirSyncs)
+	if st["dir_syncs"] != dirSyncs+1 {
+		t.Fatalf("dir_syncs = %d, want %d (leaf synced for second publish)", st["dir_syncs"], dirSyncs+1)
 	}
 	entries, err := sp.Load()
 	if err != nil || len(entries) != 2 {

@@ -132,6 +132,32 @@ func TestExpiredOwnerTakeoverAdvancesEpoch(t *testing.T) {
 	}
 }
 
+func TestTakeoverWaitsForPredecessorRecovery(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first, _ := newManager(t, dir, "node-1")
+	second, _ := newManager(t, dir, "node-2")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "gated"}
+	old, err := first.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	gateErr := errors.New("predecessor recovery incomplete")
+	second.BeforeTakeover = func(_ context.Context, got cell.Owner) error {
+		if got.Node != old.Node || got.Session != old.Session || got.Epoch != old.Epoch {
+			t.Fatalf("predecessor = %+v, want %+v", got, old)
+		}
+		return gateErr
+	}
+	if _, err := second.Claim(ctx, sc, time.UnixMilli(old.Expiry).Add(time.Second)); !errors.Is(err, gateErr) {
+		t.Fatalf("takeover error = %v, want recovery error", err)
+	}
+	got, _, err := first.Resolve(ctx, sc)
+	if err != nil || got.Node != old.Node || got.Epoch != old.Epoch {
+		t.Fatalf("owner changed before recovery: %+v, %v", got, err)
+	}
+}
+
 func TestScopeParse(t *testing.T) {
 	if _, err := cell.ParseScope("demo/__kv__/main"); err != nil {
 		t.Fatalf("valid scope rejected: %v", err)

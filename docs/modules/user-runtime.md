@@ -33,7 +33,7 @@
 - 租户 `globalOutbound` = **public-only**；capability binding 是平台侧 entrypoint stub（`:7001` 传输在平台 worker，ADR-184），租户 env 无 `PLATFORM`/`CELL_URL`。
 - env patch（`bindings-wrapper.js` / `queue-wrapper.js`）让 `this.env` 与构造形参 `env` 一致。
 - **不持桶凭据**；只拿 binding facade 与 scoped token。
-- Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。pin `1.20260916.1` 拒绝动态 loaded-worker Tail Worker（`provided value is not of type 'Fetcher'`），所以租户 `console.*` 平台采集关闭。
+- Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。默认由 host-bound 原生 Tail Fetcher 捕获租户 Worker 与 service target 的 `console.*`/异常，日志身份和凭据留在可信宿主；`CELLHIVE_TENANT_LOG_CAPTURE=off` 可按 runtime 关闭。
 - 最终 WorkerCode（64 MiB）和估算 workerLoader env（1016 KiB）在每次动态加载前经共享 `workerd/platform/budget.js` 复核；控制面检查不能替代运行时防御。
 
 ## 源码位置

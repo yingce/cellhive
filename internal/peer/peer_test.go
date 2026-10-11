@@ -1,7 +1,10 @@
 package peer
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +18,91 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 )
+
+func TestDecodeBatchFramesDrainsOnlyCompleteBufferedFrames(t *testing.T) {
+	a := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "a"}
+	b := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "b"}
+	seg1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a"))
+	seg2 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 1, EndTxID: 1}, []byte("b"))
+	first := encodeBatchFrame(a, 1, [][]byte{seg1})
+	second := encodeBatchFrame(b, 2, [][]byte{seg2})
+	partial := encodeBatchFrame(a, 1, [][]byte{seg1})
+	data := append(append(append([]byte{}, first...), second...), partial[:len(partial)-1]...)
+	r := bufio.NewReaderSize(bytes.NewReader(data), len(data))
+
+	frames, err := DecodeBatchFrames(r, 64, len(data))
+	if err != nil {
+		t.Fatalf("decode buffered frames: %v", err)
+	}
+	if len(frames) != 2 || frames[0].Scope != a || frames[1].Scope != b {
+		t.Fatalf("frames = %+v, want complete a,b frames", frames)
+	}
+	if got := r.Buffered(); got != len(partial)-1 {
+		t.Fatalf("buffered bytes = %d, want incomplete frame bytes %d", got, len(partial)-1)
+	}
+}
+
+func TestDecodeBatchFramesHonorsGroupByteLimit(t *testing.T) {
+	a := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "limit"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, bytes.Repeat([]byte("x"), 256))
+	frame := encodeBatchFrame(a, 1, [][]byte{seg})
+	r := bufio.NewReaderSize(bytes.NewReader(append(append([]byte{}, frame...), frame...)), len(frame)*2)
+	frames, err := DecodeBatchFrames(r, 64, len(frame))
+	if err != nil {
+		t.Fatalf("decode limited group: %v", err)
+	}
+	if len(frames) != 1 || r.Buffered() != len(frame) {
+		t.Fatalf("frames=%d buffered=%d, want 1 and %d", len(frames), r.Buffered(), len(frame))
+	}
+}
+
+func TestSessionStreamDoesNotFallbackToLegacyAppend(t *testing.T) {
+	legacyAppends := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/peer/stream":
+			if r.Header.Get("Upgrade") == StreamProtocol {
+				http.Error(w, "session protocol unsupported", http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "unexpected protocol", http.StatusBadRequest)
+		case "/v1/peer/append_batch":
+			legacyAppends++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"fsynced"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	transport := NewSessionStreamTransport("tok", "owner-session", 1, 1)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "upgrade"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	if err := transport.AppendBatch(context.Background(), srv.URL, sc, 1, [][]byte{seg}); err == nil {
+		t.Fatal("session stream unexpectedly succeeded against legacy follower")
+	}
+	if legacyAppends != 0 {
+		t.Fatalf("legacy append fallback count = %d, want 0", legacyAppends)
+	}
+}
+
+func TestSessionHTTPAppendRequiresV2Proof(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"fsynced"}`)
+	}))
+	defer legacy.Close()
+	transport := NewHTTPTransport("tok", nil).WithSession("owner-session")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http-v2"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	if err := transport.Append(context.Background(), legacy.URL, sc, 1, seg); err == nil {
+		t.Fatal("session append accepted legacy response without v2 proof")
+	}
+	if err := transport.AppendBatch(context.Background(), legacy.URL, sc, 1, [][]byte{seg}); err == nil {
+		t.Fatal("session batch accepted legacy response without v2 proof")
+	}
+}
 
 func TestSpoolAppendListRead(t *testing.T) {
 	ctx := context.Background()
@@ -105,6 +193,310 @@ func TestSpoolRejectsEpochMismatch(t *testing.T) {
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, EndTxID: 1}, []byte("x"))
 	if _, err := sp.Append(ctx, sc, 2, seg); err == nil {
 		t.Fatalf("expected epoch mismatch")
+	}
+}
+
+func TestSessionSealReturnsStableSequencedTail(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "session"}
+	s1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a"))
+	s2 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("b"))
+	if _, _, err := sp.AppendBatchSession(ctx, "owner-session", sc, 1, [][]byte{s1}); err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	if _, _, err := sp.AppendBatchSession(ctx, "owner-session", sc, 1, [][]byte{s2}); err != nil {
+		t.Fatalf("append second: %v", err)
+	}
+	sealedTo, err := sp.Seal("owner-session")
+	if err != nil || sealedTo != 2 {
+		t.Fatalf("seal = %d, %v; want 2", sealedTo, err)
+	}
+	tail, err := sp.Tail("owner-session", 0)
+	if err != nil || len(tail) != 2 || tail[0].Sequence != 1 || tail[1].Sequence != 2 {
+		t.Fatalf("tail = %+v, %v", tail, err)
+	}
+	if _, _, err := sp.AppendBatchSession(ctx, "owner-session", sc, 1, [][]byte{s2}); !errors.Is(err, ErrSessionSealed) {
+		t.Fatalf("append after seal = %v, want ErrSessionSealed", err)
+	}
+}
+
+func TestSessionTailPageAdvancesWithoutSplittingFragments(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "paged-tail"}
+	for i := uint64(1); i <= 3; i++ {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, bytes.Repeat([]byte{byte(i)}, 128))
+		if _, _, err := sp.AppendBatchSession(ctx, "paged-tail-session", sc, 1, [][]byte{seg}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if _, err := sp.Seal("paged-tail-session"); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	first, err := sp.TailPage("paged-tail-session", 0, 2, 1)
+	if err != nil || len(first) != 1 || first[0].Sequence != 1 {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	second, err := sp.TailPage("paged-tail-session", 1, 2, 1<<20)
+	if err != nil || len(second) != 2 || second[0].Sequence != 2 || second[1].Sequence != 3 {
+		t.Fatalf("second page = %+v, %v", second, err)
+	}
+}
+
+func TestSessionDirectorySyncFailureIsRetried(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	original := sp.syncDir
+	failed := false
+	sp.syncDir = func(path string) error {
+		if !failed {
+			failed = true
+			return errors.New("injected directory sync failure")
+		}
+		return original(path)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "dir-sync"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	if _, _, err := sp.AppendBatchSession(ctx, "dir-sync-session", sc, 1, [][]byte{seg}); err == nil {
+		t.Fatal("first append succeeded despite injected directory sync failure")
+	}
+	if _, _, err := sp.AppendBatchSession(ctx, "dir-sync-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("retry append: %v", err)
+	}
+	if !failed {
+		t.Fatal("directory sync failure was not injected")
+	}
+}
+
+func TestSessionSealDirectorySyncFailureIsRetried(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "seal-sync"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	if _, _, err := sp.AppendBatchSession(ctx, "seal-sync-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	original := sp.syncDir
+	sealDir := sp.sessionDir("seal-sync-session")
+	failed := false
+	sp.syncDir = func(path string) error {
+		if path == sealDir && !failed {
+			failed = true
+			return errors.New("injected seal directory sync failure")
+		}
+		return original(path)
+	}
+	if _, err := sp.Seal("seal-sync-session"); err == nil {
+		t.Fatal("first seal succeeded despite injected directory sync failure")
+	}
+	if final, err := sp.Seal("seal-sync-session"); err != nil || final != 1 {
+		t.Fatalf("retry seal = %d, %v; want 1", final, err)
+	}
+}
+
+func TestSpoolAppendSessionGroupPreservesFramesAndRejectsInvalidGroup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sp, err := NewSpool(dir)
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	a := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "a"}
+	b := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "b"}
+	seg1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a1"))
+	seg2 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 1, EndTxID: 1}, []byte("b1"))
+
+	seqs, err := sp.AppendSessionGroup(ctx, "group-session", []SessionAppend{
+		{Scope: a, Epoch: 1, Segments: [][]byte{seg1}},
+		{Scope: b, Epoch: 2, Segments: [][]byte{seg2}},
+	})
+	if err != nil {
+		t.Fatalf("append group: %v", err)
+	}
+	if fmt.Sprint(seqs) != "[1 2]" {
+		t.Fatalf("sequences = %v, want [1 2]", seqs)
+	}
+
+	bad := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 9, StartTxID: 2, EndTxID: 2}, []byte("bad"))
+	if _, err := sp.AppendSessionGroup(ctx, "group-session", []SessionAppend{
+		{Scope: a, Epoch: 1, Segments: [][]byte{seg1}},
+		{Scope: b, Epoch: 2, Segments: [][]byte{bad}},
+	}); err == nil {
+		t.Fatal("invalid group was accepted")
+	}
+
+	restarted, err := NewSpool(dir)
+	if err != nil {
+		t.Fatalf("restart spool: %v", err)
+	}
+	final, err := restarted.Seal("group-session")
+	if err != nil || final != 2 {
+		t.Fatalf("seal = %d, %v; want 2", final, err)
+	}
+	tail, err := restarted.Tail("group-session", 0)
+	if err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	if len(tail) != 2 || tail[0].Scope != a.String() || tail[1].Scope != b.String() {
+		t.Fatalf("tail = %+v, want ordered a,b frames", tail)
+	}
+}
+
+func TestSessionBatchesUseOneAppendLog(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sp, err := NewSpool(dir)
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "session-log"}
+	for i := uint64(1); i <= 50; i++ {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		if _, sequence, err := sp.AppendBatchSession(ctx, "append-log-session", sc, 1, [][]byte{seg}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		} else if sequence != fmt.Sprint(i) {
+			t.Fatalf("append %d sequence = %q", i, sequence)
+		}
+	}
+	sessionDir := sp.sessionDir("append-log-session")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatalf("read session dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "fragments.log" {
+		t.Fatalf("session batches must share one append log, got %v", entries)
+	}
+
+	// A restarted follower must recover the last sequence from the log once and
+	// continue contiguously without overwriting the durable tail.
+	sp, err = NewSpool(dir)
+	if err != nil {
+		t.Fatalf("restart spool: %v", err)
+	}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 51, EndTxID: 51}, []byte("restart"))
+	if _, sequence, err := sp.AppendBatchSession(ctx, "append-log-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("append after restart: %v", err)
+	} else if sequence != "51" {
+		t.Fatalf("sequence after restart = %q, want 51", sequence)
+	}
+	if final, err := sp.Seal("append-log-session"); err != nil || final != 51 {
+		t.Fatalf("seal = %d, %v; want 51", final, err)
+	}
+	tail, err := sp.Tail("append-log-session", 49)
+	if err != nil || len(tail) != 2 || tail[0].Sequence != 50 || tail[1].Sequence != 51 {
+		t.Fatalf("tail after restart = %+v, %v", tail, err)
+	}
+}
+
+func TestSessionAppendTruncatesTornTailAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sp, err := NewSpool(dir)
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "torn-tail"}
+	first := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("first"))
+	path, _, err := sp.AppendBatchSession(ctx, "torn-session", sc, 1, [][]byte{first})
+	if err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	if _, err := f.Write([]byte{0, 0, 0, 40, 1, 2, 3}); err != nil {
+		t.Fatalf("write torn record: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close torn log: %v", err)
+	}
+
+	sp, err = NewSpool(dir)
+	if err != nil {
+		t.Fatalf("restart spool: %v", err)
+	}
+	second := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("second"))
+	if _, sequence, err := sp.AppendBatchSession(ctx, "torn-session", sc, 1, [][]byte{second}); err != nil {
+		t.Fatalf("append after torn tail: %v", err)
+	} else if sequence != "2" {
+		t.Fatalf("sequence = %q, want 2", sequence)
+	}
+	if final, err := sp.Seal("torn-session"); err != nil || final != 2 {
+		t.Fatalf("seal = %d, %v; want 2", final, err)
+	}
+	tail, err := sp.Tail("torn-session", 0)
+	if err != nil || len(tail) != 2 || tail[1].Sequence != 2 {
+		t.Fatalf("tail = %+v, %v", tail, err)
+	}
+}
+
+func TestSessionMigratesLegacyFragments(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := NewSpool(dir)
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "legacy"}
+	legacyDir := filepath.Join(sp.sessionDir("legacy-session"), "fragments")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("legacy dir: %v", err)
+	}
+	for i := uint64(1); i <= 2; i++ {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		path := filepath.Join(legacyDir, fmt.Sprintf("%020d.frame", i))
+		if err := os.WriteFile(path, encodeSessionFragment(sc.String(), 1, [][]byte{seg}), 0o644); err != nil {
+			t.Fatalf("legacy fragment %d: %v", i, err)
+		}
+	}
+
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 3, EndTxID: 3}, []byte("new"))
+	if _, sequence, err := sp.AppendBatchSession(context.Background(), "legacy-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("append after upgrade: %v", err)
+	} else if sequence != "3" {
+		t.Fatalf("sequence after upgrade = %q, want 3", sequence)
+	}
+	if final, err := sp.Seal("legacy-session"); err != nil || final != 3 {
+		t.Fatalf("seal = %d, %v; want 3", final, err)
+	}
+	tail, err := sp.Tail("legacy-session", 0)
+	if err != nil || len(tail) != 3 {
+		t.Fatalf("migrated tail = %+v, %v", tail, err)
+	}
+}
+
+func TestReclaimedSessionStillRejectsAppend(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "reclaimed"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	if _, _, err := sp.AppendBatchSession(ctx, "reclaimed-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := sp.Seal("reclaimed-session"); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if err := sp.Reclaim("reclaimed-session"); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if _, _, err := sp.AppendBatchSession(ctx, "reclaimed-session", sc, 1, [][]byte{seg}); !errors.Is(err, ErrSessionSealed) {
+		t.Fatalf("append after reclaim = %v, want ErrSessionSealed", err)
 	}
 }
 

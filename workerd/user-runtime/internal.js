@@ -2,6 +2,7 @@
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { budgetErrorBody, checkedWorkerGet } from "budget.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
+export { TenantTail } from "log-tail.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -235,6 +236,9 @@ async function loadWorkflowWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
+    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
+    })] }),
   };
   return checkedWorkerGet(
     env.LOADER,
@@ -250,7 +254,7 @@ async function loadWorkflowWorker(env, ctx, body) {
 // URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
 function platformConsts(spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
@@ -291,6 +295,9 @@ async function loadWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,
+    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
+    })] }),
   };
   return checkedWorkerGet(
     env.LOADER,

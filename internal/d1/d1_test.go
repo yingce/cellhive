@@ -172,9 +172,55 @@ func TestD1ReturningRows(t *testing.T) {
 	if len(r.Rows) != 1 || len(r.Rows[0]) != 2 || r.Rows[0][1] != "a" {
 		t.Fatalf("returning rows = %+v, want one [1 a]", r.Rows)
 	}
+	if r.RowsAffected != 1 || r.LastInsertID != 1 {
+		t.Fatalf("returning metadata = changes %d last id %d, want 1/1", r.RowsAffected, r.LastInsertID)
+	}
 	// A plain mutation must still report affected rows (Exec path).
 	ra, err := s.Exec(ctx, "acme", "main", `INSERT INTO t (id, v) VALUES (?, ?)`, []any{2, "b"})
 	if err != nil || ra.RowsAffected != 1 {
 		t.Fatalf("plain insert = %+v, %v", ra, err)
+	}
+}
+
+func TestD1ReadOnlyWithDoesNotInheritMutationMeta(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	results, err := s.Batch(ctx, "acme", "main", []Statement{
+		{SQL: `INSERT INTO t (v) VALUES (?)`, Params: []any{"a"}},
+		{SQL: `WITH current AS (SELECT id, v FROM t) SELECT id, v FROM current`},
+	})
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if len(results) != 2 || results[0].RowsAffected != 1 {
+		t.Fatalf("batch results = %+v", results)
+	}
+	if results[1].RowsAffected != 0 || results[1].LastInsertID != 0 {
+		t.Fatalf("read-only WITH inherited mutation meta: %+v", results[1])
+	}
+}
+
+func TestD1JSONByteArrayBindsAsBlob(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE blobs (v BLOB)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.Exec(ctx, "acme", "main", `INSERT INTO blobs (v) VALUES (?)`, []any{[]any{float64(0), float64(127), float64(255)}}); err != nil {
+		t.Fatalf("insert byte array: %v", err)
+	}
+	got, err := s.Query(ctx, "acme", "main", `SELECT typeof(v), v FROM blobs`, nil)
+	if err != nil {
+		t.Fatalf("query blob: %v", err)
+	}
+	if len(got.Rows) != 1 || got.Rows[0][0] != "blob" {
+		t.Fatalf("blob row = %+v, want blob", got.Rows)
+	}
+	bytes, ok := got.Rows[0][1].([]int)
+	if !ok || len(bytes) != 3 || bytes[0] != 0 || bytes[1] != 127 || bytes[2] != 255 {
+		t.Fatalf("blob value = %#v, want [0 127 255]", got.Rows[0][1])
 	}
 }

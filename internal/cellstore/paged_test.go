@@ -262,3 +262,66 @@ func TestPagedCellReopenAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestMalformedPagedMarkerForcesRestore protects the sparse-cache invariant:
+// marker corruption must never make an incomplete file look like a normal
+// SQLite database. The cache is discarded and rebuilt from the durable source.
+func TestMalformedPagedMarkerForcesRestore(t *testing.T) {
+	ctx := context.Background()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "bad-marker"}
+	src, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := src.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(ctx, "key", []byte("value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CheckpointTruncate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(c.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := dst.Path(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("incomplete sparse cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pagedMarkerPath(p), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hydrated := false
+	dst.Hydrate = func(_ context.Context, _ cell.Scope, dest string) error {
+		hydrated = true
+		return os.WriteFile(dest, want, 0o644)
+	}
+	restored, err := dst.Cell(ctx, sc)
+	if err != nil {
+		t.Fatalf("restore malformed paged cache: %v", err)
+	}
+	if !hydrated {
+		t.Fatal("malformed paged cache opened without durable restore")
+	}
+	got, _, err := restored.Get(ctx, "key")
+	if err != nil || string(got) != "value" {
+		t.Fatalf("restored value = %q, %v", got, err)
+	}
+}

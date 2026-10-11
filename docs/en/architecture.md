@@ -134,7 +134,7 @@ All are unified as timers: due entries are stored in the SQLite of their owning 
 | Class A cell owner | Bucket owner record + local cache (point lookup, no LIST) |
 | DO owner | Owner record (points to do-runtime address + epoch), written by cell-agent |
 | `user-runtime` dispatch | Logical service name (mesh), any healthy replica |
-| `do-runtime` liveness/candidates | **No dedicated heartbeat**: liveness is inferred implicitly from replication activity; takeover candidates use platform service discovery (see ADR-025) |
+| `do-runtime` candidates | Static `CELLHIVE_DO_RUNTIMES` address list; shard modulo selects the first address and dial failure rotates to the next one |
 
 ## Trust Boundaries
 
@@ -142,7 +142,7 @@ All are unified as timers: due entries are stored in the SQLite of their owning 
 - Tenant Workers loaded by `user-runtime`: **public egress only**, cannot see internal Fetchers/credentials; the platform loader runs before tenant modules and is responsible for routing and header sanitization.
 - `do-runtime` is private-network only; it does not hold object-storage credentials.
 - `cell-agent`: `:7001` internal data/resolution (shared by Go↔Go and workerd bindings) is **private-network only**; `:8082` admin goes through the edge, credentials = static operations token or OIDC/JWT (`cellhive_ns` restricts ns, ADR-131); data-plane paths cannot reach control-plane handlers.
-- **Tenant isolation**: the `globalOutbound` of a tenant loaded worker = **public Internet only** (excluding RFC1918 / cell-agent); the internal token exists only in the host adapter and **never enters the tenant env**; each worker is configured with `limits` (cpu/subrequests) and a V8 heap limit. See the planned `security.md` for details.
+- **Tenant isolation**: a loaded tenant Worker's `globalOutbound` is **public-Internet-only** (excluding RFC1918 / cell-agent); platform role tokens and backend addresses exist only in the host adapter and **never enter tenant env**; binding calls use resource-scoped tokens. Per-worker CPU/subrequest and V8 heap enforcement are not implemented; see [`security.md`](security.md).
 - Tenant secrets: the control-plane cell stores envelope ciphertext and the root key remains outside the cell; cell-agent decrypts current values when constructing Worker/DO runtime env. Plaintext only enters the load envelope and workerd env.
 - All internal calls carry the shared internal token; none are exposed to the public Internet.
 
@@ -202,17 +202,17 @@ Control metadata resides in a **single** control cell (ADR-117; relational table
 
 ### Not Bound to a Single Orchestrator
 
-Core discovery **does not depend on K8s**: cell-agent peers use **bucket node leases**, owners use bucket records, and DO liveness uses replication activity. K8s only provides one implementation of the following capabilities, all of which are replaceable:
+Core discovery **does not depend on K8s**: cell-agent peers use **bucket node leases**, and owners use bucket records. A logical Service/LB configured through `CELLHIVE_DO_RUNTIMES` provides the first DO hop; the owner record carries the actual owner address. K8s is only one replaceable implementation of the following capabilities:
 
 | Requirement | K8s | Non-K8s Alternative |
 |---|---|---|
 | Caller → cell-agent (logical service name) | Service/ClusterIP | DNS round-robin, internal LB (Envoy/HAProxy/nginx), seed list + client-side polling |
-| **do-runtime → cell-agent entrypoint** (WAL/claim/restore) | Service/ClusterIP | **Seed list / DNS / internal LB / Consul**; or give do-runtime **scoped credentials restricted to read-only `nodes/*`**; or cell-agent pushes configuration in reverse (do-runtime does not hold bucket credentials and cannot self-discover) |
-| do-runtime takeover candidates | Endpoints | Consul/Nomad catalog; or **do-runtime registers/heartbeats with cell-agent** (fallback); or a configured list |
+| **do-runtime → cell-agent entrypoint** (WAL/claim/restore) | Service/ClusterIP | One configured DNS/LB address today; do-runtime holds no bucket credentials and cannot discover cell-agent through the bucket |
+| Arbitrary do-runtime entrypoint | `CELLHIVE_DO_RUNTIMES=do-runtime:8788` (ClusterIP Service load-balances; Endpoints track Pods automatically) | Stable DNS/LB; multiple entrypoints with client rotation are also supported |
+| Directed forwarding to the DO owner | `POD_IP:8788` in the owner record (`CELLHIVE_DO_ADVERTISE`) | Per-instance reachable advertise address |
 | Ingress / TLS | Ingress | **Standalone Traefik deployment** (file provider), HAProxy/nginx |
-| Stable node identity / address | StatefulSet / pod DNS | Static hostname/IP + `advertise` configuration |
 | Local disk | emptyDir / local PV | Local SSD / ephemeral disk |
 
 Therefore it can be deployed on: **Docker Compose, systemd units, Nomad, bare metal/VMs, any orchestrator**. See [`decisions.md`](decisions.md) ADR-011 / ADR-018 / ADR-025 / ADR-027.
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-25_

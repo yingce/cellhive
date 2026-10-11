@@ -54,10 +54,10 @@ user-runtime loader：
 ```
 
 - **env 预算（ADR-186，已实现）**：上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**；按完整实际 env 校验并计入 V8 双字节开销。超限返回 `worker_env_too_large`，只含 `actual_bytes`/`max_bytes`。
-- **WorkerCode 预算（ADR-186，已实现）**：传给 `workerLoader` 的最终形态（用户模块 + wrapper + 平台注入模块）上限 **64 MiB**；控制面在事务/active pointer 前拒绝，运行时在唯一共享 `checkedWorkerGet()` 中复核。超限返回 `worker_code_too_large`。
+- **WorkerCode 预算（ADR-186，已实现）**：传给 `workerLoader` 的最终形态上限 **64 MiB**；有 binding/dispatch 路径计入 wrapper 与平台注入模块，无 binding 的公共 fetch 按 ADR-193 只计实际直载租户模块。控制面在事务/active pointer 前拒绝，运行时在加载前复核。超限返回 `worker_code_too_large`。
 - **宿主秘密（ADR-186，已实现）**：平台 URL/token 通过 capnp `fromEnvironment` 只进入可信宿主 binding；user-runtime、do-runtime 与 do-supervisor 都给 workerd 构造显式子进程环境，不继承父进程环境。秘密不得出现在渲染 capnp、最终 WorkerCode、租户 env、参数或日志。
 - **secret 边界**：secret 在 control cell 以信封密文保存，运行时读取执行视图时由 cell-agent 解密，与 vars 合并后注入 Worker/DO env；明文不进入 bundle、binding spec props、渲染 capnp、参数或日志。secret 与同名 var 冲突时 secret 覆盖 var；已加载 isolate/facet 的 env 不原地变更，新加载/重建时取当前 secret。
-- **Workflow / 日志边界**：workflow 固定 op 回调由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 经 JSRPC 参数跨 `workerLoader` 传给 wrapper；它不是 `ServiceStub`，也不进入 tenant env。已在 pin `1.20260916.1` 重跑动态 Tail spike，仍被拒绝（`provided value is not of type 'Fetcher'`），故租户 `console.*` 平台采集当前关闭，不能以 env 传输回退。
+- **Workflow / 日志边界**：workflow 固定 op 回调由可信 internal host 创建、带 dispatcher-bound 身份的 `WorkflowBridgeTarget extends RpcTarget` 经 JSRPC 参数跨 `workerLoader` 传给 wrapper；它不是 `ServiceStub`，也不进入 tenant env。日志由可信 host 创建 `ctx.exports.TenantTail({props})` Fetcher，并作为 `WorkerCode.tails` capability 挂到动态 Worker；身份、log token、URL 与 private transport 均不进入 tenant env。
 - **模块前缀保留**：平台生成的模块名使用保留前缀（如 `__cellhive-`），租户不得占用。
 
 ## host adapter 与网络

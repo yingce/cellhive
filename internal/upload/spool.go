@@ -37,11 +37,10 @@ type Spool struct {
 	seq uint64
 	n   int
 
-	// dirSynced memoizes the directory fsync: the leaf makes the rename
-	// durable, the parent makes the spool directory's own entry durable. Both
-	// only change when the directory is created, so they are synced once per
-	// process (celld's memoized directory-chain fsync).
-	dirSynced bool
+	// parentSynced memoizes only the parent-directory fsync needed after creating
+	// the spool directory. The spool directory itself changes on every publish
+	// and removal, so each such mutation is followed by its own fsync.
+	parentSynced bool
 
 	// Durability telemetry (see Stats).
 	fileSyncs    atomic.Int64
@@ -109,10 +108,11 @@ func (s *Spool) path(id uint64) string {
 }
 
 // Append writes one group durably and returns its id. It is the crash- and
-// power-loss-safe atomic-write idiom (celld): tmp file -> fsync -> rename ->
-// directory fsync (memoized once per process). A failure to fsync fails the
-// append; the file may still exist, but the caller must not treat the entry as
-// durable (replay is idempotent if it is later found).
+// power-loss-safe atomic-write idiom: tmp file -> fsync -> rename -> leaf
+// directory fsync. The parent directory is additionally synced once per process
+// to persist creation of the spool directory itself. A failure to fsync fails
+// the append; the file may still exist, but the caller must not treat the entry
+// as durable (replay is idempotent if it is later found).
 func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -148,18 +148,18 @@ func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, 
 	}
 	s.renameMicros.Add(time.Since(renameStart).Microseconds())
 
-	if !s.dirSynced {
-		if err := syncDir(s.dir); err != nil {
-			return 0, err
-		}
-		s.dirSyncs.Add(1)
+	if err := syncDir(s.dir); err != nil {
+		return 0, err
+	}
+	s.dirSyncs.Add(1)
+	if !s.parentSynced {
 		if parent := filepath.Dir(s.dir); parent != s.dir {
 			if err := syncDir(parent); err != nil {
 				return 0, err
 			}
 			s.dirSyncs.Add(1)
 		}
-		s.dirSynced = true
+		s.parentSynced = true
 	}
 	s.n++
 	return id, nil
@@ -169,12 +169,20 @@ func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, 
 func (s *Spool) Remove(id uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.Remove(s.path(id)); err != nil && !os.IsNotExist(err) {
+	err := os.Remove(s.path(id))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	if s.n > 0 {
 		s.n--
 	}
+	if err := syncDir(s.dir); err != nil {
+		return err
+	}
+	s.dirSyncs.Add(1)
 	return nil
 }
 

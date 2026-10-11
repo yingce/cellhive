@@ -543,6 +543,24 @@ func TestGateEmitsSpan(t *testing.T) {
 	}
 }
 
+func TestRestoreHostEndpointReturnsMissingAsNoop(t *testing.T) {
+	s := &Supervisor{Dir: t.TempDir(), Blobs: missingBlobStore{}, Epoch: 1, ScopePrefix: "workerd/__do__"}
+	req := httptest.NewRequest(http.MethodPost, "/internal/do/restore-host", strings.NewReader(`{"host_id":"ds/shard0"}`))
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"restored":0`) {
+		t.Fatalf("restore missing host = %d %s, want 200 restored=0", rr.Code, rr.Body.String())
+	}
+}
+
+type missingBlobStore struct{}
+
+func (missingBlobStore) GetBlob(context.Context, string) ([]byte, error) {
+	return nil, bucket.ErrNotFound
+}
+
+func (missingBlobStore) PutBlob(context.Context, string, []byte) error { return nil }
+
 // slowCommitter records concurrent in-flight commits so a test can prove
 // SyncAll overlaps per-file proofs (ADR-170).
 type slowCommitter struct {

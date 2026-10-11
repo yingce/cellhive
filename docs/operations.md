@@ -8,7 +8,7 @@ CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)" CELLHIVE_NODE_ID=node-1 \
   CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
 ```
 
-Compose/K8s/Helm 启动前先运行 `python3 scripts/deploy-preflight.py compose|k8s|helm`（root key、profile 与实际部署一致）；执行步骤和 S3 初始化见 [`deployment.md`](deployment.md)。多 cell-agent 节点不可各用自己的 `/data/bucket`；必须共用经过条件写/删探针的外部 S3，并配置唯一 node ID、Pod 可达的 `CELLHIVE_PEER_URL`。单个 DO Service 名只能部署单 Pod；否则先实现稳定逐实例地址/放置后再扩副本。无实时 K8s 控制面时只完成渲染，不能声称已集群验收。
+Compose/K8s/Helm 启动前先运行 `python3 scripts/deploy-preflight.py compose|k8s|helm`（root key、profile 与实际部署一致）；执行步骤和 S3 初始化见 [`deployment.md`](deployment.md)。多 cell-agent 节点不可各用自己的 `/data/bucket`；必须共用经过条件写/删探针的外部 S3，并配置唯一 node ID、Pod 可达的 `CELLHIVE_PEER_URL`。do-runtime 可在同一 Service 后扩副本；Service 提供任意入口，owner 记录中的 Pod advertise 地址提供定向转发。无实时 K8s 控制面时只完成渲染，不能声称已集群验收。
 
 启动顺序：权威桶已创建/探针通过 → `cell-agent` → gated `do-runtime` → `user-runtime` → 运维入口。缩容单节点时 PDB `minAvailable:1` 会阻止普通 eviction，先安排维护停机；不要直接删除权威 PVC。
 
@@ -60,7 +60,7 @@ bin/cellhive vectorize drop-ann demo docs         # 回到 flat
 ## 桶故障/迁移
 
 - 桶不可达：节点在 lease 过期后自 fence 退出（supervisor 重启）；
-- 换桶：**不支持在线切换**；需停机迁移（复制对象后切换配置）；计划中的 backup 角色用于归档。
+- 换桶：**不支持在线切换**；需停机迁移（复制对象后切换配置）。独立 backup 桶角色与归档写入路径尚未实现。
 
 ## 常见故障
 
@@ -76,4 +76,4 @@ bin/cellhive vectorize drop-ann demo docs         # 回到 flat
 | `diagnose` 点名 `conditional delete (reject-stale)` | 桶**忽略 `If-Match`**（条件删除退化为无条件）；更换供应商/端点，owner 条件释放与 fence 依赖该语义 |
 | 删除 worker 后重新部署又消失 | purge 作业竞态；ADR-135 后 purge 只对仍软删实体生效、deploy 取消作业（若仍复现按 bug 报） |
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-25_

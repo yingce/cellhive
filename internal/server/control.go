@@ -753,24 +753,34 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercom
 
 // controlFixedRuntimeCodeBytes is a conservative manifest for every fixed
 // source/name byte that any current user-runtime, workflow or do-runtime
-// WorkerCode path can inject. The checked-in sources total less than 64 KiB;
-// generated binding metadata and facet classes are charged separately below.
-const controlFixedRuntimeCodeBytes int64 = 64 * 1024
+// WorkerCode path can inject. Checked-in sources currently total about 67 KiB;
+// keep explicit headroom while generated binding metadata and facet classes are
+// charged separately below.
+const controlFixedRuntimeCodeBytes int64 = 80 * 1024
 
 func deployPlatformConsts(bindings []control.Binding) string {
+	kvNames := make([]string, 0)
+	d1Names := make([]string, 0)
 	r2Names := make([]string, 0)
 	doNames := make([]string, 0)
 	for _, binding := range bindings {
 		switch binding.Type {
+		case "kv":
+			kvNames = append(kvNames, binding.Name)
+		case "d1":
+			d1Names = append(d1Names, binding.Name)
 		case "r2":
 			r2Names = append(r2Names, binding.Name)
 		case "do":
 			doNames = append(doNames, binding.Name)
 		}
 	}
+	kvJSON, _ := json.Marshal(kvNames)
+	d1JSON, _ := json.Marshal(d1Names)
 	r2JSON, _ := json.Marshal(r2Names)
 	doJSON, _ := json.Marshal(doNames)
-	return ";const __cellhivePlatform = Object.freeze({ r2Bindings: " + string(r2JSON) +
+	return ";const __cellhivePlatform = Object.freeze({ kvBindings: " + string(kvJSON) +
+		", d1Bindings: " + string(d1JSON) + ", r2Bindings: " + string(r2JSON) +
 		", doBindings: " + string(doJSON) + " });\n"
 }
 

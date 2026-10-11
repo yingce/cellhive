@@ -4,6 +4,21 @@
 
 This release closes out the remaining items in roadmap P3–P5, all backed by real runtime/test evidence.
 
+### user-runtime Worker hot-path optimization
+- user-runtime now single-flights and caches an immutable prepared-worker plan by `namespace/worker@version-bundle_sha`; bundle, binding-spec, module-template, and budget scans run only on a version's first use. A vars/bindings-only deployment gets a new plan because its version number changes.
+- Stock-workerd capabilities remain request-scoped: `LOADER.get()`, `OUTBOUND`, binding/tail stubs, and the entrypoint are acquired in the current request, avoiding cross-request I/O-capability errors. Unsampled requests retain traceparent propagation but no longer construct/flush an empty span.
+- Real-workerd c=64, 12s A/B: `/ping` 2,204→4,077 RPS (+85.0%) and KV `/get` 1,593→2,288 RPS (+43.6%); the complete `internal/userruntime` suite passes. `/ping` p99 still has a 523ms spike and the near-term 5k target is not yet met.
+- Adds `CELLHIVE_TENANT_LOG_CAPTURE=on|off` (default `on`). With `off`, user-runtime fetch/queue/scheduled/service/workflow loads and do-runtime facets omit native Tails while preserving request, binding, tracing, and header-isolation semantics; tenant console/exception capture is unavailable. Three real-workerd ping runs changed from 4,311/4,625/4,549 RPS to 4,728/5,244/4,816 RPS (paired gains of approximately 5.9%–13.4%).
+- Further proof ruled out CFS quota and route/env/prepared/`LOADER.get()` hot hits as the primary bottlenecks: one runtime gained no throughput from one to four logical CPUs, while safe Request reconstruction and the tenant-isolate crossing dominate. Two semantics-preserving Request/header rewrites regressed and were reverted. On this 2-physical-core/4-SMT host, splitting the same logical-CPU set from one runtime into four raised median throughput from 4,455 to 8,707 RPS (1.95×), with zero failures; the 18k target still requires a four-physical-core host.
+
+### Natural-Concurrency KV Read Batching (ADR-191)
+- The loaded tenant isolate now merges concurrent `KV.get/getWithMetadata` calls on one binding within the same microtask into one platform RPC and cell-agent HTTP request, bounded at 256 keys; cell-agent performs ordered point reads on one SQLite connection/read transaction. An endpoint 404 from an old cell-agent falls back to per-key RPC for reader-before-writer rolling upgrades.
+- Across two real-workerd c=64 runs, every 3-key `/batch` tenant request corresponded to exactly **one** backend request; p50 was 28.37/32.32ms versus 27.75/29.59ms for one read. Complete user-runtime/do-runtime, server, and cellstore suites pass. The control-plane fixed-runtime source reserve was also corrected from 64 KiB to 80 KiB and now counts KV/D1 wrapper metadata while retaining the fail-closed 64 MiB final-code limit.
+
+### Complete Follower Persistent-Stream Group Commit (ADR-042)
+- HTTP 101 streams and node-log records use `v2` session recovery; session-bound HTTP appends additionally require an `X-Cellhive-Session-Protocol: v2` response proof. Pre-upgrade empty/`v1` records use legacy `Held()` recovery. An old follower rejecting v2 or omitting proof degrades to bucket durability and cannot create an unrecoverable ACK. An explicit 1 MiB reader group-fsyncs ≤64 / 1 MiB complete frames; sealed tails page at ≤256 fragments / 48 MiB through `final`; directory-sync failures are safely retryable.
+- On the final v2/node-log migration build, a real two-process TCP/follower-fsync benchmark passed with `fail=0` at c=1/16/64/256 and reached 13,831 RPS at c=256; the session log, node-log, and asynchronous bucket batches were present. The complete `scripts/runtime-baseline-e2e.sh` passed.
+
 ### Documentation/runtime consistency closure
 - Bundle, asset, user-runtime, and DO bundle reads now ask cell-agent for a short-lived presigned URL and then read object storage directly. Local-filesystem/unsupported-presign backends retain an authenticated internal point-read fallback; runtimes still hold no long-lived bucket credentials.
 - Managed secrets now enter Worker and DO-facet tenant env. The control cell stores envelope ciphertext only; cell-agent decrypts values while serving an execution view, and a same-named secret overrides a var. Secret writes and deploys include current secrets in the 1016 KiB env budget and reject before mutation when over limit.
@@ -18,12 +33,15 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 ### Tenant Env Is Entirely User-Owned (ADR-185)
 - Tenant Worker and DO-facet `env` objects now contain only user-declared vars/bindings. There are zero platform keys; `CH_*`, `CELL_*`, `__cellhive*`, and historical platform names all belong to the user.
 - The workflow dispatcher passes a trusted `WorkflowBridgeTarget extends RpcTarget` fixed-op callback as a JSRPC argument to the dynamic workflow wrapper. The host env, private transport, credentials, and dispatcher-bound identity stay in the trusted internal host. Step/retry/wait/pause/error paths pass on pinned stock workerd `1.20260916.1`; the implementation neither transfers the incompatible `ServiceStub` across the dynamic-loader boundary nor enables the experimental flag.
-- Native Tail Workers for dynamically loaded Workers are unsupported on the current pin, so platform capture of tenant console output is temporarily disabled instead of restoring an env transport.
+- Dynamically loaded Workers, service targets, and DO facets now capture `console.*`/exceptions through a host-created native Tail `Fetcher`; log URL/token/private transport stay in the trusted host and tenant env remains free of platform keys.
+
+### Direct No-Binding Public Fetch (ADR-193)
+- user-runtime now loads a no-binding Worker's default tenant entrypoint directly instead of forwarding through `queue-wrapper.js`. Binding, queue/scheduled/workflow/service, and DO-WebSocket paths retain the wrapper. This fixes default-exported `WorkerEntrypoint` classes returning 501 and raised the fixed 2C2G/c=64 overall median from 4,977 to about 5,104 RPS (~2.5%); the dominant cross-isolate workerLoader RPC cost remains.
 
 ### ADR-184 platform-side stubs (historical; env conclusions superseded by ADR-185)
 - ADR-184's platform-side DO/Workflow/Vectorize stubs, DO `fetch(request)` WebSocket path, and `rpcObject(...)` data path remain current; their `:7001` transport and scoped tokens stay in the trusted platform host.
 - Fixed the final public-WebSocket hop: user-runtime now obtains the tenant response through `CellHiveHost.fetch(Request)` rather than ordinary `handleFetch` RPC, so the WebSocket carried by a 101 is not structured-cloned. Public port→tenant→DO duplex frames and gated-do-runtime restart continuity are verified without restoring `CH_DO_CONNECT`.
-- Its historical `CH_PLATFORM`/`PlatformBridge`, platform-env-key, and reserved-namespace conclusions are superseded by ADR-185: tenant env now has zero platform keys and zero reserved names. Workflow uses a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, and dynamic Tail Workers are unsupported on the current pin, so platform capture of tenant console output is disabled.
+- Its historical `CH_PLATFORM`/`PlatformBridge`, platform-env-key, and reserved-namespace conclusions are superseded by ADR-185: tenant env now has zero platform keys and zero reserved names. Workflow uses a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` argument; logs use a host-bound native Tail Fetcher with no tenant-env fallback.
 - Verified workerd semantics: `ctx.exports` is the host worker's mainModule export set; a Proxy returned from a method is not recognised as an `RpcTarget` by RPC (so the platform side exposes explicit methods only, and arbitrary DO method names are forwarded as `(method,args)` data by a tenant-side Proxy).
 
 ### KV TTL: 60s Floor Removed (ADR-183)
@@ -43,10 +61,10 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - New **single issuance entry point** `cellhive token`; `--key` lets a delegate sign without root; field order `ns,kind,name,iss,exp_ms`, empty `iss` keeps the ADR-074 canonical bytes unchanged.
 - Boundary: token-derived resources (kv/vectorize/service/do) require a concrete name; the external data-plane listener and API-key management are not built.
 
-### Optional OTLP Export for Trusted Platform Logs (ADR-172)
-- `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`): exports logs from **trusted platform producers** to the same OTLP endpoint/headers as traces (`/v1/logs`); `tail` exports only while the TTL subscription of `cellhive tail --worker` is active, and stops within ≤60s after exit.
-- Export is side-channel, best-effort, and batched in the background; it does not affect requests. The in-memory ring and `cellhive tail` behavior likewise apply only to trusted platform producers. Under ADR-185, tenant `console.*` does not enter the ring, tail, or OTLP.
-- **Fleet broadcast (ADR-173)**: subscriptions for trusted platform producers are broadcast to other cell-agent instances via the lease node list (internal endpoint + throttling), so `tail` gating covers the same-named worker served by any node (no need to switch to `all`).
+### Optional OTLP Export for Tenant Logs (ADR-172)
+- `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`): tenant `console.*`/exceptions enter the in-memory ring through native Tail and export to the traces OTLP endpoint/headers (`/v1/logs`); `tail` exports only while `cellhive tail --worker` has an active TTL subscription and stops within ≤60s after exit.
+- Export is side-channel, best-effort, and batched; it does not affect requests. Host-bound props fix tenant identity, and the log-role credential never enters tenant env.
+- **Fleet broadcast (ADR-173)**: subscriptions are broadcast to other cell-agent instances through the lease node list (internal endpoint + throttling), so `tail` gating covers the same worker on any node.
 
 ### Wake Index Fix (ADR-177)
 - The timer wake index is changed to **publish before commit** (the index may only be ahead, never behind); if index write fails, the timer is not committed (fail-closed).
@@ -76,7 +94,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - `wrangler triggers deploy` now explicitly prompts using `cellhive deploy --config` (crons are applied atomically with the version); hints for unknown commands now complete compatibility groups.
 
 ### Upload Spool Power-Loss Safety (ADR-171)
-- Async upload spool append is changed to atomic writes: tmp fsync → rename → directory fsync (leaf + parent, memoized once per process); power loss no longer drops already spooled segments.
+- Async upload spool uses tmp fsync → rename → leaf-directory fsync on every publish (the parent directory is memoized after creation); successful entry removal also fsyncs the leaf directory, making both publication and completion power-loss durable.
 - `/metrics` adds `cellhive_upload_spool_file_syncs_total`/`_dir_syncs_total`/`_sync_seconds_total`.
 
 ### DO Output Gate Concurrent Capture + Ordered Sweep (ADR-170)
@@ -175,7 +193,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 - **`transferred_classes`**: same-worker `{from,to}` = rename alias; cross-worker `script_name` rejected.
 - Runtime VFS lazy read: boundaries finalized (ADR-085), alternative = materialize on cold start by object/page.
 - Incremental cache for `refreshFacets`; `deleteAll()` shim (KV+SQL).
-- `TestDOCompatSuite`: 15 subtests.
+- `TestDOCompatSuite`: 19 subtests.
 
 ### P2 — Bindings and Assets
 - Deployment-time cron validation (`invalid_cron`).

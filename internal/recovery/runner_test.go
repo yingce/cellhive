@@ -31,7 +31,7 @@ func follower(t *testing.T, dir string) (string, peer.Transport) {
 	srv := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
 	h := httptest.NewServer(srv.Handler())
 	t.Cleanup(h.Close)
-	return h.URL, peer.NewHTTPTransport("tok", nil)
+	return h.URL, peer.NewHTTPTransport("tok", nil).WithSession("s1")
 }
 
 func ackSegment(t *testing.T, transport peer.Transport, followers []string, sc cell.Scope, epoch uint64, payload string) {

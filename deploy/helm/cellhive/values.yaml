@@ -17,6 +17,9 @@ config:
   dataDir: /data/state
   runtimeDir: /data/runtime
   bucketDir: /data/bucket
+  # Set off for throughput-first runtimes that do not need platform capture of
+  # tenant console output and uncaught exceptions.
+  tenantLogCapture: on
   # Use S3 instead of the filesystem bucket:
   # bucket: s3://cellhive
   # awsEndpoint / awsRegion / awsAccessKey / awsSecretKey -> put in the Secret.
@@ -38,7 +41,7 @@ userRuntime:
     limits: {memory: 2Gi}
 
 doRuntime:
-  replicas: 1
+  replicas: 2
   # gate=true deploys do-runtime-gated (ADR-083/140: DO RPO=0 via the output
   # gate); false deploys the ungated runtime.
   gate: true

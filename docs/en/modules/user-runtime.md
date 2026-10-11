@@ -33,7 +33,7 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 - Tenant `globalOutbound` = **public-only**; binding stubs keep their transport in the trusted platform host, not in tenant env.
 - The env patch (`bindings-wrapper.js` / `queue-wrapper.js`) keeps `this.env` consistent with the constructor parameter `env`.
 - **Does not hold bucket credentials**; only obtains the binding facade and scoped tokens.
-- Workflow callbacks cross `workerLoader` as a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, never as a `ServiceStub` or tenant-env value. Pin `1.20260916.1` rejects Tail Workers for dynamically loaded Workers (`provided value is not of type 'Fetcher'`), so platform capture of tenant `console.*` is disabled.
+- Workflow callbacks cross `workerLoader` as a dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC argument, never as a `ServiceStub` or tenant-env value. By default, host-bound native Tail Fetchers capture `console.*`/exceptions from tenant Workers and service targets while log identity and credentials remain in the trusted host; runtime-level `CELLHIVE_TENANT_LOG_CAPTURE=off` disables capture.
 - Final WorkerCode (64 MiB) and estimated workerLoader env (1016 KiB) are rechecked before every dynamic load through shared `workerd/platform/budget.js`; the control-plane check does not replace this runtime defense.
 
 ## Source Locations

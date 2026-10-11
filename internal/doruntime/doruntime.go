@@ -47,6 +47,12 @@ type Config struct {
 	// (used to fetch tenant bundles and to authenticate /v1/do/invoke).
 	CellURL   string
 	CellToken string
+	// LogToken is the narrow credential used only by the trusted native Tail
+	// entrypoint to ingest tenant console events.
+	LogToken string
+	// DisableTenantLogs omits native Tail Workers from loaded tenant facets.
+	// The default keeps console and exception capture enabled.
+	DisableTenantLogs bool
 	// Addr is the workerd HTTP listen address, e.g. "*:8788".
 	Addr string
 	// DiskDir holds the per-class Durable Object SQLite storage.
@@ -97,6 +103,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -118,6 +125,8 @@ const config :Workerd.Config = (
         (name = "DO_OBJECT_INDEX", text = "{{if .DOObjectIndex}}1{{end}}"),
         (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
+        (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
+        (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
       ],
       globalOutbound = "private-outbound",
       durableObjectNamespaces = [
@@ -172,6 +181,7 @@ func Render(dir string, cfg Config) (string, error) {
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "rpc-codec.js"), "rpc-codec.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), "telemetry.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), "budget.js"},
+		{filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), "log-tail.js"},
 	} {
 		data, err := os.ReadFile(pair[0])
 		if err != nil {
@@ -205,6 +215,7 @@ func WorkerdEnv(cfg Config) ([]string, error) {
 		"CELLHIVE_HOST_AI_URL":           cfg.AIURL,
 		"CELLHIVE_HOST_CELL_TOKEN":       cfg.CellToken,
 		"CELLHIVE_HOST_CELL_URL":         cfg.CellURL,
+		"CELLHIVE_HOST_LOG_TOKEN":        cfg.LogToken,
 		"CELLHIVE_HOST_DO_TICKET_SECRET": cfg.DoTicketSecret,
 		"CELLHIVE_HOST_GATE_URL":         cfg.GateURL,
 	})
@@ -228,6 +239,7 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 		"CELLHIVE_HOST_AI_URL",
 		"CELLHIVE_HOST_CELL_TOKEN",
 		"CELLHIVE_HOST_CELL_URL",
+		"CELLHIVE_HOST_LOG_TOKEN",
 		"CELLHIVE_HOST_DO_TICKET_SECRET",
 		"CELLHIVE_HOST_GATE_URL",
 	); err != nil {

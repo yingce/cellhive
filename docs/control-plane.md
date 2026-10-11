@@ -116,7 +116,7 @@ CLI 只是**快速反馈**；`deploy` 的校验以**服务端为权威**（防�
 | `CELLHIVE_AUTO_CREATE_APP` | `1` | deploy 时幂等补建 ns（一键跑业务） |
 | `CELLHIVE_ADMIN_JWT`（CLI） | 空 | 用 OIDC/JWT（Bearer）而非静态 admin token；JWT 的 `cellhive_ns` 决定可管理的 ns，`*` = 平台级 |
 
-CLI：`cellhive domain add|verify|ls|rm`；`route add` 要求 host 已注册且（自定义域）已验证。
+CLI：`cellhive domain add|ls|rm`；登记自定义域即授权并可路由，不做 DNS 校验；`route add` 要求 host 已登记到同一 namespace。
 
 ## Schema v2（控制面 cell：`__platform__/__control__/main`）
 
@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS version_bundle_refs (
 CREATE INDEX IF NOT EXISTS bundle_refs_sha ON version_bundle_refs(sha);
 ```
 
-### 域名与路由（传统 `(host,path)` + CDN 式域名验证）
+### 域名与路由（传统 `(host,path)`；登记即授权）
 ```sql
 CREATE TABLE IF NOT EXISTS hosts (                 -- 域名归属（登记即授权，ADR-133）
   host       TEXT PRIMARY KEY,                     -- 规范化（小写/去端口/去尾点）
@@ -193,8 +193,7 @@ CREATE INDEX IF NOT EXISTS routes_ns_worker ON routes(ns, worker);
 规则：
 1. **内置域** `<ns>-<worker>.cell.internal`（`host_label` 唯一）由系统在 deploy/promote 生成：
    `hosts(kind='builtin')` + `routes(host, '', ns, worker)`，用户不可写。
-2. **自定义域**注册即生效（ADR-133：不做 DNS 校验；能管理该 ns 的凭据就是其域名的权威；他 ns 已登记 → 409）；
-   他 ns 已 `verified` → 409；仅 `pending` → 允许并存，先验证通过者得。
+2. **自定义域**注册即生效（ADR-133：不做 DNS 校验；能管理该 ns 的凭据就是其域名的权威）；host 已由其它 ns 登记时返回 409，不存在 pending/verify 竞争流程；
 3. 写 `routes` 前必须有对应 `hosts` 行且 `hosts.ns = 请求 ns`（并发用
    `ON CONFLICT(host,path) DO UPDATE … WHERE ns=excluded.ns` 兜底）。
 4. 删 worker 按 `routes_ns_worker` / `hosts(ns)` 清理对应行。
@@ -270,4 +269,4 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);   -- 'rev
 （queue/cron/workflow/DO class → worker+version+bundle），使 cell-agent 不读控制面表；
 现在**不建**。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-25_

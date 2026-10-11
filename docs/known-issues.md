@@ -2,7 +2,7 @@
 
 本文件记录系统评审发现的全部问题，以及**每条问题的解决决议**。原始分级见文末附录。设计文档（architecture / cell-protocol / durable-objects / networking / decisions）已按此同步。
 
-_最后更新：2026-09-22_
+_最后更新：2026-09-25_
 
 ---
 
@@ -12,7 +12,7 @@ _最后更新：2026-09-22_
 |---|---|---|
 | C-01 | DO owner claim flow | ✅ 定稿（durable-objects.md） |
 | C-02 | bundle/assets 读取路径 | ✅ 已实现：runtime 向 cell-agent 申请短期只读 presigned URL 后直连对象存储；本地 FS/后端不支持 presign 时回退内部鉴权点查（ADR-030） |
-| C-03 | node-log / recovery | ✅ **完整实现**（ADR-057：`RecoverNode` 列节点+fast path；优雅停止 seal；E2E kill -9 恢复 128 段、时延 0.04s、RPO=0/keys=1000。**ADR-066**：节点死亡自动编排已接线） |
+| C-03 | node-log / recovery | ✅ **完整实现**（ADR-057/066：node-log 在 fleet ack 前建立并绑定不可变 ensemble；follower 按 owner session 保存连续 fragment；接管前 seal/tail 无缺口恢复并记录 `covered_seq`；失败时拒绝接管；节点死亡自动编排已接线。2026-09-23 真实双进程 E2E：写入 200 key → `SIGKILL` owner → 删除本地目录 → follower 接管，`restoreverify` integrity=ok/keys=200，live read missing=0/wrong=0） |
 | C-04 | DO 冷激活 / restore | ✅ 定稿（durable-objects.md） |
 | C-05 | DO alarm 恢复 | ✅ 定稿（见下） |
 | C-06 | 路由投影下发 | ✅ 定稿：**纯拉取 + 5–10s TTL（无 push）**（ADR-031） |
@@ -48,11 +48,10 @@ _最后更新：2026-09-22_
 ## I-01 租户 binding 鉴权（定稿）
 
 - **主防线是网络隔离**（见 I-09）：租户 Worker **无法**访问内网 cell-agent :7001。
-- internal token **只存在于 host adapter（平台代码）与 cell-agent 之间**，**绝不注入租户 env**；租户只拿到 binding facade。
-- cell-agent 校验 host adapter 注入的 **scope 声明**（`ns` + `binding 类型/id`）；缺省或越权即拒绝。
-- 不新增 per-load token（可后续作为纵深防御补充）。
-- **管理后台身份模型另见 ADR-036**：不区分管理员与租户，单一管理后台，租户身份作为请求参数传入；管理后台绝不暴露给租户/公网。
-- 详见规划中的 `security.md`。
+- 平台角色 token **只存在于 host adapter（平台代码）与 cell-agent 之间**，**绝不注入租户 env**；租户只拿到 binding facade。
+- host adapter 为每个 binding 生成资源范围 token；cell-agent 校验签名、namespace、binding kind/name 与登记 ACL，缺省或越权即拒（ADR-074/181）。
+- 外部委派 issuer token 必须带过期时间；issuer key 目前不按 namespace 收窄，完整边界见 [`security.md`](./security.md)。
+- 管理面支持静态 admin token 或 OIDC/JWT `cellhive_ns` 授权（ADR-131），与 binding 数据面隔离。
 
 ## I-03 WAL checkpoint/截断（定稿）
 
@@ -84,8 +83,7 @@ _最后更新：2026-09-22_
 
 - workerd capnp：租户 loaded worker 的 `globalOutbound` = **公网 only network service**（不含 RFC1918 / cell-agent 地址）。
 - **host adapter 的内网 binding 不暴露给租户**。
-- 每 worker 配 `limits`（`cpu_ms`/`subrequests`）+ V8 heap 上限。
-- 详见规划中的 `security.md`。
+- worker CPU/subrequest 与 V8 heap per-worker 强制上限**尚未实现**；当前已有 deploy-time WorkerCode/env 预算、per-namespace 写准入与 cell-agent 过载拒绝。详见 [`security.md`](./security.md)。
 
 ## M-02 端口划分（定稿）
 
@@ -152,7 +150,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | 热路径禁止 List | ✅ 达标 | P0.6：节点样本 5s 缓存；`list` 仅随刷新 |
 | checkpoint/截断检测与对齐（I-03） | ✅ 历史实测（workerd 2026-06-15）：DO SQLite 默认 **1000 页 autocheckpoint**；每次 checkpoint **salt1 递增（salt 轮换）**、`total_frames` 重置为 1000、WAL 文件 **reuse 同尺寸 ~4.12MB（非 TRUNCATE shrink）**。我们的 `wal.Cursor` 按 salt 轮换报告 `Checkpoint=true` 并重定基 → 与 workerd 对齐 | 实测：每 ~1000 写触发一次；`walscan` 观测 salt 序列 `...889→890→891...`、size 恒 4120032。**含义**：stock workerd 无法关闭 autocheckpoint，因此逐 actor 捕获会每 ~1000 写产生一次快照边界（ADR-049 已处理）；回退：周期快照 |
 | 从 workerd alarm 表可靠提取 due（C-05） | ✅ 历史实测（workerd 2026-06-15）：alarm 存 per-namespace `metadata.sqlite` 的 **`_cf_ALARM(actor_id TEXT PRIMARY KEY, scheduled_time INTEGER) WITHOUT ROWID`**；`scheduled_time` 为 **Unix 纳秒**（`Date.now()+Δms` 存为 ns；实测行 `actor_id=862b…a8112, scheduled_time=1789453754754000000`）；按 due 提取 = `SELECT actor_id FROM _cf_ALARM WHERE scheduled_time <= <now_ns>` | 触发：真实 DO `storage.setAlarm(Date.now()+Δ)`；actor DB `<hash>.sqlite` 与 metadata 同目录。回退：waker 询问 live supervisor |
-| 真实 S3 条件写 + presigned | ✅ 本地 S3 兼容（MinIO）实测；◐ 云端对象存储差异未测 | `cmd/s3probe` / `cmd/s3init`；云端按 `diagnose` 探针确认 |
+| 真实对象存储条件语义 + presigned | ✅ 原生 OSS 北京测试桶与原生 COS 香港测试桶通过完整启动诊断；固定 MinIO 因条件删除不合格 | `internal/bucket TestProviderCloudDiagnose` / `TestNativeAppendCloud`；其它桶仍须逐实例探测 |
 | **fleet commit 每笔做一次 S3 GET（owner epoch）** | ✅ 已修 | `owner.ResolveCached`（1s TTL，claim/release 失效）；远程 S3 下 fleet c=1 p50 **1.26ms** |
 | **follower spool 每段单独 fsync（fleet ack 吞吐封顶 ~1.1k RPS）** | ✅ 已修 | 改单 append-log `segments.log` + 批量一次 fsync（`Spool.AppendBatch` + follower 合批器）；2 节点 fleet **~1.1k → ~13.8k → ~45k RPS（帧化批量再 3.3x；与单节点 bucket async 持平）** |
 | 持久 peer 流 / pipeline | ✅ 已实现（ADR-042） | HTTP 101 自定义二进制流；4 scope-hashed lane × 4 批在途；单 scope 45.0k→47.1k（+4.5%），8 scope p99 ~63–65ms→48–52ms；吞吐瓶颈已转为本机 CPU/单盘 |
@@ -165,7 +163,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | 云对象存储尾延迟 | ⚠️ 实测：远端对象存储单节点 batch p50 可达数百 ms–秒级、偶发超时；async 低 p50 但 RPO>0 | 桶提交仅后台；上 ≥2 节点走 fleet；同区/就近 |
 | **S3 权威桶条件语义** | ❌ 2026-09-22 `make s3-test` 固定 MinIO：`s3probe` 四条件写 + range 通过、复制恢复链通过，但新增 `TestS3BucketIntegration` 检出 stale `DeleteObject If-Match` 未拒绝（返回 nil） | 完整权威契约失败；不能用该 MinIO 镜像上线。需支持目标 CAS、条件删除的对象存储并逐实例验证；不可仅凭旧四项通过推断可用 |
 | 跨节点"捕获→cell-agent→证明" p50/p99 | ✅ 真实多进程 + 真实 TCP（loopback）已测；◐ 云/跨主机未测 | 评估 FUSE 或调整放置 |
-| do-runtime 冷激活/恢复时间 | ◐ 未验证（restore 500 段 5ms，非 workerd actor） | paging/常驻策略 |
+| do-runtime 冷激活/恢复时间 | ✅ 功能已由真实 workerd 冷激活/接管测试覆盖；◐ 云端大对象与跨主机时延未测 | `TestDoRuntimeCrossNodeColdActivation`、`TestDoRuntimeTakeoverAfterCrash`；生产容量仍需环境压测 |
 | 兼容日期/flag 表与 pinned workerd | ✅ 已实测（workerd 2026-09-16）：支持 `compatibilityDate` 上限 **2026-09-23**（更新会硬报错"newest date supported ... 2026-09-23"）；未知 `compatibilityFlags` 硬报错 `No such compatibility flag: <x>`，已知 flag（如 `nodejs_compat`）通过配置校验 | 探测方式：临时 capnp 设未来日期/伪 flag + `workerd serve`。含义：pinned workerd 的 flag 集必须在加载时逐项验证，不能盲信 wrangler 默认 |
 | `workerLoader` 加载租户模块 + 真实 KV 往返 | ✅ 已验证 | P0.7：`workerd/spikes/p0/`，`put:200` / `get:hello-world` |
 | `globalOutbound` 公网-only 隔离强制 | ✅ 历史实测（workerd 2026-06-15）：outbound `network.allow=["public"]` 时，租户 `fetch("http://127.0.0.1:7001")` 被拒：`connect() blocked by restrictPeers()`（host 返回 500）。**隔离可强制、无需改 workerd** | P0.7 loader 默认 `allow=["public","private"]` 以便连本地 cell-agent；生产应设 `["public"]`，cell-agent 走 service binding/HMAC 而非公网 fetch（**已实现：ADR-073**——租户 outbound public-only，facade 经 `PLATFORM` service binding 出网，真实 workerd e2e） |
@@ -185,7 +183,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 ### 已确认的推荐（用户交互确认，2026-09-14）
 
-- **ADR-030**：bundle/assets 目标态为**短期 scoped 凭据直连对象存储**（不经 cell-agent 代理）；presign 接口已实现，当前 runtime 仍走 cell-agent 内部鉴权点查。
+- **ADR-030**：bundle/assets 已实现**短期 presigned URL 直连对象存储**；本地 FS 或不支持 presign 时回退 cell-agent 内部鉴权点查。
 - **ADR-031**：路由投影**纯拉取 + 5–10s TTL（无 push）**。
 - **ADR-028**：端口划分 `:7001` 内部 REST（Go↔Go 与 JS↔cell 共用；`:7000` gRPC 平面已取消，ADR-136）/ `:8082` admin。
 - **ADR-035**：限流/配额/admission **P1 实现**，保守默认 + 可配。
@@ -266,7 +264,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 ## purge / 上传 / WAL / r2.List（ADR-134 后更新）
 
 - **删除/purge**：软删 + `purges` 作业 + `RunPurgeLoop` 已落地（ADR-131），并且 purge 只对**仍处于软删状态**的实体生效、deploy/create 会取消作业（ADR-135）；**数据侧 hook 已接线（ADR-142）**：worker 删除清该 worker 的 DO 段与 assets、app 删除清整个 ns 的 `cells/`+`assets/`，每个 cell-agent 都执行（跨节点本地副本 drain + 桶删除幂等），hook 可续跑（有界删除/轮，`done=false` 保留 pending）。**已补（ADR-169）**：数据侧改为 `objectstore.Objects.ListPage` + `bucket.PagedLister` 游标分页删除（S3 `StartAfter`；内存有界）；`Purger.delete` 边删边推进、预算用尽下一轮续跑。**残余**：每轮从目标前缀起点重扫（未持久化跨轮 cursor，冷路径）；FS dev 每页仍走树（内存有界）。
-- **async bucket 上传**：已有**持久化重试队列**（ADR-143）：写前 spool（`<DATA_DIR>/upload-spool`）+ 启动/周期重放，失败计 `deferred`（不再丢，只有落盘失败+上传失败才 `dropped`），`/metrics` 暴露 spool/deferred/dropped。**已补（ADR-171）**：spool 改原子写（tmp fsync → rename → 目录 fsync，目录链记忆化），**断电安全**；`Remove` 不 fsync（replay 幂等，安全）。
+- **async bucket 上传**：已有**持久化重试队列**（ADR-143）：写前 spool（`<DATA_DIR>/upload-spool`）+ 启动/周期重放，失败计 `deferred`（不再丢，只有落盘失败+上传失败才 `dropped`），`/metrics` 暴露 spool/deferred/dropped。**已补（ADR-171）**：spool 原子写（tmp fsync → rename → 每次叶目录 fsync；父目录创建项按进程记忆化），成功 `Remove` 后也 fsync 叶目录，保证 publish 与完成删除均断电持久。
 - **对象存储状态权威兼容性**：S3 `ConditionalDelete` 依赖 `DeleteObject If-Match`；忽略该头会无条件删除新 owner/lease，故启动探针失败时 `cell-agent` 直接退出。`CELLHIVE_BUCKET` 接受空值（本地）、`s3://`，以及原生追加式 `oss://` / `cos://`；其余 scheme 拒绝。原生 provider 以 `AppendObject(position)` 和 tombstone 帧提供可变权威对象的 CAS/条件删除，不以 `HEAD+PUT/DELETE` 假装原子。2026-09-22 OSS 北京桶及 COS 香港 `cell-1376795072` 桶的隔离键并发 claim、CAS/条件删除、启动诊断通过；同宿主双进程共享真实云桶的 `SIGKILL`/新目录接管与高并发数据精确核对亦通过（见 ADR-189）。原 COS 香港 `vwork-hk-1376795072` 桶 AppendObject 返回 405，仍不能作为权威桶。COS/OSS 的普通 S3 API 在所测桶不满足权威条件写（ADR-188）。其他供应商/桶仍须分别验收；跨主机分区及长时混沌未测。
 - **`r2.List`**：已 cursor 分页 + 尺寸化（ADR-145）：`bucket.PagedLister`（S3 `StartAfter`+`MaxKeys`、FS 有界选择），`/v1/r2/list` 返回 `truncated`/`cursor`，facade 透传。**已补（ADR-168）**：`include=httpMetadata,customMetadata`（显式才逐对象读 sidecar）与 `delimiter`/`delimitedPrefixes`（扫描上限 10000，超出 `truncated`+cursor）。**残余**：FS 后端算 etag 仍读对象体（dev 后端）；仍未实现 object versioning/SSE-C/conditional put。
 
@@ -328,7 +326,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | `deleteAll()` | ✅ **shim（ADR-079 扩展）**：stock workerd 对 SQLite-backed facet 调 `deleteAll()` 抛内部错误（`expected parent == kj::none`）；`cellhive-do.js` 改为清空全部 KV + `DROP` 用户 SQL 表（保留 `_cf_*`/`sqlite_*`）+ 清 alarm。`TestDoRuntimeDeleteAllCaptured`、`TestDoRuntimeDeleteAllSQLCaptured`（含冷启动恢复后为空） |
 | 运行期 SQLite VFS 懒读 | ✅ **cell-agent 侧已实现（ADR-160）**：`internal/pagedvfs` fault-in VFS（稀疏 cut + hydration 位图 + 同步 fault + IOERR fail-closed）+ `replica.PageFetcher` 页源；`CELLHIVE_PAGED_RESTORE`（默认开）/`_MIN_BYTES`（默认 256MiB，小于则整克隆）/`_HYDRATE_MBPS`（默认 16，0=保持稀疏）；`SnapshotPages` 前强制 `HydrateAll`；**b-tree 感知 fault 策略**（内部页 child 单页取、顺序 child 按 `scanAhead`=64 预取到内存缓存、连续 child 合并成 run；顺序访问才开窗）；**缓存标记位** `<cell>.db.paged`（有标记=稀疏缓存必须经 paged VFS；cut 不匹配/无页源则丢弃重建；全量 hydrate 或后台补齐完成即删标记——修复了"重启/驱逐后用 base VFS 打开稀疏文件读到零页"的 bug）；**批量 hydrate**（`ReadRun`）；**LZ4 逐帧压缩**（`WAL3` page-map v2 + `CID2` 索引；L1 3.1MB→140KB/真栈 315KB→86KB；解码 1.1GB/s）；**child 并发预取**（`CELLHIVE_PAGED_PREFETCH_WORKERS`=4）；**`/metrics`** 六个 `cellhive_paged_*` 指标；**稀疏感知磁盘口径**（`AllocBytes`/`DiskBytes`）。`WAL2`/`CIDX` 向后兼容可读；delta（`WAL1`）不压缩（逐笔小段收益低）；LZ4 编码单线程 ~47MB/s（3MB 快照 ~70ms，冷路径）；**GC 与压缩无关**（manifest key + txid 水位；混格式链可折叠回收，真栈 L0 归零），但 `MinBytes` 现在按压缩后字节计（更贴近 IO 预算），`EncodeSnapshotParts` 分片预算仍按 v1 估算（分片偏小，安全）。实测：点读 8/771 页、全扫 336 页 = 6 窗口读；真栈冷请求 123ms、`cells=1 faults=72 runs=9 prefetch_hits=3 hydrated=12/77`。⛔ **DO 侧边界（ADR-085，待 FUSE）**：不可实现于 stock workerd（需 FUSE 或改 workerd）；替代=冷启动按对象/按页 materialize（`RestoreObject` + `PageFetcher.Materialize` range 读）。**修订（ADR-159/160）**：cell-agent 侧已实现运行期 paged VFS（`internal/pagedvfs`，ADR-160）；捕获/快照前强制 `HydrateAll`，避免零页静默损坏 |
 | DO 内 bindings | ✅ **已修（ADR-089）**：facet `this.env` 注入 worker bindings（KV/D1/R2/Queue/Workflow/DO）；`TestDoRuntimeBindingInsideDO`。边界：经 `this.env`（构造参数 `env` 为 host env） |
-| DO 兼容套件 | ✅ `TestDOCompatSuite` 统一入口，16 真实 workerd 子测试（sync SQL/事务、alarm、WS 1012、migrations、注册/删除、转发/`result_unknown`、门、冷激活、接管、resident/evictable） |
+| DO 兼容套件 | ✅ `TestDOCompatSuite` 统一入口，19 真实 workerd 子测试（sync SQL/事务、alarm、WS 1012、migrations、注册/删除、转发/`result_unknown`、门、冷激活、接管、resident/evictable） |
 | 无桶凭据恢复 | ✅ `HTTPStore` 经 cell-agent `/v1/internal/segments`+`/segment`(Range 206)+`/blob`；`TestRestoreViaAgentNoBucketCreds`、`TestAgentPagedRestoreUsesRangedReads`、`TestInternalBlobRoundTrip`、`TestReadSegmentRange` |
 | gate 热路径 blob 写 | ✅ **已优化**：manifest/sidecar **内容哈希去重**（`blobUnchanged`），稳态零桶 PUT（`TestSyncAllSkipsUnchangedBlobs`）；`refreshFacets` 改为**增量缓存**（目录 mtime 发现新增 + `.facets` (mtime,size) 检测内容变化，稳态仅几次 stat，不再每请求全目录 walk；`TestRefreshFacetsPicksUpNewFacet`） |
 | HTTPCommitter 证明过窄 | ✅ **已修**：提交证明接受 `fleet`/`bucket`/`bucket-batch`（RPO=0），拒绝 `bucket-async`（RPO>0）与未知；`TestHTTPCommitterProofModes`。纯 bucket 部署不再 gate 失败 |
@@ -340,15 +338,15 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | vec1 v0.7 的 rowid UPDATE 段错误（ADR-159） | ✅ **已规避**：对 `vec` 的 rowid-targeted `UPDATE` 会让 v0.7 崩溃（store 单测发现），因此 upsert = `DELETE` + `INSERT`（同一事务、语义等价）；升级 vec1 后可再评估 |
 | Vectorize 的 CF 差异（ADR-158） | ⚠️ **超集/边界**：metadata index **不强制**（CF 要先建 metadata index 才能过滤；我们允许直接过滤完整 metadata，且未模拟 indexed string 的 64B 截断）；`describe`/`insert` 返回 `{mutationId,count,ids}`（CF 只保证 `mutationId`）；`--deprecated-v1` 无 V1 语义（按 V2 处理）；批量上限 1000；`listVectors` 是扩展（CF 仅 wrangler） |
 | L1 快照分片预算保守（ADR-160） | ✅ **有意接受，不做**：`EncodeSnapshotParts` 按 v1「每页 4KiB」估算 → 分片偏小（安全）。注意**分片本身是 CellHive 的 HTTP `maxSegmentBytes` 传输约束**（LTX 是"一文件一对象、无分片概念"，对象数量靠 compaction level 控）；按实际压缩帧字节精确分片只在"大且高压缩"的快照上少几个对象，收益小、不值得加复杂度 |
-| 租户 console 日志（ADR-185） | ⚠️ **暂不支持**：实测 pinned stock `workerd 1.20260916.1` 的动态 `workerLoader` 在 `tails: [{name:"tenant-tail"}]` 上拒绝 service designator：`TypeError: Incorrect type for array element 0: the provided value is not of type 'Fetcher'.`。因此已删除 `log-tail.js`/`PlatformBridge.logSend` 旧桥接；tenant 请求与 DO facet 仍正常执行，但 `console.*` 不写入平台 ring 或 OTLP。不得以 tenant env 的 token、URL 或 transport 恢复此路径；升级 pin 后必须重跑真实动态-tail spike。 |
-| workerd 运行时基线（ADR-186） | ✅ **第一阶段已验收**：pin `1.20260916.1`、esbuild `0.28.2`、宿主 `fromEnvironment`、生成式 compatibility manifest、最终 WorkerCode 64 MiB 与 env 1016 KiB 双层预算均已落地；隔离 Docker E2E 验证源码打包、env 隔离、KV、gated DO 桶持久化与重启续数，`REQUIRE_ALL=1` 为 **GATE: PASS 14/14**。后续 loader lifecycle、DO mid-flight fencing/restart generation、native Tail/OTLP 与兼容多模块 artifact 仍是独立阶段；Tail 不以 tenant env 回退。 |
+| 租户 console 日志（ADR-185） | ✅ **已实现**：pinned stock `workerd 1.20260916.1` 接受动态 Worker 的真实 `Fetcher`：宿主用 `ctx.exports.TenantTail({props})` 固定 `namespace/worker/version`，捕获 Worker、service target 与 DO facet 的 `console.*`/未捕获异常并写入 ring/可选 OTLP。旧失败只因误传 capnp 风格 `{name:"tenant-tail"}`。log token/URL/private transport 仅在可信宿主，不进入 tenant env；投递仍是 best-effort。 |
+| workerd 运行时基线（ADR-186） | ✅ **第一阶段已验收**：pin `1.20260916.1`、esbuild `0.28.2`、宿主 `fromEnvironment`、生成式 compatibility manifest、最终 WorkerCode 64 MiB 与 env 1016 KiB 双层预算均已落地；隔离 Docker E2E 验证源码打包、env 隔离、KV、gated DO 桶持久化与重启续数，`REQUIRE_ALL=1` 为 **GATE: PASS 14/14**。原生 Tail 已通过真实 Fetcher 接线；兼容多模块 artifact 仍是独立阶段。 |
 | OTLP 追踪覆盖（ADR-167） | ⚠️ **边界**：**DO 内 `this.env.<binding>`（props-bound）调用不带 DO traceparent、自成一条 trace**（workerd 三个 isolate 各自 globalThis + CF 绑定 API 无按请求参数；`TestDoRuntimeBindingInsideDO` 断言当前为空）；**`peer.append` 是捕获流水线按批的独立 trace**（group commit 合并多请求，无法归属单一 trace）；租户 isolate `facades.js` 回退路径无 JS span（服务端 span 仍能挂上）；DO `/v1/do/connect`·abort、compaction/upload 后台循环无 span；JS span 毫秒精度；入口头部采样；端点空时 no-op |
 | peer 复制冗余（ADR-164） | ⚠️ **默认语义**：adaptive hedge 下常态是 **owner 本地 + 1 个 follower**（慢时才补第 2 份），`CELLHIVE_PEER_HEDGE_MS=0` 永远单份；要"始终 2 份 follower"需显式接受常态双发（当前不提供该模式）。单节点故障可恢复（owner 死→从 follower spool `/v1/peer/held` 恢复；follower 死→owner 本地段后台上传），同时坏 owner+follower 才丢；一致性不受影响（单写者/顺序/epoch/quorum-1 不变） |
-| R2 对象字段与 metadata（ADR-163） | ⚠️ **边界**：`get()` 的 `R2ObjectBody` 数据字段与 `text/json/arrayBuffer/blob` 都可用（workerd RPC 按值序列化数据、把函数序列化成可调用 stub；方法设计为可枚举以跨 RPC，JSON.stringify 会跳过函数）；`bodyUsed` 读取后**不翻转**（快照值）；`list()` 默认只回 `key/size/etag/httpEtag/version`，**不逐对象回填** http/custom metadata/uploaded/checksums；显式 `list({include:["httpMetadata","customMetadata"]})` 才按需逐对象读 sidecar（ADR-168）；`get()` 多一次 metadata sidecar 读；`put` 的 metadata 存 `r2meta/<ns>/<bucket>/<key>` sidecar（已登记保留前缀），删除对象会一并删 sidecar；`md5/sha256` 提供时校验 |
+| R2 对象字段与 metadata（ADR-163） | ⚠️ **边界**：`get()` 的 `R2ObjectBody` 数据字段与 `text/json/arrayBuffer/blob` 都可用（workerd RPC 按值序列化数据、把函数序列化成可调用 stub；binding 侧方法需跨 RPC，本地 facade 方法保持 non-enumerable；JSON.stringify 会跳过函数）；`bodyUsed` 在 props-bound RPC 路径读取后**不翻转**（快照值）；`list()` 默认只回 `key/size/etag/httpEtag/version`，**不逐对象回填** http/custom metadata/uploaded/checksums；显式 `list({include:["httpMetadata","customMetadata"]})` 才按需逐对象读 sidecar（ADR-168）；`get()` 多一次 metadata sidecar 读；`put` 的 metadata 存 `r2meta/<ns>/<bucket>/<key>` sidecar（已登记保留前缀），删除对象会一并删 sidecar；`md5/sha256` 提供时校验 |
 | R2 `writeHttpMetadata`（ADR-174→ADR-175 已修） | ✅ **已解决**：`loader.js`/`buildFacetEnv` 经模块作用域常量 `__cellhivePlatform.r2Bindings` 传 R2 绑定名（不占 env 名），`queue-wrapper`/`bindings-wrapper` 对每个 R2 binding 套本地 Proxy（`facades.js wrapR2Metadata`），`writeHttpMetadata` 在租户 isolate 改调用方 `Headers`，content-type 正常；仅 `get()` 被代理，其余方法透传 |
 | KV 大值（ADR-176 记录） | ⚠️ **缺口**：value ≤25MiB 目前**全量内联**在 cell 的 SQLite，并随 LTX 捕获/复制走一遍（对齐做法是 >1MiB 转 fleet bucket blob `v2:e<epoch>:<digest>`，同一个 alarm 里做 GC；实测 1MiB 是延迟交叉点）。大值 `put` 的代价随值大小线性上涨；正确性不受影响。对齐需要"小值内联/大值 blob + epoch 引用 + GC"的完整链路 |
 | wake 索引落后于 timer（ADR-177 已修） | ✅ **已解决**：`Store.Upsert` 先发布索引再提交（索引不落后，失败则 fail-closed）；`registerTimerScope`/认领时 `SyncIndex` 重建；`CELLHIVE_WAKE_REPAIR_INTERVAL` 有界轮转修复本地 cell（只读扫描，稀疏 paged 未挂载跳过）。剩余：修复只覆盖本节点本地 cell（死节点盘不可达，靠新 owner 认领时重建） |
-| DO stub 上的 WebSocket 升级（ADR-174→ADR-175 已修） | ✅ **已解决（ADR-184 后无需租户传输）**：公开 loader→`CellHiveHost.fetch(request)` 与租户 facade→平台侧 `DurableObjectNamespace.fetch(request)` 两个 workerLoader 边界都保持 fetch 形 RPC；后者给 Request 加 `DO_ID_HEADER`，再经 cell-agent scoped lookup 取 `{owner,ticket}` 并直连 owner do-runtime。`TestTenantDoWebSocketPassesThroughPublicLoader` 验证外部客户端 101 + 双向帧，`TestTenantDoWebSocketCrossesRpc` 验证 tenant 内部消费 socket；Docker gated runtime 验证重启前后公开 WS 与持久计数。`CH_DO_CONNECT`/`CELLHIVE_CAP_WS` 保持删除。 |
+| DO stub 上的 WebSocket 升级（ADR-174→ADR-175 已修） | ✅ **已解决（ADR-184 后无需租户传输）**：带 DO binding 的公开 loader→`CellHiveHost.fetch(request)` 与租户 facade→平台侧 `DurableObjectNamespace.fetch(request)` 两个 workerLoader 边界都保持 fetch 形 RPC；无 binding Worker 按 ADR-193 直载默认 fetch，仍为 fetch-shaped RPC。后者给 Request 加 `DO_ID_HEADER`，再经 cell-agent scoped lookup 取 `{owner,ticket}` 并直连 owner do-runtime。`TestTenantDoWebSocketPassesThroughPublicLoader` 验证外部客户端 101 + 双向帧，`TestTenantDoWebSocketCrossesRpc` 验证 tenant 内部消费 socket；Docker gated runtime 验证重启前后公开 WS 与持久计数。`CH_DO_CONNECT`/`CELLHIVE_CAP_WS` 保持删除。 |
 | DO RPC 的值与上限（ADR-162） | ⚠️ **边界**：支持 `undefined`/`-0`/NaN/±Inf/bigint/Date/RegExp/Map/Set/ArrayBuffer/TypedArray/DataView/Error(含 cause)/URL/URLSearchParams + 共享引用/环；**不支持** function/Symbol/Promise/弱集合/流/`RpcTarget`/DO stub；类实例降级普通对象；args 与结果各 ≤ **8 MiB**（tagged 编码后，二进制 base64 约 ×4/3）；方法名必须标识符且禁 `fetch`/`alarm`/`constructor`/`__proto__`/`then`/`toString` 等与 `__ch*`；跨进程无 traceparent（仅 requestId） |
 | SQLite 现在是 CGo + 构建 tags（ADR-159） | ⚠️ **必须知道**：`make build/test`（或 `-tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"`）不可省——漏加会在 `internal/cellstore` 触发 `#error` 守卫；二进制含 AVX2 代码（`-march=x86-64-v3`），非 AVX2 CPU 用 `-tags cellhive_vec1_portable`（标量，较慢），arm64 走 NEON |
 | Vectorize 绑定面的鉴权层级（ADR-158） | ✅ **已对齐**：`/v1/vectorize/*` 绑定端点与 KV/D1/R2/Queue 一样**只需 scoped token**（不带 internal token）；写操作 `forwardOrClaim`、读 `forwardRead`。容器 smoke 曾发现误包 `s.auth` 导致 401，已修 + 回归测试 |
@@ -357,7 +355,9 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | 行数只能是估计（ADR-157） | ⚠️ **SQLite 无行数元数据**：默认给 dbstat 叶页 `ncell` 估计（KV `rows_estimate`、D1 每表、workflow `instances_estimate`）；精确计数须 `?exact=1`（`count(*)`，KV 走最小索引/index-only，仍是 O(rows)）。不提供"永远精确且永远便宜"的选项（`cell_meta` 计数器方案未采纳） |
 | Workflow `by_status`/DO stats 的前提（ADR-157） | ⚠️ **边界**：workflow 状态分解只在 `?exact=1` 时给（未加 `instances(status)` 索引，避免写放大）；DO stats 只在对象索引开启（`CELLHIVE_DO_OBJECT_INDEX`，ADR-109）时有数据，否则 `available:false` |
 | `resource delete` 语义边界（ADR-156） | ⚠️ **有意**：只吊销**登记**（墓碑 fail-closed）并**不删**数据 cell（KV 条目/队列消息/DO SQLite 仍在）——vwork 的"关停"不是"销毁"；彻底回收需删除对应 cell（当前无运维端点）。`replay-dlq` 为**至少一次**（主队列入队成功后 DLQ ack 失败会重复重放），且要求队列已被 producer binding 登记并声明了 `dead_letter_queue` |
-| `do-runtime` 非 gated 模式 SIGTERM 不 drain（ADR-156） | ⚠️ **边界**：仅 `do-runtime-gated`（do-supervisor，ADR-140）接管 drain；裸 `do-runtime` 依赖 readiness 摘除 + 租约过期 + 接管恢复（`TestDoRuntimeTakeoverAfterCrash`）。生产用 gated |
+| 裸 `do-runtime` SIGTERM drain（ADR-156） | ✅ **已解决**：信号先触发本地 `/v1/do/drain`，host actor 停新请求、等待 in-flight 并释放租约；drain 返回或 15s 超时后才取消 workerd。生产仍推荐 `do-runtime-gated`，因为 supervisor 还负责 WAL 捕获与输出门。 |
+| Kubernetes 多 Pod 验收（ADR-194） | ⚠️ **已验证范围/边界**：真实单节点 k3d 中 2 个 gated Pod、owner 删除冷恢复与 RollingUpdate 期间 120 个逻辑写通过，计数精确 `1→2→123`；ownership 切换时观察到短暂 5xx，客户端重试后无丢写/重复提交，因此不等于物理请求零错误。真实跨主机 RTT、云对象存储、多主机混沌以及目标 NetworkPolicy/CNI 仍属 C 类环境验证。 |
+
 | 入口 `/ready` 的覆盖范围（ADR-156） | ⚠️ **边界**：描述的是**入口/DO 宿主**的就绪（投影新鲜度、排空状态），不是租户 worker 内部健康；props-bound facades（KV/D1/R2/Queue 在 loader isolate）没有独立探针 |
 
 **含义（2026-09-15 更新）**：P3.7/P3.8 的交付（facet 发现、对象键、按对象恢复、门、跨节点冷激活/接管、compat 套件）**均已实现并验证**。P3 各项均已实现/定稿（WS 跨节点转发、`transferred_classes` 同 worker、运行期 VFS 懒读见 ADR-160、`refreshFacets` 增量缓存）；仅剩 **C 类环境验证**（真实跨主机 RTT、云端对象存储、多主机混沌/接管）与跨 worker `transferred_classes`（有意拒绝）。

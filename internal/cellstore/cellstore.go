@@ -180,23 +180,24 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
-	markerPS, markerCommit, hasMarker := readPagedMarker(p)
-	if missing && hasMarker {
+	markerPS, markerCommit, markerExists, markerValid := readPagedMarker(p)
+	if missing && markerExists {
 		// A marker without its file is leftover state: drop it.
 		removePagedMarker(p)
-		hasMarker = false
+		markerExists = false
+		markerValid = false
 	}
 	// A sparse paged cache is not a database: it must be served by the paged VFS,
 	// never by the base VFS. Treat it like a cold cell and re-register it.
-	cold := missing || hasMarker
+	cold := missing || markerExists
 	paged := false
-	if cold && s.Paged != nil {
+	if cold && (missing || markerValid) && s.Paged != nil {
 		src, ok, perr := s.Paged(ctx, sc, p)
 		if perr != nil {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
 		if ok {
-			reuse := hasMarker && !missing && markerPS == src.PageSize() && markerCommit == src.Commit()
+			reuse := markerExists && !missing && markerPS == src.PageSize() && markerCommit == src.Commit()
 			// Write the marker before the file can become sparse, so a crash in
 			// between cannot leave a sparse file that looks complete.
 			if err := writePagedMarker(p, src.PageSize(), src.Commit()); err != nil {
@@ -215,7 +216,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			missing = false // the sparse file now exists
 		}
 	}
-	if cold && hasMarker && !paged {
+	if cold && markerExists && !paged {
 		// A partial cache we cannot serve: discard it and rebuild the file from
 		// the durable replica rather than reading zeros.
 		if err := removeCellFileSet(p); err != nil {
@@ -229,7 +230,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if !paged && missing && s.Hydrate == nil {
-		if _, _, ok := readPagedMarker(p); ok {
+		if _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -573,7 +574,7 @@ func (s *Store) LocalScopes() ([]cell.Scope, error) {
 // when the table exists but holds no pending row. A sparse (paged) cell that is
 // not mounted through the paged VFS is skipped rather than read as zeros.
 func PendingTimerMin(ctx context.Context, path string) (min int64, has bool, err error) {
-	if _, _, ok := readPagedMarker(path); ok && !pagedvfs.IsPaged(path) {
+	if _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
 		return 0, false, nil
 	}
 	dsn := OpenDSN(path)
@@ -635,7 +636,7 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 		paged = pagedvfs.IsPaged(p)
 	}
 	if !paged {
-		if _, _, ok := readPagedMarker(p); ok {
+		if _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -654,6 +655,10 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 	}
 	c := &Cell{DB: db, Scope: sc, Path: p, paged: paged}
 	if err := c.loadTxID(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if c.kvUpsert, err = db.PrepareContext(ctx, kvUpsertSQL); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -677,6 +682,9 @@ func (c *Cell) loadTxID(ctx context.Context) error {
 	c.txid, c.txidOK = n, true
 	return nil
 }
+
+const kvUpsertSQL = `INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
+	ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	const schema = `
@@ -753,10 +761,15 @@ func OpenAt(ctx context.Context, path string) (*Cell, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	// OpenAt callers (restored snapshots) read more than they write; the mirror
-	// is loaded lazily on the first Tx if it is not set here.
-
-	return &Cell{DB: db, Path: path}, nil
+	// OpenAt callers use one connection and are primarily restore readers. Keep
+	// their occasional writes on the direct SQL path; a database-level prepared
+	// statement plus MaxOpenConns(1) can otherwise wait for a second connection.
+	c := &Cell{DB: db, Path: path}
+	if err := c.loadTxID(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 // Cell is a single cell's SQLite database handle.
@@ -777,9 +790,10 @@ type Cell struct {
 	// read-back. The mirror is safe because exactly one process owns a cell at a
 	// time and writeMu serializes the transactions within it; it is reloaded from
 	// cell_meta on open, so a restart or a takeover continues the sequence.
-	writeMu sync.Mutex
-	txid    uint64
-	txidOK  bool
+	writeMu  sync.Mutex
+	txid     uint64
+	txidOK   bool
+	kvUpsert *sql.Stmt
 
 	readConn *sql.Conn
 	readTx   *sql.Tx
@@ -797,6 +811,10 @@ func (c *Cell) Close() error {
 	}
 	c.closed = true
 	_ = c.ReleaseReadLock(context.Background())
+	if c.kvUpsert != nil {
+		_ = c.kvUpsert.Close()
+		c.kvUpsert = nil
+	}
 	err := c.DB.Close()
 	if c.hydrateStop != nil {
 		c.hydrateStop()
@@ -949,10 +967,11 @@ func (c *Cell) PutTxOpts(ctx context.Context, key string, value, meta []byte, ex
 		expiresMs = now // already expired: still stored, filtered out on read
 	}
 	return c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`,
-			key, value, meta, now, expiresMs)
+		if c.kvUpsert != nil {
+			_, err := tx.StmtContext(ctx, c.kvUpsert).ExecContext(ctx, key, value, meta, now, expiresMs)
+			return err
+		}
+		_, err := tx.ExecContext(ctx, kvUpsertSQL, key, value, meta, now, expiresMs)
 		return err
 	})
 }
@@ -1006,10 +1025,11 @@ func (c *Cell) PutTxIf(ctx context.Context, key string, value, meta []byte, expi
 		if (cond == CondAbsent && exists) || (cond == CondPresent && !exists) {
 			return ErrConditionFailed
 		}
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`,
-			key, value, meta, now, expiresMs)
+		if c.kvUpsert != nil {
+			_, err := tx.StmtContext(ctx, c.kvUpsert).ExecContext(ctx, key, value, meta, now, expiresMs)
+			return err
+		}
+		_, err := tx.ExecContext(ctx, kvUpsertSQL, key, value, meta, now, expiresMs)
 		return err
 	})
 	if errors.Is(err, ErrConditionFailed) {
@@ -1076,9 +1096,12 @@ func (c *Cell) incrTxIn(ctx context.Context, tx *sql.Tx, key string, delta, expi
 			meta = existing
 		}
 	}
-	_, werr := tx.ExecContext(ctx,
-		`INSERT INTO kv(key, value, meta, updated_ms, expires_ms) VALUES(?,?,?,?,?)
-		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta, updated_ms=excluded.updated_ms, expires_ms=excluded.expires_ms`,
+	if c.kvUpsert != nil {
+		_, werr := tx.StmtContext(ctx, c.kvUpsert).ExecContext(ctx,
+			key, []byte(strconv.FormatInt(*next, 10)), meta, nowMs, expiresMs)
+		return werr
+	}
+	_, werr := tx.ExecContext(ctx, kvUpsertSQL,
 		key, []byte(strconv.FormatInt(*next, 10)), meta, nowMs, expiresMs)
 	return werr
 }
@@ -1092,6 +1115,53 @@ func (c *Cell) Get(ctx context.Context, key string) (value, meta []byte, err err
 		return nil, nil, ErrNotFound
 	}
 	return value, meta, err
+}
+
+// KVResult is one ordered result from GetMany. Found is false for a missing or
+// expired key; Value and Meta are then nil.
+type KVResult struct {
+	Value []byte
+	Meta  []byte
+	Found bool
+}
+
+// GetMany reads keys through one SQLite connection and read transaction. The
+// returned slice preserves input order and duplicates.
+func (c *Cell) GetMany(ctx context.Context, keys []string) ([]KVResult, error) {
+	out := make([]KVResult, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	conn, err := c.DB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `SELECT value, meta FROM kv WHERE key=? AND (expires_ms=0 OR expires_ms>?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+	now := time.Now().UnixMilli()
+	for i, key := range keys {
+		err := stmt.QueryRowContext(ctx, key, now).Scan(&out[i].Value, &out[i].Meta)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[i].Found = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Delete removes a key and advances the txid in one transaction.

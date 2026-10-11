@@ -70,9 +70,9 @@ func TestKVTTLAndMetadataE2E(t *testing.T) {
 	}
 }
 
-// TestKVValidationLimits covers the Cloudflare/celld-aligned KV write limits
-// (docs/bindings.md): key <= 512 B, metadata <= 1 KiB, expirationTtl >= 60s,
-// and an absolute expiration must be in the future.
+// TestKVValidationLimits covers the documented KV write limits: key <= 512 B,
+// metadata <= 1 KiB, any positive expirationTtl, and an absolute expiration
+// must be in the future.
 func TestKVValidationLimits(t *testing.T) {
 	ctx := context.Background()
 	s := newScopeServer(t)

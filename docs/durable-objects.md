@@ -149,8 +149,8 @@ do-runtime 的 supervisor 主动向 cell-agent 发起 claim。流程：
 
 - 粒度：**每个 DO 对象一个 owner/lease**（scope = `(ns, DoClass, objectId)`），（一个 cell 就是一个 DO）。
 - **owner 记录指向 do-runtime 执行节点**（含 advertise 地址 + epoch），由 **cell-agent 写**。
-- **无专门心跳**：do-runtime 存活由**复制活动隐式判定**——持续向 cell-agent 上报 WAL/续约即视为存活；停止上报 → owner 租约到期 → 可接管。
-- **接管候选**走**平台服务发现**（K8s Endpoints / mesh）或按需探测；不维护自注册表。
+- **已激活对象存活**：do-runtime/supervisor 续约该 DO 的 owner lease；停止续约后 lease 到期，才允许接管。无需独立 do-runtime 节点心跳或注册表。
+- **首次落点与 owner 分离**：`CELLHIVE_DO_RUNTIMES` 是任意入口（K8s 下为随 Endpoint 自动更新的 Service），不是 owner 列表。任意 Pod 可尝试 claim；若已有 owner，则根据 owner 记录中的 per-Pod advertise 地址转发。普通 invoke 会缓存 owner hint，WebSocket 入口也会代理到真正 owner。
 - **router 缓存**：正常请求只查 cell-agent 的 owner 解析缓存；仅冷激活、缓存失效、接管时读 bucket（点查）。
 - WebSocket `connect` 必须落在 owner；owner 迁移时以 **1012** 关闭，客户端携带**稳定 operation id** 重连。
 
@@ -239,10 +239,10 @@ do-runtime 的 supervisor 主动向 cell-agent 发起 claim。流程：
 
 ## 风险
 
-- workerd 的 WAL/checkpoint 语义未验证（P0 消除）；
+- workerd 的 WAL/checkpoint 语义已按 pinned 版本验证；升级 workerd 时必须重跑兼容与捕获探针；
 - actor 存储为多文件（共享 metadata + 每 actor），一致性复制更复杂；
 - **跨节点上报在写 ack 热路径**上，需内网低延迟与容量规划；
 - 临时盘 ⇒ 冷激活需从 cell-agent/对象存储恢复，冷启动成本是弹性代价；
 - 自研 PID1 supervisor 需正确编排跨进程关停顺序。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-25_

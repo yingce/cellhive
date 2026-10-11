@@ -175,6 +175,7 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade source |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | runtime directory (subdirectory `user-runtime/`) |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` captures tenant `console.*`/uncaught exceptions; `off` omits the native Tail for higher Worker throughput; accepts only `on`/`off` |
 | `CELLHIVE_SERVICE_NATIVE` | empty=enabled | `0` disables native service RPC |
 | `CELLHIVE_DO_DIRECT` | empty=enabled | `0` disables owner-hint direct access |
 | `CELLHIVE_TENANT_OUTBOUND` | empty→`public` | egress category `public`/`private`/`local` |
@@ -195,7 +196,7 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | `CELLHIVE_DO_OBJECT_INDEX` | `false` | persist object registry to bucket (`true`/`1`) |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite disk = `<DATA_DIR>/do` |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | runtime directory (subdirectory `do-runtime/`) |
-| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `TENANT_OUTBOUND` / `AI_*` | same as above | same as user-runtime |
+| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `CELLHIVE_TENANT_LOG_CAPTURE` / `TENANT_OUTBOUND` / `AI_*` | same as above | same as user-runtime |
 
 ## CLI (`cellhive`)
 

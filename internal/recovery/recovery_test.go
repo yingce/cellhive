@@ -2,6 +2,7 @@ package recovery_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -40,7 +41,7 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	defer fh.Close()
 
 	// Owner acknowledges the write to the follower but does not upload it.
-	transport := peer.NewHTTPTransport("tok", nil)
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
 	peerMgr := peer.NewManager(transport)
 	nl := nodelog.New(shared, "node-1")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
@@ -92,6 +93,79 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	}
 }
 
+func TestRecoverLegacyNodeLogUsesHeldSpool(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	shared, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	spool, err := peer.NewSpool(filepath.Join(dir, "follower-spool"))
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "legacy"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("legacy-acked"))
+	if _, _, err := spool.AppendBatch(ctx, sc, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("legacy spool append: %v", err)
+	}
+	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	fh := httptest.NewServer(follower.Handler())
+	defer fh.Close()
+
+	nl := nodelog.New(shared, "node-1")
+	legacy := nodelog.Record{Node: "node-1", Session: "legacy-session", Epoch: 1, Followers: []string{fh.URL}, Status: nodelog.StatusOpen, ProtoVersion: nodelog.ProtoVersionLegacy}
+	data, _ := json.Marshal(legacy)
+	if _, err := shared.ConditionalCreate(ctx, nodelog.Key("node-1", "legacy-session"), data); err != nil {
+		t.Fatalf("seed legacy node-log: %v", err)
+	}
+	transport := peer.NewHTTPTransport("tok", nil)
+	rep := replica.New(shared)
+	rec := recovery.New(rep, transport)
+	if n, err := rec.Recover(ctx, nl, "node-1", "legacy-session"); err != nil || n != 1 {
+		t.Fatalf("legacy recover = %d, %v; want 1", n, err)
+	}
+	if keys, _ := rep.ListSegments(ctx, sc, 1); len(keys) != 1 {
+		t.Fatalf("legacy recovered keys = %v", keys)
+	}
+}
+
+func TestRecoverSessionTailAcrossPages(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	shared, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	spool, err := peer.NewSpool(filepath.Join(dir, "follower-spool"))
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "paged-recovery"}
+	for i := uint64(1); i <= 300; i++ {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		if _, _, err := spool.AppendBatchSession(ctx, "paged-session", sc, 1, [][]byte{seg}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	fh := httptest.NewServer(follower.Handler())
+	defer fh.Close()
+	nl := nodelog.New(shared, "node-1")
+	if _, err := nl.Open(ctx, "paged-session", 1, []string{fh.URL}); err != nil {
+		t.Fatalf("node-log open: %v", err)
+	}
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("paged-session")
+	rep := replica.New(shared)
+	rec := recovery.New(rep, transport)
+	if n, err := rec.Recover(ctx, nl, "node-1", "paged-session"); err != nil || n != 300 {
+		t.Fatalf("paged recover = %d, %v; want 300", n, err)
+	}
+	if keys, _ := rep.ListSegments(ctx, sc, 1); len(keys) != 300 {
+		t.Fatalf("paged recovered keys = %d, want 300", len(keys))
+	}
+}
+
 // TestRecoverNodeListsAndSkipsSealed verifies that a new owner can recover every
 // unsealed session of a dead node and that sealed sessions take the fast path.
 func TestRecoverNodeListsAndSkipsSealed(t *testing.T) {
@@ -108,7 +182,7 @@ func TestRecoverNodeListsAndSkipsSealed(t *testing.T) {
 	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
-	transport := peer.NewHTTPTransport("tok", nil)
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
 	peerMgr := peer.NewManager(transport)
 	nl := nodelog.New(shared, "node-1")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}

@@ -141,6 +141,16 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		id, _ := res.LastInsertId()
 		return Result{RowsAffected: n, LastInsertID: id, DurationMs: msSince(start)}, nil
 	}
+	// WITH and PRAGMA are conservatively treated as writes by IsReadOnly for
+	// durability, but row-producing forms may be read-only. Compare connection-
+	// local total_changes() around the statement before exposing mutation meta.
+	var changesBefore int64
+	trackMutation := !IsReadOnly(sqlText) && tx != nil
+	if trackMutation {
+		if err := tx.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&changesBefore); err != nil {
+			return Result{}, err
+		}
+	}
 
 	var rows *sql.Rows
 	var err error
@@ -169,7 +179,11 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		}
 		for i, v := range vals {
 			if b, ok := v.([]byte); ok {
-				vals[i] = string(b)
+				encoded := make([]int, len(b))
+				for j, value := range b {
+					encoded[j] = int(value)
+				}
+				vals[i] = encoded
 			}
 		}
 		out.Rows = append(out.Rows, vals)
@@ -177,7 +191,21 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 	if err := rows.Err(); err != nil {
 		return Result{}, err
 	}
+	if err := rows.Close(); err != nil {
+		return Result{}, err
+	}
 	out.DurationMs = msSince(start)
+	if trackMutation {
+		var changesAfter int64
+		if err := tx.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&changesAfter); err != nil {
+			return Result{}, err
+		}
+		if changesAfter > changesBefore {
+			if err := tx.QueryRowContext(ctx, `SELECT changes(), last_insert_rowid()`).Scan(&out.RowsAffected, &out.LastInsertID); err != nil {
+				return Result{}, err
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -232,14 +260,31 @@ func containsWord(up, word string) bool {
 	}
 }
 
-// normalizeParams converts JSON numbers (float64) with integral values to int64
-// so SQLite comparisons and integer columns behave as expected.
+// normalizeParams converts JSON numbers with integral values to int64 and D1's
+// byte-array representation to []byte, matching the values accepted by
+// Cloudflare D1PreparedStatement.bind(). Other arrays remain unsupported.
 func normalizeParams(params []any) []any {
 	out := make([]any, len(params))
 	for i, p := range params {
 		if f, ok := p.(float64); ok && f == float64(int64(f)) {
 			out[i] = int64(f)
 			continue
+		}
+		if values, ok := p.([]any); ok {
+			bytes := make([]byte, len(values))
+			valid := true
+			for j, value := range values {
+				f, ok := value.(float64)
+				if !ok || f < 0 || f > 255 || f != float64(byte(f)) {
+					valid = false
+					break
+				}
+				bytes[j] = byte(f)
+			}
+			if valid {
+				out[i] = bytes
+				continue
+			}
 		}
 		out[i] = p
 	}

@@ -7,10 +7,17 @@
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError } from "cellhive-workflow.js";
-import { buildBindings, makeDOFromStub } from "facades.js";
+import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
+
+// Rebuild synchronous tenant-isolate APIs over the props-bound capabilities.
 
 try {
 
+  for (const name of __cellhivePlatform.kvBindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeKVFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
+    }
+  }
   if (__cellhivePlatform.doBindings.length > 0) {
     for (const name of __cellhivePlatform.doBindings) {
       if (__env[name]) {
@@ -19,6 +26,11 @@ try {
           writable: true, configurable: true, enumerable: true,
         });
       }
+    }
+  }
+  for (const name of __cellhivePlatform.d1Bindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeD1FromStub(__env[name]), writable: true, configurable: true, enumerable: true });
     }
   }
 } catch (e) {

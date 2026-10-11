@@ -7,8 +7,8 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 | CF binding | Backend | API shape | Storage | owner |
 |---|---|---|---|---|
 | **KV** | KV cell | Async | SQLite (`__kv__` cell) | cell-agent node |
-| **D1** | D1 cell | Async (`prepare/bind/all/batch/exec`) | SQLite (`__d1__` cell) | cell-agent node |
-| 　└ Contract fidelity | `meta` includes `changes/last_row_id/changed_db/duration`; error `err.name=D1_ERROR` + `err.code` (ADR-163) | | | |
+| **D1** | D1 cell | Async (`prepare/bind/all/first/run/raw/batch/exec`) | SQLite (`__d1__` cell) | cell-agent node |
+| 　└ Contract fidelity | `prepare()`/`bind()` are synchronous local objects in the tenant isolate and can be passed directly to `batch()`; typed arrays round-trip as BLOBs; `meta` includes `changes/last_row_id/changed_db/duration`; errors expose `err.name=D1_ERROR` + `err.code` (ADR-163) | | | |
 | **R2** | S3-compatible object storage | Async | `r2/<ns>/<bucket>/...` + `r2meta/...` (metadata sidecar) | Object storage |
 | 　└ Contract fidelity | All fields of `R2Object/R2ObjectBody` (`key/version/size/etag/httpEtag/uploaded/httpMetadata/customMetadata/checksums` + `text/json/arrayBuffer/blob`); `put` supports `{httpMetadata,customMetadata,md5,sha256}` (validation); `head()`; list `truncated/cursor` + `include` (metadata on demand) + `delimiter`/`delimitedPrefixes` (ADR-163/168) | | | |
 | **Queues producer** | Queue cell | Async | SQLite (`__queue__` cell) | cell-agent node |
@@ -25,8 +25,9 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 
 - Each binding generates a **binding-scoped facade** at load time, with immutable props (`ns` + binding type/id);
 - Tenant code only gets the facade; it **cannot access** internal tokens, backend addresses, or a generic Fetcher;
-- The facade calls `cell-agent` (`:7001` REST/JSON) to execute the corresponding operation; the tenant loaded worker’s `globalOutbound` is public-only, and capability bindings run as **platform-side entrypoint stubs** (the `:7001` transport stays in the platform worker; ADR-184);
+- The facade is a platform-side RPC entrypoint stub holding trusted private transport (ADR-184) and calls `cell-agent` (`:7001` REST/JSON); the loaded tenant worker's `globalOutbound` remains public-only;
 - The facade only carries **`x-cellhive-scope-token`** (computed locally with HMAC at platform load time, no expiration, ADR-074); `ns/kind/name` are inside the same token, and cell-agent verifies the signature + `HasBinding`. A broad-privilege internal token is **no longer carried**.
+- Naturally concurrent KV `get()`/`getWithMetadata()` calls on one stub in the same microtask are merged into one `POST /v1/kv/get-batch` (at most 256 keys per batch). There is no batching timer; a lone read waits only until the microtask checkpoint. cell-agent performs one owner route and ordered point reads on one SQLite connection/read transaction; missing keys, duplicates, metadata, and `text/json/arrayBuffer` behavior are unchanged.
 
 ## Synchronous vs Async
 
@@ -122,16 +123,16 @@ export default {
 
 cell-agent's `queue.Runner` periodically obtains the polling set from **queue resources registered in the control plane** (`control.ResourcesByKind("queue")`, cold path), `Claim`s a batch (lease) for each queue, and POSTs it to **`/v1/queues/dispatch`** at `CELLHIVE_DISPATCH_URL`; on success it `Ack`s, and on failure it `Retry`s the entire batch (**at-least-once**). The body contains `(namespace, queue, worker, bundle_sha, version, messages)` (worker/bundle/version are resolved by `Projection.QueueTargets()`, ADR-067/112/127). user-runtime directly loads that active version and calls its `queue()` handler. The body does not carry bindings; on load, user-runtime calls `GET /v1/internal/worker/bindings` with `(ns, worker, version)` to fetch that version's binding spec and inject it into env (ADR-128, fail-open), so the env for `queue(batch, env)` is consistent with fetch. Configuration: `CELLHIVE_QUEUE_INTERVAL` (default 1s, 0 disables). **Implemented**: user-runtime `/v1/queues/dispatch` (ADR-067); retry limit + dead letter (`DeadLetterQueue`, ADR-072, `internal/queue/runner.go`).
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-09-24_
 
 ## Binding implementation (ADR-090, RPC entrypoint env)
 
 Tenant bindings are no longer HTTP facades: the platform worker exports `WorkerEntrypoint` capability classes, and `ctx.exports.X({props})` generates props binding stubs placed into **the env of the loaded tenant worker**.
 
-- **KV / D1 / R2 / Queue**: entrypoint stubs (`workerd/platform/bindings.js`); D1 `prepare()` returns an `RpcTarget` statement, and R2 `get()` returns an `RpcTarget` body. The tenant fetch and its DO's `this.env` and constructor parameter `env` are all natively visible.
-- **DO namespace / Workflow**: the CF API requires **synchronous** `idFromName`, which cannot cross RPC → use the generated `bindings-wrapper.js` to patch the importable `env` (building local facades from `CH_FACADE_SPEC`). Both hosts are unified (do-runtime `bindings-wrapper.js`; user-runtime `queue-wrapper.js`/`workflow-wrapper.js`).
+- **KV / R2 / Queue**: entrypoint stubs (`workerd/platform/bindings.js`); R2 `get()` returns an `RpcTarget` body. **D1** database calls still use a props-bound entrypoint, while the generated wrapper uses `makeD1FromStub()` to rebuild synchronous `prepare()`/`bind()` statement objects in the tenant isolate, preventing ORM `batch()` calls from receiving non-serializable `RpcPromise` values. Tenant fetch and DO `this.env`/constructor `env` all see these bindings.
+- **DO namespace / Workflow**: the CF API requires synchronous `idFromName`, which cannot cross RPC, so generated `bindings-wrapper.js` patches the importable `env`. Both hosts use the same mechanism (do-runtime `bindings-wrapper.js`; user-runtime `queue-wrapper.js`/`workflow-wrapper.js`).
 - **ServiceBinding**: `env.SVC.fetch()` and `env.SVC.<method>()` (Proxy forwarding) → cell-agent `/v1/service/{fetch,run}` (scope kind=service) → user-runtime `/v1/services/{fetch,run}` → target worker / its named entrypoint (same namespace); `binding.entrypoint` specifies the target entrypoint.
 - **R2 list**: `env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` returns `{objects,truncated,cursor}` (cursor is exclusive; sizes come from the list response, ADR-145).
 - **R2 presign**: `env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet` (self-hosted backend returns a short-lived read URL).
-- **Log tail (historical)**: this `log-tail.js`/`LogSink` path was superseded and removed by ADR-185. Pin `1.20260916.1` rejects a native Tail Worker for dynamic loaded Workers (`provided value is not of type 'Fetcher'`), so tenant `console.*` does not enter the platform ring/OTLP and must not fall back to tenant env.
+- **Log tail**: trusted hosts attach `workerd/platform/log-tail.js` as a real `Fetcher` in each dynamic Worker's `WorkerCode.tails`. It captures `console.*`/exceptions into the platform ring and optional OTLP export; identity, log token, URL, and private transport never enter tenant env (ADR-185).
 - **AI (BYO)**: `env.AI.run(model, inputs)` → `<AI_URL>/chat/completions` (OpenAI-compatible, `AI_KEY` Bearer), returns `{response,model,usage}`; `inputs.messages` or `{prompt}`.

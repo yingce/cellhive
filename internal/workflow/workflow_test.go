@@ -132,8 +132,11 @@ func TestLifecycleAndRestart(t *testing.T) {
 		t.Fatalf("status = %s, want terminated", got.Status)
 	}
 
-	// Restart clears memoized steps and re-queues, clearing output/error.
+	// Restart clears every execution-generation artifact before re-queueing.
 	_ = s.PutStep(ctx, "acme", "wf", in.ID, "a", []byte(`1`))
+	_ = s.SetAttempt(ctx, "acme", "wf", in.ID, "a", 2, "retry")
+	_ = s.SetWait(ctx, "acme", "wf", in.ID, "event", time.Now().Add(time.Minute).UnixMilli())
+	_ = s.AppendEvent(ctx, "acme", "wf", in.ID, []byte(`{"type":"wake"}`))
 	_ = s.SetOutput(ctx, "acme", "wf", in.ID, []byte(`{"done":true}`))
 	if err := s.Restart(ctx, "acme", "wf", in.ID); err != nil {
 		t.Fatalf("restart: %v", err)
@@ -144,6 +147,15 @@ func TestLifecycleAndRestart(t *testing.T) {
 	}
 	if _, ok, _ := s.GetStep(ctx, "acme", "wf", in.ID, "a"); ok {
 		t.Fatal("restart did not clear memoized steps")
+	}
+	if _, _, ok, _ := s.GetAttempt(ctx, "acme", "wf", in.ID, "a"); ok {
+		t.Fatal("restart did not clear retry state")
+	}
+	if _, ok, _ := s.GetWait(ctx, "acme", "wf", in.ID, "event"); ok {
+		t.Fatal("restart did not clear event wait")
+	}
+	if events, _ := s.Events(ctx, "acme", "wf", in.ID); len(events) != 0 {
+		t.Fatalf("restart retained %d event(s)", len(events))
 	}
 	if list, err := s.List(ctx, "acme", "wf", 10); err != nil || len(list) != 1 {
 		t.Fatalf("list = %v, %v", list, err)

@@ -58,8 +58,6 @@ def validate(state):
     if state.get("profile") == "rpo0" and "do-runtime-gated" not in targets:
         errors.append("rpo0 profile requires CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788")
     for name, replicas in state["runtimes"].items():
-        if replicas > 1:
-            errors.append(f"{name}: multiple DO pods behind one DNS shard are unsafe")
         if replicas and not any(target == name or name.endswith("-" + target) or target.endswith("-" + name) for target in targets):
             errors.append(f"{name}: active DO workload absent from placement list")
     return errors

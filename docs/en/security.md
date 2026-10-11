@@ -41,12 +41,11 @@
 | Any → cell-agent:7001 (public Internet) | ❌ |
 | Tenant Worker → private network (any) | ❌ |
 
-## Quotas and Admission (P1, ADR-035)
+## Quotas and Admission (ADR-035)
 
-- Per-namespace write rate limiting; cell-agent returns `503 overloaded` when overloaded;
-- Per-DO WAL limit; worker `limits` (cpu/subrequests) + V8 heap limit;
-- `pressured`/`shed_cells` in consumption node leases provide backpressure;
-- Queue DLQ limit.
+- Per-namespace write-rate limiting is implemented; cell-agent returns `503 overloaded` when overloaded;
+- Per-DO WAL limits, consumption-node `pressured`/`shed_cells` backpressure, and queue DLQ limits are implemented;
+- Per-worker CPU/subrequest and V8 heap enforcement are not implemented; only deploy-time WorkerCode/env budgets exist today.
 
 ## Internal Role Tokens (ADR-075)
 
@@ -62,6 +61,7 @@
 - **Platform tokens** (empty `iss`): the loader signs locally with `SCOPE_SECRET`; `HasBinding` is validated on every request.
 - **Delegated tokens** (non-empty `iss`): a trusted tenant platform signs with a derived issuer key (`HKDF(SCOPE_SECRET,"issuer/"+iss)`; print with `cellhive creds issuer <name>`, or mint directly with `cellhive token ... --iss <name> --ttl 5m`); an **expiry is mandatory** and authorization is by ns/scope (no registered-binding requirement).
 - **Honest boundary**: the delegated key is **not narrowed per ns** (it can sign any ns) — that is the "entry manages many namespaces, may delegate all of them" design. The platform only enforces **request ns == token ns**; cross-ns / per-user isolation is the delegate's responsibility. A leaked issuer key therefore exposes every ns it may sign for; stop-loss is rotating `SCOPE_SECRET`/root (issuer versions/allowlist are not implemented).
+- **Boundary**: token-derived resources (kv/vectorize/service/do) require a concrete name because a wildcard cannot resolve a cell; the public data-plane entrypoint (`ExternalHandler`) and API-key management are not implemented.
 
 ## Implemented
 
@@ -80,4 +80,4 @@
 - **Why mTLS is not implemented**: It requires a full CA/issuance/rotation/trust-distribution system (the current fixed cluster has no PKI), and network isolation + independent secrets are already the primary defense; introducing mTLS brings marginal benefit while significantly increasing operational surface area.
 - When to re-evaluate: deployments across trust domains (cell-agent interoperating with untrusted networks), or compliance requirements for "cryptographic identity"; the interface layer (`token` header) is already abstracted, so certificate records can be added then.
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-25_

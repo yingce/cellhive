@@ -7,8 +7,8 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 | CF binding | 后端 | API 形态 | 存储 | owner |
 |---|---|---|---|---|
 | **KV** | KV cell | 异步 | SQLite（`__kv__` cell） | cell-agent 节点 |
-| **D1** | D1 cell | 异步（`prepare/bind/all/batch/exec`） | SQLite（`__d1__` cell） | cell-agent 节点 |
-| 　└ 契约保真 | `meta` 含 `changes/last_row_id/changed_db/duration`；错误 `err.name=D1_ERROR` + `err.code`（ADR-163） | | | |
+| **D1** | D1 cell | 异步（`prepare/bind/all/first/run/raw/batch/exec`） | SQLite（`__d1__` cell） | cell-agent 节点 |
+| 　└ 契约保真 | `prepare()`/`bind()` 是租户 isolate 内同步本地对象，可直接传给 `batch()`；TypedArray 按 BLOB 往返；`meta` 含 `changes/last_row_id/changed_db/duration`；错误 `err.name=D1_ERROR` + `err.code`（ADR-163） | | | |
 | **R2** | 对象存储 S3 兼容 | 异步 | `r2/<ns>/<bucket>/...` + `r2meta/...`（metadata sidecar） | 对象存储 |
 | 　└ 契约保真 | `R2Object/R2ObjectBody` 全字段（`key/version/size/etag/httpEtag/uploaded/httpMetadata/customMetadata/checksums` + `text/json/arrayBuffer/blob`）；`put` 支持 `{httpMetadata,customMetadata,md5,sha256}`（校验）；`head()`；list `truncated/cursor` + `include`（按需 metadata）+ `delimiter`/`delimitedPrefixes`（ADR-163/168） | | | |
 | **Queues 生产者** | Queue cell | 异步 | SQLite（`__queue__` cell） | cell-agent 节点 |
@@ -25,8 +25,9 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 
 - 每个 binding 在加载期生成一个 **binding-scoped facade**，props 不可变（`ns` + binding 类型/id）；
 - 租户代码只拿到 facade；**拿不到** internal token、后端地址、通用 Fetcher；
-- facade 调 `cell-agent`（`:7001` REST/JSON）执行对应操作；租户 loaded worker 的 `globalOutbound` 为 public-only，facade 经平台 **`PLATFORM` service binding**（private 网络）出网（ADR-073，`facades.js` 的 `pfetch`）；
+- facade 由平台侧 RPC entrypoint stub 持有可信 private transport（ADR-184），调用 `cell-agent`（`:7001` REST/JSON）；租户 loaded worker 的 `globalOutbound` 仍为 public-only；
 - facade 只带 **`x-cellhive-scope-token`**（平台加载期本地 HMAC 计算、无过期，ADR-074）；`ns/kind/name` 在同一 token 内，cell-agent 校验签名 + `HasBinding`。**不再带**广权限 internal token。
+- KV `get()`/`getWithMetadata()` 在同一个 stub、同一 microtask 内自然并发时合并为一次 `POST /v1/kv/get-batch`（每批最多 256 key）；不设置等待定时器，单次读取只延后到 microtask checkpoint。cell-agent 只做一次 owner 路由，并在同一 SQLite 连接/只读事务内按输入顺序点查；缺失、重复、metadata 与 `text/json/arrayBuffer` 语义保持不变。
 
 ## 同步 vs 异步
 
@@ -122,16 +123,16 @@ export default {
 
 cell-agent 的 `queue.Runner` 周期性从**控制面登记的 queue 资源**取轮询集（`control.ResourcesByKind("queue")`，冷路径），对每个队列 `Claim` 一批（lease），POST 到 `CELLHIVE_DISPATCH_URL` 的 **`/v1/queues/dispatch`**；成功 `Ack`、失败整批 `Retry`（**at-least-once**）。body 含 `(namespace, queue, worker, bundle_sha, version, messages)`（worker/bundle/version 由 `Projection.QueueTargets()` 解析，ADR-067/112/127），user-runtime 直接加载该活跃版本并调用其 `queue()` handler。body 不带 bindings；user-runtime 在加载时按 `(ns, worker, version)` 调 `GET /v1/internal/worker/bindings` 取该版本的 binding spec 注入 env（ADR-128，失败开放），故 `queue(batch, env)` 与 fetch 的 env 一致。配置：`CELLHIVE_QUEUE_INTERVAL`（默认 1s，0 关闭）。**已实现**：user-runtime `/v1/queues/dispatch`（ADR-067）；重试上限 + 死信（`DeadLetterQueue`，ADR-072，`internal/queue/runner.go`）。
 
-_最后更新：2026-09-22_
+_最后更新：2026-09-24_
 
 ## 绑定实现（ADR-090，RPC entrypoint env；ADR-185 已取代其平台 env 结论）
 
 租户 bindings 不再是 HTTP facade：平台 worker 导出 `WorkerEntrypoint` 能力类，`ctx.exports.X({props})` 生成 props 绑定 stub 放进**被加载租户 worker 的 env**。
 
-- **KV / D1 / R2 / Queue**：entrypoint stub（`workerd/platform/bindings.js`）；D1 `prepare()` 返回 `RpcTarget` 语句，R2 `get()` 返回 `RpcTarget` body。租户 fetch 与其 DO 的 `this.env` 与构造函数形参 `env` 都原生可见。
-- **DO namespace / Workflow**：CF API 需**同步** `idFromName`，不能跨 RPC → 用 generated `bindings-wrapper.js` patch importable `env`（从 `CH_FACADE_SPEC` 造 local facades）。两宿主统一（do-runtime `bindings-wrapper.js`；user-runtime `queue-wrapper.js`/`workflow-wrapper.js`）。
+- **KV / R2 / Queue**：entrypoint stub（`workerd/platform/bindings.js`）；R2 `get()` 返回 `RpcTarget` body。**D1** 的数据库调用仍走 props-bound entrypoint，但 generated wrapper 用 `makeD1FromStub()` 在租户 isolate 重建同步 `prepare()`/`bind()` 语句对象，避免 ORM `batch()` 收到不可序列化的 `RpcPromise`。租户 fetch 与其 DO 的 `this.env` 与构造函数形参 `env` 都可见这些绑定。
+- **DO namespace / Workflow**：CF API 需**同步** `idFromName`，不能跨 RPC → 用 generated `bindings-wrapper.js` patch importable `env`。两宿主统一（do-runtime `bindings-wrapper.js`；user-runtime `queue-wrapper.js`/`workflow-wrapper.js`）。
 - **ServiceBinding**：`env.SVC.fetch()` 与 `env.SVC.<method>()`（Proxy 转发）→ cell-agent `/v1/service/{fetch,run}`（scope kind=service）→ user-runtime `/v1/services/{fetch,run}` → 目标 worker / 其命名 entrypoint（同名空间）；`binding.entrypoint` 指定目标 entrypoint。
 - **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、尺寸来自 list 响应，ADR-145）。
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
-- **日志 tail（历史）**：本 ADR 的 `log-tail.js`/`LogSink` 传输已由 ADR-185 取代并删除。pin `1.20260916.1` 拒绝动态 loaded-worker 原生 Tail Worker（`provided value is not of type 'Fetcher'`），因此当前 tenant `console.*` 不进入平台 ring/OTLP，且不得以 tenant env 回退。
+- **日志 Tail**：`workerd/platform/log-tail.js` 由可信宿主作为真实 `Fetcher` 挂到动态 Worker 的 `WorkerCode.tails`；它捕获 `console.*`/异常并写入平台 ring/可选 OTLP。身份、log token、URL 与 private transport 不进入 tenant env（ADR-185）。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。

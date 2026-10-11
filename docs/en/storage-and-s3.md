@@ -22,17 +22,18 @@
 | Native COS (`cos://`) | Tested Hong Kong `cell-1376795072` bucket passed; verify each other bucket | Isolated concurrent claim/CAS/delete and startup diagnose passed. Same-host process `SIGKILL` followed by fresh-directory takeover: 5,000/5,000 writes ACKed at 192 clients; 6,488 ACKed values recovered exactly (missing=0, wrong=0), SQLite integrity=ok. Earlier `vwork-hk-1376795072` returned 405 for AppendObject and remains unqualified. |
 | COS/OSS S3 endpoints tested on 2026-09-22 | ❌ for those configurations | COS accepted duplicate `If-None-Match:*` PUT; OSS returned `NotImplemented` on the first PUT. Do not generalize to untested accounts/endpoints |
 
-## Bucket Roles (Default Single Bucket + Prefix, Splittable)
+## Bucket Namespaces (Current Single Bucket)
 
-| Role | Default | Content | Splittable into Separate Bucket |
-|---|---|---|---|
-| `state` | primary bucket | cell replication, owner/lease, nodes, node-logs, drain-token | ✅ |
-| `code` | primary bucket `bundles/`, `deploys/` | Worker bundle (content-addressed) + version pointer | ✅ |
-| `assets` | primary bucket `assets/` | static assets (can be attached to CDN) | ✅ |
-| `r2` | primary bucket `r2/` | tenant R2 virtual buckets | ✅ |
-| `backup` | none | optional archive | ✅ |
+The implementation currently configures one `CELLHIVE_BUCKET` with one endpoint/region/credential set. Reserved prefixes isolate the following subsystems inside that bucket and cannot yet be split into separate buckets:
 
-Configuration: each role can specify its own `bucket / endpoint / region / credentials / prefix`; if unset, it falls back to the primary bucket + prefix.
+| Prefix | Content |
+|---|---|
+| `cells/`, `nodes/`, `node-logs/`, `fleet/` | cell replication, owner/lease records, node logs, and fleet control records |
+| `bundles/`, `deploys/` | content-addressed Worker bundles and version pointers |
+| `assets/` | static assets |
+| `r2/` | tenant R2 virtual buckets |
+
+Independent `state/code/assets/r2/backup` bucket roles and per-role credentials are not implemented. There is also no independent backup/archive write path.
 
 ## Key Layout (Example)
 
@@ -62,7 +63,7 @@ r2/<ns>/<bucket_name>/<object-key>
 - **Retained versions**: bundles are deduplicated by content addressing; version deletion goes through lifecycle (reference counting/`deploys` pointer cleanup);
 - **LTX**: background **compaction → L1** for L0 segments (`min_txids`/`min_mb`); large cell **paging** (sparse files on demand);
 - **Snapshots**: L9 snapshots are used for takeover/large databases; generated when checkpoints are aligned;
-- **Cleanup**: worker/app deletion uses soft delete + `purges` jobs (ADR-131); **purge only takes effect for entities that are still soft-deleted**, and deploy/create cancels the job (ADR-135); physical SQLite files are retained until explicit cleanup; the cross-node cell-data cleanup hook is still not closed-loop;
+- **Cleanup**: worker/app deletion uses soft delete + `purges` jobs (ADR-131); **purge only takes effect for entities that are still soft-deleted**, and deploy/create cancels the job (ADR-135); each cell-agent performs idempotent deletion of local replicas and bucket objects in bounded, paginated passes (ADR-142/169);
 - **Enumeration**: operations commands only, with bounded pagination; **LIST is prohibited on hot paths**.
 
 ## Performance
@@ -75,7 +76,7 @@ r2/<ns>/<bucket_name>/<object-key>
 
 - Compatibility and TTL of presigned URLs across providers;
 - Lifecycle rules and cost model;
-- Snapshot/archive strategy for the backup role;
+- Independent bucket roles and credentials, plus the backup snapshot/archive strategy;
 - Other cloud stores/accounts: atomic write/delete semantics, concurrent races, and presigned reads (Class C environment).
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-09-25_

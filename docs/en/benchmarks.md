@@ -324,13 +324,59 @@ The stub injects 3ms on router/service hops; timing via `performance.now()` insi
 
 loopback + injected latency validates the mechanism that "the hop is removed"; production savings = real round trip (RTT for cross-host, requires a second host).
 
+### user-runtime prepared-worker hot-path A/B (real workerd, 2026-09-24)
+
+Pinned stock workerd `1.20260916.1`; one Go HTTP control/KV stub; full public-loader → workerLoader → tenant-isolate path; `/get` additionally traverses KV WorkerEntrypoint → `PLATFORM.fetch`. Each path was warmed with 100 requests, then run for 12s at c=64. The baseline swaps only `loader.js` from the pre-optimization image; all other code and dependencies are identical.
+
+| Path | Baseline RPS | Prepared-worker + unsampled fast path | Change | Baseline p50 | Optimized p50 | Failures (baseline→optimized) |
+|---|---:|---:|---:|---:|---:|---:|
+| `/ping` (no binding) | 2,204 | **4,077** | **+85.0%** | 23.90 ms | **2.83 ms** | 12→0 |
+| `/get` (KV read) | 1,593 | **2,288** | **+43.6%** | 34.99 ms | **24.09 ms** | 0→0 |
+
+The implementation caches a plain-data load plan (bundle, binding spec, module template, and budget validation) by `namespace/worker@version-bundle_sha`, with single-flight initial preparation. workerd capabilities are request-scoped: `LOADER.get()`, `OUTBOUND`, binding/tail stubs, and `getEntrypoint()` **cannot be cached across requests**; real workerd otherwise reports `Cannot perform I/O on behalf of a different request`. Those remain acquired in the current request. A version-number change creates a new plan, so a vars/bindings-only deployment with the same bundle cannot reuse the old env. Unsampled requests retain ADR-146 traceparent propagation while skipping span construction/flushing.
+
+Limitation: optimized `/ping` p99 was 523 ms, so a tail spike remains; 4,077 RPS is also below the near-term 5k target. The next step is profiling loader→tenant scheduling and connection lifetime, not claiming Worker performance is complete.
+
+### Natural-concurrency KV read batching (real workerd, ADR-191, 2026-09-24)
+
+The same probe ran at c=64, with 100 warm-up requests followed by 8s per path for two consecutive runs. `/get` performs one `KV.get`; `/batch` performs three `KV.get` calls inside tenant-isolate `Promise.all`. The backend stub returns ordered results matching the requested key count.
+
+| Run | `/get` RPS / p50 / p99 | `/batch` RPS / p50 / p99 | Backend requests per `/batch` tenant request |
+|---|---|---|---:|
+| 1 | 2,008 / 27.75ms / 113.18ms | 1,912 / 28.37ms / 165.09ms | **1** |
+| 2 | 1,784 / 29.59ms / 155.71ms | 1,610 / 32.32ms / 162.79ms | **1** |
+
+Run 1's cumulative `kv_requests=46,443` exactly equals successful tenant requests for `/local`, `/get`, and `/batch` (14,777+16,066+15,300), plus 100 warm-ups for each path. Thus the three reads inside `/batch` produced one cell-agent HTTP request; this is directly counted, not inferred from latency. Three-read p50 was only 0.63–2.73ms above one-read p50, avoiding three independent JSRPC/HTTP costs. This does not fix loader scheduling tails: `/ping` p99 was still 466ms in run 2.
+
+### Native Tail capture switch A/B (real workerd, ADR-192, 2026-09-24)
+
+Pinned stock workerd `1.20260916.1`, the same public-loader → workerLoader → tenant ping path, c=64, 200 warm-ups, and 8s per run. Default `CELLHIVE_TENANT_LOG_CAPTURE=on` produced **4,311 / 4,625 / 4,549 RPS**; the final `off` implementation produced **4,728 / 5,244 / 4,816 RPS**, a paired gain of approximately **5.9%–13.4%**. Disabling capture removes only native-Tail event collection/dispatch; tenant requests, bindings, tracing, and header isolation remain unchanged, while platform capture of tenant `console.*` and uncaught exceptions is unavailable for that runtime. An earlier 5.7k–6.6k observation was host-scheduling noise and is not treated as a result.
+
+Three unproductive or unsafe directions were also measured and reverted: `WorkerStub` has no direct `fetch()` and requires `getEntrypoint()`; a binding-free env fast path regressed to 3.9k–4.1k RPS; completely bypassing Request/header/trace reconstruction showed only a 5%–10% upper-bound gain while breaking arbitrary `x-cellhive-*` stripping and trace propagation.
+
+### user-runtime CPU, stage, and replica proof (real workerd, 2026-09-24)
+
+Pinned stock workerd `1.20260916.1`, an external load generator, Tail off, trace ratio 0, a trivial `pong` Worker, and c=64. The median across three runs was **4,827 RPS** with a 1C CFS quota, **5,021 RPS** on one unthrottled cpuset logical CPU, and **5,034 RPS** on four unthrottled logical CPUs. The quota accumulated only 0.26–0.27 CPU seconds of throttling per 8s window, while unthrottled p99 remained 109–124ms. CFS therefore explains only about 3%–4% of the loss, not the 100ms-class tail, and adding logical CPUs to one runtime provides no vertical gain.
+
+Disposable c=64 stage cutoffs measured **10.7k–11.4k RPS** through route/env/plan/stub, **7.3k RPS** after `prepareRequest`, and **4.6k RPS** for the complete tenant fetch. A complete no-copy diagnostic reached 5.5k–5.8k RPS but violated arbitrary `x-cellhive-*` stripping and ADR-146 traceparent propagation. Semantics-preserving single-Request cloning and a lower-allocation header scan instead regressed to about 3.7k median RPS and were reverted. Real workerd also proved that inbound Request headers are immutable, precluding in-place mutation.
+
+With CPUs 4–7 fixed (this host has only **2 physical cores / 4 SMT logical CPUs**), 12s, three runs:
+
+| Layout | RPS (three runs) | Median RPS | Median p99 | failures |
+|---|---:|---:|---:|---:|
+| 1 runtime × 4 logical CPUs | 4,455 / 4,469 / 4,391 | **4,455** | **113.9ms** | 0 |
+| 2 runtimes × 2 logical CPUs | 5,796 / 5,893 / 7,382 | **5,893** | **86.7ms** | 0 |
+| 4 runtimes × 1 logical CPU | 9,042 / 8,707 / 7,258 | **8,707** | **100.6ms** | 0 |
+
+Four replicas delivered **1.95×** the median throughput of one replica, near the capacity of the two physical cores. This proves that multiple runtime replicas, not more CPUs on one process, are the correct scaling direction. The original `4×1C ≥18k RPS, p99 ≤50ms` target requires at least four physical cores without SMT contention; this host cannot honestly validate it.
+
 ## Conclusion
 
 - **Baseline consistency**: FS `c=128` sqlbench **30.7k TPS**, consistent with historical durable ~28.9k (historical tens-of-thousands level is steady state under **high concurrency**, not single-request latency). **TPS is low when concurrency is low** (c=8 → ~2.8k), which is normal latency-limited scaling.
 - **The FS → S3 gap** mainly lies in **bucket commit wait** (realbench p50 0.22→2.0 ms; sqlbench E2E p50 2.9→5.1 ms), i.e. the cost of RPO=0; local MinIO still does not represent production cloud object storage tail latency.
 - **Write coalescing is effective**: sqlbench `transactions_per_batch ≈ 7.4–7.9`, `put_per_ack` is far below 1; in-capture batching significantly amortizes commits.
 - **Data is accurate**: all profiles have `db_integrity=ok`, `failures=0`.
-- **workerd/DO**: process-level ceilings and gating numbers (≈800 req/s bare DO, k write coalescing improvement) are in `docs/archive/p0-report.md`; workerd benchmarks were not rerun on this page.
+- **workerd/DO**: this page reran user-runtime benchmarks (prepared plan, Tail, CPU/stages/replicas). Historical DO process-level ceilings and gating numbers (≈800 req/s bare DO, k write-coalescing improvement) remain in `docs/archive/p0-report.md`; this round did not rerun DO.
 - **Limitations**: Single-node loopback, no cross-host RTT; local MinIO; did not stress real disks/cloud object storage. Cross-host/cloud numbers require the environment (Class C blocker).
 ### Observability overhead (ADR-178, `-benchmem`)
 

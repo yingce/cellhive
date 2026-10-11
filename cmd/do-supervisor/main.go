@@ -6,8 +6,10 @@
 package main
 
 import (
+	"cellhive/internal/bucket"
 	cellcfg "cellhive/internal/config"
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
@@ -32,6 +34,7 @@ func main() {
 	follower := flag.String("follower", "", "comma-separated follower URLs")
 	token := flag.String("token", cellcfg.DeriveCredentials(cellcfg.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
 	restore := flag.Bool("restore", false, "cold-restore captured shard files into -dir via cell-agent, then exit")
+	restoreIfPresent := flag.Bool("restore-if-present", false, "cold-restore captured files when a manifest exists, then exit")
 	restoreObj := flag.String("restore-object", "", "with -restore: restore only one object as storage_id/class/name (per-object cold start)")
 	workerdBin := flag.String("workerd", "", "workerd binary to spawn/supervise (empty: auto-detect)")
 	config := flag.String("config", "", "workerd capnp config to spawn/supervise (empty: do not spawn)")
@@ -44,7 +47,7 @@ func main() {
 	logger := log.New(os.Stderr, "do-supervisor ", log.LstdFlags)
 	agent := &dosupervisor.HTTPStore{Base: *owner, Token: *token}
 
-	if *restore {
+	if *restore || *restoreIfPresent {
 		s := &dosupervisor.Supervisor{
 			Dir: *dir, Epoch: *epoch, ScopePrefix: *scopePrefix,
 			Segments: agent, Blobs: agent, Log: logger,
@@ -62,10 +65,14 @@ func main() {
 			return
 		}
 		n, err := s.RestoreAll(context.Background(), *dir)
-		if err != nil {
+		if err = optionalRestoreError(err, *restoreIfPresent); err != nil {
 			log.Fatalf("restore: %v", err)
 		}
-		log.Printf("restored %d files from %s into %s", n, *owner, *dir)
+		if n == 0 && *restoreIfPresent {
+			log.Printf("no capture manifest; starting with empty runtime state")
+		} else {
+			log.Printf("restored %d files from %s into %s", n, *owner, *dir)
+		}
 		return
 	}
 
@@ -81,12 +88,16 @@ func main() {
 		Committer:   committer,
 		Epoch:       *epoch,
 		ScopePrefix: *scopePrefix,
+		Segments:    agent,
 		Blobs:       agent,
 		Log:         logger,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	var drain func() error
 
 	// OTLP trace export (ADR-167); empty endpoint = no-op.
 	acfg := cellcfg.FromEnv()
@@ -120,6 +131,7 @@ func main() {
 			CellURL:        *owner,
 			CellToken:      *token,
 			DoTicketSecret: creds.DoTicket,
+			LogToken:       creds.Log,
 			AIURL:          os.Getenv("CELLHIVE_AI_URL"),
 			AIKey:          os.Getenv("CELLHIVE_AI_KEY"),
 			GateURL:        os.Getenv("CELLHIVE_DO_GATE_URL"),
@@ -128,7 +140,7 @@ func main() {
 			log.Fatalf("build workerd environment: %v", err)
 		}
 		go func() {
-			if err := doruntime.Run(ctx, bin, *config, childEnv); err != nil && ctx.Err() == nil {
+			if err := doruntime.Run(runCtx, bin, *config, childEnv); err != nil && runCtx.Err() == nil {
 				log.Printf("workerd exited: %v", err)
 				stop()
 			}
@@ -138,19 +150,17 @@ func main() {
 		// renew the DO owner leases and drain on shutdown (ADR-078/083).
 		go doruntime.RenewLoop(ctx, *doURL, *token, doruntime.RenewEvery,
 			func(err error) { log.Printf("do renew failed: %v", err) })
-		go func() {
-			<-ctx.Done()
-			if err := doruntime.Drain(*doURL, *token); err != nil {
-				log.Printf("do drain failed; relying on lease expiry: %v", err)
-				return
-			}
-			log.Printf("do-runtime drained")
-		}()
+		drain = func() error { return doruntime.Drain(*doURL, *token) }
 	}
 
 	srv := &http.Server{Addr: *listen, Handler: s.Handler()}
 	go func() {
-		<-ctx.Done()
+		err := shutdownAfter(ctx, drain, cancelRun)
+		if err != nil {
+			log.Printf("do drain failed; relying on lease expiry: %v", err)
+		} else if drain != nil {
+			log.Printf("do-runtime drained")
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
@@ -159,4 +169,23 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// shutdownAfter keeps workerd alive while the host actor drains in-flight work
+// and releases leases. cancelRun stops it only after drain finishes or times out.
+func shutdownAfter(signalCtx context.Context, drain func() error, cancelRun context.CancelFunc) error {
+	<-signalCtx.Done()
+	var err error
+	if drain != nil {
+		err = drain()
+	}
+	cancelRun()
+	return err
+}
+
+func optionalRestoreError(err error, optional bool) error {
+	if optional && errors.Is(err, bucket.ErrNotFound) {
+		return nil
+	}
+	return err
 }

@@ -17,10 +17,17 @@ import (
 type Manager struct {
 	Replica *replica.Manager
 	Peer    peer.Transport
+	Sealed  peer.RecoveryTransport
 }
 
 // New creates a recovery manager.
-func New(r *replica.Manager, p peer.Transport) *Manager { return &Manager{Replica: r, Peer: p} }
+func New(r *replica.Manager, p peer.Transport) *Manager {
+	m := &Manager{Replica: r, Peer: p}
+	if sealed, ok := p.(peer.RecoveryTransport); ok {
+		m.Sealed = sealed
+	}
+	return m
+}
 
 // Collect fetches every segment held by the given followers and uploads them to
 // the object store under their scope/epoch prefix. It returns the number of
@@ -57,6 +64,52 @@ func (m *Manager) Collect(ctx context.Context, followers []string) (int, error) 
 		return total, fmt.Errorf("recovery: incomplete collect: %w", lastErr)
 	}
 	return total, nil
+}
+
+// collectSealed freezes each follower session and uploads its contiguous tail.
+// Recovery fails closed unless every recorded follower can be sealed and read
+// through the final sequence it reported.
+func (m *Manager) collectSealed(ctx context.Context, followers []string, session string) (int, map[string]uint64, error) {
+	if m.Sealed == nil {
+		return 0, nil, fmt.Errorf("recovery: peer transport lacks seal/tail support")
+	}
+	total := 0
+	covered := make(map[string]uint64, len(followers))
+	for _, follower := range followers {
+		final, err := m.Sealed.Seal(ctx, follower, session)
+		if err != nil {
+			return total, covered, fmt.Errorf("recovery: seal follower %s: %w", follower, err)
+		}
+		var after uint64
+		for after < final {
+			fragments, err := m.Sealed.Tail(ctx, follower, session, after)
+			if err != nil {
+				return total, covered, fmt.Errorf("recovery: tail follower %s after %d: %w", follower, after, err)
+			}
+			if len(fragments) == 0 {
+				return total, covered, fmt.Errorf("recovery: follower %s tail ended at %d want %d", follower, after, final)
+			}
+			for _, fragment := range fragments {
+				want := after + 1
+				if fragment.Sequence != want {
+					return total, covered, fmt.Errorf("recovery: follower %s tail gap: got %d want %d", follower, fragment.Sequence, want)
+				}
+				sc, err := cell.ParseScope(fragment.Scope)
+				if err != nil {
+					return total, covered, err
+				}
+				for _, segment := range fragment.Segments {
+					if _, _, err := m.Replica.Append(ctx, sc, fragment.Epoch, segment); err != nil {
+						return total, covered, fmt.Errorf("recovery: append %s: %w", fragment.Scope, err)
+					}
+					total++
+				}
+				after = fragment.Sequence
+			}
+		}
+		covered[follower] = final
+	}
+	return total, covered, nil
 }
 
 // RecoverNode runs recovery for every unsealed session of a dead node. Sealed
@@ -97,12 +150,25 @@ func (m *Manager) Recover(ctx context.Context, nl *nodelog.Manager, deadNode, se
 	if _, err := nl.SetStatus(ctx, deadNode, session, nodelog.StatusRecovering); err != nil {
 		return 0, err
 	}
-	n, err := m.Collect(ctx, rec.Followers)
+	var n int
+	covered := map[string]uint64{}
+	if len(rec.Followers) > 0 {
+		if rec.ProtoVersion == nodelog.ProtoVersionSession {
+			n, covered, err = m.collectSealed(ctx, rec.Followers, rec.Session)
+		} else {
+			n, err = m.Collect(ctx, rec.Followers)
+		}
+	}
 	if err != nil {
 		return n, err
 	}
-	if _, err := nl.Seal(ctx, deadNode, session); err != nil {
+	if _, err := nl.SealCovered(ctx, deadNode, session, covered); err != nil {
 		return n, err
+	}
+	for follower := range covered {
+		// Coverage is already durable in the sealed node-log. Reclamation is a
+		// space optimization and must not turn a completed recovery into failure.
+		_ = m.Sealed.Reclaim(ctx, follower, session)
 	}
 	return n, nil
 }

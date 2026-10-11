@@ -30,7 +30,7 @@ docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:dev --version
 
 Build (ADR-159): Go binaries are now **CGo** (mattn/go-sqlite3 + static vec1), and must include SQLite build tags (`make build` wraps this; Dockerfile installs gcc); x86-64 defaults to `-march=x86-64-v3` (requires AVX2). For non-AVX2, use `-tags cellhive_vec1_portable`.
 
-Health checks: `GET http://127.0.0.1:7001/readyz` (no auth; returns 503 when overloaded). `user-runtime` uses `GET /ready` (no auth; refreshes projections on demand; returns 503 when projections are stale, the cell is unreachable, or draining is in progress) and `POST /drain` (internal token; on SIGTERM the process automatically calls `/drain` first, then exits after a 3s grace period); `do-runtime` uses `GET /ready` (returns 503 while draining or when cell-agent is unreachable) — compose/k8s/Helm readiness probes have all been changed to use `/ready` (ADR-156).
+Health checks: `GET http://127.0.0.1:7001/readyz` (no auth; returns 503 when overloaded). `user-runtime` uses `GET /ready` (no auth; refreshes projections on demand; returns 503 when projections are stale, the cell is unreachable, or draining is in progress) and `POST /drain` (internal token; on SIGTERM the process calls `/drain` before a 3-second grace period). `do-runtime` uses `GET /ready` (503 while draining or when cell-agent is unreachable); on SIGTERM it invokes local `/v1/do/drain`, waits for in-flight work and lease release (up to 15 seconds), then stops workerd. Compose, Kubernetes, and Helm readiness probes use `/ready` (ADR-156).
 
 ## Docker Compose
 
@@ -50,7 +50,7 @@ The actual runtime exercise is `bash scripts/runtime-baseline-e2e.sh`; static Co
 
 ## Kubernetes
 
-The Kustomize base is **one cell-agent and one DO runtime**. Independent agent PVCs are not a shared filesystem bucket, while DNS for a headless Service with multiple DO Pods cannot be a stable shard identifier. The user-runtime can scale via HPA. `CELLHIVE_CELL_URL` names the stable StatefulSet Pod; agent leases advertise their own Pod IP via `CELLHIVE_PEER_URL`. DO Deployment updates use `Recreate` to avoid overlapping old/new shards.
+The Kustomize base is deliberately **one cell-agent plus one ungated DO runtime**. The ungated runtime has no authoritative capture, keeps `Recreate`, and does not promise DO state after Pod replacement. The production `rpo0` overlay runs **two gated DO Pods**: the ClusterIP Service load-balances arbitrary first hops, each Pod advertises its Pod IP in owner records, and non-owners forward to the owner. After an owner replacement, the winner restores the deterministic `host_id` actor/facets/sidecars through cell-agent before dispatch. The gated Deployment uses `RollingUpdate(maxUnavailable=1,maxSurge=1)` and a `minAvailable:1` PDB. user-runtime scales via HPA; `CELLHIVE_CELL_URL` names the stable StatefulSet Pod and agent leases advertise Pod IPs.
 
 ```bash
 python3 scripts/deploy-preflight.py k8s --path deploy/k8s/overlays/rpo0
@@ -64,7 +64,7 @@ kubectl -n cellhive rollout status deployment/do-runtime-gated
 kubectl -n cellhive rollout status deployment/user-runtime
 ```
 
-Scale cell-agent beyond one Pod **only after** provisioning a shared S3 bucket and validating conditional create/CAS/delete, ranged reads, and presign. A single `CELLHIVE_DO_RUNTIMES=do-runtime:8788` likewise supports only one DO Pod; multiple DO instances require stable per-instance targets and an updated placement list. `scripts/deploy-preflight.py` rejects either unsafe manifest topology. Kustomize/Helm rendering does not prove in-cluster availability; no live cluster was available for this review. NetworkPolicy limits user-runtime port 8088 to agent Pods; the gated overlay adds a DO policy. Configure real registry images, storage, ingress, CNI enforcement, and egress for your environment.
+Scale cell-agent beyond one Pod **only after** provisioning shared S3 and validating conditional create/CAS/delete, ranged reads, and presign. Multi-Pod DO takeover is supported only by the gated RPO=0 runtime: `CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788` targets the Service, Endpoints follow replicas, and owner records carry actual Pod addresses. The ungated base stays single-replica. Preflight rejects multiple filesystem-backed agents, an empty DO entrypoint, or an active runtime omitted from placement. Rendering is static only; run `bash scripts/k3d-runtime-e2e.sh` for a disposable real k3d acceptance covering two gated Pods, owner-Pod deletion/cold restore, and 120 logical DO writes during a rollout. NetworkPolicy explicitly permits cluster DNS and limits user-runtime port 8088 to agent Pods; configure cloud endpoints, DNS, and edge ingress for the target cluster.
 
 ## DO Output Gate / RPO=0 (`do-runtime-gated`, ADR-140)
 
@@ -77,7 +77,8 @@ docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d cell-ag
 kubectl apply -k deploy/k8s/overlays/rpo0
 ```
 
-- **Verified (real containers)**: DO calls through the gate return `count:2..5` (state is durable), writing to the bucket at `cells/workerd/__do__/<host>.sqlite/ltx/e1/*.ltx` + `owner.json`;
+- **Verified (real containers):** gated DO responses persist and write `cells/workerd/__do__/<host>.sqlite/ltx/e1/*.ltx`; `scripts/runtime-baseline-e2e.sh` covers same-volume process restart.
+- **Real Kubernetes acceptance (2026-09-25 PASS):** `scripts/k3d-runtime-e2e.sh` proves two gated Pods, per-host-manifest cold restore after owner-Pod deletion (`1→2`), and an exact final count of `123` after 120 logical writes during RollingUpdate (no lost or duplicate commits). Ownership transition can return transient 5xx responses; the acceptance client retries and verifies the exact final count, so this is not a claim that every physical HTTP attempt is error-free. A single-node k3d run does not replace cross-host, cloud-store, or target-CNI validation.
 - Manual: `do-supervisor -dir /data/state/do -owner http://cell-agent:7001 -listen :18901 -do-url http://127.0.0.1:8788 -workerd /usr/local/bin/workerd -config <capnp>`.
 
 ## systemd / Bare Metal

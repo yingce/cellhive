@@ -142,11 +142,30 @@ func claim(srv *server.Server, sc cell.Scope) {
 	}
 }
 
+func workerIterations(total, workers, worker int) int {
+	if total <= 0 || workers <= 0 || worker < 0 || worker >= workers {
+		return 0
+	}
+	base := total / workers
+	if worker < total%workers {
+		base++
+	}
+	return base
+}
+func workerOffset(total, workers, worker int) int {
+	if total <= 0 || workers <= 0 || worker <= 0 {
+		return 0
+	}
+	if worker >= workers {
+		worker = workers
+	}
+	return worker*(total/workers) + min(worker, total%workers)
+}
+
 func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string, epoch uint64) result {
 	// Use the handler directly to avoid an extra httptest hop; this measures
 	// the commit path (replication + optional bucket upload).
 	h := srv.Handler()
-	per := n / c
 	lat := make([][]time.Duration, c)
 	fails := make([]int, c)
 	var wg sync.WaitGroup
@@ -155,9 +174,11 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			lat[w] = make([]time.Duration, 0, per)
-			for i := 0; i < per; i++ {
-				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: uint64(i + 1), EndTxID: uint64(i + 1)}, []byte("bench"))
+			runs := workerIterations(n, c, w)
+			offset := workerOffset(n, c, w)
+			lat[w] = make([]time.Duration, 0, runs)
+			for i := 0; i < runs; i++ {
+				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: uint64(offset + i + 1), EndTxID: uint64(offset + i + 1)}, []byte("bench"))
 				body, _ := json.Marshal(map[string]any{
 					"scope": sc.String(), "epoch": epoch,
 					"segment": base64.StdEncoding.EncodeToString(seg), "followers": followers,

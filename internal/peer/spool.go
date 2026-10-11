@@ -2,6 +2,9 @@ package peer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +20,21 @@ import (
 // logName is the per-(scope,epoch) append-log filename. Segment writes are
 // framed ([u32 len][bytes]) into this single file so a whole batch costs one
 // fsync instead of one per segment.
-const logName = "segments.log"
+const (
+	logName        = "segments.log"
+	sessionLogName = "fragments.log"
+	sealName       = "sealed"
+)
+
+var ErrSessionSealed = errors.New("peer: follower session sealed")
+
+// SessionFragment is one durable, monotonically sequenced follower batch.
+type SessionFragment struct {
+	Sequence uint64
+	Scope    string
+	Epoch    uint64
+	Segments [][]byte
+}
 
 // Spool is a follower's durable local copy of replicated segments.
 //
@@ -39,6 +56,12 @@ type Spool struct {
 	// a retried or hedged (duplicate) copy is a no-op. Loaded from the log on
 	// first append after a restart. Guarded by the per-directory dirMu.
 	logs sync.Map // dir -> *spoolLog
+
+	// sessionLocks serialize sequence allocation, sealing and reclamation for an
+	// owner session. Different owner sessions remain independent.
+	sessionLocks sync.Map // session hash -> *sync.Mutex
+	sessionLogs  sync.Map // session dir -> *sessionLog
+	syncDir      func(string) error
 }
 
 // spoolLog is the per-log identity set used for idempotent appends.
@@ -47,12 +70,20 @@ type spoolLog struct {
 	seen   map[string]struct{}
 }
 
+// sessionLog caches the sequence recovered from a session append-log. Access
+// is serialized by the corresponding session lock.
+type sessionLog struct {
+	loaded bool
+	last   uint64
+	size   int64
+}
+
 // NewSpool creates a spool rooted at dir.
 func NewSpool(dir string) (*Spool, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Spool{Dir: dir}, nil
+	return &Spool{Dir: dir, syncDir: syncDir}, nil
 }
 
 // dirMu returns the per-directory mutex for the given directory, creating it
@@ -62,6 +93,435 @@ func (s *Spool) dirMu(dir string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+func (s *Spool) sessionDir(session string) string {
+	h := sha256.Sum256([]byte(session))
+	return filepath.Join(s.Dir, "_sessions", fmt.Sprintf("%x", h[:]))
+}
+
+func (s *Spool) sessionMu(session string) *sync.Mutex {
+	v, _ := s.sessionLocks.LoadOrStore(s.sessionDir(session), &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// ensureSessionDir durably creates both levels below the already-created spool
+// root. A directory is cached only after its parent entry has been fsynced, so
+// a failed sync is retried even when mkdir already made the entry visible.
+func (s *Spool) ensureSessionDir(dir string) error {
+	parent := filepath.Join(s.Dir, "_sessions")
+	if err := s.mkdirDurable(parent, s.Dir); err != nil {
+		return err
+	}
+	return s.mkdirDurable(dir, parent)
+}
+
+func (s *Spool) mkdirDurable(path, parent string) error {
+	if _, ok := s.dirs.Load("session-dir:" + path); ok {
+		return nil
+	}
+	err := os.Mkdir(path, 0o755)
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("spool: session path is not a directory: %s", path)
+	}
+	if err := s.syncDir(parent); err != nil {
+		return err
+	}
+	s.dirs.Store("session-dir:"+path, struct{}{})
+	return nil
+}
+
+// SessionAppend is one ordered stream frame in a follower session commit.
+type SessionAppend struct {
+	Scope    cell.Scope
+	Epoch    uint64
+	Segments [][]byte
+}
+
+// AppendBatchSession persists one frame under its owner session. It is the
+// compatibility wrapper around AppendSessionGroup.
+func (s *Spool) AppendBatchSession(ctx context.Context, session string, sc cell.Scope, epoch uint64, segments [][]byte) (string, string, error) {
+	if session == "" {
+		return s.AppendBatch(ctx, sc, epoch, segments)
+	}
+	seqs, err := s.AppendSessionGroup(ctx, session, []SessionAppend{{Scope: sc, Epoch: epoch, Segments: segments}})
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(s.sessionDir(session), sessionLogName), strconv.FormatUint(seqs[0], 10), nil
+}
+
+// AppendSessionGroup persists ordered stream frames with one write and fsync.
+// Every frame is validated before the session log is changed.
+func (s *Spool) AppendSessionGroup(_ context.Context, session string, appends []SessionAppend) ([]uint64, error) {
+	if session == "" {
+		return nil, fmt.Errorf("spool: grouped session append requires a session")
+	}
+	if len(appends) == 0 {
+		return nil, fmt.Errorf("spool: empty session append group")
+	}
+	for _, append := range appends {
+		if len(append.Segments) == 0 {
+			return nil, fmt.Errorf("spool: empty session frame")
+		}
+		for _, seg := range append.Segments {
+			h, _, err := ltx.Decode(seg)
+			if err != nil {
+				return nil, fmt.Errorf("spool: invalid segment: %w", err)
+			}
+			if h.Epoch != append.Epoch {
+				return nil, fmt.Errorf("spool: epoch mismatch: segment %d, request %d", h.Epoch, append.Epoch)
+			}
+		}
+	}
+	dir := s.sessionDir(session)
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := os.Stat(filepath.Join(dir, sealName)); err == nil {
+		return nil, ErrSessionSealed
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := s.ensureSessionDir(dir); err != nil {
+		return nil, err
+	}
+	stateValue, _ := s.sessionLogs.LoadOrStore(dir, &sessionLog{})
+	state := stateValue.(*sessionLog)
+	path := filepath.Join(dir, sessionLogName)
+	if !state.loaded {
+		fragments, size, err := loadSession(dir)
+		if err != nil {
+			return nil, err
+		}
+		state.size = size
+		for i, fragment := range fragments {
+			want := uint64(i + 1)
+			if fragment.Sequence != want {
+				return nil, fmt.Errorf("spool: session sequence gap: got %d want %d", fragment.Sequence, want)
+			}
+			state.last = fragment.Sequence
+		}
+		state.loaded = true
+	}
+	seqs := make([]uint64, len(appends))
+	var records []byte
+	for i, item := range appends {
+		seq := state.last + uint64(i) + 1
+		seqs[i] = seq
+		records = append(records, encodeSessionRecord(seq, item.Scope.String(), item.Epoch, item.Segments)...)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err = f.Truncate(state.size); err == nil {
+		_, err = f.Seek(state.size, 0)
+	}
+	if err == nil {
+		_, err = f.Write(records)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := s.dirs.Load(dir); !ok {
+		if err := s.syncDir(dir); err != nil {
+			return nil, err
+		}
+		s.dirs.Store(dir, struct{}{})
+	}
+	state.last = seqs[len(seqs)-1]
+	state.size += int64(len(records))
+	return seqs, nil
+}
+
+func encodeSessionFragment(scope string, epoch uint64, segments [][]byte) []byte {
+	frames := EncodeFrames(segments)
+	b := make([]byte, 2+len(scope)+8+len(frames))
+	binary.BigEndian.PutUint16(b, uint16(len(scope)))
+	copy(b[2:], scope)
+	binary.BigEndian.PutUint64(b[2+len(scope):], epoch)
+	copy(b[2+len(scope)+8:], frames)
+	return b
+}
+
+func encodeSessionRecord(seq uint64, scope string, epoch uint64, segments [][]byte) []byte {
+	payload := encodeSessionFragment(scope, epoch, segments)
+	record := make([]byte, 4+8+len(payload))
+	binary.BigEndian.PutUint32(record, uint32(8+len(payload)))
+	binary.BigEndian.PutUint64(record[4:], seq)
+	copy(record[12:], payload)
+	return record
+}
+
+func decodeSessionFragment(seq uint64, b []byte) (SessionFragment, error) {
+	if len(b) < 10 {
+		return SessionFragment{}, fmt.Errorf("spool: truncated session fragment")
+	}
+	n := int(binary.BigEndian.Uint16(b))
+	if n+10 > len(b) {
+		return SessionFragment{}, fmt.Errorf("spool: invalid session fragment scope")
+	}
+	segments := DecodeFrames(b[n+10:])
+	if len(segments) == 0 || len(EncodeFrames(segments)) != len(b[n+10:]) {
+		return SessionFragment{}, fmt.Errorf("spool: invalid session fragment frames")
+	}
+	return SessionFragment{Sequence: seq, Scope: string(b[2 : 2+n]), Epoch: binary.BigEndian.Uint64(b[2+n:]), Segments: segments}, nil
+}
+
+// parseSessionLog decodes complete length-prefixed records and ignores a torn
+// final record. The sequence is stored inside each record so recovery can
+// detect gaps independently of directory entries.
+func parseSessionLog(path string) ([]SessionFragment, int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	var out []SessionFragment
+	var consumed int64
+	for len(data) >= 4 {
+		n := int(binary.BigEndian.Uint32(data))
+		if n < 8 || n > len(data)-4 {
+			break
+		}
+		seq := binary.BigEndian.Uint64(data[4:12])
+		fragment, err := decodeSessionFragment(seq, data[12:4+n])
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, fragment)
+		consumed += int64(4 + n)
+		data = data[4+n:]
+	}
+	return out, consumed, nil
+}
+
+func loadSession(dir string) ([]SessionFragment, int64, error) {
+	path := filepath.Join(dir, sessionLogName)
+	fragments, size, err := parseSessionLog(path)
+	if err != nil || size != 0 {
+		return fragments, size, err
+	}
+	legacy, err := readLegacySession(filepath.Join(dir, "fragments"))
+	if err != nil || len(legacy) == 0 {
+		return legacy, 0, err
+	}
+	tmp := path + ".migrate"
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, fragment := range legacy {
+		record := encodeSessionRecord(fragment.Sequence, fragment.Scope, fragment.Epoch, fragment.Segments)
+		if _, err = f.Write(record); err != nil {
+			break
+		}
+		size += int64(len(record))
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err == nil {
+		err = syncDir(dir)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, 0, err
+	}
+	return legacy, size, nil
+}
+
+func readLegacySession(dir string) ([]SessionFragment, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	out := make([]SessionFragment, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".frame") {
+			continue
+		}
+		seq, err := strconv.ParseUint(strings.TrimSuffix(entry.Name(), ".frame"), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		fragment, err := decodeSessionFragment(seq, data)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fragment)
+	}
+	return out, nil
+}
+
+// Seal atomically closes a follower session and returns its final sequence.
+func (s *Spool) Seal(session string) (uint64, error) {
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	dir := s.sessionDir(session)
+	if err := s.ensureSessionDir(dir); err != nil {
+		return 0, err
+	}
+	marker := filepath.Join(dir, sealName)
+	data, readErr := os.ReadFile(marker)
+	if readErr == nil {
+		if err := s.syncDir(dir); err != nil {
+			return 0, err
+		}
+		return strconv.ParseUint(string(data), 10, 64)
+	}
+	if !os.IsNotExist(readErr) {
+		return 0, readErr
+	}
+	stateValue, _ := s.sessionLogs.LoadOrStore(dir, &sessionLog{})
+	state := stateValue.(*sessionLog)
+	if !state.loaded {
+		fragments, size, err := loadSession(dir)
+		if err != nil {
+			return 0, err
+		}
+		state.size = size
+		for i, fragment := range fragments {
+			want := uint64(i + 1)
+			if fragment.Sequence != want {
+				return 0, fmt.Errorf("spool: session sequence gap: got %d want %d", fragment.Sequence, want)
+			}
+			state.last = fragment.Sequence
+		}
+		state.loaded = true
+	}
+	final := state.last
+	markerData := []byte(strconv.FormatUint(final, 10))
+	tmp := marker + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		if err = os.Remove(tmp); err == nil {
+			f, err = os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer func() {
+		_ = f.Close()
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.Write(markerData); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, marker)
+	}
+	if err == nil {
+		committed = true
+		err = s.syncDir(dir)
+	}
+	return final, err
+}
+
+// Tail reads every sealed session fragment after sequence. Recovery transports
+// should use TailPage to keep wire responses bounded.
+func (s *Spool) Tail(session string, after uint64) ([]SessionFragment, error) {
+	return s.TailPage(session, after, 0, 0)
+}
+
+// TailPage reads whole fragments from a sealed session in ascending order.
+// maxBytes counts raw segment bytes; the first matching fragment is always
+// returned so a single large but valid fragment can make progress.
+func (s *Spool) TailPage(session string, after uint64, maxFragments, maxBytes int) ([]SessionFragment, error) {
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	dir := s.sessionDir(session)
+	sealed, err := os.ReadFile(filepath.Join(dir, sealName))
+	if err != nil {
+		return nil, err
+	}
+	final, err := strconv.ParseUint(string(sealed), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	fragments, _, err := parseSessionLog(filepath.Join(dir, sessionLogName))
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(fragments)) != final {
+		return nil, fmt.Errorf("spool: reclaimed or incomplete session tail: got %d want %d", len(fragments), final)
+	}
+	out := make([]SessionFragment, 0)
+	bytes := 0
+	for _, fragment := range fragments {
+		if fragment.Sequence <= after {
+			continue
+		}
+		fragmentBytes := 0
+		for _, segment := range fragment.Segments {
+			fragmentBytes += len(segment)
+		}
+		if len(out) > 0 && (maxFragments > 0 && len(out) >= maxFragments || maxBytes > 0 && bytes+fragmentBytes > maxBytes) {
+			break
+		}
+		out = append(out, fragment)
+		bytes += fragmentBytes
+	}
+	return out, nil
+}
+
+// Reclaim removes a sealed session after the recovery coordinator has recorded
+// bucket coverage. Open sessions are never removed.
+func (s *Spool) Reclaim(session string) error {
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	dir := s.sessionDir(session)
+	if _, err := os.Stat(filepath.Join(dir, sealName)); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, sessionLogName)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "fragments")); err != nil {
+		return err
+	}
+	s.sessionLogs.Delete(dir)
+	return s.syncDir(dir)
+}
 func (s *Spool) logPath(sc cell.Scope, epoch uint64) string {
 	return filepath.Join(s.Dir, sc.Namespace, sc.Class, sc.ID, fmt.Sprintf("e%d", epoch), logName)
 }

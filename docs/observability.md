@@ -22,7 +22,7 @@
 | `cellhive_paged_prefetch_hits_total` | counter | 由 child 预取缓存直接命中、未再取数的 fault |
 | `cellhive_paged_hydrated_pages` / `_total_pages` | gauge | 已物化页数 / cut 总页数（后台补齐进度） |
 | `cellhive_upload_batches_total` / `_segments_total` / `_dropped_total` / `_deferred_total` / `_replayed_total` / `_spool` | counter/gauge | 上传批/spool（ADR-143） |
-| `cellhive_upload_spool_file_syncs_total` / `_dir_syncs_total` / `_sync_seconds_total` | counter | spool 断电安全 fsync 计数与耗时（目录 sync 记忆化，ADR-171） |
+| `cellhive_upload_spool_file_syncs_total` / `_dir_syncs_total` / `_sync_seconds_total` | counter | spool 断电安全 fsync 计数与耗时（每次 publish/remove 同步叶目录，父目录创建项按进程记忆化；ADR-171） |
 | `cellhive_binding_calls_total{ns,kind,outcome}` | counter | 绑定端点调用（`outcome=ok|denied|error`；`denied`=401/403/429）。`ns` 有上界：超 `CELLHIVE_METRICS_NS_MAX`（默认 1000）的记为 `other`，无 ns 的内部调用记为 `platform`（ADR-165/179） |
 | `cellhive_durability_proof_seconds{ns}` | histogram | 写路径 `Capture.Wait` 持久化证明耗时，按 ns 分（桶 5ms/25ms/100ms/500ms/1s/5s；ns 同上（ADR-165/179） |
 | `cellhive_owner_epoch_changes_total{role}` | counter | epoch（generation）递增次数（ADR-165） |
@@ -63,7 +63,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 
 ### 平台日志：内存 tail + 可选 OTLP 导出（ADR-172）
 
-- `workerd/platform/log-tail.js` 已删除。当前 pinned stock `workerd 2026-09-16` 的动态 `workerLoader` 会拒绝 `tails: [{name:"tenant-tail"}]`（要求 `Fetcher`），因此**租户 `console.*` 不会写入** `/v1/internal/logs`、ring 或 OTLP；不得通过 tenant env 恢复该传输。`/v1/internal/logs`、ring 与 `cellhive tail --worker` 仍可承载平台可信生产者写入的日志。未来升级 pin 后，必须先重跑真实动态-tail spike 并验证可信脚本身份，才可重新启用租户 tail。
+- `workerd/platform/log-tail.js` 是可信宿主导出的 `TenantTail extends WorkerEntrypoint`。user-runtime、内部 dispatch/service target 与 do-runtime facet 在 `workerLoader` 的 `WorkerCode.tails` 中传入宿主 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 生成的真实 `Fetcher`。Tail 捕获 `console.*` 与未捕获异常，批量写入 `/v1/internal/logs`；租户身份取不可伪造的 host-bound props，不取动态事件中为 null 的 `scriptName`。log-role token、cell URL 与 private transport 仅在宿主 env，tenant env 仍为零平台键。投递失败吞掉，不影响生产者请求。
 - **可选 OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
   - `all`：每条都导出（集中采集；量大）。
   - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续），tail 退出后 ≤60s 停止导出。
@@ -85,7 +85,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 ## 多租户与对外查询（推荐：日志/追踪 push，指标内部 pull）
 
 - **日志/追踪 push**：节点只向**内网 OTLP 端点**推送（`CELLHIVE_OTLP_ENDPOINT` / `_HEADERS`；`CELLHIVE_OTLP_LOGS=off|tail|all`），平台不对外暴露查询面——存储、保留、查询与**租户鉴权**都交给后端（OpenObserve/Tempo/Collector）。
-- **统一资源属性**：每条平台写入的记录带 `service.name`、`service.instance.id`（= 节点 id）、`cellhive.namespace`、`cellhive.worker`。当前不存在租户 `console.*` 到日志的链路，故不能承诺租户请求的 `trace_id`/`span_id` 日志关联。
+- **统一资源属性与关联**：平台记录带 `service.name`、`service.instance.id`（= 节点 id）；租户日志另带 `cellhive.namespace`、`cellhive.worker`。原生 Tail 已捕获租户 `console.*`/未捕获异常；请求事件带 `traceparent` 时，ring 与 OTLP log record 都保留对应 `trace_id`/`span_id`，可与平台 span 关联（无请求上下文的 alarm/定时事件可能为空）。
 - **租户隔离的唯一租户面在后端**：把每个 namespace 映射到后端的 **org/stream**（如 OpenObserve 的 `logs-<ns>`），给租户一个只读该范围的用户；**不要**只靠 `cellhive.namespace` 属性做行级隔离（多数后端不支持按任意属性过滤）。
 - **参考管线**：[`../deploy/observability/otel-collector.yaml`](../deploy/observability/otel-collector.yaml)（OTLP in → redact/route/tail-sample → OpenObserve）+ [`../deploy/observability/README.md`](../deploy/observability/README.md)；compose 用 `--profile observability`（OpenObserve 在 `tracing` profile）。
 - **可复现冒烟**：
@@ -105,4 +105,4 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - `cellhive_do_restore_seconds` p99（`rate(_sum)/rate(_count)`）持续升高；
 - `cellhive_list_calls_total` > 0（回归热路径禁 List）。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-23_

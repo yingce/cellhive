@@ -401,6 +401,27 @@ func (s *Supervisor) manifestKey() string {
 	return objectstore.PrefixSupervisor + prefix + "/manifest.json"
 }
 
+func (s *Supervisor) hostManifestKey(hostID string) string {
+	prefix := strings.ReplaceAll(s.ScopePrefix, "/", "_")
+	id := base64.RawURLEncoding.EncodeToString([]byte(hostID))
+	return objectstore.PrefixSupervisor + prefix + "/hosts/" + id + ".json"
+}
+
+func (s *Supervisor) putManifest(ctx context.Context, key string, doc manifestDoc) error {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	if s.blobUnchanged(key, data) {
+		return nil
+	}
+	if s.Blobs != nil {
+		return s.Blobs.PutBlob(ctx, key, data)
+	}
+	_, err = s.Bucket.Put(ctx, key, data)
+	return err
+}
+
 // writeManifest records the captured file paths (ADR-084).
 func (s *Supervisor) writeManifest(ctx context.Context, rels, rawRels []string) error {
 	if s.Blobs == nil && s.Bucket == nil {
@@ -415,18 +436,35 @@ func (s *Supervisor) writeManifest(ctx context.Context, rels, rawRels []string) 
 		Hosts:   s.hostSnapshot(),
 		Objects: s.buildObjects(rels),
 	}
-	data, err := json.Marshal(doc)
-	if err != nil {
-		return err
+	for hostID, host := range doc.Hosts {
+		if host.HostHash == "" {
+			continue
+		}
+		hostDoc := manifestDoc{Hosts: map[string]hostBinding{hostID: host}}
+		for _, rel := range doc.Files {
+			base := filepath.Base(filepath.FromSlash(rel))
+			if base == host.HostHash+".sqlite" || strings.HasPrefix(base, host.HostHash+".") {
+				hostDoc.Files = append(hostDoc.Files, rel)
+			}
+		}
+		for _, rel := range doc.Raw {
+			if strings.HasPrefix(filepath.Base(filepath.FromSlash(rel)), host.HostHash+".") {
+				hostDoc.Raw = append(hostDoc.Raw, rel)
+			}
+		}
+		for _, object := range doc.Objects {
+			if object.HostHash == host.HostHash {
+				hostDoc.Objects = append(hostDoc.Objects, object)
+			}
+		}
+		if names := doc.Facets[host.HostHash]; len(names) > 0 {
+			hostDoc.Facets = map[string][]string{host.HostHash: names}
+		}
+		if err := s.putManifest(ctx, s.hostManifestKey(hostID), hostDoc); err != nil {
+			return err
+		}
 	}
-	if s.blobUnchanged(s.manifestKey(), data) {
-		return nil
-	}
-	if s.Blobs != nil {
-		return s.Blobs.PutBlob(ctx, s.manifestKey(), data)
-	}
-	_, err = s.Bucket.Put(ctx, s.manifestKey(), data)
-	return err
+	return s.putManifest(ctx, s.manifestKey(), doc)
 }
 
 func (s *Supervisor) readManifest(ctx context.Context) ([]string, error) {
@@ -1008,6 +1046,26 @@ func (s *Supervisor) Handler() http.Handler {
 		}
 		s.Bind(req.HostID, req.HostHash, req.StorageID, req.Class)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /internal/do/restore-host", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			HostID string `json:"host_id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil || req.HostID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host_id is required"})
+			return
+		}
+		n, err := s.RestoreHost(r.Context(), s.Dir, req.HostID)
+		if errors.Is(err, bucket.ErrNotFound) || errors.Is(err, ErrHostNotCaptured) {
+			writeJSON(w, http.StatusOK, map[string]any{"restored": 0})
+			return
+		}
+		if err != nil {
+			s.logf("restore host %s failed after %d files: %v", req.HostID, n, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "restored": n})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"restored": n})
 	})
 	mux.HandleFunc("GET /status", status)
 	mux.HandleFunc("GET /internal/do/capture/status", status)

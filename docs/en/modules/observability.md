@@ -1,6 +1,6 @@
 # Module: Observability (Metrics / Logs / Tracing)
 
-Metrics, trusted-platform log tailing, and OpenTelemetry OTLP traces and logs export; tenant `console.*` is not captured on the current pin (ADR-185).
+Metrics, tenant/platform log tailing, and OpenTelemetry OTLP traces and logs export; tenant `console.*` is captured through host-bound native Tail Fetchers (ADR-185).
 
 > The authoritative configuration sources are [`../configuration.md`](../configuration.md) and the code; the table below is the relevant subset for this module.
 ## Key Interfaces
@@ -30,7 +30,7 @@ Metrics, trusted-platform log tailing, and OpenTelemetry OTLP traces and logs ex
 
 ## Source Locations
 
-`internal/{telemetry,logbuf,nodelog}`; `internal/server/*` (metrics/spans/logs endpoints); `workerd/platform/telemetry.js` (`log-tail.js` was removed by ADR-185).
+`internal/{telemetry,logbuf,nodelog}`; `internal/server/*` (metrics/spans/log endpoints); `workerd/platform/{telemetry.js,log-tail.js}`.
 
 ## Test Anchors
 

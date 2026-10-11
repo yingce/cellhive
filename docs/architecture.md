@@ -134,7 +134,7 @@ Worker → env.NS.get(id).fetch() → host adapter
 | A 类 cell owner | bucket owner 记录 + 本地缓存（点查，不 LIST） |
 | DO owner | owner 记录（指向 do-runtime 地址 + epoch），由 cell-agent 写 |
 | `user-runtime` 派发 | 逻辑服务名（mesh），任意健康副本 |
-| `do-runtime` 存活/候选 | **无专门心跳**：由复制活动隐式判活；接管候选走平台服务发现（见 ADR-025） |
+| `do-runtime` 候选 | `CELLHIVE_DO_RUNTIMES` 静态地址列表；按 shard 取模，拨号失败时轮转到下一地址 |
 
 ## 信任边界
 
@@ -142,7 +142,7 @@ Worker → env.NS.get(id).fetch() → host adapter
 - `user-runtime` 加载的租户 Worker：**仅公网出网**，看不到内部 Fetcher/凭据；平台 loader 先于租户模块执行，负责路由与清头。
 - `do-runtime` 仅私网；不持对象存储凭据。
 - `cell-agent`：`:7001` 内部数据/解析（Go↔Go 与 workerd bindings 共用）**仅私网**；`:8082` admin 经边缘，凭据 = 静态运维 token 或 OIDC/JWT（`cellhive_ns` 限定 ns，ADR-131）；数据面路径不可达控制面处理器。
-- **租户隔离**：租户 loaded worker 的 `globalOutbound` = **公网 only**（不含 RFC1918 / cell-agent）；internal token 只存在于 host adapter，**绝不进租户 env**；每 worker 配 `limits`（cpu/subrequests）与 V8 heap 上限。详见规划中的 `security.md`。
+- **租户隔离**：租户 loaded worker 的 `globalOutbound` = **公网 only**（不含 RFC1918 / cell-agent）；平台角色令牌与后端地址只存在于 host adapter，**绝不进租户 env**；binding 调用使用资源范围 token。worker CPU/subrequest 与 V8 heap per-worker 强制上限尚未实现，见 [`security.md`](./security.md)。
 - 租户密钥：控制面 cell 存信封密文，根密钥在 cell 之外；加载期在 `cell-agent` 内解密注入 `env`，明文只进 load envelope + workerd env。
 - 所有内部调用携带共享内部 token；对公网不暴露。
 
@@ -202,17 +202,17 @@ CellHive 的设计在多处参考了同领域开源项目。借的是**设计与
 
 ### 不绑定单一编排器
 
-核心发现**不依赖 K8s**：cell-agent peer 用 **bucket node lease**，owner 用 bucket 记录，DO 存活用复制活动。K8s 只提供下述能力的一种实现，均可替换：
+核心发现**不依赖 K8s**：cell-agent peer 用 **bucket node lease**，owner 用 bucket 记录；DO 的首次落点由 `CELLHIVE_DO_RUNTIMES` 配置的逻辑 Service/LB 提供，真正 owner 地址由 owner 记录携带。K8s 只提供下述能力的一种实现，均可替换：
 
 | 需要 | K8s | 非 K8s 替代 |
 |---|---|---|
 | 调用方 → cell-agent（逻辑服务名） | Service/ClusterIP | DNS 轮询、内部 LB（Envoy/HAProxy/nginx）、种子列表 + 客户端轮询 |
-| **do-runtime → cell-agent 入口**（WAL/claim/restore） | Service/ClusterIP | **种子列表 / DNS / 内部 LB / Consul**；或给 do-runtime **只读限定 `nodes/*` 的 scoped 凭据**；或 cell-agent 反向下发（do-runtime 不持桶凭据，不能自发现） |
-| do-runtime 接管候选 | Endpoints | Consul/Nomad catalog；或 **do-runtime 注册/心跳到 cell-agent**（回退）；或配置列表 |
+| **do-runtime → cell-agent 入口**（WAL/claim/restore） | Service/ClusterIP | 当前配置一个 DNS/LB 地址；do-runtime 不持桶凭据，不能从 bucket 自发现 |
+| do-runtime 任意入口 | `CELLHIVE_DO_RUNTIMES=do-runtime:8788`（ClusterIP Service 负载均衡，Endpoints 自动随 Pod 变化） | 稳定 DNS/LB；也可配置多个入口并由客户端轮转 |
+| DO owner 定向转发 | owner 记录中的 `POD_IP:8788`（`CELLHIVE_DO_ADVERTISE`） | 每实例可达的 advertise 地址 |
 | 入口 / TLS | Ingress | **Traefik 独立部署**（file provider）、HAProxy/nginx |
-| 稳定节点身份 / 地址 | StatefulSet / pod DNS | 静态主机名/IP + `advertise` 配置 |
 | 本地盘 | emptyDir / local PV | 本地 SSD / 临时盘 |
 
 因此可部署于：**Docker Compose、systemd 单元、Nomad、裸机/VM、任意编排器**。详见 [`decisions.md`](./decisions.md) ADR-011 / ADR-018 / ADR-025 / ADR-027。
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-25_

@@ -26,23 +26,24 @@ var ErrPagedCacheUnusable = errors.New("cellstore: partial paged cache without a
 
 func pagedMarkerPath(p string) string { return p + pagedMarkerSuffix }
 
-// readPagedMarker returns the cut recorded for a paged cache, if the marker
-// exists.
-func readPagedMarker(p string) (pageSize, commit int, ok bool) {
+// readPagedMarker reports marker existence separately from validity. A malformed
+// marker still identifies a sparse cache and must fail closed; treating it as
+// absent could open unmaterialized pages as zeros.
+func readPagedMarker(p string) (pageSize, commit int, exists, valid bool) {
 	data, err := os.ReadFile(pagedMarkerPath(p))
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	parts := strings.Fields(string(data))
 	if len(parts) != 2 {
-		return 0, 0, false
+		return 0, 0, true, false
 	}
 	ps, err1 := strconv.Atoi(parts[0])
 	cm, err2 := strconv.Atoi(parts[1])
 	if err1 != nil || err2 != nil || ps <= 0 || cm <= 0 {
-		return 0, 0, false
+		return 0, 0, true, false
 	}
-	return ps, cm, true
+	return ps, cm, true, true
 }
 
 func writePagedMarker(p string, pageSize, commit int) error {

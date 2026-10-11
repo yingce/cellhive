@@ -1,6 +1,6 @@
 # 模块：可观测性（指标 / 日志 / 追踪）
 
-指标、平台可信日志 tail、OpenTelemetry OTLP traces 与 logs 导出；当前 pin 不采集租户 `console.*`（ADR-185）。
+指标、租户/平台日志 tail、OpenTelemetry OTLP traces 与 logs 导出；租户 `console.*` 通过 host-bound 原生 Tail Fetcher 采集（ADR-185）。
 
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
 ## 关键接口
@@ -30,7 +30,7 @@
 
 ## 源码位置
 
-`internal/{telemetry,logbuf,nodelog}`；`internal/server/*`（metrics/spans/logs 端点）；`workerd/platform/telemetry.js`（`log-tail.js` 已由 ADR-185 删除）。
+`internal/{telemetry,logbuf,nodelog}`；`internal/server/*`（metrics/spans/logs 端点）；`workerd/platform/{telemetry.js,log-tail.js}`。
 
 ## 测试锚点
 

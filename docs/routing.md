@@ -54,7 +54,7 @@ Client → Traefik(TLS, host) → user-runtime :8081
 | admin/CLI | admin host（或独立域名） | cell-agent :8082 |
 
 - **内置域**：`deploy`/`promote` 时系统生成 `hosts(kind='builtin')` + `routes(host,'',ns,worker)`；`<base>` 通配符与证书由边缘/运维配置（ADR-131/132/133）；
-- **自定义域 = 登记即授权**（ADR-133）：`cellhive domain add <host> <ns> <worker>` 后**立即生效**，不做 DNS/CNAME/TXT 校验；host 归属冲突时已注册（verified）409、内置域空间拒绝认领；
+- **自定义域 = 登记即授权**（ADR-133）：`cellhive domain add <namespace> <host>` 后即可用 `route add` 绑定 worker，不做 DNS/CNAME/TXT 校验；host 已由其它 namespace 登记时返回 409，内置域空间拒绝认领；
 - **挂载前缀总是剥离**：route 含占位 `(host,path)` 时，worker 看到的路径 = 请求路径去掉挂载前缀；`path=''`/`'/'` 表示整 host；按**段边界**匹配（`/api` 不匹配 `/apix`，ADR-131）；
 - `workers_dev` → 命名空间路径（见 [`wrangler-compat.md`](./wrangler-compat.md)）；`preview_urls` 不支持。
 
@@ -69,4 +69,4 @@ Client → Traefik(TLS, host) → user-runtime :8081
 - 自定义域绑定：`cellhive domain add|ls|rm` → `POST/DELETE /v1/control/domain`、`GET /v1/control/domains`（ADR-131/133）；
 - 边缘：**不做下发**（ADR-132），由运维静态配置。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-25_

@@ -66,6 +66,8 @@
 - **理由**：D1/KV 的 Worker API 是异步的，可走 cell-agent；只有 DO 的同步 SQL 需要 workerd 进程内。
 - **代价**：无。
 
+> **修订（ADR-140）**：单 cell-agent 不能提供 follower ensemble，但默认 `BucketWait=true` 可用权威桶证明 A 类写；DO 使用 `do-runtime-gated` 时也可由 bucket 证明通过输出门。单节点是高延迟/无 HA 的开发与验证形态，不再是“DO 不可用”。
+
 ## ADR-011 部署：同集群；最小 2 个 cell-agent；S3 不在 ack 路径 ✅
 
 - **决策**：各服务同一集群的不同工作负载；`cell-agent` 固定集群、**≥2 节点**（稳定身份）；`do-runtime` 弹性、**本地盘可临时**（可用 Deployment）；`user-runtime` Deployment + HPA；稳态写确认走 fleet ensemble（follower fsync），对象存储上传异步。
@@ -149,6 +151,8 @@
 - **决策**：owner 记录指向持有该 cell 工作 SQLite 的节点：A 类 = `cell-agent` 节点；B 类（DO）= `do-runtime` 节点。DO 的 owner 记录由 `cell-agent` 协调写入（含执行地址 + epoch）。
 - **理由**："谁执行"（do-runtime）与"谁持久化"（cell-agent）分离，但归属唯一。
 - **代价**：两套 owner 角色，协议需区分。
+
+> **实现说明（2026-09-25）**：`CELLHIVE_DO_RUNTIMES` 表示一个或多个任意入口，不是 owner 名单。K8s 清单将其设为 ClusterIP Service `do-runtime:8788`，Service 在 ready Pod 间负载均衡且 Endpoints 自动随 Pod 扩缩；Pod 以 `CELLHIVE_DO_ADVERTISE=$(POD_IP):8788` 写入 owner 记录。请求先落任意 Pod，若已有 owner 则按 owner record 点对点转发。因此 K8s 部署不需要额外的 do-runtime 注册/心跳或 catalog adapter；owner lease 续约仍决定已激活对象能否被接管。
 
 ## ADR-025 do-runtime 无心跳；存活靠复制活动，候选靠平台发现 ✅
 
@@ -283,7 +287,7 @@
 
 ## ADR-042 fleet peer 使用 HTTP 101 持久二进制流与有序 lane ✅
 
-- **决策**：实现 `POST /v1/peer/stream`，鉴权后 HTTP **101 Upgrade** 为自定义双向二进制流（不是 SSE）；owner 发送 scope/epoch + framed segments，follower `AppendBatch` fsync 后回 1-byte ack。每 follower 建 **4 条按 scope 哈希的 lane**，同 `(scope,epoch)` 固定 lane 保序，每 lane 最多 **4 批在途**；流建立/读写失败自动回退 ADR-041 的 `/v1/peer/append_batch`。
+- **决策**：实现 `POST /v1/peer/stream`，鉴权后 HTTP **101 Upgrade** 为自定义双向二进制流（不是 SSE）；stream 与 node-log 均使用 `v2` session recovery，session-bound HTTP append 还必须返回 `X-Cellhive-Session-Protocol: v2` 证明。升级前空版本/`v1` node-log 继续走 legacy `Held()`，旧 follower 拒绝 v2 或不返回证明时退化 bucket，禁止 legacy append 构成不可恢复的 fleet ACK。follower 用显式 1 MiB reader 只 drain 已完整缓冲的连续帧（≤64 / 1 MiB），一次写 session log + fsync 后逐帧 ACK；每 follower 4 条 scope-hashed lane、每 lane最多 4 批在途。seal 后 tail 按 ≤256 fragments / 48 MiB 原始数据分页，recovery 用 `after` 连续推进到 `final`。
 - **配套**：`Spool` 全局锁改为 per-directory mutex，不同 `(scope,epoch)` 可并行，同一 log 仍串行；`realbench` txid 改全局原子递增，消除并发 worker 重用 txid 的假冲突。
 - **理由**：采用 signed peer HTTP POST + 101 升级为自定义二进制流、每 lane 多批在途；避免每批 HTTP header 往返并改善多 cell 尾延迟。
 - **结果**：同等总 c=1024/n=102,400：单 scope **45.0k→47.1k RPS（+4.5%）**，p99 65.0→62.7ms；8 scope 吞吐 44.6k，但 p99 降到 **48–52ms**。持久流主要改善 tail，数量级吞吐收益来自 ADR-040/041 的两级 group commit。
@@ -1020,7 +1024,7 @@
 - **cell-agent API**：租户 `POST /v1/workflow/create|event`、`GET /v1/workflow/get`（scopeAuth `workflow`）；内部 `GET/PUT /v1/internal/workflow/step`、`POST /v1/internal/workflow/sleep|finish`。**回调经 `PLATFORM` service binding**（不放宽租户 `globalOutbound`）。
 - **控制面**：`cellhive workflow create <ns> <name>`（kind=workflow 资源）；`wranglercompat` 要求 workflow 绑定带 `class_name`（否则 `invalid_binding`）；`Projection.WorkflowTargets()` 解析 worker+class+bundle。
 - **验证**：`internal/workflow` 单测；`internal/server TestWorkflowEndpoints`；`internal/dispatch TestWorkflowDispatcherRunAndSleepTimer`；**真实 workerd `TestUserRuntimeRunsWorkflow`**（`step.do` 记忆化 → 输出 `A:p:B`；`sleep` 首跑 parked → 重派发后 complete）；`wranglercompat TestWorkflowBindingRequiresClassName`。
-- **Partial 边界**：`pause/resume/terminate/restart`、实例列举 **✅ 已实现**（`internal/workflow` status 迁移 + `Restart` 清记忆化步骤；cell-agent `/v1/workflow/{pause,resume,terminate,restart,list}`；facade `env.WF.get(id)` 返回 CF 形态实例对象 `status()/pause()/resume()/terminate()/restart()/sendEvent()`，另 `list()`）。验证：`TestLifecycleAndRestart`、`TestWorkflowEndpoints`（lifecycle/list/restart 清步骤）、`TestUserRuntimeWorkflowLifecycleFacade`（真实 workerd `wf:queued/paused`）。**`retry`/backoff ✅**：`step.do(name, {retries:{limit,delay,backoff}}, fn)`——`limit` 次重试，`delay`(秒)+`backoff`(constant/linear/exponential)，超过后抛出；验证 `TestUserRuntimeWorkflowStepRetries`（失败两次后第三次成功 → `ok:3`）。
+- **Partial 边界**：`pause/resume/terminate/restart`、实例列举 **✅ 已实现**（`internal/workflow` status 迁移；`Restart` 清该实例的 steps/attempts/waits/events，再清 output/error/run lease 并重新排队，避免上一 execution generation 的事件或等待泄漏；cell-agent `/v1/workflow/{pause,resume,terminate,restart,list}`；facade `env.WF.get(id)` 返回 CF 形态实例对象 `status()/pause()/resume()/terminate()/restart()/sendEvent()`，另 `list()`）。验证：`TestLifecycleAndRestart`、`TestWorkflowEndpoints`、`TestUserRuntimeWorkflowLifecycleFacade`。
 - **`waitForEvent` ✅**：`step.waitForEvent(name,{type,timeout})`——`events` 增加 `consumed` 列 + `waits` 表；内部 `/v1/internal/workflow/event/consume` 与 `/wait`(GET/POST/DELETE)；事件到达经 `sendEvent`→重派发恢复，超时经 sleep timer 恢复并返回 `undefined`；验证 `TestUserRuntimeWorkflowWaitForEvent`（park→投递事件→`got:E`）。
 - **生产级补齐（本次）**：
   - **run lease/generation（并发安全）**：实例增 `run_token/lease_until_ms/generation`；派发前 `ClaimRun`（有活租约/已暂停/终态 → 跳过）；所有 run 回调带 `run` 令牌并被 **fence**（陈旧 409）+ 顺带续租；parked/finish/pause/terminate 释放租约。验证 `TestRunLeaseAndFencing`、`TestWorkflowRunLeasePreventsDoubleDispatch`。
@@ -2264,17 +2268,14 @@
 - **验证**：`internal/server TestOrderedDispatcherDoSweepsIdleScope`（另一 scope 的 `Do` 触发淘汰，缺口请求收到 evicted）；`internal/dosupervisor TestSyncAllPipelinesAcrossFiles`（6 文件 / 4 并发：max in-flight ≥2、总耗时 < 串行 `files×delay`、失败仍报错）；两包 `-race` 通过。
 - **文档**：`docs/decisions.md`（ADR-047/048 修订）、`docs/testing.md`、`docs/release-notes.md`。
 
-## ADR-171 upload spool 断电安全（原子写 + 目录 fsync 记忆化）✅实现
+## ADR-171 upload spool 断电安全（原子写 + 每次叶目录 fsync）✅实现
 
 - **背景**：`known-issues` 记着异步上传 spool（ADR-143）的残余——`Spool.Append` 只有 `WriteFile(tmp)+Rename`，**没有 fsync**，进程崩溃安全但**断电可能丢**。
-- **决策**：`Spool.Append` 改为
-  1. `OpenFile(tmp)` → `Write` → **`File.Sync()`（fsync 数据）** → `Close`；
-  2. `Rename(tmp, final)`；
-  3. **目录 fsync**：叶子目录（让 rename 的名字持久）+ 其父目录（让 spool 目录自身的目录项持久）各一次，且**按进程记忆化**（目录项只在创建时变化，故每进程只 sync 一次；失败则不置记忆位，下次 append 重试）。任一步失败返回错误（fail-closed），调用方计 `spool_errors` 且不把该 entry 当作 durable；若文件仍在，后续 replay 幂等。
-  4. **遥测**：`Spool.Stats()` 暴露 `file_syncs/dir_syncs/sync_us/rename_us`，经 `Batcher.Stats()` 出 `/metrics`：`cellhive_upload_spool_file_syncs_total`、`_dir_syncs_total`、`_sync_seconds_total`。
-- **理由**："原子 tmp→fsync→rename + 目录链 fsync + `synced_namespaces` 记忆化 + write/fsync/rename/dir 遥测"把每次 persist 的 fsync 从 ~9 次降到稳定 1 次。
-- **代价/边界**：异步上传路径每次 append 多一次文件 fsync（不在写 ack 热路径）；目录 fsync 只在首次；`Remove` 不 fsync（删除未持久只会导致 replay，幂等安全）。
-- **验证**：`internal/upload TestSpoolDurableAppendSyncs`（每次 append `file_syncs` +1、`dir_syncs` 记忆化不增长、`Load` 仍可读）、`TestBatcherStatsIncludeSpoolDurability`（`/metrics` 经 `Batcher.Stats()` 暴露）。
+- **决策**：`Spool.Append` 使用 `OpenFile(tmp)` → `Write` → `File.Sync()` → `Close` → `Rename(tmp, final)`；每次 publish 后 fsync spool 叶目录，spool 父目录只在本进程首次写时 fsync。`Spool.Remove` 在 unlink 后也 fsync 叶目录，确保完成记录不会因断电复活。任一步失败均返回错误（fail-closed）；残留文件由幂等 replay 安全处理。
+- **遥测**：`Spool.Stats()` 暴露 `file_syncs/dir_syncs/sync_us/rename_us`，经 `Batcher.Stats()` 出 `/metrics`：`cellhive_upload_spool_file_syncs_total`、`_dir_syncs_total`、`_sync_seconds_total`。
+- **理由**：rename/unlink 每次都会修改叶目录；只 fsync 第一次不能保证后续目录项断电持久。父目录只在 spool 目录创建时变化，可记忆化。
+- **代价/边界**：异步上传路径每次 append 增加一次文件 fsync + 一次叶目录 fsync，成功 remove 再一次叶目录 fsync；不在写 ack 热路径。
+- **验证**：`internal/upload TestSpoolDurableAppendSyncs`、`TestSpoolSyncsDirectoryForEveryMutation`、`TestBatcherStatsIncludeSpoolDurability`。
 - **文档**：`docs/known-issues.md`、`docs/observability.md`、`docs/testing.md`、`docs/release-notes.md`。
 
 ## ADR-172 租户日志可选 OTLP 导出（默认关，tail 订阅才导）✅实现
@@ -2395,6 +2396,38 @@
 - **配置**：`oss://` 使用 `OSS_ENDPOINT`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`；`cos://` 使用 `COS_ENDPOINT`、`COS_SECRET_ID`、`COS_SECRET_KEY`。若未提供 provider 专用凭据变量，则兼容读取现有 AWS 变量；endpoint 必须是 HTTPS，OSS 可省略 scheme。供应商普通对象的 S3 适配器关闭 SDK 可选 trailer checksum（测试 OSS 桶不接受该编码）。
 - **验证状态**：共享条件对象契约覆盖创建竞争、陈旧 CAS、陈旧删除、tombstone 后重建、损坏尾部拒绝；OSS 北京实桶与 COS 香港 `cell-1376795072` 实桶的独立键并发 claim、CAS/删除及完整 `bucket.Diagnose` 通过。2026-09-22 又以两套独立 `cell-agent` 进程、共享各自云桶、`CELLHIVE_DURABILITY=bucket`、6s 租约执行真实进程级 `SIGKILL`/新本地目录接管：COS 192 并发 5000 次写全 ACK，最终冷恢复核对 6488 条已 ACK 键，missing=0/wrong=0，SQLite `integrity_check=ok`；OSS 192 并发 5000 次写全 ACK，最终冷恢复核对 6470 条已 ACK 键，missing=0/wrong=0，`integrity_check=ok`。两桶还在 24 并发流中取得 ≥30 个 ACK 后杀死 owner，接管后所有已 ACK 值精确匹配；断连请求为结果未知，不计入 ACK。原 COS 香港 `vwork-hk-1376795072` 桶追加探针失败（405）；供应商支持须逐桶验证。此结果是**同宿主多进程 + 真实云桶**，不是跨主机网络分区或长期混沌证明。
 
+## ADR-190 JS OTLP span 身份与父子链完整性（2026-09-23）✅实现
+
+- **背景**：workerd 平台 JS 已生成 `trace_id`/`span_id`/`parent_span_id`，但 cell-agent 的 `telemetry.Ingest` 把 JS `span_id` 当 parent 交给 SDK，SDK 又随机生成新 span ID；`ParentSpanID` 字段完全未使用。结果是日志携带的 JS span ID 在 OTLP 中找不到对应 span，`do.invoke`/`do.gate` 也只是同 trace 的兄弟，文档声称的父子链不成立。ratio=0 时，无 parent 的已采样 JS root span还会被二次采样丢弃。
+- **决策**：OTel provider 使用仅对内部上报 context 生效的 ID generator/sampler：root 与 child span 都保留 JS 报告的 trace/span ID，child 使用报告的 parent ID，已由入口 sampled 位采集的 JS span不再被二次丢弃；普通 Go span仍用加密随机 ID 与既有 `ParentBased(TraceIDRatioBased)`。workerd telemetry 支持显式 parent span；`do.gate` 成为 `do.invoke` 子 span，并把自己的 span ID 写入发往 supervisor 的 `traceparent`。
+- **验证**：`internal/telemetry TestExportsSpanAndRemoteSpan` 解码真实 OTLP protobuf，断言 root/child 的 trace/span/parent ID；`TestSamplerHonorsRemoteFlag` 覆盖 ratio=0 的已采样 JS span；`workerd/platform/telemetry.test.mjs` 覆盖嵌套 span/下游 traceparent；`internal/doruntime TestDoRuntimeSpanExport` 用真 workerd 断言 `caller → do.invoke → do.gate → supervisor` 精确链。
+
+## ADR-191 KV 自然并发读取合批（2026-09-24）✅实现
+
+- **背景**：真实 stock workerd 压测显示 `env.KV.get()` 的主要额外成本是每次读取各自产生一次跨 workerLoader JSRPC 与 cell-agent HTTP subrequest；为每个 Fetcher 增加连接不能降低该成本。平台 `WorkerEntrypoint` 还可能按每次 JSRPC 调用重新实例化，因此平台 stub 内的实例缓存看不到租户 `Promise.all()` 的兄弟调用。
+- **决策**：在 loaded tenant isolate 中为每个 KV binding 包装 `makeKVFromStub`，把同一 microtask 自然并发的 `get()`/`getWithMetadata()` 收集后调用一次平台 stub `getBatch(keys)`；不设置 batching timer，单次读取只等待 microtask checkpoint。每个 HTTP batch 最多 256 key、body 最多 256 KiB（容纳 256 个 512-byte 合法最大 key），超出时顺序分块。cell-agent 的 `POST /v1/kv/get-batch` 只执行一次 scope 鉴权/owner 路由，并在一个 SQLite connection/read transaction 上按输入顺序点查；结果保留重复 key、缺失 null、metadata 与 `text/json/arrayBuffer` 语义。批处理状态只存在于单 binding facade，不跨 tenant invocation 或 binding 混合。reader-before-writer 滚动升级期间，旧 cell-agent 对新端点返回 404 时，平台自动回退原有逐键 RPC；新 cell-agent 不返回业务 404，故该哨兵无歧义。
+- **验证**：server 契约覆盖顺序、重复、缺失、metadata 与 256 个最大长度 key；真实 workerd 的 tenant `Promise.all([KV.get(a), KV.get(missing), KV.get(b)])` 断言响应语义且后端仅收到一次 `/v1/kv/get-batch`；user-runtime/do-runtime 既有单键 mock 套件覆盖旧 cell-agent 404 fallback。
+
+## ADR-192 tenant native Tail 捕获可按 runtime 关闭（2026-09-24）✅实现
+
+- **背景**：默认 native Tail 为每次动态 Worker/DO 执行采集 `console.*` 与未捕获异常，但即使租户不输出日志，workerd 仍需建立并派发 Tail 事件。真实 workerd 的无 binding ping A/B 显示这是剩余热路径中的可观开销；同时不能靠跳过 Request/header/trace 重建来换吞吐，因为那会破坏保留头清理与 trace 传播。
+- **决策**：新增严格枚举 `CELLHIVE_TENANT_LOG_CAPTURE=on|off`，默认 `on` 保持兼容。`off` 时 user-runtime 的 fetch、queue、scheduled、service、workflow 动态 Worker 与 do-runtime facet 都不设置 `tails`；请求、binding、预算、trace/header 隔离和错误响应语义不变。该开关是 runtime 级运营策略，不进入 tenant env；非法值启动失败。Compose、Kubernetes 与 Helm 显式提供该配置。
+- **代价**：`off` 的 runtime 不再把租户 console 与未捕获异常送入 `/v1/internal/logs`/OTLP；应用必须依赖显式日志出口或接受该可观测性缺口。平台自身 Go/workerd 日志与 trace 不受影响。
+- **验证**：真 workerd 行为测试证明默认模式上传结构化 console/异常，关闭模式请求仍成功且日志上传数为 0；渲染测试覆盖 user-runtime 两个入口和 do-runtime。c=64、200 次预热、8s 的三轮 ping A/B：`on` 为 4,311/4,625/4,549 RPS，`off` 为 4,728/5,244/4,816 RPS（约 +10%–20%）。
+
+## ADR-193 无 binding 公共 fetch 直载租户入口（2026-09-25）✅实现
+
+- **背景**：user-runtime 对所有公共 fetch 都加载 `queue-wrapper.js`，再调用 `CellHiveHost.fetch(Request)` 转发给租户。真实 stock workerd A/B 表明路由缓存不是主要成本，剩余主成本是 workerLoader 跨 isolate RPC；但无 binding Worker 不需要平台 stub/env patch，额外 wrapper 只增加一次租户 isolate 内转发，并使默认导出 `class extends WorkerEntrypoint` 被当作普通对象后错误返回 501。
+- **决策**：执行视图的 binding spec 为空时，公共 fetch 以独立 `fetch/` loader id 直接加载租户 bundle 为 main module，env 只含用户 vars，保留 public-only `globalOutbound`、Tail 开关、WorkerCode/env 预算、入口平台头清理、trace 注入和 fetch-shaped RPC。存在任意 binding 时继续加载 `queue-wrapper.js`/`CellHiveHost`；queue、scheduled、workflow、service RPC 与 DO WebSocket 路径不变。不同 loader id 防止同一版本的 direct 与 wrapped WorkerCode 冲突。
+- **验证**：真实 workerd 回归把默认导出改为 `WorkerEntrypoint`，旧实现稳定返回 501，直载后通过并保留 vars、路径、平台头清理和 trace；有 binding 的 D1/R2/Queue 与公开 DO WebSocket 套件通过。相同 2C2G/c=64/15s×3 基线为 4,729/4,977/5,093 RPS；优化后 8 轮总体中位约 5,104 RPS（基线中位 4,977，约 +2.5%；周期性尾延迟/失败仍存在，未归因于本改动）。该优化不消除 workerLoader RPC，数量级边界不变。
+
+## ADR-194 gated DO 多 Pod 接管与滚动更新闭环（2026-09-25）✅实现
+
+- **背景**：部署文档把 Kubernetes DO runtime 描述为可水平扩展，但代码仍有四个单 supervisor 假设：所有 Pod 写同一个全局 manifest，后写者会覆盖别的 host 索引；新 Pod 认领 shard 后未在首次租户派发前恢复确定性 host actor；supervisor 收到 SIGTERM 时先取消 workerd、后尝试 drain/capture；gated Deployment 使用 `Recreate`，无法保证滚动期间可用。文档与真实生产路径不一致。
+- **决策**：每个确定性 `host_id` 写独立、可并存的 manifest；保留旧全局 manifest 仅作迁移读取回退。do-runtime 赢得新 shard claim 后，必须先调用同 Pod supervisor 的 `/internal/do/restore-host`，恢复该 host 的 actor/facet/sidecar 后才派发；未曾捕获是空恢复，真实恢复错误必须 release owner 并 fail closed。supervisor 优雅退出顺序固定为 drain workerd（停止新请求、等待 in-flight、释放租约并完成最终捕获）后再取消子进程。
+- **部署契约**：生产 `rpo0` 使用两个 gated Pod、Pod IP advertise、ClusterIP 任意首跳、`RollingUpdate(maxUnavailable=1,maxSurge=1)` 与 `minAvailable:1` PDB；无输出门 runtime 强制单副本并保持 `Recreate`，不承诺 Pod 替换后恢复。Helm 与 Kustomize 使用同一策略。
+- **验证边界**：`scripts/k3d-runtime-e2e.sh` 是真实 Kubernetes 多 Pod 验收入口；2026-09-25 实跑通过：任意首跳、owner Pod 删除后的 per-host 冷恢复（`1→2`），以及 RollingUpdate 期间 120 个逻辑写后精确计数 `123`（无丢写/重复提交）。ownership 切换窗口存在短暂 5xx，客户端重试后以最终计数验证逻辑语义，故不宣称每个物理 HTTP 尝试零错误。`CELLHIVE_K3D_AGENTS` 可在具备健康 worker-node 环境时增加 k3s agent；单节点 k3d 只证明多 Pod/进程接管，不替代真实跨主机 RTT、云对象存储或 NetworkPolicy/CNI 验证。
+
 ---
 
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
@@ -2408,7 +2441,7 @@
   5. 最终 WorkerCode 上限 **64 MiB**；workerLoader env 上游 1 MiB，预留 8 KiB，CellHive 上限 **1016 KiB**。控制面在 active pointer 切换前拒绝超限，运行时在 `workerLoader.get()` 前复核；不截断、不删字段、不暴露源码或 secret。
 - **升级/回滚**：reader-before-writer；新 pin 先证明能读取旧 artifact/DO working copy，再开放新 date/flag。manifest 与二进制成对回滚；若存在旧 pin 无法加载的 active version，则拒绝回滚。schema、cell/owner/epoch/RPO=0 协议不变。
 - **当前实现证据（2026-09-22）**：stock workerd `1.20260916.1`、esbuild `0.28.2`、Miniflare `5.20260916.0-alpha` 已精确固定；host binding 已改为 `fromEnvironment` 且子进程使用显式环境；compatibility manifest 由上游 revision `adda2635656d09e541b0feeea796da9d2a8bc10e` 生成；控制面和所有动态 `workerLoader.get()` 路径已执行 64 MiB / 1016 KiB 双层预算。Go/JS 单测与真实 user-runtime/do-runtime workerd 套件通过；`scripts/runtime-baseline-e2e.sh` 又验证镜像内 TypeScript 打包、用户自定义 `CELL_URL`/`CELL_TOKEN`、host canary 隔离、真实 fetch/KV、公开 WebSocket 101/双向消息、gated DO 桶 LTX，以及同一 DO 在 runtime 重启前后的持久计数 `HTTP 1→WS 2→重启→WS 3→HTTP 4`，并覆盖 capnp/WorkerCode 扫描、精确预算边界与 288 个 compatibility flag。最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 为 **GATE: PASS 14/14**，无实际跳过项。
-- **阶段边界**：本 ADR 只覆盖秘密隔离、固定工具链、compatibility authority 与 code/env 预算。冷加载治理、invocation-scoped context、isolate 淘汰、DO mid-flight fence/restart generation、原生 Tail/OTLP 和多模块 artifact 后续分阶段实施。Tenant Tail 当前仍关闭，不以 env transport 回退。
+- **阶段边界**：本 ADR 只验收秘密隔离、固定工具链、compatibility authority 与 code/env 预算；当时 invocation-scoped context、主动 isolate 淘汰、原生 Tail/OTLP 与多模块 artifact 不在其验收范围。后续 ADR-185 已接入可信宿主原生 Tail，ADR-190 已修正 JS OTLP span 身份/父子链；这些后续完成项不回写为 ADR-186 的原始验收内容。
 - **验收**：单元测试先红后绿；真实 workerd 覆盖 `fromEnvironment`、env/KV/D1/R2/Queue/Workflow/Service/DO；真实 Docker Compose 覆盖镜像内 esbuild 打包、用户同名 env、KV、gated DO、重启持久性和秘密扫描；最终 `REQUIRE_ALL=1 bash scripts/ci.sh` 无相关隐式 SKIP。
 - **详细设计/计划**：`docs/superpowers/specs/2026-09-22-workerd-runtime-baseline-security-design.md`、`docs/superpowers/plans/2026-09-22-workerd-runtime-baseline-security.md`。
 
@@ -2430,8 +2463,8 @@
 - **决策**：
   1. **零平台键、全部名称归用户**：tenant Worker 与 DO facet 的 `env` 只包含用户声明的 version `vars`、用户命名的 binding stub，以及未来以同一规则注入的 secrets；不注入任何平台系统键，不保留任何名称或前缀。`CH_*`、`CELL_*`、`__cellhive*`、`PLATFORM`、`LOG_*`、`WF_*` 等任意合法名称均属用户。控制面删除 `ReservedEnvPrefixes`、`ReservedEnvNames`、`ReservedEnvName`，deploy 的 var/binding 与 secret put 不再返回 `reserved_env_name`；保留名称格式、重复用户 binding、配置 schema、资源登记和不支持 binding type 等无关校验。
   2. **Workflow 以 capability 参数传递**：可信 user-runtime internal host 创建 `WorkflowBridgeTarget extends RpcTarget`，由该 target 留存宿主 env，并固定 `namespace`、`worker`、`workflow`、`id`、`run`；再经原生 JSRPC 作为 `CellHiveWorkflow.handleRun()` 参数传给 wrapper。不能用 `ctx.exports.X({props})` 生成的 `ServiceStub`：pinned stock workerd `1.20260916.1` 会在跨动态 `workerLoader` 边界时拒绝序列化（需要 experimental）。wrapper 用闭包构造交给租户 `run(event, step)` 的 Cloudflare 形状 `step`；capability 不进入 tenant `env`，不直接交给租户 workflow 类，固定 op 表继续拒绝原始路径、身份覆盖和跨租户参数。
-  3. **日志优先 stock workerd Tail Worker**：已在 pinned workerd `1.20260916.1` 重跑真实 spike，动态 loaded Worker 的 service designator 仍被拒绝；因此继续采用第 4 条回退。未来 pin 若通过，同样只能由可信 tail service 持平台日志凭据和 private transport，并以不可伪造的 loaded Worker 标识映射回 namespace/worker/version。日志仍 best-effort，不影响租户请求。
-  4. **无 Tail 能力时宁可无平台日志**：若动态 Worker 不支持 Tail Worker，删除平台日志捕获并在兼容矩阵明确标记暂不支持；不得恢复向 tenant `env` 注入 log sink、token、URL 或其他系统键。Workflow JSRPC capability 方案不受此回退影响。
+  3. **日志使用 stock workerd 原生 Tail Fetcher**：pinned `workerd 1.20260916.1` 的 `WorkerCode.tails` 要求 `Fetcher[]`，不是 capnp service designator；旧 spike 传 `[{name:"tenant-tail"}]` 才触发类型错误。可信 user-runtime/do-runtime host 现在用 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 创建 Fetcher 并挂到动态 Worker。Tail entrypoint 独占 log-role token 与 private transport，将 `console.*`/未捕获异常批量写入 `/v1/internal/logs`；身份只取宿主绑定的 `ctx.props`，不信任事件 `scriptName`（动态 Worker 为 null）。日志 best-effort，不影响租户请求。
+  4. **租户 env 仍为零平台键**：Tail Fetcher 是 `WorkerCode` 的宿主 capability，不进入 tenant `env`；不得向 tenant 注入 log sink、token、URL 或 transport。若未来 pin 改变 `tails`/transfer 语义，真实动态-tail 测试必须 fail closed。
 - **边界**：可信宿主 Worker 自己的 env 可以持有 `CELL_URL`、角色凭据、private outbound 和 loader；它们不得复制、枚举或暴露给 loaded Worker。租户 global outbound 仍为 public-only；不修改/fork workerd，RPO=0 与既有 binding 权限边界不变。
 - **取代范围**：仅取代 ADR-184 中「保留命名空间（防用户命名冲突）+ 平台键压到 2 个」这项，以及其中 tenant env 保留 `CH_PLATFORM`、部署/secret 拒绝保留名的结论；ADR-184 的平台侧 stub、DO fetch 形 RPC、workerLoader 与固定-op 安全边界继续有效，除与本 ADR 冲突者外不变。
 
@@ -2443,7 +2476,7 @@
 - **决策**：
   1. **平台侧 stub**：`bindings.js` 新增 `DurableObjectNamespace`（`get(id)` 返回 `DOStubTarget extends RpcTarget`，显式 `fetch`/`rpc` 方法）、`WorkflowBinding`（create/get/sendEvent/list；get 返回 `WorkflowInstanceTarget`）、`Vectorize`、`WorkflowSteps`（`call(path,method,body)`）、`LogSink`（`send(ns,worker,batch)`）。`bindingStub` 增加 do/workflow/vectorize case，`CH_FACADE_SPEC` 因此恒为空。
   2. **租户 env 只剩 stub 与名字元数据**：`PLATFORM`/`CELL_URL` 不再注入；DO 只给绑定名元数据（模块作用域常量，无 token/spec），WS 的 owner 查询与 **shard ticket** 由平台 worker 内部完成（do-runtime 的 connect 只认 ticket，不需要 scope token）；workflow 身份（ns/workflow/id/run）与日志身份（ns/worker）绑进 `CH_PLATFORM`（`PlatformBridge`）的 **props**，不再以 `WF_*`/`LOG_NS`/`LOG_WORKER` 出现在 env。
-  3. **DO WebSocket 全链路走 `fetch` 形 RPC（无租户传输）**：workerd 只对「方法名 `fetch` + 单个 Request 参数」保留 fetch 语义（流式 + 101/WebSocket 回传），其它名字或把 id 放成前置参数都会退化为普通 RPC、WS 无法序列化（pinned workerd 实测：`Could not serialize object of type "WebSocket"`；同一 101 从 `RpcTarget` 方法返回同样失败）。因此两个 workerLoader 边界都必须保持此形状：公开 loader 调 `CellHiveHost.fetch(request)`，租户 DO facade 调平台侧 `DurableObjectNamespace.fetch(request)`。DO id 经共享常量 `DO_ID_HEADER`（`x-cellhive-do-id`）随 Request 传递，平台侧读完即从请求上删除；租户侧 `makeDOFromStub` 只在 CF 形状的 `get(id).fetch(...)` 上补该 header。owner 查询、scoped token、shard ticket 全在平台 worker 内完成，**租户 env 无需任何 WS 传输**。`TestTenantDoWebSocketPassesThroughPublicLoader` 覆盖外部客户端→`:8081`→tenant→DO 的 101/双向帧，`TestTenantDoWebSocketCrossesRpc` 覆盖 tenant 内部消费 DO socket。
+- 3. **DO WebSocket 全链路走 `fetch` 形 RPC（无租户传输）**：workerd 只对「方法名 `fetch` + 单个 Request 参数」保留 fetch 语义（流式 + 101/WebSocket 回传），其它名字或把 id 放成前置参数都会退化为普通 RPC、WS 无法序列化（pinned workerd 实测：`Could not serialize object of type "WebSocket"`；同一 101 从 `RpcTarget` 方法返回同样失败）。因此带 DO binding 的公开 loader 必须调用 `CellHiveHost.fetch(request)`，租户 DO facade 调平台侧 `DurableObjectNamespace.fetch(request)`；无 binding Worker 由 ADR-193 直载默认 fetch，仍保持 fetch-shaped RPC。DO id 经共享常量 `DO_ID_HEADER`（`x-cellhive-do-id`）随 Request 传递，平台侧读完即从请求上删除；租户侧 `makeDOFromStub` 只在 CF 形状的 `get(id).fetch(...)` 上补该 header。owner 查询、scoped token、shard ticket 全在平台 worker 内完成，**租户 env 无需任何 WS 传输**。`TestTenantDoWebSocketPassesThroughPublicLoader` 覆盖外部客户端→`:8081`→tenant→DO 的 101/双向帧，`TestTenantDoWebSocketCrossesRpc` 覆盖 tenant 内部消费 DO socket。
   4. **workerLoader 语义（实测）**：`ctx.exports` 是**宿主 worker mainModule 的导出集** → 新增 stub 类必须同步 `export {...} from "bindings.js"`（user-runtime 的 loader.js/internal.js、do-runtime 的 host.js）；**方法返回值若是 Proxy，不被 RPC 认作 RpcTarget**（"receiver does not implement"）→ 平台侧只暴露显式方法，任意名由租户侧 Proxy 转成 `(method,args)`。
   5. DO 传输经**模块级缓存**（`doTransports`）跨 RPC 实例保持 owner hint（workerLoader 可能按调用实例化 entrypoint）。
   6. **stub 参数受限（安全边界）**：数据型 stub 不暴露原始 path/身份参数——`WorkflowSteps.call(op,params,body)` 的 `op` 走**固定表**（13 个 workflow 内部端点），`ns` 由 props 强制为调用方 worker 自己的命名空间（参数里的 `ns` 被忽略）；`LogSink.send(batch)` 的 ns/worker 同样来自 props；各 binding stub 的资源名/scope 由 props 固定。故租户即使直接调用这些 stub 也无法把 internal 角色令牌变成开放中继或跨租户操作。
@@ -2492,6 +2525,7 @@
 
 ## 修订记录
 
+- ADR-194：gated DO 多 Pod 闭环（per-host manifest、claim 后派发前恢复、drain-before-cancel、双 Pod RollingUpdate/PDB；无门 runtime 强制单副本 Recreate；真实 k3d 验收入口）。
 - ADR-003：由"独立无状态 `cell-router` 服务"改为"**Go 库 + 本地端点**"。
 - ADR-006：由"WAL sidecar → S3"改为"**WAL → cell-agent**；owner 记录指 do-runtime"。
 - ADR-008：明确默认捕获路径为"上报 cell-agent"。
@@ -2534,16 +2568,18 @@
 - ADR-179：指标按命名空间归属（ns 维度，有界标签）+ 绑定 span 带租户属性。
 - ADR-178：日志带 trace 上下文 + 多租户可观测性参考管线（OTLP push + Collector + 后端 org/stream 隔离；指标内部 pull）。
 - ADR-177：wake 索引不落后于 timer（先发布 + fail-closed + 认领时重建 + 有界轮转修复）。
-- ADR-176：KV 写入校验对齐 Cloudflare（key≤512B、metadata≤1KiB、expirationTtl≥60s、expiration 须在未来）。
+- ADR-176：KV 写入校验对齐 Cloudflare（key≤512B、metadata≤1KiB、expiration 须在未来）；其 `expirationTtl≥60s` 下限后由 ADR-183 取消，现接受任意正整数秒。
 - ADR-175：兼容性收口（DO WebSocket→`/v1/do/connect` 接线 + ticket、R2 `writeHttpMetadata` 本地包装、DO alarm 身份/storage_id 与 scheme 修复）。
 - ADR-174：示例兼容性修复（KV `put` 体类型、legacy DO 类包装为 facet、DO 响应状态/content-type/`x-cellhive-do-app` 透传、R2ObjectBody `body`/`writeHttpMetadata`）。
 - ADR-173：日志订阅的 fleet 广播（`POST /v1/internal/logs/subscribe` + lease 节点名单，best-effort、每 worker ≤25s 节流）。
 - ADR-172：租户日志可选 OTLP logs 导出（`CELLHIVE_OTLP_LOGS=off|tail|all`，默认 off；`tail` 由 `cellhive tail` 的 TTL 订阅门控）。
-- ADR-171：upload spool 断电安全（tmp fsync → rename → 目录 fsync 记忆化；`/metrics` spool fsync 计数/耗时）。
+- ADR-171：upload spool 断电安全（tmp fsync → rename → 每次 publish/remove 后叶目录 fsync，父目录创建项记忆化；`/metrics` spool fsync 计数/耗时）。
 - ADR-170：DO 输出门跨文件并发捕获（`dosupervisor.Concurrency`）+ `orderedDispatcher.sweep` 生产接线。
 - ADR-169：purge 数据侧改 `objectstore.ListPage`+`bucket.PagedLister` 游标分页删除（内存有界）。
 - ADR-168：R2 list 的 `include`（按需逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（扫描上限 10000 + cursor）。
 - ADR-167：标准 OTel OTLP/HTTP 追踪导出（官方 SDK；Go span + JS 经 `/v1/internal/telemetry/spans` 汇总；`CELLHIVE_OTLP_ENDPOINT` 可换后端；修复 ADR-146 binding 传播残余）。
+- ADR-190：修复 JS OTLP span 身份重写与错误父子链；保留上报 trace/span/parent ID，`do.gate` 成为 `do.invoke` 子 span并向 supervisor 传播自身 context。
+- ADR-193：无 binding 的公共 fetch 直载租户默认入口，删除多余平台 wrapper 转发并支持默认导出 `WorkerEntrypoint`；有 binding/dispatch/DO WebSocket 保持原 wrapper 路径。
 - ADR-166：可观测性 batch 2（replication_bytes shipped/received、waker_fires{kind,outcome}、do-supervisor `/metrics` + host `/internal/do/stats` 上报 do_*）。
 - ADR-165：可观测性指标 batch 1（binding_calls/durability_proof histogram/owner epoch+takeover/projection_version/peer hedge；仍待 replication_bytes、waker_fires、do_*）。
 - ADR-164：peer 自适应 hedge（默认自适应、`0`=单份、adaptive=4×最近最慢≥250ms 且封顶）+ spool 按 `ltx.Header.ID()` 幂等（重试/重连/hedge 副本安全）。
@@ -2633,4 +2669,4 @@
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-09-22_
+_最后更新：2026-09-25_

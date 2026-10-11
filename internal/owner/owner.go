@@ -40,8 +40,12 @@ type Manager struct {
 	Role      cell.Role
 	OwnerTTL  time.Duration
 
-	mu    sync.Mutex
-	cache map[string]cachedOwner
+	// BeforeTakeover must durably recover the expired predecessor session before
+	// its owner record is replaced. Nil is only safe for roles with no fleet
+	// acknowledgement path.
+	BeforeTakeover func(context.Context, cell.Owner) error
+	mu             sync.Mutex
+	cache          map[string]cachedOwner
 
 	ownedMu sync.Mutex
 	owned   map[string]OwnedScope
@@ -158,6 +162,12 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 		return cur, ErrOwnerLive
 	}
 	takeover := cur.Node != m.NodeID
+	if takeover && m.BeforeTakeover != nil {
+		if err := m.BeforeTakeover(ctx, cur); err != nil {
+			m.takeoverFailed.Add(1)
+			return cur, err
+		}
+	}
 	epoch, gerr := m.nextEpoch(ctx, s)
 	if gerr != nil {
 		return cell.Owner{}, gerr

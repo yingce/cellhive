@@ -22,7 +22,7 @@
 | `cellhive_paged_prefetch_hits_total` | counter | Faults served directly from the child prefetch cache without another fetch |
 | `cellhive_paged_hydrated_pages` / `_total_pages` | gauge | Number of materialized pages / total pages in the cut (background backfill progress) |
 | `cellhive_upload_batches_total` / `_segments_total` / `_dropped_total` / `_deferred_total` / `_replayed_total` / `_spool` | counter/gauge | Upload batches/spool (ADR-143) |
-| `cellhive_upload_spool_file_syncs_total` / `_dir_syncs_total` / `_sync_seconds_total` | counter | Spool power-loss-safe fsync counts and duration (directory sync is memoized, ADR-171) |
+| `cellhive_upload_spool_file_syncs_total` / `_dir_syncs_total` / `_sync_seconds_total` | counter | Power-loss-safe spool fsync counts and duration (leaf directory synced after every publish/remove; parent-directory creation memoized per process, ADR-171) |
 | `cellhive_binding_calls_total{kind,outcome}` | counter | Binding endpoint calls (`outcome=ok|denied|error`; `denied`=401/403/429) (ADR-165) |
 | `cellhive_durability_proof_seconds` | histogram | Write-path `Capture.Wait` durability proof latency (buckets 5ms/25ms/100ms/500ms/1s/5s) (ADR-165) |
 | `cellhive_owner_epoch_changes_total{role}` | counter | Number of epoch (generation) increments (ADR-165) |
@@ -63,7 +63,7 @@ None: the "planned" metrics previously listed in `docs/observability.md` have al
 
 ### Platform logs: in-memory tail + optional OTLP export (ADR-172)
 
-- `workerd/platform/log-tail.js` has been removed. Pinned stock `workerd 1.20260916.1` (binary date `2026-09-16`) rejects `tails: [{name:"tenant-tail"}]` for a dynamic `workerLoader` Worker with `provided value is not of type 'Fetcher'`; therefore tenant `console.*` does **not** enter `/v1/internal/logs`, the ring, or OTLP. Do not restore this path through tenant env. `/v1/internal/logs`, the **bounded in-memory ring** (`CELLHIVE_LOG_BUFFER=<entries>:<workers>`, default `1000:200`), and `cellhive tail --worker <ns>/<worker>` remain available to trusted platform producers; the ring is non-persistent and single-node and drops oldest entries under load.
+- `workerd/platform/log-tail.js` exports a trusted-host `TenantTail extends WorkerEntrypoint`. user-runtime, internal dispatch/service targets, and do-runtime facets pass a real `ctx.exports.TenantTail({props:{namespace,worker,version}})` Fetcher in dynamic `WorkerCode.tails`. It captures `console.*` and uncaught exceptions and batches them to `/v1/internal/logs`; identity comes from unforgeable host-bound props rather than the dynamic event's null `scriptName`. The log-role token, cell URL, and private transport remain only in host env. Delivery failures are swallowed and never affect producer requests.
 - **Optional OTLP/HTTP logs export** (standard protocol; changing backends only requires changing environment variables; shares endpoint/headers/resource with traces, path `/v1/logs`): `CELLHIVE_OTLP_LOGS=off|tail|all` (default **off**).
   - `all`: export every entry (centralized collection; high volume).
   - `tail`: **export only when there is an active subscription for `(ns,worker)`**—each `cellhive tail --worker` poll POSTs `/v1/control/logs/subscribe` (TTL 60s, auto-renewed), and export stops within ≤60s after tail exits.
@@ -85,7 +85,7 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 ## Multi-tenancy and external querying (push logs/traces, pull metrics internally)
 
 - **Push logs and traces**: nodes only push to an **internal OTLP endpoint** (`CELLHIVE_OTLP_ENDPOINT` / `_HEADERS`; `CELLHIVE_OTLP_LOGS=off|tail|all`). The platform exposes no query surface — storage, retention, query and **tenant auth** belong to the backend (OpenObserve/Tempo/Collector).
-- **Unified resource attributes**: every trusted platform log record carries `service.name`, `service.instance.id` (= node id), `cellhive.namespace`, and `cellhive.worker`; it may carry `trace_id`/`span_id`. Tenant console records are not currently captured (ADR-185).
+- **Unified resource attributes and correlation**: platform records carry `service.name` and `service.instance.id` (= node id); tenant log records also carry `cellhive.namespace` and `cellhive.worker`. Native Tail captures tenant `console.*` and uncaught exceptions. When a request event has `traceparent`, both the ring and OTLP log record retain its `trace_id`/`span_id`; alarm/timer events without request context may leave them empty.
 - **The only tenant-facing hop is the backend**: map each namespace to a backend **org/stream** (e.g. OpenObserve `logs-<ns>`) and give the tenant a read-only user for exactly that scope; do **not** rely on the `cellhive.namespace` attribute alone for row-level isolation (most backends cannot filter by arbitrary attributes).
 - **Reference pipeline**: [`../../deploy/observability/otel-collector.yaml`](../../deploy/observability/otel-collector.yaml) (OTLP in → redact/route/tail-sample → OpenObserve) plus [`../../deploy/observability/README.md`](../../deploy/observability/README.md); compose with `--profile observability` (OpenObserve is in the `tracing` profile).
 - **Reproducible smokes**:
@@ -105,4 +105,4 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 - `cellhive_do_restore_seconds` p99 (`rate(_sum)/rate(_count)`) continuously increasing;
 - `cellhive_list_calls_total` > 0 (regression of the hot-path List prohibition).
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-23_

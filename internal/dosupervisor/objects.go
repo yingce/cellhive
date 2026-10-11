@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,12 +13,15 @@ import (
 	"strings"
 	"time"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/restore"
 	"cellhive/internal/telemetry"
 
 	"go.opentelemetry.io/otel/trace"
 )
+
+var ErrHostNotCaptured = errors.New("dosupervisor: host not captured")
 
 // hostBinding is the deterministic identity of one workerd host actor. The router
 // reports host_id -> storage_id/class; the host actor reports host_id -> the
@@ -351,6 +355,60 @@ func (s *Supervisor) RestoreObject(ctx context.Context, outDir, storageID, class
 	return found.Rel, nil
 }
 
+// RestoreHost materializes every file belonging to one deterministic host actor.
+// The runtime calls it after winning a shard claim and before opening the workerd
+// Durable Object stub, so no tenant code can observe an empty replacement disk.
+func (s *Supervisor) RestoreHost(ctx context.Context, outDir, hostID string) (int, error) {
+	doc, err := s.readManifestDocKey(ctx, s.hostManifestKey(hostID))
+	if errors.Is(err, bucket.ErrNotFound) {
+		doc, err = s.readManifestDoc(ctx) // migration fallback for pre-host manifests
+	}
+	if err != nil {
+		return 0, err
+	}
+	host, ok := doc.Hosts[hostID]
+	if !ok || host.HostHash == "" {
+		return 0, fmt.Errorf("%w: %s", ErrHostNotCaptured, hostID)
+	}
+	objects := make(map[string]objectEntry, len(doc.Objects))
+	for _, object := range doc.Objects {
+		objects[object.Rel] = object
+	}
+	n := 0
+	for _, rel := range doc.Files {
+		base := filepath.Base(filepath.FromSlash(rel))
+		if base != host.HostHash+".sqlite" && !strings.HasPrefix(base, host.HostHash+".") {
+			continue
+		}
+		scope, err := s.hostScopeForRel(rel, nil)
+		if object, found := objects[rel]; found {
+			scope, err = cell.ParseScope(object.Scope)
+		}
+		if err != nil {
+			return n, err
+		}
+		if err := s.restoreScope(ctx, scope, filepath.Join(outDir, filepath.FromSlash(rel))); err != nil {
+			return n, err
+		}
+		n++
+	}
+	for _, rel := range doc.Raw {
+		base := filepath.Base(filepath.FromSlash(rel))
+		if !strings.HasPrefix(base, host.HostHash+".") {
+			continue
+		}
+		if err := s.restoreSidecarsFor(ctx, outDir, []string{rel}, host.HostHash); err != nil {
+			return n, err
+		}
+		n++
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("%w: %s", ErrHostNotCaptured, hostID)
+	}
+	s.logf("restored host %s (%s): %d files", hostID, host.HostHash, n)
+	return n, nil
+}
+
 // hostScopeForRel resolves a non-facet host file (relpath scope).
 func (s *Supervisor) hostScopeForRel(rel string, _ map[string]objectEntry) (cell.Scope, error) {
 	ns, class, _ := strings.Cut(s.ScopePrefix, "/")
@@ -431,13 +489,17 @@ func (s *Supervisor) restoreScope(ctx context.Context, scope cell.Scope, dest st
 
 // readManifestDoc loads the full manifest.
 func (s *Supervisor) readManifestDoc(ctx context.Context) (*manifestDoc, error) {
+	return s.readManifestDocKey(ctx, s.manifestKey())
+}
+
+func (s *Supervisor) readManifestDocKey(ctx context.Context, key string) (*manifestDoc, error) {
 	var data []byte
 	var err error
 	switch {
 	case s.Blobs != nil:
-		data, err = s.Blobs.GetBlob(ctx, s.manifestKey())
+		data, err = s.Blobs.GetBlob(ctx, key)
 	case s.Bucket != nil:
-		data, _, err = s.Bucket.Get(ctx, s.manifestKey())
+		data, _, err = s.Bucket.Get(ctx, key)
 	default:
 		return nil, fmt.Errorf("dosupervisor: no blob store configured for restore")
 	}

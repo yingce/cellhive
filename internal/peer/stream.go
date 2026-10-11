@@ -15,7 +15,7 @@ import (
 	"cellhive/internal/cell"
 )
 
-const StreamProtocol = "cellhive-peer-v1"
+const StreamProtocol = "cellhive-peer-v2"
 
 func encodeBatchFrame(scope cell.Scope, epoch uint64, segments [][]byte) []byte {
 	scopeText := scope.String()
@@ -61,6 +61,66 @@ func DecodeBatchFrame(r io.Reader) (string, uint64, [][]byte, error) {
 	return scopeText, epoch, segments, nil
 }
 
+// BatchFrame is one decoded persistent-stream append.
+type BatchFrame struct {
+	Scope    cell.Scope
+	Epoch    uint64
+	Segments [][]byte
+}
+
+// DecodeBatchFrames blocks for one frame, then drains only complete frames
+// already buffered by the connection. It never waits for another frame solely
+// to improve batching and never consumes a partial buffered frame. maxBytes
+// bounds the encoded group size; the blocking first frame is always accepted.
+func DecodeBatchFrames(r *bufio.Reader, maxFrames, maxBytes int) ([]BatchFrame, error) {
+	if maxFrames <= 0 {
+		maxFrames = 1
+	}
+	decode := func() (BatchFrame, error) {
+		scopeText, epoch, segments, err := DecodeBatchFrame(r)
+		if err != nil {
+			return BatchFrame{}, err
+		}
+		scope, err := cell.ParseScope(scopeText)
+		if err != nil {
+			return BatchFrame{}, err
+		}
+		return BatchFrame{Scope: scope, Epoch: epoch, Segments: segments}, nil
+	}
+	header, err := r.Peek(4)
+	if err != nil {
+		return nil, err
+	}
+	firstBytes := 4 + int(binary.BigEndian.Uint32(header))
+	first, err := decode()
+	if err != nil {
+		return nil, err
+	}
+	frames := []BatchFrame{first}
+	groupBytes := firstBytes
+	for len(frames) < maxFrames && r.Buffered() >= 4 {
+		header, err := r.Peek(4)
+		if err != nil {
+			break
+		}
+		n := int(binary.BigEndian.Uint32(header))
+		if n < 10 || n > 64<<20 {
+			return nil, fmt.Errorf("peer stream: invalid batch size %d", n)
+		}
+		frameBytes := 4 + n
+		if r.Buffered() < frameBytes || maxBytes > 0 && groupBytes+frameBytes > maxBytes {
+			break
+		}
+		frame, err := decode()
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, frame)
+		groupBytes += frameBytes
+	}
+	return frames, nil
+}
+
 type streamPending struct {
 	done chan error
 }
@@ -78,7 +138,7 @@ type rawStream struct {
 	failOne sync.Once
 }
 
-func dialRawStream(ctx context.Context, baseURL, token string, pipeline int) (*rawStream, error) {
+func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline int) (*rawStream, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, err
@@ -100,6 +160,9 @@ func dialRawStream(ctx context.Context, baseURL, token string, pipeline int) (*r
 			"Upgrade":                   []string{StreamProtocol},
 			"X-Cellhive-Internal-Token": []string{token},
 		},
+	}
+	if session != "" {
+		req.Header.Set("X-Cellhive-Owner-Session", session)
 	}
 	if err := req.Write(conn); err != nil {
 		conn.Close()
@@ -260,6 +323,7 @@ func (s *rawStream) isFailed() bool {
 // Each lane preserves FIFO order and pipelines up to pipeline batches.
 type StreamTransport struct {
 	token    string
+	session  string
 	lanes    int
 	pipeline int
 	fallback *HTTPTransport
@@ -268,17 +332,23 @@ type StreamTransport struct {
 }
 
 func NewStreamTransport(token string, lanes, pipeline int) *StreamTransport {
+	return NewSessionStreamTransport(token, "", lanes, pipeline)
+}
+
+func NewSessionStreamTransport(token, session string, lanes, pipeline int) *StreamTransport {
 	if lanes <= 0 {
 		lanes = 4
 	}
 	if pipeline <= 0 {
 		pipeline = 4
 	}
+	fallback := NewHTTPTransport(token, nil).WithSession(session)
 	return &StreamTransport{
 		token:    token,
 		lanes:    lanes,
+		session:  session,
 		pipeline: pipeline,
-		fallback: NewHTTPTransport(token, nil),
+		fallback: fallback,
 		streams:  make(map[string]*rawStream),
 	}
 }
@@ -291,7 +361,7 @@ func (t *StreamTransport) stream(ctx context.Context, baseURL string, scope cell
 	if s := t.streams[key]; s != nil && !s.isFailed() {
 		return s, nil
 	}
-	s, err := dialRawStream(ctx, baseURL, t.token, t.pipeline)
+	s, err := dialRawStream(ctx, baseURL, t.token, t.session, t.pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +384,9 @@ func (t *StreamTransport) Append(ctx context.Context, baseURL string, scope cell
 func (t *StreamTransport) AppendBatch(ctx context.Context, baseURL string, scope cell.Scope, epoch uint64, segments [][]byte) error {
 	s, err := t.stream(ctx, baseURL, scope)
 	if err != nil {
-		// No stream was established, so no write can have reached the follower.
+		if t.session != "" {
+			return fmt.Errorf("peer stream: session protocol unavailable: %w", err)
+		}
 		return t.fallback.AppendBatch(ctx, baseURL, scope, epoch, segments)
 	}
 	// Do not retry after a stream write: if the ack was lost the outcome is
@@ -322,15 +394,14 @@ func (t *StreamTransport) AppendBatch(ctx context.Context, baseURL string, scope
 	return s.send(ctx, encodeBatchFrame(scope, epoch, segments))
 }
 
-// AppendBatchAsync pipelines a batch on the follower's lane. The frame is
-// written before returning, so sequential calls preserve order; the follower
-// ack arrives on the returned channel.
 func (t *StreamTransport) AppendBatchAsync(ctx context.Context, baseURL string, scope cell.Scope, epoch uint64, segments [][]byte) (<-chan error, error) {
 	s, err := t.stream(ctx, baseURL, scope)
 	if err != nil {
-		// Fall back to a one-shot HTTP batch (its own connection) when the
-		// stream is unavailable.
 		out := make(chan error, 1)
+		if t.session != "" {
+			out <- fmt.Errorf("peer stream: session protocol unavailable: %w", err)
+			return out, nil
+		}
 		go func() { out <- t.fallback.AppendBatch(ctx, baseURL, scope, epoch, segments) }()
 		return out, nil
 	}
@@ -339,4 +410,16 @@ func (t *StreamTransport) AppendBatchAsync(ctx context.Context, baseURL string, 
 
 func (t *StreamTransport) Held(ctx context.Context, baseURL string) ([]HeldSegment, error) {
 	return t.fallback.Held(ctx, baseURL)
+}
+
+func (t *StreamTransport) Seal(ctx context.Context, baseURL, session string) (uint64, error) {
+	return t.fallback.Seal(ctx, baseURL, session)
+}
+
+func (t *StreamTransport) Tail(ctx context.Context, baseURL, session string, after uint64) ([]SessionFragment, error) {
+	return t.fallback.Tail(ctx, baseURL, session, after)
+}
+
+func (t *StreamTransport) Reclaim(ctx context.Context, baseURL, session string) error {
+	return t.fallback.Reclaim(ctx, baseURL, session)
 }

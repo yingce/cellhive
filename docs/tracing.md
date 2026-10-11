@@ -45,7 +45,7 @@ client ──traceparent──▶ loader http.server ──header──▶ cell-
                                                                                               └─▶ host do.gate ──header──▶ supervisor do.gate
 ```
 
-- **能串**：worker→cell-agent 绑定调用、worker→DO（`do.invoke`）、DO→`do.gate`→supervisor `do.gate`、`cell.durability_proof`（都在同一 trace，且 DO/gate 父子关系正确——由真 workerd 测试断言）。
+- **能串**：worker→cell-agent 绑定调用、worker→DO（`do.invoke`）、DO→`do.gate`→supervisor `do.gate`、`cell.durability_proof` 都在同一 trace。JS 上报 span 的 `trace_id`/`span_id`/`parent_span_id` 会原样进入 OTLP；`do.gate.parent_span_id = do.invoke.span_id`，发给 supervisor 的 `traceparent.span_id = do.gate.span_id`（真 workerd + OTLP protobuf 测试断言）。
 - **断点 1（DO 内的绑定调用）**：facet 里 `this.env.KV/D1/...`（props-bound entrypoint）**不带** DO 的 traceparent，会自成一条 trace。原因：workerd 给 host actor、facet、平台 entrypoint 各自独立的 isolate `globalThis`，而 CF 形状的绑定 API 没有"按请求传参"的口子（user-runtime 能串，是因为 loader 就是那个 isolate）。测试：`internal/doruntime TestDoRuntimeBindingInsideDO`（当前断言为空）。
 - **断点 2（peer 复制）**：`peer.append` 跑在捕获流水线（`context.Background()` 派生 + group commit 合并多请求）上，**不是**某个请求 trace 的子 span；按"批"独立成 trace。
 - 租户 isolate 的 `facades.js` 回退路径不上报 JS span，但其 `pfetch` 仍带 `traceparent`，所以 cell-agent 的服务端 span 仍能挂到该 worker 的 trace 上。
@@ -107,7 +107,7 @@ curl -s -u '<user>:<pass>' \
 
 4. 若没数据：确认启动日志有 `otel export enabled endpoint=… ratio=…`、`CELLHIVE_TRACES_SAMPLE_RATIO > 0`、Basic 头正确（`printf %s` 不要带换行）、`5080` 网络可达；OpenObserve 侧可看容器日志是否出现 `POST /api/<org>/v1/traces 200`（UA `OTel OTLP Exporter Go/…`）。
 
-> 只导出 **traces**；OpenObserve 的 logs/metrics 入口（`/api/<org>/v1/logs|metrics`）不在这条 trace 验收链路中。当前也不采集租户 console 日志；指标走 Prometheus `/metrics`。
+> 本节命令只验收 **traces**；OpenObserve 的 logs/metrics 入口（`/api/<org>/v1/logs|metrics`）不在这条 trace 验收链路中。租户 `console.*` 由原生 Tail 进入 CellHive ring，并可按 `CELLHIVE_OTLP_LOGS` 独立导出；指标走 Prometheus `/metrics`。
 
 ## 4. 其他后端
 
@@ -126,7 +126,7 @@ CellHive 指向 `CELLHIVE_OTLP_ENDPOINT=http://collector:4318`（无 headers）�
 
 ## 4.5 日志关联与多租户（推荐）
 
-- **trace ↔ 日志**：当前不采集租户 `console.*`（动态 `workerLoader` 的 native Tail Worker 配置在 pinned stock `workerd 2026-09-16` 上被拒绝，旧 `log-tail.js` 已删除），因此不能从 trace 跳到同请求的租户 console 日志。平台可信日志若带 trace 字段，仍可由后端关联。
+- **trace ↔ 日志**：原生 Tail 从事件 request headers 提取 `traceparent`，`/v1/internal/logs` 转成 `trace_id`/`span_id`，因此带采样上下文的租户 `console.*` 可在后端关联；没有请求头的 DO/定时事件可能无 trace 字段。
 - **多租户**：节点 push 到**内网 Collector**（`deploy/observability/`），由 Collector 脱敏、按 `cellhive.namespace` 路由、tail-sample，再落 OpenObserve；租户查询走**后端 org/stream + 用户角色**，平台不暴露查询面，也不把 OTLP 凭据给租户。细节见 [`observability.md`](./observability.md) 的"多租户与对外查询"。
 
 ## 5. 边界与残余
@@ -144,4 +144,4 @@ CellHive 指向 `CELLHIVE_OTLP_ENDPOINT=http://collector:4318`（无 headers）�
 - 全部环境变量：[`configuration.md`](./configuration.md)
 - 决策：[`decisions.md`](./decisions.md) ADR-167、ADR-146（traceparent 透传）
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-23_

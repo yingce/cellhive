@@ -22,13 +22,17 @@ function setTraceContext(tp) {
 }
 
 const tenant = tenantMod.default;
-import { buildBindings, wrapR2Metadata, makeDOFromStub } from "facades.js";
+import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
 
-// Patch the importable env with local facades for bindings whose CF API cannot
-// cross RPC (DO namespaces, Workflows) — same mechanism as the do-runtime
-// bindings-wrapper (ADR-090). Migrated bindings are already entrypoint stubs.
+// Patch the importable env with local facades for binding API portions that
+// cannot cross RPC synchronously or must mutate caller-isolate state.
 try {
 
+  for (const name of __cellhivePlatform.kvBindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeKVFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
+    }
+  }
   // DO namespaces arrive as platform-side entrypoint stubs; rebuild the
   // CF-shaped facade on top of them (fetch(request)/rpcObject; ADR-184).
   if (__cellhivePlatform.doBindings.length > 0) {
@@ -39,6 +43,11 @@ try {
           writable: true, configurable: true, enumerable: true,
         });
       }
+    }
+  }
+  for (const name of __cellhivePlatform.d1Bindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeD1FromStub(__env[name]), writable: true, configurable: true, enumerable: true });
     }
   }
   // R2ObjectBody.writeHttpMetadata must run in the tenant isolate to mutate the

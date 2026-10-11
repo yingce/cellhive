@@ -193,7 +193,7 @@ const failureCounts = {
   do: { code: 0, env: 0 },
 };
 
-export function checkedWorkerGet(loader, id, workerCode, vars, specs, surface = "user") {
+export function checkWorkerBudgets(workerCode, vars, specs, surface = "user") {
   const target = surface === "do" ? failureCounts.do : failureCounts.user;
   try {
     assertWorkerCodeBudget(workerCode);
@@ -207,6 +207,10 @@ export function checkedWorkerGet(loader, id, workerCode, vars, specs, surface = 
     if (error instanceof LimitError) target.env++;
     throw error;
   }
+}
+
+export function checkedWorkerGet(loader, id, workerCode, vars, specs, surface = "user") {
+  checkWorkerBudgets(workerCode, vars, specs, surface);
   return loader.get(id, () => workerCode);
 }
 

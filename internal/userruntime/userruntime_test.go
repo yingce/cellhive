@@ -413,6 +413,23 @@ func TestRenderSubstitutesConfig(t *testing.T) {
 	}
 }
 
+func TestRenderDisablesTenantLogCapture(t *testing.T) {
+	path, err := Render(t.TempDir(), Config{
+		CellURL: "http://cell:7001", CellToken: "tok", InternalPort: 18088, PublicPort: 18081,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), `(name = "CH_LOG_CAPTURE", text = "0")`); got != 2 {
+		t.Fatalf("disabled capture bindings = %d, want 2", got)
+	}
+}
+
 func TestFromEnvironmentRequiresExplicitChildEnv(t *testing.T) {
 	workerd, err := FindWorkerd()
 	if err != nil {
@@ -471,16 +488,20 @@ func TestFromEnvironmentRequiresExplicitChildEnv(t *testing.T) {
 }
 
 const webTenantBundle = `
-export default {
-  async fetch(req, env) {
+import { WorkerEntrypoint } from "cloudflare:workers";
+export default class extends WorkerEntrypoint {
+  async fetch(req) {
     const url = new URL(req.url);
     return Response.json({
-      greeting: env.GREETING,
+      greeting: this.env.GREETING,
       path: url.pathname,
-      platformHeader: req.headers.get("x-cellhive-internal-token"),
+      internalHeader: req.headers.get("x-cellhive-internal-token"),
+      scopeHeader: req.headers.get("x-cellhive-scope-token"),
+      ordinaryHeader: req.headers.get("x-client-header"),
+      traceparent: req.headers.get("traceparent"),
     });
-  },
-};
+  }
+}
 `
 
 // TestUserRuntimePublicLoaderRoutesAndLoads is an end-to-end test against real
@@ -547,6 +568,10 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, public+"/x", nil)
 	req.Host = "app.test"
 	req.Header.Set("x-cellhive-internal-token", "should-be-stripped")
+	req.Header.Set("x-cellhive-scope-token", "also-stripped")
+	req.Header.Set("x-client-header", "preserved")
+	const givenTrace = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	req.Header.Set("traceparent", givenTrace)
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -559,7 +584,10 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	var out struct {
 		Greeting       string `json:"greeting"`
 		Path           string `json:"path"`
-		PlatformHeader any    `json:"platformHeader"`
+		InternalHeader any    `json:"internalHeader"`
+		ScopeHeader    any    `json:"scopeHeader"`
+		OrdinaryHeader string `json:"ordinaryHeader"`
+		Traceparent    string `json:"traceparent"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -567,8 +595,11 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	if out.Greeting != "hi" || out.Path != "/x" {
 		t.Fatalf("tenant response = %+v", out)
 	}
-	if out.PlatformHeader != nil {
-		t.Fatalf("platform header leaked to tenant: %v", out.PlatformHeader)
+	if out.InternalHeader != nil || out.ScopeHeader != nil {
+		t.Fatalf("platform headers leaked to tenant: internal=%v scope=%v", out.InternalHeader, out.ScopeHeader)
+	}
+	if out.OrdinaryHeader != "preserved" || out.Traceparent != givenTrace {
+		t.Fatalf("ordinary/trace headers changed: ordinary=%q traceparent=%q", out.OrdinaryHeader, out.Traceparent)
 	}
 
 	// Unknown host -> 404.
@@ -1758,8 +1789,8 @@ func TestUserRuntimeAssetRouterConfig(t *testing.T) {
 const kvTenantBundle = `
 export default {
   async fetch(req, env) {
-    const v = await env.KV.get("k");
-    return Response.json({ kv: v });
+    const values = await Promise.all([env.KV.get("a"), env.KV.get("missing"), env.KV.get("b")]);
+    return Response.json({ values });
   },
 };
 `
@@ -1782,7 +1813,9 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 	}}}
 
 	const scopeSecret = "test-scope-secret"
-	var kvScope, kvInternal string
+	var kvMu sync.Mutex
+	var kvScope, kvInternal, kvPath string
+	var kvRequests int
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -1790,9 +1823,29 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(kvTenantBundle))
 		case "/v1/kv/get":
+			kvMu.Lock()
+			kvRequests++
+			kvPath = r.URL.Path
 			kvScope = r.Header.Get("x-cellhive-scope-token")
 			kvInternal = r.Header.Get("x-cellhive-internal-token")
-			_, _ = w.Write([]byte("hello"))
+			kvMu.Unlock()
+			if r.URL.Query().Get("key") == "missing" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(r.URL.Query().Get("key")))
+		case "/v1/kv/get-batch":
+			kvMu.Lock()
+			kvRequests++
+			kvPath = r.URL.Path
+			kvScope = r.Header.Get("x-cellhive-scope-token")
+			kvInternal = r.Header.Get("x-cellhive-internal-token")
+			kvMu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+				map[string]any{"found": true, "value": base64.StdEncoding.EncodeToString([]byte("a"))},
+				map[string]any{"found": false},
+				map[string]any{"found": true, "value": base64.StdEncoding.EncodeToString([]byte("b"))},
+			}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1840,8 +1893,14 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 	}
 
 	resp, body := fetchHost(t, client, public, "/")
-	if resp.StatusCode != 200 || body != `{"kv":"hello"}` {
+	if resp.StatusCode != 200 || body != `{"values":["a",null,"b"]}` {
 		t.Fatalf("tenant KV response = %d %q", resp.StatusCode, body)
+	}
+	kvMu.Lock()
+	requests, path := kvRequests, kvPath
+	kvMu.Unlock()
+	if requests != 1 || path != "/v1/kv/get-batch" {
+		t.Fatalf("KV backend calls = %d at %q, want one batched request", requests, path)
 	}
 	// The loader computed the token locally; a real Go verifier accepts it,
 	// proving JS/Go canonical JSON agreement (ADR-074).
@@ -2135,6 +2194,10 @@ export default {
     const run = await env.DB.prepare("INSERT INTO t (v) VALUES (?)").bind("x").run();
     let err = "";
     try { await env.DB.prepare("boom").run(); } catch (e) { err = e.name + ":" + (e.code || ""); }
+    const batch = await env.DB.batch([
+      env.DB.prepare("INSERT INTO blobs(v) VALUES (?)").bind(new Uint8Array([1, 2, 3])),
+    ]);
+    const raw = await env.DB.prepare("SELECT v FROM blobs").raw({ columnNames: true });
     return Response.json({
       put,
       head,
@@ -2146,6 +2209,8 @@ export default {
         text: await got.text(), bodyUsed: got.bodyUsed,
       },
       run: run.meta,
+      batch: batch[0].meta,
+      raw,
       err,
     });
   },
@@ -2243,6 +2308,30 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
 				"rows_affected": 1, "last_row_id": 42, "duration_ms": 0.3,
 			}}, "success": true})
+		case "/v1/d1/batch":
+			var req struct {
+				Statements []struct {
+					SQL    string `json:"sql"`
+					Params []any  `json:"params"`
+				} `json:"statements"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(req.Statements) != 1 || len(req.Statements[0].Params) != 1 {
+				http.Error(w, "bad batch", http.StatusBadRequest)
+				return
+			}
+			blob, _ := req.Statements[0].Params[0].([]any)
+			if len(blob) != 3 || blob[0] != float64(1) || blob[2] != float64(3) {
+				http.Error(w, "bad blob", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
+				"rows_affected": 1, "last_row_id": 43,
+			}}, "success": true})
+		case "/v1/d1/query":
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
+				"columns": []string{"v"}, "rows": []any{[]any{[]int{1, 2, 3}}},
+			}}, "success": true})
 		default:
 			http.NotFound(w, r)
 		}
@@ -2313,7 +2402,12 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 			LastRowID int64 `json:"last_row_id"`
 			ChangedDB bool  `json:"changed_db"`
 		} `json:"run"`
-		Err string `json:"err"`
+		Batch struct {
+			Changes   int   `json:"changes"`
+			LastRowID int64 `json:"last_row_id"`
+		} `json:"batch"`
+		Raw [][]any `json:"raw"`
+		Err string  `json:"err"`
 	}
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("decode %q: %v", body, err)
@@ -2340,6 +2434,12 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 	}
 	if got.Run.Changes != 1 || got.Run.LastRowID != 42 || !got.Run.ChangedDB {
 		t.Fatalf("d1 run meta = %+v", got.Run)
+	}
+	if got.Batch.Changes != 1 || got.Batch.LastRowID != 43 {
+		t.Fatalf("d1 batch meta = %+v", got.Batch)
+	}
+	if len(got.Raw) != 2 || len(got.Raw[0]) != 1 || got.Raw[0][0] != "v" {
+		t.Fatalf("d1 raw = %+v", got.Raw)
 	}
 	if got.Err != "D1_ERROR:d1_error" {
 		t.Fatalf("d1 error = %q (want D1_ERROR:d1_error)", got.Err)
@@ -3575,111 +3675,16 @@ export default {
   async fetch(req, env) {
     console.log("native-tail-marker", { n: 1 });
     console.warn("warned");
-    return new Response("ok");
+    throw new Error("tail-boom");
   },
 };
 `
 
-// TestWorkerLoaderNativeTail records the pinned stock workerd boundary for
-// native Tail Workers. The workerLoader callback really supplies the dynamic
-// `tails: [{name: "tenant-tail"}]` definition; on the pinned binary it is
-// rejected because the JS API expects a Fetcher, not a service designator.
-//
-// Keep this as a minimal, standalone config rather than hiding the attempted
-// tail behind user-runtime's normal loader: a future workerd upgrade must make
-// this test fail before platform log capture is reconsidered.
-func TestWorkerLoaderNativeTail(t *testing.T) {
-	workerd, err := FindWorkerd()
-	if err != nil {
-		t.Skipf("workerd unavailable: %v", err)
-	}
-	dir := t.TempDir()
-	port := freePort(t)
-	files := map[string]string{
-		"host.js": `
-const tenant = 'export default { fetch() { console.log("native-tail-marker"); return new Response("tenant-ok"); } }';
-export default {
-  async fetch(_req, env) {
-    try {
-      const worker = env.LOADER.get("acme/web@1", () => ({
-        compatibilityDate: "2026-06-15",
-        mainModule: "tenant.js",
-        modules: { "tenant.js": tenant },
-        tails: [{ name: "tenant-tail" }],
-      }));
-      return await worker.getEntrypoint().fetch(new Request("http://tenant/"));
-    } catch (err) {
-      return new Response(String(err), { status: 500 });
-    }
-  },
-};
-`,
-		"tail.js": `export default { tail(_events) {} };`,
-		"workerd.capnp": fmt.Sprintf(`using Workerd = import "/workerd/workerd.capnp";
-const config :Workerd.Config = (
-  services = [
-    (name = "tenant-tail", worker = (
-      modules = [(name = "tail.js", esModule = embed "tail.js")],
-      compatibilityDate = "2026-06-15",
-    )),
-    (name = "main", worker = (
-      modules = [(name = "host.js", esModule = embed "host.js")],
-      compatibilityDate = "2026-06-15",
-      bindings = [(name = "LOADER", workerLoader = (id = "native-tail-spike"))],
-    )),
-  ],
-  sockets = [(name = "http", address = "*:%d", http = (), service = "main")],
-);`, port),
-	}
-	for name, contents := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	childEnv, err := WorkerdEnv(Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { done <- Run(ctx, workerd, filepath.Join(dir, "workerd.capnp"), childEnv) }()
-	client := noProxyClient()
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	deadline := time.Now().Add(25 * time.Second)
-	for {
-		resp, err := client.Get(base)
-		if err == nil {
-			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr != nil {
-				t.Fatalf("read spike response: %v", readErr)
-			}
-			if resp.StatusCode != http.StatusInternalServerError {
-				t.Fatalf("dynamic tails status = %d body=%q, want 500 rejection", resp.StatusCode, body)
-			}
-			if !strings.Contains(string(body), "provided value is not of type 'Fetcher'") {
-				t.Fatalf("dynamic tails rejection = %q, want Fetcher type error", body)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("native-tail spike not healthy: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("workerd did not exit after cancel")
-	}
-}
-
-// TestUserRuntimeLogTailUnavailable documents the approved fallback when the
-// pinned workerLoader rejects native tail service designators: tenant requests
-// still succeed, but console output is not sent to the platform log endpoint.
-func TestUserRuntimeLogTailUnavailable(t *testing.T) {
+// TestUserRuntimeCapturesConsoleWithNativeTail verifies that the trusted host
+// attaches a native Tail Fetcher to a dynamically loaded tenant. The tenant
+// request succeeds and its structured console arguments reach the platform
+// endpoint under the host-bound namespace and worker identity.
+func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -3689,7 +3694,12 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 		"workers":   []any{map[string]any{"worker": "web", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}}},
 	}}}
 	var mu sync.Mutex
-	var logRequests int
+	var logRequests []struct {
+		Namespace string
+		Worker    string
+		Token     string
+		Entries   []map[string]any
+	}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -3697,13 +3707,19 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(logTailBundle))
 		case "/v1/internal/logs":
-			mu.Lock()
-			logRequests++
-			mu.Unlock()
-			if r.Header.Get("x-cellhive-internal-token") != "dev-log-token" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			var entries []map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			mu.Lock()
+			logRequests = append(logRequests, struct {
+				Namespace string
+				Worker    string
+				Token     string
+				Entries   []map[string]any
+			}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), r.Header.Get("x-cellhive-internal-token"), entries})
+			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
 			http.NotFound(w, r)
@@ -3713,7 +3729,7 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", LogToken: "dev-log-token", ScopeSecret: "test-scope-secret",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3741,17 +3757,107 @@ func TestUserRuntimeLogTailUnavailable(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	resp, body := fetchHost(t, client, public, "/")
-	if resp.StatusCode != 200 || body != "ok" {
+	if resp.StatusCode != 500 || !strings.Contains(body, "tail-boom") {
+		t.Fatalf("fetch = %d %q, want tenant exception response", resp.StatusCode, body)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	var got []struct {
+		Namespace string
+		Worker    string
+		Token     string
+		Entries   []map[string]any
+	}
+	for {
+		mu.Lock()
+		got = append(got[:0], logRequests...)
+		mu.Unlock()
+		if len(got) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(got) != 1 {
+		t.Fatalf("platform log requests = %d, want 1", len(got))
+	}
+	if got[0].Namespace != "acme" || got[0].Worker != "web" {
+		t.Fatalf("tail identity = %s/%s, want acme/web", got[0].Namespace, got[0].Worker)
+	}
+	if got[0].Token != "dev-log-token" {
+		t.Fatalf("tail token = %q, want log-role token", got[0].Token)
+	}
+	if len(got[0].Entries) != 3 || got[0].Entries[0]["level"] != "log" || got[0].Entries[0]["message"] != `native-tail-marker {"n":1}` || got[0].Entries[1]["level"] != "warn" || got[0].Entries[1]["message"] != "warned" || got[0].Entries[2]["level"] != "error" || !strings.Contains(got[0].Entries[2]["message"].(string), "tail-boom") {
+		t.Fatalf("tail entries = %#v", got[0].Entries)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
+func TestUserRuntimeCanDisableNativeTailCapture(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
+		"workers": []any{map[string]any{"worker": "web", "active": 1, "version": map[string]any{
+			"number": 1, "bundle_sha": "shaNoTail",
+		}}},
+	}}}
+	var logRequests atomic.Int64
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(`export default { fetch() { console.log("not-captured"); return new Response("ok"); } };`))
+		case "/v1/internal/logs":
+			logRequests.Add(1)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", LogToken: "log-tok", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort, DisableTenantLogs: true,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loader not healthy: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	resp, body := fetchHost(t, client, public, "/")
+	if resp.StatusCode != http.StatusOK || body != "ok" {
 		t.Fatalf("fetch = %d %q", resp.StatusCode, body)
 	}
-	// The former bridge used a microtask to send this asynchronously. Leave a
-	// longer window than that path, then assert that nothing reached the stub.
-	time.Sleep(600 * time.Millisecond)
-	mu.Lock()
-	got := logRequests
-	mu.Unlock()
-	if got != 0 {
-		t.Fatalf("platform /v1/internal/logs requests = %d, want none", got)
+	time.Sleep(200 * time.Millisecond)
+	if got := logRequests.Load(); got != 0 {
+		t.Fatalf("log requests = %d, want 0 when native tail capture is disabled", got)
 	}
 	cancel()
 	select {
@@ -4105,9 +4211,9 @@ export default {
 };
 `
 
-// TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable verifies that a
-// native service target still runs while its console output stays local.
-func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
+// TestUserRuntimeServiceBindingNativeTargetLogTail verifies that a service
+// target loaded through the shared workerLoader keeps its own trusted identity.
+func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -4126,7 +4232,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
 	}}}
 
 	var mu sync.Mutex
-	var logCalls int
+	var logWorkers []string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -4139,7 +4245,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
 			}
 		case "/v1/internal/logs":
 			mu.Lock()
-			logCalls++
+			logWorkers = append(logWorkers, r.URL.Query().Get("ns")+"/"+r.URL.Query().Get("worker"))
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
@@ -4150,7 +4256,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", LogToken: "log-tok", ScopeSecret: "test-scope-secret",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4181,12 +4287,19 @@ func TestUserRuntimeServiceBindingNativeTargetLogTailUnavailable(t *testing.T) {
 	if resp.StatusCode != 200 || body != "target" {
 		t.Fatalf("native fetch = %d %q (want target)", resp.StatusCode, body)
 	}
-	time.Sleep(600 * time.Millisecond)
-	mu.Lock()
-	got := logCalls
-	mu.Unlock()
-	if got != 0 {
-		t.Fatalf("platform log calls = %d, want 0", got)
+	deadline = time.Now().Add(5 * time.Second)
+	var got []string
+	for {
+		mu.Lock()
+		got = append(got[:0], logWorkers...)
+		mu.Unlock()
+		if len(got) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !slices.Contains(got, "acme/api") {
+		t.Fatalf("platform log workers = %v, want service target acme/api", got)
 	}
 	cancel()
 	select {
@@ -4785,12 +4898,14 @@ func TestUserRuntimeBindingOnlyRedeployTakesEffect(t *testing.T) {
 	var mu sync.Mutex
 	vars := map[string]string{"MODE": "v1"}
 	number := 1
+	hyperdriveLookups := 0
 	proj := func() map[string]any {
 		return map[string]any{"apps": []any{map[string]any{
 			"namespace": "acme",
 			"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
 			"workers": []any{map[string]any{"worker": "web", "active": number, "version": map[string]any{
 				"number": number, "bundle_sha": "shaBindOnly", "vars": vars,
+				"bindings": []any{map[string]any{"type": "hyperdrive", "name": "DB", "id": "missing"}},
 			}}},
 		}}}
 	}
@@ -4804,6 +4919,11 @@ func TestUserRuntimeBindingOnlyRedeployTakesEffect(t *testing.T) {
 			serveProjection(p, w, r)
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(tenant))
+		case "/v1/internal/hyperdrive":
+			mu.Lock()
+			hyperdriveLookups++
+			mu.Unlock()
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -4852,6 +4972,15 @@ func TestUserRuntimeBindingOnlyRedeployTakesEffect(t *testing.T) {
 	if got := fetch(); got != "mode:v1" {
 		t.Fatalf("v1 = %q, want mode:v1", got)
 	}
+	if got := fetch(); got != "mode:v1" {
+		t.Fatalf("second v1 = %q, want mode:v1", got)
+	}
+	mu.Lock()
+	lookups := hyperdriveLookups
+	mu.Unlock()
+	if lookups != 2 {
+		t.Fatalf("v1 hyperdrive resolution lookups = %d, want 2 (worker version must be prepared once)", lookups)
+	}
 
 	// Binding/vars-only redeploy: same bundle sha, new version number.
 	mu.Lock()
@@ -4866,6 +4995,12 @@ func TestUserRuntimeBindingOnlyRedeployTakesEffect(t *testing.T) {
 	}
 	if got != "mode:v2" {
 		t.Fatalf("after binding-only redeploy = %q, want mode:v2 (loader cached the old isolate)", got)
+	}
+	mu.Lock()
+	lookups = hyperdriveLookups
+	mu.Unlock()
+	if lookups != 4 {
+		t.Fatalf("hyperdrive resolution lookups after v2 = %d, want 4 (one preparation per version)", lookups)
 	}
 	cancel()
 }

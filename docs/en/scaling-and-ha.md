@@ -14,7 +14,7 @@
 - **cell-agent**: each node writes a `nodes/*` bucket lease (self-registration); owner records use bucket **conditional writes**; epoch fence; takeover occurs when a node lease expires;
 - **write acknowledgment**: fleet mode = owner + **≥1 follower fsync** (2 nodes are sufficient); **S3 is not in the ack path**;
 - **owner failure**: lease expires → another node takes over via conditional write (epoch+1);
-- **do-runtime failure**: liveness is implicitly determined by **replication activity**; takeover candidates use platform service discovery; the DO owner record points to do-runtime.
+- **do-runtime failure**: Service/Endpoints stops using an unready Pod as a first hop; after the activated object's owner lease stops renewing and expires, another Pod may claim it (epoch+1) and restore from cell-agent. If a request first lands on a non-owner, it forwards to the Pod advertise address in the owner record;
 
 ## Graceful Handoff / Drain
 
@@ -28,8 +28,8 @@ Recommended `terminationGracePeriodSeconds`: user-runtime 30 / do-runtime 60 / c
 
 - The node lease `load` exposes signals: `owned_cells`, `resident_cells`, `rss_bytes`, `cpu_percent_x100`, `pressured`, `memory_headroom`, `shed_cells`, `restoring`;
 - **cell-agent scale-in floor = 2** (required for fleet proof); scale out based on owned_cells/load;
-- `do-runtime` scales based on resident object count and memory; new nodes restore objects from cell-agent (paginated lazy loading);
-- **single-node mode is degraded only**: DO is unavailable (no ensemble).
+- `do-runtime` may be scaled by an external orchestrator, but the core does not calculate its target replica count; K8s Service Endpoints follow replica changes automatically, and new nodes restore objects from cell-agent on demand (paginated lazy loading), without updating `CELLHIVE_DO_RUNTIMES`;
+- **single-node behavior**: Class A cell writes wait for the authority bucket by default; DO has an RPO=0 output gate only with the gated runtime, and the ungated runtime is not a production topology;
 
 ## Hotspots and Balancing
 
@@ -41,7 +41,7 @@ Recommended `terminationGracePeriodSeconds`: user-runtime 30 / do-runtime 60 / c
 
 - cell-agent peers: bucket `nodes/*` (authoritative);
 - callers → cell-agent: service name (built-in DNS in K8s/Compose) or seed list;
-- do-runtime → cell-agent: configured endpoint/DNS/LB; candidates use platform discovery (fall back to registration/heartbeat when platform discovery is unavailable);
+- do-runtime → cell-agent: configured endpoint/DNS/LB; cell-agent → do-runtime uses the logical Service/LB in `CELLHIVE_DO_RUNTIMES` as an arbitrary entrypoint. K8s Service Endpoints follow Pod scaling automatically; the per-Pod advertise address in the owner record provides directed forwarding, so runtime registration/heartbeat is unnecessary;
 - See [`decisions.md`](decisions.md) ADR-027 for details.
 
 ## Finalized (ADR-151)
@@ -59,4 +59,4 @@ Recommended `terminationGracePeriodSeconds`: user-runtime 30 / do-runtime 60 / c
 - `CELLHIVE_PLACEMENT_AZ` (this node's AZ; empty=no preference). When set, **follower selection prefers a different AZ** (`selectFollowers`: cross-AZ first, same-AZ fallback, excluding self/expired/no `peer_url`), so a single-AZ failure does not take all replicas.
 - Owners are still placed by scope hash/capacity; cross-AZ only affects replication targets and does not change the consistency model (follower fsync proof remains in the same quorum semantics).
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-25_

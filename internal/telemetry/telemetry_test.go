@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,17 @@ import (
 )
 
 // otlpSink is a minimal OTLP/HTTP receiver that decodes the protobuf request.
+type exportedSpan struct {
+	name   string
+	trace  [16]byte
+	span   [8]byte
+	parent [8]byte
+}
+
 type otlpSink struct {
 	srv   *httptest.Server
 	mu    sync.Mutex
-	spans []string
-	trace [][16]byte
+	spans []exportedSpan
 }
 
 func newOTLPSink(t *testing.T) *otlpSink {
@@ -41,10 +48,12 @@ func newOTLPSink(t *testing.T) *otlpSink {
 		for _, rs := range req.ResourceSpans {
 			for _, ss := range rs.ScopeSpans {
 				for _, sp := range ss.Spans {
-					s.spans = append(s.spans, sp.Name)
-					var tid [16]byte
-					copy(tid[:], sp.TraceId)
-					s.trace = append(s.trace, tid)
+					var got exportedSpan
+					got.name = sp.Name
+					copy(got.trace[:], sp.TraceId)
+					copy(got.span[:], sp.SpanId)
+					copy(got.parent[:], sp.ParentSpanId)
+					s.spans = append(s.spans, got)
 				}
 			}
 		}
@@ -55,10 +64,19 @@ func newOTLPSink(t *testing.T) *otlpSink {
 	return s
 }
 
-func (s *otlpSink) names() []string {
+func (s *otlpSink) exported() []exportedSpan {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.spans...)
+	return append([]exportedSpan(nil), s.spans...)
+}
+
+func (s *otlpSink) names() []string {
+	spans := s.exported()
+	names := make([]string, len(spans))
+	for i := range spans {
+		names[i] = spans[i].name
+	}
+	return names
 }
 
 func TestDisabledIsNoop(t *testing.T) {
@@ -95,12 +113,19 @@ func TestExportsSpanAndRemoteSpan(t *testing.T) {
 		trace.WithAttributes(ScopeAttrs("acme", "kv", "KV", "acme/__kv__/main")...))
 	span.End()
 
-	// A JS-reported span carrying its own ids, in a new trace.
+	// A JS-reported span must retain its supplied identity and parent. Otherwise
+	// logs and child spans carrying its W3C span ID cannot correlate to it.
 	Ingest(ctx, []RemoteSpan{{
 		TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
-		Name: "do.invoke", Kind: "server", StartUnixNano: time.Now().Add(-2 * time.Millisecond).UnixNano(),
-		EndUnixNano: time.Now().UnixNano(), Attributes: map[string]string{"cellhive.kind": "do"},
+		ParentSpanID: "fedcba9876543210", Name: "do.invoke", Kind: "server",
+		StartUnixNano: time.Now().Add(-2 * time.Millisecond).UnixNano(),
+		EndUnixNano:   time.Now().UnixNano(), Attributes: map[string]string{"cellhive.kind": "do"},
 		StatusCode: 1,
+	}})
+	Ingest(ctx, []RemoteSpan{{
+		TraceID: "11111111111111111111111111111111", SpanID: "2222222222222222",
+		Name: "loader.root", Kind: "server", StartUnixNano: time.Now().UnixNano(),
+		EndUnixNano: time.Now().UnixNano(),
 	}})
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -113,8 +138,36 @@ func TestExportsSpanAndRemoteSpan(t *testing.T) {
 	for _, n := range names {
 		found[n] = true
 	}
-	if !found["local.op"] || !found["do.invoke"] {
-		t.Fatalf("exported spans = %v, want local.op and do.invoke", names)
+	if !found["local.op"] || !found["do.invoke"] || !found["loader.root"] {
+		t.Fatalf("exported spans = %v, want local.op, do.invoke, and loader.root", names)
+	}
+	for _, sp := range sink.exported() {
+		if sp.name != "do.invoke" {
+			continue
+		}
+		if got := fmt.Sprintf("%x", sp.trace); got != "0123456789abcdef0123456789abcdef" {
+			t.Fatalf("remote trace id = %s", got)
+		}
+		if got := fmt.Sprintf("%x", sp.span); got != "0123456789abcdef" {
+			t.Fatalf("remote span id = %s, want supplied JS id", got)
+		}
+		if got := fmt.Sprintf("%x", sp.parent); got != "fedcba9876543210" {
+			t.Fatalf("remote parent span id = %s", got)
+		}
+	}
+	for _, sp := range sink.exported() {
+		if sp.name != "loader.root" {
+			continue
+		}
+		if got := fmt.Sprintf("%x", sp.trace); got != "11111111111111111111111111111111" {
+			t.Fatalf("remote root trace id = %s", got)
+		}
+		if got := fmt.Sprintf("%x", sp.span); got != "2222222222222222" {
+			t.Fatalf("remote root span id = %s, want supplied JS id", got)
+		}
+		if got := fmt.Sprintf("%x", sp.parent); got != "0000000000000000" {
+			t.Fatalf("remote root parent span id = %s, want empty", got)
+		}
 	}
 }
 

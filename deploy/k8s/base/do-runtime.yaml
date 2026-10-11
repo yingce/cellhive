@@ -1,5 +1,5 @@
-# The static DO shard list contains this Service name once. With multiple
-# backends DNS can route a shard to different pods, so default to one replica.
+# The ClusterIP Service load-balances arbitrary first hops. Each Pod advertises
+# its own Pod IP in the DO owner record so non-owners reach the actual owner.
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,7 +7,6 @@ metadata:
   namespace: cellhive
   labels: {app: do-runtime, app.kubernetes.io/part-of: cellhive}
 spec:
-  clusterIP: None
   selector: {app: do-runtime}
   ports:
     - {name: do, port: 8788, targetPort: 8788}

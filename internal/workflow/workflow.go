@@ -653,11 +653,10 @@ func (s *Store) Restart(ctx context.Context, ns, name, id string) error {
 	}
 	now := s.now().UnixMilli()
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM steps WHERE instance_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM step_attempts WHERE instance_id = ?`, id); err != nil {
-			return err
+		for _, tbl := range []string{"steps", "step_attempts", "events", "waits"} {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE instance_id = ?", id); err != nil {
+				return err
+			}
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE instances SET status = ?, output = NULL, error = '', updated_ms = ?, run_token = '', lease_until_ms = 0 WHERE id = ?`,

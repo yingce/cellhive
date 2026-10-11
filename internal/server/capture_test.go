@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellcapture"
@@ -24,6 +26,12 @@ type replicaCommitter struct{ rep *replica.Manager }
 func (r replicaCommitter) Commit(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte) error {
 	_, _, err := r.rep.Append(ctx, sc, epoch, seg)
 	return err
+}
+
+type testCommitterFunc func(context.Context, cell.Scope, uint64, []byte) error
+
+func (f testCommitterFunc) Commit(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte) error {
+	return f(ctx, sc, epoch, seg)
 }
 
 // TestKVCaptureReplicatesAndRestores covers ADR-092: with capture wired, a KV
@@ -77,6 +85,107 @@ func TestKVCaptureReplicatesAndRestores(t *testing.T) {
 	}
 	if val != "hello" {
 		t.Fatalf("restored value = %q, want hello", val)
+	}
+}
+
+// TestCaptureWaitTxIDDoesNotWaitForLaterWrite pins the output-gate boundary:
+// a request waits for its own committed transaction, not a later concurrent
+// transaction in the same cell. Waiting for the cell's current watermark can
+// couple unrelated requests and inflate tail latency.
+func TestCaptureWaitTxIDDoesNotWaitForLaterWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cellstore: %v", err)
+	}
+	defer cs.Close()
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var commits int
+	var mu sync.Mutex
+	m := &cellcapture.Manager{
+		Store: cs,
+		Committer: testCommitterFunc(func(context.Context, cell.Scope, uint64, []byte) error {
+			mu.Lock()
+			commits++
+			n := commits
+			mu.Unlock()
+			switch n {
+			case 1:
+				close(firstEntered)
+				<-releaseFirst
+			case 2:
+				close(secondEntered)
+				<-releaseSecond
+			}
+			return nil
+		}),
+		Owner:           func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		GroupCommitWait: time.Millisecond,
+	}
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "exact-ticket"}
+	if _, err := m.Ensure(ctx, scope); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	c, err := cs.Cell(ctx, scope)
+	if err != nil {
+		t.Fatalf("cell: %v", err)
+	}
+	first, err := c.PutTx(ctx, "first", []byte("1"), nil)
+	if err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	trigger := make(chan error, 1)
+	go func() { trigger <- m.Wait(ctx, scope, first) }()
+	select {
+	case <-firstEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first durability commit did not start")
+	}
+	second, err := c.PutTx(ctx, "second", []byte("2"), nil)
+	if err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	if second != first+1 {
+		t.Fatalf("tickets = %d, %d; want consecutive", first, second)
+	}
+	srv := &Server{Store: cs, Capture: m}
+	waited := make(chan error, 1)
+	go func() { waited <- srv.captureWaitTxID(ctx, scope, first) }()
+	close(releaseFirst)
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("wait first: %v", err)
+		}
+	case <-secondEntered:
+		select {
+		case err := <-waited:
+			if err != nil {
+				t.Fatalf("wait first: %v", err)
+			}
+		case <-time.After(time.Second):
+			close(releaseSecond)
+			t.Fatal("first request waited for the later transaction")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not pass its durability gate")
+	}
+	select {
+	case <-secondEntered:
+	default:
+		select {
+		case <-secondEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("second durability commit did not start")
+		}
+	}
+	close(releaseSecond)
+	if err := <-trigger; err != nil {
+		t.Fatalf("trigger wait: %v", err)
 	}
 }
 

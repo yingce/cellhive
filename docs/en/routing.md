@@ -54,7 +54,7 @@ Client → Traefik(TLS, host) → user-runtime :8081
 | admin/CLI | admin host (or separate domain name) | cell-agent :8082 |
 
 - **Built-in domains**: During `deploy`/`promote`, the system creates `hosts(kind='builtin')` + `routes(host,'',ns,worker)`; the `<base>` wildcard and certificates are configured by the edge/ops side (ADR-131/132/133);
-- **Custom domain = registration is authorization** (ADR-133): After `cellhive domain add <host> <ns> <worker>`, it **takes effect immediately**, with no DNS/CNAME/TXT validation; if host ownership conflicts, already-registered (verified) hosts return 409, and claiming the built-in domain space is rejected;
+- **Custom domain = registration is authorization** (ADR-133): `cellhive domain add <namespace> <host>` registers it, after which `route add` binds a worker; there is no DNS/CNAME/TXT validation. A host registered by another namespace returns 409, and the built-in domain space cannot be claimed;
 - **Mount prefixes are always stripped**: When a route includes a placeholder `(host,path)`, the path seen by the worker = the request path with the mount prefix removed; `path=''`/`'/'` means the entire host; matching is by **segment boundary** (`/api` does not match `/apix`, ADR-131);
 - `workers_dev` → namespace path (see [`wrangler-compat.md`](wrangler-compat.md)); `preview_urls` are not supported.
 
@@ -69,4 +69,4 @@ Platform-internal namespaces (such as `__system__`/`__platform__`) are **not ext
 - Custom domain binding: `cellhive domain add|ls|rm` → `POST/DELETE /v1/control/domain`, `GET /v1/control/domains` (ADR-131/133);
 - Edge: **no push-based configuration** (ADR-132); statically configured by ops.
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-25_

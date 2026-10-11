@@ -146,8 +146,10 @@ type Server struct {
 	commits       atomic.Uint64
 	readyFlag     atomic.Bool
 
-	sessionOpen atomic.Bool
-	draining    atomic.Bool
+	sessionMu        sync.Mutex
+	sessionEpoch     uint64
+	sessionFollowers []string
+	draining         atomic.Bool
 
 	// ordered serializes pipelined commit frame writes per scope so the SQL
 	// capture can keep several LTX chunks in flight without reordering.
@@ -226,6 +228,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/commit_binary", s.auth(s.handleCommitBinary))
 	mux.HandleFunc("POST /v1/peer/append", s.roleAuth("peer")(s.handlePeerAppend))
 	mux.HandleFunc("POST /v1/peer/append_batch", s.roleAuth("peer")(s.handlePeerAppendBatch))
+	mux.HandleFunc("POST /v1/peer/seal", s.roleAuth("peer")(s.handlePeerSeal))
+	mux.HandleFunc("GET /v1/peer/tail", s.roleAuth("peer")(s.handlePeerTail))
+	mux.HandleFunc("DELETE /v1/peer/session", s.roleAuth("peer")(s.handlePeerSessionDelete))
 	mux.HandleFunc("POST /v1/peer/stream", s.roleAuth("peer")(s.handlePeerStream))
 	mux.HandleFunc("GET /v1/peer/held", s.roleAuth("peer")(s.handlePeerHeld))
 	mux.HandleFunc("POST /v1/kv/put", s.scopeAuth("kv")(s.admit(s.handleKVPut)))
@@ -269,6 +274,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/internal/asset", s.auth(s.handleAssetGet))
 	mux.HandleFunc("GET /v1/internal/asset-url", s.auth(s.handleAssetURL))
 	mux.HandleFunc("GET /v1/kv/get", s.scopeAuth("kv")(s.handleKVGet))
+	mux.HandleFunc("POST /v1/kv/get-batch", s.scopeAuth("kv")(s.handleKVGetBatch))
 	mux.HandleFunc("POST /v1/d1/query", s.scopeAuth("d1")(s.admit(s.handleD1Query)))
 	mux.HandleFunc("POST /v1/d1/exec", s.scopeAuth("d1")(s.admit(s.handleD1Exec)))
 	mux.HandleFunc("POST /v1/d1/batch", s.scopeAuth("d1")(s.admit(s.handleD1Batch)))
@@ -1353,7 +1359,7 @@ func (s *Server) handlePeerAppend(w http.ResponseWriter, r *http.Request) {
 	}
 	// Group commit: concurrent appends are coalesced into one log write and one
 	// fsync by the follower-side batcher; each caller waits for that fsync.
-	if s.PeerUploader != nil {
+	if s.PeerUploader != nil && r.Header.Get("x-cellhive-owner-session") == "" {
 		if err := s.PeerUploader.EnqueueWait(r.Context(), sc, epoch, seg); err != nil {
 			writeErr(w, http.StatusInternalServerError, "spool_failed", err.Error())
 			return
@@ -1362,10 +1368,13 @@ func (s *Server) handlePeerAppend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "fsynced"})
 		return
 	}
-	p, err := s.Spool.Append(r.Context(), sc, epoch, seg)
+	p, _, err := s.Spool.AppendBatchSession(r.Context(), r.Header.Get("x-cellhive-owner-session"), sc, epoch, [][]byte{seg})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "spool_failed", err.Error())
 		return
+	}
+	if r.Header.Get("x-cellhive-owner-session") != "" {
+		w.Header().Set(peer.SessionProtocolHeader, nodelog.ProtoVersionSession)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "fsynced", "path": p})
 }
@@ -1418,11 +1427,14 @@ func (s *Server) handlePeerAppendBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, _, err := s.Spool.AppendBatch(r.Context(), sc, epoch, segments); err != nil {
+	if _, _, err := s.Spool.AppendBatchSession(r.Context(), r.Header.Get("x-cellhive-owner-session"), sc, epoch, segments); err != nil {
 		writeErr(w, http.StatusBadRequest, "spool_failed", err.Error())
 		return
 	}
 	s.peerRecvBytes.Add(int64(len(body)))
+	if r.Header.Get("x-cellhive-owner-session") != "" {
+		w.Header().Set(peer.SessionProtocolHeader, nodelog.ProtoVersionSession)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "fsynced", "count": len(segments)})
 }
 
@@ -1453,29 +1465,44 @@ func (s *Server) handlePeerStream(w http.ResponseWriter, r *http.Request) {
 	if err := rw.Flush(); err != nil {
 		return
 	}
+	const (
+		maxStreamCommitFrames = 64
+		maxStreamCommitBytes  = 1 << 20
+	)
+	reader := bufio.NewReaderSize(rw.Reader, maxStreamCommitBytes)
 	for {
-		scopeText, epoch, segments, err := peer.DecodeBatchFrame(rw)
+		frames, err := peer.DecodeBatchFrames(reader, maxStreamCommitFrames, maxStreamCommitBytes)
 		if err != nil {
 			return
 		}
-		sc, err := cell.ParseScope(scopeText)
-		if err != nil {
-			_ = rw.WriteByte(0)
-			_ = rw.Flush()
-			continue
-		}
-		if _, _, err := s.Spool.AppendBatch(r.Context(), sc, epoch, segments); err != nil {
-			_ = rw.WriteByte(0)
-			_ = rw.Flush()
-			continue
-		}
+		appends := make([]peer.SessionAppend, len(frames))
 		n := 0
-		for _, seg := range segments {
-			n += len(seg)
+		for i, frame := range frames {
+			appends[i] = peer.SessionAppend{Scope: frame.Scope, Epoch: frame.Epoch, Segments: frame.Segments}
+			for _, seg := range frame.Segments {
+				n += len(seg)
+			}
 		}
-		s.peerRecvBytes.Add(int64(n))
-		if err := rw.WriteByte(1); err != nil {
-			return
+		session := r.Header.Get("x-cellhive-owner-session")
+		if session != "" {
+			_, err = s.Spool.AppendSessionGroup(r.Context(), session, appends)
+		} else {
+			for _, frame := range frames {
+				if _, _, err = s.Spool.AppendBatchSession(r.Context(), "", frame.Scope, frame.Epoch, frame.Segments); err != nil {
+					break
+				}
+			}
+		}
+		ack := byte(1)
+		if err != nil {
+			ack = 0
+		} else {
+			s.peerRecvBytes.Add(int64(n))
+		}
+		for range frames {
+			if err := rw.WriteByte(ack); err != nil {
+				return
+			}
 		}
 		if err := rw.Flush(); err != nil {
 			return
@@ -1505,6 +1532,78 @@ func (s *Server) handlePeerHeld(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, wireSeg{Scope: h.Scope, Epoch: h.Epoch, Segment: base64.StdEncoding.EncodeToString(h.Segment)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"segments": out})
+}
+
+func (s *Server) handlePeerSeal(w http.ResponseWriter, r *http.Request) {
+	if s.Spool == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_spool", "follower spool not configured")
+		return
+	}
+	session := r.URL.Query().Get("session")
+	if session == "" {
+		writeErr(w, http.StatusBadRequest, "session_required", "owner session is required")
+		return
+	}
+	final, err := s.Spool.Seal(session)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "seal_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"final": final})
+}
+
+func (s *Server) handlePeerTail(w http.ResponseWriter, r *http.Request) {
+	if s.Spool == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_spool", "follower spool not configured")
+		return
+	}
+	session := r.URL.Query().Get("session")
+	after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	if session == "" || err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_tail_request", "session and numeric after are required")
+		return
+	}
+	const (
+		maxTailFragments = 256
+		maxTailRawBytes  = 48 << 20
+	)
+	fragments, err := s.Spool.TailPage(session, after, maxTailFragments, maxTailRawBytes)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "tail_failed", err.Error())
+		return
+	}
+	type wireFragment struct {
+		Sequence uint64   `json:"sequence"`
+		Scope    string   `json:"scope"`
+		Epoch    uint64   `json:"epoch"`
+		Segments []string `json:"segments"`
+	}
+	out := make([]wireFragment, 0, len(fragments))
+	for _, fragment := range fragments {
+		wire := wireFragment{Sequence: fragment.Sequence, Scope: fragment.Scope, Epoch: fragment.Epoch}
+		for _, segment := range fragment.Segments {
+			wire.Segments = append(wire.Segments, base64.StdEncoding.EncodeToString(segment))
+		}
+		out = append(out, wire)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"fragments": out})
+}
+
+func (s *Server) handlePeerSessionDelete(w http.ResponseWriter, r *http.Request) {
+	if s.Spool == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_spool", "follower spool not configured")
+		return
+	}
+	session := r.URL.Query().Get("session")
+	if session == "" {
+		writeErr(w, http.StatusBadRequest, "session_required", "owner session is required")
+		return
+	}
+	if err := s.Spool.Reclaim(session); err != nil {
+		writeErr(w, http.StatusConflict, "reclaim_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reclaimed"})
 }
 
 // kvCell returns the default KV cell scope for a namespace.
@@ -1859,20 +1958,12 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
-	var txid uint64
-	if condParam != "" {
-		err = s.capturedWrite(r.Context(), scope, func() error {
-			var werr error
-			txid, werr = c.PutTxIf(r.Context(), key, val, meta, expiresMs, cond)
-			return werr
-		})
-	} else {
-		err = s.capturedWrite(r.Context(), scope, func() error {
-			var werr error
-			txid, werr = c.PutTxOpts(r.Context(), key, val, meta, expiresMs)
-			return werr
-		})
-	}
+	txid, err := s.capturedWriteTxID(r.Context(), scope, func() (uint64, error) {
+		if condParam != "" {
+			return c.PutTxIf(r.Context(), key, val, meta, expiresMs, cond)
+		}
+		return c.PutTxOpts(r.Context(), key, val, meta, expiresMs)
+	})
 	if errors.Is(err, cellstore.ErrConditionFailed) {
 		// Condition not met: nothing written, nothing captured. The caller
 		// gets a clean boolean instead of an error (platform adapters map
@@ -1999,13 +2090,13 @@ func (s *Server) handleKVIncr(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err == nil {
-			err = s.CaptureWait(r.Context(), scope)
+			err = s.captureWaitTxID(r.Context(), scope, txid)
 		}
 	} else {
-		err = s.capturedWrite(r.Context(), scope, func() error {
+		txid, err = s.capturedWriteTxID(r.Context(), scope, func() (uint64, error) {
 			var werr error
 			next, txid, werr = c.IncrTx(r.Context(), key, by, expiresMs, meta)
-			return werr
+			return txid, werr
 		})
 	}
 	if err != nil {
@@ -2179,6 +2270,74 @@ func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(v)
 }
 
+const (
+	maxKVGetBatchKeys = 256
+	maxKVGetBatchBody = 256 << 10
+)
+
+func (s *Server) handleKVGetBatch(w http.ResponseWriter, r *http.Request) {
+	scope, err := s.kvScope(r)
+	if err != nil {
+		kvScopeErr(w, err)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxKVGetBatchBody+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+		return
+	}
+	if len(body) > maxKVGetBatchBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, "batch_too_large", "batch body exceeds 256 KiB")
+		return
+	}
+	if s.forwardRead(w, r, scope, body) {
+		return
+	}
+	var req struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Keys) == 0 || len(req.Keys) > maxKVGetBatchKeys {
+		writeErr(w, http.StatusBadRequest, "invalid_arg", "keys must contain 1..256 entries")
+		return
+	}
+	for _, key := range req.Keys {
+		if key == "" {
+			writeErr(w, http.StatusBadRequest, "invalid_arg", "key is required")
+			return
+		}
+		if kvKeyTooLarge(key) {
+			writeErr(w, http.StatusBadRequest, "key_too_large", errKVKeyTooLarge.Error())
+			return
+		}
+	}
+	if s.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_store", "cellstore not configured")
+		return
+	}
+	c, err := s.Store.Cell(r.Context(), scope)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
+		return
+	}
+	got, err := c.GetMany(r.Context(), req.Keys)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "get_failed", err.Error())
+		return
+	}
+	results := make([]map[string]any, len(got))
+	for i, result := range got {
+		item := map[string]any{"found": result.Found}
+		if result.Found {
+			item["value"] = base64.StdEncoding.EncodeToString(result.Value)
+			if len(result.Meta) > 0 {
+				item["metadata"] = base64.StdEncoding.EncodeToString(result.Meta)
+			}
+		}
+		results[i] = item
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
 type commitReq struct {
 	Scope     string   `json:"scope"`
 	Epoch     uint64   `json:"epoch"`
@@ -2293,12 +2452,14 @@ func (s *Server) commitPipelined(w http.ResponseWriter, r *http.Request, sc cell
 	if base == 0 {
 		base = header.StartTxID
 	}
-	if s.NodeLog != nil && !s.sessionOpen.Load() {
-		if _, err := s.NodeLog.Open(r.Context(), s.Cfg.SessionID, epoch, followers); err == nil {
-			s.sessionOpen.Store(true)
-		} else {
-			s.Log.Warn("node-log open failed", "err", err)
+	if !s.openFleetSession(r.Context(), epoch, followers) {
+		res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, true)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "bucket_failed", err.Error())
+			return
 		}
+		writeJSON(w, http.StatusOK, map[string]any{"mode": res.Mode, "key": res.Key, "etag": res.Etag})
+		return
 	}
 	ctx := r.Context()
 	key := sc.String() + "@" + strconv.FormatUint(epoch, 10)
@@ -2396,6 +2557,37 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 	return werr
 }
 
+// capturedWriteTxID is the exact-ticket form of capturedWrite. The write
+// returns the transaction it committed, so the output gate cannot accidentally
+// wait for a later concurrent transaction in the same cell.
+func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write func() (uint64, error)) (uint64, error) {
+	if s.Capture == nil {
+		return write()
+	}
+	if _, err := s.Capture.Ensure(ctx, scope); err != nil {
+		return 0, err
+	}
+	txid, err := write()
+	if err != nil {
+		return txid, err
+	}
+	return txid, s.captureWaitTxID(ctx, scope, txid)
+}
+
+func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uint64) error {
+	if s.Capture == nil {
+		return nil
+	}
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.durability_proof",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
+	proofStart := time.Now()
+	werr := s.Capture.Wait(ctx, scope, txid)
+	s.recordProof(scope.Namespace, time.Since(proofStart))
+	telemetry.End(span, werr)
+	return werr
+}
+
 // CaptureEnsure starts the capture pipeline for a scope without performing a
 // write. For handlers that conditionally write (a CAS miss commits nothing,
 // so there is no txid to wait for) but must still arm capture before their
@@ -2423,14 +2615,7 @@ func (s *Server) CaptureWait(ctx context.Context, scope cell.Scope) error {
 	if err != nil {
 		return err
 	}
-	ctx, span := telemetry.Tracer().Start(ctx, "cell.durability_proof",
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
-	proofStart := time.Now()
-	werr := s.Capture.Wait(ctx, scope, txid)
-	s.recordProof(scope.Namespace, time.Since(proofStart))
-	telemetry.End(span, werr)
-	return werr
+	return s.captureWaitTxID(ctx, scope, txid)
 }
 
 // captureErr writes the standard error for a capture-gated store call.
@@ -2474,30 +2659,27 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	// peers first.
 	tryFleet := s.Cfg.Durability != "bucket"
 	if tryFleet && len(followers) > 0 && s.PeerMgr != nil {
-		if s.NodeLog != nil && !s.sessionOpen.Load() {
-			if _, err := s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers); err == nil {
-				s.sessionOpen.Store(true)
-			} else {
-				s.Log.Warn("node-log open failed", "err", err)
-			}
-		}
-		var ackedBy string
-		var rerr error
-		if prebatched && s.PeerShipper != nil {
-			ackedBy, rerr = s.PeerShipper.ShipNow(ctx, followers, sc, epoch, seg)
+		if !s.openFleetSession(ctx, epoch, followers) {
+			s.Log.Warn("fleet recovery ensemble unavailable; writes wait for the bucket", "epoch", epoch)
 		} else {
-			ackedBy, rerr = s.replicate(ctx, followers, sc, epoch, seg)
-		}
-		if rerr == nil {
-			if s.Uploader != nil {
-				s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
+			var ackedBy string
+			var rerr error
+			if prebatched && s.PeerShipper != nil {
+				ackedBy, rerr = s.PeerShipper.ShipNow(ctx, followers, sc, epoch, seg)
 			} else {
-				go func() {
-					_, _, _ = s.Replica.Append(context.Background(), sc, epoch, seg)
-				}()
+				ackedBy, rerr = s.replicate(ctx, followers, sc, epoch, seg)
 			}
-			s.commits.Add(1)
-			return commitResult{Mode: "fleet", AckedBy: ackedBy}, nil
+			if rerr == nil {
+				if s.Uploader != nil {
+					s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
+				} else {
+					go func() {
+						_, _, _ = s.Replica.Append(context.Background(), sc, epoch, seg)
+					}()
+				}
+				s.commits.Add(1)
+				return commitResult{Mode: "fleet", AckedBy: ackedBy}, nil
+			}
 		}
 	}
 
@@ -2529,6 +2711,42 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	}
 	s.commits.Add(1)
 	return commitResult{Mode: "bucket", Key: key, Etag: etag}, nil
+}
+
+// openFleetSession establishes the immutable recovery coordinates before any
+// follower acknowledgement. A process session uses one ensemble: changing it
+// without sealing and starting a new session would leave the node-log unable to
+// name every follower that may hold acknowledged data.
+func (s *Server) openFleetSession(ctx context.Context, epoch uint64, followers []string) bool {
+	if s.NodeLog == nil {
+		return false
+	}
+	followers = append([]string(nil), followers...)
+	sort.Strings(followers)
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessionEpoch != 0 {
+		return s.sessionEpoch == epoch && slicesEqual(s.sessionFollowers, followers)
+	}
+	if _, err := s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers); err != nil {
+		s.Log.Warn("node-log open failed", "err", err)
+		return false
+	}
+	s.sessionEpoch = epoch
+	s.sessionFollowers = followers
+	return true
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // commitSegment is the HTTP wrapper around commitSegmentCore.

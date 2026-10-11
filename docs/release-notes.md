@@ -4,6 +4,25 @@
 
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
+### user-runtime Worker 热路径优化
+- user-runtime 现在按 `namespace/worker@version-bundle_sha` single-flight 缓存不可变 prepared-worker plan；bundle、binding spec、模块模板和预算扫描只在版本首次使用时构造。vars/bindings-only 发布会因版本号变化得到新 plan。
+- stock workerd capability 保持 request-scoped：`LOADER.get()`、`OUTBOUND`、binding/tail stub 和 entrypoint 仍在当前请求获取，避免跨请求 I/O capability 错误。未采样请求保留 traceparent 传播，但不再构造/flush 空 span。
+- 真 workerd、c=64、12s A/B：`/ping` 2,204→4,077 RPS（+85.0%），KV `/get` 1,593→2,288 RPS（+43.6%）；完整 `internal/userruntime` 套件通过。`/ping` p99 仍有 523ms 尖峰，尚未达到 5k 近期目标。
+- 新增 `CELLHIVE_TENANT_LOG_CAPTURE=on|off`（默认 `on`）：`off` 时 user-runtime 的 fetch/queue/scheduled/service/workflow 与 do-runtime facet 均不附加 native Tail，保留请求、binding、trace/header 隔离语义，但不再捕获租户 console/异常。真 workerd ping 三轮从 4,311/4,625/4,549 RPS 提升到 4,728/5,244/4,816 RPS（配对提升约 5.9%–13.4%）。
+- 进一步 proof 排除了 CFS quota 与 route/env/prepared/`LOADER.get()` 热命中作为主瓶颈：单 runtime 从 1 到 4 个逻辑 CPU 无吞吐提升；Request 安全重建与 tenant isolate crossing 是主要成本。保留安全语义的两种 Request/header 重写均退化并已回退。当前 2 物理核/4 SMT 主机上，固定相同逻辑 CPU 资源从 1 runtime 扩到 4 runtime，中位吞吐 4,455→8,707 RPS（1.95×），失败为 0；四物理核 18k 目标仍待对应硬件验证。
+
+### KV 自然并发读取合批（ADR-191）
+- loaded tenant isolate 现在把同一 microtask 内、同一 binding 的并发 `KV.get/getWithMetadata` 合并为一次最多 256 key 的平台 RPC 与 cell-agent HTTP 请求；cell-agent 在单 SQLite connection/read transaction 内保序点查。旧 cell-agent 返回 endpoint 404 时自动回退逐键 RPC，支持 reader-before-writer 滚动升级。
+- 真 workerd c=64 两轮中，3-key `/batch` 每个租户请求均精确对应 **1** 个后端请求；p50 28.37/32.32ms，对比单读 27.75/29.59ms。完整 user-runtime/do-runtime、server、cellstore 套件通过。控制面固定 runtime source 预算同时由 64 KiB 修正为 80 KiB，并计入 KV/D1 wrapper metadata，保持最终 64 MiB code 上限 fail-closed。
+
+### follower 持久流 group commit 补齐（ADR-042）
+- HTTP 101 stream 与 node-log 均用 `v2` session recovery；session-bound HTTP append 还必须收到 `X-Cellhive-Session-Protocol: v2` 响应证明。升级前空版本/`v1` 记录走 legacy `Held()`；旧 follower 拒绝 v2 或不返回证明时退化 bucket，禁止不可恢复 ACK。follower 用显式 1 MiB reader group-fsync ≤64 / 1 MiB 完整 frame；sealed tail 按 ≤256 fragments / 48 MiB 分页到 `final`；目录 fsync 失败可安全重试。
+- 最终 v2/node-log 分流版本的双进程真实 TCP/follower-fsync 基准在 c=1/16/64/256 均 `fail=0`，c=256 为 13,831 RPS；session log、node-log、异步 bucket batch 均存在。完整 `scripts/runtime-baseline-e2e.sh` PASS。
+
+### OTLP trace 身份与父子链修复（ADR-190）
+- workerd 平台 JS 上报的 `trace_id`/`span_id`/`parent_span_id` 现在原样进入 OTLP，不再由 Go SDK 重写；已在入口采样的 JS root span 不会因 cell-agent ratio=0 被二次丢弃。
+- `do.gate` 现在是 `do.invoke` 的真实子 span，并把自己的 context 传播给 do-supervisor。真 workerd 与解码 OTLP protobuf 的回归测试固定这条链。
+
 ### 文档/运行时一致性收口
 - bundle、assets 与 DO/user-runtime 的 bundle 加载改为先向 cell-agent 申请短期 presigned URL，再由 runtime 直连对象存储；本地 FS/不支持 presign 时保留内部鉴权点查回退。runtime 继续不持长期桶凭据。
 - managed secrets 现在进入 Worker 与 DO facet 的 tenant env：control cell 仅存信封密文，cell-agent 在执行视图读取时解密；同名 secret 覆盖 var。secret put 与 deploy 都把当前 secrets 计入 1016 KiB env 预算，超限先拒绝、不会写入。
@@ -18,12 +37,15 @@
 ### 租户 env 完全由用户拥有（ADR-185）
 - tenant Worker 与 DO facet 的 `env` 现在只有用户声明的 vars/bindings；平台键为 0，`CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称均归用户所有。
 - Workflow dispatcher 以可信 `WorkflowBridgeTarget extends RpcTarget` 把固定 op 回调能力作为 JSRPC 参数传入动态 workflow wrapper；宿主 env、私网 transport、凭据与 dispatcher-bound 身份留在可信 internal host。pinned stock workerd `1.20260916.1` 已实测 step/retry/wait/pause/error 全链路；未使用跨动态 loader 不兼容的 `ServiceStub`，也未开启 experimental flag。
-- 动态 loaded Worker 的原生 Tail Worker 在当前 pin 不支持，因此租户 console 平台采集暂时关闭；不以 env transport 回退。
+- 动态 loaded Worker、service target 与 DO facet 已通过宿主创建的原生 Tail `Fetcher` 采集 `console.*`/异常；log token/URL/private transport 留在可信 host，tenant env 仍为零平台键。
+
+### 无 binding 公共 fetch 直载（ADR-193）
+- user-runtime 对无 binding Worker 直接加载租户默认入口，不再经过 `queue-wrapper.js` 的二次转发；有 binding、queue/scheduled/workflow/service 与 DO WebSocket 保持原 wrapper 路径。由此修复默认导出 `WorkerEntrypoint` 误返回 501，并在固定 2C2G/c=64 基准中把总体中位从 4,977 提到约 5,104 RPS（约 +2.5%）；workerLoader 跨 isolate RPC 主成本不变。
 
 ### ADR-184 平台侧 stub（历史；env 结论由 ADR-185 取代）
 - ADR-184 的平台侧 DO/Workflow/Vectorize stub、DO `fetch(request)` WebSocket 路径和 `rpcObject(...)` 数据通道仍适用；`:7001` 传输与 scoped token 留在可信平台 host。
 - 修复公开 WebSocket 最后一跳：user-runtime loader 现在以 `CellHiveHost.fetch(Request)` 而非普通 `handleFetch` RPC 取回租户响应，避免 101 内的 WebSocket 被结构化序列化。公开端口→tenant→DO 的 101/双向帧与 gated do-runtime 重启续数均已真实验证；未恢复 `CH_DO_CONNECT`。
-- 其 `CH_PLATFORM`/`PlatformBridge`、平台 env 键和保留命名空间的历史结论已由 ADR-185 取代：tenant env 现为零平台键、零保留名。workflow 改用 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC 参数；动态 Tail Worker 未获当前 pin 支持，租户 console 平台采集关闭。
+- 其 `CH_PLATFORM`/`PlatformBridge`、平台 env 键和保留命名空间的历史结论已由 ADR-185 取代：tenant env 现为零平台键、零保留名。workflow 使用 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` JSRPC 参数；日志使用 host-bound 原生 Tail Fetcher，不回退 tenant env。
 - 实测支持的 workerd 语义：`ctx.exports` = 宿主 worker mainModule 的导出集；方法返回的 Proxy 不被 RPC 认作 `RpcTarget`（故平台侧只暴露显式方法，任意 DO 方法名由租户侧 Proxy 转发为 `(method,args)`）。
 
 ### KV TTL 放开 60s 下限（ADR-183）
@@ -44,9 +66,9 @@
 - 边界：token 派生的资源（kv/vectorize/service/do）要求具体 name；对外数据面入口与 API key 管理未做。
 
 ### 可信平台日志可选 OTLP 导出（ADR-172）
-- `CELLHIVE_OTLP_LOGS=off|tail|all`（默认 `off`）：对**可信平台生产者**的日志用与 traces 相同的 OTLP 端点/headers 导出（`/v1/logs`）；`tail` 只在 `cellhive tail --worker` 的 TTL 订阅有效期间导出，退出后 ≤60s 停。
-- 导出是旁路、best-effort、后台批量，不影响请求；内存 ring 与 `cellhive tail` 的行为也只适用于可信平台生产者。ADR-185 下租户 `console.*` 不进入 ring、tail 或 OTLP。
-- **fleet 广播（ADR-173）**：可信平台生产者的订阅会经 lease 节点名单广播到其它 cell-agent（内部端点 + 节流），因此 `tail` 门控覆盖任意节点服务的同名 worker（无需切 `all`）。
+- `CELLHIVE_OTLP_LOGS=off|tail|all`（默认 `off`）：租户 `console.*`/异常经原生 Tail 进入内存 ring，并用与 traces 相同的 OTLP endpoint/headers 导出（`/v1/logs`）；`tail` 只在 `cellhive tail --worker` 的 TTL 订阅有效期间导出，退出后 ≤60s 停。
+- 导出是旁路、best-effort、后台批量，不影响请求；Tail 身份由宿主 props 固定，日志角色凭据不进入 tenant env。
+- **fleet 广播（ADR-173）**：订阅经 lease 节点名单广播到其它 cell-agent（内部端点 + 节流），因此 `tail` 门控覆盖任意节点服务的同名 worker（无需切 `all`）。
 
 ### wake 索引修复（ADR-177）
 - timer 的 wake 索引改为**提交前先发布**（索引只会领先、不会落后）；索引写失败则 timer 不提交（fail-closed）。
@@ -76,7 +98,7 @@
 - `wrangler triggers deploy` 明确提示用 `cellhive deploy --config`（crons 随版本原子应用）；未知命令的提示补全兼容组。
 
 ### upload spool 断电安全（ADR-171）
-- 异步上传 spool 的 append 改为原子写：tmp fsync → rename → 目录 fsync（叶子+父，记忆化，每进程一次）；断电不再丢已 spool 的段。
+- 异步上传 spool 使用 tmp fsync → rename → 每次叶目录 fsync（父目录仅创建时按进程记忆化）；成功删除 entry 后也 fsync 叶目录，publish/完成状态均具备断电持久性。
 - `/metrics` 新增 `cellhive_upload_spool_file_syncs_total`/`_dir_syncs_total`/`_sync_seconds_total`。
 
 ### DO 输出门并发捕获 + ordered sweep（ADR-170）
@@ -175,7 +197,7 @@
 - **`transferred_classes`**：同 worker `{from,to}` = rename 别名；跨 worker `script_name` 拒绝。
 - 运行期 VFS 懒读：边界定稿（ADR-085），替代=冷启动按对象/按页 materialize。
 - `refreshFacets` 增量缓存；`deleteAll()` shim（KV+SQL）。
-- `TestDOCompatSuite`：15 子测试。
+- `TestDOCompatSuite`：19 子测试。
 
 ### P2 — 绑定与资产
 - cron 部署期校验（`invalid_cron`）。

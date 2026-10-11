@@ -149,8 +149,8 @@ The do-runtime supervisor actively initiates claim requests to cell-agent. Flow:
 
 - Granularity: **one owner/lease per DO object** (scope = `(ns, DoClass, objectId)`), (one cell is one DO).
 - **The owner record points to the do-runtime execution node** (including advertise address + epoch), written by **cell-agent**.
-- **No dedicated heartbeat**: do-runtime liveness is determined **implicitly by replication activity**—continuously reporting WAL/renewal to cell-agent counts as alive; stopping reports → owner lease expires → takeover is allowed.
-- **Takeover candidates** use **platform service discovery** (K8s Endpoints / mesh) or on-demand probing; no self-registration table is maintained.
+- **Activated-object liveness**: do-runtime/supervisor renews that DO's owner lease; takeover is allowed only after renewal stops and the lease expires. No separate do-runtime node heartbeat or registry is required.
+- **First hop is separate from ownership**: `CELLHIVE_DO_RUNTIMES` is an arbitrary entrypoint (a Service whose Endpoints update automatically on K8s), not an owner list. Any Pod may attempt the claim; if an owner already exists, it forwards to the per-Pod advertise address in the owner record. Normal invokes cache owner hints, and WebSocket entrypoints also proxy to the actual owner.
 - **router cache**: normal requests only query the owner resolution cache in cell-agent; the bucket is read only for cold activation, cache invalidation, or takeover (point lookup).
 - WebSocket `connect` must land on the owner; during owner migration, it is closed with **1012**, and the client reconnects with a **stable operation id**.
 
@@ -239,10 +239,10 @@ If 1–3 do not hold: degrade to periodic snapshots (RPO=interval) or (self-mana
 
 ## Risks
 
-- workerd's WAL/checkpoint semantics have not been validated (eliminated in P0);
+- workerd WAL/checkpoint semantics are validated for the pinned version; every workerd upgrade must rerun compatibility and capture probes;
 - actor storage is multi-file (shared metadata + per-actor), making consistent replication more complex;
 - **Cross-node reporting is on the write ack hot path**, requiring low internal-network latency and capacity planning;
 - Temporary disk ⇒ cold activation requires restore from cell-agent/object storage, and cold start cost is the price of elasticity;
 - The in-house PID1 supervisor must correctly orchestrate cross-process shutdown order.
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-25_

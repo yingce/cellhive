@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,7 +40,6 @@ import (
 	"cellhive/internal/timer"
 	"cellhive/internal/upload"
 	"cellhive/internal/workflow"
-	"sync/atomic"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -204,6 +204,31 @@ func TestCommitFleetAndBucketFallback(t *testing.T) {
 	}
 }
 
+func TestCommitDoesNotFleetAckOutsideRecordedEnsemble(t *testing.T) {
+	ownerSrv, _ := newTestServer(t)
+	followerSrv, _ := newTestServer(t)
+	fh := httptest.NewServer(followerSrv.Handler())
+	defer fh.Close()
+	h := ownerSrv.Handler()
+	scopeText := "demo/__kv__/ensemble"
+	if rr := do(t, h, http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scopeText+`"}`)); rr.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
+	}
+	if _, err := ownerSrv.NodeLog.Open(context.Background(), ownerSrv.Cfg.SessionID, 1, []string{"http://recorded.invalid"}); err != nil {
+		t.Fatalf("open node-log: %v", err)
+	}
+	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("safe"))
+	body := fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[%q]}`, scopeText, base64.StdEncoding.EncodeToString(segment), fh.URL)
+	rr := do(t, h, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"bucket-batch"`) {
+		t.Fatalf("commit = %d %s, want synchronous bucket fallback", rr.Code, rr.Body.String())
+	}
+	scope, _ := cell.ParseScope(scopeText)
+	if segments, err := followerSrv.Spool.Segments(scope, 1); err != nil || len(segments) != 0 {
+		t.Fatalf("unrecorded follower received %d segments, err=%v", len(segments), err)
+	}
+}
+
 func TestCommitBucketModes(t *testing.T) {
 	for _, wait := range []bool{true, false} {
 		mode := "async"
@@ -314,6 +339,32 @@ func TestPeerPersistentStreamAppendBatch(t *testing.T) {
 		if !bytes.Equal(got[i], segments[i]) {
 			t.Fatalf("segment %d mismatch", i)
 		}
+	}
+}
+
+func TestPeerSessionHTTPAppendReturnsV2Proof(t *testing.T) {
+	follower, _ := newTestServer(t)
+	server := httptest.NewServer(follower.Handler())
+	defer server.Close()
+
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("http-owner-session")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http-session"}
+	segments := [][]byte{
+		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a")),
+		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("b")),
+	}
+	if err := transport.Append(context.Background(), server.URL, sc, 1, segments[0]); err != nil {
+		t.Fatalf("session append: %v", err)
+	}
+	if err := transport.AppendBatch(context.Background(), server.URL, sc, 1, segments[1:]); err != nil {
+		t.Fatalf("session append batch: %v", err)
+	}
+	if _, err := follower.Spool.Seal("http-owner-session"); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	tail, err := follower.Spool.Tail("http-owner-session", 0)
+	if err != nil || len(tail) != 2 {
+		t.Fatalf("session tail = %d frames, %v; want 2", len(tail), err)
 	}
 }
 

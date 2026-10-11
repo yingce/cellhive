@@ -89,22 +89,22 @@ nodes/<node>.json
 - `load` exposes scaling signals: `owned_cells`, `placement_weight`, `resident_cells`, `host_websockets`, `rss_bytes`, `cpu_percent_x100`, `pressured`, `memory_headroom`, `shed_cells`, `restoring`, `sampled_ms`.
 - **fleet capacity sample**: each node reads a shared snapshot every 5s; one node refreshes it (by reading each lease), and the others read the result, avoiding O(cells).
 
-### do-runtime (elastic, no self-registration, no heartbeat)
+### do-runtime (elastic, no self-registration)
 
 - do-runtime **does not hold bucket credentials**, so it cannot write `nodes/*` like cell-agent;
-- Its liveness is **implicitly determined by replication activity**: as long as it continues reporting WAL / renewing owner to cell-agent, it is considered live; if reporting stops → the owner lease expires → it can be taken over;
-- **Takeover candidates** do not rely on heartbeats; they use platform service discovery (K8s Endpoints / mesh); see §4.1.
+- each activated DO owner lease is renewed by the runtime/supervisor; after renewal stops and the owner lease expires, another runtime may take over;
+- `CELLHIVE_DO_RUNTIMES` configures one or more **arbitrary entrypoints**. On K8s it points to the `do-runtime:8788` ClusterIP Service, which load-balances across ready Pods while Endpoints follow scaling automatically. A request may first land on any runtime, which then forwards using the per-Pod advertise address in the owner record; no do-runtime node registry is required.
 
 ### 4.1 Discovery mechanism
 
 | Target | Mechanism |
 |---|---|
 | `cell-agent` cluster | `nodes/*` bucket lease (self-registration) |
-| Class A cell owner | bucket owner record + local cache (**point lookup, no LIST**) |
-| DO owner | owner record (points to do-runtime address + epoch), written by cell-agent |
+| Class A cell owner | Bucket owner record + local cache (**point lookup, no LIST**) |
+| DO owner | Owner record (points to do-runtime address + epoch), written by cell-agent |
 | `user-runtime` dispatch | Logical service name (mesh), any healthy replica |
-| do-runtime liveness | **Implicit liveness via replication activity** (no dedicated heartbeat) |
-| do-runtime takeover candidates | Platform service discovery; probe on demand (after selection, ask it to claim) |
+| Activated DO liveness | Owner-lease renewal; takeover after renewal stops and the lease expires |
+| do-runtime cold-activation candidates | Logical Service/LB in `CELLHIVE_DO_RUNTIMES` (K8s Endpoints update automatically) |
 
 **How callers (workerd / supervisor) find cell-agent**: use a **logical service name** (mesh / K8s Service), any replica is acceptable; a non-owner replica resolves the owner and **forwards the request to the owner**, so the caller does not need to know the specific machine.
 
@@ -119,13 +119,13 @@ nodes/<node>.json
 
 **Across orchestrators**: the bucket node lease is **authoritative**; K8s headless Service / pod DNS provides only **transport reachability** and does not provide identity or epoch.
 
-**Difference from do-runtime**: do-runtime does not hold bucket credentials and does not self-register, so its liveness relies on replication activity, and its candidates rely on platform service discovery (see §4 above).
+**Difference from do-runtime**: do-runtime holds no bucket credentials and does not write `nodes/*`; the Service only provides an arbitrary entrypoint, while owner leases and owner records provide identity, liveness, and directed forwarding for activated objects.
 
 **Non-K8s environments (including do→cell endpoint discovery)**:
 
-- **No third-party registry by default**: use a **configurable service name (one or more)**, resolved by **K8s / Docker Compose built-in DNS**—the Compose `<service>` name returns A records for all replicas; K8s uses a Service (ClusterIP, or preferably **headless**, which returns pod IPs). After resolving all A records, the client (Go HTTP) performs **round-robin / failure retry**; for DO coordination, it is recommended to **select cell-agent by hashing scope**, ensuring that the WAL of the same DO is coordinated by the same cell-agent. Bare metal/VMs use a **seed list** or local DNS.
-- **do-runtime → cell-agent (finding the cluster entrypoint)**: use the same service name / seed list described above; do-runtime **does not hold bucket credentials and cannot** self-discover through `nodes/*`. Consider **Consul/Nomad**, **read-only scoped credentials limited to `nodes/*`** for do-runtime, or **reverse-pushed** endpoints from cell-agent only when dynamic/health-aware discovery is required.
-- **do-runtime takeover candidates**: prefer platform discovery (K8s/Consul/Nomad); without platform discovery, use **do-runtime registration/heartbeat to cell-agent**, or a configured list.
+- **Caller → cell-agent**: configure one service-name/DNS/LB address; a non-owner node forwards requests. Bare-metal/VM deployments use stable DNS or an internal LB.
+- **do-runtime → cell-agent**: use the configured `CELLHIVE_CELL_URL`; do-runtime **does not hold bucket credentials and cannot** discover cell-agent through `nodes/*`.
+- **cell-agent → do-runtime**: configure one or more arbitrary entrypoints in `CELLHIVE_DO_RUNTIMES`. K8s Service/Endpoints automatically add and remove Pods; non-K8s deployments use stable DNS/LB or an explicit multi-entrypoint list. The entrypoint need not know the owner: a non-owner runtime forwards internally to the advertise address in the owner record.
 - Core peer discovery (`nodes/*` lease) and owner records are still bucket-based and **do not depend on K8s**. do→cell uses internal direct connections (HTTP) and **does not go through Traefik**.
 
 ## 5. epoch fence
@@ -263,17 +263,11 @@ Object storage must provide:
 
 **Startup probe**: Every node checks create/reject-create/CAS/reject-stale, ranged read, rejection of stale conditional delete, and successful current-version delete; any failure terminates startup. `cellhive diagnose` repeats this **write-based** probe on a running node; it is not read-only. See `storage-and-s3.md` / ADR-188.
 
-### Bucket roles (topology)
+### Bucket namespaces (current implementation)
 
-| Role | Default | Contents | Can be split into an independent bucket |
-|---|---|---|---|
-| `state` | Primary bucket | cell replication data, owner/lease, nodes | ✅ |
-| `code` | Primary bucket `bundles/`, `deploy/` | Worker bundle (content-addressed), version pointers | ✅ |
-| `assets` | Primary bucket `assets/` | Static assets (can be put behind a CDN) | ✅ |
-| `r2` | Primary bucket `r2/` | Tenant R2 virtual buckets | ✅ |
-| `backup` | None | Optional archive | ✅ |
+There is currently one `CELLHIVE_BUCKET` and one endpoint/region/credential set. Reserved prefixes such as `cells/`, `nodes/`, `node-logs/`, `fleet/`, `bundles/`, `deploys/`, `assets/`, and `r2/` isolate subsystems inside that bucket.
 
-**Default is a single bucket + reserved prefixes; each role can be overridden with an independent bucket/credentials/lifecycle.** Long-lived credentials are held only by `cell-agent` (ADR-023).
+Independent `state/code/assets/r2/backup` buckets, per-role credentials/lifecycle, and a backup archive write path are not implemented. Long-lived credentials are held only by `cell-agent` (ADR-023).
 
 ## 9. No scanning (bucket interaction budget)
 
@@ -355,9 +349,9 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 |---|---|
 | Network | **Same region/same AZ/same rack**; NVMe; avoid cross-AZ/cross-region; owner and follower in the same AZ but on different machines (low latency + failure independence) |
 | Connections | Long-lived connections, connection pools, keepalive, multiplexing |
-| Batching | ✅ **group commit**: owner-side `ShipBatcher` (1ms window, ≤256 segments/batch) combines concurrent commits into **one frame containing multiple segments** in a single POST (`/v1/peer/append_batch`); follower-side `Spool.AppendBatch` performs one log write + one fsync (ADR-040/041) |
+| Batching | ✅ **group commit**: owner-side `ShipBatcher` (1ms window, ≤256 segments/batch) combines concurrent commits into one multi-segment frame; the follower persists an HTTP batch with one `Spool.AppendBatch` write + fsync. Without waiting for more network input, the HTTP 101 persistent stream also drains consecutive fully buffered frames (≤64, ≤1 MiB encoded total), writes frames from the same owner session to one contiguous session log with one fsync, then returns one ACK per frame; a partial or over-group-limit frame remains for the next round (ADR-040/041/042) |
 | Redundancy | ✅ **adaptive hedge (ADR-164, default)**: first write the primary (1 copy); after exceeding `max(250ms, 4×recent slowest append)` (cap `CELLHIVE_PEER_HEDGE_MAX_MS`=2000), send a **second copy** to the next follower, and take the first to arrive (quorum 1); `CELLHIVE_PEER_HEDGE_MS=0` = send only to primary (single copy), and sequentially fail over only if primary fails. Duplicate replicas are safe: spool is **idempotent by `ltx.Header.ID()`** |
-| Protocol | ✅ length-prefixed binary frames + **HTTP 101 persistent stream**; 4 scope-hashed lanes per follower, up to 4 in-flight batches per lane, fallback to `/append_batch` on failure (ADR-042); ❌ gRPC plane **has been canceled** (ADR-136; all internal traffic is HTTP) |
+| Protocol | ✅ length-prefixed binary frames + **HTTP 101 persistent stream `cellhive-peer-v2`**; node-log also marks `v2` session-log recovery. Pre-upgrade empty/`v1` records continue through legacy `Held()` collection. Rejection of v2 stream or absence of `X-Cellhive-Session-Protocol: v2` proof on a session-bound HTTP append degrades directly to bucket proof; legacy append may not form an unrecoverable fleet ACK. There are 4 scope-hashed lanes per follower and up to 4 in-flight batches per lane. Sealed tails page at ≤256 fragments / 48 MiB raw data through `final` (ADR-042). ❌ The gRPC plane **has been canceled** (ADR-136) |
 | Storage | NVMe + batched fsync; avoid write amplification |
 | Read path | Local read-only; does not touch peer/bucket |
 | Deployment | Node affinity (same failure domain); bucket upload only in the background |
@@ -387,4 +381,4 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 | **hedge hit / ineffective ratio** | `/metrics` `cellhive_peer_hedge_fired_total` (replica issued) / `cellhive_peer_hedge_won_total` (replica won the ack); wait is derived from the most recent slowest append in a rolling window (ADR-164/165) |
 | **group commit batching ratio** | append/fsync count per ack significantly < 1 under high concurrency |
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-25_

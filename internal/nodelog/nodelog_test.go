@@ -2,6 +2,8 @@ package nodelog
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"cellhive/internal/bucket"
@@ -24,7 +26,7 @@ func TestOpenGetSeal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if r.Status != StatusOpen || r.Epoch != 3 || len(r.Followers) != 1 {
+	if r.Status != StatusOpen || r.Epoch != 3 || len(r.Followers) != 1 || r.ProtoVersion != ProtoVersionSession {
 		t.Fatalf("record = %+v", r)
 	}
 
@@ -50,6 +52,33 @@ func TestOpenGetSeal(t *testing.T) {
 	list, err := m.ListNode(ctx, "node-1")
 	if err != nil || len(list) != 1 || list[0].Status != StatusSealed {
 		t.Fatalf("list: %+v %v", list, err)
+	}
+}
+
+func TestOpenRejectsDifferentEnsemble(t *testing.T) {
+	ctx := context.Background()
+	m := newMgr(t)
+	if _, err := m.Open(ctx, "s1", 1, []string{"b", "c"}); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if _, err := m.Open(ctx, "s1", 1, []string{"c", "b"}); err != nil {
+		t.Fatalf("same ensemble in another order: %v", err)
+	}
+	if _, err := m.Open(ctx, "s1", 1, []string{"b", "d"}); !errors.Is(err, ErrEnsembleMismatch) {
+		t.Fatalf("changed ensemble error = %v, want ErrEnsembleMismatch", err)
+	}
+}
+
+func TestOpenRejectsLegacyProtocolRecord(t *testing.T) {
+	ctx := context.Background()
+	m := newMgr(t)
+	legacy := Record{Node: "node-1", Session: "legacy", Epoch: 1, Followers: []string{"n2"}, Status: StatusOpen, ProtoVersion: ProtoVersionLegacy}
+	data, _ := json.Marshal(legacy)
+	if _, err := m.B.ConditionalCreate(ctx, Key("node-1", "legacy"), data); err != nil {
+		t.Fatalf("seed legacy record: %v", err)
+	}
+	if _, err := m.Open(ctx, "legacy", 1, []string{"n2"}); !errors.Is(err, ErrEnsembleMismatch) {
+		t.Fatalf("reopen legacy record = %v, want ErrEnsembleMismatch", err)
 	}
 }
 

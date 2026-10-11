@@ -172,11 +172,16 @@ func main() {
 		log.Error("open peer spool", "err", err)
 		os.Exit(1)
 	}
-	peerTransport := peer.NewHTTPTransport(cfg.TokenPeer, nil)
+	peerTransport := peer.NewHTTPTransport(cfg.TokenPeer, nil).WithSession(cfg.SessionID)
 	peerMgr := peer.NewManager(peerTransport)
 	nodeLog := nodelog.New(b, cfg.NodeID)
 
 	rep := replica.New(b)
+	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
+	om.BeforeTakeover = func(tctx context.Context, predecessor cell.Owner) error {
+		_, err := takeoverRecovery.Recover(tctx, nodeLog, predecessor.Node, predecessor.Session)
+		return err
+	}
 	upCtx, upCancel := context.WithCancel(ctx)
 	shards := cfg.UploadShards
 	if shards <= 0 {
@@ -203,7 +208,7 @@ func main() {
 	// CELLD_LOG_GROUP_COMMIT_MS + CELLD_LOG_PIPELINE=4. StreamTransport uses
 	// four scope-hashed HTTP 101 binary lanes per follower, with four batches
 	// allowed in flight per lane.
-	var shipTransport peer.Transport = peer.NewStreamTransport(cfg.TokenPeer, 4, 4)
+	var shipTransport peer.Transport = peer.NewSessionStreamTransport(cfg.TokenPeer, cfg.SessionID, 4, 4)
 	if cfg.PeerLatency > 0 {
 		log.Info("peer latency injection enabled", "one_way", cfg.PeerLatency)
 		shipTransport = peer.NewLatencyTransport(shipTransport, cfg.PeerLatency)
@@ -752,19 +757,15 @@ func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager,
 }
 
 // performHandoff runs the shutdown-side of graceful handoff: acquire the bucket
-// drain token (serializing concurrent shutdowns), seal this node's session so the
-// next owner takes the recovery fast path, release every owned cell so a peer can
-// claim it immediately, then release the token.
-func performHandoff(log *slog.Logger, cfg config.Config, nl *nodelog.Manager, om *owner.Manager, dm *drain.Manager) {
+// drain token (serializing concurrent shutdowns), release every owned cell so a
+// peer can claim it, then release the token. The node-log intentionally remains
+// open: asynchronous bucket uploads are not proven drained here, so the next
+// owner must seal followers and recover their tail before takeover.
+func performHandoff(log *slog.Logger, cfg config.Config, _ *nodelog.Manager, om *owner.Manager, dm *drain.Manager) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DrainWait)
 	defer cancel()
 	if err := dm.Wait(ctx); err != nil {
 		log.Warn("drain token not acquired; proceeding best-effort", "err", err)
-	}
-	if rec, _, err := nl.Get(ctx, cfg.NodeID, cfg.SessionID); err == nil && rec.Status != nodelog.StatusSealed {
-		if _, err := nl.Seal(ctx, cfg.NodeID, cfg.SessionID); err != nil {
-			log.Warn("node-log seal failed", "err", err)
-		}
 	}
 	released := 0
 	for _, owned := range om.OwnedScopes() {

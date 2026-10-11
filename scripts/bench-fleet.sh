@@ -76,7 +76,12 @@ for c in $CONCS; do
   "$BIN/kvbench" -mode put -ns "$NS" -c "$c" -d "$DUR" -addr "$A_URL" | tee -a "$OUT"
 done
 
-spool="$(find "$D2/peer-spool/$NS/__kv__" -type f 2>/dev/null | wc -l)"
-batch="$(find "$BUCKET_DIR/cells/$NS/__kv__/default/ltx" -name '*.batch' 2>/dev/null | wc -l)"
-echo "# fleet path proof: follower spool files=$spool  bucket .batch objects=$batch" | tee -a "$OUT"
+spool="$(find "$D2/peer-spool/_sessions" -name 'fragments.log' -type f 2>/dev/null | wc -l)"
+batch="$(find "$BUCKET_DIR/cells/$NS/__kv__/default/ltx" -name '*.batch' -type f 2>/dev/null | wc -l)"
+node_log="$(find "$BUCKET_DIR/node-logs/a" -name '*.json' -type f 2>/dev/null | wc -l)"
+echo "# fleet path proof: follower session logs=$spool  node-log records=$node_log  bucket .batch objects=$batch" | tee -a "$OUT"
+if [[ "$spool" -eq 0 || "$node_log" -eq 0 ]]; then
+  echo "fleet path proof missing" >&2
+  exit 1
+fi
 echo "wrote $OUT"

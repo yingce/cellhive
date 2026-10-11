@@ -6,7 +6,6 @@ metadata:
     {{- include "cellhive.labels" . | nindent 4 }}
     app: do-runtime
 spec:
-  clusterIP: None
   selector:
     app: do-runtime
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -24,8 +23,14 @@ metadata:
     {{- include "cellhive.labels" . | nindent 4 }}
     app: do-runtime
 spec:
-  replicas: {{ .Values.doRuntime.replicas }}
+  replicas: {{ if .Values.doRuntime.gate }}{{ .Values.doRuntime.replicas }}{{ else }}1{{ end }}
+  {{- if .Values.doRuntime.gate }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+  {{- else }}
   strategy: {type: Recreate}
+  {{- end }}
   selector:
     matchLabels:
       app: do-runtime
@@ -47,9 +52,9 @@ spec:
           {{- if .Values.doRuntime.gate }}
           # ADR-083/140: do-supervisor renders, spawns workerd and gates every
           # response on cell-agent durability; it also owns lease renew/drain.
-          command: ["do-runtime-gated"]
+          command: ["/usr/local/bin/do-runtime-gated.sh"]
           {{- else }}
-          command: ["do-runtime"]
+          command: ["/usr/local/bin/do-runtime"]
           {{- end }}
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}

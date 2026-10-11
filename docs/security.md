@@ -41,12 +41,11 @@
 | 任意 → cell-agent:7001（公网） | ❌ |
 | 租户 Worker → 私网（任意） | ❌ |
 
-## 配额与 admission（P1，ADR-035）
+## 配额与 admission（ADR-035）
 
-- per-namespace 写速率限制；cell-agent 过载返回 `503 overloaded`；
-- 单 DO WAL 上限；worker `limits`（cpu/subrequests）+ V8 heap 上限；
-- 消费节点 lease 的 `pressured`/`shed_cells` 做 backpressure；
-- queue DLQ 上限。
+- 已实现 per-namespace 写速率限制；cell-agent 过载返回 `503 overloaded`；
+- 已实现单 DO WAL 上限、消费节点 lease 的 `pressured`/`shed_cells` backpressure 与 queue DLQ 上限；
+- worker CPU/subrequest 与 V8 heap 的 per-worker 强制上限尚未实现；当前只有 deploy-time WorkerCode/env 预算。
 
 ## 内部角色令牌（ADR-075）
 
@@ -81,4 +80,4 @@
 - **不做 mTLS 的理由**：需要一整套 CA/签发/轮换/信任分发（当前固定集群无 PKI），且网络隔离 + 独立 secret 已是主防线；引入 mTLS 收益边际、运维面显著变大。
 - 何时再评估：跨信任域部署（cell-agent 与非受信网络互通）、或合规要求"密码学身份"时；接口层（`token` header）已抽象，届时可加证书记录。
 
-_最后更新：2026-09-17_
+_最后更新：2026-09-25_

@@ -9,7 +9,7 @@
 | ES module Workers / `fetch` | Supported | `workerLoader` 动态加载不可变版本 |
 | WebSocket | Supported | user-runtime 代理；DO 上迁移/部署时 1012，客户端重连（CF 兼容）；**`env.DO.get().fetch(升级请求)` 经 `/v1/do/connect` 直连 owner（`{owner,ticket}` 查询 + ticket 仅本 shard，ADR-175）** |
 | KV | Supported | 强一致（读也转发给 owner，ADR-120；cell SQLite）；无全局边缘复制；**`put` 接受 string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream（ADR-174）**；**写入校验：key≤512B、metadata≤1KiB、expiration 须在未来、value≤25MiB（ADR-176）；expirationTtl 接受任意正整数（ADR-183 放开 CF 的 ≥60s 下限——读路径惰性过期秒级生效，清扫按最近到期武装）** |
-| D1 | Supported | SQL + `batch`/`exec`；单写者；**Sessions/bookmarks 显式拒绝**（`withSession()`/`session()` 抛错，无读复制，ADR-153）；`run()/batch()` 的 `meta` 含 `last_row_id`/`changed_db`，错误映射 `D1_ERROR`（ADR-163） |
+| D1 | Supported | SQL + `prepare`/`bind`/`all`/`first`/`run`/`raw`/`batch`/`exec`；`prepare()`/`bind()` 同步返回本地语句对象，ORM 可将其传给 `batch()`；`ArrayBuffer`/TypedArray 按 BLOB 绑定与回读；单写者；**Sessions/bookmarks 与事务显式拒绝**（`withSession()`/`session()` 抛错，`BEGIN` 不支持，无读复制，ADR-153）；`meta` 含 `changes`/`last_row_id`/`changed_db`，错误映射 `D1_ERROR`（ADR-163） |
 | R2 | Supported | S3 兼容 + **presign（`createPresignedUrl`）** + **multipart（ADR-113）** + **cursor 分页 list（ADR-145）**；**R2Object 全字段 + `put` http/custom metadata/checksums + `head()`（ADR-163）**；**list 支持 `include`（按需回填逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（ADR-168）**；**`R2ObjectBody.body` + `writeHttpMetadata`（ADR-174/175：本地 Proxy 包装，metadata 写入调用方 Headers）**；无 SSE-C/jurisdiction、无 object versioning/conditional put |
 | Queues | Partial | 至少一次 + DLQ；`max_concurrency` **支持**（ADR-112，批次并发上限）；`contentType=v8` 拒绝 |
 | Cron | Supported | 分钟对齐、best-effort、不补跑 |
@@ -19,7 +19,7 @@
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
 | Vars / Secrets | Supported | vars、managed secrets 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secrets 在 control cell 信封加密，运行时由 cell-agent 解密注入 Worker/DO；同名 secret 覆盖 var |
-| 租户 `console.*` 平台采集 | Partial | pin `workerd 1.20260916.1` 的动态 `workerLoader` Tail Worker 被拒绝：`provided value is not of type 'Fetcher'`；因此当前不采集到 ring/OTLP，不能以 tenant env 回退 |
+| 租户 `console.*` 平台采集 | Supported | 默认由 host-bound 原生 Tail `Fetcher` 捕获 Worker/service target/DO facet 的 console 与异常，写入 ring/可选 OTLP；身份与 log 凭据不进入 tenant env（ADR-185）。可按 runtime 设 `CELLHIVE_TENANT_LOG_CAPTURE=off` 关闭并省去 Tail 开销（ADR-192） |
 | `nodejs_compat` | Supported | 随 workerd；需开启 |
 | Cache API | Rejected | 无边缘缓存 |
 | AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供；Vectorize 由 CellHive 的 SQLite vec1 facade 提供（见下，ADR-158/159），Hyperdrive 已支持 |
@@ -57,4 +57,4 @@
 - **框架预构建产物验收**：`internal/wrangler TestFrameworkPrebuiltLayouts` 覆盖 OpenNext（`.open-next/worker.js` + `.open-next/assets`）、SvelteKit（`.svelte-kit/cloudflare/_worker.js` + 同目录资产）、Astro（`dist/_worker.js/index.js` + `dist/client`）：配置映射 + `bundler.Build` 打包。
 - **不做的项**：见"Rejected"行的原因说明（Cache API/浏览器渲染/Email/Python 等）；Vectorize 已支持（ADR-158/159）。
 
-_最后更新：2026-09-22_
+_最后更新：2026-09-23_

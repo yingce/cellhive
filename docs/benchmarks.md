@@ -324,13 +324,59 @@ stub 在 router/service 跳上注入 3ms；worker 内 `performance.now()` 计时
 
 loopback + 注入延迟，验证"跳被移除"的机制；生产节省 = 真实往返（跨主机为 RTT，需第二台主机）。
 
+### user-runtime prepared-worker 热路径 A/B（真 workerd，2026-09-24）
+
+固定 stock workerd `1.20260916.1`；同一个 Go HTTP control/KV stub；public loader → workerLoader → tenant isolate 全链路；`/get` 还经过 KV WorkerEntrypoint → `PLATFORM.fetch`。每条路径预热 100 次，再以 c=64 跑 12s。基线只替换为优化前镜像中的 `loader.js`，其余代码/依赖相同。
+
+| 路径 | 基线 RPS | prepared-worker + 未采样快路径 | 变化 | 基线 p50 | 优化后 p50 | 失败（基线→优化） |
+|---|---:|---:|---:|---:|---:|---:|
+| `/ping`（无 binding） | 2,204 | **4,077** | **+85.0%** | 23.90 ms | **2.83 ms** | 12→0 |
+| `/get`（KV read） | 1,593 | **2,288** | **+43.6%** | 34.99 ms | **24.09 ms** | 0→0 |
+
+实现按 `namespace/worker@version-bundle_sha` 缓存纯数据 load plan（bundle、binding spec、模块模板和预算校验），并 single-flight 首次准备。workerd capability 是 request-scoped：`LOADER.get()`、`OUTBOUND`、binding/tail stub 与 `getEntrypoint()` **不能跨请求缓存**，否则真实 workerd 报 `Cannot perform I/O on behalf of a different request`；这些仍在当前请求获取。版本号变化即得到新 plan，同 bundle 的 vars/bindings-only 发布不会复用旧 env。未采样请求保留 ADR-146 traceparent 传播，但跳过 span 构造/flush。
+
+限制：优化后 `/ping` p99 为 523 ms，存在尾部尖峰；4,077 RPS 仍低于近期 5k 目标。下一步应 profile loader→tenant 调度与连接生命周期，不能把这次结果解释为已完成 worker 性能优化。
+
+### KV 自然并发读取合批（真 workerd，ADR-191，2026-09-24）
+
+同一探针与 c=64，预热 100 次后每路径跑 8s、连续 2 轮。`/get` 做 1 次 `KV.get`；`/batch` 在租户 isolate 内 `Promise.all` 3 次 `KV.get`。后端 stub 按 batch 请求中的 key 数返回同序结果。
+
+| 轮次 | `/get` RPS / p50 / p99 | `/batch` RPS / p50 / p99 | `/batch` 每租户请求的后端请求数 |
+|---|---|---|---:|
+| 1 | 2,008 / 27.75ms / 113.18ms | 1,912 / 28.37ms / 165.09ms | **1** |
+| 2 | 1,784 / 29.59ms / 155.71ms | 1,610 / 32.32ms / 162.79ms | **1** |
+
+run 1 的累计 `kv_requests=46,443`，精确等于 `/local`、`/get`、`/batch` 的成功租户请求数（14,777+16,066+15,300）加三条路径各 100 次预热；所以 `/batch` 内 3 次读取确实只产生 1 次 cell-agent HTTP 请求，而不是靠响应时间推断。三读 p50 仅比单读高 0.63–2.73ms，避免了三次独立 JSRPC/HTTP 成本。该优化不解决 loader 调度尾部：同次 run 2 的 `/ping` p99 仍为 466ms。
+
+### native Tail 捕获开关 A/B（真 workerd，ADR-192，2026-09-24）
+
+固定 stock workerd `1.20260916.1`、同一 public loader → workerLoader → tenant ping、c=64、预热 200 次、每轮 8s。默认 `CELLHIVE_TENANT_LOG_CAPTURE=on` 三轮为 **4,311 / 4,625 / 4,549 RPS**；`off` 的最终实现三轮为 **4,728 / 5,244 / 4,816 RPS**，配对提升约 **5.9%–13.4%**。关闭只省 native Tail 事件采集/派发，租户请求、bindings、trace 与 header 隔离不变，但平台不再捕获该 runtime 的租户 `console.*` 与未捕获异常。更早一次 5.7k–6.6k 结果受宿主调度噪声影响，不作为承诺。
+
+同时验证并回退了三个无效/不安全方向：`WorkerStub` 没有直接 `fetch()`，必须使用 `getEntrypoint()`；无 binding env 快路径降到 3.9k–4.1k RPS；完全跳过 Request/header/trace 重建虽有约 5%–10% 上界收益，但会破坏任意 `x-cellhive-*` 清理与 trace 传播。
+
+### user-runtime CPU / 阶段 / 副本 proof（真 workerd，2026-09-24）
+
+固定 stock workerd `1.20260916.1`、外部压测器、Tail off、trace ratio 0、简单 `pong` Worker、c=64。CFS quota 1C 三轮中位 **4,827 RPS**，无 quota 的 cpuset 单逻辑 CPU 为 **5,021 RPS**，无 quota 四逻辑 CPU 为 **5,034 RPS**；quota 每个 8s 窗口仅 throttled 0.26–0.27 CPU 秒，且无 quota 时 p99 仍为 109–124ms。故 CFS quota 只解释约 3%–4% 损失，100ms 级尾延迟不是 quota 根因；单 runtime 加逻辑 CPU 也没有纵向收益。
+
+一次性阶段截点在 c=64 下得到 route/env/plan/stub **10.7k–11.4k RPS**、完成 `prepareRequest` 后 **7.3k RPS**、完整 tenant fetch **4.6k RPS**。完整 no-copy 诊断为 5.5k–5.8k RPS，但破坏任意 `x-cellhive-*` 清理与 ADR-146 traceparent 传播，不可采用。保留语义的单 Request clone 与低分配 header scan 分别降至中位 3.7k RPS，均已回退；真实 workerd 还证明入站 Request headers immutable，不能原地修改。
+
+固定 CPU 4–7（本机仅 **2 个物理核 / 4 个 SMT 逻辑 CPU**）、12s、三轮：
+
+| 布局 | RPS（三轮） | 中位 RPS | p99 中位 | failures |
+|---|---:|---:|---:|---:|
+| 1 runtime × 4 logical CPU | 4,455 / 4,469 / 4,391 | **4,455** | **113.9ms** | 0 |
+| 2 runtimes × 2 logical CPU | 5,796 / 5,893 / 7,382 | **5,893** | **86.7ms** | 0 |
+| 4 runtimes × 1 logical CPU | 9,042 / 8,707 / 7,258 | **8,707** | **100.6ms** | 0 |
+
+四副本相对单副本中位吞吐 **1.95×**，接近两个物理核的容量上限，证明正确方向是 runtime 多副本而非单进程加核。原定 `4×1C ≥18k RPS、p99 ≤50ms` 需要至少四个无 SMT 争用的物理核环境验证；本机拓扑不具备该验收条件，不能宣称达标。
+
 ## 结论
 
 - **基线一致性**：FS `c=128` sqlbench **30.7k TPS**，与历史 durable ~28.9k 一致（历史上万级是**高并发**下的稳态，不是单请求延迟）。**并发低则 TPS 低**（c=8 → ~2.8k），属延迟受限的正常缩放。
 - **FS → S3 的差**主要落在 **bucket 提交等待**（realbench p50 0.22→2.0 ms；sqlbench E2E p50 2.9→5.1 ms），即 RPO=0 的代价；本机 MinIO 仍非生产云对象存储尾延迟。
 - **写合并有效**：sqlbench `transactions_per_batch ≈ 7.4–7.9`，`put_per_ack` 远小于 1；capture 批内合并显著摊薄提交。
 - **数据准确**：所有档 `db_integrity=ok`、`failures=0`。
-- **workerd/DO**：进程级上限与门控数字（≈800 req/s 裸 DO、k 写合并提升）见 `docs/archive/p0-report.md`；本页未重跑 workerd 基准。
+- **workerd/DO**：本页已重跑 user-runtime（prepared plan、Tail、CPU/阶段/副本）基准；历史 DO 进程级上限与门控数字（≈800 req/s 裸 DO、k 写合并提升）仍见 `docs/archive/p0-report.md`，本轮未重跑 DO。
 - **局限**：单机 loopback、无跨主机 RTT；MinIO 本地；未压真实磁盘/云对象存储。跨主机/云数字需环境（C 类 blocker）。
 
 ### 可观测性开销（ADR-178，`-benchmem`）

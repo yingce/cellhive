@@ -89,11 +89,11 @@ nodes/<node>.json
 - `load` 暴露伸缩信号：`owned_cells`、`placement_weight`、`resident_cells`、`host_websockets`、`rss_bytes`、`cpu_percent_x100`、`pressured`、`memory_headroom`、`shed_cells`、`restoring`、`sampled_ms`。
 - **fleet capacity sample**：每节点每 5s 读一次共享快照；由一个节点刷新（读各 lease），其余读结果，避免 O(cells)。
 
-### do-runtime（弹性，无自注册、无心跳）
+### do-runtime（弹性，无自注册）
 
 - do-runtime **不持桶凭据**，因此不能像 cell-agent 那样写 `nodes/*`；
-- 其存活由**复制活动隐式判定**：只要还在向 cell-agent 上报 WAL / 续约 owner，即视为存活；停止上报 → owner 租约到期 → 可接管；
-- **接管候选**不靠心跳，走平台服务发现（K8s Endpoints / mesh）；详见 §4.1。
+- 每个已激活 DO 的 owner lease 由 runtime/supervisor 续约；停止续约后 owner lease 到期，其他 runtime 才可接管；
+- `CELLHIVE_DO_RUNTIMES` 配置一个或多个**任意入口**；K8s 下配置 ClusterIP Service `do-runtime:8788`，由 Service 在 ready Pod 间负载均衡，Endpoints 自动随 Pod 扩缩。请求可先落到任意 runtime，runtime 再按 owner 记录中的 per-Pod advertise 地址转发；无需 do-runtime 节点注册表。
 
 ### 4.1 发现机制
 
@@ -103,8 +103,8 @@ nodes/<node>.json
 | A 类 cell owner | bucket owner 记录 + 本地缓存（**点查，不 LIST**） |
 | DO owner | owner 记录（指向 do-runtime 地址 + epoch），cell-agent 写 |
 | `user-runtime` 派发 | 逻辑服务名（mesh），任意健康副本 |
-| do-runtime 存活 | **复制活动隐式判活**（无专门心跳） |
-| do-runtime 接管候选 | 平台服务发现；按需探测（选出后请其 claim） |
+| do-runtime 已激活对象存活 | owner lease 续约；停止续约后可接管 |
+| do-runtime 冷激活候选 | `CELLHIVE_DO_RUNTIMES` 逻辑 Service/LB（K8s 下 Endpoint 自动更新） |
 
 **调用方（workerd / supervisor）如何找 cell-agent**：用**逻辑服务名**（mesh / K8s Service），任一副本即可；非 owner 副本会按 owner 解析把请求**转发给 owner**，所以调用方无需知道具体机器。
 
@@ -119,13 +119,13 @@ nodes/<node>.json
 
 **跨编排器**：bucket node lease 是**权威**；K8s headless Service / pod DNS 只提供**传输可达性**，不承担身份与 epoch。
 
-**与 do-runtime 的区别**：do-runtime 不持桶凭据、不自注册，故其存活靠复制活动、候选靠平台服务发现（§4 上文）。
+**与 do-runtime 的区别**：do-runtime 不持桶凭据、不写 `nodes/*`；Service 只提供任意入口，已激活对象的 owner lease 和 owner 记录负责身份、存活与定向转发。
 
 **非 K8s 环境（含 do→cell 端点发现）**：
 
-- **默认无第三方注册中心**：用**可配置的 service name（可多个）**，由 **K8s / Docker Compose 内置 DNS** 解析——Compose 的 `<service>` 名返回所有副本 A 记录；K8s 用 Service（ClusterIP 或更推荐的 **headless** 返回 pod IP）。客户端（Go HTTP）解析全部 A 记录后 **round-robin / 失败重试**；对 DO 协调建议**按 scope 哈希选 cell-agent**，保证同一 DO 的 WAL 由同一 cell-agent 协调。裸机/VM 用**种子列表**或本地 DNS。
-- **do-runtime → cell-agent（找集群入口）**：同样用上述 service name / 种子列表；do-runtime **不持桶凭据、不能**通过 `nodes/*` 自发现。需要动态/健康感知时才考虑 **Consul/Nomad**、给 do-runtime **只读且限定 `nodes/*` 的 scoped 凭据**、或由 cell-agent **反向下发**端点。
-- **do-runtime 接管候选**：优先平台发现（K8s/Consul/Nomad）；无平台发现时 **do-runtime 注册/心跳到 cell-agent**，或配置列表。
+- **调用方 → cell-agent**：当前配置一个 service name / DNS / LB 地址；非 owner 节点会转发。裸机/VM 用稳定 DNS 或内部 LB。
+- **do-runtime → cell-agent**：同样使用配置的 `CELLHIVE_CELL_URL`；do-runtime **不持桶凭据、不能**通过 `nodes/*` 自发现。
+- **cell-agent → do-runtime**：`CELLHIVE_DO_RUNTIMES` 配置一个或多个任意入口。K8s 使用 Service/Endpoints 自动纳入或移除 Pod；非 K8s 使用稳定 DNS/LB 或显式多入口列表。入口无需知道 owner：落到非 owner 后按 owner 记录中的 advertise 地址内部转发。
 - 核心 peer 发现（`nodes/*` lease）与 owner 记录仍基于 bucket，**不依赖 K8s**。do→cell 为内部直连（HTTP），**不经 Traefik**。
 
 ## 5. epoch fence
@@ -208,20 +208,21 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 **存储位置**：bucket `node-logs/<node>/<session>.json`，由本节点写。
 
 **生命周期**：
-- **open**：节点启动并收到第一次 fleet-mode 写 ack 时，条件创建。记录：`{node, session, epoch, followers, status="open"}`。
+- **open**：节点第一次准备走 fleet-mode ack **之前**条件创建；只有创建成功且 `{node, session, epoch, followers}` 与既有记录完全一致，才允许 follower ack。一个进程 session 的 follower ensemble 不可变；ensemble/epoch 不一致时同步降级到 bucket，不得使用未被 node-log 覆盖的 follower 证明。
+- follower 将每个已 fsync batch 写为该 owner session 下的连续序号 fragment；seal 与 append 使用同一 session 锁，seal 返回最终序号，之后 append 被拒绝。
 - **recovering**：另一节点看到 open 记录并开始执行 recovery 时设为 recovering（CAS）。
-- **sealed**：recovery 完成后设为 sealed。节点优雅停止时也主动 seal。
+- **sealed**：recovery 完成后写入每个 follower 的 `covered_seq` 并设为 sealed；节点优雅停止只有在 bucket 上传已排空后才可 seal。
 - **失效**：节点重启后不使用旧 session；旧 log 留给 recovery 处理。
 
 **Recovery 执行**（新 owner 接管前）：
-1. 读 bucket `node-logs/<dead-node>/` 下所有 open/recovering 记录；
-2. 对每个 open session，CAS 设为 recovering；
-3. 联系 session 记录的 followers（地址来自其当时的 node lease）请求 seal（流式发送它们持有的未上传段）；
-4. 将收到的段上传到对应的 `cells/<scope>/ltx/e<epoch>/`；
-5. 确认完整后标记 session sealed；
-6. 继续正常接管流程。
+1. 读取前任 owner 的 `{node, session}` node-log；不存在或 sealed 才可走 fast path；
+2. open/recovering 记录 CAS 为 recovering；
+3. 对记录中的每个 follower 发 seal，取得该 session 的最终序号；
+4. 从序号 1 读取不可变 tail，要求无缺口且恰好到最终序号，将其中所有段上传到对应 `cells/<scope>/ltx/e<epoch>/`；
+5. node-log 以单次 CAS 写入 `covered_seq` 并标记 sealed；随后 best-effort 回收 follower session fragment；
+6. **只有上述 recovery 成功后**，接管节点才 CAS owner 记录、恢复 bucket 链并开始服务。recovery 失败则旧 owner 记录保持不变，接管失败关闭。
 
-**fast path**：若节点优雅停止（SIGTERM 完成 handoff），它自己 seal log 并确保上传完成，接管直接跳 recovery 步骤。
+**fast path**：若 node-log 不存在（该 session 从未以 fleet 证明 ack）或已经 sealed，接管无需联系 follower。优雅停止必须先排空异步 bucket 上传，再写 sealed，不能仅因收到 SIGTERM 就声明完整。
 
 **自动编排（ADR-066）**：上述 recovery 不再依赖人工触发。fleet waker 的 leader 每轮 pass 顺带执行 `recovery.Runner.Pass`：用 `nodelog.Nodes` 枚举有 node-log 的节点，**以 node lease 判活**（存活→跳过，绝不恢复；缺失/过期→视为死亡；lease 读取出错→跳过以保证 fail-safe），对死亡节点执行上面的 1–6。整个过程**幂等**（sealed 快速路径、open→recovering→sealed 单向），可与 timer 派发共用同一次 leader 选举。
 
@@ -264,17 +265,11 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 
 **启动探针**：每个节点运行条件创建、重复拒绝、CAS、旧版本拒绝、ranged read，以及旧版本条件删除拒绝 / 当前版本删除；任一失败即退出。运维的 `cellhive diagnose` 在已启动节点上再次执行该**写入式**探针，不是只读检查。详情见 `storage-and-s3.md` / ADR-188。
 
-### 桶角色（拓扑）
+### 桶命名空间（当前实现）
 
-| 角色 | 默认 | 内容 | 可拆为独立桶 |
-|---|---|---|---|
-| `state` | 主桶 | cell 复制数据、owner/lease、nodes | ✅ |
-| `code` | 主桶 `bundles/`、`deploy/` | Worker bundle（内容寻址）、版本指针 | ✅ |
-| `assets` | 主桶 `assets/` | 静态资产（可挂 CDN） | ✅ |
-| `r2` | 主桶 `r2/` | 租户 R2 虚拟桶 | ✅ |
-| `backup` | 无 | 可选归档 | ✅ |
+当前只有一个 `CELLHIVE_BUCKET` 与一组 endpoint/region/credentials。`cells/`、`nodes/`、`node-logs/`、`fleet/`、`bundles/`、`deploys/`、`assets/`、`r2/` 等保留前缀在同一桶内隔离。
 
-**默认单桶 + 保留前缀；每个角色可覆盖为独立桶/凭据/生命周期。** 长期凭据只由 `cell-agent` 持有（ADR-023）。
+独立 `state/code/assets/r2/backup` 桶、per-role 凭据/生命周期和 backup 归档写入路径尚未实现。长期凭据只由 `cell-agent` 持有（ADR-023）。
 
 ## 9. 禁止扫描（bucket 交互预算）
 
@@ -356,9 +351,9 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 |---|---|
 | 网络 | **同区/同 AZ/同机架**；NVMe；避免跨 AZ/跨区；owner 与 follower 同 AZ 不同机（低延迟 + 故障独立） |
 | 连接 | 长连接、连接池、keepalive、多路复用 |
-| 批量 | ✅ **group commit**：owner 侧 `ShipBatcher`（1ms 窗口、≤256 段/批）把并发 commit 合成**一帧多段**一次 POST（`/v1/peer/append_batch`）；follower 侧 `Spool.AppendBatch` 一次 log 写 + 一次 fsync（ADR-040/041） |
+| 批量 | ✅ **group commit**：owner 侧 `ShipBatcher`（1ms 窗口、≤256 段/批）把并发 commit 合成一帧多段；HTTP batch 由 follower `Spool.AppendBatch` 一次写 + fsync。HTTP 101 持久流还会在不额外等待网络的前提下 drain 已完整缓冲的连续 frame（≤64、编码总量≤1 MiB），把同一 owner session 的 frame 写入一个连续 session log 并一次 fsync，再按 frame 数回 ACK；半帧/超组上限 frame 留待下一轮（ADR-040/041/042） |
 | 冗余 | ✅ **自适应 hedge（ADR-164，默认）**：先写 primary（1 份），超过 `max(250ms, 4×最近最慢 append)`（上限 `CELLHIVE_PEER_HEDGE_MAX_MS`=2000）再向下一 follower 发**第二份**，取先到者（法定 1）；`CELLHIVE_PEER_HEDGE_MS=0` = 只发 primary（单份），primary 失败才顺序 failover。重复副本安全：spool **按 `ltx.Header.ID()` 幂等** |
-| 协议 | ✅ 长度前缀二进制帧 + **HTTP 101 持久流**；每 follower 4 条 scope-hashed lane、每 lane 最多 4 批在途，失败回退 `/append_batch`（ADR-042）；❌ gRPC 平面**已取消**（ADR-136；内部全 HTTP） |
+| 协议 | ✅ 长度前缀二进制帧 + **HTTP 101 持久流 `cellhive-peer-v2`**；node-log 同步标记 `v2` session-log recovery。升级前空版本/`v1` 记录继续走 legacy `Held()` 收集；旧 follower 拒绝 v2 stream 或 session-bound HTTP append 缺少 `X-Cellhive-Session-Protocol: v2` 响应证明时，直接退化 bucket，禁止 legacy append 构成不可恢复的 fleet ACK。每 follower 4 条 scope-hashed lane、每 lane最多 4 批在途；sealed tail 按 ≤256 fragments / 48 MiB 原始数据分页到 `final`（ADR-042）；❌ gRPC 平面**已取消**（ADR-136） |
 | 存储 | NVMe + batched fsync；避免写放大 |
 | 读路径 | 只读本地，不碰 peer/bucket |
 | 部署 | 节点亲和（同一失败域）；bucket 上传仅后台 |
@@ -388,4 +383,4 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 | **hedge 命中 / 无效比例** | `/metrics` `cellhive_peer_hedge_fired_total`（发出副本）/`cellhive_peer_hedge_won_total`（副本赢得 ack）；等待用滚动窗口的最近最慢 append 推导（ADR-164/165） |
 | **group commit 合批比** | 高并发下每 ack 的 append/fsync 次数显著 < 1 |
 
-_最后更新：2026-09-19_
+_最后更新：2026-09-25_

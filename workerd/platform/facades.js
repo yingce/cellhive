@@ -96,6 +96,78 @@ function kvKeyOut(k) {
   return out;
 }
 
+function b64bytes(s) {
+  const bin = atob(s || "");
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+function kvValue(bytes, type) {
+  if (type === "arrayBuffer") return bytes.buffer;
+  const text = new TextDecoder().decode(bytes);
+  return type === "json" ? JSON.parse(text) : text;
+}
+
+// makeKVFromStub keeps micro-batching in the tenant isolate. A WorkerEntrypoint
+// may be instantiated once per JSRPC call, so batching inside the platform stub
+// cannot observe sibling Promise.all() calls.
+export function makeKVFromStub(stub) {
+  let pending = null;
+  const enqueue = (key, type, withMetadata) => {
+    if (!pending) {
+      pending = [];
+      const batch = pending;
+      queueMicrotask(() => flush(batch));
+    }
+    return new Promise((resolve, reject) => pending.push({ key, type, withMetadata, resolve, reject }));
+  };
+  const flush = async (batch) => {
+    if (pending !== batch) return;
+    pending = null;
+    try {
+      for (let start = 0; start < batch.length; start += 256) {
+        const items = batch.slice(start, start + 256);
+        let results = await stub.getBatch(items.map((item) => item.key));
+        if (results === null) {
+          results = await Promise.all(items.map(async (item) => {
+            const got = item.withMetadata ? await stub.getWithMetadata(item.key, item.type) : await stub.get(item.key, item.type);
+            if (item.withMetadata) return got.value === null ? { found: false } : { direct: got };
+            return got === null ? { found: false } : { direct: { value: got, metadata: null } };
+          }));
+        }
+        if (!Array.isArray(results) || results.length !== items.length) throw new Error("kv.get: invalid batch response");
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const result = results[i];
+          if (result.direct) {
+            item.resolve(item.withMetadata ? result.direct : result.direct.value);
+            continue;
+          }
+          if (!result || !result.found) {
+            item.resolve(item.withMetadata ? { value: null, metadata: null } : null);
+            continue;
+          }
+          try {
+            const value = kvValue(b64bytes(result.value), item.type);
+            const metadata = b64decJson(result.metadata);
+            item.resolve(item.withMetadata ? { value, metadata } : value);
+          } catch (e) {
+            item.reject(e);
+          }
+        }
+      }
+    } catch (e) {
+      for (const item of batch) item.reject(e);
+    }
+  };
+  return {
+    get: (key, type) => enqueue(key, type, false),
+    getWithMetadata: (key, type) => enqueue(key, type, true),
+    put: (...args) => stub.put(...args),
+    delete: (...args) => stub.delete(...args),
+    list: (...args) => stub.list(...args),
+  };
+}
+
 export function makeKV(platform, ns, scopeToken) {
   const base = platform.url + "/v1/kv/";
   return {
@@ -359,13 +431,19 @@ export function makeDOFromStub(stub) {
   };
 }
 
+function d1Param(value) {
+  if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  return value;
+}
+
 export function makeD1(platform, ns, db, scopeToken) {
   const base = platform.url + "/v1/d1/";
   async function call(path, body) {
     const r = await pfetch(platform, base + path + "?" + q({ ns, db }), {
       method: "POST",
       headers: { ...headers(platform, scopeToken), "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(Object.assign({}, body, { params: (body.params || []).map(d1Param) })),
     });
     await must(r, "d1." + path);
     return (await r.json()).results;
@@ -377,15 +455,16 @@ export function makeD1(platform, ns, db, scopeToken) {
       params,
       bind(...p) { params = p; stmt.params = p; return stmt; },
       async all() { const [res] = await call("query", { sql, params }); return { results: rowsToObjects(res), success: true, meta: d1Meta(res, true) }; },
-      async first() { const [res] = await call("query", { sql, params }); const objs = rowsToObjects(res); return objs.length ? objs[0] : null; },
+      async first(column) { const [res] = await call("query", { sql, params }); const objs = rowsToObjects(res); if (!objs.length) return null; return column ? objs[0][column] : objs[0]; },
       async run() { const [res] = await call("exec", { sql, params }); return { success: true, meta: d1Meta(res, false) }; },
+      async raw(options = {}) { const [res] = await call("query", { sql, params }); const rows = res.rows || []; return options.columnNames ? [res.columns || [], ...rows] : rows; },
     };
     return stmt;
   }
   return {
     prepare,
     async batch(stmts) {
-      const statements = stmts.map((s) => ({ sql: s.sql, params: s.params || [] }));
+      const statements = stmts.map((s) => ({ sql: s.sql, params: (s.params || []).map(d1Param) }));
       const results = await call("batch", { statements });
       return results.map((res) => ({ success: true, results: rowsToObjects(res), meta: d1Meta(res, false) }));
     },
@@ -509,8 +588,9 @@ export function makeQueue(platform, ns, queue, scopeToken) {
   };
 }
 
-// makeWorkflow exposes the Workflows subset (P2): create() and get() (status).
-// Not supported: delete()/locationHint/cross-worker (docs/compatibility-matrix).
+// makeWorkflow exposes the supported Workflows subset: create/createBatch,
+// instance lifecycle/status/delete/sendEvent, and instance listing.
+// locationHint and cross-worker instances remain unsupported.
 export function makeWorkflow(platform, ns, name, scopeToken) {
   const base = platform.url + "/v1/workflow/";
   const call = async (path, method, extra, body) => {
@@ -617,6 +697,34 @@ export function makeVectorize(platform, ns, name, scopeToken) {
       await must(r, "vectorize.listVectors");
       return await r.json();
     },
+  };
+}
+
+// D1 prepared statements must be local objects. A props-bound WorkerEntrypoint
+// method returns an RpcPromise, but Cloudflare's prepare()/bind() are synchronous
+// and ORMs pass their returned statements to batch().
+export function makeD1FromStub(database) {
+  function prepare(sql) {
+    let params = [];
+    const stmt = {
+      sql,
+      params,
+      bind(...values) { params = values; stmt.params = values; return stmt; },
+      async all() { const res = await database.query(sql, params); return { results: res.results || [], success: true, meta: res.meta }; },
+      async first(column) { const res = await database.query(sql, params); const rows = res.results || []; if (!rows.length) return null; return column ? rows[0][column] : rows[0]; },
+      async run() { return database.execute(sql, params); },
+      async raw(options = {}) { const res = await database.query(sql, params); const rows = res.raw || []; return options.columnNames ? [res.columns || [], ...rows] : rows; },
+    };
+    return stmt;
+  }
+  return {
+    prepare,
+    async batch(stmts) {
+      return database.batchStatements(stmts.map((stmt) => ({ sql: stmt.sql, params: stmt.params || [] })));
+    },
+    exec(sql) { return database.exec(sql); },
+    session() { throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)"); },
+    withSession() { throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)"); },
   };
 }
 

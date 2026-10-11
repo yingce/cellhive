@@ -87,6 +87,7 @@ function b64decJson(h) {
     return null;
   }
 }
+
 function kvPutOpts(options = {}) {
   const o = {};
   if (options.expiration) o.expiration = options.expiration;
@@ -112,6 +113,18 @@ export class KV extends WorkerEntrypoint {
     return type === "json" ? r.json() : type === "arrayBuffer" ? r.arrayBuffer() : r.text();
   }
 
+  async getBatch(keys) {
+    const p = this.ctx.props;
+    const r = await call(this.env, "/v1/kv/get-batch?" + q({ ns: p.ns }), {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(p)),
+      body: JSON.stringify({ keys }),
+    });
+    if (r.status === 404) return null;
+    await must(r, "kv.get");
+    return (await r.json()).results || [];
+  }
+
   async put(key, value, options = {}) {
     const p = this.ctx.props;
     // Cloudflare KV accepts string | ArrayBuffer | ArrayBufferView | Blob |
@@ -127,7 +140,6 @@ export class KV extends WorkerEntrypoint {
     });
     await must(r, "kv.put");
   }
-
   // getWithMetadata returns { value, metadata } like Cloudflare KV.
   async getWithMetadata(key, type) {
     const p = this.ctx.props;
@@ -169,9 +181,19 @@ function rowsToObjects(res) {
   });
 }
 
+function d1Param(value) {
+  if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  return value;
+}
+
+function d1Params(values) {
+  return (values || []).map(d1Param);
+}
+
 async function d1call(env, props, path, body) {
   const r = await call(env, "/v1/d1/" + path + "?" + q({ ns: props.ns, db: props.name }), {
-    method: "POST", headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(props)), body: JSON.stringify(body),
+    method: "POST", headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(props)), body: JSON.stringify(Object.assign({}, body, { params: d1Params(body.params) })),
   });
   await must(r, "d1." + path);
   return (await r.json()).results;
@@ -222,6 +244,11 @@ class D1PreparedStatement extends RpcTarget {
     const [res] = await d1call(this.env, this.props, "exec", { sql: this.sql, params: this.params });
     return { success: true, meta: d1Meta(res, false) };
   }
+  async raw(options = {}) {
+    const [res] = await d1call(this.env, this.props, "query", { sql: this.sql, params: this.params });
+    const rows = res.rows || [];
+    return options.columnNames ? [res.columns || [], ...rows] : rows;
+  }
 }
 
 export class D1Database extends WorkerEntrypoint {
@@ -237,15 +264,22 @@ export class D1Database extends WorkerEntrypoint {
   prepare(sql) {
     return new D1PreparedStatement(this.env, this.ctx.props, sql);
   }
+  async query(sql, params = []) {
+    const [res] = await d1call(this.env, this.ctx.props, "query", { sql, params });
+    return { results: rowsToObjects(res), raw: res.rows || [], columns: res.columns || [], success: true, meta: d1Meta(res, true) };
+  }
+  async execute(sql, params = []) {
+    const [res] = await d1call(this.env, this.ctx.props, "exec", { sql, params });
+    return { success: true, meta: d1Meta(res, false) };
+  }
+  async batchStatements(statements) {
+    const encoded = statements.map((statement) => Object.assign({}, statement, { params: d1Params(statement.params) }));
+    const results = await d1call(this.env, this.ctx.props, "batch", { statements: encoded });
+    return results.map((res) => ({ success: true, results: rowsToObjects(res), raw: res.rows || [], columns: res.columns || [], meta: d1Meta(res, false) }));
+  }
   async batch(stmts) {
     const specs = await Promise.all(stmts.map((s) => s.spec()));
-    const results = await d1call(this.env, this.ctx.props, "batch", {
-      statements: specs.map((x) => ({ sql: x.sql, params: x.params || [] })),
-    });
-    return results.map((res) => ({
-      success: true, results: rowsToObjects(res),
-      meta: d1Meta(res, false),
-    }));
+    return this.batchStatements(specs.map((x) => ({ sql: x.sql, params: x.params || [] })));
   }
   async exec(sql) {
     const [res] = await d1call(this.env, this.ctx.props, "exec", { sql });

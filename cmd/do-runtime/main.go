@@ -45,6 +45,11 @@ func main() {
 		log.Error("invalid CELLHIVE_DO_PREVENT_EVICTION", "err", err)
 		os.Exit(1)
 	}
+	tenantLogCapture, err := tenantLogCapture()
+	if err != nil {
+		log.Error("invalid CELLHIVE_TENANT_LOG_CAPTURE", "err", err)
+		os.Exit(1)
+	}
 	dataDir := getenv("CELLHIVE_DATA_DIR", "./.cellhive/data")
 	runtimeDir := filepath.Join(runtimeRoot(), "do-runtime")
 	// Local DO storage is a disposable working copy; the bucket/cell-agent keep
@@ -54,21 +59,23 @@ func main() {
 	gateURL := getenv("CELLHIVE_DO_GATE_URL", "")
 
 	runtimeCfg := doruntime.Config{
-		CellURL:         cellURL,
-		DoTicketSecret:  creds.DoTicket,
-		DoLeaseS:        doLeaseSeconds(),
-		DOObjectIndex:   envTrue("CELLHIVE_DO_OBJECT_INDEX"),
-		AIURL:           getenv("CELLHIVE_AI_URL", ""),
-		AIKey:           getenv("CELLHIVE_AI_KEY", ""),
-		CellToken:       cellToken,
-		Addr:            addr,
-		DiskDir:         diskDir,
-		PlatformJS:      platformJS,
-		NodeID:          nodeID,
-		Advertise:       advertise,
-		PreventEviction: preventEviction,
-		GateURL:         gateURL,
-		OutboundAllow:   outboundAllow(),
+		CellURL:           cellURL,
+		DoTicketSecret:    creds.DoTicket,
+		DoLeaseS:          doLeaseSeconds(),
+		DOObjectIndex:     envTrue("CELLHIVE_DO_OBJECT_INDEX"),
+		AIURL:             getenv("CELLHIVE_AI_URL", ""),
+		AIKey:             getenv("CELLHIVE_AI_KEY", ""),
+		CellToken:         cellToken,
+		LogToken:          creds.Log,
+		DisableTenantLogs: !tenantLogCapture,
+		Addr:              addr,
+		DiskDir:           diskDir,
+		PlatformJS:        platformJS,
+		NodeID:            nodeID,
+		Advertise:         advertise,
+		PreventEviction:   preventEviction,
+		GateURL:           gateURL,
+		OutboundAllow:     outboundAllow(),
 	}
 	capnpPath, err := doruntime.Render(runtimeDir, runtimeCfg)
 	if err != nil {
@@ -92,29 +99,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	log.Info("do-runtime starting", "workerd", workerd, "config", capnpPath, "addr", addr,
 		"disk", diskDir, "cell", cellURL, "node", nodeID, "resident", preventEviction)
 
 	// Lease renewal loop (local 127.0.0.1; never a service alias, ADR-078).
-	go doruntime.RenewLoop(ctx, localURL(addr), cellToken, doruntime.RenewEvery,
+	go doruntime.RenewLoop(signalCtx, localURL(addr), cellToken, doruntime.RenewEvery,
 		func(err error) { log.Warn("do renew failed", "err", err) })
 	// On shutdown, drain (stop new work, wait in-flight, release leases) then
 	// exit — killing workerd directly rather than relying on a graceful window.
 	go func() {
-		<-ctx.Done()
-		if err := doruntime.Drain(localURL(addr), cellToken); err != nil {
+		err := shutdownAfter(signalCtx, func() error {
+			return doruntime.Drain(localURL(addr), cellToken)
+		}, cancelRun)
+		if err != nil {
 			log.Warn("do drain failed; relying on lease expiry", "err", err)
 			return
 		}
 		log.Info("do-runtime drained")
 	}()
 
-	if err := doruntime.Run(ctx, workerd, capnpPath, childEnv); err != nil {
+	if err := doruntime.Run(runCtx, workerd, capnpPath, childEnv); err != nil {
 		log.Error("do-runtime exited", "err", err)
 		os.Exit(1)
 	}
+}
+
+// shutdownAfter keeps workerd alive while the host actor drains in-flight work
+// and releases leases. cancelRun stops it only after drain finishes or times out.
+func shutdownAfter(signalCtx context.Context, drain func() error, cancelRun context.CancelFunc) error {
+	<-signalCtx.Done()
+	err := drain()
+	cancelRun()
+	return err
 }
 
 // localURL turns a workerd listen address like "*:8788" into a local base URL.
@@ -148,6 +168,17 @@ func boolEnv(k string, def bool) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("%s must be exactly true or false, got %q", k, v)
+}
+
+func tenantLogCapture() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(getenv("CELLHIVE_TENANT_LOG_CAPTURE", "on"))) {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be exactly on or off")
+	}
 }
 
 // envTrue parses a boolean-ish env var the same way config.envBool does for

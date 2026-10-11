@@ -45,7 +45,7 @@ client ──traceparent──▶ loader http.server ──header──▶ cell-
                                                                                               └─▶ host do.gate ──header──▶ supervisor do.gate
 ```
 
-- **Can be correlated**: worker→cell-agent binding calls, worker→DO (`do.invoke`), DO→`do.gate`→supervisor `do.gate`, `cell.durability_proof` (all in the same trace, with correct DO/gate parent-child relationships—asserted by real workerd tests).
+- **Can be correlated**: worker→cell-agent binding calls, worker→DO (`do.invoke`), DO→`do.gate`→supervisor `do.gate`, and `cell.durability_proof` remain in one trace. Reported JS `trace_id`/`span_id`/`parent_span_id` values are preserved in OTLP; `do.gate.parent_span_id = do.invoke.span_id`, and the supervisor receives `traceparent.span_id = do.gate.span_id` (asserted by real workerd and decoded OTLP protobuf tests).
 - **Break point 1 (binding calls inside DO)**: `this.env.KV/D1/...` (props-bound entrypoint) inside a facet **does not carry** the DO's traceparent, and will form a separate trace. Reason: workerd gives the host actor, facet, and platform entrypoint independent isolate `globalThis` instances, and the CF-shaped binding API has no "pass parameters per request" entry point (user-runtime can correlate because the loader is that isolate). Test: `internal/doruntime TestDoRuntimeBindingInsideDO` (currently asserts empty).
 - **Break point 2 (peer replication)**: `peer.append` runs on the capture pipeline (derived from `context.Background()` + group commit merging multiple requests) and is **not** a child span of any request trace; it forms an independent trace per "batch".
 - The fallback path in the tenant isolate's `facades.js` does not report JS spans, but its `pfetch` still carries `traceparent`, so cell-agent's server span can still attach to that worker's trace.
@@ -126,7 +126,7 @@ Point CellHive to `CELLHIVE_OTLP_ENDPOINT=http://collector:4318` (no headers).
 
 ## 4.5 Log correlation and multi-tenancy (recommended)
 
-- **trace <-> logs**: trusted platform log records may carry `trace_id`/`span_id`. Tenant `console.*` capture is currently unavailable because pin `1.20260916.1` rejects Tail Workers for dynamic `workerLoader` Workers; see `observability.md` and ADR-185.
+- **trace <-> logs**: native Tail extracts `traceparent` from event request headers, and `/v1/internal/logs` derives `trace_id`/`span_id`, so tenant `console.*` emitted in traced requests can correlate in the backend. DO/timer events without request headers may have no trace fields.
 - **Multi-tenancy**: nodes push to an **internal Collector** (`deploy/observability/`), which redacts, routes by `cellhive.namespace` and tail-samples before sending to OpenObserve; tenants query through **backend org/stream + user roles**, so the platform exposes no query surface and never hands OTLP credentials to a tenant. Details in [`observability.md`](./observability.md) -> "Multi-tenancy and external querying".
 
 ## 5. Boundaries and remaining gaps
@@ -144,4 +144,4 @@ Point CellHive to `CELLHIVE_OTLP_ENDPOINT=http://collector:4318` (no headers).
 - All environment variables: [`configuration.md`](configuration.md)
 - Decisions: [`decisions.md`](decisions.md) ADR-167, ADR-146 (`traceparent` propagation)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-23_

@@ -915,80 +915,126 @@ export class Tenant extends DurableObject {
 export default { async fetch() { return new Response("t"); } };
 `
 
-// TestDoRuntimeLogTailUnavailable verifies the no-platform-tail fallback for
-// DO facets: a tenant request succeeds without forwarding console output.
-func TestDoRuntimeLogTailUnavailable(t *testing.T) {
+// TestDoRuntimeCapturesConsoleWithNativeTail verifies that dynamically loaded
+// Durable Object facets send console output through a trusted native tail.
+func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	var mu sync.Mutex
-	var logRequests int
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/internal/bundle":
-			_, _ = w.Write([]byte(doLogTailTenant))
-		case "/v1/internal/do/bindings":
-			_ = json.NewEncoder(w).Encode(map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
-		case "/v1/internal/do/claim":
-			_ = json.NewEncoder(w).Encode(map[string]any{"epoch": 1, "expiry_ms": time.Now().Add(time.Minute).UnixMilli(), "node": "n1"})
-		case "/v1/internal/do/alarm/upsert":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case "/v1/internal/logs":
-			mu.Lock()
-			logRequests++
-			mu.Unlock()
-			_, _ = w.Write([]byte(`{"ok":true}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer stub.Close()
-	port := freePort(t)
-	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
-		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-log", PreventEviction: true,
-	})
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	workerd, _ := FindWorkerd()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- Run(ctx, workerd, capnpPath) }()
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	client := noProxyClient()
-	deadline := time.Now().Add(25 * time.Second)
-	for {
-		resp, err := client.Get(base + "/healthz")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		if time.Now().After(deadline) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{{"enabled", true}, {"disabled", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var logRequests []struct {
+				Namespace string
+				Worker    string
+				Entries   []map[string]any
+			}
+			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/internal/bundle":
+					_, _ = w.Write([]byte(doLogTailTenant))
+				case "/v1/internal/do/bindings":
+					_ = json.NewEncoder(w).Encode(map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
+				case "/v1/internal/do/claim":
+					_ = json.NewEncoder(w).Encode(map[string]any{"epoch": 1, "expiry_ms": time.Now().Add(time.Minute).UnixMilli(), "node": "n1"})
+				case "/v1/internal/do/alarm/upsert":
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+				case "/v1/internal/logs":
+					var entries []map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					mu.Lock()
+					logRequests = append(logRequests, struct {
+						Namespace string
+						Worker    string
+						Entries   []map[string]any
+					}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), entries})
+					mu.Unlock()
+					_, _ = w.Write([]byte(`{"ok":true}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer stub.Close()
+			port := freePort(t)
+			capnpPath, err := Render(t.TempDir(), Config{
+				CellURL: stub.URL, CellToken: "tok", LogToken: "log-tok", Addr: fmt.Sprintf("*:%d", port),
+				DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-log", PreventEviction: true,
+				DisableTenantLogs: !tc.enabled,
+			})
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			workerd, _ := FindWorkerd()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- Run(ctx, workerd, capnpPath) }()
+			base := fmt.Sprintf("http://127.0.0.1:%d", port)
+			client := noProxyClient()
+			deadline := time.Now().Add(25 * time.Second)
+			for {
+				resp, err := client.Get(base + "/healthz")
+				if err == nil {
+					resp.Body.Close()
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("runtime not healthy: %v", err)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if _, body := invokeSpec(t, base, map[string]any{
+				"namespace": "demo", "worker": "w", "bundle_sha": "sha1", "storage_id": "ds_log",
+				"class": "Tenant", "id": "l1", "request": map[string]any{"method": "GET", "path": "/"},
+			}); body != "ok" {
+				t.Fatalf("do fetch = %q", body)
+			}
+
+			deadline = time.Now().Add(5 * time.Second)
+			var got []struct {
+				Namespace string
+				Worker    string
+				Entries   []map[string]any
+			}
+			for {
+				mu.Lock()
+				got = append(got[:0], logRequests...)
+				mu.Unlock()
+				if len(got) > 0 || !tc.enabled || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if tc.enabled {
+				if len(got) != 1 || got[0].Namespace != "demo" || got[0].Worker != "w" {
+					t.Fatalf("platform log requests = %#v, want one for demo/w", got)
+				}
+				if len(got[0].Entries) != 1 || got[0].Entries[0]["level"] != "log" || got[0].Entries[0]["message"] != "do-tail-line" {
+					t.Fatalf("tail entries = %#v", got[0].Entries)
+				}
+			} else {
+				time.Sleep(200 * time.Millisecond)
+				mu.Lock()
+				count := len(logRequests)
+				mu.Unlock()
+				if count != 0 {
+					t.Fatalf("platform log requests = %d, want 0", count)
+				}
+			}
 			cancel()
-			t.Fatalf("runtime not healthy: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if _, body := invokeSpec(t, base, map[string]any{
-		"namespace": "demo", "worker": "w", "bundle_sha": "sha1", "storage_id": "ds_log",
-		"class": "Tenant", "id": "l1", "request": map[string]any{"method": "GET", "path": "/"},
-	}); body != "ok" {
-		t.Fatalf("do fetch = %q", body)
-	}
-	time.Sleep(600 * time.Millisecond)
-	mu.Lock()
-	got := logRequests
-	mu.Unlock()
-	if got != 0 {
-		t.Fatalf("platform /v1/internal/logs requests = %d, want none", got)
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("workerd did not exit after cancel")
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("workerd did not exit after cancel")
+			}
+		})
 	}
 }
 

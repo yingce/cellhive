@@ -25,21 +25,30 @@ const (
 	StatusOpen       Status = "open"
 	StatusRecovering Status = "recovering"
 	StatusSealed     Status = "sealed"
+
+	ProtoVersionLegacy  = "v1"
+	ProtoVersionSession = "v2"
 )
 
 // Record is a node-log entry.
 type Record struct {
-	Node         string   `json:"node"`
-	Session      string   `json:"session"`
-	Epoch        uint64   `json:"epoch"`
-	Followers    []string `json:"followers"`
-	Status       Status   `json:"status"`
-	ProtoVersion string   `json:"proto_version"`
-	UpdatedMs    int64    `json:"updated_ms"`
+	Node         string            `json:"node"`
+	Session      string            `json:"session"`
+	Epoch        uint64            `json:"epoch"`
+	Followers    []string          `json:"followers"`
+	Status       Status            `json:"status"`
+	ProtoVersion string            `json:"proto_version"`
+	UpdatedMs    int64             `json:"updated_ms"`
+	CoveredSeq   map[string]uint64 `json:"covered_seq,omitempty"`
 }
 
 // ErrNotFound is returned when a node-log record does not exist.
 var ErrNotFound = errors.New("nodelog: not found")
+
+// ErrEnsembleMismatch means a session record already exists with recovery
+// coordinates different from the ensemble being opened. Reusing that record
+// would make later acknowledgements unrecoverable from the recorded peers.
+var ErrEnsembleMismatch = errors.New("nodelog: session ensemble mismatch")
 
 // Manager reads and writes node-log records.
 type Manager struct {
@@ -53,16 +62,18 @@ func New(b bucket.Bucket, nodeID string) *Manager { return &Manager{B: b, NodeID
 // Key returns the bucket key for a session.
 func Key(node, session string) string { return "node-logs/" + node + "/" + session + ".json" }
 
-// Open creates an open record for a session (conditional create). If the record
-// already exists with the same content it is a no-op.
+// Open creates an open record for a session (conditional create). Reopening is
+// a no-op only when the immutable recovery coordinates match. Follower order
+// is not significant.
 func (m *Manager) Open(ctx context.Context, session string, epoch uint64, followers []string) (Record, error) {
+	followers = canonicalFollowers(followers)
 	r := Record{
 		Node:         m.NodeID,
 		Session:      session,
 		Epoch:        epoch,
 		Followers:    followers,
 		Status:       StatusOpen,
-		ProtoVersion: "v1",
+		ProtoVersion: ProtoVersionSession,
 		UpdatedMs:    time.Now().UnixMilli(),
 	}
 	data, _ := json.Marshal(r)
@@ -70,11 +81,37 @@ func (m *Manager) Open(ctx context.Context, session string, epoch uint64, follow
 	if err != nil {
 		if errors.Is(err, bucket.ErrPrecondition) {
 			existing, _, gerr := m.Get(ctx, m.NodeID, session)
-			return existing, gerr
+			if gerr != nil {
+				return Record{}, gerr
+			}
+			if existing.Node != m.NodeID || existing.Session != session || existing.Epoch != epoch || existing.ProtoVersion != ProtoVersionSession || !sameFollowers(existing.Followers, followers) {
+				return Record{}, ErrEnsembleMismatch
+			}
+			return existing, nil
 		}
 		return Record{}, err
 	}
 	return r, nil
+}
+
+func canonicalFollowers(followers []string) []string {
+	out := append([]string(nil), followers...)
+	sort.Strings(out)
+	return out
+}
+
+func sameFollowers(a, b []string) bool {
+	a = canonicalFollowers(a)
+	b = canonicalFollowers(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Get reads a record for a node/session.
@@ -100,6 +137,23 @@ func (m *Manager) SetStatus(ctx context.Context, node, session string, status St
 		return Record{}, err
 	}
 	r.Status = status
+	r.UpdatedMs = time.Now().UnixMilli()
+	data, _ := json.Marshal(r)
+	if _, err := m.B.CAS(ctx, Key(node, session), data, e); err != nil {
+		return Record{}, err
+	}
+	return r, nil
+}
+
+// SealCovered records the durable follower coverage and seals the session in
+// the same CAS update. The map is keyed by follower address.
+func (m *Manager) SealCovered(ctx context.Context, node, session string, covered map[string]uint64) (Record, error) {
+	r, e, err := m.Get(ctx, node, session)
+	if err != nil {
+		return Record{}, err
+	}
+	r.Status = StatusSealed
+	r.CoveredSeq = covered
 	r.UpdatedMs = time.Now().UnixMilli()
 	data, _ := json.Marshal(r)
 	if _, err := m.B.CAS(ctx, Key(node, session), data, e); err != nil {

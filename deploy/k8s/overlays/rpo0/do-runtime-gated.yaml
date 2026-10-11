@@ -8,7 +8,6 @@ metadata:
   namespace: cellhive
   labels: {app: do-runtime-gated, app.kubernetes.io/part-of: cellhive}
 spec:
-  clusterIP: None
   selector: {app: do-runtime-gated}
   ports:
     - {name: do, port: 8788, targetPort: 8788}
@@ -21,8 +20,10 @@ metadata:
   namespace: cellhive
   labels: {app: do-runtime-gated, app.kubernetes.io/part-of: cellhive}
 spec:
-  replicas: 1
-  strategy: {type: Recreate}
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
   selector:
     matchLabels: {app: do-runtime-gated}
   template:
@@ -40,7 +41,7 @@ spec:
         - name: do-runtime-gated
           image: cellhive:dev
           imagePullPolicy: IfNotPresent
-          command: ["do-runtime-gated"]
+          command: ["/usr/local/bin/do-runtime-gated.sh"]
           envFrom:
             - configMapRef: {name: cellhive-config}
           env:

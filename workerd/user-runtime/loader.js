@@ -12,8 +12,9 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
-import { budgetErrorBody, checkedWorkerGet } from "budget.js";
+import { budgetErrorBody, checkWorkerBudgets } from "budget.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
+export { TenantTail } from "log-tail.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
 
@@ -55,6 +56,8 @@ const bundleCache = new LRU(2000); // sha -> source
 const bundleInflight = new Map(); // sha -> Promise
 const assetCache = new LRU(4000); // "ns/worker/token/path" -> Uint8Array | null
 const metaCache = new LRU(4000); // "ns/worker/token/_redirects|_headers" -> parsed
+const preparedCache = new LRU(2000); // "ns/worker@version-sha" -> immutable load plan
+const preparedInflight = new Map();
 
 export default {
   async fetch(req, env, ctx) {
@@ -66,18 +69,19 @@ export default {
     if (url.pathname === "/ready") return readyResponse(env);
     if (url.pathname === "/drain" && req.method === "POST") return drainRequest(req, env);
     maybePollRoutes(env, ctx);
+    const host = normalizeHost(req.headers.get("host") || url.host);
 
     let view;
     try {
-      view = await hostView(env, normalizeHost(req.headers.get("host") || url.host), ctx);
+      view = await hostView(env, host, ctx);
     } catch (e) {
       return text("routing lookup unavailable", 503);
     }
     if (!view || !view.routes || view.routes.length === 0) {
-      return text("no route for host " + normalizeHost(req.headers.get("host") || url.host), 404);
+      return text("no route for host " + host, 404);
     }
     const route = matchPath(view.routes, url.pathname);
-    if (!route) return text("no route for host " + normalizeHost(req.headers.get("host") || url.host), 404);
+    if (!route) return text("no route for host " + host, 404);
     // Mount semantics (ADR-131): the matched path prefix is always removed, so
     // the worker and its assets see paths relative to it.
     const effReq = stripRoutePrefix(req, route);
@@ -122,42 +126,34 @@ import { traceparent as newTraceparent, startSpan, endSpan, flushSpans } from "t
 
 // --- worker ---------------------------------------------------------------
 
-// withTraceparent ensures the request handed to the tenant carries a W3C
-// traceparent, generating one when the client did not (ADR-146).
-function withTraceparent(req, env) {
-  const existing = req.headers.get("traceparent");
-  if (existing) {
-    const m = /^[0-9a-fA-F]{2}-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-([0-9a-fA-F]{2})/.exec(existing.trim());
-    globalThis.__cellhiveTraceparent = existing;
-    globalThis.__cellhiveTraceSampled = !!(m && (parseInt(m[1], 16) & 1));
-    return req;
+// prepareRequest propagates W3C trace context and strips host-only headers in
+// one headers/request copy. The sampled bit lets the unsampled hot path skip
+// all span allocation and flushing without weakening ADR-146 propagation.
+function prepareRequest(req, env) {
+  let tp = req.headers.get("traceparent");
+  let sampled = false;
+  if (tp) {
+    const m = /^[0-9a-fA-F]{2}-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-([0-9a-fA-F]{2})/.exec(tp.trim());
+    sampled = !!(m && (parseInt(m[1], 16) & 1));
+  } else {
+    const ratio = Number(env.CH_TRACE_RATIO);
+    sampled = Number.isFinite(ratio) && Math.random() < ratio;
+    tp = newTraceparent(sampled);
   }
-  const ratio = Number(env.CH_TRACE_RATIO);
-  const sample = Number.isFinite(ratio) && Math.random() < ratio;
-  const tp = newTraceparent(sample);
   globalThis.__cellhiveTraceparent = tp;
-  globalThis.__cellhiveTraceSampled = sample;
-  const r = new Request(req);
-  r.headers.set("traceparent", tp);
-  return r;
+  globalThis.__cellhiveTraceSampled = sampled;
+  const headers = new Headers(req.headers);
+  for (const k of [...headers.keys()]) {
+    if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
+  }
+  headers.set("traceparent", tp);
+  return { request: new Request(req, { headers }), sampled };
 }
 
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
-  let source;
+  let plan;
   try {
-    source = await bundle(env, version.bundle_sha);
-  } catch (e) {
-    return text("bundle fetch failed: " + e, 502);
-  }
-  let spec;
-  try {
-    spec = await bindingSpec(env, app, worker, version, classStorage, deletedClasses);
-  } catch (e) {
-    return text("binding setup failed: " + e, 502);
-  }
-  let stub;
-  try {
-    stub = workerStub(env, ctx, app, worker, version, source, spec);
+    plan = await preparedWorker(env, app, worker, version, classStorage, deletedClasses);
   } catch (e) {
     const body = budgetErrorBody(e);
     if (body) {
@@ -166,9 +162,20 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
         headers: { "content-type": "application/json" },
       });
     }
-    throw e;
+    if (e && e.stage === "bundle") return text("bundle fetch failed: " + e.cause, 502);
+    if (e && e.stage === "binding") return text("binding setup failed: " + e.cause, 502);
+    return text("worker preparation failed: " + e, 502);
   }
-  const traced = cleanRequest(withTraceparent(req, env));
+  const stub = fetchWorkerStub(env, ctx, app, worker, version, plan);
+  const entrypoint = stub.getEntrypoint(plan.directFetch ? undefined : "CellHiveHost");
+  const traced = prepareRequest(req, env);
+  if (!traced.sampled) {
+    try {
+      return await entrypoint.fetch(traced.request);
+    } catch (e) {
+      return text("worker error: " + e, 500);
+    }
+  }
   const span = startSpan("http.server", {
     kind: "server",
     "http.method": req.method,
@@ -176,7 +183,7 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     "cellhive.worker": worker,
   });
   try {
-    const res = await stub.getEntrypoint("CellHiveHost").fetch(traced);
+    const res = await entrypoint.fetch(traced.request);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
     return res;
@@ -187,32 +194,92 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   }
 }
 
-// workerStub loads a worker version through the shared workerLoader in this
-// workerd instance and returns its stub. Used both to serve a request and, via
-// the service loader below, to run a service binding target natively (ADR-102).
-function workerStub(env, ctx, app, worker, version, source, spec) {
-  // The loader id keys the cached loaded worker (and therefore its isolate,
-  // module state and connection pools). It must include the VERSION NUMBER and
-  // not just the bundle sha: a binding/vars-only deploy keeps the same sha but
-  // is a new version, and reusing the old isolate would keep the old env.
-  const id = `${app.namespace}/${worker}@${version.version}-${version.bundle_sha}`;
-  const workerCode = {
-    compatibilityDate: version.compat_date || "2026-06-15",
-    compatibilityFlags: version.compat_flags || [],
-    mainModule: "wrapper.js",
-    modules: {
-      "wrapper.js": platformConsts(spec) + env.WRAPPER_SRC,
-      "tenant.js": source,
-      "facades.js": env.FACADES_SRC,
-      "rpc-codec.js": env.RPC_CODEC_SRC,
+function workerVersionKey(app, worker, version) {
+  return `${app.namespace}/${worker}@${version.version}-${version.bundle_sha}`;
+}
+
+async function preparedWorker(env, app, worker, version, classStorage, deletedClasses) {
+  const key = workerVersionKey(app, worker, version);
+  const cached = preparedCache.get(key);
+  if (cached) return cached;
+  const running = preparedInflight.get(key);
+  if (running) return running;
+  const pending = (async () => {
+    try {
+      let source;
+      try {
+        source = await bundle(env, version.bundle_sha);
+      } catch (e) {
+        throw { stage: "bundle", cause: e };
+      }
+      let spec;
+      try {
+        spec = await bindingSpec(env, app, worker, version, classStorage, deletedClasses);
+      } catch (e) {
+        throw { stage: "binding", cause: e };
+      }
+      const plan = workerPlan(env, version, source, spec);
+      checkWorkerBudgets(plan.directFetch ? plan.directWorkerCode : plan.workerCode, version.vars, spec, "user");
+      preparedCache.set(key, plan);
+      return plan;
+    } finally {
+      preparedInflight.delete(key);
+    }
+  })();
+  preparedInflight.set(key, pending);
+  return pending;
+}
+
+// workerPlan contains only immutable plain data and may cross request contexts.
+// workerd capabilities cannot: loader.get(), OUTBOUND, entrypoints, binding
+// stubs, and tails must all be acquired in the current request.
+function workerPlan(env, version, source, spec) {
+  const directFetch = Object.keys(spec).length === 0;
+  return {
+    spec,
+    directFetch,
+    directWorkerCode: directFetch ? {
+      compatibilityDate: version.compat_date || "2026-06-15",
+      compatibilityFlags: version.compat_flags || [],
+      mainModule: "tenant.js",
+      modules: { "tenant.js": source },
+    } : null,
+    workerCode: {
+      compatibilityDate: version.compat_date || "2026-06-15",
+      compatibilityFlags: version.compat_flags || [],
+      mainModule: "wrapper.js",
+      modules: {
+        "wrapper.js": platformConsts(spec) + env.WRAPPER_SRC,
+        "tenant.js": source,
+        "facades.js": env.FACADES_SRC,
+        "rpc-codec.js": env.RPC_CODEC_SRC,
+      },
+      // globalOutbound is request-scoped and attached by workerStub.
     },
-    // ADR-090: migrated bindings become props-bound entrypoint stubs in env;
-    // all kinds are platform-side stubs (ADR-184), so the wrapper only wraps
-    // R2 (local metadata) and DO (WebSocket) bindings.
-    env: tenantEnv(env, ctx, spec, version.vars, app.namespace, worker),
-    globalOutbound: env.OUTBOUND,
   };
-  return checkedWorkerGet(env.LOADER, id, workerCode, version.vars, spec, "user");
+}
+
+function fetchWorkerStub(env, ctx, app, worker, version, plan) {
+  if (!plan.directFetch) return workerStub(env, ctx, app, worker, version, plan);
+  const id = "fetch/" + workerVersionKey(app, worker, version);
+  return env.LOADER.get(id, () => Object.assign({}, plan.directWorkerCode, {
+    globalOutbound: env.OUTBOUND,
+    env: Object.assign({}, version.vars || {}),
+    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: app.namespace, worker, version: version.version || 0 },
+    })] }),
+  }));
+}
+
+function workerStub(env, ctx, app, worker, version, plan) {
+  const id = workerVersionKey(app, worker, version);
+  return env.LOADER.get(id, () => Object.assign({}, plan.workerCode, {
+    globalOutbound: env.OUTBOUND,
+    env: tenantEnv(env, ctx, plan.spec, version.vars),
+    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: app.namespace, worker, version: version.version || 0 },
+    })] }),
+  }));
 }
 
 // The service loader is registered once: ServiceBinding (bindings.js) calls it
@@ -231,16 +298,14 @@ setServiceLoader(async (ctx, env, target) => {
     if (!pinnedEnv || pinnedEnv.bundle_sha !== pinned) {
       throw new Error("service target " + target.ns + "/" + target.worker + " pinned version " + pinned + " is gone");
     }
-    const src = await bundle(env, pinned);
     version = pinnedEnv;
-    const app0 = { namespace: target.ns };
-    const spec0 = await bindingSpec(env, app0, target.worker, version, version.class_storage || {}, version.deleted_classes || []);
-    return workerStub(env, ctx, app0, target.worker, version, src, spec0);
   }
   const app = { namespace: target.ns };
-  const source = await bundle(env, version.bundle_sha);
-  const spec = await bindingSpec(env, app, target.worker, version, version.class_storage || {}, version.deleted_classes || []);
-  return workerStub(env, ctx, app, target.worker, version, source, spec);
+  const plan = await preparedWorker(
+    env, app, target.worker, version,
+    version.class_storage || {}, version.deleted_classes || [],
+  );
+  return workerStub(env, ctx, app, target.worker, version, plan);
 });
 
 // tenantEnv builds the loaded worker env: vars + entrypoint stubs for migrated
@@ -273,7 +338,7 @@ function platformConsts(spec) {
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 // --- assets ---------------------------------------------------------------
@@ -997,14 +1062,6 @@ function b64url(bytes) {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-// Strip platform-only headers before tenant code runs.
-function cleanRequest(req) {
-  const headers = new Headers(req.headers);
-  for (const k of [...headers.keys()]) {
-    if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
-  }
-  return new Request(req, { headers });
-}
 
 function text(msg, status) {
   return new Response(msg + "\n", { status, headers: { "content-type": "text/plain" } });

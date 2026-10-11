@@ -22,10 +22,11 @@ import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
 } from "rpc-codec.js";
-import { startSpan, endSpan, flushSpans } from "telemetry.js";
+import { startSpan, endSpan, flushSpans, traceparentForSpan } from "telemetry.js";
 import { budgetErrorBody, checkedWorkerGet } from "budget.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
+export { TenantTail } from "log-tail.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned
@@ -42,6 +43,10 @@ const SEEN_MAX = 10000;
 const BUNDLE_CACHE_MAX = 64;
 const DRAIN_WAIT_MS = 8000;
 const HINT_TTL_MS = 30000;
+function ownerURL(address) {
+  const value = String(address || "").replace(/\/$/, "");
+  return /^https?:\/\//i.test(value) ? value : "http://" + value;
+}
 
 const claims = new Map(); // scopeKey -> { epoch, expiryMs, spec, shard }
 const hints = new Map(); // scopeKey -> { address, expiry } (owner hint, ADR-080)
@@ -256,7 +261,7 @@ async function invoke(req, env, ticket) {
 // request may have been applied is reported as result_unknown (ADR-080).
 async function forward(env, address, spec) {
   try {
-    const r = await fetch(String(address).replace(/\/$/, "") + "/v1/do/invoke", {
+    const r = await fetch(ownerURL(address) + "/v1/do/invoke", {
       method: "POST",
       headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
       body: JSON.stringify(spec),
@@ -268,6 +273,23 @@ async function forward(env, address, spec) {
     return new Response(await r.text(), { status: r.status, headers: hdrs });
   } catch (e) {
     return json({ error: "result_unknown", reason: "forward_transport_failed" }, 409);
+  }
+}
+
+async function restoreClaimedHost(env, spec, shard) {
+  const base = env.GATE_URL || "";
+  if (!base) return null;
+  const hostId = `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`;
+  try {
+    const r = await fetch(base.replace(/\/$/, "") + "/internal/do/restore-host", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ host_id: hostId }),
+    });
+    if (!r.ok) return `restore_${r.status}`;
+    return null;
+  } catch (e) {
+    return "restore_transport";
   }
 }
 
@@ -295,6 +317,14 @@ async function ensureClaim(env, spec, shard) {
     }
     if (!r.ok) return { resp: json({ error: "owner_unavailable", reason: "claim_" + r.status }, 503) };
     const o = await r.json();
+    const restoreError = await restoreClaimedHost(env, spec, shard);
+    if (restoreError) {
+      await post(env, "/v1/internal/do/release", {
+        namespace: spec.namespace, worker: spec.worker, class: storageClass, shard,
+        node: env.NODE_ID, epoch: o.epoch,
+      });
+      return { resp: json({ error: "owner_unavailable", reason: restoreError }, 503) };
+    }
     claims.set(key, { epoch: o.epoch, expiryMs: o.expiry_ms, spec: { namespace: spec.namespace, worker: spec.worker, class: storageClass }, shard });
     return null;
   }
@@ -373,7 +403,7 @@ async function connect(req, env, url, ticket) {
 // URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
 function platformConsts(spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
@@ -402,7 +432,7 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
 async function proxyConnect(env, address, req, url) {
   let upstream;
   try {
-    const target = new URL("/v1/do/connect", String(address).replace(/\/$/, ""));
+    const target = new URL("/v1/do/connect", ownerURL(address));
     target.search = url.search;
     upstream = await fetch(target.toString(), {
       headers: {
@@ -771,7 +801,7 @@ export class Host extends DurableObject {
     await reportDoStats(this.env);
     // Output gate (ADR-083): do not ack until the supervisor has captured and
     // proven durability; unknown => result_unknown (do not silently ack).
-    const gate = await gateSync(this.env);
+    const gate = await gateSync(this.env, span);
     if (gate) {
       endSpan(span, { code: 2, message: "gate_failed" });
       await flushSpans(this.env);
@@ -874,6 +904,9 @@ export class Host extends DurableObject {
         ),
         env: buildFacetEnv(this.ctx, this.env, bs, spec),
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
+        ...(this.env.CH_LOG_CAPTURE === "0" ? {} : { tails: [this.ctx.exports.TenantTail({
+          props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0 },
+        })] }),
       };
       const loaded = checkedWorkerGet(this.env.LOADER, loaderId, workerCode, bs.vars, bs.bindings, "do");
       const cls = loaded.getDurableObjectClass(spec.class, {
@@ -966,12 +999,13 @@ async function reportHostBinding(env, body) {
 
 // gateSync asks the do-supervisor to capture+prove all SQLite files (ADR-083).
 // Returns a Response to fail with, or null when the gate is disabled/ok.
-async function gateSync(env) {
+async function gateSync(env, parentSpan) {
   const base = env.GATE_URL || "";
   if (!base) return null;
-  const span = startSpan("do.gate", { kind: "internal" });
+  const span = startSpan("do.gate", { kind: "internal" }, parentSpan);
   const gateHeaders = {};
-  if (globalThis.__cellhiveTraceparent) gateHeaders["traceparent"] = globalThis.__cellhiveTraceparent;
+  const tp = traceparentForSpan(span);
+  if (tp) gateHeaders["traceparent"] = tp;
   try {
     const r = await fetch(base.replace(/\/$/, "") + "/sync-all", { method: "POST", headers: gateHeaders });
     if (!r.ok) {

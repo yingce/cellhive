@@ -30,9 +30,9 @@
 
 | 类别 | 字段 | 处理 |
 |---|---|---|
-| 核心 | `name` `main` `compatibility_date` `compatibility_flags` `tsconfig` `rules` `build` `no_bundle` `find_additional_modules` `base_dir` `preserve_file_names` `minify` `keep_names` `define` | 解析并保留；`build.command` 仅在本地执行，服务端不跑 |
+| 核心 | `name` `main` `compatibility_date` `compatibility_flags` `rules` `build` `no_bundle` `find_additional_modules` `base_dir` `preserve_file_names` `minify` `keep_names` `define` | 解析并保留；`build.command` 仅在本地执行，服务端不跑。`tsconfig` 字段可解析，但显式自定义路径尚未传给 esbuild；当前只使用入口目录旁的 `tsconfig.json` |
 | 绑定 | `vars` `secrets`(声明) `kv_namespaces` `d1_databases` `r2_buckets` `queues.producers/consumers` `workflows` `services` `durable_objects.bindings` `ai` `hyperdrive` `assets` `triggers.crons` | ✅ 映射到 binding/cell（hyperdrive：origin URL 存为注册资源（信封加密），`id` 按资源名解析；平台不池化，ADR-125/129；service 的 `service` 可为 `ns/worker`，跨 ns 由目标侧 `service-acl` 授权，ADR-144）|
-| DO 生命周期 | 新 `exports`（声明式）+ 旧 `migrations`（命令式） | ✅ 仅 `created`/`sqlite`（及 `new_classes`/`new_sqlite_classes`）；**拒绝** rename/delete/transfer、`script_name` |
+| DO 生命周期 | 新 `exports`（声明式）+ 旧 `migrations`（命令式） | ✅ `created`/`sqlite`（及 `new_classes`/`new_sqlite_classes`）、`renamed_classes`、`deleted_classes`、同 worker `transferred_classes {from,to}`；**拒绝**带 `script_name` 的跨 worker transfer |
 | 路由 | `workers_dev` `route`/`routes` `custom_domain` `preview_urls` | `workers_dev` → `<ns>.<domain>/<worker>/`；自定义域/routes 可选映射到 Traefik host 路由（由 user-runtime 解析 ns/worker），否则拒绝；`preview_urls` 拒绝 |
 | 观测/限制 | `observability` `logpush` `limits` `tail_consumers` | 部分映射或拒绝 |
 | 环境 | `env.<name>` | 每环境独立 app/namespace |

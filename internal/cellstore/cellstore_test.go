@@ -128,6 +128,22 @@ func TestOpenAtUsesNormalSynchronousMode(t *testing.T) {
 	}
 }
 
+func TestOpenAtSupportsKVWrites(t *testing.T) {
+	ctx := context.Background()
+	c, err := OpenAt(ctx, filepath.Join(t.TempDir(), "restored.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.PutTx(ctx, "k", []byte("v"), nil); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	value, _, err := c.Get(ctx, "k")
+	if err != nil || string(value) != "v" {
+		t.Fatalf("get = %q, %v", value, err)
+	}
+}
+
 func TestScanPrefix(t *testing.T) {
 	ctx := context.Background()
 	s, _ := New(t.TempDir())

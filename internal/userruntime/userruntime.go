@@ -83,6 +83,9 @@ type Config struct {
 	ScopeSecret string
 	// DispatchToken guards the internal dispatch endpoints (ADR-075).
 	DispatchToken string
+	// LogToken is the narrow credential used only by the trusted native Tail
+	// entrypoint to ingest tenant console events.
+	LogToken string
 	// AIURL/AIKey configure the BYO OpenAI-compatible AI binding endpoint.
 	AIURL string
 	AIKey string
@@ -95,6 +98,9 @@ type Config struct {
 	// TraceSampleRatio is the head sampling ratio for generated traceparents
 	// (ADR-167); 0 disables recording of new traces (upstream flags still win).
 	TraceSampleRatio float64
+	// DisableTenantLogs omits native Tail Workers from loaded tenant code. The
+	// default keeps console and exception capture enabled.
+	DisableTenantLogs bool
 	// HostCacheTTLMs overrides the loader's per-host routing cache TTL (ADR-115);
 	// 0 = the 10s default. Tests set a short TTL.
 	HostCacheTTLMs int
@@ -130,6 +136,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -144,10 +151,12 @@ const config :Workerd.Config = (
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
         (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
+        (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "private-outbound"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
+        (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
       ],
       globalOutbound = "private-outbound",
     )),
@@ -160,6 +169,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
       bindings = [
@@ -174,11 +184,13 @@ const config :Workerd.Config = (
         (name = "RPC_CODEC_SRC", text = embed "rpc-codec.js"),
         (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
+        (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
         (name = "OUTBOUND", service = "public-network"),
         (name = "PLATFORM", service = "cap-egress"),
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_TRACE_RATIO", text = "{{.TraceSampleRatio}}"),
+        (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
         (name = "HOST_TTL_MS", text = "{{.HostCacheTTLMs}}"),
         (name = "REV_POLL_MS", text = "{{.RevPollMs}}"),
         (name = "HOST_LOOKUP_MAX_PER_SEC", text = "{{.HostLookupMaxPerSec}}"),
@@ -238,6 +250,9 @@ func Render(dir string, cfg Config) (string, error) {
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), filepath.Join(dir, "budget.js")); err != nil {
 		return "", err
 	}
+	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), filepath.Join(dir, "log-tail.js")); err != nil {
+		return "", err
+	}
 	tpl, err := template.New("capnp").Parse(capnpTemplate)
 	if err != nil {
 		return "", err
@@ -263,6 +278,7 @@ func WorkerdEnv(cfg Config) ([]string, error) {
 		"CELLHIVE_HOST_CELL_TOKEN":     cfg.CellToken,
 		"CELLHIVE_HOST_CELL_URL":       cfg.CellURL,
 		"CELLHIVE_HOST_DISPATCH_TOKEN": cfg.DispatchToken,
+		"CELLHIVE_HOST_LOG_TOKEN":      cfg.LogToken,
 		"CELLHIVE_HOST_SCOPE_SECRET":   cfg.ScopeSecret,
 	})
 }
@@ -286,6 +302,7 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 		"CELLHIVE_HOST_CELL_TOKEN",
 		"CELLHIVE_HOST_CELL_URL",
 		"CELLHIVE_HOST_DISPATCH_TOKEN",
+		"CELLHIVE_HOST_LOG_TOKEN",
 		"CELLHIVE_HOST_SCOPE_SECRET",
 	); err != nil {
 		return fmt.Errorf("userruntime: child environment: %w", err)

@@ -37,6 +37,7 @@ func main() {
 	cellToken := creds.Internal
 	scopeSecret := creds.Scope
 	dispatchToken := creds.Dispatch
+	logToken := creds.Log
 	internalPort := envInt("CELLHIVE_USER_RUNTIME_INTERNAL_PORT", 8088)
 	publicPort := envInt("CELLHIVE_USER_RUNTIME_PORT", 8081)
 	dataDir := filepath.Join(runtimeRoot(), "user-runtime")
@@ -44,22 +45,29 @@ func main() {
 	platformJS := getenv("CELLHIVE_USER_RUNTIME_JS", "workerd/user-runtime")
 	facadesJS := getenv("CELLHIVE_FACADES_JS", "workerd/platform/facades.js")
 
+	tenantLogCapture, err := tenantLogCapture()
+	if err != nil {
+		log.Error("invalid CELLHIVE_TENANT_LOG_CAPTURE", "err", err)
+		os.Exit(1)
+	}
 	runtimeCfg := userruntime.Config{
-		CellURL:          cellURL,
-		CellToken:        cellToken,
-		AIURL:            getenv("CELLHIVE_AI_URL", ""),
-		AIKey:            getenv("CELLHIVE_AI_KEY", ""),
-		InternalPort:     internalPort,
-		PublicPort:       publicPort,
-		PlatformJS:       platformJS,
-		FacadesJS:        facadesJS,
-		ScopeSecret:      scopeSecret,
-		DispatchToken:    dispatchToken,
-		ServiceNative:    getenv("CELLHIVE_SERVICE_NATIVE", ""),
-		TraceSampleRatio: traceRatio(),
-		DoDirect:         getenv("CELLHIVE_DO_DIRECT", ""),
-		OutboundAllow:    outboundAllow(),
-		EgressAllow:      egressAllow(),
+		CellURL:           cellURL,
+		CellToken:         cellToken,
+		AIURL:             getenv("CELLHIVE_AI_URL", ""),
+		AIKey:             getenv("CELLHIVE_AI_KEY", ""),
+		InternalPort:      internalPort,
+		PublicPort:        publicPort,
+		PlatformJS:        platformJS,
+		FacadesJS:         facadesJS,
+		ScopeSecret:       scopeSecret,
+		DispatchToken:     dispatchToken,
+		LogToken:          logToken,
+		DisableTenantLogs: !tenantLogCapture,
+		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
+		TraceSampleRatio:  traceRatio(),
+		DoDirect:          getenv("CELLHIVE_DO_DIRECT", ""),
+		OutboundAllow:     outboundAllow(),
+		EgressAllow:       egressAllow(),
 	}
 	capnpPath, err := userruntime.Render(dataDir, runtimeCfg)
 	if err != nil {
@@ -140,6 +148,17 @@ func traceRatio() float64 {
 		}
 	}
 	return 0.01
+}
+
+func tenantLogCapture() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(getenv("CELLHIVE_TENANT_LOG_CAPTURE", "on"))) {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be exactly on or off")
+	}
 }
 
 func getenv(k, def string) string {

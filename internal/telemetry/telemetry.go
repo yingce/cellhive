@@ -7,6 +7,7 @@ package telemetry
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -46,6 +47,66 @@ type Config struct {
 
 // enabled mirrors the active provider for cheap checks on hot paths.
 var enabled atomic.Bool
+
+type reportedSpanIDs struct {
+	trace trace.TraceID
+	span  trace.SpanID
+}
+
+type reportedSpanIDKey struct{}
+
+// telemetryIDGenerator uses a reported JS span ID when Ingest places one in
+// the start context. All ordinary Go spans still receive cryptographically
+// random IDs.
+type telemetryIDGenerator struct{}
+
+type reportedSampler struct{ fallback sdktrace.Sampler }
+
+func (s reportedSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	if ids, ok := p.ParentContext.Value(reportedSpanIDKey{}).(reportedSpanIDs); ok && ids.trace.IsValid() && ids.span.IsValid() {
+		return sdktrace.SamplingResult{Decision: sdktrace.RecordAndSample}
+	}
+	return s.fallback.ShouldSample(p)
+}
+
+func (s reportedSampler) Description() string {
+	return "ReportedOr" + s.fallback.Description()
+}
+
+func (telemetryIDGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
+	if ids, ok := ctx.Value(reportedSpanIDKey{}).(reportedSpanIDs); ok && ids.trace.IsValid() && ids.span.IsValid() {
+		return ids.trace, ids.span
+	}
+	var tid trace.TraceID
+	var sid trace.SpanID
+	fillRandom(tid[:])
+	fillRandom(sid[:])
+	return tid, sid
+}
+
+func (telemetryIDGenerator) NewSpanID(ctx context.Context, _ trace.TraceID) trace.SpanID {
+	if ids, ok := ctx.Value(reportedSpanIDKey{}).(reportedSpanIDs); ok && ids.span.IsValid() {
+		return ids.span
+	}
+	var sid trace.SpanID
+	fillRandom(sid[:])
+	return sid
+}
+
+func fillRandom(dst []byte) {
+	for {
+		if _, err := rand.Read(dst); err != nil {
+			panic(fmt.Sprintf("telemetry random ID: %v", err))
+		}
+		allZero := true
+		for _, b := range dst {
+			allZero = allZero && b == 0
+		}
+		if !allZero {
+			return
+		}
+	}
+}
 
 // Telemetry owns the tracer and logger providers.
 type Telemetry struct {
@@ -98,7 +159,8 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(5*time.Second)),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
+		sdktrace.WithSampler(reportedSampler{fallback: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))}),
+		sdktrace.WithIDGenerator(telemetryIDGenerator{}),
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
@@ -235,16 +297,23 @@ func Ingest(ctx context.Context, spans []RemoteSpan) {
 	tr := Tracer()
 	for _, s := range spans {
 		tid, err := trace.TraceIDFromHex(s.TraceID)
-		if err != nil {
+		if err != nil || !tid.IsValid() {
 			continue
 		}
 		sid, err := trace.SpanIDFromHex(s.SpanID)
-		if err != nil {
+		if err != nil || !sid.IsValid() {
 			continue
 		}
-		sc := trace.NewSpanContext(trace.SpanContextConfig{
-			TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled, Remote: true,
-		})
+		var parentSC trace.SpanContext
+		if s.ParentSpanID != "" {
+			parent, err := trace.SpanIDFromHex(s.ParentSpanID)
+			if err != nil || !parent.IsValid() {
+				continue
+			}
+			parentSC = trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: tid, SpanID: parent, TraceFlags: trace.FlagsSampled, Remote: true,
+			})
+		}
 		start := time.Unix(0, s.StartUnixNano)
 		if s.StartUnixNano == 0 {
 			start = time.Now()
@@ -254,7 +323,9 @@ func Ingest(ctx context.Context, spans []RemoteSpan) {
 		for k, v := range s.Attributes {
 			attrs = append(attrs, attribute.String(k, v))
 		}
-		_, span := tr.Start(trace.ContextWithSpanContext(ctx, sc), s.Name,
+		spanCtx := trace.ContextWithSpanContext(ctx, parentSC)
+		spanCtx = context.WithValue(spanCtx, reportedSpanIDKey{}, reportedSpanIDs{trace: tid, span: sid})
+		_, span := tr.Start(spanCtx, s.Name,
 			trace.WithSpanKind(spanKind(s.Kind)),
 			trace.WithTimestamp(start),
 			trace.WithAttributes(attrs...))

@@ -176,6 +176,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade 源 |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `user-runtime/`） |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 捕获租户 `console.*`/未捕获异常；`off` 不附加 native Tail，换取更高 Worker 吞吐；仅接受 `on`/`off` |
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
@@ -196,7 +197,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_DO_OBJECT_INDEX` | `false` | 对象注册表持久化到桶（`true`/`1`） |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite 盘 = `<DATA_DIR>/do` |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `do-runtime/`） |
-| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `TENANT_OUTBOUND` / `AI_*` | 同上 | 与 user-runtime 相同 |
+| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `CELLHIVE_TENANT_LOG_CAPTURE` / `TENANT_OUTBOUND` / `AI_*` | 同上 | 与 user-runtime 相同 |
 
 ## CLI（`cellhive`）
 

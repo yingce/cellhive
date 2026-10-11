@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -187,5 +188,58 @@ func TestR2ListCursorPaging(t *testing.T) {
 	k2, trunc2, cur2 := page(cur)
 	if len(k2) != 1 || k2[0] != "d/c" || trunc2 || cur2 != "" {
 		t.Fatalf("page2 = %v truncated=%v cursor=%q", k2, trunc2, cur2)
+	}
+}
+func TestKVGetBatchPreservesOrderMissingAndMetadata(t *testing.T) {
+	ctx := context.Background()
+	s := newScopeServer(t)
+	if _, err := s.Control.CreateResource(ctx, "acme", "kv", "main", "acme/__kv__/main", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	tok := mint(t, s, "acme", "kv", "main")
+	meta := base64.StdEncoding.EncodeToString([]byte(`{"tag":"x"}`))
+	if rr := scopeDo(t, s, http.MethodPost, "/v1/kv/put?ns=acme&key=a&metadata="+meta, tok, []byte("one")); rr.Code != http.StatusOK {
+		t.Fatalf("put = %d: %s", rr.Code, rr.Body.String())
+	}
+	body, _ := json.Marshal(map[string]any{"keys": []string{"a", "missing", "a"}})
+	rr := scopeDo(t, s, http.MethodPost, "/v1/kv/get-batch?ns=acme", tok, body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("batch = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Results []struct {
+			Found    bool   `json:"found"`
+			Value    string `json:"value"`
+			Metadata string `json:"metadata"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Results) != 3 || !got.Results[0].Found || got.Results[1].Found || !got.Results[2].Found {
+		t.Fatalf("batch result shape = %+v", got.Results)
+	}
+	for _, i := range []int{0, 2} {
+		value, err := base64.StdEncoding.DecodeString(got.Results[i].Value)
+		if err != nil || string(value) != "one" || got.Results[i].Metadata != meta {
+			t.Fatalf("result[%d] = %+v, decoded=%q err=%v", i, got.Results[i], value, err)
+		}
+	}
+}
+
+func TestKVGetBatchAcceptsMaximumSizedKeys(t *testing.T) {
+	ctx := context.Background()
+	s := newScopeServer(t)
+	if _, err := s.Control.CreateResource(ctx, "acme", "kv", "main", "acme/__kv__/main", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, maxKVGetBatchKeys)
+	for i := range keys {
+		keys[i] = strings.Repeat(string(rune('a'+i%26)), 512)
+	}
+	body, _ := json.Marshal(map[string]any{"keys": keys})
+	rr := scopeDo(t, s, http.MethodPost, "/v1/kv/get-batch?ns=acme", mint(t, s, "acme", "kv", "main"), body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("maximum batch (%d bytes) = %d: %s", len(body), rr.Code, rr.Body.String())
 	}
 }

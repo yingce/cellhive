@@ -8,7 +8,7 @@ CELLHIVE_ROOT_KEY="$(openssl rand -base64 32)" CELLHIVE_NODE_ID=node-1 \
   CELLHIVE_BUCKET_DIR=./.cellhive/bucket ./bin/cell-agent
 ```
 
-Run `python3 scripts/deploy-preflight.py compose|k8s|helm` with the same root key/profile before deployment; see [`deployment.md`](deployment.md) for Compose, cluster rollout and S3 bucket initialization. Multiple cell-agent nodes cannot each use a private `/data/bucket`: they require the same S3 bucket with validated conditional writes/deletes, unique node IDs, and a Pod-reachable `CELLHIVE_PEER_URL`. A single DO Service target supports only one Pod until placement has stable per-instance addresses. Without a working Kubernetes API, rendering is not live-cluster validation.
+Run `python3 scripts/deploy-preflight.py compose|k8s|helm` with the same root key/profile before deployment; see [`deployment.md`](deployment.md) for Compose, cluster rollout, and S3 bucket initialization. Multiple cell-agent nodes cannot each use a private `/data/bucket`: they require the same S3 bucket with validated conditional writes/deletes, unique node IDs, and a Pod-reachable `CELLHIVE_PEER_URL`. do-runtime may scale behind one Service: the Service provides an arbitrary entrypoint, while the Pod advertise address in the owner record provides directed forwarding. Without a working Kubernetes API, rendering is not live-cluster validation.
 
 Startup order: bucket provisioned and probed → cell-agent → gated do-runtime → user-runtime → operator edge. With one replica, a PDB `minAvailable:1` prevents voluntary eviction; schedule downtime for node maintenance and never casually delete the authoritative PVC.
 
@@ -60,7 +60,7 @@ Roll each service according to `docs/deployment.md`; replace `do-runtime` elasti
 ## Bucket Failure/Migration
 
 - Bucket unreachable: the node self-fences and exits after the lease expires (supervisor restarts it);
-- Changing buckets: **online switching is not supported**; downtime migration is required (copy objects, then switch configuration); the planned backup role is used for archiving.
+- Changing buckets: **online switching is not supported**; downtime migration is required (copy objects, then switch configuration). The independent backup bucket role and archive write path are not implemented.
 
 ## Common Issues
 
@@ -76,4 +76,4 @@ Roll each service according to `docs/deployment.md`; replace `do-runtime` elasti
 | `diagnose` names `conditional delete (reject-stale)` | The bucket **ignores `If-Match`** (conditional delete degrades to unconditional); switch provider/endpoint, because owner conditional release and fencing depend on this semantic |
 | Worker disappears again after being deleted and redeployed | purge job race; after ADR-135, purge only applies to entities that are still soft-deleted, and deploy cancels the job (if it still reproduces, report it as a bug) |
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-25_

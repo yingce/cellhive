@@ -1,6 +1,6 @@
 # Decision records (English index)
 
-CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record (ADR-001 ~ 179). This page is an English index of the titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
+CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record (ADR-001 ~ 192). This page is an English index of the titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
 
 > Generated from `docs/decisions.md`. If the two disagree, the Chinese record wins.
 
@@ -47,7 +47,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-039 | Persistence Posture Naming: `fleet` / `bucket` | Establish `fleet` and `bucket` terminology for persistence posture concepts. |
 | ADR-040 | Follower Spool Uses Single Append-Log with Group Commit fsync | Implement follower spooling as one append log with group-committed fsync for durability and efficiency. |
 | ADR-041 | Fleet Transport Group Commit: Framed Batching + Single Batch In Flight | Batch fleet transport frames with group commit while allowing only one in-flight batch. |
-| ADR-042 | Fleet Peer Uses HTTP 101 Persistent Binary Stream and Ordered Lanes | Use upgraded HTTP persistent binary streams with ordered lanes for fleet peer communication. |
+| ADR-042 | Fleet Peer Uses HTTP 101 Persistent Binary Stream and Ordered Lanes | Use negotiated `v2` streams/node-log records and require `X-Cellhive-Session-Protocol: v2` proof on session-bound HTTP appends; empty/`v1` records retain legacy `Held()` recovery and old followers degrade to bucket proof. Group-fsync ≤64 complete frames / 1 MiB, then ACK each frame; page sealed tails at ≤256 fragments / 48 MiB through `final`. |
 | ADR-043 | SQL Durability Benchmark Uses Atomic txid + WAL1 Page Payload + Output Barrier | Benchmark SQL durability using atomic transaction IDs, WAL1 page payloads, and output barriers. |
 | ADR-044 | SQL Capture: Incremental WAL, Binary Commit, In-Memory Tickets | Capture SQL changes through incremental WAL processing, binary commits, and in-memory tickets. |
 | ADR-045 | SQL Capture Uses WAL2 Page-Map Deduplication | Deduplicate SQL capture data using WAL2 page-map tracking. |
@@ -176,7 +176,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-168 | R2 list include/delimiter Cloudflare Alignment Implementation | Aligns R2 list include and delimiter behavior with Cloudflare semantics. |
 | ADR-169 | Purge Changed to Cursor-Paginated Deletion Implementation | Replaces purge deletion with cursor-based pagination for safer large-scale cleanup. |
 | ADR-170 | DO Output Gate Concurrent Capture and orderedDispatcher Active Eviction Implementation | Completes workerd integration by adding concurrent output capture and proactive orderedDispatcher eviction. |
-| ADR-171 | Upload Spool Power-Loss Safety: Atomic Writes and Memoized Directory fsync Implementation | Makes upload spooling resilient to power loss through atomic writes and directory fsync memoization. |
+| ADR-171 | Upload Spool Power-Loss Safety: Atomic Writes and Per-Mutation Leaf Directory fsync | Makes spool publication and completion resilient to power loss while memoizing only the parent-directory creation sync. |
 | ADR-172 | Optional Tenant Log OTLP Export: Off by Default, Export Only for Tail Subscriptions Implementation | Adds tenant log OTLP export gated by tail subscriptions and disabled by default. |
 | ADR-173 | Fleet Broadcast for Log Subscriptions: Tail Gate Covers All Nodes Implementation | Broadcasts log subscriptions fleet-wide so tail gating applies across every node. |
 | ADR-174 | Example Compatibility Fixes: KV put Body Type, Legacy DO Class, and DO Response Pass-Through Implementation | Fixes example compatibility issues for KV bodies, legacy Durable Objects, and response pass-through. |
@@ -188,5 +188,10 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-184 | Zero Tenant-Env Platform Transport via Platform-Side Stubs | DO WebSocket passthrough keeps both workerLoader boundaries fetch-shaped: public loader → `CellHiveHost.fetch(Request)` and tenant DO facade → `DurableObjectNamespace.fetch(Request)`. Owner lookup/tickets remain trusted-side; `CH_DO_CONNECT` is not restored. |
 | ADR-185 | Tenant Env Is Fully User-Owned: Zero Platform Keys | Tenant Worker and DO env namespaces contain only user-declared values and user-named bindings; platform transport and credentials stay in trusted hosts. |
 | ADR-186 | Stock-workerd Runtime Baseline and Security Hardening | Pins stock workerd `1.20260916.1` and esbuild `0.28.2`; uses `fromEnvironment`, removes platform credentials from final WorkerCode, generates compatibility rules from pinned source, and enforces 64 MiB code / 1016 KiB env budgets. Real Docker source-build/env/KV/gated-DO restart acceptance and the no-skip gate pass (`GATE: PASS 14/14`). |
+| ADR-190 | JS OTLP Span Identity and Parent-Chain Integrity | Preserves reported JS trace/span/parent IDs in OTLP, keeps pre-sampled JS roots under ratio zero, and makes `do.gate` a real child of `do.invoke` whose context reaches the supervisor. |
+| ADR-191 | Natural-Concurrency KV Read Batching | Coalesces same-microtask KV reads in the tenant isolate into bounded batch RPC/HTTP requests and executes ordered reads on one SQLite connection/transaction. |
+| ADR-192 | Runtime-Optional Tenant Native-Tail Capture | Adds strict `CELLHIVE_TENANT_LOG_CAPTURE=on|off` (default `on`); `off` omits native Tails from every tenant Worker/DO load for roughly 10%–20% higher measured ping throughput while explicitly giving up platform capture of tenant console output and uncaught exceptions. |
+| ADR-193 | Direct No-Binding Public Fetch | Loads a no-binding Worker's default tenant entrypoint directly, preserving fetch-shaped workerLoader RPC while removing a redundant wrapper hop and supporting default-exported `WorkerEntrypoint` classes. |
+| ADR-194 | Gated DO Multi-Pod Takeover and Rolling-Update Closure | Uses per-host manifests, restores a claimed host before dispatch, drains before stopping workerd, and aligns Helm/Kustomize on two gated rolling Pods while forcing ungated runtime to one `Recreate` Pod. |
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-09-25_
