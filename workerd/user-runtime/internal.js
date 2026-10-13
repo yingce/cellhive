@@ -1,6 +1,7 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { budgetErrorBody, checkedWorkerGet } from "budget.js";
+import { ByteLRU, textWeight, jsonWeight } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 //
@@ -315,12 +316,11 @@ async function loadWorker(env, ctx, body) {
 // (interval 1s) would re-download the bundle. Bounded FIFO maps.
 const BUNDLE_CACHE_MAX = 256;
 const SPEC_CACHE_MAX = 64;
-const bundleCache = new Map(); // bundle sha -> bundle source text (pre-rewrite)
+const bundleCache = new ByteLRU(BUNDLE_CACHE_MAX,32*1024*1024,textWeight);
 const bundleInflight = new Map(); // bundle sha -> Promise (single-flight)
-const specCache = new Map();   // "ns/worker@version" -> { bindings, vars }
+const specCache = new ByteLRU(SPEC_CACHE_MAX,8*1024*1024,jsonWeight);
 
 function cachePut(map, key, val, max) {
-  if (map.size >= max) map.delete(map.keys().next().value);
   map.set(key, val);
 }
 

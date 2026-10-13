@@ -136,6 +136,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "lifecycle.js", esModule = embed "lifecycle.js"),
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
@@ -169,6 +170,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "lifecycle.js", esModule = embed "lifecycle.js"),
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
@@ -248,6 +250,9 @@ func Render(dir string, cfg Config) (string, error) {
 		return "", err
 	}
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), filepath.Join(dir, "budget.js")); err != nil {
+		return "", err
+	}
+	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "lifecycle.js"), filepath.Join(dir, "lifecycle.js")); err != nil {
 		return "", err
 	}
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), filepath.Join(dir, "log-tail.js")); err != nil {

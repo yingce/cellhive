@@ -12,7 +12,8 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
-import { budgetErrorBody, checkWorkerBudgets } from "budget.js";
+import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode } from "budget.js";
+import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 
@@ -50,14 +51,90 @@ class LRU {
 // hostCache: host -> { value(pointer view|null for known-404), etag, expiresAt, inflight }
 const hostCache = new LRU(10000);
 // envCache: "ns/worker" -> { version, value(immutable view) }
-const envCache = new LRU(2000);
+const envCache = new ByteLRU(2000, 16*1024*1024, jsonWeight);
 const envInflight = new Map(); // "ns/worker@version" -> Promise
-const bundleCache = new LRU(2000); // sha -> source
+const bundleCache = new ByteLRU(2000, 32*1024*1024, textWeight); // sha -> source
 const bundleInflight = new Map(); // sha -> Promise
-const assetCache = new LRU(4000); // "ns/worker/token/path" -> Uint8Array | null
-const metaCache = new LRU(4000); // "ns/worker/token/_redirects|_headers" -> parsed
-const preparedCache = new LRU(2000); // "ns/worker@version-sha" -> immutable load plan
+const assetCache = new ByteLRU(4000, 32*1024*1024, v=>v?v.byteLength:0, 1024*1024+1024);
+const metaCache = new ByteLRU(4000, 4*1024*1024, jsonWeight);
+const preparedCache = new ByteLRU(2000, 64*1024*1024, jsonWeight); // conservative plan accounting
 const preparedInflight = new Map();
+
+const residents = new Map(); // plain descriptors only, never WorkerStub/Fetcher
+const capacity = new RuntimeCapacity(128, 256*1024*1024);
+let coldLoads = 0;
+
+function managedCode(entry) {
+  const base=entry.plan.directFetch?entry.plan.directWorkerCode:entry.plan.workerCode;
+  const modules=Object.assign({},base.modules);
+  // Track importable waitUntil as well as ctx.waitUntil in the same child state.
+  modules['tenant.js']=modules['tenant.js'].replaceAll('"cloudflare:workers"','"__cellhive-workers.js"').replaceAll("'cloudflare:workers'","'__cellhive-workers.js'");
+  Object.assign(modules,managedModules(base,entry.plan.directFetch?'default':'CellHiveHost',entry.nonce));
+  return Object.assign({},base,{mainModule:'__cellhive-managed.js',modules});
+}
+function managedStub(env,ctx,entry) {
+  const code=entry.code;
+  return env.LOADER.get(entry.id,()=>Object.assign({},code,{
+    env:entry.plan.directFetch?Object.assign({},entry.version.vars||{}):tenantEnv(env,ctx,entry.plan.spec,entry.version.vars),
+    globalOutbound:env.OUTBOUND,
+    ...(env.CH_LOG_CAPTURE==='0'?{}:{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0}})]}),
+  }));
+}
+async function sweepResidents(env,ctx) {
+  for(const [key,e] of residents){
+    if(!e.retiring||e.cleaning||!e.life.idle()||e.pinned)continue;
+    e.cleaning=(async()=>{
+      try{
+        const ctl=managedStub(env,ctx,e).getEntrypoint('CellHiveLifecycle');
+        const status=await ctl.status();
+        if(status.pinned){e.pinned=true;return;}
+        if(status.nonce!==e.nonce||!status.idle||!e.life.idle())return;
+        try{if(await ctl.retire(e.nonce)===false)return;}
+        catch(err){if(!/internal error; reference =|execution.*abort|disconnected/i.test(String(err)))throw err;}
+        residents.delete(key);capacity.release(key);preparedCache.delete(key);
+      }catch(err){console.error('worker retirement failed:',String(err));}
+    })();
+    await e.cleaning;
+    e.cleaning=null;
+  }
+}
+function scheduleSweep(env,ctx){
+  if(![...residents.values()].some(e=>e.retiring&&!e.pinned))return;
+  ctx.waitUntil((async()=>{
+    // Bounded retry for waitUntil/stream teardown; later requests also sweep.
+    for(let i=0;i<100;i++){
+      await sweepResidents(env,ctx);
+      if(![...residents.values()].some(e=>e.retiring&&!e.pinned))return;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+  })());
+}
+async function residentWorker(env,ctx,app,worker,version,plan){
+  const key=workerVersionKey(app,worker,version),family=app.namespace+'/'+worker;
+  for(const e of residents.values())if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
+  await sweepResidents(env,ctx);
+  let e=residents.get(key);
+  if(e?.cleaning){await e.cleaning;e=residents.get(key);}
+  if(!e){
+    // Reserve before any further await: concurrent misses cannot exceed admission.
+    e={key,family,app,worker,version,plan,nonce:crypto.randomUUID(),life:new Lifetime(),retiring:false,cleaning:null,pinned:false};
+    e.id='managed-fetch/'+key+'/'+e.nonce;
+    e.code=managedCode(e);
+    checkWorkerBudgets(e.code,version.vars,plan.spec,'user');
+    const weight=3*estimateWorkerCode(e.code)+2*1024*1024+jsonWeight(version)+jsonWeight(plan.spec);
+    if(!capacity.reserve(key,weight)){
+      for(const old of residents.values())if(old.life.idle())old.retiring=true;
+      await sweepResidents(env,ctx);
+      if(!capacity.reserve(key,weight))throw new Error('runtime_capacity');
+      e=residents.get(key)||e;
+    }
+    residents.set(key,e);
+  }
+  // Moving the descriptor refreshes the eviction order.
+  residents.delete(key);residents.set(key,e);
+  const release=e.life.hold();
+  return {entry:e,release};
+}
 
 export default {
   async fetch(req, env, ctx) {
@@ -151,6 +228,9 @@ function prepareRequest(req, env) {
 }
 
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
+  const cold=!preparedCache.has(workerVersionKey(app,worker,version));
+  if(cold&&coldLoads>=16)return text('runtime cold-load capacity exhausted',503);
+  if(cold)coldLoads++;
   let plan;
   try {
     plan = await preparedWorker(env, app, worker, version, classStorage, deletedClasses);
@@ -165,14 +245,23 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     if (e && e.stage === "bundle") return text("bundle fetch failed: " + e.cause, 502);
     if (e && e.stage === "binding") return text("binding setup failed: " + e.cause, 502);
     return text("worker preparation failed: " + e, 502);
+  } finally {
+    if(cold)coldLoads--;
   }
-  const stub = fetchWorkerStub(env, ctx, app, worker, version, plan);
-  const entrypoint = stub.getEntrypoint(plan.directFetch ? undefined : "CellHiveHost");
+  let lease;
+  try { lease=await residentWorker(env,ctx,app,worker,version,plan); }
+  catch(e){return text(String(e).includes('runtime_capacity')?'runtime load capacity exhausted':'worker load failed',503);}
+  const finish=()=>{
+    lease.release();
+    scheduleSweep(env,ctx);
+  };
   const traced = prepareRequest(req, env);
   if (!traced.sampled) {
     try {
-      return await entrypoint.fetch(traced.request);
+      const res=await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
+      return lease.entry.life.response(res,finish);
     } catch (e) {
+      finish();
       return text("worker error: " + e, 500);
     }
   }
@@ -183,11 +272,12 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     "cellhive.worker": worker,
   });
   try {
-    const res = await entrypoint.fetch(traced.request);
+    const res = await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
-    return res;
+    return lease.entry.life.response(res,finish);
   } catch (e) {
+    finish();
     endSpan(span, { code: 2, message: String(e) });
     await flushSpans(env);
     return text("worker error: " + e, 500);
@@ -385,6 +475,15 @@ async function assetResponse(req, env, app, worker, token, pathname, status, mat
   for (const candidate of assetCandidates(pathname)) {
     const bytes = await asset(env, app, worker, token, candidate);
     if (!bytes) continue;
+    if(bytes instanceof Response){
+      const etag=bytes.headers.get('etag')||'"'+fnv1a(new TextEncoder().encode(token+'/'+candidate)).toString(16)+'"';
+      const headers=new Headers({'content-type':contentType(candidate),etag});
+      if(bytes.headers.has('content-length'))headers.set('content-length',bytes.headers.get('content-length'));
+      applyHeaderRules(headers,await headerRules(env,app,worker,token),matchPath||pathname);
+      if(req.headers.get('if-none-match')===etag){await bytes.body?.cancel();return new Response(null,{status:304,headers});}
+      if(req.method==='HEAD'){await bytes.body?.cancel();return new Response(null,{status,headers});}
+      return new Response(bytes.body,{status,headers});
+    }
     const etag = '"' + fnv1a(bytes).toString(16) + "-" + bytes.length + '"';
     if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag } });
     const headers = new Headers({
@@ -431,6 +530,15 @@ async function asset(env, app, worker, token, path) {
     return null;
   }
   if (!r.ok) throw new Error("GET asset " + path + " -> " + r.status);
+  const metadata=path==='_headers'||path==='_redirects';
+  const length=Number(r.headers.get('content-length')||NaN);
+  if(!metadata&&(!Number.isFinite(length)||length>1024*1024))return r;
+  if(metadata){
+    const reader=r.body?.getReader();const chunks=[];let size=0;
+    if(reader)for(;;){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>64*1024){await reader.cancel();throw new Error('asset metadata too large');}chunks.push(part.value);}
+    const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+    assetCache.set(key,bytes);return bytes;
+  }
   const bytes = new Uint8Array(await r.arrayBuffer());
   assetCache.set(key, bytes);
   return bytes;
