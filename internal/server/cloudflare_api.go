@@ -21,6 +21,7 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 	for _, prefix := range []string{"", "/client/v4"} {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/subdomain", compat(s.handleCloudflareWorkerSubdomain))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/services/{script_name}", compat(s.handleCloudflareWorkerService))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/deployments", compat(s.handleCloudflareWorkerDeployments))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/deployments", compat(s.handleCloudflareWorkerDeploymentCreate))
