@@ -52,9 +52,9 @@
 | `wrangler rollback` / `wrangler promote` | 同名命令 |
 | `wrangler secret put\|get\|delete\|list` | `cellhive secret ...` |
 | `wrangler tail` | `cellhive tail` |
-| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`（数据面 verb 如 `execute` 结构化拒绝 → 用 worker 的 D1 绑定） |
-| `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]`（`object` 等数据面 verb 结构化拒绝 → 用 R2 绑定） |
-| `wrangler kv namespace\|key ...` | `cellhive kv ...`（namespace verbs 走原生；`key` 数据面结构化拒绝 → 用 KV 绑定） |
+| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`；数据面支持 `execute\|query <ns> <db> <sql>` 与 `migrations list\|apply` |
+| `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]`；数据面支持 `object put\|get\|delete\|list` |
+| `wrangler kv namespace\|key ...` | `cellhive kv ...`；`key put\|get\|delete\|list <ns> <binding> [key] [value]` 通过 scoped token 访问数据面 |
 | `wrangler triggers deploy` | 提示用 `cellhive deploy --config wrangler.jsonc`（`triggers.crons` 原子随版本应用） |
 
 - **命名空间**：CellHive 无账号概念，`--namespace <ns>`（= 租户）必填；

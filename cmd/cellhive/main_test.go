@@ -276,9 +276,9 @@ func TestCmdCompatRejections(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"d1", "execute"}, "not supported"},
-		{[]string{"kv", "key", "list"}, "not supported"},
-		{[]string{"r2", "object", "put"}, "not supported"},
+		{[]string{"d1", "execute"}, "usage"},
+		{[]string{"kv", "key", "list"}, "usage"},
+		{[]string{"r2", "object", "put"}, "usage"},
 		{[]string{"types"}, "not supported"},
 		{[]string{"init"}, "not supported"},
 		{[]string{"versions", "upload"}, "publish atomically"},
@@ -294,18 +294,17 @@ func TestCmdCompatRejections(t *testing.T) {
 	}
 }
 
-// TestWranglerDataPlaneRejections: `cellhive wrangler d1|r2|kv` must reach the
-// native per-domain command (ADR-157) and get a structured rejection for
-// data-plane verbs, not "unknown wrangler command" (ADR-148).
-func TestWranglerDataPlaneRejections(t *testing.T) {
+// TestWranglerDataPlaneValidation: data-plane verbs reach the native command
+// and validate required arguments before attempting a network call.
+func TestWranglerDataPlaneValidation(t *testing.T) {
 	for _, in := range [][]string{
 		{"d1", "execute", "acme", "main"},
 		{"r2", "object", "put"},
 		{"kv", "key", "list"},
 	} {
 		err := cmdWrangler(in)
-		if err == nil || !strings.Contains(err.Error(), "not supported") {
-			t.Errorf("cmdWrangler(%v) = %v, want a structured not-supported error", in, err)
+		if err == nil || !strings.Contains(err.Error(), "usage") {
+			t.Errorf("cmdWrangler(%v) = %v, want usage validation", in, err)
 		}
 		if strings.Contains(fmt.Sprint(err), "unknown wrangler command") {
 			t.Errorf("cmdWrangler(%v) fell through to unknown command: %v", in, err)

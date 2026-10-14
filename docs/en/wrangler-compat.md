@@ -52,9 +52,9 @@ Goal: allow users to keep using standard `wrangler.jsonc`/`wrangler.toml` and th
 | `wrangler rollback` / `wrangler promote` | Commands with the same names |
 | `wrangler secret put\|get\|delete\|list` | `cellhive secret ...` |
 | `wrangler tail` | `cellhive tail` |
-| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]` (data-plane verbs such as `execute` are structurally rejected → use the Worker's D1 binding) |
-| `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]` (`object` and other data-plane verbs are structurally rejected → use the R2 binding) |
-| `wrangler kv namespace\|key ...` | `cellhive kv ...` (namespace verbs use the native path; `key` data-plane operations are structurally rejected → use the KV binding) |
+| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`; data plane supports `execute\|query <ns> <db> <sql>` and `migrations list\|apply` |
+| `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]`; data plane supports `object put\|get\|delete\|list` |
+| `wrangler kv namespace\|key ...` | `cellhive kv ...`; `key put\|get\|delete\|list <ns> <binding> [key] [value]` uses a scoped data-plane token |
 | `wrangler triggers deploy` | Prompt to use `cellhive deploy --config wrangler.jsonc` (`triggers.crons` are applied atomically with the version) |
 
 - **Namespace**: CellHive has no account concept, so `--namespace <ns>` (= tenant) is required;

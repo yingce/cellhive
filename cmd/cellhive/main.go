@@ -1417,18 +1417,27 @@ func cmdVectorize(args []string) error {
 // scopeCall mints a scoped binding token from the platform root key and calls a
 // tenant binding endpoint on the internal listener (ADR-074/158).
 func scopeCall(method, path, ns, index string, body any, extra ...url.Values) (json.RawMessage, error) {
+	return scopeCallKind(method, path, ns, "vectorize", index, body, extra...)
+}
+
+// scopeCallKind is the shared data-plane client for operator commands. It
+// mints a narrowly scoped token for exactly one namespace/resource pair.
+func scopeCallKind(method, path, ns, kind, name string, body any, extra ...url.Values) (json.RawMessage, error) {
 	creds := config.DeriveCredentials(config.LoadRootKey())
 	if creds.Scope == "" {
 		return nil, fmt.Errorf("CELLHIVE_ROOT_KEY is required to mint a scoped token")
 	}
 	token, err := scopedtoken.Mint([]byte(creds.Scope), scopedtoken.Claims{
-		Namespace: ns, Kind: "vectorize", Name: index,
+		Namespace: ns, Kind: kind, Name: name,
 		ExpiresMs: time.Now().Add(5 * time.Minute).UnixMilli(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	qs := url.Values{"ns": {ns}, "index": {index}}
+	qs := url.Values{"ns": {ns}}
+	if kind == "vectorize" {
+		qs.Set("index", name)
+	}
 	if len(extra) > 0 {
 		for k, v := range extra[0] {
 			if len(v) > 0 && v[0] != "" {
@@ -1516,7 +1525,7 @@ func parseVector(parts []string) ([]float32, error) {
 //	cellhive queue create|list|delete|stats <ns> <name>
 //	cellhive workflows create|list|delete|stats <ns> <name>
 //
-// Data-plane verbs (kv key ..., d1 execute, r2 object ...) stay unsupported.
+// Data-plane verbs use short-lived scoped tokens and the internal binding API.
 func cmdKind(kind string, args []string) error {
 	rest := args
 	// wrangler-style nouns: `kv namespace ...`, `r2 bucket ...`.
@@ -1527,6 +1536,18 @@ func cmdKind(kind string, args []string) error {
 		return fmt.Errorf("usage: cellhive %s create|list|delete|stats <namespace> [name]", kind)
 	}
 	verb := rest[0]
+	if kind == "kv" && verb == "key" {
+		return cmdKVData(rest[1:])
+	}
+	if kind == "d1" && (verb == "execute" || verb == "query") {
+		return cmdD1Data(verb, rest[1:])
+	}
+	if kind == "r2" && verb == "object" {
+		return cmdR2Data(rest[1:])
+	}
+	if kind == "d1" && verb == "migrations" {
+		return cmdD1Migrations(rest[1:])
+	}
 	switch verb {
 	case "create":
 		if len(rest) < 3 {
@@ -1621,6 +1642,257 @@ func cmdKind(kind string, args []string) error {
 		return fmt.Errorf("%s %s is not supported: CellHive exposes %s to worker bindings only; use `cellhive dev` locally or a worker with a %s binding (docs/bindings.md). Registry ops: `cellhive %s create|list|delete|stats`",
 			kind, verb, strings.ToUpper(kind), kind, kind)
 	}
+}
+
+func scopeRawCall(method, path, ns, kind, name string, raw []byte, q url.Values) ([]byte, error) {
+	creds := config.DeriveCredentials(config.LoadRootKey())
+	if creds.Scope == "" {
+		return nil, fmt.Errorf("CELLHIVE_ROOT_KEY is required to mint a scoped token")
+	}
+	tok, err := scopedtoken.Mint([]byte(creds.Scope), scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name, ExpiresMs: time.Now().Add(5 * time.Minute).UnixMilli()})
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		q = url.Values{}
+	}
+	q.Set("ns", ns)
+	req, err := http.NewRequest(method, internalURL()+path+"?"+q.Encode(), bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-cellhive-scope-token", tok)
+	if method == http.MethodPost || method == http.MethodPut {
+		req.Header.Set("content-type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+func cmdKVData(args []string) error {
+	if len(args) < 3 {
+		return fmt.Errorf("usage: cellhive kv key put|get|delete <namespace> <binding> <key> [value]")
+	}
+	verb, ns, name := args[0], args[1], args[2]
+	if verb == "list" {
+		q := url.Values{}
+		if len(args) > 3 {
+			q.Set("prefix", args[3])
+		}
+		out, err := scopeRawCall(http.MethodGet, "/v1/kv/list", ns, "kv", name, nil, q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	}
+	if len(args) < 4 {
+		return fmt.Errorf("usage: cellhive kv key put|get|delete <namespace> <binding> <key> [value]")
+	}
+	key := args[3]
+	q := url.Values{"key": {key}}
+	switch verb {
+	case "put":
+		if len(args) < 5 {
+			return fmt.Errorf("usage: ... kv key put <namespace> <binding> <key> <value>")
+		}
+		out, err := scopeRawCall(http.MethodPost, "/v1/kv/put", ns, "kv", name, []byte(args[4]), q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	case "get":
+		out, err := scopeRawCall(http.MethodGet, "/v1/kv/get", ns, "kv", name, nil, q)
+		if err != nil {
+			return err
+		}
+		os.Stdout.Write(out)
+		return nil
+	case "delete":
+		out, err := scopeRawCall(http.MethodDelete, "/v1/kv/delete", ns, "kv", name, nil, q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	case "list":
+		out, err := scopeRawCall(http.MethodGet, "/v1/kv/list", ns, "kv", name, nil, url.Values{})
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown kv key verb %q (put|get|delete|list)", verb)
+	}
+}
+
+func cmdD1Data(verb string, args []string) error {
+	if len(args) < 3 {
+		return fmt.Errorf("usage: cellhive d1 %s <namespace> <database> <sql>", verb)
+	}
+	ns, db := args[0], args[1]
+	sqlArgs := args[2:]
+	if len(sqlArgs) >= 1 && sqlArgs[0] == "--command" {
+		if len(sqlArgs) < 2 {
+			return fmt.Errorf("d1 %s --command requires SQL", verb)
+		}
+		sqlArgs = sqlArgs[1:2]
+	} else if len(sqlArgs) >= 1 && sqlArgs[0] == "--file" {
+		if len(sqlArgs) < 2 {
+			return fmt.Errorf("d1 %s --file requires a path", verb)
+		}
+		raw, err := os.ReadFile(sqlArgs[1])
+		if err != nil {
+			return err
+		}
+		sqlArgs = []string{string(raw)}
+	}
+	sqlText := strings.Join(sqlArgs, " ")
+	if strings.TrimSpace(sqlText) == "" {
+		return fmt.Errorf("d1 %s requires SQL", verb)
+	}
+	path := "/v1/d1/query"
+	if verb == "execute" {
+		path = "/v1/d1/exec"
+	}
+	out, err := scopeCallKind(http.MethodPost, path, ns, "d1", db, map[string]any{"sql": sqlText}, url.Values{"db": {db}})
+	if err != nil {
+		return err
+	}
+	printJSON(out)
+	return nil
+}
+
+func cmdR2Data(args []string) error {
+	if len(args) < 3 {
+		return fmt.Errorf("usage: cellhive r2 object put|get|delete|list <namespace> <bucket> <key> [file]")
+	}
+	verb, ns, bucket := args[0], args[1], args[2]
+	if verb == "list" {
+		q := url.Values{"bucket": {bucket}}
+		if len(args) > 3 {
+			q.Set("prefix", args[3])
+		}
+		out, err := scopeRawCall(http.MethodGet, "/v1/r2/list", ns, "r2", bucket, nil, q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	}
+	if len(args) < 4 {
+		return fmt.Errorf("usage: cellhive r2 object put|get|delete <namespace> <bucket> <key> [file]")
+	}
+	key := args[3]
+	q := url.Values{"bucket": {bucket}, "key": {key}}
+	switch verb {
+	case "put":
+		if len(args) < 5 {
+			return fmt.Errorf("r2 object put requires a file")
+		}
+		data, err := os.ReadFile(args[4])
+		if err != nil {
+			return err
+		}
+		out, err := scopeRawCall(http.MethodPut, "/v1/r2/object", ns, "r2", bucket, data, q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	case "get":
+		out, err := scopeRawCall(http.MethodGet, "/v1/r2/object", ns, "r2", bucket, nil, q)
+		if err != nil {
+			return err
+		}
+		output := key
+		if len(args) > 4 {
+			output = args[4]
+		}
+		return os.WriteFile(output, out, 0600)
+	case "delete":
+		out, err := scopeRawCall(http.MethodDelete, "/v1/r2/object", ns, "r2", bucket, nil, q)
+		if err != nil {
+			return err
+		}
+		printJSON(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown r2 object verb %q (put|get|delete|list)", verb)
+	}
+}
+
+func cmdD1Migrations(args []string) error {
+	if len(args) < 3 {
+		return fmt.Errorf("usage: cellhive d1 migrations list|apply <namespace> <database> [--directory dir]")
+	}
+	verb, ns, db := args[0], args[1], args[2]
+	dir := "migrations"
+	if len(args) > 3 {
+		fs := flag.NewFlagSet("d1 migrations", flag.ContinueOnError)
+		fs.StringVar(&dir, "directory", dir, "migration directory")
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+	}
+	if verb == "list" {
+		if _, err := cmdD1ExecSQL(ns, db, "CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)"); err != nil {
+			return err
+		}
+		return cmdD1Data("query", []string{ns, db, "SELECT name, applied_at FROM __cellhive_migrations ORDER BY name"})
+	}
+	if verb != "apply" {
+		return fmt.Errorf("unknown d1 migrations verb %q (list|apply)", verb)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	_, err = cmdD1ExecSQL(ns, db, "CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)")
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		name := filepath.Base(file)
+		raw, e := os.ReadFile(file)
+		if e != nil {
+			return e
+		}
+		q := fmt.Sprintf("SELECT name FROM __cellhive_migrations WHERE name='%s'", strings.ReplaceAll(name, "'", "''"))
+		existing, e := cmdD1QuerySQL(ns, db, q)
+		if e != nil {
+			return e
+		}
+		if strings.Contains(string(existing), name) {
+			continue
+		}
+		if _, e = cmdD1ExecSQL(ns, db, string(raw)); e != nil {
+			return fmt.Errorf("migration %s: %w", name, e)
+		}
+		if _, e = cmdD1ExecSQL(ns, db, fmt.Sprintf("INSERT INTO __cellhive_migrations(name, applied_at) VALUES('%s', strftime('%%s','now'))", strings.ReplaceAll(name, "'", "''"))); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func cmdD1ExecSQL(ns, db, sqlText string) ([]byte, error) {
+	return scopeCallKind(http.MethodPost, "/v1/d1/exec", ns, "d1", db, map[string]any{"sql": sqlText}, url.Values{"db": {db}})
+}
+
+func cmdD1QuerySQL(ns, db, sqlText string) ([]byte, error) {
+	return scopeCallKind(http.MethodPost, "/v1/d1/query", ns, "d1", db, map[string]any{"sql": sqlText}, url.Values{"db": {db}})
 }
 
 // cmdQueue is operator queue tooling: status and dead-letter replay (ADR-156).
