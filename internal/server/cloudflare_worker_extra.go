@@ -9,6 +9,53 @@ import (
 	"cellhive/internal/control"
 )
 
+func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request) {
+	apps, err := s.Control.Apps(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "accounts_failed", err.Error())
+		return
+	}
+	out := make([]any, 0, len(apps))
+	for _, app := range apps {
+		out = append(out, map[string]any{"id": app.Namespace, "name": app.Namespace, "status": "active"})
+	}
+	cloudflareResult(w, out)
+}
+
+func (s *Server) handleCloudflareWorkerDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.Control.DeleteWorker(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), "wrangler"); err != nil {
+		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": nil})
+}
+
+func (s *Server) handleCloudflareWorkerVersionDeploy(w http.ResponseWriter, r *http.Request) {
+	ns, worker, wanted := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("version_id")
+	releases, err := s.Control.Releases(r.Context(), ns, worker)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "version_not_found", err.Error())
+		return
+	}
+	version := 0
+	for _, rel := range releases {
+		if wanted == rel.BundleSHA || wanted == strconv.Itoa(rel.Version) {
+			version = rel.Version
+			break
+		}
+	}
+	if version == 0 {
+		writeErr(w, http.StatusNotFound, "version_not_found", "version does not exist")
+		return
+	}
+	wk, err := s.Control.Promote(r.Context(), ns, worker, version, "wrangler")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "version_deploy_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"id": wanted, "version_id": wanted, "script_name": wk.Name})
+}
+
 func (s *Server) activeCloudflareVersion(r *http.Request) (control.Version, error) {
 	p, err := s.Control.Projection(r.Context())
 	if err != nil {

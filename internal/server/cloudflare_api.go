@@ -22,6 +22,8 @@ import (
 func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 	compat := s.cloudflareAuth
 	for _, prefix := range []string{"", "/client/v4"} {
+		mux.HandleFunc("GET "+prefix+"/accounts", compat(s.handleCloudflareAccounts))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}", compat(s.handleCloudflareWorkerDelete))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/subdomain", compat(s.handleCloudflareWorkerSubdomain))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
@@ -34,6 +36,7 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerVersions))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions/{version_id}", compat(s.handleCloudflareWorkerVersionGet))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions/{version_id}/deploy", compat(s.handleCloudflareWorkerVersionDeploy))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/schedules", compat(s.handleCloudflareWorkerSchedules))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/schedules", compat(s.handleCloudflareWorkerSchedules))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets", compat(s.handleCloudflareWorkerSecrets))

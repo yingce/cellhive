@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"cellhive/internal/control"
 )
 
 func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
@@ -74,6 +76,38 @@ func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {
 	_ = json.Unmarshal(call(http.MethodGet, "/client/v4/accounts/acme/workers/routes", "").Body.Bytes(), &got)
 	if got["success"] != true {
 		t.Fatalf("routes response=%v", got)
+	}
+}
+
+func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {
+	s := newControlServer(t)
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts", ""); rr.Code != 200 {
+		t.Fatalf("accounts %d %s", rr.Code, rr.Body.String())
+	}
+	// Upload two versions through the native control endpoint, then publish the
+	// first one via the Cloudflare versions API.
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} {
+		if _, err := s.Control.Deploy(t.Context(), "acme", "web", control.DeploySpec{BundleSHA: sha}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions/1/deploy", "{}"); rr.Code != 200 {
+		t.Fatalf("version deploy %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/workers/scripts/web", ""); rr.Code != 200 {
+		t.Fatalf("worker delete %d %s", rr.Code, rr.Body.String())
 	}
 }
 
