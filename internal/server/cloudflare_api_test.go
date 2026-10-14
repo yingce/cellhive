@@ -33,6 +33,15 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	if err != nil || len(releases) != 1 {
 		t.Fatalf("worker was not deployed: releases=%d err=%v", len(releases), err)
 	}
+	if rr := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions", nil)
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		out := httptest.NewRecorder()
+		s.AdminHandler().ServeHTTP(out, req)
+		return out
+	}(); rr.Code != 200 {
+		t.Fatalf("versions list %d %s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {

@@ -126,30 +126,62 @@ func (s *Server) handleCloudflareAssetsUpload(w http.ResponseWriter, r *http.Req
 	for path, a := range manifest {
 		byHash[a.Hash] = append(byHash[a.Hash], path)
 	}
-	hash := r.PathValue("asset_hash")
-	if hash == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_upload", "bulk asset upload is not supported by this upload session")
-		return
-	}
-	paths := byHash[hash]
-	if len(paths) == 0 {
-		writeErr(w, http.StatusBadRequest, "unknown_asset", "asset hash not in session")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxArtifactBytes+1))
-	if err != nil || len(body) > maxArtifactBytes {
-		writeErr(w, http.StatusRequestEntityTooLarge, "too_large", "asset exceeds cap")
-		return
-	}
-	for _, path := range paths {
-		if int64(len(body)) != manifest[path].Size {
-			writeErr(w, http.StatusBadRequest, "size_mismatch", "asset size does not match manifest")
-			return
-		}
-		if _, err := st.PutAssetAt(r.Context(), claim.NS, claim.Worker, claim.Token, path, body); err != nil {
+	if hash := r.PathValue("asset_hash"); hash != "" {
+		if err := s.storeCloudflareAsset(r, st, claim, manifest, byHash, hash, r.Body); err != nil {
 			writeErr(w, http.StatusBadRequest, "asset_put_failed", err.Error())
 			return
 		}
+	} else {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_upload", err.Error())
+			return
+		}
+		for {
+			part, e := mr.NextPart()
+			if e == io.EOF {
+				break
+			}
+			if e != nil {
+				writeErr(w, http.StatusBadRequest, "invalid_upload", e.Error())
+				return
+			}
+			hash := part.FormName()
+			if hash == "" {
+				hash = part.FileName()
+			}
+			if err := s.storeCloudflareAsset(r, st, claim, manifest, byHash, hash, part); err != nil {
+				writeErr(w, http.StatusBadRequest, "asset_put_failed", err.Error())
+				return
+			}
+		}
 	}
 	cloudflareResult(w, map[string]any{"jwt": token})
+}
+
+func (s *Server) storeCloudflareAsset(r *http.Request, st *artifacts.Store, claim wranglerAssetsClaim, manifest map[string]wranglerAsset, byHash map[string][]string, hash string, src io.Reader) error {
+	paths := byHash[hash]
+	if len(paths) == 0 {
+		return errors.New("unknown asset hash")
+	}
+	body, err := io.ReadAll(io.LimitReader(src, maxArtifactBytes+1))
+	if err != nil || len(body) > maxArtifactBytes {
+		return errors.New("asset exceeds cap")
+	}
+	if r.URL.Query().Get("base64") == "true" {
+		decoded, e := base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
+		if e != nil {
+			return e
+		}
+		body = decoded
+	}
+	for _, path := range paths {
+		if int64(len(body)) != manifest[path].Size {
+			return errors.New("asset size does not match manifest")
+		}
+		if _, err := st.PutAssetAt(r.Context(), claim.NS, claim.Worker, claim.Token, path, body); err != nil {
+			return err
+		}
+	}
+	return nil
 }
