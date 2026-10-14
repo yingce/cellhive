@@ -662,17 +662,17 @@ const WRAP_SRC = `function __wrap(Inner) {
   class Wrapped extends __Base {
     constructor(ctx, env) { super(ctx, env); inners.set(this, new Inner(ctx, env)); }
     __inner() { return inners.get(this); }
-    fetch(r) { const i = this.__inner(); return typeof i.fetch === "function" ? i.fetch(r, this.env) : super.fetch(r); }
-    alarm(...a) { const i = this.__inner(); return typeof i.alarm === "function" ? i.alarm(...a) : super.alarm(...a); }
-    webSocketMessage(...a) { const i = this.__inner(); return typeof i.webSocketMessage === "function" ? i.webSocketMessage(...a) : super.webSocketMessage(...a); }
-    webSocketClose(...a) { const i = this.__inner(); return typeof i.webSocketClose === "function" ? i.webSocketClose(...a) : super.webSocketClose(...a); }
-    webSocketError(...a) { const i = this.__inner(); return typeof i.webSocketError === "function" ? i.webSocketError(...a) : super.webSocketError(...a); }
+    fetch(r) { const i = this.__inner(); return typeof i.fetch === "function" ? runInvocation(() => i.fetch(r, this.env)) : super.fetch(r); }
+    alarm(...a) { const i = this.__inner(); return typeof i.alarm === "function" ? runInvocation(() => i.alarm(...a)) : super.alarm(...a); }
+    webSocketMessage(...a) { const i = this.__inner(); return typeof i.webSocketMessage === "function" ? runInvocation(() => i.webSocketMessage(...a)) : super.webSocketMessage(...a); }
+    webSocketClose(...a) { const i = this.__inner(); return typeof i.webSocketClose === "function" ? runInvocation(() => i.webSocketClose(...a)) : super.webSocketClose(...a); }
+    webSocketError(...a) { const i = this.__inner(); return typeof i.webSocketError === "function" ? runInvocation(() => i.webSocketError(...a)) : super.webSocketError(...a); }
   }
   for (const name of Object.getOwnPropertyNames(Inner.prototype)) {
     if (name === "constructor" || name === "fetch" || name === "alarm" || name.startsWith("webSocket") || name.startsWith("__ch")) continue;
     if (typeof Inner.prototype[name] !== "function") continue;
     Object.defineProperty(Wrapped.prototype, name, { configurable: true, writable: true, value: function(...args) {
-      return this.__inner()[name](...args);
+      return runInvocation(() => this.__inner()[name](...args));
     }});
   }
   return Wrapped;
@@ -688,6 +688,7 @@ function renderFacetModule(classes) {
     .join("\n");
   return [
     'import "bindings-wrapper.js";',
+    'import { runInvocation } from "__cellhive-quota.js";',
     'import { DurableObject as __Base } from "cellhive-do.js";',
     'import * as __tenant from "tenant.js";',
     'export * from "tenant.js";',
