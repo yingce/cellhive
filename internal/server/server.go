@@ -143,6 +143,8 @@ type Server struct {
 	peerRecvBytes atomic.Int64
 	logFanMu      sync.Mutex
 	logFan        map[string]time.Time // ns/worker -> last peer fan-out
+	tailMu        sync.Mutex
+	tails         map[string]*cloudflareTailSession
 	commits       atomic.Uint64
 	readyFlag     atomic.Bool
 
@@ -186,7 +188,9 @@ type bindingEntry struct {
 }
 
 // New builds a Server.
-func New(d Deps) *Server { return &Server{Deps: d, ordered: newOrderedDispatcher()} }
+func New(d Deps) *Server {
+	return &Server{Deps: d, ordered: newOrderedDispatcher(), tails: make(map[string]*cloudflareTailSession)}
+}
 
 // SetReady marks the node ready.
 func (s *Server) SetReady(v bool) { s.readyFlag.Store(v) }

@@ -6,9 +6,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"cellhive/internal/control"
+	"cellhive/internal/logbuf"
+	"github.com/gorilla/websocket"
 )
 
 func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
@@ -139,6 +142,69 @@ func TestCloudflareQueueConsumerLifecycle(t *testing.T) {
 	}
 	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/queues/jobs/consumers/worker", ""); rr.Code != 200 {
 		t.Fatalf("consumer delete %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareTailSessionLifecycle(t *testing.T) {
+	s := newControlServer(t)
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	created := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/tails", `{"search":"hello"}`)
+	if created.Code != 200 || !bytes.Contains(created.Body.Bytes(), []byte(`"url"`)) {
+		t.Fatalf("tail create %d %s", created.Code, created.Body.String())
+	}
+	var envelope struct {
+		Result struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &envelope); err != nil || envelope.Result.ID == "" {
+		t.Fatalf("tail response %s", created.Body.String())
+	}
+	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/workers/scripts/web/tails/"+envelope.Result.ID, ""); rr.Code != 200 {
+		t.Fatalf("tail delete %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareTailWebSocket(t *testing.T) {
+	s := newControlServer(t)
+	s.Logs = logbuf.New(16, 4)
+	s.Logs.Add(logbuf.Entry{Namespace: "acme", Worker: "web", Message: "hello"})
+	h := httptest.NewServer(s.AdminHandler())
+	defer h.Close()
+	base, _ := url.Parse(h.URL)
+	req, _ := http.NewRequest(http.MethodPost, h.URL+"/client/v4/accounts/acme/workers/scripts/web/tails", bytes.NewBufferString("{}"))
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var env struct {
+		Result struct {
+			URL string `json:"url"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(env.Result.URL)
+	u.Scheme = "ws"
+	u.Host = base.Host
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatal(err)
 	}
 }
 
