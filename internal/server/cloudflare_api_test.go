@@ -68,6 +68,45 @@ func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {
 	}
 }
 
+func TestCloudflareAssetsAndWorkflows(t *testing.T) {
+	s := newControlServer(t)
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	session := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/assets-upload-session", `{"manifest":{"index.html":{"hash":"hash1","size":5}}}`)
+	if session.Code != 200 {
+		t.Fatalf("assets session %d %s", session.Code, session.Body.String())
+	}
+	var envelope struct {
+		Result struct {
+			JWT string `json:"jwt"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(session.Body.Bytes(), &envelope); err != nil || envelope.Result.JWT == "" {
+		t.Fatalf("assets session response=%s", session.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/assets/upload/hash1", bytes.NewBufferString("hello"))
+	req.Header.Set("Authorization", "Bearer "+envelope.Result.JWT)
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("asset upload %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPut, "/client/v4/accounts/acme/workflows/daily", `{"script_name":"web","class_name":"Daily"}`); rr.Code != 200 {
+		t.Fatalf("workflow put %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workflows/daily", ""); rr.Code != 200 {
+		t.Fatalf("workflow get %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestParseCloudflareWorkerMultipart(t *testing.T) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)

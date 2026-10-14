@@ -55,6 +55,13 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueList))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareResourceDelete("queue")))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareQueueGet))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/assets-upload-session", compat(s.handleCloudflareAssetsSession))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload", s.handleCloudflareAssetsUpload)
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload/{asset_hash}", s.handleCloudflareAssetsUpload)
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workflows", compat(s.handleCloudflareWorkflowList))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowGet))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowPut))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowDelete))
 	}
 }
 
@@ -136,6 +143,30 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusServiceUnavailable, "no_bucket", "object store not configured")
 		return
 	}
+	if metadata.AssetsJWT != "" {
+		claim, err := s.verifyAssetsClaim(metadata.AssetsJWT)
+		if err != nil || claim.NS != ns || claim.Worker != worker {
+			writeErr(w, http.StatusBadRequest, "invalid_assets", "assets token does not belong to this worker")
+			return
+		}
+		metadata.AssetsToken = claim.Token
+		data, err := st.GetAsset(r.Context(), ns, worker, claim.Token, wranglerManifestPath)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_assets", "asset upload session missing")
+			return
+		}
+		var manifest map[string]wranglerAsset
+		if json.Unmarshal(data, &manifest) != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_assets", "asset manifest invalid")
+			return
+		}
+		for path := range manifest {
+			if _, err := st.GetAsset(r.Context(), ns, worker, claim.Token, path); err != nil {
+				writeErr(w, http.StatusBadRequest, "incomplete_assets", "asset "+path+" was not uploaded")
+				return
+			}
+		}
+	}
 	sha, _, err := st.PutBundle(r.Context(), module)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "bundle_upload_failed", err.Error())
@@ -156,9 +187,24 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// Wrangler registers locally defined Workflows after the Worker upload.
+	// Their binding must resolve during CellHive's atomic deploy, so reserve
+	// that declared workflow name now. KV/D1/R2/Queue remain explicit resources.
+	for _, b := range metadata.Bindings {
+		if b.Type != "workflow" || b.ID == "" || b.ClassName == "" {
+			continue
+		}
+		if _, err := s.Control.GetResource(r.Context(), ns, "workflow", b.ID); err != nil {
+			if _, err := s.Control.CreateResource(r.Context(), ns, "workflow", b.ID, defaultResourceScope(ns, "workflow", b.ID), "wrangler"); err != nil {
+				writeErr(w, http.StatusBadRequest, "workflow_create_failed", err.Error())
+				return
+			}
+		}
+	}
 
 	req := deployReq{
 		Namespace: ns, Worker: worker, BundleSHA: sha,
+		AssetsSHA: metadata.AssetsToken, Assets: metadata.Assets,
 		Vars: metadata.Vars, Bindings: metadata.Bindings,
 		CompatibilityDate:  metadata.CompatibilityDate,
 		CompatibilityFlags: metadata.CompatibilityFlags,
@@ -210,6 +256,9 @@ type cloudflareWorkerMetadata struct {
 	Consumers          []control.Consumer
 	Migrations         []map[string]any
 	MainModule         string
+	AssetsJWT          string
+	AssetsToken        string
+	Assets             *control.AssetsConfig
 }
 
 func parseCloudflareWorkerMultipart(r *http.Request) (cloudflareWorkerMetadata, []byte, error) {
@@ -265,7 +314,13 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		CompatibilityFlags []string         `json:"compatibility_flags"`
 		Bindings           []map[string]any `json:"bindings"`
 		Migrations         []map[string]any `json:"migrations"`
-		Triggers           struct {
+		Assets             struct {
+			JWT    string `json:"jwt"`
+			Config struct {
+				NotFoundHandling string `json:"not_found_handling"`
+			} `json:"config"`
+		} `json:"assets"`
+		Triggers struct {
 			Crons []string `json:"crons"`
 		} `json:"triggers"`
 	}
@@ -274,6 +329,10 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 	}
 	out.MainModule, out.CompatibilityDate, out.CompatibilityFlags = raw.MainModule, raw.CompatibilityDate, raw.CompatibilityFlags
 	out.Migrations, out.Crons = raw.Migrations, raw.Triggers.Crons
+	if raw.Assets.JWT != "" {
+		out.AssetsJWT = raw.Assets.JWT
+		out.Assets = &control.AssetsConfig{NotFoundHandling: raw.Assets.Config.NotFoundHandling}
+	}
 	for _, b := range raw.Bindings {
 		name, typ := stringValue(b["name"]), stringValue(b["type"])
 		switch typ {
