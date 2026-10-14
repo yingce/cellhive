@@ -723,7 +723,18 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercom
 		Vars:               req.Vars,
 		IsRegistered: func(kind, name string) bool {
 			ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, name)
-			return err == nil && ok
+			if err == nil && ok {
+				return true
+			}
+			for _, declared := range req.Bindings {
+				if declared.Type == kind && declared.Name == name && declared.ID != "" {
+					ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, declared.ID)
+					if err == nil && ok {
+						return true
+					}
+				}
+			}
+			return false
 		},
 	}
 	for _, b := range req.Bindings {

@@ -36,7 +36,7 @@
 | 路由 | `workers_dev` `route`/`routes` `custom_domain` `preview_urls` | `workers_dev` → `<ns>.<domain>/<worker>/`；自定义域/routes 可选映射到 Traefik host 路由（由 user-runtime 解析 ns/worker），否则拒绝；`preview_urls` 拒绝 |
 | 观测/限制 | `observability` `logpush` `limits` `tail_consumers` | 部分映射或拒绝 |
 | 环境 | `env.<name>` | 每环境独立 app/namespace |
-| 自动 provisioning | 无 id 自动创建资源 | **拒绝**；资源由控制面显式管理 |
+| 自动 provisioning | 无 id 自动创建资源 | **拒绝**；生产资源先通过 Wrangler 资源命令显式创建，再把返回 ID 写入配置；部署不会隐式创建资源 |
 | 不支持 | `ai_search*` `dispatch_namespaces` `secrets_store_secrets` `send_email` `browser` `images` `containers` `flagship` `pipelines` `vpc` `placement` `site` | 显式拒绝 + 错误码 |
 | `vectorize` | **支持**（ADR-158）：`vectorize[{binding,index_name}]` → 注册资源（kind `vectorize`，配置 dims/metric）；CLI `wrangler vectorize create|list|delete|get|info|insert|upsert|query|get-vectors|delete-vectors|list-vectors|create-metadata-index|list-metadata-index|delete-metadata-index` 前缀透传；`--deprecated-v1` 接受但语义同 V2（无 V1 兼容模式） |
 
@@ -63,7 +63,8 @@
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`kv:bulk`→数据面（用 KV 绑定）、`unstable_*`→内部命令；
 - **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive releases`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`d1 execute`/`r2 object`/`kv key`→Worker 绑定 + `cellhive dev`、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
 - **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。
-- **第一阶段边界**：目前优先保证普通 Worker 发布主链路；复杂多模块上传、独立 versions/deployments 生命周期、Wrangler 资源自动创建、tail/login/dev 及 Cloudflare 专有资源 API 仍按兼容矩阵处理。后续按真实固定版本 Wrangler 的请求对拍逐项补齐，避免把 Cloudflare API 形状耦合进 CellHive 原生控制 API。
+- **原版 Wrangler API 资源语义**：管理员兼容端点同时提供 KV/D1/R2/Queues 的 create/list/delete（分别映射到 `storage/kv/namespaces`、`d1/database`、`r2/buckets`、`queues`）。这些端点只登记 CellHive 资源，不改变“资源先创建、部署引用 ID”的控制面约束；绑定 ID 与资源登记名均可用于部署校验。Secrets 和 Workers routes 也提供 Cloudflare 形状的 CRUD。
+- **第一阶段边界**：目前优先保证普通 Worker 发布主链路；复杂多模块上传、独立 versions/deployments 生命周期、tail/login/dev 及 Cloudflare 专有资源 API 仍按兼容矩阵处理。资源 API 已按固定 Wrangler 4.133.0 的真实请求路径实现，后续继续逐项对拍。
 
 ## `compatibility_flags` authority（ADR-153/186）
 

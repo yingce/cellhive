@@ -7,11 +7,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"time"
 
 	"cellhive/internal/control"
 )
@@ -29,6 +32,29 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/script-settings", compat(s.handleCloudflareWorkerSettings))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/content", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerUpload))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets", compat(s.handleCloudflareWorkerSecrets))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets", compat(s.handleCloudflareWorkerSecretPut))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets/{secret_name}", compat(s.handleCloudflareWorkerSecretDelete))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/routes", compat(s.handleCloudflareRoutes))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/routes", compat(s.handleCloudflareRoutePut))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/routes/{route_id}", compat(s.handleCloudflareRoutePut))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/routes/{route_id}", compat(s.handleCloudflareRouteDelete))
+		// Resource APIs used by wrangler kv/d1/r2/queues create/list/delete.
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/storage/kv/namespaces", compat(s.handleCloudflareKVCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/storage/kv/namespaces", compat(s.handleCloudflareKVList))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}", compat(s.handleCloudflareResourceDelete("kv")))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/d1/database", compat(s.handleCloudflareD1Create))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/d1/database", compat(s.handleCloudflareD1List))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/d1/database/{resource_id}", compat(s.handleCloudflareResourceDelete("d1")))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/d1/database/{resource_id}", compat(s.handleCloudflareD1Get))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/r2/buckets", compat(s.handleCloudflareR2Create))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/r2/buckets", compat(s.handleCloudflareR2List))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}", compat(s.handleCloudflareResourceDelete("r2")))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}", compat(s.handleCloudflareR2Get))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueList))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareResourceDelete("queue")))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareQueueGet))
 	}
 }
 
@@ -273,4 +299,250 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func cloudflareResult(w http.ResponseWriter, result any) {
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": result})
+}
+
+func (s *Server) handleCloudflareWorkerSecretPut(w http.ResponseWriter, r *http.Request) {
+	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
+	var in struct{ Name, Text, Type string }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || in.Name == "" || in.Type != "secret_text" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "name and secret_text type are required")
+		return
+	}
+	if err := s.Control.PutSecret(r.Context(), ns, worker, in.Name, []byte(in.Text), "wrangler"); err != nil {
+		writeErr(w, http.StatusBadRequest, "secret_put_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"name": in.Name})
+}
+
+func (s *Server) handleCloudflareWorkerSecrets(w http.ResponseWriter, r *http.Request) {
+	metas, err := s.Control.ListSecrets(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "secret_list_failed", err.Error())
+		return
+	}
+	if metas == nil {
+		metas = []control.SecretMeta{}
+	}
+	cloudflareResult(w, metas)
+}
+
+func (s *Server) handleCloudflareWorkerSecretDelete(w http.ResponseWriter, r *http.Request) {
+	ns, worker, key := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("secret_name")
+	if err := s.Control.DeleteSecret(r.Context(), ns, worker, key, "wrangler"); err != nil {
+		writeErr(w, http.StatusNotFound, "secret_delete_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, nil)
+}
+
+type cloudflareRoute struct{ ID, Pattern, Script string }
+
+func (s *Server) handleCloudflareRoutes(w http.ResponseWriter, r *http.Request) {
+	p, err := s.Control.Projection(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "routes_failed", err.Error())
+		return
+	}
+	ns := r.PathValue("account_id")
+	out := []cloudflareRoute{}
+	for _, app := range p.Apps {
+		if app.Namespace != ns {
+			continue
+		}
+		for _, rt := range app.Routes {
+			out = append(out, cloudflareRoute{ID: rt.Host, Pattern: rt.Host + rt.Path, Script: rt.Worker})
+		}
+	}
+	cloudflareResult(w, out)
+}
+
+func (s *Server) handleCloudflareRoutePut(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("account_id")
+	var in struct{ Pattern, Script string }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if in.Pattern == "" || in.Script == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "pattern and script are required")
+		return
+	}
+	u, err := url.Parse(in.Pattern)
+	if err != nil || u.Host == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "pattern must be an absolute URL")
+		return
+	}
+	// Cloudflare routes implicitly own the hostname. CellHive keeps host
+	// registration explicit internally, so the compatibility adapter performs
+	// the idempotent registration before writing the route.
+	if _, err := s.Control.PutCustomHost(r.Context(), ns, u.Host, "wrangler"); err != nil {
+		writeErr(w, http.StatusBadRequest, "route_host_failed", err.Error())
+		return
+	}
+	if err := s.Control.PutRoute(r.Context(), ns, control.Route{Host: u.Host, Path: u.EscapedPath(), Worker: in.Script}, "wrangler"); err != nil {
+		writeErr(w, http.StatusBadRequest, "route_put_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, cloudflareRoute{ID: u.Host, Pattern: in.Pattern, Script: in.Script})
+}
+
+func (s *Server) handleCloudflareRouteDelete(w http.ResponseWriter, r *http.Request) {
+	id, _ := url.PathUnescape(r.PathValue("route_id"))
+	if id == "" {
+		id = r.URL.Query().Get("id")
+	}
+	if err := s.Control.DeleteRoute(r.Context(), r.PathValue("account_id"), id, "wrangler"); err != nil {
+		writeErr(w, http.StatusNotFound, "route_delete_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, nil)
+}
+
+func (s *Server) cloudflareResource(ctx context.Context, ns, kind, name string) (control.Resource, error) {
+	if s.Control == nil {
+		return control.Resource{}, control.ErrNotFound
+	}
+	return s.Control.CreateResource(ctx, ns, kind, name, defaultResourceScope(ns, kind, name), "wrangler")
+}
+
+func (s *Server) cloudflareResourceCreate(w http.ResponseWriter, r *http.Request, kind string, name string) {
+	ns := r.PathValue("account_id")
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "resource name is required")
+		return
+	}
+	if _, err := s.Control.CreateApp(r.Context(), ns, "wrangler"); err != nil && !strings.Contains(err.Error(), "already exists") {
+		writeErr(w, http.StatusBadRequest, "account_create_failed", err.Error())
+		return
+	}
+	res, err := s.cloudflareResource(r.Context(), ns, kind, name)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "resource_create_failed", err.Error())
+		return
+	}
+	switch kind {
+	case "kv":
+		cloudflareResult(w, map[string]any{"id": res.Name, "title": res.Name})
+	case "d1":
+		cloudflareResult(w, map[string]any{"uuid": res.Name, "name": res.Name, "version": "production"})
+	case "r2":
+		cloudflareResult(w, map[string]any{"name": res.Name, "creation_date": time.Now().UTC().Format(time.RFC3339)})
+	case "queue":
+		cloudflareResult(w, map[string]any{"queue_id": res.Name, "queue_name": res.Name, "created_on": time.Now().UTC().Format(time.RFC3339), "modified_on": time.Now().UTC().Format(time.RFC3339)})
+	default:
+		cloudflareResult(w, res)
+	}
+}
+
+func (s *Server) handleCloudflareKVCreate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Title string `json:"title"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	s.cloudflareResourceCreate(w, r, "kv", in.Title)
+}
+func (s *Server) handleCloudflareD1Create(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	s.cloudflareResourceCreate(w, r, "d1", in.Name)
+}
+func (s *Server) handleCloudflareR2Create(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	s.cloudflareResourceCreate(w, r, "r2", in.Name)
+}
+func (s *Server) handleCloudflareQueueCreate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name      string `json:"name"`
+		QueueName string `json:"queue_name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	name := in.Name
+	if name == "" {
+		name = in.QueueName
+	}
+	s.cloudflareResourceCreate(w, r, "queue", name)
+}
+
+func (s *Server) cloudflareResourceList(w http.ResponseWriter, r *http.Request, kind string, shape func(control.ResourceRef) any) {
+	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), kind)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resources_failed", err.Error())
+		return
+	}
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, shape(item))
+	}
+	cloudflareResult(w, out)
+}
+func (s *Server) handleCloudflareKVList(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareResourceList(w, r, "kv", func(x control.ResourceRef) any { return map[string]any{"id": x.Name, "title": x.Name} })
+}
+func (s *Server) handleCloudflareD1List(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareResourceList(w, r, "d1", func(x control.ResourceRef) any {
+		return map[string]any{"uuid": x.Name, "name": x.Name, "version": "production"}
+	})
+}
+func (s *Server) handleCloudflareR2List(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), "r2")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resources_failed", err.Error())
+		return
+	}
+	out := make([]any, 0, len(items))
+	for _, x := range items {
+		out = append(out, map[string]any{"name": x.Name, "creation_date": time.Now().UTC().Format(time.RFC3339)})
+	}
+	cloudflareResult(w, map[string]any{"buckets": out})
+}
+func (s *Server) handleCloudflareQueueList(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareResourceList(w, r, "queue", func(x control.ResourceRef) any { return map[string]any{"queue_id": x.Name, "queue_name": x.Name} })
+}
+func (s *Server) handleCloudflareResourceDelete(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ns, name := r.PathValue("account_id"), r.PathValue("resource_id")
+		if err := s.Control.DeleteResource(r.Context(), ns, kind, name, "wrangler"); err != nil {
+			writeErr(w, http.StatusNotFound, "resource_delete_failed", err.Error())
+			return
+		}
+		cloudflareResult(w, nil)
+	}
+}
+
+func (s *Server) handleCloudflareD1Get(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("resource_id")
+	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "d1", name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"uuid": res.Name, "name": res.Name, "version": "production"})
+}
+func (s *Server) handleCloudflareR2Get(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("resource_id")
+	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "r2", name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"name": res.Name, "creation_date": time.Now().UTC().Format(time.RFC3339)})
+}
+func (s *Server) handleCloudflareQueueGet(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("resource_id")
+	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "queue", name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"queue_id": res.Name, "queue_name": res.Name})
 }

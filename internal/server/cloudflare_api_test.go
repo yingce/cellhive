@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,39 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	releases, err := s.Control.Releases(t.Context(), "acme", "web")
 	if err != nil || len(releases) != 1 {
 		t.Fatalf("worker was not deployed: releases=%d err=%v", len(releases), err)
+	}
+}
+
+func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {
+	s := newControlServer(t)
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/storage/kv/namespaces", `{"title":"sessions"}`); rr.Code != 200 {
+		t.Fatalf("kv create %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/storage/kv/namespaces", ""); rr.Code != 200 {
+		t.Fatalf("kv list %d", rr.Code)
+	}
+	if rr := call(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web/secrets", `{"name":"TOKEN","text":"secret","type":"secret_text"}`); rr.Code != 200 {
+		t.Fatalf("secret %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/secrets", ""); rr.Code != 200 {
+		t.Fatalf("secret list %d", rr.Code)
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/workers/routes", `{"pattern":"https://example.com/*","script":"web"}`); rr.Code != 200 {
+		t.Fatalf("route %d %s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(call(http.MethodGet, "/client/v4/accounts/acme/workers/routes", "").Body.Bytes(), &got)
+	if got["success"] != true {
+		t.Fatalf("routes response=%v", got)
 	}
 }
 
