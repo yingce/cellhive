@@ -111,6 +111,37 @@ func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {
 	}
 }
 
+func TestCloudflareQueueConsumerLifecycle(t *testing.T) {
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.Deploy(t.Context(), "acme", "worker", control.DeploySpec{BundleSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues", `{"name":"jobs"}`); rr.Code != 200 {
+		t.Fatalf("queue %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"batch_size":10,"max_retries":2}}`); rr.Code != 200 {
+		t.Fatalf("consumer create %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/queues/jobs/consumers", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"consumer_id":"worker"`)) {
+		t.Fatalf("consumer list %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/queues/jobs/consumers/worker", ""); rr.Code != 200 {
+		t.Fatalf("consumer delete %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestCloudflareAssetsAndWorkflows(t *testing.T) {
 	s := newControlServer(t)
 	h := s.AdminHandler()

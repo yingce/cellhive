@@ -63,6 +63,11 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueList))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareResourceDelete("queue")))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareQueueGet))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers", compat(s.handleCloudflareQueueConsumerCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers", compat(s.handleCloudflareQueueConsumerList))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerUpdate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerGet))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerDelete))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/assets-upload-session", compat(s.handleCloudflareAssetsSession))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload", s.handleCloudflareAssetsUpload)
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload/{asset_hash}", s.handleCloudflareAssetsUpload)
@@ -611,5 +616,116 @@ func (s *Server) handleCloudflareQueueGet(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
-	cloudflareResult(w, map[string]any{"queue_id": res.Name, "queue_name": res.Name})
+	cloudflareResult(w, s.cloudflareQueueResult(r, res.Name))
+}
+
+func (s *Server) cloudflareQueueResult(r *http.Request, queue string) map[string]any {
+	out := map[string]any{"queue_id": queue, "queue_name": queue, "consumers": []any{}}
+	if p, err := s.Control.Projection(r.Context()); err == nil {
+		items := make([]any, 0)
+		for _, target := range p.QueueTargets() {
+			if target.Namespace != r.PathValue("account_id") || target.Queue != queue {
+				continue
+			}
+			items = append(items, map[string]any{
+				"consumer_id": target.Worker,
+				"type":        "worker", "script": target.Worker,
+				"settings":          map[string]any{"batch_size": target.Consumer.MaxBatchSize, "max_retries": target.Consumer.MaxRetries, "max_concurrency": target.Consumer.MaxConcurrency, "max_wait_time_ms": target.Consumer.MaxBatchTimeoutSeconds * 1000},
+				"dead_letter_queue": target.Consumer.DeadLetterQueue,
+			})
+		}
+		out["consumers"] = items
+	}
+	return out
+}
+
+type cloudflareQueueConsumerRequest struct {
+	Type            string `json:"type"`
+	ScriptName      string `json:"script_name"`
+	DeadLetterQueue string `json:"dead_letter_queue"`
+	Settings        struct {
+		BatchSize      int `json:"batch_size"`
+		MaxRetries     int `json:"max_retries"`
+		MaxConcurrency int `json:"max_concurrency"`
+		MaxWaitTimeMs  int `json:"max_wait_time_ms"`
+		RetryDelay     int `json:"retry_delay"`
+	} `json:"settings"`
+}
+
+func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Request, remove bool) {
+	ns, queue := r.PathValue("account_id"), r.PathValue("resource_id")
+	var in cloudflareQueueConsumerRequest
+	if !remove {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || in.Type != "worker" || in.ScriptName == "" {
+			writeErr(w, http.StatusBadRequest, "invalid_consumer", "type=worker and script_name are required")
+			return
+		}
+	} else {
+		in.ScriptName = r.PathValue("consumer_id")
+	}
+	v, err := s.activeCloudflareVersionForWorker(r.Context(), ns, in.ScriptName)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())
+		return
+	}
+	consumers := make([]control.Consumer, 0, len(v.Consumers)+1)
+	for _, c := range v.Consumers {
+		if c.Queue == queue && in.ScriptName == r.PathValue("consumer_id") && remove {
+			continue
+		}
+		if c.Queue == queue && in.ScriptName == in.ScriptName && !remove {
+			continue
+		}
+		consumers = append(consumers, c)
+	}
+	if !remove {
+		consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: in.Settings.MaxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: in.Settings.MaxWaitTimeMs / 1000})
+	}
+	nv, err := s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits}, "wrangler-queue-consumer")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "consumer_update_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"consumer_id": in.ScriptName, "type": "worker", "script": in.ScriptName, "queue_name": queue, "version": nv.Number})
+}
+
+func (s *Server) activeCloudflareVersionForWorker(ctx context.Context, ns, worker string) (control.Version, error) {
+	p, err := s.Control.Projection(ctx)
+	if err != nil {
+		return control.Version{}, err
+	}
+	for _, app := range p.Apps {
+		if app.Namespace == ns {
+			for _, wk := range app.Workers {
+				if wk.Worker == worker {
+					return wk.Version, nil
+				}
+			}
+		}
+	}
+	return control.Version{}, control.ErrNotFound
+}
+
+func (s *Server) handleCloudflareQueueConsumerCreate(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareQueueConsumerApply(w, r, false)
+}
+func (s *Server) handleCloudflareQueueConsumerUpdate(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareQueueConsumerApply(w, r, false)
+}
+func (s *Server) handleCloudflareQueueConsumerDelete(w http.ResponseWriter, r *http.Request) {
+	s.cloudflareQueueConsumerApply(w, r, true)
+}
+func (s *Server) handleCloudflareQueueConsumerList(w http.ResponseWriter, r *http.Request) {
+	q := s.cloudflareQueueResult(r, r.PathValue("resource_id"))
+	cloudflareResult(w, q["consumers"])
+}
+func (s *Server) handleCloudflareQueueConsumerGet(w http.ResponseWriter, r *http.Request) {
+	q := s.cloudflareQueueResult(r, r.PathValue("resource_id"))
+	for _, item := range q["consumers"].([]any) {
+		if item.(map[string]any)["consumer_id"] == r.PathValue("consumer_id") {
+			cloudflareResult(w, item)
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "consumer_not_found", "consumer does not exist")
 }
