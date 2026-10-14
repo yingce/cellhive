@@ -70,7 +70,12 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusBadRequest, "invalid_manifest", "nonempty asset manifest is required")
 		return
 	}
+	// Wrangler addresses assets as URL paths (for example "/index.html"),
+	// while the artifact store deliberately accepts only relative keys. Keep
+	// the compatibility boundary here and persist a normalized manifest.
+	normalized := make(map[string]wranglerAsset, len(in.Manifest))
 	for path, asset := range in.Manifest {
+		path = strings.TrimPrefix(strings.TrimSpace(path), "/")
 		if path == wranglerManifestPath || asset.Hash == "" || asset.Size < 0 || asset.Size > maxArtifactBytes {
 			writeErr(w, http.StatusBadRequest, "invalid_manifest", "invalid asset entry")
 			return
@@ -79,7 +84,9 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 			writeErr(w, http.StatusBadRequest, "invalid_manifest", err.Error())
 			return
 		}
+		normalized[path] = asset
 	}
+	in.Manifest = normalized
 	data, _ := json.Marshal(in.Manifest)
 	sum := sha256.Sum256(data)
 	token := hex.EncodeToString(sum[:])

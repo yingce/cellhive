@@ -88,7 +88,7 @@ func TestCloudflareAssetsAndWorkflows(t *testing.T) {
 		h.ServeHTTP(rr, req)
 		return rr
 	}
-	session := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/assets-upload-session", `{"manifest":{"index.html":{"hash":"hash1","size":5}}}`)
+	session := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/assets-upload-session", `{"manifest":{"/index.html":{"hash":"hash1","size":5}}}`)
 	if session.Code != 200 {
 		t.Fatalf("assets session %d %s", session.Code, session.Body.String())
 	}
@@ -116,6 +116,9 @@ func TestCloudflareAssetsAndWorkflows(t *testing.T) {
 	}
 	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workflows/daily", ""); rr.Code != 200 {
 		t.Fatalf("workflow get %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workflows/new-workflow", ""); rr.Code != 200 {
+		t.Fatalf("workflow probe %d %s", rr.Code, rr.Body.String())
 	}
 }
 

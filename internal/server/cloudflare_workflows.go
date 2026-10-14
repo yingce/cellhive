@@ -42,7 +42,10 @@ func (s *Server) workflowResult(r *http.Request, name string) (map[string]any, e
 func (s *Server) handleCloudflareWorkflowGet(w http.ResponseWriter, r *http.Request) {
 	result, err := s.workflowResult(r, r.PathValue("workflow_name"))
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "workflow_not_found", err.Error())
+		// Wrangler probes this endpoint before creating a workflow and expects a
+		// Cloudflare-shaped successful probe when the name is not registered.
+		// Returning an empty result lets the subsequent PUT establish it.
+		cloudflareResult(w, map[string]any{})
 		return
 	}
 	cloudflareResult(w, result)
