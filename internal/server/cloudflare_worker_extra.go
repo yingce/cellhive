@@ -22,6 +22,19 @@ func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request
 	cloudflareResult(w, out)
 }
 
+func (s *Server) handleCloudflareMemberships(w http.ResponseWriter, r *http.Request) {
+	apps, err := s.Control.Apps(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "memberships_failed", err.Error())
+		return
+	}
+	out := make([]any, 0, len(apps))
+	for _, app := range apps {
+		out = append(out, map[string]any{"id": app.Namespace, "account": map[string]any{"id": app.Namespace, "name": app.Namespace}})
+	}
+	cloudflareResult(w, out)
+}
+
 func (s *Server) handleCloudflareWorkerDelete(w http.ResponseWriter, r *http.Request) {
 	if err := s.Control.DeleteWorker(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), "wrangler"); err != nil {
 		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())

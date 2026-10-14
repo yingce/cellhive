@@ -283,6 +283,20 @@ func (s *Store) Retry(ctx context.Context, ns, name, id string, delayMs int64) e
 	return err
 }
 
+// Purge removes all queued messages. It is an operator operation used by the
+// Wrangler queues purge compatibility endpoint.
+func (s *Store) Purge(ctx context.Context, ns, name string) error {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return err
+	}
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM messages`)
+		return err
+	})
+	return err
+}
+
 // Depth returns the number of pending messages.
 func (s *Store) Depth(ctx context.Context, ns, name string) (int, error) {
 	c, err := s.cell(ctx, ns, name)

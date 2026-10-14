@@ -22,6 +22,7 @@ import (
 func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 	compat := s.cloudflareAuth
 	for _, prefix := range []string{"", "/client/v4"} {
+		mux.HandleFunc("GET "+prefix+"/memberships", compat(s.handleCloudflareMemberships))
 		mux.HandleFunc("GET "+prefix+"/accounts", compat(s.handleCloudflareAccounts))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}", compat(s.handleCloudflareWorkerDelete))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/subdomain", compat(s.handleCloudflareWorkerSubdomain))
@@ -71,6 +72,8 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerUpdate))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerGet))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerDelete))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/queues/{resource_id}/purge", compat(s.handleCloudflareQueuePurge))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}/purge", compat(s.handleCloudflareQueuePurgeStatus))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/assets-upload-session", compat(s.handleCloudflareAssetsSession))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload", s.handleCloudflareAssetsUpload)
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload/{asset_hash}", s.handleCloudflareAssetsUpload)
@@ -731,4 +734,20 @@ func (s *Server) handleCloudflareQueueConsumerGet(w http.ResponseWriter, r *http
 		}
 	}
 	writeErr(w, http.StatusNotFound, "consumer_not_found", "consumer does not exist")
+}
+
+func (s *Server) handleCloudflareQueuePurge(w http.ResponseWriter, r *http.Request) {
+	if s.Queue == nil {
+		writeErr(w, http.StatusServiceUnavailable, "queue_unavailable", "queue store is not configured")
+		return
+	}
+	if err := s.Queue.Purge(r.Context(), r.PathValue("account_id"), r.PathValue("resource_id")); err != nil {
+		writeErr(w, http.StatusBadRequest, "queue_purge_failed", err.Error())
+		return
+	}
+	cloudflareResult(w, map[string]any{"queue_id": r.PathValue("resource_id"), "status": "complete"})
+}
+
+func (s *Server) handleCloudflareQueuePurgeStatus(w http.ResponseWriter, r *http.Request) {
+	cloudflareResult(w, map[string]any{"queue_id": r.PathValue("resource_id"), "status": "complete"})
 }
