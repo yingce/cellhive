@@ -55,13 +55,15 @@ export class RuntimeCapacity {
 
 // This source runs INSIDE the dynamic Worker. Never call abortIsolate in the
 // static platform host. Nonces are incarnation identifiers, not credentials.
-export function managedModules(code, target, nonce){
+export function managedModules(code, target, nonce, specs = {}){
   const main=code.mainModule;
   return {
     '__cellhive-state.js': `export ${Lifetime.toString()}; export const life=new Lifetime();`,
+    '__cellhive-quota.js': quotaSource(code.limits?.subRequests, specs),
     '__cellhive-workers.js': `export * from 'cloudflare:workers'; import {waitUntil as original} from 'cloudflare:workers'; import {life} from '__cellhive-state.js'; export const waitUntil=p=>original(life.background(p));`,
     '__cellhive-managed.js': `
       import {WorkerEntrypoint,abortIsolate} from 'cloudflare:workers';
+      import {runInvocation} from '__cellhive-quota.js';
       import {life} from '__cellhive-state.js';
       import * as target from ${JSON.stringify(main)};
       const nonce=${JSON.stringify(nonce)};
@@ -71,7 +73,7 @@ export function managedModules(code, target, nonce){
           try{
             const ctx=life.context(this.ctx), T=target[${JSON.stringify(target)}];
             const handler=typeof T==='function'?new T(ctx,this.env):T;
-            const res=await handler.fetch(req,this.env,ctx);
+            const res=await runInvocation(()=>handler.fetch(req,this.env,ctx));
             return life.response(res);
           }finally{release();}
         }
@@ -82,4 +84,36 @@ export function managedModules(code, target, nonce){
       }
     `,
   };
+}
+
+export function quotaSource(max, specs) {
+  if (!max) return 'export const runInvocation=fn=>fn();';
+  return `
+    import {AsyncLocalStorage} from 'node:async_hooks';
+    import {env} from 'cloudflare:workers';
+    const contexts=new AsyncLocalStorage(), limit=${JSON.stringify(max)};
+    function consume(){const state=contexts.getStore();if(!state)return;if(++state.count>limit){const e=new Error('subrequest limit exceeded');e.code='subrequest_limit_exceeded';throw e;}}
+    const fetchOriginal=globalThis.fetch.bind(globalThis);
+    globalThis.fetch=(...args)=>{consume();return fetchOriginal(...args);};
+    const localMethods=new Set(['prepare','bind','get','getByName','idFromName','idFromString','newUniqueId','resumeMultipartUpload']);
+    function wrap(value,kind){
+      if(!value||typeof value!=='object')return value;
+      return new Proxy(value,{get(target,key){
+        if(key==='then')return undefined;
+        const v=Reflect.get(target,key,target);
+        if(typeof v!=='function')return v;
+        return (...args)=>{
+          const local=(kind==='d1'&&(key==='prepare'||key==='bind'))||(kind==='do'&&localMethods.has(key))||(kind==='workflow'&&key==='get')||(kind==='r2'&&key==='resumeMultipartUpload');
+          if(!local)consume();
+          const result=v.apply(target,args);
+          if(local&&result&&typeof result.then==='function')return result.then(x=>wrap(x,kind));
+          if(local)return wrap(result,kind);
+          return result;
+        };
+      }});
+    }
+    const specs=${JSON.stringify(Object.fromEntries(Object.entries(specs).map(([k,v])=>[k,v.kind])))};
+    for(const [name,kind] of Object.entries(specs))if(env[name])Object.defineProperty(env,name,{value:wrap(env[name],kind),writable:true,configurable:true,enumerable:true});
+    export const runInvocation=fn=>contexts.run({count:0},fn);
+  `;
 }

@@ -24,6 +24,7 @@ function eventEntries(events) {
       entries.push({
         level: line.level || "log",
         message: (line.message || []).map(formatValue).join(" "),
+        message_args: line.message || [],
         request_id: requestId,
         traceparent,
         at_ms: line.timestamp || event.eventTimestamp || Date.now(),

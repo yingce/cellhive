@@ -49,7 +49,11 @@ CREATE TABLE IF NOT EXISTS instances (
   updated_ms     INTEGER NOT NULL,
   run_token      TEXT NOT NULL DEFAULT '',
   lease_until_ms INTEGER NOT NULL DEFAULT 0,
-  generation     INTEGER NOT NULL DEFAULT 0
+  generation     INTEGER NOT NULL DEFAULT 0,
+  target_worker  TEXT NOT NULL DEFAULT '',
+  target_bundle  TEXT NOT NULL DEFAULT '',
+  target_version INTEGER NOT NULL DEFAULT 0,
+  target_class   TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS steps (
   instance_id TEXT NOT NULL,
@@ -98,13 +102,23 @@ func Scope(ns, name string) cell.Scope {
 
 // Instance is one workflow run.
 type Instance struct {
-	ID        string `json:"id"`
-	Status    Status `json:"status"`
-	Params    []byte `json:"params,omitempty"`
-	Output    []byte `json:"output,omitempty"`
-	Error     string `json:"error,omitempty"`
-	CreatedMs int64  `json:"created_ms"`
-	UpdatedMs int64  `json:"updated_ms"`
+	ID            string `json:"id"`
+	Status        Status `json:"status"`
+	Params        []byte `json:"params,omitempty"`
+	Output        []byte `json:"output,omitempty"`
+	Error         string `json:"error,omitempty"`
+	CreatedMs     int64  `json:"created_ms"`
+	UpdatedMs     int64  `json:"updated_ms"`
+	TargetWorker  string `json:"target_worker,omitempty"`
+	TargetBundle  string `json:"target_bundle,omitempty"`
+	TargetVersion int    `json:"target_version,omitempty"`
+	TargetClass   string `json:"target_class,omitempty"`
+}
+
+// Target pins the Worker version/class used by a workflow instance.
+type Target struct {
+	Worker, BundleSHA, ClassName string
+	Version                      int
 }
 
 func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, error) {
@@ -134,6 +148,10 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 		`ALTER TABLE instances ADD COLUMN run_token TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE instances ADD COLUMN lease_until_ms INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE instances ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE instances ADD COLUMN target_worker TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE instances ADD COLUMN target_bundle TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE instances ADD COLUMN target_version INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE instances ADD COLUMN target_class TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, stmt)
@@ -471,6 +489,10 @@ func NewID() string {
 // Create inserts a new instance in the queued state. A non-empty id makes the
 // call idempotent: an existing instance with the same id is returned unchanged.
 func (s *Store) Create(ctx context.Context, ns, name, id string, params []byte) (Instance, error) {
+	return s.CreateWithTarget(ctx, ns, name, id, params, Target{})
+}
+
+func (s *Store) CreateWithTarget(ctx context.Context, ns, name, id string, params []byte, target Target) (Instance, error) {
 	if id == "" {
 		id = NewID()
 	}
@@ -480,9 +502,9 @@ func (s *Store) Create(ctx context.Context, ns, name, id string, params []byte) 
 	}
 	now := s.now().UnixMilli()
 	if _, err := execCell(ctx, c,
-		`INSERT INTO instances(id, params, status, created_ms, updated_ms) VALUES(?,?,?,?,?)
+		`INSERT INTO instances(id, params, status, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class) VALUES(?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		id, params, string(StatusQueued), now, now); err != nil {
+		id, params, string(StatusQueued), now, now, target.Worker, target.BundleSHA, target.Version, target.ClassName); err != nil {
 		return Instance{}, err
 	}
 	return s.Get(ctx, ns, name, id)
@@ -491,6 +513,10 @@ func (s *Store) Create(ctx context.Context, ns, name, id string, params []byte) 
 // CreateBatch inserts every instance in one cell transaction. A failure leaves
 // the batch unchanged; non-empty IDs retain Create's idempotent semantics.
 func (s *Store) CreateBatch(ctx context.Context, ns, name string, instances []Instance) ([]Instance, error) {
+	return s.CreateBatchWithTarget(ctx, ns, name, instances, Target{})
+}
+
+func (s *Store) CreateBatchWithTarget(ctx context.Context, ns, name string, instances []Instance, target Target) ([]Instance, error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, err
@@ -505,9 +531,9 @@ func (s *Store) CreateBatch(ctx context.Context, ns, name string, instances []In
 			}
 			ids[i] = id
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO instances(id, params, status, created_ms, updated_ms) VALUES(?,?,?,?,?)
+				`INSERT INTO instances(id, params, status, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class) VALUES(?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO NOTHING`,
-				id, in.Params, string(StatusQueued), now, now); err != nil {
+				id, in.Params, string(StatusQueued), now, now, target.Worker, target.BundleSHA, target.Version, target.ClassName); err != nil {
 				return err
 			}
 		}
@@ -535,8 +561,8 @@ func (s *Store) Get(ctx context.Context, ns, name, id string) (Instance, error) 
 	var in Instance
 	var status string
 	err = c.DB.QueryRowContext(ctx,
-		`SELECT id, params, status, output, error, created_ms, updated_ms FROM instances WHERE id = ?`, id).
-		Scan(&in.ID, &in.Params, &status, &in.Output, &in.Error, &in.CreatedMs, &in.UpdatedMs)
+		`SELECT id, params, status, output, error, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class FROM instances WHERE id = ?`, id).
+		Scan(&in.ID, &in.Params, &status, &in.Output, &in.Error, &in.CreatedMs, &in.UpdatedMs, &in.TargetWorker, &in.TargetBundle, &in.TargetVersion, &in.TargetClass)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -554,7 +580,7 @@ func (s *Store) List(ctx context.Context, ns, name string, limit int) ([]Instanc
 		limit = 100
 	}
 	rows, err := c.DB.QueryContext(ctx,
-		`SELECT id, params, status, output, error, created_ms, updated_ms FROM instances ORDER BY created_ms DESC LIMIT ?`, limit)
+		`SELECT id, params, status, output, error, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class FROM instances ORDER BY created_ms DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +589,7 @@ func (s *Store) List(ctx context.Context, ns, name string, limit int) ([]Instanc
 	for rows.Next() {
 		var in Instance
 		var status string
-		if err := rows.Scan(&in.ID, &in.Params, &status, &in.Output, &in.Error, &in.CreatedMs, &in.UpdatedMs); err != nil {
+		if err := rows.Scan(&in.ID, &in.Params, &status, &in.Output, &in.Error, &in.CreatedMs, &in.UpdatedMs, &in.TargetWorker, &in.TargetBundle, &in.TargetVersion, &in.TargetClass); err != nil {
 			return nil, err
 		}
 		in.Status = Status(status)

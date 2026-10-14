@@ -322,6 +322,16 @@ func main() {
 			}
 			return instance.Params, nil
 		},
+		TargetForInstance: func(cctx context.Context, ns, name, id string) (control.WorkflowTarget, bool, error) {
+			instance, err := workflowStore.Get(cctx, ns, name, id)
+			if err != nil {
+				return control.WorkflowTarget{}, false, err
+			}
+			if instance.TargetWorker == "" || instance.TargetBundle == "" || instance.TargetClass == "" || instance.TargetVersion == 0 {
+				return control.WorkflowTarget{}, false, nil
+			}
+			return control.WorkflowTarget{Namespace: ns, Worker: instance.TargetWorker, Name: name, ClassName: instance.TargetClass, BundleSHA: instance.TargetBundle, Version: instance.TargetVersion}, true, nil
+		},
 		Claim: func(cctx context.Context, ns, name, id string) (string, uint64, bool, error) {
 			tok, gen, _, ok, err := workflowStore.ClaimRun(cctx, ns, name, id, workflowLeaseMs)
 			return tok, gen, ok, err

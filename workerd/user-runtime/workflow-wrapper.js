@@ -6,8 +6,9 @@
 // attempt resumes from the last durable step.
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
-import { NonRetryableError } from "cellhive-workflow.js";
+import { NonRetryableError, WorkflowTimeoutError } from "cellhive-workflow.js";
 import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
+import { runInvocation } from "__cellhive-quota.js";
 
 // Rebuild synchronous tenant-isolate APIs over the props-bound capabilities.
 
@@ -62,7 +63,7 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
     const step = makeStep(workflowBridge, eventJson.instanceId);
     const inst = new cls(this.ctx, bindings);
     try {
-      const out = await inst.run(eventJson.event, step);
+      const out = await runInvocation(() => inst.run(eventJson.event, step));
       await finish(workflowBridge, eventJson.instanceId, out);
       return { status: "complete" };
     } catch (e) {
@@ -106,6 +107,17 @@ function retryDelayMs(retries, attempt) {
     case "exponential": return base * Math.pow(2, attempt);
     default: return base;
   }
+}
+
+function parseDurationMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+  if (value instanceof Date) return Math.max(0, value.getTime() - Date.now());
+  if (typeof value !== "string") return 0;
+  const m = value.trim().match(/^(-?\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?|m|minutes?|h|hours?|d|days?)$/i);
+  if (!m) return 0;
+  const n = Number(m[1]); const unit = m[2].toLowerCase();
+  const factor = unit.startsWith("ms") ? 1 : unit.startsWith("s") ? 1000 : unit.startsWith("m") ? 60000 : unit.startsWith("h") ? 3600000 : 86400000;
+  return Math.max(0, n * factor);
 }
 
 function makeStep(bridge, id) {
@@ -160,7 +172,14 @@ function makeStep(bridge, id) {
       // re-dispatch resumes the same attempt/backoff instead of restarting.
       const attempts = await getAttempt(name);
       try {
-        const result = await fn();
+        const timeout = parseDurationMs(config.timeout);
+        let result;
+        if (timeout > 0) {
+          let timer;
+          try {
+            result = await Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => { timer = setTimeout(() => reject(new WorkflowTimeoutError("workflow step timed out")), timeout); })]);
+          } finally { if (timer) clearTimeout(timer); }
+        } else result = await fn();
         await putStep(name, result);
         await clearAttempt(name);
         return result;
@@ -175,7 +194,7 @@ function makeStep(bridge, id) {
         throw new SleepSignal();
       }
     },
-    async sleep(name, durationMs) {
+    async sleep(name, duration) {
       await checkState();
       const got = await getStep(name);
       if (got.found) {
@@ -183,7 +202,7 @@ function makeStep(bridge, id) {
         if (Date.now() < wake) throw new SleepSignal();
         return;
       }
-      const wake = Date.now() + (typeof durationMs === "number" ? durationMs : 0);
+      const wake = Date.now() + parseDurationMs(duration);
       await putStep(name, { wake_at_ms: wake });
       const r = await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
       if (!r.ok) throw new Error("step sleep " + r.status);
@@ -208,7 +227,7 @@ function makeStep(bridge, id) {
         await call(bridge, "wait.delete", named(name));
         return val;
       }
-      const timeoutMs = typeof options.timeout === "number" ? options.timeout * 1000 : 0;
+      const timeoutMs = typeof options.timeout === "number" ? options.timeout * 1000 : parseDurationMs(options.timeout);
       const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
       // On resume, honor an elapsed timeout.
       const wr = await call(bridge, "wait.get", named(name));
@@ -217,7 +236,7 @@ function makeStep(bridge, id) {
         if (wj.found && wj.deadline_ms > 0 && Date.now() >= wj.deadline_ms) {
           await putStep(name, null);
           await call(bridge, "wait.delete", named(name));
-          return undefined;
+          throw new WorkflowTimeoutError();
         }
       }
       await call(bridge, "wait.put", Object.assign(named(name), { deadline_ms: deadline }));
@@ -227,9 +246,9 @@ function makeStep(bridge, id) {
       }
       throw new SleepSignal();
     },
-    async sleepUntil(name, timestampMs) {
-      const d = typeof timestampMs === "number" ? timestampMs - Date.now() : 0;
-      return this.sleep(name, d);
+    async sleepUntil(name, timestamp) {
+      const at = timestamp instanceof Date ? timestamp.getTime() : (typeof timestamp === "number" ? timestamp : Date.parse(timestamp));
+      return this.sleep(name, Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0);
     },
   };
 }

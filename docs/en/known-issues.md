@@ -83,7 +83,8 @@ _Last updated: 2026-09-25_
 
 - workerd capnp: `globalOutbound` of a tenant loaded worker = **public-Internet-only network service** (excluding RFC1918 / cell-agent addresses).
 - **The host adapter's internal-network binding is not exposed to tenants**.
-- Per-worker CPU/subrequest and V8 heap enforcement are **not implemented**. Current controls are deploy-time WorkerCode/env budgets, per-namespace write admission, and cell-agent overload rejection. See [`security.md`](security.md).
+- Per-worker CPU time and V8 heap enforcement are **not implemented**; subrequest limits are enforced by the dynamic Worker invocation quota and covered by a real workerd test. Current additional controls are deploy-time WorkerCode/env budgets, per-namespace write admission, and cell-agent overload rejection. See [`security.md`](security.md).
+- **Dynamic-load aggregate memory protection is still being closed out (measured 2026-10-13)**: earlier pinned-workerd tests in a 2 GiB container were OOMKilled after 451 distinct 1 MiB Workers or 575 same-SHA versions; 189 distinct 10 MiB assets also triggered OOM. Public user-runtime now has version retirement, activity lifetime tracking, cold-load admission, byte budgets for source/plan/env/assets, and streaming for large assets; the same 2 GiB/1000×1 MiB synthetic Worker run no longer OOMKilled, but still observed roughly 840 MiB cgroup usage and workerd abort logs, so this is not a production capacity guarantee. DO runtime, internal dispatch, long-lived RPC/WS, FD limits, and long churn remain separate validation work. Evidence: [`runtime-memory-2026-10-13.md`](../archive/bench/runtime-memory-2026-10-13.md) and [`workerd-loader-lifecycle-2026-10-13.md`](../archive/bench/workerd-loader-lifecycle-2026-10-13.md).
 
 ## M-02 Port Allocation (Finalized)
 
@@ -250,6 +251,7 @@ Inventory against roadmap P1 “complete cell replication” and the current sta
 | user-runtime internal dispatch (queue/scheduled) | ✅ ADR-067 (`internal.js` + wrapper `CellHiveHost` RPC; real workerd e2e) |
 | Static asset serving (loader side) | ✅ ADR-069 + **ADR-071** (`_redirects`/`_headers`/ETag/304/index/fallback worker + `not_found_handling`(SPA/404-page) + `run_worker_first`(bool/paths); real workerd e2e 4 cases) |
 | Cron → `scheduled()` dispatch | ✅ ADR-070 (`Version.Crons` + `Projection.CronTargets()` + cell-agent `cronEnricher` + user-runtime `/v1/timers/dispatch` → `handleScheduled`; real workerd e2e); parsing/evaluation/scheduling are implemented in both validation and runtime (`internal/cron` `Parse`/`Matches` + `Scheduler.Pass`, deploy-time `ValidateCrons` → `invalid_cron`; CLI `triggers list`) |
+| Cloudflare semantic boundaries for KV/Cron/R2 | ⚠️ KV `{type}` read options are supported; `cacheTtl` does not create an edge cache. Cron accepts UTC five-field numeric expressions and schedules the current minute best-effort without catch-up. R2 `onlyIf` conditional reads/writes throw an explicit unsupported error. See `docs/en/compatibility-matrix.md`. |
 | Workflows/Cron binding | ✅ **ADR-086** (Workflows: `__workflow__` cell + `env.WF` + `step.do/sleep` + lifecycle/events) + **ADR-070/076** (Cron: `Version.Crons` projection + scheduler materializes slots + `scheduled()` dispatch) |
 
 ## Observability (after ADR-146)
@@ -290,11 +292,16 @@ Tests: `internal/purge TestAppPurgeDropsNamespaceData`/`TestWorkerPurgeDropsOnly
 - Release logs/idempotent deployment/Admission/Autoscaler **signals** have been implemented and unit-tested (ADR-087).
 - **Boundary**: the autoscaler only emits signals; actual node add/remove belongs to external orchestration (no orchestrator/cloud driver) → Class C environment validation; admin backend = admin API (no Web UI).
 
+## P2 Queue Compatibility Boundaries (Partial)
+
+The Queue producer/consumer path now supports `sendBatch()`, `json/text/bytes/v8`, the 128 KiB body limit, metadata, original timestamps, delay validation, and idempotency conflicts. Remaining differences are `max_batch_timeout`, cross-batch ordering, and some retry/DLQ edges. See the call-level behavior in [`compatibility-matrix.md`](./compatibility-matrix.md#queue-and-workflow-call-boundaries).
+
 ## P2 Workflows Binding (ADR-086, Partial)
 
 **Implemented (real workerd e2e)**: `internal/workflow` (`__workflow__` cell: instances/steps/events, step memoization); facade `env.WF.create/createBatch/get/sendEvent`; cell-agent API (tenant create/create-batch/get/event, internal step/sleep/finish); user-runtime `/v1/workflows/run` + `cellhive-workflow.js` base + `step.do/sleep` (shim: rewrites `cloudflare:workers`, constructed by the platform, because workerd's `WorkflowEntrypoint` cannot be constructed outside the engine); sleep reuses the unified timer (`KindWorkflowSleep`); CLI `workflow create`; `wranglercompat` requires `class_name`.
 
-**Partial boundaries (not done)**: cross-worker instances; `locationHint` is accepted but **ignored** (best-effort placement hint, no effect); step-history listing and progress callbacks.
+**Partial boundaries (not done)**: cross-worker instances; `locationHint` is accepted but **ignored** (best-effort placement hint, no effect); step-history listing and progress callbacks; resumed/redispatched instances use the currently active worker version rather than a version pinned at creation.
+**Call-shape differences**: `sleep/sleepUntil` accept numeric milliseconds only; `waitForEvent.timeout` accepts numeric seconds only and resolves to `undefined` on timeout; `step.do timeout/sensitive`, `restart({from})`, and `terminate(options)` do not take effect. See [`compatibility-matrix.md`](./compatibility-matrix.md#queue-and-workflow-call-boundaries).
 **Implemented**: `pause`/`resume`/`terminate`/`restart`, `waitForEvent`, instance listing, idempotent `instance.delete()`, per-step `retries{limit,delay,backoff}`, `createBatch` (1..100 instances in one cell transaction), and the 1 MiB total create/createBatch request budget.
 
 ## backend-A Capture and Cold Recovery (ADR-092)

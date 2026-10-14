@@ -8,13 +8,13 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 |---|---|---|
 | ES module Workers / `fetch` | Supported | `workerLoader` dynamically loads immutable versions |
 | WebSocket | Supported | Proxied by user-runtime; 1012 during DO migration/deployment, clients reconnect (CF-compatible); **`env.DO.get().fetch(upgrade request)` connects directly to the owner via `/v1/do/connect` (`{owner,ticket}` query + ticket only valid on this shard, ADR-175)** |
-| KV | Supported | Strongly consistent (reads are also forwarded to the owner, ADR-120; cell SQLite); no global edge replication; **`put` accepts string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream (ADR-174)**; **write validation: key≤512B, metadata≤1KiB, absolute expiration must be in the future, value≤25MiB (ADR-176); `expirationTtl` accepts any positive integer (ADR-183 removed Cloudflare's ≥60s floor because lazy read expiry is immediate and timer sweeping only reclaims storage)** |
+| KV | Supported | Strongly consistent (reads are also forwarded to the owner, ADR-120; cell SQLite); no global edge replication; **`put` accepts string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream (ADR-174)**; `get`/`getWithMetadata` accept string types and `{type:"text"|"json"|"arrayBuffer"}`; `cacheTtl` is accepted but has no edge-cache effect; **write validation: key≤512B, metadata≤1KiB, absolute expiration must be in the future, value≤25MiB (ADR-176); `expirationTtl` is validated at ≥60s** |
 | D1 | Supported | SQL + `prepare`/`bind`/`all`/`first`/`run`/`raw`/`batch`/`exec`; `prepare()`/`bind()` synchronously return local statement objects that ORMs can pass to `batch()`; `ArrayBuffer`/typed arrays bind and round-trip as BLOBs; single writer; **Sessions/bookmarks and transactions explicitly rejected** (`withSession()`/`session()` throw, `BEGIN` is unsupported, no read replicas, ADR-153); `meta` includes `changes`/`last_row_id`/`changed_db`, errors map to `D1_ERROR` (ADR-163) |
-| R2 | Supported | S3-compatible + **presign (`createPresignedUrl`)** + **multipart (ADR-113)** + **cursor-paginated list (ADR-145)**; **full R2Object fields + `put` http/custom metadata/checksums + `head()` (ADR-163)**; **list supports `include` (backfills per-object metadata on demand) and `delimiter`/`delimitedPrefixes` (ADR-168)**; **`R2ObjectBody.body` + `writeHttpMetadata` (ADR-174/175: local Proxy wrapper, metadata written to caller Headers)**; no SSE-C/jurisdiction, no object versioning/conditional put |
-| Queues | Partial | At-least-once + DLQ; `max_concurrency` **supported** (ADR-112, per-batch concurrency limit); `contentType=v8` rejected |
-| Cron | Supported | Minute-aligned, best-effort, no catch-up runs |
+| R2 | Supported | S3-compatible + **presign (`createPresignedUrl`)** + **multipart (ADR-113)** + **cursor-paginated list (ADR-145)**; **full R2Object fields + `put` http/custom metadata/checksums + `head()` (ADR-163)**; **list supports `include` (backfills per-object metadata on demand) and `delimiter`/`delimitedPrefixes` (ADR-168)**; **`R2ObjectBody.body` + `writeHttpMetadata` (ADR-174/175: local Proxy wrapper, metadata written to caller Headers)**; `onlyIf` supports exists/etagMatches/etagDoesNotMatch conditional reads/writes; no SSE-C/jurisdiction or object versioning |
+| Queues | Partial | At-least-once + DLQ; `send()`/`sendBatch()` with atomic 1..100 batches, JSON/text/bytes/v8 content types, metadata, enqueue timestamps, idempotency conflicts, 128 KiB body limit, delay validation, and supported `max_concurrency`. `max_batch_timeout`, cross-batch ordering, and some retry/DLQ edge semantics remain partial. |
+| Cron | Supported | UTC five-field numeric cron (lists/ranges/steps, Vixie DOM/DOW OR); minute-aligned, best-effort, no catch-up runs; scheduler scans every 30s by default, so exact-once and exact-time delivery are not guaranteed |
 | Durable Objects | Partial | Native facet + synchronous SQL; **bindings inside DO ✅ (ADR-090)**; only same worker class; deployments default to **lazy restart** (configurable via `do_eager_restart`/`session_policy`); WS migration/restart 1012; **DO RPC ✅ (ADR-162)**: `env.NS.get(id|name).method(...)`, tagged JSON + host→facet native JSRPC (≤8 MiB; no functions/stubs/streams); **legacy classes (not `extends DurableObject`) supported via facet wrapping (ADR-174)**; **non-2xx DO `fetch` responses are returned unchanged (status/content-type, ADR-174)** |
-| Workflows | Partial | Self-built engine; supports create/createBatch/get/status/lifecycle/delete/list + `step.do` (including `retries{limit,delay,backoff}`)/`sleep`/`waitForEvent` + `sendEvent`; total create/createBatch payload ≤1 MiB, batch size 1..100; no cross-worker instances, step-history listing, or progress callbacks; `locationHint` accepted but ignored |
+| Workflows | Partial | Self-built engine; supports create/createBatch/get/status/lifecycle/delete/list + `step.do` (including `retries{limit,delay,backoff}`)/`sleep`/`waitForEvent` + `sendEvent`; total create/createBatch payload ≤1 MiB, batch size 1..100. No cross-worker instances, step-history listing, or progress callbacks; `locationHint` is accepted but ignored (no placement effect). Duration strings, Date/time sleepUntil, wait timeout errors, step.do timeout, and creation-time worker/bundle/version pinning are supported; sensitive and some lifecycle options remain partial. |
 | ASSETS | Supported | Object storage + versioning; complete asset pipeline |
 | AI | Partial (optional) | **BYO OpenAI-compatible endpoint** (`env.AI.run`, `CELLHIVE_AI_URL/_KEY`); no platform-hosted catalog, no workers-ai catalog models |
 | Service / Platform bindings | Supported | Version pinning + ACL; **worker↔worker RPC = same-instance native JSRPC (ADR-102)**; **DO RPC = owner-routed JSON+tagged (ADR-162)** |
@@ -24,6 +24,22 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 | Cache API | Rejected | No edge cache |
 | AI Search / Browser / Email / Analytics Engine | Rejected | Not provided by workerd; Vectorize is supplied by CellHive's SQLite vec1 facade (see below, ADR-158/159), while Hyperdrive is supported |
 | Python Workers | Rejected | Not supported |
+
+### Queue and Workflow call boundaries
+
+These describe tenant runtime behavior. Parsing `queues.producers/consumers` or `workflows` configuration does not imply full Cloudflare API compatibility.
+
+| Call/configuration | Current CellHive behavior | Migration guidance |
+|---|---|---|
+| Queue `send()` body format | Supports `json`, `text`, `bytes`, and tagged `v8`; consumer receives the enum and decodes the body. | Keep payloads within 128 KiB and use the declared content type. |
+| Queue `sendBatch()` | Atomic 1..100 messages; returns IDs in input order, with metadata, delay and idempotency per message. | Handle explicit idempotency conflicts. |
+| Queue size/delay | Body limit 128 KiB; `delaySeconds` is validated to 0..86400. | |
+| Queue consumer settings | `max_batch_size` and `max_concurrency` work. `max_batch_timeout` is parsed/stored but not yet consumed; cross-batch order and some `max_retries=0`/DLQ edges remain partial. | Do not rely on timeout-based batching; set explicit retry/DLQ policy. |
+| Queue message metadata | Enqueue timestamp and metadata are preserved; cross-batch order is not guaranteed. | Use an application ordering key when required. |
+| Workflow `step.sleep/sleepUntil` | Supports numeric and common duration strings plus Date/time values. | |
+| Workflow `step.waitForEvent` | Supports numeric/duration timeout and throws `WorkflowTimeoutError`; event payload remains the stored JSON object. | |
+| Workflow step/instance options | `step.do` timeout is supported; `sensitive`, `restart({from})`, `terminate(options)`, subscribe, step-history listing, and progress stream remain partial or unsupported. | Check status before relying on lifecycle details. |
+| Workflow status/version | `status()` maps sleeping to waiting, UTF-8 output is preserved, and instances retain creation-time worker/bundle/version targets on redispatch. | |
 
 ## Wrangler Configuration Surface
 

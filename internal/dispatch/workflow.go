@@ -24,6 +24,9 @@ type WorkflowDispatcher struct {
 	Token string
 	// Target resolves a workflow definition to its worker + entrypoint class.
 	Target func(ctx context.Context, ns, name string) (control.WorkflowTarget, bool)
+	// TargetForInstance returns the immutable target captured at create time.
+	// When absent or unset, Run falls back to the active definition target.
+	TargetForInstance func(ctx context.Context, ns, name, id string) (control.WorkflowTarget, bool, error)
 	// Params reads the durable instance input for every run and timer resume.
 	Params func(ctx context.Context, ns, name, id string) ([]byte, error)
 	// Claim acquires a run lease for the instance (nil = dispatch without lease).
@@ -56,6 +59,13 @@ func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken str
 	t, ok := d.Target(ctx, ns, name)
 	if !ok {
 		return fmt.Errorf("workflow: no active definition %s/%s", ns, name)
+	}
+	if d.TargetForInstance != nil {
+		if pinned, pok, err := d.TargetForInstance(ctx, ns, name, id); err != nil {
+			return err
+		} else if pok {
+			t = pinned
+		}
 	}
 	if d.Params == nil {
 		return fmt.Errorf("workflow: instance params reader not configured")

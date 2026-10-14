@@ -24,6 +24,9 @@ data:
   CELLHIVE_DO_ADDR: "*:8788"
   CELLHIVE_DO_RUNTIMES: {{ printf "%s:8788" (include "cellhive.doRuntimeService" .) | quote }}
   CELLHIVE_DISPATCH_URL: {{ printf "http://%s-user-runtime:8088" .Release.Name | quote }}
+  CELLHIVE_POOL_MODE: {{ .Values.userRuntime.pool.mode | quote }}
+  CELLHIVE_POOL_MEMORY_UTILIZATION: {{ .Values.userRuntime.pool.memoryUtilization | quote }}
+  CELLHIVE_POOL_MAX_SLOTS: {{ .Values.userRuntime.pool.maxSlots | quote }}
   {{- if .Values.config.bucket }}
   CELLHIVE_BUCKET: {{ .Values.config.bucket | quote }}
   {{- end }}

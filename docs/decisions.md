@@ -622,7 +622,7 @@
 
 - **D1**（`internal/d1`，cell `<ns>/__d1__/<db>`）：`Query`（单语句→Columns/Rows 或 affected）、`Exec`（affected）、`Batch`（多语句**单事务**、失败整体回滚）；`?` 参数绑定，JSON 数字整数值规范化为 int64；端点 `POST /v1/d1/query|exec|batch?ns&db`，scope kind=`d1`。
 - **R2**（`internal/r2`，键 `r2/<ns>/<bucket>/<key>`）：`Put`/`Get`/`GetRange`/`Delete`/`List`（返回 key/size/etag，limit 有界）；端点 `PUT|GET|DELETE /v1/r2/object`（GET 支持 `Range`→206）、`GET /v1/r2/list`；scope kind=`r2`；键安全校验。
-- **Queue**（`internal/queue`，cell `<ns>/__queue__/<name>`，表 `messages`）：`Send`（delay + **幂等键去重**）、`Claim`（可见性 + 租约 + attempts）、`Ack`、`Retry`（退避重入队）、`Depth`；端点 `POST /v1/queue/send|claim|ack|retry`；scope kind=`queue`。
+- **Queue**（`internal/queue`，cell `<ns>/__queue__/<name>`，表 `messages`）：`Send`（delay + **幂等键去重**）、`Claim`（可见性 + 租约 + attempts）、`Ack`、`Retry`（退避重入队）、`Depth`；端点 `POST /v1/queue/send|claim|ack|retry`；scope kind=`queue`。`send` body 超过 1 MiB 返回 413，禁止截断入队（`TestQueueSendRejectsOversizedBodyWithoutTruncation`）。
 - **KV 补全**：`DELETE /v1/kv/delete` 与 `GET /v1/kv/list`（`cellstore.Cell.List` 有界游标：prefix + after + limit）。
 - **scope 鉴权泛化**：`scopeAuth(kind)` 工厂（kv/d1/r2/queue 复用同一中间件；校验 kind、ns、`HasBinding`）。
 - **binding facade（host adapter，workerd JS）**：`workerd/platform/facades.js`——`makeKV/makeD1/makeR2/makeQueue/buildBindings`，把 CF 形态 API（KV get/put/delete/list；D1 prepare/bind/all/first/run/batch/exec；R2 put/get(range)/delete/list；Queue send）映射到上述端点，**闭包持有 scoped token**。
@@ -1026,13 +1026,14 @@
 - **验证**：`internal/workflow` 单测；`internal/server TestWorkflowEndpoints`；`internal/dispatch TestWorkflowDispatcherRunAndSleepTimer`；**真实 workerd `TestUserRuntimeRunsWorkflow`**（`step.do` 记忆化 → 输出 `A:p:B`；`sleep` 首跑 parked → 重派发后 complete）；`wranglercompat TestWorkflowBindingRequiresClassName`。
 - **Partial 边界**：`pause/resume/terminate/restart`、实例列举 **✅ 已实现**（`internal/workflow` status 迁移；`Restart` 清该实例的 steps/attempts/waits/events，再清 output/error/run lease 并重新排队，避免上一 execution generation 的事件或等待泄漏；cell-agent `/v1/workflow/{pause,resume,terminate,restart,list}`；facade `env.WF.get(id)` 返回 CF 形态实例对象 `status()/pause()/resume()/terminate()/restart()/sendEvent()`，另 `list()`）。验证：`TestLifecycleAndRestart`、`TestWorkflowEndpoints`、`TestUserRuntimeWorkflowLifecycleFacade`。
 - **`waitForEvent` ✅**：`step.waitForEvent(name,{type,timeout})`——`events` 增加 `consumed` 列 + `waits` 表；内部 `/v1/internal/workflow/event/consume` 与 `/wait`(GET/POST/DELETE)；事件到达经 `sendEvent`→重派发恢复，超时经 sleep timer 恢复并返回 `undefined`；验证 `TestUserRuntimeWorkflowWaitForEvent`（park→投递事件→`got:E`）。
+- **租户状态/输出兼容修正**：`instance.status()` 将内部 `sleeping` 映射为 Cloudflare 形态 `waiting`；base64 JSON 输出按 UTF-8 解码，避免非 ASCII 输出乱码。`TestUserRuntimeWorkflowLifecycleFacade` 在真实 workerd 中覆盖两项。
 - **生产级补齐（本次）**：
   - **run lease/generation（并发安全）**：实例增 `run_token/lease_until_ms/generation`；派发前 `ClaimRun`（有活租约/已暂停/终态 → 跳过）；所有 run 回调带 `run` 令牌并被 **fence**（陈旧 409）+ 顺带续租；parked/finish/pause/terminate 释放租约。验证 `TestRunLeaseAndFencing`、`TestWorkflowRunLeasePreventsDoubleDispatch`。
   - **协作式 pause/terminate**：每个 step 边界前查 `/v1/internal/workflow/state`——被 fence（409）或 `paused/terminated/complete` → `StopSignal` 停止推进（不 finish）。验证 `TestUserRuntimeWorkflowCooperativePause`（paused → `stopped`，steps/finished=0）。
   - **持久重试（跨崩溃）**：`step_attempts` 表存 `attempts/last_error`；失败不 inline sleep，而是记 attempt + 排 timer 重派发（park→wake 续跑同 attempt/backoff）；超 `limit` → errored。验证 `TestUserRuntimeWorkflowStepRetries`（跨重派发到 `ok:3`）。
   - **retention/TTL**：`CELLHIVE_WORKFLOW_RETENTION`（0=关）；cell-agent 周期 `Prune` 终态旧实例并级联 steps/attempts/events/waits。验证 `TestPruneTerminalOlderThanRetention`。
   - **NonRetryableError**：`cellhive-workflow.js` 导出；重写 `cloudflare:workflows` 导入；`step.do` 遇该错**不重试**。验证 `TestUserRuntimeWorkflowNonRetryable`（`errored`）。
-- **当前 Partial 边界**：`locationHint`（接受但忽略）、跨 worker、step 历史列举/progress 回调（跨 worker 有意不做）。`createBatch(items)` 已接 `/v1/workflow/create-batch`（1..100 个实例），create/createBatch 请求总 payload 上限 1 MiB；`delete()` 已实现为幂等实例删除 API。
+- **当前 Partial 边界**：`locationHint`（接受但忽略；`TestUserRuntimeWorkflowLifecycleFacade` 真实 workerd 验证）、跨 worker、step 历史列举/progress 回调（跨 worker 有意不做）；duration 字符串、Date/time sleepUntil、wait 超时错误、step.do timeout、创建时 worker/bundle/version pin 已支持；`sensitive`、`restart({from})`、`terminate(options)` 仍未生效。`createBatch(items)` 已接 `/v1/workflow/create-batch`（1..100 个实例），create/createBatch 请求总 payload 上限 1 MiB；`delete()` 已实现为幂等实例删除 API。
 
 ---
 
@@ -1379,7 +1380,7 @@
   3. 重试/死信逻辑抽成 `dispatchBatch`，每批独立；语义不变。
   4. CLI：`--consumer <queue>[:maxRetries[:deadLetterQueue[:maxConcurrency]]]`。
 - **测试**：`internal/queue` `TestRunnerMaxConcurrency`（屏障 dispatcher 证明 3 批同时在飞；未设时仍是 **1 批/Pass** 不回归）、`cmd/cellhive` `TestConsumeSpecs`（含第 4 段解析）。
-- **边界（如实）**：`max_concurrency` 只限"同时在飞的批次数"，不等同 CF 的并发实例数；`contentType=v8` 仍不支持；不保证跨批顺序。
+- **边界（如实）**：`max_concurrency` 只限"同时在飞的批次数"，不等同 CF 的并发实例数；`max_batch_timeout` 解析/存储但 runner 未消费；跨批不保证顺序；`max_retries=0` 与部分 DLQ 边界仍需对齐。Queue 已支持 sendBatch、v8 和入队 timestamp。真实 workerd 边界测试：`TestUserRuntimePublicLoaderD1R2Queue`。
 
 ---
 
@@ -2427,6 +2428,19 @@
 - **决策**：每个确定性 `host_id` 写独立、可并存的 manifest；保留旧全局 manifest 仅作迁移读取回退。do-runtime 赢得新 shard claim 后，必须先调用同 Pod supervisor 的 `/internal/do/restore-host`，恢复该 host 的 actor/facet/sidecar 后才派发；未曾捕获是空恢复，真实恢复错误必须 release owner 并 fail closed。supervisor 优雅退出顺序固定为 drain workerd（停止新请求、等待 in-flight、释放租约并完成最终捕获）后再取消子进程。
 - **部署契约**：生产 `rpo0` 使用两个 gated Pod、Pod IP advertise、ClusterIP 任意首跳、`RollingUpdate(maxUnavailable=1,maxSurge=1)` 与 `minAvailable:1` PDB；无输出门 runtime 强制单副本并保持 `Recreate`，不承诺 Pod 替换后恢复。Helm 与 Kustomize 使用同一策略。
 - **验证边界**：`scripts/k3d-runtime-e2e.sh` 是真实 Kubernetes 多 Pod 验收入口；2026-09-25 实跑通过：任意首跳、owner Pod 删除后的 per-host 冷恢复（`1→2`），以及 RollingUpdate 期间 120 个逻辑写后精确计数 `123`（无丢写/重复提交）。ownership 切换窗口存在短暂 5xx，客户端重试后以最终计数验证逻辑语义，故不宣称每个物理 HTTP 尝试零错误。`CELLHIVE_K3D_AGENTS` 可在具备健康 worker-node 环境时增加 k3s agent；单节点 k3d 只证明多 Pod/进程接管，不替代真实跨主机 RTT、云对象存储或 NetworkPolicy/CNI 验证。
+
+## ADR-195 公共 function 动态版本退休与字节缓存预算（2026-10-13，实施中）
+
+- **依据**：512 MiB pinned stock workerd 实验确认 named loader 内部 Map 强引用；动态 isolate 自 `abortIsolate()` 可移除条目，匿名加载亦可释放。见 `docs/archive/bench/workerd-loader-lifecycle-2026-10-13.md`。
+- **决策**：公共 fetch 使用独立 managed loader id（不可变版本 + incarnation）；可信管理 entrypoint 不作为公网 URL，旧版本标记 retiring、新请求取新版本。宿主在调用前计活动引用，响应 body EOF/cancel/error 后释放；子 wrapper 追踪 handler、ctx/importable waitUntil，101/WS 保守 pin。无 binding 仍支持默认 WorkerEntrypoint，注入轻量生命周期模块取代 ADR-193 的完全直载；有 binding 继续原 facade wrapper。
+- **回收**：只对宿主无活动请求且子 wrapper 无活动/后台任务的版本调用自 abort；每次 lookup 使用 incarnation，避免晚到清理影响新实例。容量按条目 + 估算代码/env 字节限制；无法释放（busy/WS）时拒绝新冷加载（503），不强制中止执行。源码/plan/env/assets 缓存有总字节与单项上限；大静态资源走流式路径。
+- **边界**：native service RPC/内部 queue/scheduled/workflow/DO 的原 loader namespace 独立，暂不对它们强制回收；其跨请求 RPC capability、facet 和持久性必须分别验收。公共 WS 保守驻留，容量拒绝不能当作全进程 heap 硬限制。并发租户自身分配、内部运行时与 DO、FD 仍有独立压力，RSS 进程监控/drain 是后续兜底。版本历史 artifact 不删除。
+
+## ADR-196 stock runtime 容器级资源配额（2026-10-14）
+
+- **决策**：Helm/Kustomize/Compose 默认 user-runtime 为 1 CPU/2 GiB，DO runtime（含 gated supervisor）为 2 CPU/4 GiB；Helm 通过 resources 覆盖，Compose 通过 `CELLHIVE_{USER,DO}_RUNTIME_{CPUS,MEMORY}` 覆盖并禁用容器 swap。Compose runtime nofile=65536；K8s/TKE 需验证运行时继承值。
+- **依据**：pinned standalone 的 `NullIsolateLimitEnforcer`/空 subrequest enforcement 不提供托管 Workers 的 CPU/heap quota。CPU 配额只限速，不会终止同步死循环；内存是容器 aggregate 预算，超限可能 OOMKilled。不修改 workerd，不宣称 per-function CPU/内存硬限制。
+- **边界**：初始容量预算，不是安全容量保证；进程高水位 drain/watchdog、云集群 OOM/接管验收另行实现/验证。已有版本退休和缓存预算继续用于避免常规加载累计，不替代容器兜底。
 
 ---
 

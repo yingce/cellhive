@@ -312,6 +312,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/service/fetch", s.scopeAuth("service")(s.admit(s.handleServiceFetch)))
 	mux.HandleFunc("POST /v1/service/run", s.scopeAuth("service")(s.admit(s.handleServiceRun)))
 	mux.HandleFunc("POST /v1/queue/send", s.scopeAuth("queue")(s.admit(s.handleQueueSend)))
+	mux.HandleFunc("POST /v1/queue/send-batch", s.scopeAuth("queue")(s.admit(s.handleQueueSendBatch)))
 	mux.HandleFunc("POST /v1/queue/claim", s.scopeAuth("queue")(s.admit(s.handleQueueClaim)))
 	mux.HandleFunc("POST /v1/queue/ack", s.scopeAuth("queue")(s.admit(s.handleQueueAck)))
 	mux.HandleFunc("POST /v1/queue/retry", s.scopeAuth("queue")(s.admit(s.handleQueueRetry)))
@@ -1761,14 +1762,11 @@ func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 
 // kvExpiry derives an absolute expiry (unix millis) from the expiration (unix
 // seconds) or expiration_ttl (seconds from now) query parameter. ok is false
-// only when the parameter is present but not a positive integer.
+// when the parameter is outside Cloudflare's valid range.
 // KV limits (docs/bindings.md): a key is at most 512 bytes, metadata at most
 // 1 KiB, and an absolute expiration must be in the future. Values are capped
-// at 25 MiB by the body reader in handleKVPut. expirationTtl accepts ANY
-// positive second value (ADR-183): expiry is enforced lazily on read
-// (expires_ms > now filters) with second-granularity timer sweeps for space
-// reclamation, so sub-60s TTLs are honored — deliberately more permissive
-// than Cloudflare's ≥60s KV limit (platform requirement).
+// at 25 MiB by the body reader in handleKVPut. expirationTtl follows
+// Cloudflare's minimum 60 second constraint.
 const (
 	kvMaxKeyBytes      = 512
 	kvMaxMetadataBytes = 1024
@@ -1799,7 +1797,7 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 	}
 	if v := q.Get("expiration_ttl"); v != "" {
 		sec, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || sec <= 0 {
+		if err != nil || sec < 60 {
 			return 0, errKVExpirationBad
 		}
 		return now.Add(time.Duration(sec) * time.Second).UnixMilli(), nil

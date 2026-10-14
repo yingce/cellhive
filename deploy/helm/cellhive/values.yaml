@@ -36,9 +36,17 @@ userRuntime:
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
+  pool:
+    # opt-in only: adaptive mode starts Go-managed workerd slots behind the
+    # user-runtime ports; default keeps the proven single workerd path.
+    mode: ""
+    memoryUtilization: 0.70
+    maxSlots: 16
   resources:
     requests: {cpu: 250m, memory: 256Mi}
-    limits: {memory: 2Gi}
+    # Container-wide quota, including Go host and workerd. CPU throttles usage;
+    # this is not an invocation CPU timer or a per-isolate memory limit.
+    limits: {cpu: "1", memory: 2Gi}
 
 doRuntime:
   replicas: 2
@@ -47,7 +55,8 @@ doRuntime:
   gate: true
   resources:
     requests: {cpu: 500m, memory: 512Mi}
-    limits: {memory: 4Gi}
+    # Gated runtime shares this budget with its supervisor and WAL capture.
+    limits: {cpu: "2", memory: 4Gi}
 
 podSecurityContext:
   runAsNonRoot: true

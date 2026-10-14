@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS versions (
   consumers      TEXT NOT NULL DEFAULT '[]',
   crons          TEXT NOT NULL DEFAULT '[]',
   assets         TEXT,
+  limits         TEXT NOT NULL DEFAULT '{}',
   created_ms     INTEGER NOT NULL,
   actor          TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (ns, worker, number)
@@ -273,7 +274,7 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 	cols := map[string][]string{
 		"apps":               {"deleted_ms INTEGER NOT NULL DEFAULT 0"},
 		"workers":            {"host_label TEXT NOT NULL DEFAULT ''", "created_ms INTEGER NOT NULL DEFAULT 0", "deleted_ms INTEGER NOT NULL DEFAULT 0"},
-		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'"},
+		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'"},
 		"deploy_idempotency": {"created_ms INTEGER NOT NULL DEFAULT 0"},
 		"audit":              {"actor_kind TEXT NOT NULL DEFAULT ''", "on_behalf_of TEXT NOT NULL DEFAULT ''", "request_id TEXT NOT NULL DEFAULT ''"},
 	}
@@ -788,14 +789,21 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	var v Version
 	var bindings, vars, consumers, crons string
 	var assets sql.NullString
-	var flags string
+	var flags, limits string
 	var number int
 	if err := scan(&number, &v.BundleSHA, &v.AssetsSHA, &v.StorageID, &v.SessionPolicy,
-		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &v.CreatedMs, &v.Actor); err != nil {
+		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &v.CreatedMs, &v.Actor); err != nil {
 		return Version{}, err
 	}
 	if flags != "" {
 		_ = unmarshal([]byte(flags), &v.CompatFlags)
+	}
+	if limits != "" && limits != "{}" {
+		var l WorkerLimits
+		if err := unmarshal([]byte(limits), &l); err != nil {
+			return Version{}, err
+		}
+		v.Limits = &l
 	}
 	v.Number = number
 	if err := unmarshal([]byte(bindings), &v.Bindings); err != nil {
@@ -820,11 +828,11 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	return v, nil
 }
 
-const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, created_ms, actor`
+const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor`
 
 // versionColsAliased is versionCols qualified with the versions-table alias "v"
 // for queries that join workers (both tables have storage_id).
-const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.created_ms, v.actor`
+const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.limits, v.created_ms, v.actor`
 
 func (s *Store) getVersion(ctx context.Context, c *cellstore.Cell, ns, worker string, number int) (Version, bool, error) {
 	row := c.DB.QueryRowContext(ctx,
@@ -896,6 +904,9 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 	if worker == "" || spec.BundleSHA == "" {
 		return Version{}, fmt.Errorf("control: worker and bundle sha are required")
 	}
+	if spec.Limits != nil && spec.Limits.SubRequests != nil && *spec.Limits.SubRequests <= 0 {
+		return Version{}, fmt.Errorf("control: limits.subrequests must be positive")
+	}
 	c, err := s.cell(ctx)
 	if err != nil {
 		return Version{}, err
@@ -954,7 +965,7 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			Number: next, BundleSHA: spec.BundleSHA, AssetsSHA: spec.AssetsSHA,
 			Bindings: bindings, Vars: spec.Vars, Consumers: spec.Consumers,
 			Crons: spec.Crons, Assets: spec.Assets, StorageID: storageID,
-			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags,
+			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags, Limits: spec.Limits,
 			CreatedMs: s.now().UnixMilli(), Actor: actor, SessionPolicy: spec.SessionPolicy,
 		}
 		var assets any
@@ -962,13 +973,14 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			b, _ := json.Marshal(v.Assets)
 			assets = string(b)
 		}
+		limits := jsonOr(v.Limits, "{}")
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO versions(ns, worker, number, bundle_sha, assets_sha, storage_id, session_policy,
-			                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, created_ms, actor)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			ns, worker, v.Number, v.BundleSHA, v.AssetsSHA, v.StorageID, v.SessionPolicy,
 			jsonOr(v.Bindings, "[]"), jsonOr(v.Vars, "{}"), jsonOr(v.Consumers, "[]"),
-			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), v.CreatedMs, v.Actor); err != nil {
+			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, v.CreatedMs, v.Actor); err != nil {
 			return err
 		}
 		if _, err := t.ExecContext(ctx,
@@ -1668,7 +1680,7 @@ func (s *Store) VersionEnv(ctx context.Context, ns, worker string, number int) (
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }
@@ -1703,7 +1715,7 @@ func (s *Store) VersionEnvBySHA(ctx context.Context, ns, worker, sha string) (Wo
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }

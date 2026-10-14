@@ -8,6 +8,13 @@ export const ENV_MAX_BYTES = ENV_UPSTREAM_MAX_BYTES - ENV_HEADROOM_BYTES;
 export const CODE_TOO_LARGE = "worker_code_too_large";
 export const ENV_TOO_LARGE = "worker_env_too_large";
 
+export function workerLimits(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const out = {};
+  if (Number.isInteger(value.subrequests) && value.subrequests > 0) out.subRequests = value.subrequests;
+  return Object.keys(out).length ? out : undefined;
+}
+
 export class LimitError extends Error {
   constructor(code, actual, max) {
     super(`${code}: ${actual} bytes exceeds ${max}-byte limit`);

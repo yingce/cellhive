@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -68,6 +69,15 @@ func (d *HTTPDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("dispatch: status %d", resp.StatusCode)
+	}
+	// scheduled() may call controller.noRetry() and then fail. The runtime
+	// returns a successful transport response with no_retry=true so the timer
+	// slot is consumed without a retry.
+	var result struct {
+		NoRetry bool `json:"no_retry"`
+	}
+	if b, e := io.ReadAll(resp.Body); e == nil && len(b) != 0 {
+		_ = json.Unmarshal(b, &result)
 	}
 	return nil
 }

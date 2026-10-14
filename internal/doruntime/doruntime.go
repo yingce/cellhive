@@ -103,6 +103,7 @@ const config :Workerd.Config = (
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
         (name = "budget.js", esModule = embed "budget.js"),
+        (name = "lifecycle.js", esModule = embed "lifecycle.js"),
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
@@ -181,6 +182,7 @@ func Render(dir string, cfg Config) (string, error) {
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "rpc-codec.js"), "rpc-codec.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), "telemetry.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "budget.js"), "budget.js"},
+		{filepath.Join(cfg.PlatformJS, "..", "platform", "lifecycle.js"), "lifecycle.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), "log-tail.js"},
 	} {
 		data, err := os.ReadFile(pair[0])

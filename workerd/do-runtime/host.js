@@ -23,7 +23,8 @@ import {
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans, traceparentForSpan } from "telemetry.js";
-import { budgetErrorBody, checkedWorkerGet } from "budget.js";
+import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
+import { quotaSource } from "lifecycle.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
@@ -657,18 +658,24 @@ async function dispatchRPC(facet, rpc) {
 // fetch/alarm/webSocket* to a legacy instance. Detection uses the platform
 // __chAlarmState method, present on every class extending cellhive-do.js.
 const WRAP_SRC = `function __wrap(Inner) {
-  return class extends __Base {
-    #inner;
-    #get() {
-      if (!this.#inner) this.#inner = new Inner(this.ctx, this.env);
-      return this.#inner;
-    }
-    fetch(r) { const i = this.#get(); return typeof i.fetch === "function" ? i.fetch(r, this.env) : super.fetch(r); }
-    alarm(...a) { const i = this.#get(); return typeof i.alarm === "function" ? i.alarm(...a) : super.alarm(...a); }
-    webSocketMessage(...a) { const i = this.#get(); return typeof i.webSocketMessage === "function" ? i.webSocketMessage(...a) : super.webSocketMessage(...a); }
-    webSocketClose(...a) { const i = this.#get(); return typeof i.webSocketClose === "function" ? i.webSocketClose(...a) : super.webSocketClose(...a); }
-    webSocketError(...a) { const i = this.#get(); return typeof i.webSocketError === "function" ? i.webSocketError(...a) : super.webSocketError(...a); }
-  };
+  const inners = new WeakMap();
+  class Wrapped extends __Base {
+    constructor(ctx, env) { super(ctx, env); inners.set(this, new Inner(ctx, env)); }
+    __inner() { return inners.get(this); }
+    fetch(r) { const i = this.__inner(); return typeof i.fetch === "function" ? i.fetch(r, this.env) : super.fetch(r); }
+    alarm(...a) { const i = this.__inner(); return typeof i.alarm === "function" ? i.alarm(...a) : super.alarm(...a); }
+    webSocketMessage(...a) { const i = this.__inner(); return typeof i.webSocketMessage === "function" ? i.webSocketMessage(...a) : super.webSocketMessage(...a); }
+    webSocketClose(...a) { const i = this.__inner(); return typeof i.webSocketClose === "function" ? i.webSocketClose(...a) : super.webSocketClose(...a); }
+    webSocketError(...a) { const i = this.__inner(); return typeof i.webSocketError === "function" ? i.webSocketError(...a) : super.webSocketError(...a); }
+  }
+  for (const name of Object.getOwnPropertyNames(Inner.prototype)) {
+    if (name === "constructor" || name === "fetch" || name === "alarm" || name.startsWith("webSocket") || name.startsWith("__ch")) continue;
+    if (typeof Inner.prototype[name] !== "function") continue;
+    Object.defineProperty(Wrapped.prototype, name, { configurable: true, writable: true, value: function(...args) {
+      return this.__inner()[name](...args);
+    }});
+  }
+  return Wrapped;
 }`;
 
 function renderFacetModule(classes) {
@@ -685,7 +692,10 @@ function renderFacetModule(classes) {
     'import * as __tenant from "tenant.js";',
     'export * from "tenant.js";',
     decl,
-    'function __pick(I) { return (I && typeof I.prototype.__chAlarmState === "function") ? I : __wrap(I); }',
+    // A DO binding may point at a class that is not exported by this bundle
+    // (for example while a migration is being rolled out). Keep the module
+    // loadable; the bound class will fail closed only if actually invoked.
+    'function __pick(I) { return __wrap(I === undefined ? class extends __Base {} : I); }',
     WRAP_SRC,
     picks,
   ].join("\n") + "\n";
@@ -888,7 +898,8 @@ export class Host extends DurableObject {
       const facetSrc = renderFacetModule(doClasses);
       const workerCode = {
         compatibilityDate: spec.compat_date || "2026-06-15",
-        compatibilityFlags: spec.compat_flags || [],
+        compatibilityFlags: spec.limits?.subrequests ? [...new Set([...(spec.compat_flags || []), "nodejs_als"])] : (spec.compat_flags || []),
+        limits: workerLimits(spec.limits),
         mainModule: facetSrc ? "cellhive-facet.js" : "bindings-wrapper.js",
         modules: Object.assign(
           facetSrc ? { "cellhive-facet.js": facetSrc } : {},
@@ -900,6 +911,7 @@ export class Host extends DurableObject {
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,
             "rpc-codec.js": this.env.RPC_CODEC_SRC,
+            "__cellhive-quota.js": quotaSource(spec.limits?.subrequests, bs.bindings),
           },
         ),
         env: buildFacetEnv(this.ctx, this.env, bs, spec),

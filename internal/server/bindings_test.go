@@ -138,6 +138,22 @@ func TestBindingAPIs(t *testing.T) {
 	}
 }
 
+func TestQueueSendRejectsOversizedBodyWithoutTruncation(t *testing.T) {
+	s := newScopeServer(t)
+	if _, err := s.Control.CreateResource(context.Background(), "acme", "queue", "jobs", "acme/__queue__/jobs", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	token := mint(t, s, "acme", "queue", "jobs")
+	oversized := bytes.Repeat([]byte("x"), (1<<20)+1)
+	rr := scopeDo(t, s, http.MethodPost, "/v1/queue/send?ns=acme&queue=jobs", token, oversized)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized queue send = %d: %s", rr.Code, rr.Body.String())
+	}
+	if depth, err := s.Queue.Depth(context.Background(), "acme", "jobs"); err != nil || depth != 0 {
+		t.Fatalf("queue depth after rejected send = %d, %v; want 0", depth, err)
+	}
+}
+
 // TestR2ListCursorPaging: /v1/r2/list is cursor-paged with sizes and reports
 // truncation (ADR-145).
 func TestR2ListCursorPaging(t *testing.T) {

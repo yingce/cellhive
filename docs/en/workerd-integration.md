@@ -69,7 +69,8 @@ user-runtime loader:
 
 ## Limits
 
-- `limits`: per-worker `cpu_ms`/`subrequests` (workerd config); V8 heap limit (process/isolate level);
+- **Standalone enforcement boundary**: the pinned standalone binary uses `NullIsolateLimitEnforcer` and no-op subrequest enforcement. `WorkerCode.limits.cpuMs/subRequests` are accepted by the API, but a 250ms busy loop with `cpuMs=1` and five requests with `subRequests=1` both completed in real probes. There is no configurable per-isolate heap quota; hosted Cloudflare enforcement is not a local guarantee.
+- **Process-level protection**: runtime container resources in Helm/Kustomize and Compose `cpus/mem_limit` enforce cgroup CPU rate and aggregate memory, including the Go host/supervisor and workerd. CPU quota does not interrupt synchronous loops; memory overflow may cause OOMKilled. See container resource quotas in [`deployment.md`](deployment.md).
 - Not supported: Python Workers, Cache API, Browser Rendering, Email Workers, and Analytics Engine. See the compatibility matrix for the CellHive-supported Vectorize and Hyperdrive subsets;
 - Compatibility with all historical `compatibility_date` behavior is not guaranteed—it is subject to the set of flags we support.
 

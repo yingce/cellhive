@@ -83,7 +83,8 @@ _最后更新：2026-09-25_
 
 - workerd capnp：租户 loaded worker 的 `globalOutbound` = **公网 only network service**（不含 RFC1918 / cell-agent 地址）。
 - **host adapter 的内网 binding 不暴露给租户**。
-- worker CPU/subrequest 与 V8 heap per-worker 强制上限**尚未实现**；当前已有 deploy-time WorkerCode/env 预算、per-namespace 写准入与 cell-agent 过载拒绝。详见 [`security.md`](./security.md)。
+- worker CPU time 与 V8 heap per-worker 强制上限**尚未实现**；subrequest 上限已由动态 Worker 的 invocation quota 执行并有真实 workerd 测试。当前另有 deploy-time WorkerCode/env 预算、per-namespace 写准入与 cell-agent 过载拒绝。详见 [`security.md`](./security.md)。
+- **动态加载总内存保护仍在收口（2026-10-13）**：先前真实 pinned workerd 在 2 GiB 容器中，451 个不同 1 MiB Worker 或 575 个同 SHA 不同版本触发 OOMKilled；189 个 10 MiB 静态资源也触发 OOM。当前公共 user-runtime 已加入版本退休、活动生命周期、冷加载并发/容量准入、源码/plan/env/asset 字节预算和大 asset 流式返回；同样 2 GiB/1000 个 1 MiB 合成 Worker 压测不再 OOM，但仍观测约 840 MiB cgroup、workerd abort 日志，尚未作为生产容量承诺。DO runtime、内部 dispatch、长连接/RPC、FD 限制和更长时 churn 仍需独立验证。证据与复现入口见 [`runtime-memory-2026-10-13.md`](./archive/bench/runtime-memory-2026-10-13.md) 与 [`workerd-loader-lifecycle-2026-10-13.md`](./archive/bench/workerd-loader-lifecycle-2026-10-13.md)。
 
 ## M-02 端口划分（定稿）
 
@@ -250,6 +251,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 | user-runtime 内部派发（queue/scheduled） | ✅ ADR-067（`internal.js` + wrapper `CellHiveHost` RPC；真实 workerd e2e） |
 | 静态资产服务（loader 侧） | ✅ ADR-069 + **ADR-071**（`_redirects`/`_headers`/ETag/304/index/回退 worker + `not_found_handling`(SPA/404-page) + `run_worker_first`(bool/paths)；真实 workerd e2e 4 用例） |
 | Cron → `scheduled()` 派发 | ✅ ADR-070（`Version.Crons` + `Projection.CronTargets()` + cell-agent `cronEnricher` + user-runtime `/v1/timers/dispatch` → `handleScheduled`；真实 workerd e2e）；解析/评估/调度在校验与运行期均已实现（`internal/cron` `Parse`/`Matches` + `Scheduler.Pass`，部署期 `ValidateCrons` → `invalid_cron`；CLI `triggers list`） |
+| KV/Cron/R2 的 Cloudflare 语义边界 | ⚠️ KV 的 `{type}` 读取形态已对齐，`cacheTtl` 不产生边缘缓存；Cron 只接受 UTC 五字段数字表达式，当前分钟 best-effort 调度且不补跑；R2 `onlyIf` 条件读写不支持并显式抛错。详见 `docs/compatibility-matrix.md`。 |
 | Workflows/Cron binding | ✅ **ADR-086**（Workflows：`__workflow__` cell + `env.WF` + `step.do/sleep` + 生命周期/事件）+ **ADR-070/076**（Cron：`Version.Crons` 投影 + 调度器物化 slot + `scheduled()` 派发） |
 
 ## 可观测性（ADR-146 后）
@@ -266,7 +268,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 - **删除/purge**：软删 + `purges` 作业 + `RunPurgeLoop` 已落地（ADR-131），并且 purge 只对**仍处于软删状态**的实体生效、deploy/create 会取消作业（ADR-135）；**数据侧 hook 已接线（ADR-142）**：worker 删除清该 worker 的 DO 段与 assets、app 删除清整个 ns 的 `cells/`+`assets/`，每个 cell-agent 都执行（跨节点本地副本 drain + 桶删除幂等），hook 可续跑（有界删除/轮，`done=false` 保留 pending）。**已补（ADR-169）**：数据侧改为 `objectstore.Objects.ListPage` + `bucket.PagedLister` 游标分页删除（S3 `StartAfter`；内存有界）；`Purger.delete` 边删边推进、预算用尽下一轮续跑。**残余**：每轮从目标前缀起点重扫（未持久化跨轮 cursor，冷路径）；FS dev 每页仍走树（内存有界）。
 - **async bucket 上传**：已有**持久化重试队列**（ADR-143）：写前 spool（`<DATA_DIR>/upload-spool`）+ 启动/周期重放，失败计 `deferred`（不再丢，只有落盘失败+上传失败才 `dropped`），`/metrics` 暴露 spool/deferred/dropped。**已补（ADR-171）**：spool 原子写（tmp fsync → rename → 每次叶目录 fsync；父目录创建项按进程记忆化），成功 `Remove` 后也 fsync 叶目录，保证 publish 与完成删除均断电持久。
 - **对象存储状态权威兼容性**：S3 `ConditionalDelete` 依赖 `DeleteObject If-Match`；忽略该头会无条件删除新 owner/lease，故启动探针失败时 `cell-agent` 直接退出。`CELLHIVE_BUCKET` 接受空值（本地）、`s3://`，以及原生追加式 `oss://` / `cos://`；其余 scheme 拒绝。原生 provider 以 `AppendObject(position)` 和 tombstone 帧提供可变权威对象的 CAS/条件删除，不以 `HEAD+PUT/DELETE` 假装原子。2026-09-22 OSS 北京桶及 COS 香港 `cell-1376795072` 桶的隔离键并发 claim、CAS/条件删除、启动诊断通过；同宿主双进程共享真实云桶的 `SIGKILL`/新目录接管与高并发数据精确核对亦通过（见 ADR-189）。原 COS 香港 `vwork-hk-1376795072` 桶 AppendObject 返回 405，仍不能作为权威桶。COS/OSS 的普通 S3 API 在所测桶不满足权威条件写（ADR-188）。其他供应商/桶仍须分别验收；跨主机分区及长时混沌未测。
-- **`r2.List`**：已 cursor 分页 + 尺寸化（ADR-145）：`bucket.PagedLister`（S3 `StartAfter`+`MaxKeys`、FS 有界选择），`/v1/r2/list` 返回 `truncated`/`cursor`，facade 透传。**已补（ADR-168）**：`include=httpMetadata,customMetadata`（显式才逐对象读 sidecar）与 `delimiter`/`delimitedPrefixes`（扫描上限 10000，超出 `truncated`+cursor）。**残余**：FS 后端算 etag 仍读对象体（dev 后端）；仍未实现 object versioning/SSE-C/conditional put。
+- **`r2.List`**：已 cursor 分页 + 尺寸化（ADR-145）：`bucket.PagedLister`（S3 `StartAfter`+`MaxKeys`、FS 有界选择），`/v1/r2/list` 返回 `truncated`/`cursor`，facade 透传。**已补（ADR-168）**：`include=httpMetadata,customMetadata`（显式才逐对象读 sidecar）与 `delimiter`/`delimitedPrefixes`（扫描上限 10000，超出 `truncated`+cursor）。**残余**：FS 后端算 etag 仍读对象体（dev 后端）；仍未实现 object versioning/SSE-C。
 
 ## 删除/清理（ADR-131/142，已实现）
 
@@ -291,11 +293,16 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 - 发布日志/幂等部署/Admission/Autoscaler **信号** 已实现并单测（ADR-087）。
 - **边界**：autoscaler 只给信号，实际增删节点属外部编排（无 orchestrator/云驱动）→ C 类环境验证；admin 后台=admin API（无 Web UI）。
 
+## P2 Queue 兼容边界（Partial）
+
+Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、128 KiB 上限、metadata、原始 timestamp、delay 校验和幂等冲突已补齐。剩余差异是 `max_batch_timeout`、跨批顺序以及部分 retry/DLQ 边界，继续按 [`compatibility-matrix.md`](./compatibility-matrix.md#queue--workflow-的调用边界) 验收。
+
 ## P2 Workflows 绑定（ADR-086，Partial）
 
 **已实现（真实 workerd e2e）**：`internal/workflow`（`__workflow__` cell：instances/steps/events，step 记忆化）；facade `env.WF.create/createBatch/get/sendEvent`；cell-agent API（租户 create/create-batch/get/event，内部 step/sleep/finish）；user-runtime `/v1/workflows/run` + `cellhive-workflow.js` base + `step.do/sleep`（shim：改写 `cloudflare:workers`，平台自构造，因 workerd 的 `WorkflowEntrypoint` 引擎外不可构造）；sleep 复用统一 timer（`KindWorkflowSleep`）；CLI `workflow create`；`wranglercompat` 要求 `class_name`。create/createBatch 请求总 payload 上限 1 MiB，batch 为 1..100 个实例。
 
-**Partial 边界（未做）**：跨 worker 实例；`locationHint` 被接受但**忽略**（best-effort 放置提示，无效果）；step 历史列举与 progress 回调。
+**Partial 边界（未做）**：跨 worker 实例；`locationHint` 被接受但**忽略**（best-effort 放置提示，无效果）；step 历史列举与 progress 回调；实例恢复/重派发使用当前活跃 worker 版本，未固定创建版本。
+**调用形态差异**：`sleep/sleepUntil` 仅数字毫秒、`waitForEvent.timeout` 仅数字秒数且超时返回 `undefined`；`step.do timeout/sensitive`、`restart({from})`、`terminate(options)` 未生效。详见 [`compatibility-matrix.md`](./compatibility-matrix.md#queue--workflow-的调用边界)。
 **已实现**：`pause`/`resume`/`terminate`/`restart`（`internal/server/workflow.go` + facade）、`waitForEvent`（`handleWorkflowWait` + `env.WF.sendEvent`）、实例列举（`handleWorkflowList` + `env.WF.list`）、`instance.delete()`、每步 `retries{limit,delay,backoff}`、`createBatch` 与 payload 预算。
 
 ## backend-A 捕获与冷恢复（ADR-092）

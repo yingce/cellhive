@@ -53,6 +53,7 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			spec[b.Name] = map[string]any{
 				"kind": "do", "ns": ns, "worker": worker, "bundle_sha": v.BundleSHA, "version": v.Version,
 				"compat_date": v.CompatDate, "compat_flags": v.CompatFlags,
+				"limits":     v.Limits,
 				"storage_id": v.StorageID, "class": cls, "storage_class": storageClass,
 				"deleted": deleted[cls], "name": b.Name, "token": token,
 			}
@@ -145,5 +146,6 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bindings": spec, "vars": vars,
 		"compat_date": view.CompatDate, "compat_flags": view.CompatFlags,
+		"limits": view.Limits,
 	})
 }

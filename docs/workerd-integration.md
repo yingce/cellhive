@@ -69,7 +69,8 @@ user-runtime loader：
 
 ## 限制
 
-- `limits`：每 worker `cpu_ms`/`subrequests`（workerd config）；V8 heap 上限（进程/isolate 级）；
+- **standalone enforcement 边界**：当前 pinned standalone workerd 使用 `NullIsolateLimitEnforcer` 和空的 subrequest enforcement；`WorkerCode.limits.cpuMs/subRequests` 仅被 API 接受，实测 `cpuMs=1` 的 250ms 忙循环与 `subRequests=1` 的五次请求均完成。没有可配置的 per-isolate heap quota；不能把 Cloudflare 托管运行时的限额当作本地保证。
+- **进程级保护**：Helm/Kustomize 的 runtime container resources 与 Compose 的 `cpus/mem_limit` 提供 cgroup CPU 速率和内存总量限制，包含 Go 宿主/supervisor 与 workerd。CPU 配额不会中止同步死循环，内存超限可能 OOMKilled；见 [`deployment.md`](deployment.md) 的容器资源配额。
 - 不支持：Python Workers、Cache API、Browser Rendering、Email Workers、Analytics Engine；Vectorize 与 Hyperdrive 的 CellHive 兼容子集见兼容矩阵；
 - 不保证兼容所有历史 `compatibility_date` 行为——按我们支持的 flag 集合为准。
 

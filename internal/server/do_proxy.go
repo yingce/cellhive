@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
+	"cellhive/internal/control"
 	"cellhive/internal/doticket"
 )
 
@@ -26,18 +27,19 @@ const (
 
 // doInvokeReq is the tenant-facing DO invoke request (via the client binding).
 type doInvokeReq struct {
-	Namespace    string          `json:"namespace"`
-	Worker       string          `json:"worker"`
-	Class        string          `json:"class"`
-	ID           string          `json:"id"`
-	BundleSHA    string          `json:"bundle_sha"`
-	Version      int             `json:"version,omitempty"`
-	StorageID    string          `json:"storage_id"`
-	StorageClass string          `json:"storage_class"`
-	Shard        *int            `json:"shard,omitempty"`
-	Kind         string          `json:"kind,omitempty"`
-	Request      map[string]any  `json:"request,omitempty"`
-	RPC          json.RawMessage `json:"rpc,omitempty"`
+	Namespace    string                `json:"namespace"`
+	Worker       string                `json:"worker"`
+	Class        string                `json:"class"`
+	ID           string                `json:"id"`
+	BundleSHA    string                `json:"bundle_sha"`
+	Version      int                   `json:"version,omitempty"`
+	Limits       *control.WorkerLimits `json:"limits,omitempty"`
+	StorageID    string                `json:"storage_id"`
+	StorageClass string                `json:"storage_class"`
+	Shard        *int                  `json:"shard,omitempty"`
+	Kind         string                `json:"kind,omitempty"`
+	Request      map[string]any        `json:"request,omitempty"`
+	RPC          json.RawMessage       `json:"rpc,omitempty"`
 }
 
 // handleDOProxy places a Durable Object invoke onto a do-runtime deterministically
@@ -78,7 +80,7 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"namespace": req.Namespace, "worker": req.Worker, "class": req.Class,
-		"shard": shard, "id": req.ID, "bundle_sha": req.BundleSHA, "version": req.Version,
+		"shard": shard, "id": req.ID, "bundle_sha": req.BundleSHA, "version": req.Version, "limits": req.Limits,
 	}
 	if req.StorageID != "" {
 		out["storage_id"] = req.StorageID

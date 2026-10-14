@@ -20,6 +20,10 @@ export class NonRetryableError extends Error {
   }
 }
 
+export class WorkflowTimeoutError extends Error {
+  constructor(message = "workflow waitForEvent timed out") { super(message); this.name = "WorkflowTimeoutError"; }
+}
+
 export class WorkflowEntrypoint {
   constructor(ctx, env) {
     this.ctx = ctx;

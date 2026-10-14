@@ -692,6 +692,7 @@ type deployReq struct {
 	Vars               map[string]string     `json:"vars,omitempty"`
 	CompatibilityDate  string                `json:"compatibility_date,omitempty"`
 	CompatibilityFlags []string              `json:"compatibility_flags,omitempty"`
+	Limits             *control.WorkerLimits `json:"limits,omitempty"`
 	Consumers          []control.Consumer    `json:"consumers,omitempty"`
 	Crons              []string              `json:"crons,omitempty"`
 	Assets             *control.AssetsConfig `json:"assets,omitempty"`
@@ -934,6 +935,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			SessionPolicy:  req.SessionPolicy,
 			CompatDate:     req.CompatibilityDate,
 			CompatFlags:    req.CompatibilityFlags,
+			Limits:         req.Limits,
 		}, "admin")
 		return e
 	}); err != nil {

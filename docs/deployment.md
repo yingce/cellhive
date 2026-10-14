@@ -102,6 +102,14 @@ values 覆盖：镜像/副本/资源/存储、`doRuntime.gate`（true → `do-ru
 
 ## 一键门禁
 
+### 容器资源配额
+
+Helm/Kustomize 默认：user-runtime 每容器 **1 CPU / 2 GiB**，do-runtime（含 gated supervisor）每容器 **2 CPU / 4 GiB**；requests 保留 user `250m/256Mi`、DO `500m/512Mi`，HPA 仍基于 CPU request 计算。可以通过 `userRuntime.resources` / `doRuntime.resources` 覆盖。配额不是每个 function 的 `cpuMs` 或 isolate heap quota：CPU 超额会限速，内存超额可能 OOMKilled。
+
+Compose 默认相同配额，通过 `CELLHIVE_USER_RUNTIME_CPUS/MEMORY`、`CELLHIVE_DO_RUNTIME_CPUS/MEMORY` 覆盖；`memswap_limit=mem_limit` 禁用容器 swap，runtime `nofile` 为 65536。参数是 Compose 插值配置，须用 `--env-file deploy/compose/.env` 或 export 提供，详见 `.env.example`。Kubernetes 没有 Pod `ulimits` 字段，TKE 需检查容器运行时继承的 nofile，不能假定和 Compose 一致。
+
+这些默认值是初始部署预算，不是租户安全容量承诺；高内存水位主动 drain/watchdog 尚未实现，现有 liveness probe 也不等于 JS CPU 超时中断。云集群的 CPU throttling、OOM 恢复、DO 输出门和重新接管需实际验收。
+
 ```bash
 make ci            # = bash scripts/ci.sh：gofmt/vet/test/build/js-test/cli-test/perf/rpo/s3/镜像/编排
 ```

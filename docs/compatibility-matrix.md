@@ -8,13 +8,13 @@
 |---|---|---|
 | ES module Workers / `fetch` | Supported | `workerLoader` 动态加载不可变版本 |
 | WebSocket | Supported | user-runtime 代理；DO 上迁移/部署时 1012，客户端重连（CF 兼容）；**`env.DO.get().fetch(升级请求)` 经 `/v1/do/connect` 直连 owner（`{owner,ticket}` 查询 + ticket 仅本 shard，ADR-175）** |
-| KV | Supported | 强一致（读也转发给 owner，ADR-120；cell SQLite）；无全局边缘复制；**`put` 接受 string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream（ADR-174）**；**写入校验：key≤512B、metadata≤1KiB、expiration 须在未来、value≤25MiB（ADR-176）；expirationTtl 接受任意正整数（ADR-183 放开 CF 的 ≥60s 下限——读路径惰性过期秒级生效，清扫按最近到期武装）** |
+| KV | Supported | 强一致（读也转发给 owner，ADR-120；cell SQLite）；无全局边缘复制；**`put` 接受 string/ArrayBuffer/ArrayBufferView/Blob/ReadableStream（ADR-174）**；`get`/`getWithMetadata` 支持字符串类型和 `{type:"text"|"json"|"arrayBuffer"}` 形态；`cacheTtl` 被接受但不提供边缘缓存语义；**写入校验：key≤512B、metadata≤1KiB、expiration 须在未来、expirationTtl≥60s、value≤25MiB（ADR-176）** |
 | D1 | Supported | SQL + `prepare`/`bind`/`all`/`first`/`run`/`raw`/`batch`/`exec`；`prepare()`/`bind()` 同步返回本地语句对象，ORM 可将其传给 `batch()`；`ArrayBuffer`/TypedArray 按 BLOB 绑定与回读；单写者；**Sessions/bookmarks 与事务显式拒绝**（`withSession()`/`session()` 抛错，`BEGIN` 不支持，无读复制，ADR-153）；`meta` 含 `changes`/`last_row_id`/`changed_db`，错误映射 `D1_ERROR`（ADR-163） |
-| R2 | Supported | S3 兼容 + **presign（`createPresignedUrl`）** + **multipart（ADR-113）** + **cursor 分页 list（ADR-145）**；**R2Object 全字段 + `put` http/custom metadata/checksums + `head()`（ADR-163）**；**list 支持 `include`（按需回填逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（ADR-168）**；**`R2ObjectBody.body` + `writeHttpMetadata`（ADR-174/175：本地 Proxy 包装，metadata 写入调用方 Headers）**；无 SSE-C/jurisdiction、无 object versioning/conditional put |
-| Queues | Partial | 至少一次 + DLQ；`max_concurrency` **支持**（ADR-112，批次并发上限）；`contentType=v8` 拒绝 |
-| Cron | Supported | 分钟对齐、best-effort、不补跑 |
+| R2 | Supported | S3 兼容 + **presign（`createPresignedUrl`）** + **multipart（ADR-113）** + **cursor 分页 list（ADR-145）**；**R2Object 全字段 + `put` http/custom metadata/checksums + `head()`（ADR-163）**；**list 支持 `include`（按需回填逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（ADR-168）**；**`R2ObjectBody.body` + `writeHttpMetadata`（ADR-174/175）**；`onlyIf` 的 exists/etagMatches/etagDoesNotMatch 已支持；无 SSE-C/jurisdiction、无 object versioning |
+| Queues | Partial | `send()`/`sendBatch()`、原子批量、`json`/`text`/`bytes`/`v8`、128 KiB 限制、metadata、原始 timestamp、delay 和幂等冲突已实现；仍有 `max_batch_timeout`、跨批顺序和部分 retry/DLQ 边界待收口。 |
+| Cron | Supported | UTC 五字段数字 cron（支持列表/范围/步长，Vixie DOM/DOW OR）；分钟对齐、best-effort、不补跑；调度器默认每 30 秒扫描，故不保证恰好一次或准点触发 |
 | Durable Objects | Partial | 原生 facet + 同步 SQL；**DO 内 bindings ✅（ADR-090）**；仅同 worker class；部署默认**惰性重启**（可 `do_eager_restart`/`session_policy`）；WS 迁移/重启 1012；**DO RPC ✅（ADR-162）**：`env.NS.get(id|name).method(...)`，tagged JSON + host→facet 原生 JSRPC（≤8 MiB；无函数/stub/流）；**legacy（未 `extends DurableObject`）类由 facet 包装支持（ADR-174）**；**DO `fetch` 的非 2xx 原样返回（状态/content-type，ADR-174）** |
-| Workflows | Partial | 自研引擎；支持 create/createBatch/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；create/createBatch payload 总量 ≤1 MiB、batch 1..100；不支持跨 worker、step 历史列举/progress 回调；`locationHint` 接受但忽略 |
+| Workflows | Partial | 自研引擎；支持 create/createBatch/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；create/createBatch payload 总量 ≤1 MiB、batch 1..100。不支持跨 worker、step 历史列举/progress 回调；`locationHint` 接受但忽略（无放置效果）；duration 字符串、Date/time sleepUntil、wait 超时错误、step.do timeout、创建时 worker/bundle/version pin 已支持；sensitive 与部分 lifecycle 选项仍为 Partial。 |
 | ASSETS | Supported | 对象存储 + 版本化；完整资产管道 |
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
@@ -24,6 +24,22 @@
 | Cache API | Rejected | 无边缘缓存 |
 | AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供；Vectorize 由 CellHive 的 SQLite vec1 facade 提供（见下，ADR-158/159），Hyperdrive 已支持 |
 | Python Workers | Rejected | 不支持 |
+
+### Queue / Workflow 的调用边界
+
+以下是租户运行时的行为；`queues.producers/consumers` 和 `workflows` 配置能被解析，不等于对应的 Cloudflare API 全部兼容。
+
+| 调用/配置 | CellHive 当前行为 | 迁移时的处理 |
+|---|---|---|
+| Queue `send()` 的消息格式 | 已使用 `json`/`text`/`bytes`/`v8` 枚举；v8 使用 CellHive 的 tagged structured encoding，消费者按枚举还原。 |
+| Queue `sendBatch()` | 已实现 1..100 条、单事务原子入队、输入顺序返回 ID；重复幂等键同内容复用 ID，不同内容返回冲突。 |
+| Queue 大小/延迟 | body 上限 128 KiB；`delaySeconds` 严格校验 0..86400。 |
+| Queue 消费配置 | `max_batch_size`、`max_concurrency` 生效；`max_batch_timeout`、跨批顺序和 `max_retries=0` 的 CF 精确语义仍待收口。 |
+| Queue 消息元数据 | 保存并传递原始入队 timestamp 和 metadata；批次间不保证顺序。 |
+| Workflow `step.sleep/sleepUntil` | 已支持数字、常见时长字符串和 `Date`/时间字符串。 |
+| Workflow `step.waitForEvent` | 数字和常见时长字符串可用；超时抛 `WorkflowTimeoutError`；事件载荷仍是 CellHive 保存的 JSON 事件对象。 |
+| Workflow 步骤/实例选项 | `step.do` timeout 已进入执行路径；`sensitive`、`restart({from})`、`terminate(options)`、`subscribe()`、step 历史和进度流仍待收口。 |
+| Workflow 状态/版本 | 租户 `status()` 把内部 `sleeping` 映射为 `waiting`，非 ASCII 输出按 UTF-8 解码；实例保存创建时 worker/bundle/version，恢复/重派发使用该目标。 | |
 
 ## Wrangler 配置面
 

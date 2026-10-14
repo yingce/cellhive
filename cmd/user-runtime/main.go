@@ -5,19 +5,24 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"cellhive/internal/config"
 	"cellhive/internal/userruntime"
+	"cellhive/internal/userruntimepool"
+	"cellhive/internal/workerdpool"
 )
 
 func main() {
@@ -84,6 +89,13 @@ func main() {
 		log.Error("find workerd", "err", err)
 		os.Exit(1)
 	}
+	if getenv("CELLHIVE_POOL_MODE", "") == "adaptive" {
+		if err := runAdaptivePool(runtimeCfg, workerd, dataDir, log); err != nil {
+			log.Error("adaptive user-runtime pool exited", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -111,10 +123,105 @@ func main() {
 	}
 }
 
+func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	manager, err := userruntimepool.NewManager(context.Background(), workerd, filepath.Join(dataDir, "pool"), cfg, workerdpool.Config{
+		MemoryUtilization: envFloat("CELLHIVE_POOL_MEMORY_UTILIZATION", .70),
+		MaxSlots:          envInt("CELLHIVE_POOL_MAX_SLOTS", 16),
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = manager.Close(closeCtx)
+	}()
+	router := userruntimepool.NewRouter(cfg.CellURL, cfg.CellToken, cfg.DispatchToken)
+	defer router.Close()
+	proxy := workerdpool.NewProxy(manager.Supervisor, router.Public, manager.Acquire)
+	defer proxy.Close()
+	internal := workerdpool.NewProxy(manager.Supervisor, router.Internal, manager.Acquire)
+	defer internal.Close()
+	var draining atomic.Bool
+	public := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		case "/ready":
+			if draining.Load() || !manager.Ready() {
+				http.Error(w, "draining", http.StatusServiceUnavailable)
+			} else {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			}
+			return
+		case "/drain":
+			if r.Method == http.MethodPost {
+				if cfg.CellToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("x-cellhive-internal-token")), []byte(cfg.CellToken)) != 1 {
+					http.Error(w, "unauthorized", 401)
+					return
+				}
+				draining.Store(true)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+		if draining.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+	lnPublic, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.PublicPort))
+	if err != nil {
+		return err
+	}
+	lnInternal, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.InternalPort))
+	if err != nil {
+		lnPublic.Close()
+		return err
+	}
+	sp := &http.Server{Handler: public}
+	si := &http.Server{Handler: internal}
+	defer sp.Close()
+	defer si.Close()
+	errCh := make(chan error, 2)
+	go func() { errCh <- sp.Serve(lnPublic) }()
+	go func() { errCh <- si.Serve(lnInternal) }()
+	log.Info("adaptive user-runtime pool started", "public", cfg.PublicPort, "internal", cfg.InternalPort, "max_slots", manager.Supervisor.Pool.Config.MaxSlots)
+	select {
+	case <-ctx.Done():
+		draining.Store(true)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = sp.Shutdown(shutdownCtx)
+		_ = si.Shutdown(shutdownCtx)
+		return nil
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
+}
+
 // runtimeRoot mirrors do-runtime's CELLHIVE_RUNTIME_DIR: one scratch root for
 // every runtime (ADR-137).
 func runtimeRoot() string {
 	return getenv("CELLHIVE_RUNTIME_DIR", filepath.Join(os.TempDir(), "cellhive"))
+}
+
+func envFloat(k string, def float64) float64 {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // drainGrace is how long to keep serving after readiness turns 503 so the edge

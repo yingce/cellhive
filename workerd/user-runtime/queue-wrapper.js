@@ -23,6 +23,7 @@ function setTraceContext(tp) {
 
 const tenant = tenantMod.default;
 import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
+import { runInvocation } from "__cellhive-quota.js";
 
 // Patch the importable env with local facades for binding API portions that
 // cannot cross RPC synchronously or must mutate caller-isolate state.
@@ -73,7 +74,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     if (typeof tenant.fetch !== "function") return new Response("worker has no fetch handler", { status: 501 });
     setTraceContext(traceOf(req));
     try {
-      return await tenant.fetch(req, this.#bindings(), this.ctx);
+      return await runInvocation(() => tenant.fetch(req, this.#bindings(), this.ctx));
     } finally {
       setTraceContext(undefined);
     }
@@ -124,7 +125,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     batch.retryAll = (opts) => { for (const m of batch) if (m && m.id) markRetry(m.id, opts && opts.delaySeconds); };
     setTraceContext(traceparent || traceOf(batch));
     try {
-      const result = await tenant.queue(batch, this.#bindings(), this.ctx);
+      const result = await runInvocation(() => tenant.queue(batch, this.#bindings(), this.ctx));
       return { result, ack: outcomes.ack, retry: outcomes.retry };
     } finally {
       setTraceContext(undefined);
@@ -135,7 +136,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
     setTraceContext(traceOf(event));
     try {
-      return await tenant.scheduled(event, this.#bindings(), this.ctx);
+      return await runInvocation(() => tenant.scheduled(event, this.#bindings(), this.ctx));
     } finally {
       setTraceContext(undefined);
     }
@@ -154,7 +155,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     if (typeof inst[method] !== "function") throw new Error("entrypoint has no method " + method);
     setTraceContext(traceparent);
     try {
-      return await inst[method](...(args || []));
+      return await runInvocation(() => inst[method](...(args || [])));
     } finally {
       setTraceContext(undefined);
     }

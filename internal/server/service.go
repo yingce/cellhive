@@ -80,11 +80,13 @@ func (s *Server) handleServiceRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "method is required")
 		return
 	}
-	bindings, vars := s.doBindingSpec(r.Context(), ns, target)
+	bindings, vars := s.bindingSpecFor(r.Context(), ns, target, tw.Version.Number)
+	vars = s.runtimeVars(r.Context(), ns, target, vars)
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": target, "bundle_sha": tw.Version.BundleSHA,
 		"version":     tw.Version.Number,
 		"compat_date": tw.Version.CompatDate, "compat_flags": tw.Version.CompatFlags,
+		"limits":     tw.Version.Limits,
 		"entrypoint": body.Entrypoint, "method": body.Method, "args": body.Args,
 		"bindings": bindings, "vars": vars,
 		"traceparent": r.Header.Get("traceparent"),
@@ -143,11 +145,13 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
 		return
 	}
-	bindings, vars := s.doBindingSpec(r.Context(), ns, target)
+	bindings, vars := s.bindingSpecFor(r.Context(), ns, target, tw.Version.Number)
+	vars = s.runtimeVars(r.Context(), ns, target, vars)
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": target, "bundle_sha": tw.Version.BundleSHA,
 		"version":     tw.Version.Number,
 		"compat_date": tw.Version.CompatDate, "compat_flags": tw.Version.CompatFlags,
+		"limits": tw.Version.Limits,
 		"method": r.Header.Get("x-cellhive-req-method"), "url": r.Header.Get("x-cellhive-req-url"),
 		"content_type": r.Header.Get("x-cellhive-req-content-type"),
 		"entrypoint":   r.Header.Get("x-cellhive-req-entrypoint"),

@@ -36,13 +36,16 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 			return "tok2", 2, true, nil
 		},
 		Target: func(context.Context, string, string) (control.WorkflowTarget, bool) {
-			return control.WorkflowTarget{Namespace: "acme", Worker: "api", Name: "MY_WF", ClassName: "MyWF", BundleSHA: "sha1"}, true
+			return control.WorkflowTarget{Namespace: "acme", Worker: "api", Name: "MY_WF", ClassName: "MyWF", BundleSHA: "sha1", Version: 1}, true
+		},
+		TargetForInstance: func(context.Context, string, string, string) (control.WorkflowTarget, bool, error) {
+			return control.WorkflowTarget{Namespace: "acme", Worker: "api-v1", Name: "MY_WF", ClassName: "MyWFv1", BundleSHA: "sha-created", Version: 7}, true, nil
 		},
 	}
 	if err := d.Run(context.Background(), "acme", "MY_WF", "i1", "tok1"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got["worker"] != "api" || got["class_name"] != "MyWF" || got["id"] != "i1" || got["workflow"] != "MY_WF" {
+	if got["worker"] != "api-v1" || got["class_name"] != "MyWFv1" || got["bundle_sha"] != "sha-created" || got["version"] != float64(7) || got["id"] != "i1" || got["workflow"] != "MY_WF" {
 		t.Fatalf("payload = %+v", got)
 	}
 	if got["params"] != base64.StdEncoding.EncodeToString([]byte(`{"seed":20}`)) {

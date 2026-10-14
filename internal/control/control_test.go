@@ -124,6 +124,26 @@ func TestDeployPromoteRollback(t *testing.T) {
 	}
 }
 
+func TestDeployPersistsWorkerLimits(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, true)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	sub := 7
+	v, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha", Limits: &WorkerLimits{SubRequests: &sub}}, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Limits == nil || *v.Limits.SubRequests != sub {
+		t.Fatalf("version limits = %+v", v.Limits)
+	}
+	view, ok, err := s.VersionEnv(ctx, "acme", "api", v.Number)
+	if err != nil || !ok || view.Limits == nil || *view.Limits.SubRequests != sub {
+		t.Fatalf("view limits = %+v ok=%v err=%v", view.Limits, ok, err)
+	}
+}
+
 func TestProjectionAndETag(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t, true)

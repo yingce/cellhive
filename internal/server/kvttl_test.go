@@ -98,10 +98,8 @@ func TestKVValidationLimits(t *testing.T) {
 		t.Fatalf("big metadata = %d %s, want 400 metadata_too_large", rr.Code, rr.Body.String())
 	}
 	future := time.Now().Add(time.Hour).Unix()
-	// ADR-183: any positive TTL is accepted (sub-60s included); expiry is
-	// enforced lazily on read, so a 1s key vanishes without waiting for a sweep.
-	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=59", []byte("v")); rr.Code != http.StatusOK {
-		t.Fatalf("ttl 59 = %d %s, want 200 (no 60s floor)", rr.Code, rr.Body.String())
+	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=59", []byte("v")); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ttl 59 = %d %s, want 400 (Cloudflare minimum)", rr.Code, rr.Body.String())
 	}
 	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=60", []byte("v")); rr.Code != http.StatusOK {
 		t.Fatalf("ttl 60 = %d %s, want 200", rr.Code, rr.Body.String())

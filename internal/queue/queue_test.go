@@ -2,12 +2,59 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
 	"cellhive/internal/cellstore"
 )
+
+func TestQueueSendBatchAtomicAndMetadata(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	meta := json.RawMessage(`{"tenant":"a"}`)
+	ids, err := s.SendBatch(ctx, "acme", "jobs", []SendMessage{
+		{Body: []byte(`{"n":1}`), ContentType: "json", Metadata: meta},
+		{Body: []byte("hello"), ContentType: "text", IdempotencyKey: "k"},
+	})
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("sendBatch = %#v, %v", ids, err)
+	}
+	msgs, err := s.Claim(ctx, "acme", "jobs", 10, 1000)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("claim = %#v, %v", msgs, err)
+	}
+	foundMeta := false
+	for _, msg := range msgs {
+		if msg.TimestampMs == 0 {
+			t.Fatalf("message timestamp = %#v", msg)
+		}
+		if string(msg.Metadata) == string(meta) {
+			foundMeta = true
+		}
+	}
+	if !foundMeta {
+		t.Fatalf("message metadata missing = %#v", msgs)
+	}
+	ids2, err := s.SendBatch(ctx, "acme", "jobs", []SendMessage{{Body: []byte("hello"), ContentType: "text", IdempotencyKey: "k"}})
+	if err != nil || len(ids2) != 1 || ids2[0] != ids[1] {
+		t.Fatalf("idempotent batch = %#v, %v", ids2, err)
+	}
+	if _, err := s.SendBatch(ctx, "acme", "jobs", []SendMessage{{Body: []byte("different"), ContentType: "text", IdempotencyKey: "k"}}); err == nil {
+		t.Fatal("expected idempotency conflict")
+	}
+}
+
+func TestQueueSendBatchRejectsBeforeCommit(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.SendBatch(context.Background(), "acme", "jobs", []SendMessage{{Body: make([]byte, 128*1024+1), ContentType: "bytes"}, {Body: []byte("ok"), ContentType: "text"}}); err == nil {
+		t.Fatal("expected oversized batch rejection")
+	}
+	if n, _ := s.Depth(context.Background(), "acme", "jobs"); n != 0 {
+		t.Fatalf("partial batch committed: %d", n)
+	}
+}
 
 func newStore(t *testing.T) *Store {
 	t.Helper()

@@ -4,6 +4,7 @@
 package logbuf
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -16,7 +17,10 @@ type Entry struct {
 	Worker    string `json:"worker"`
 	Level     string `json:"level"`
 	Message   string `json:"message"`
-	RequestID string `json:"request_id,omitempty"`
+	// MessageArgs preserves the raw Cloudflare Tail message[] values. Message
+	// remains the convenient flattened rendering used by the legacy CLI.
+	MessageArgs []json.RawMessage `json:"message_args,omitempty"`
+	RequestID   string            `json:"request_id,omitempty"`
 	// TraceID/SpanID correlate a line with its trace (W3C traceparent); empty
 	// when the line was emitted outside a traced request.
 	TraceID string `json:"trace_id,omitempty"`

@@ -24,6 +24,9 @@ x-common-env: &common-env
   CELLHIVE_OTLP_HEADERS: ${CELLHIVE_OTLP_HEADERS:-}
   CELLHIVE_TRACES_SAMPLE_RATIO: ${CELLHIVE_TRACES_SAMPLE_RATIO:-0.01}
   CELLHIVE_TENANT_LOG_CAPTURE: ${CELLHIVE_TENANT_LOG_CAPTURE:-on}
+  CELLHIVE_POOL_MODE: ${CELLHIVE_POOL_MODE:-}
+  CELLHIVE_POOL_MEMORY_UTILIZATION: ${CELLHIVE_POOL_MEMORY_UTILIZATION:-0.70}
+  CELLHIVE_POOL_MAX_SLOTS: ${CELLHIVE_POOL_MAX_SLOTS:-16}
 
 services:
   cell-agent:
@@ -60,6 +63,11 @@ services:
 
   user-runtime:
     <<: *image
+    cpus: ${CELLHIVE_USER_RUNTIME_CPUS:-1.0}
+    mem_limit: ${CELLHIVE_USER_RUNTIME_MEMORY:-2g}
+    memswap_limit: ${CELLHIVE_USER_RUNTIME_MEMORY:-2g}
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
     command: ["user-runtime"]
     environment:
       <<: *common-env
@@ -82,6 +90,11 @@ services:
 
   do-runtime:
     <<: *image
+    cpus: ${CELLHIVE_DO_RUNTIME_CPUS:-2.0}
+    mem_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
+    memswap_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
     command: ["do-runtime"]
     environment:
       <<: *common-env
@@ -108,6 +121,11 @@ services:
   # do-runtime in production.
   do-runtime-gated:
     <<: *image
+    cpus: ${CELLHIVE_DO_RUNTIME_CPUS:-2.0}
+    mem_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
+    memswap_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
     command: ["do-runtime-gated"]
     profiles: ["rpo0"]
     environment:

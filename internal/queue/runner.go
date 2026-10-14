@@ -327,10 +327,12 @@ type DetailedDispatcher interface {
 }
 
 type dispatchMessage struct {
-	ID          string `json:"id"`
-	Body        string `json:"body"` // base64
-	ContentType string `json:"content_type"`
-	Attempts    int    `json:"attempts"`
+	ID          string          `json:"id"`
+	Body        string          `json:"body"` // base64
+	ContentType string          `json:"content_type"`
+	Attempts    int             `json:"attempts"`
+	Timestamp   int64           `json:"timestamp"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Dispatch delivers a batch to the consumer endpoint (whole-batch semantics).
@@ -349,6 +351,8 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 			Body:        base64.StdEncoding.EncodeToString(m.Body),
 			ContentType: m.ContentType,
 			Attempts:    m.Attempts,
+			Timestamp:   m.TimestampMs,
+			Metadata:    m.Metadata,
 		})
 	}
 	body, err := json.Marshal(map[string]any{

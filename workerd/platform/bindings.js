@@ -105,7 +105,8 @@ function kvKeyOut(k) {
 
 // KV is the Phase-0 pilot capability.
 export class KV extends WorkerEntrypoint {
-  async get(key, type) {
+  async get(key, options) {
+    const type = options && typeof options === "object" ? options.type : options;
     const p = this.ctx.props;
     const r = await call(this.env, "/v1/kv/get?" + q({ ns: p.ns, key }), { headers: scopeHeaders(p) });
     if (r.status === 404) return null;
@@ -141,7 +142,8 @@ export class KV extends WorkerEntrypoint {
     await must(r, "kv.put");
   }
   // getWithMetadata returns { value, metadata } like Cloudflare KV.
-  async getWithMetadata(key, type) {
+  async getWithMetadata(key, options) {
+    const type = options && typeof options === "object" ? options.type : options;
     const p = this.ctx.props;
     const r = await call(this.env, "/v1/kv/get?" + q({ ns: p.ns, key }), { headers: scopeHeaders(p) });
     if (r.status === 404) return { value: null, metadata: null };
@@ -408,6 +410,7 @@ export class R2Bucket extends WorkerEntrypoint {
     const p = this.ctx.props;
     const body = typeof value === "string" ? value : value;
     const headers = Object.assign({}, scopeHeaders(p));
+    if (options.onlyIf !== undefined) headers["x-cellhive-r2-only-if"] = b64enc(JSON.stringify(options.onlyIf));
     if (options.httpMetadata) headers["x-cellhive-r2-http-metadata"] = b64enc(JSON.stringify(options.httpMetadata));
     if (options.customMetadata) headers["x-cellhive-r2-custom-metadata"] = b64enc(JSON.stringify(options.customMetadata));
     if (options.md5) headers["x-cellhive-r2-md5"] = options.md5;
@@ -415,12 +418,14 @@ export class R2Bucket extends WorkerEntrypoint {
     const r = await call(this.env, "/v1/r2/object?" + q({ ns: p.ns, bucket: p.name, key }), {
       method: "PUT", headers, body,
     });
+    if (r.status === 412) return null;
     await must(r, "r2.put");
     return r2ObjectFromJSON(await r.json());
   }
   async get(key, options = {}) {
     const p = this.ctx.props;
     const h = Object.assign({}, scopeHeaders(p));
+    if (options.onlyIf !== undefined) h["x-cellhive-r2-only-if"] = b64enc(JSON.stringify(options.onlyIf));
     if (options.range) {
       // A missing length means "from offset to the end": emitting
       // bytes=<off>-<off-1> would be a malformed (inverted) range.
@@ -428,7 +433,7 @@ export class R2Bucket extends WorkerEntrypoint {
       h["range"] = "bytes=" + options.range.offset + "-" + end;
     }
     const r = await call(this.env, "/v1/r2/object?" + q({ ns: p.ns, bucket: p.name, key }), { headers: h });
-    if (r.status === 404) return null;
+    if (r.status === 404 || r.status === 304) return null;
     await must(r, "r2.get");
     const info = r2ObjectFromResponse(r, key);
     return r2ObjectBody(await r.arrayBuffer(), info, options.range);
@@ -487,15 +492,41 @@ export class R2Bucket extends WorkerEntrypoint {
 export class QueueProducer extends WorkerEntrypoint {
   async send(body, options = {}) {
     const p = this.ctx.props;
+    const encoded = encodeQueueBody(body, options.contentType);
     const r = await call(this.env, "/v1/queue/send?" + q({ ns: p.ns, queue: p.name, delay_seconds: options.delaySeconds, idempotency_key: options.idempotencyKey }), {
       method: "POST",
-      headers: Object.assign({ "content-type": typeof body === "string" ? "text/plain" : "application/json" }, scopeHeaders(p)),
-      body: typeof body === "string" ? body : JSON.stringify(body),
+      headers: Object.assign({ "content-type": encoded.mime, "x-cellhive-queue-content-type": encoded.contentType }, scopeHeaders(p)),
+      body: encoded.body,
     });
     await must(r, "queue.send");
     return { id: (await r.json()).id };
   }
+  async sendBatch(messages = []) {
+    if (!Array.isArray(messages) || messages.length < 1 || messages.length > 100) throw new TypeError("sendBatch requires 1..100 messages");
+    const payload = messages.map((item) => {
+      if (!item || typeof item !== "object" || !("body" in item)) throw new TypeError("sendBatch message must contain body");
+      const encoded = encodeQueueBody(item.body, item.contentType);
+      return { body: base64Queue(encoded.body), contentType: encoded.contentType, delaySeconds: item.delaySeconds, idempotencyKey: item.idempotencyKey, metadata: item.metadata };
+    });
+    const p = this.ctx.props;
+    const r = await call(this.env, "/v1/queue/send-batch?" + q({ ns: p.ns, queue: p.name }), {
+      method: "POST", headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(p)), body: JSON.stringify({ messages: payload }),
+    });
+    await must(r, "queue.sendBatch");
+    return { ids: (await r.json()).ids || [] };
+  }
 }
+
+function base64Queue(bytes) { let s = ""; for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b); return btoa(s); }
+function encodeQueueBody(body, requested) {
+  const contentType = requested || (typeof body === "string" ? "text" : "json");
+  if (contentType === "text") return { contentType, mime: "text/plain", body: String(body) };
+  if (contentType === "bytes") { const b = body instanceof ArrayBuffer ? new Uint8Array(body) : ArrayBuffer.isView(body) ? new Uint8Array(body.buffer, body.byteOffset, body.byteLength) : null; if (!b) throw new TypeError("bytes contentType requires ArrayBuffer or view"); return { contentType, mime: "application/octet-stream", body: b }; }
+  if (contentType === "v8") return { contentType, mime: "application/octet-stream", body: JSON.stringify({ __cellhive_v8: encode(body) }) };
+  if (contentType !== "json") throw new TypeError("contentType must be json, text, bytes, or v8");
+  return { contentType, mime: "application/json", body: JSON.stringify(body) };
+}
+
 
 function aiOpenAIBody(model, inputs) {
   const i = inputs || {};
@@ -729,7 +760,7 @@ class WorkflowInstanceTarget extends RpcTarget {
   }
   async status() {
     const s = await this.#b.__call("get", "GET", { id: this.#id });
-    return { status: s.status, error: s.error || undefined, output: WorkflowBinding.decode(s.output) };
+    return { status: s.status === "sleeping" ? "waiting" : s.status, error: s.error || undefined, output: WorkflowBinding.decode(s.output) };
   }
   async pause() { await this.#b.__call("pause", "POST", { id: this.#id }); }
   async resume() { await this.#b.__call("resume", "POST", { id: this.#id }); }
@@ -762,7 +793,7 @@ export class WorkflowBinding extends WorkerEntrypoint {
   }
   static decode(b64) {
     if (!b64) return undefined;
-    try { return JSON.parse(atob(b64)); } catch (e) { return undefined; }
+    try { return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)))); } catch (e) { return undefined; }
   }
   async create(options = {}) {
     const out = await this.__call("create", "POST", { id: options.id || undefined },

@@ -12,8 +12,8 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
-import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode } from "budget.js";
-import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules } from "lifecycle.js";
+import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
+import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 
@@ -69,8 +69,9 @@ function managedCode(entry) {
   const modules=Object.assign({},base.modules);
   // Track importable waitUntil as well as ctx.waitUntil in the same child state.
   modules['tenant.js']=modules['tenant.js'].replaceAll('"cloudflare:workers"','"__cellhive-workers.js"').replaceAll("'cloudflare:workers'","'__cellhive-workers.js'");
-  Object.assign(modules,managedModules(base,entry.plan.directFetch?'default':'CellHiveHost',entry.nonce));
-  return Object.assign({},base,{mainModule:'__cellhive-managed.js',modules});
+  Object.assign(modules,managedModules(base,entry.plan.directFetch?'default':'CellHiveHost',entry.nonce,entry.plan.spec));
+  const flags=base.limits?.subRequests?[...base.compatibilityFlags.filter(f=>f!=='no_nodejs_als'),'nodejs_als']:base.compatibilityFlags;
+  return Object.assign({},base,{mainModule:'__cellhive-managed.js',modules,compatibilityFlags:[...new Set(flags)]});
 }
 function managedStub(env,ctx,entry) {
   const code=entry.code;
@@ -140,11 +141,28 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok");
+    if (env.CH_POOL_MODE === "1" && url.pathname === "/drain") return text("not found", 404);
     // Rolling-update probes (ADR-156): /ready reports projection freshness and
     // draining so the edge can pull this instance out before it stops; /drain
     // (internal token) flips that flag.
     if (url.pathname === "/ready") return readyResponse(env);
     if (url.pathname === "/drain" && req.method === "POST") return drainRequest(req, env);
+    if (env.CH_POOL_MODE === "1") {
+      if (draining) return text("runtime draining", 503);
+      if (!secureEqual(req.headers.get("x-cellhive-internal-token") || "", env.CELL_TOKEN || "")) return text("unauthorized", 401);
+      const ns=req.headers.get("x-cellhive-pool-namespace"),worker=req.headers.get("x-cellhive-pool-worker");
+      const number=Number(req.headers.get("x-cellhive-pool-version")),sha=req.headers.get("x-cellhive-pool-bundle");
+      if(!ns||!worker||!Number.isSafeInteger(number)||number<=0||!sha)return text("invalid execution identity",400);
+      const target=JSON.parse(env.CH_POOL_TARGET||"null");
+      if(target&&(target.namespace!==ns||target.worker!==worker||target.version!==number||target.bundle_sha!==sha))return text("dedicated target mismatch",403);
+      let version;
+      try{version=await workerEnv(env,ns,worker,number);}catch(e){return text("worker env unavailable",503);}
+      if(!version||version.bundle_sha!==sha)return text("execution version mismatch",409);
+      // Go already stripped the route mount and pinned this immutable version.
+      // Reuse the existing asset/worker routing contract below with no control
+      // lookup of active version in the child.
+      return fixedFetch(req,env,ctx,{namespace:ns},worker,version,url);
+    }
     maybePollRoutes(env, ctx);
     const host = normalizeHost(req.headers.get("host") || url.host);
 
@@ -198,6 +216,19 @@ export default {
     return runWorker(effReq, env, ctx, app, route.worker, version, version.class_storage || {}, version.deleted_classes || []);
   },
 };
+
+function secureEqual(a,b){if(!b||a.length!==b.length)return false;let diff=0;for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^b.charCodeAt(i);return diff===0;}
+async function fixedFetch(req,env,ctx,app,worker,version,url){
+  if(version.assets_sha&&(req.method==='GET'||req.method==='HEAD')){
+    const cfg=version.assets||{};
+    if(shouldRunWorkerFirst(cfg,url.pathname)){
+      const res=await runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
+      if(res.status!==404)return res;return(await serveAsset(req,env,app,worker,version,url))||res;
+    }
+    const asset=await serveAsset(req,env,app,worker,version,url);if(asset)return asset;
+  }
+  return runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
+}
 
 import { traceparent as newTraceparent, startSpan, endSpan, flushSpans } from "telemetry.js";
 
@@ -325,24 +356,30 @@ async function preparedWorker(env, app, worker, version, classStorage, deletedCl
 // stubs, and tails must all be acquired in the current request.
 function workerPlan(env, version, source, spec) {
   const directFetch = Object.keys(spec).length === 0;
+  const compatibilityFlags = version.limits?.subrequests
+    ? [...new Set([...(version.compat_flags || []), "nodejs_als"])]
+    : (version.compat_flags || []);
   return {
     spec,
     directFetch,
     directWorkerCode: directFetch ? {
       compatibilityDate: version.compat_date || "2026-06-15",
-      compatibilityFlags: version.compat_flags || [],
+      compatibilityFlags,
+      limits: workerLimits(version.limits),
       mainModule: "tenant.js",
       modules: { "tenant.js": source },
     } : null,
     workerCode: {
       compatibilityDate: version.compat_date || "2026-06-15",
-      compatibilityFlags: version.compat_flags || [],
+      compatibilityFlags,
+      limits: workerLimits(version.limits),
       mainModule: "wrapper.js",
       modules: {
         "wrapper.js": platformConsts(spec) + env.WRAPPER_SRC,
         "tenant.js": source,
         "facades.js": env.FACADES_SRC,
         "rpc-codec.js": env.RPC_CODEC_SRC,
+        "__cellhive-quota.js": quotaSource(version.limits?.subrequests, spec),
       },
       // globalOutbound is request-scoped and attached by workerStub.
     },

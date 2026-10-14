@@ -37,6 +37,10 @@ const tenantBundle = `
 export default {
   async fetch() { return new Response("tenant"); },
   async queue(batch, env, ctx) {
+    if (batch[0].contentType === "v8") {
+      const v = batch[0].body;
+      return "v8:" + typeof v.n + ":" + v.n + ":" + v.when.toISOString() + ":" + [...v.bytes].join(",");
+    }
     return "handled:" + batch.length + ":" + batch[0].body;
   },
 };
@@ -265,6 +269,34 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	}
 	if gotToken != "test-token" {
 		t.Fatalf("bundle fetch token = %q", gotToken)
+	}
+
+	v8Payload := map[string]any{
+		"namespace": "demo", "worker": "consumer", "bundle_sha": "sha1", "queue": "jobs",
+		"messages": []map[string]any{{
+			"id": "m2", "content_type": "v8", "attempts": 1,
+			"body": base64.StdEncoding.EncodeToString([]byte(`{"__cellhive_v8":{"t":"o","i":0,"v":{"n":{"t":"bigint","v":"9"},"when":{"t":"Date","i":1,"v":1792022400000},"bytes":{"t":"TypedArray","i":2,"c":"Uint8Array","b":"AID/"}}}}`)),
+		}},
+	}
+	v8Body, _ := json.Marshal(v8Payload)
+	v8Req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(v8Body))
+	v8Req.Header.Set("content-type", "application/json")
+	v8Req.Header.Set("x-cellhive-internal-token", "test-token")
+	v8Resp, err := client.Do(v8Req)
+	if err != nil {
+		t.Fatalf("v8 dispatch: %v", err)
+	}
+	defer v8Resp.Body.Close()
+	var v8Out struct {
+		OK     bool   `json:"ok"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(v8Resp.Body).Decode(&v8Out); err != nil {
+		t.Fatal(err)
+	}
+	if v8Resp.StatusCode != http.StatusOK || !v8Out.OK || v8Out.Result != "v8:bigint:9:2026-10-15T00:00:00.000Z:0,128,255" {
+		t.Fatalf("v8 dispatch status=%d out=%+v", v8Resp.StatusCode, v8Out)
 	}
 
 	cancel()
@@ -2187,6 +2219,8 @@ const r2d1FidelityTenant = `
 export default {
   async fetch(req, env) {
     const put = await env.BUCKET.put("k", "hello", { httpMetadata: { contentType: "text/plain" }, customMetadata: { who: "bob" } });
+    const conditionalPut = await env.BUCKET.put("k", "overwrite", { onlyIf: { etagMatches: "wrong" } });
+    const conditionalGet = await env.BUCKET.get("k", { onlyIf: { etagMatches: "wrong" } });
     const got = await env.BUCKET.get("k");
     const head = await env.BUCKET.head("k");
     const list = await env.BUCKET.list({ prefix: "k" });
@@ -2200,6 +2234,7 @@ export default {
     const raw = await env.DB.prepare("SELECT v FROM blobs").raw({ columnNames: true });
     return Response.json({
       put,
+      conditionalPut, conditionalGet,
       head,
       list: { n: list.objects.length, truncated: list.truncated, cursor: list.cursor, first: list.objects[0] },
       listDl: { prefixes: dl.delimitedPrefixes, hm: (dl.objects[0] && dl.objects[0].httpMetadata && dl.objects[0].httpMetadata.contentType) || "" },
@@ -2253,6 +2288,10 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 			defer mu.Unlock()
 			switch r.Method {
 			case http.MethodPut:
+				if r.Header.Get("x-cellhive-r2-only-if") != "" {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
 				b, _ := io.ReadAll(r.Body)
 				stored[key] = string(b)
 				putHTTP = r.Header.Get("x-cellhive-r2-http-metadata")
@@ -2264,6 +2303,10 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 					"customMetadata": map[string]string{"who": "bob"}, "checksums": map[string]string{"md5": "abc"},
 				})
 			default:
+				if r.Header.Get("x-cellhive-r2-only-if") != "" {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
 				v, ok := stored[key]
 				if !ok {
 					http.NotFound(w, r)
@@ -2373,9 +2416,11 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 		t.Fatalf("status = %d %s", resp.StatusCode, body)
 	}
 	var got struct {
-		Put  map[string]any `json:"put"`
-		Head map[string]any `json:"head"`
-		List struct {
+		Put            map[string]any `json:"put"`
+		ConditionalPut any            `json:"conditionalPut"`
+		ConditionalGet any            `json:"conditionalGet"`
+		Head           map[string]any `json:"head"`
+		List           struct {
 			N         int            `json:"n"`
 			Truncated bool           `json:"truncated"`
 			Cursor    string         `json:"cursor"`
@@ -2414,6 +2459,9 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 	}
 	if fmt.Sprint(got.Put["key"]) != "k" || fmt.Sprint(got.Put["etag"]) != "etag1" || fmt.Sprint(got.Put["httpEtag"]) != `"etag1"` {
 		t.Fatalf("put = %v", got.Put)
+	}
+	if got.ConditionalPut != nil || got.ConditionalGet != nil {
+		t.Fatalf("conditional R2 calls should return null: put=%v get=%v", got.ConditionalPut, got.ConditionalGet)
 	}
 	if fmt.Sprint(got.Got.Key) != "k" || fmt.Sprint(got.Got.Etag) != "etag1" || fmt.Sprint(got.Got.HTTPEtag) != `"etag1"` ||
 		fmt.Sprint(got.Got.CT) != "text/plain" || fmt.Sprint(got.Got.Who) != "bob" || fmt.Sprint(got.Got.MD5) != "abc" ||
@@ -2710,6 +2758,8 @@ export default {
     const put = await env.BUCKET.put("k", "hello");
     const got = await env.BUCKET.get("k");
     const q = await env.QUEUE.send({ n: 1 });
+    const v8 = await env.QUEUE.send({ n: 2 }, { contentType: "v8" });
+    const batch = await env.QUEUE.sendBatch([{ body: "b1" }, { body: { n: 3 }, contentType: "json" }]);
     const up = await env.BUCKET.createMultipartUpload("big");
     const p1 = await up.uploadPart(1, "part-a|");
     const p2 = await up.uploadPart(2, "part-b");
@@ -2719,7 +2769,7 @@ export default {
     // D1 sessions must fail loudly (ADR-153).
     let sess = "no-error";
     try { await env.DB.withSession("first-primary"); } catch (e) { sess = String((e && e.message) || e); }
-    return Response.json({ rows, put: put.size, got: await got.text(), q: q.id, mp: await big.text(), mpsize: done.size, hd, sess });
+    return Response.json({ rows, put: put.size, got: await got.text(), q: q.id, v8: v8.id, batch: batch.ids, mp: await big.text(), mpsize: done.size, hd, sess });
   },
 };
 `
@@ -2839,6 +2889,8 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 	}}}
 	var r2Mu sync.Mutex
 	r2 := map[string]string{}
+	var queueMu sync.Mutex
+	var queueSends []string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -2896,7 +2948,17 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 			r2Mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/queue/send":
+			b, _ := io.ReadAll(r.Body)
+			queueMu.Lock()
+			queueSends = append(queueSends, r.Header.Get("x-cellhive-queue-content-type")+":"+string(b))
+			queueMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "m1"})
+		case "/v1/queue/send-batch":
+			var in struct {
+				Messages []any `json:"messages"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ids": []string{"b1", "b2"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -2936,8 +2998,14 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%q", resp.StatusCode, body)
 	}
-	if body != `{"rows":[{"a":1}],"put":5,"got":"hello","q":"m1","mp":"part-a|part-b","mpsize":13,"hd":"db.example.com:5432/appdb/u","sess":"d1 sessions are not supported by CellHive (no read replication or bookmarks)"}` {
+	if body != `{"rows":[{"a":1}],"put":5,"got":"hello","q":"m1","v8":"m1","batch":["b1","b2"],"mp":"part-a|part-b","mpsize":13,"hd":"db.example.com:5432/appdb/u","sess":"d1 sessions are not supported by CellHive (no read replication or bookmarks)"}` {
 		t.Fatalf("multi-binding response = %q", body)
+	}
+	queueMu.Lock()
+	gotQueueSends := append([]string(nil), queueSends...)
+	queueMu.Unlock()
+	if len(gotQueueSends) != 2 || gotQueueSends[0] != `json:{"n":1}` || !strings.HasPrefix(gotQueueSends[1], "v8:{\"__cellhive_v8\":") {
+		t.Fatalf("queue sends = %q; expected json and v8 envelopes", gotQueueSends)
 	}
 	cancel()
 	select {
@@ -3189,13 +3257,13 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 export class W extends WorkflowEntrypoint { async run(e, s) { return "x"; } }
 export default {
   async fetch(req, env) {
-    const created = await env.WF.create({ params: { n: 1 } });
+    const created = await env.WF.create({ params: { n: 1 }, locationHint: "enam" });
     const batch = await env.WF.createBatch([{ id: "b1", params: { n: 2 } }, { id: "b2", params: { n: 3 } }]);
     const inst = await env.WF.get(created.id);
     const st = await inst.status();
     await inst.pause();
     const st2 = await inst.status();
-    return new Response("wf:" + st.status + "/" + st2.status + "/" + batch.map((item) => item.id).join(","));
+    return new Response("wf:" + st.status + "/" + st2.status + "/" + batch.map((item) => item.id).join(",") + "/" + st.output);
   },
 };
 `
@@ -3206,7 +3274,9 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	status := "queued"
+	status := "sleeping"
+	var createMu sync.Mutex
+	var createBody string
 	proj := map[string]any{"apps": []any{map[string]any{
 		"namespace": "acme",
 		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
@@ -3224,11 +3294,15 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 		case "/v1/internal/workflow/finish":
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/workflow/create":
+			b, _ := io.ReadAll(r.Body)
+			createMu.Lock()
+			createBody = string(b)
+			createMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "status": "queued"})
 		case "/v1/workflow/create-batch":
 			_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{map[string]any{"id": "b1"}, map[string]any{"id": "b2"}}})
 		case "/v1/workflow/get":
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "status": status, "output": ""})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "status": status, "output": base64.StdEncoding.EncodeToString([]byte(`"José"`))})
 		case "/v1/workflow/pause":
 			status = "paused"
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -3270,8 +3344,14 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 	// (This test drives the internal dispatch path via a direct workflow binding
 	// in the loaded env, so use the public loader with a route.)
 	resp, body := fetchHost(t, client, public, "/")
-	if resp.StatusCode != 200 || body != "wf:queued/paused/b1,b2" {
-		t.Fatalf("workflow lifecycle/batch = %d %q (want wf:queued/paused/b1,b2)", resp.StatusCode, body)
+	if resp.StatusCode != 200 || body != "wf:waiting/paused/b1,b2/José" {
+		t.Fatalf("workflow lifecycle/batch/output = %d %q (want wf:waiting/paused/b1,b2/José)", resp.StatusCode, body)
+	}
+	createMu.Lock()
+	gotCreateBody := createBody
+	createMu.Unlock()
+	if gotCreateBody != `{"n":1}` {
+		t.Fatalf("workflow create body = %q; locationHint must be documented as ignored", gotCreateBody)
 	}
 	cancel()
 	select {
@@ -3788,6 +3868,10 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if len(got[0].Entries) != 3 || got[0].Entries[0]["level"] != "log" || got[0].Entries[0]["message"] != `native-tail-marker {"n":1}` || got[0].Entries[1]["level"] != "warn" || got[0].Entries[1]["message"] != "warned" || got[0].Entries[2]["level"] != "error" || !strings.Contains(got[0].Entries[2]["message"].(string), "tail-boom") {
 		t.Fatalf("tail entries = %#v", got[0].Entries)
 	}
+	args, ok := got[0].Entries[0]["message_args"].([]any)
+	if !ok || len(args) != 2 || args[0] != "native-tail-marker" {
+		t.Fatalf("tail raw message_args = %#v", got[0].Entries[0]["message_args"])
+	}
 	cancel()
 	select {
 	case <-done:
@@ -3872,8 +3956,11 @@ export default {
   async fetch(req, env) {
     await env.KV.put("k", "v", { expirationTtl: 60, metadata: { tag: "x" } });
     const m = await env.KV.getWithMetadata("k");
+    const object = await env.KV.get("json", { type: "json", cacheTtl: 60 });
+    const objectWithMetadata = await env.KV.getWithMetadata("json", { type: "json" });
+    const bytes = await env.KV.get("json", { type: "arrayBuffer" });
     const l = await env.KV.list({ includeMetadata: true });
-    return Response.json({ v: m.value, tag: m.metadata && m.metadata.tag, keys: l.keys });
+    return Response.json({ v: m.value, tag: m.metadata && m.metadata.tag, object, objectWithMetadata, byteLength: bytes.byteLength, keys: l.keys });
   },
 };
 `
@@ -3910,7 +3997,11 @@ func TestUserRuntimeKVTTLAndMetadata(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/kv/get":
 			w.Header().Set("x-cellhive-kv-metadata", metaB64)
-			_, _ = w.Write([]byte("v"))
+			if r.URL.Query().Get("key") == "json" {
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			} else {
+				_, _ = w.Write([]byte("v"))
+			}
 		case "/v1/kv/list":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"keys":          []any{map[string]any{"name": "k", "expiration": 123, "metadata": metaB64}},
@@ -3956,7 +4047,7 @@ func TestUserRuntimeKVTTLAndMetadata(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%q", resp.StatusCode, body)
 	}
-	want := `{"v":"v","tag":"x","keys":[{"name":"k","expiration":123,"metadata":{"tag":"x"}}]}`
+	want := `{"v":"v","tag":"x","object":{"ok":true},"objectWithMetadata":{"value":{"ok":true},"metadata":{"tag":"x"}},"byteLength":11,"keys":[{"name":"k","expiration":123,"metadata":{"tag":"x"}}]}`
 	if body != want {
 		t.Fatalf("kv response = %q, want %q", body, want)
 	}

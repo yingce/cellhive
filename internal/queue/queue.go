@@ -8,7 +8,9 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,8 @@ CREATE TABLE IF NOT EXISTS messages (
   attempts        INTEGER NOT NULL DEFAULT 0,
   lease_until_ms  INTEGER NOT NULL DEFAULT 0,
   idempotency_key TEXT,
+  idempotency_fingerprint TEXT,
+  metadata        TEXT,
   created_ms      INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -62,7 +66,18 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	// advance the capture txid on every call (read traffic -> replication).
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, schema)
-		return err
+		if err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`ALTER TABLE messages ADD COLUMN idempotency_fingerprint TEXT`,
+			`ALTER TABLE messages ADD COLUMN metadata TEXT`,
+		} {
+			if _, e := tx.ExecContext(ctx, stmt); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+				return e
+			}
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -72,12 +87,14 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 
 // Message is one queued message.
 type Message struct {
-	ID           string `json:"id"`
-	Body         []byte `json:"body"`
-	ContentType  string `json:"content_type"`
-	VisibleAtMs  int64  `json:"visible_at_ms"`
-	Attempts     int    `json:"attempts"`
-	LeaseUntilMs int64  `json:"lease_until_ms"`
+	ID           string          `json:"id"`
+	Body         []byte          `json:"body"`
+	ContentType  string          `json:"content_type"`
+	VisibleAtMs  int64           `json:"visible_at_ms"`
+	Attempts     int             `json:"attempts"`
+	LeaseUntilMs int64           `json:"lease_until_ms"`
+	TimestampMs  int64           `json:"timestamp_ms"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	// IdempotencyKey travels with the message so a dead-letter replay can
 	// preserve it (the replayed send dedupes against live messages again).
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
@@ -89,47 +106,100 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Send enqueues a message, honoring a delay and an idempotency key.
+// Send enqueues one message. SendBatch contains the atomic implementation.
 func (s *Store) Send(ctx context.Context, ns, name string, body []byte, contentType string, delaySeconds int, idempotencyKey string) (string, error) {
-	c, err := s.cell(ctx, ns, name)
+	ids, err := s.SendBatch(ctx, ns, name, []SendMessage{{Body: body, ContentType: contentType, DelaySeconds: delaySeconds, IdempotencyKey: idempotencyKey}})
 	if err != nil {
 		return "", err
 	}
-	now := s.now().UnixMilli()
-	if idempotencyKey != "" {
-		var existing string
-		err := c.DB.QueryRowContext(ctx, `SELECT id FROM messages WHERE idempotency_key=?`, idempotencyKey).Scan(&existing)
-		if err == nil {
-			return existing, nil // dedupe
+	return ids[0], nil
+}
+
+// SendMessage is one Cloudflare Queue message in an atomic batch.
+type SendMessage struct {
+	Body           []byte
+	ContentType    string
+	DelaySeconds   int
+	IdempotencyKey string
+	Metadata       json.RawMessage
+}
+
+// SendBatch atomically enqueues all messages. Reusing an idempotency key with
+// a different payload is a conflict; an identical message returns its old id.
+func (s *Store) SendBatch(ctx context.Context, ns, name string, messages []SendMessage) ([]string, error) {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(messages) == 0 {
+		return []string{}, nil
+	}
+	for _, m := range messages {
+		m.ContentType = normalizeContentType(m.ContentType)
+		if m.ContentType != "json" && m.ContentType != "text" && m.ContentType != "bytes" && m.ContentType != "v8" {
+			return nil, fmt.Errorf("queue: invalid content type %q", m.ContentType)
+		}
+		if m.DelaySeconds < 0 || m.DelaySeconds > 86400 {
+			return nil, fmt.Errorf("queue: delaySeconds must be between 0 and 86400")
+		}
+		if len(m.Body) > 128*1024 {
+			return nil, fmt.Errorf("queue: message exceeds 128 KiB")
 		}
 	}
-	id := newID()
-	visible := now + int64(delaySeconds)*1000
-	var idem any
-	if idempotencyKey != "" {
-		idem = idempotencyKey
-	}
-	// Cell.Tx advances the cell txid so the capture watermark covers this write
-	// before the caller is acknowledged (RPO=0).
+	now := s.now().UnixMilli()
+	ids := make([]string, len(messages))
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, created_ms)
-			 VALUES(?,?,?,?,0,0,?,?)`,
-			id, body, contentType, visible, idem, now)
-		return err
-	}); err != nil {
-		// A concurrent send with the same idempotency key won the unique index;
-		// dedupe by returning its id instead of surfacing a constraint error.
-		if idempotencyKey != "" {
-			var existing string
-			if qerr := c.DB.QueryRowContext(ctx,
-				`SELECT id FROM messages WHERE idempotency_key=?`, idempotencyKey).Scan(&existing); qerr == nil {
-				return existing, nil
+		for i, m := range messages {
+			m.ContentType = normalizeContentType(m.ContentType)
+			fingerprint := fmt.Sprintf("%x:%s:%d:%s", m.Body, m.ContentType, m.DelaySeconds, string(m.Metadata))
+			if m.IdempotencyKey != "" {
+				var oldID, oldFP string
+				e := tx.QueryRowContext(ctx, `SELECT id, COALESCE(idempotency_fingerprint,'') FROM messages WHERE idempotency_key=?`, m.IdempotencyKey).Scan(&oldID, &oldFP)
+				if e == nil {
+					if oldFP != "" && oldFP != fingerprint {
+						return fmt.Errorf("queue: idempotency key %q conflicts with a different message", m.IdempotencyKey)
+					}
+					ids[i] = oldID
+					continue
+				}
+				if e != sql.ErrNoRows {
+					return e
+				}
+			}
+			id := newID()
+			ids[i] = id
+			visible := now + int64(m.DelaySeconds)*1000
+			var idem, metadata any
+			if m.IdempotencyKey != "" {
+				idem = m.IdempotencyKey
+			}
+			if len(m.Metadata) > 0 {
+				metadata = string(m.Metadata)
+			}
+			if _, e := tx.ExecContext(ctx,
+				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms)
+				 VALUES(?,?,?,?,0,0,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now); e != nil {
+				return e
 			}
 		}
-		return "", err
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	return id, nil
+	return ids, nil
+}
+
+func normalizeContentType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "application/json":
+		return "json"
+	case "text/plain":
+		return "text"
+	case "application/octet-stream":
+		return "bytes"
+	default:
+		return strings.ToLower(strings.TrimSpace(v))
+	}
 }
 
 // Claim returns up to limit visible messages and leases them until now+leaseMs.
@@ -148,7 +218,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 	var out []Message
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,'') FROM messages
+			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,''), created_ms, COALESCE(metadata,'') FROM messages
 			 WHERE visible_at_ms <= ? AND lease_until_ms <= ? ORDER BY visible_at_ms, id LIMIT ?`,
 			now, now, limit)
 		if err != nil {
@@ -156,9 +226,13 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 		}
 		for rows.Next() {
 			var m Message
-			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey); err != nil {
+			var metadata string
+			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata); err != nil {
 				rows.Close()
 				return err
+			}
+			if metadata != "" {
+				m.Metadata = json.RawMessage(metadata)
 			}
 			out = append(out, m)
 		}

@@ -1,7 +1,8 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
-import { budgetErrorBody, checkedWorkerGet } from "budget.js";
-import { ByteLRU, textWeight, jsonWeight } from "lifecycle.js";
+import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
+import { ByteLRU, textWeight, jsonWeight, quotaSource } from "lifecycle.js";
+import { decode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 //
@@ -22,6 +23,12 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok");
+    if(env.CH_POOL_TARGET&&env.CH_POOL_TARGET!=="null"){
+      if(!authorized(req,env))return json({error:"unauthorized"},401);
+      let identity;try{identity=await req.clone().json();}catch(e){return json({error:"bad_json"},400);}
+      const target=JSON.parse(env.CH_POOL_TARGET);
+      if(identity.namespace!==target.namespace||identity.worker!==target.worker||identity.version!==target.version||identity.bundle_sha!==target.bundle_sha)return json({error:"dedicated_target_mismatch"},403);
+    }
     if (req.method === "POST" && url.pathname === "/v1/queues/dispatch") {
       if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchQueues(req, env, ctx);
@@ -78,7 +85,8 @@ async function dispatchQueues(req, env, ctx) {
     body: decodeBody(m.body, m.content_type),
     contentType: m.content_type,
     attempts: m.attempts,
-    timestamp: new Date(),
+    timestamp: new Date(m.timestamp || Date.now()),
+    metadata: m.metadata || undefined,
   }));
   // The batch crosses an isolate boundary over RPC, and structured clone drops
   // non-index array properties and functions — so send a plain payload and let
@@ -112,12 +120,14 @@ async function dispatchTimers(req, env, ctx) {
   } catch (e) {
     return workerLoadFailure(e);
   }
-  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
+  let noRetry = false;
+  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, noRetry() { noRetry = true; } };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
     const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
-    return json({ ok: true, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, result: result === undefined ? null : result });
+    return json({ ok: true, no_retry: noRetry, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, result: result === undefined ? null : result });
   } catch (e) {
+    if (noRetry) return json({ ok: false, no_retry: true, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, error: String(e) });
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
 }
@@ -226,7 +236,8 @@ async function loadWorkflowWorker(env, ctx, body) {
   const spec = await specFor(env, body);
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
-    compatibilityFlags: body.compat_flags || spec.compat_flags || [],
+    compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
+    limits: workerLimits(body.limits || spec.limits),
     mainModule: "workflow-wrapper.js",
     modules: {
       "workflow-wrapper.js": platformConsts(spec && spec.bindings) + env.WF_WRAPPER_SRC,
@@ -234,6 +245,7 @@ async function loadWorkflowWorker(env, ctx, body) {
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
+      "__cellhive-quota.js": quotaSource((body.limits || spec.limits)?.subrequests, spec.bindings),
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
@@ -286,13 +298,15 @@ async function loadWorker(env, ctx, body) {
   const ver = body.version != null ? `${body.version}-` : "";
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
-    compatibilityFlags: body.compat_flags || spec.compat_flags || [],
+    compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
+    limits: workerLimits(body.limits || spec.limits),
     mainModule: "wrapper.js",
     modules: {
       "wrapper.js": platformConsts(spec && spec.bindings) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
+      "__cellhive-quota.js": quotaSource((body.limits || spec.limits)?.subrequests, spec.bindings),
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,
@@ -349,6 +363,7 @@ async function specFor(env, body) {
   if (body.bindings !== undefined) {
     return {
       bindings: body.bindings || {}, vars: body.vars || {},
+      limits: body.limits,
       compat_date: body.compat_date, compat_flags: body.compat_flags,
     };
   }
@@ -374,7 +389,7 @@ async function fetchSpec(env, ns, worker, version) {
     });
     if (!r.ok) return { ok: false, bindings: {}, vars: {} };
     const j = await r.json();
-    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags };
+    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits };
   } catch (e) {
     return { ok: false, bindings: {}, vars: {} };
   }
@@ -416,8 +431,11 @@ function decodeBody(b64, contentType) {
   } catch {
     return "";
   }
-  const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
-  if (ct === "application/json" || ct.endsWith("+json")) {
+  const ct = String(contentType || "json").toLowerCase().split(";")[0].trim();
+  if (ct === "v8") {
+    try { return decode(JSON.parse(new TextDecoder().decode(bytes)).__cellhive_v8); } catch { return bytes; }
+  }
+  if (ct === "json" || ct === "application/json" || ct.endsWith("+json")) {
     const text = new TextDecoder().decode(bytes);
     try {
       return JSON.parse(text);
@@ -425,9 +443,11 @@ function decodeBody(b64, contentType) {
       return text;
     }
   }
-  if (ct === "" || ct.startsWith("text/")) return new TextDecoder().decode(bytes);
+  if (ct === "text" || ct === "" || ct.startsWith("text/")) return new TextDecoder().decode(bytes);
   return bytes;
 }
+
+
 
 function json(o, status) {
   return new Response(JSON.stringify(o), {

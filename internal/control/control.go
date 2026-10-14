@@ -27,6 +27,10 @@ type Binding struct {
 	Version string `json:"version,omitempty"`
 }
 
+type WorkerLimits struct {
+	SubRequests *int `json:"subrequests,omitempty"`
+}
+
 // Version is an immutable worker version. Deploys always allocate a new number.
 type Version struct {
 	Number    int               `json:"number"`
@@ -51,8 +55,9 @@ type Version struct {
 	SessionPolicy string `json:"session_policy,omitempty"`
 	// CompatDate/CompatFlags are the compatibility settings applied when the
 	// runtime loads this version (ADR-134).
-	CompatDate  string   `json:"compat_date,omitempty"`
-	CompatFlags []string `json:"compat_flags,omitempty"`
+	CompatDate  string        `json:"compat_date,omitempty"`
+	CompatFlags []string      `json:"compat_flags,omitempty"`
+	Limits      *WorkerLimits `json:"limits,omitempty"`
 }
 
 // Consumer configures a queue consumer (Cloudflare queues.consumers subset).
@@ -96,6 +101,7 @@ type DeploySpec struct {
 	// with the version and applied at load time (ADR-134).
 	CompatDate  string
 	CompatFlags []string
+	Limits      *WorkerLimits
 }
 
 // Release is one entry of a worker's release log.
@@ -166,8 +172,9 @@ type WorkerView struct {
 	StorageID string            `json:"storage_id,omitempty"`
 	// CompatDate/CompatFlags are forwarded to the runtime loader so production
 	// behaves like `cellhive dev` (ADR-134).
-	CompatDate  string   `json:"compat_date,omitempty"`
-	CompatFlags []string `json:"compat_flags,omitempty"`
+	CompatDate  string        `json:"compat_date,omitempty"`
+	CompatFlags []string      `json:"compat_flags,omitempty"`
+	Limits      *WorkerLimits `json:"limits,omitempty"`
 	// HostLabel is the worker's built-in domain label (ADR-131); empty means the
 	// label is derived from the namespace + worker name.
 	HostLabel      string            `json:"host_label,omitempty"`

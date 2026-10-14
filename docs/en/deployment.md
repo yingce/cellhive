@@ -99,6 +99,14 @@ values overrides: image/replicas/resources/storage, `doRuntime.gate` (true → `
 
 ## One-Command Gate
 
+### Container resource quotas
+
+Helm/Kustomize defaults are **1 CPU / 2 GiB** per user-runtime container and **2 CPU / 4 GiB** per DO runtime container (including the gated supervisor). Requests remain user `250m/256Mi` and DO `500m/512Mi`; HPA utilization remains relative to CPU requests. Override `userRuntime.resources` / `doRuntime.resources` as needed. These are aggregate container budgets, not invocation `cpuMs` or isolate heap quotas: excess CPU is throttled and excess memory may cause OOMKilled.
+
+Compose uses the same quotas, configurable through `CELLHIVE_USER_RUNTIME_CPUS/MEMORY` and `CELLHIVE_DO_RUNTIME_CPUS/MEMORY`; equal `memswap_limit` and `mem_limit` disable container swap. Runtime nofile is 65536. Supply Compose interpolation settings via export or `--env-file deploy/compose/.env` (see `.env.example`). Kubernetes has no Pod ulimits field; check the inherited container-runtime nofile on TKE independently.
+
+These are initial deployment budgets, not tenant capacity guarantees. Memory-high-watermark drain and external watchdog are not implemented; existing liveness probes are not JS CPU-time interrupts. Validate cloud CPU throttling, OOM recovery, the DO output gate and takeover in the target cluster.
+
 ```bash
 make ci            # = bash scripts/ci.sh: gofmt/vet/test/build/js-test/cli-test/perf/rpo/s3/image/orchestration
 ```

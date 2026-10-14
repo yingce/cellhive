@@ -56,6 +56,21 @@ func (s *Server) workflowParams(r *http.Request) (ns, name, id string) {
 	return s.scopeNS(r), q.Get("workflow"), q.Get("id")
 }
 
+func (s *Server) workflowTarget(ctx context.Context, ns, name string) workflow.Target {
+	if s.Control == nil {
+		return workflow.Target{}
+	}
+	proj, err := s.Control.Projection(ctx)
+	if err != nil {
+		return workflow.Target{}
+	}
+	t, ok := proj.WorkflowTargetFor(ns, name)
+	if !ok {
+		return workflow.Target{}
+	}
+	return workflow.Target{Worker: t.Worker, BundleSHA: t.BundleSHA, Version: t.Version, ClassName: t.ClassName}
+}
+
 // startWorkflowRun claims a run lease (concurrency safety) and dispatches the
 // attempt; it is a no-op when another run is active or the instance is terminal.
 func (s *Server) startWorkflowRun(ctx context.Context, ns, name, id string) {
@@ -118,7 +133,7 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	var in workflow.Instance
 	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
 		var e error
-		in, e = s.Workflows.Create(r.Context(), ns, name, id, body)
+		in, e = s.Workflows.CreateWithTarget(r.Context(), ns, name, id, body, s.workflowTarget(r.Context(), ns, name))
 		return e
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "workflow_create_failed", err.Error())
@@ -156,7 +171,7 @@ func (s *Server) handleWorkflowCreateBatch(w http.ResponseWriter, r *http.Reques
 	var instances []workflow.Instance
 	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
 		var err error
-		instances, err = s.Workflows.CreateBatch(r.Context(), ns, name, batch)
+		instances, err = s.Workflows.CreateBatchWithTarget(r.Context(), ns, name, batch, s.workflowTarget(r.Context(), ns, name))
 		return err
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "workflow_create_batch_failed", err.Error())

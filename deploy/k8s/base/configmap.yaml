@@ -25,3 +25,6 @@ data:
   CELLHIVE_DO_RUNTIMES: do-runtime:8788
   # Queue/timer/cron/waker dispatch target (user-runtime internal service).
   CELLHIVE_DISPATCH_URL: http://user-runtime:8088
+  CELLHIVE_POOL_MODE: ""
+  CELLHIVE_POOL_MEMORY_UTILIZATION: "0.70"
+  CELLHIVE_POOL_MAX_SLOTS: "16"

@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -49,6 +51,91 @@ func r2PutMeta(r *http.Request) *r2.Metadata {
 		return nil
 	}
 	return md
+}
+
+func r2Condition(r *http.Request) (*r2.Condition, error) {
+	h := r.Header.Get("x-cellhive-r2-only-if")
+	if h == "" {
+		return nil, nil
+	}
+	b, err := base64.StdEncoding.DecodeString(h)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, err
+	}
+	c := &r2.Condition{}
+	for name, value := range raw {
+		switch name {
+		case "exists":
+			if err := json.Unmarshal(value, &c.Exists); err != nil {
+				return nil, err
+			}
+		case "etagMatches", "etagDoesNotMatch":
+			var list []string
+			var single string
+			if err := json.Unmarshal(value, &single); err == nil {
+				list = []string{single}
+			} else if err := json.Unmarshal(value, &list); err != nil {
+				return nil, err
+			}
+			if name == "etagMatches" {
+				c.ETagMatches = list
+			} else {
+				c.ETagDoesNotMatch = list
+			}
+		default:
+			return nil, fmt.Errorf("unsupported R2 onlyIf field %q", name)
+		}
+	}
+	return c, nil
+}
+
+func r2ConditionMatches(c *r2.Condition, exists bool, etag string) bool {
+	if c == nil {
+		return true
+	}
+	if c.Exists != nil && *c.Exists != exists {
+		return false
+	}
+	if len(c.ETagMatches) > 0 {
+		ok := false
+		for _, v := range c.ETagMatches {
+			if v == etag || strings.Trim(v, `"`) == etag {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	for _, v := range c.ETagDoesNotMatch {
+		if v == etag || strings.Trim(v, `"`) == etag {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) checkR2Condition(ctx context.Context, r *http.Request, bucketName, key string) (bool, error) {
+	c, err := r2Condition(r)
+	if err != nil {
+		return false, err
+	}
+	if c == nil {
+		return true, nil
+	}
+	_, etag, err := s.R2.Stat(ctx, s.scopeNS(r), bucketName, key)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return r2ConditionMatches(c, false, ""), nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return r2ConditionMatches(c, true, etag), nil
 }
 
 func writeR2MetaHeader(w http.ResponseWriter, md *r2.Metadata) {
@@ -114,6 +201,11 @@ func (s *Server) handleR2Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	condition, err := r2Condition(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "r2_invalid_condition", err.Error())
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxArtifactBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
@@ -124,9 +216,13 @@ func (s *Server) handleR2Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	md := r2PutMeta(r)
-	etag, err := s.R2.PutWithMeta(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"), body, md)
+	etag, matched, err := s.R2.PutConditional(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"), body, md, condition)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "r2_put_failed", err.Error())
+		return
+	}
+	if !matched {
+		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}
 	w.Header().Set("etag", etag)
@@ -238,6 +334,13 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ns, bucketName, key := s.scopeNS(r), q.Get("bucket"), q.Get("key")
+	if ok, err := s.checkR2Condition(r.Context(), r, bucketName, key); err != nil {
+		writeErr(w, http.StatusInternalServerError, "r2_condition_failed", err.Error())
+		return
+	} else if !ok {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 
 	// head=1: metadata only (R2Object), no body.
 	if q.Get("head") == "1" {

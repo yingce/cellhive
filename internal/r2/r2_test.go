@@ -7,11 +7,57 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"cellhive/internal/bucket"
 )
+
+func TestPutConditionalIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	no := false
+	if _, matched, err := s.PutConditional(ctx, "acme", "files", "k", []byte("a"), nil, &Condition{Exists: &no}); err != nil || !matched {
+		t.Fatalf("create: matched=%v err=%v", matched, err)
+	}
+	_, old, err := s.Get(ctx, "acme", "files", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const writers = 20
+	var wg sync.WaitGroup
+	wins := make(chan string, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := strconv.Itoa(i)
+			_, matched, err := s.PutConditional(ctx, "acme", "files", "k", []byte(body), nil, &Condition{ETagMatches: []string{old}})
+			if err != nil {
+				t.Errorf("put %d: %v", i, err)
+			}
+			if matched {
+				wins <- body
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(wins)
+	var winner string
+	n := 0
+	for v := range wins {
+		winner = v
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("CAS winners=%d, want 1", n)
+	}
+	got, _, err := s.Get(ctx, "acme", "files", "k")
+	if err != nil || string(got) != winner {
+		t.Fatalf("stored=%q winner=%q err=%v", got, winner, err)
+	}
+}
 
 func newStore(t *testing.T) *Store {
 	t.Helper()

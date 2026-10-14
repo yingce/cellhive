@@ -79,6 +79,41 @@ type Metadata struct {
 	UploadedMs int64             `json:"uploaded_ms,omitempty"`
 }
 
+// Condition is evaluated against the current object and fenced by an atomic
+// conditional create/CAS. It mirrors the supported R2 onlyIf fields.
+type Condition struct {
+	ETagMatches      []string `json:"etagMatches"`
+	ETagDoesNotMatch []string `json:"etagDoesNotMatch"`
+	Exists           *bool    `json:"exists"`
+}
+
+func (c *Condition) matches(exists bool, etag string) bool {
+	if c == nil {
+		return true
+	}
+	if c.Exists != nil && *c.Exists != exists {
+		return false
+	}
+	if len(c.ETagMatches) != 0 {
+		matched := false
+		for _, v := range c.ETagMatches {
+			if strings.Trim(v, `"`) == etag && exists {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, v := range c.ETagDoesNotMatch {
+		if strings.Trim(v, `"`) == etag && exists {
+			return false
+		}
+	}
+	return true
+}
+
 func metaKey(ns, bucketName, key string) (string, error) {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", err
@@ -94,30 +129,57 @@ func (s *Store) Put(ctx context.Context, ns, bucketName, key string, data []byte
 // PutWithMeta writes an object plus optional metadata. Provided md5/sha256
 // checksums (hex) are verified before the write, like Cloudflare R2.
 func (s *Store) PutWithMeta(ctx context.Context, ns, bucketName, key string, data []byte, md *Metadata) (string, error) {
+	etag, _, err := s.PutConditional(ctx, ns, bucketName, key, data, md, nil)
+	return etag, err
+}
+
+// PutConditional returns matched=false when onlyIf fails. A condition always
+// uses the bucket's atomic create/CAS, so a concurrent writer cannot slip
+// between the check and the write.
+func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, data []byte, md *Metadata, condition *Condition) (etag string, matched bool, err error) {
 	k, err := Key(ns, bucketName, key)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if md != nil {
 		if md.MD5 != "" {
 			sum := md5.Sum(data)
 			if !strings.EqualFold(hex.EncodeToString(sum[:]), md.MD5) {
-				return "", fmt.Errorf("r2: md5 checksum mismatch")
+				return "", false, fmt.Errorf("r2: md5 checksum mismatch")
 			}
 		}
 		if md.SHA256 != "" {
 			sum := sha256.Sum256(data)
 			if !strings.EqualFold(hex.EncodeToString(sum[:]), md.SHA256) {
-				return "", fmt.Errorf("r2: sha256 checksum mismatch")
+				return "", false, fmt.Errorf("r2: sha256 checksum mismatch")
 			}
 		}
 	}
-	etag, err := s.B.Put(ctx, k, data)
+	if condition == nil {
+		etag, err = s.B.Put(ctx, k, data)
+	} else {
+		_, old, getErr := s.B.Get(ctx, k)
+		exists := getErr == nil
+		if getErr != nil && !errors.Is(getErr, bucket.ErrNotFound) {
+			return "", false, getErr
+		}
+		if !condition.matches(exists, old) {
+			return "", false, nil
+		}
+		if exists {
+			etag, err = s.B.CAS(ctx, k, data, old)
+		} else {
+			etag, err = s.B.ConditionalCreate(ctx, k, data)
+		}
+		if errors.Is(err, bucket.ErrPrecondition) {
+			return "", false, nil
+		}
+	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if md == nil || (len(md.HTTP) == 0 && len(md.Custom) == 0 && md.MD5 == "" && md.SHA256 == "") {
-		return etag, nil
+		return etag, true, nil
 	}
 	stored := *md
 	stored.Size = int64(len(data))
@@ -127,16 +189,16 @@ func (s *Store) PutWithMeta(ctx context.Context, ns, bucketName, key string, dat
 	}
 	buf, err := json.Marshal(stored)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	mk, err := metaKey(ns, bucketName, key)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if _, err := s.B.Put(ctx, mk, buf); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return etag, nil
+	return etag, true, nil
 }
 
 // GetMeta returns the object's metadata sidecar, or (nil, nil) when absent.

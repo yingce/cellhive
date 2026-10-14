@@ -30,11 +30,12 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var entries []struct {
-		Level       string `json:"level"`
-		Message     string `json:"message"`
-		RequestID   string `json:"request_id"`
-		Traceparent string `json:"traceparent"`
-		AtMs        int64  `json:"at_ms"`
+		Level       string            `json:"level"`
+		Message     string            `json:"message"`
+		MessageArgs []json.RawMessage `json:"message_args"`
+		RequestID   string            `json:"request_id"`
+		Traceparent string            `json:"traceparent"`
+		AtMs        int64             `json:"at_ms"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&entries); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -50,7 +51,8 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		added := s.Logs.Add(logbuf.Entry{
 			Namespace: ns, Worker: worker, Level: e.Level, Message: e.Message,
-			RequestID: e.RequestID, TraceID: tid, SpanID: sid, AtMs: e.AtMs,
+			MessageArgs: e.MessageArgs,
+			RequestID:   e.RequestID, TraceID: tid, SpanID: sid, AtMs: e.AtMs,
 		})
 		// Optional OTLP export (ADR-172): off by default, and "tail" mode only
 		// exports workers with an active subscription. Best-effort/non-blocking.

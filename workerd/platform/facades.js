@@ -107,6 +107,10 @@ function kvValue(bytes, type) {
   return type === "json" ? JSON.parse(text) : text;
 }
 
+function kvReadType(options) {
+  return options && typeof options === "object" ? options.type : options;
+}
+
 // makeKVFromStub keeps micro-batching in the tenant isolate. A WorkerEntrypoint
 // may be instantiated once per JSRPC call, so batching inside the platform stub
 // cannot observe sibling Promise.all() calls.
@@ -160,8 +164,8 @@ export function makeKVFromStub(stub) {
     }
   };
   return {
-    get: (key, type) => enqueue(key, type, false),
-    getWithMetadata: (key, type) => enqueue(key, type, true),
+    get: (key, options) => enqueue(key, kvReadType(options), false),
+    getWithMetadata: (key, options) => enqueue(key, kvReadType(options), true),
     put: (...args) => stub.put(...args),
     delete: (...args) => stub.delete(...args),
     list: (...args) => stub.list(...args),
@@ -171,7 +175,8 @@ export function makeKVFromStub(stub) {
 export function makeKV(platform, ns, scopeToken) {
   const base = platform.url + "/v1/kv/";
   return {
-    async get(key, type) {
+    async get(key, options) {
+      const type = kvReadType(options);
       const r = await pfetch(platform, base + "get?" + q({ ns, key }), { headers: headers(platform, scopeToken) });
       if (r.status === 404) return null;
       await must(r, "kv.get");
@@ -182,7 +187,8 @@ export function makeKV(platform, ns, scopeToken) {
       const r = await pfetch(platform, base + "put?" + q({ ns, key, ...kvPutOpts(options) }), { method: "POST", headers: headers(platform, scopeToken), body });
       await must(r, "kv.put");
     },
-    async getWithMetadata(key, type) {
+    async getWithMetadata(key, options) {
+      const type = kvReadType(options);
       const r = await pfetch(platform, base + "get?" + q({ ns, key }), { headers: headers(platform, scopeToken) });
       if (r.status === 404) return { value: null, metadata: null };
       await must(r, "kv.getWithMetadata");
@@ -217,6 +223,7 @@ export function makeDO(platform, spec) {
   function identity(id) {
     return {
       namespace: spec.ns, worker: spec.worker, bundle_sha: spec.bundle_sha, version: spec.version,
+      limits: spec.limits,
       storage_id: spec.storage_id || "",
       class: spec.class, storage_class: spec.storage_class || spec.class, id: String(id),
     };
@@ -528,22 +535,25 @@ export function makeR2(platform, ns, bucket, scopeToken) {
     async put(key, value, options = {}) {
       const payload = typeof value === "string" ? value : value;
       const h = Object.assign({}, headers(platform, scopeToken));
+      if (options.onlyIf !== undefined) h["x-cellhive-r2-only-if"] = b64enc(JSON.stringify(options.onlyIf));
       if (options.httpMetadata) h["x-cellhive-r2-http-metadata"] = b64enc(JSON.stringify(options.httpMetadata));
       if (options.customMetadata) h["x-cellhive-r2-custom-metadata"] = b64enc(JSON.stringify(options.customMetadata));
       if (options.md5) h["x-cellhive-r2-md5"] = options.md5;
       if (options.sha256) h["x-cellhive-r2-sha256"] = options.sha256;
       const r = await pfetch(platform, base + "object?" + q({ ns, bucket, key }), { method: "PUT", headers: h, body: payload });
+      if (r.status === 412) return null;
       await must(r, "r2.put");
       return objFromJSON(await r.json());
     },
     async get(key, options = {}) {
       const h = headers(platform, scopeToken);
+      if (options.onlyIf !== undefined) h["x-cellhive-r2-only-if"] = b64enc(JSON.stringify(options.onlyIf));
       if (options.range) {
         const end = options.range.length ? options.range.offset + options.range.length - 1 : "";
         h["range"] = "bytes=" + options.range.offset + "-" + end;
       }
       const r = await pfetch(platform, base + "object?" + q({ ns, bucket, key }), { headers: h });
-      if (r.status === 404) return null;
+      if (r.status === 404 || r.status === 304) return null;
       await must(r, "r2.get");
       return body(await r.arrayBuffer(), objFromResponse(r, key), options.range);
     },
@@ -576,17 +586,36 @@ export function makeR2(platform, ns, bucket, scopeToken) {
 export function makeQueue(platform, ns, queue, scopeToken) {
   return {
     async send(body, options = {}) {
+      const encoded = encodeQueueBody(body, options.contentType);
       const r = await pfetch(platform, platform.url + "/v1/queue/send?" + q({ ns, queue, delay_seconds: options.delaySeconds, idempotency_key: options.idempotencyKey }), {
         method: "POST",
-        headers: { ...headers(platform, scopeToken), "content-type": typeof body === "string" ? "text/plain" : "application/json" },
-        body: typeof body === "string" ? body : JSON.stringify(body),
+        headers: { ...headers(platform, scopeToken), "content-type": encoded.mime, "x-cellhive-queue-content-type": encoded.contentType },
+        body: encoded.body,
       });
       await must(r, "queue.send");
       const out = await r.json();
       return { id: out.id };
     },
+    async sendBatch(messages = []) {
+      if (!Array.isArray(messages) || messages.length < 1 || messages.length > 100) throw new TypeError("sendBatch requires 1..100 messages");
+      const payload = messages.map((item) => { if (!item || typeof item !== "object" || !("body" in item)) throw new TypeError("sendBatch message must contain body"); const e = encodeQueueBody(item.body, item.contentType); return { body: base64Queue(e.body), contentType: e.contentType, delaySeconds: item.delaySeconds, idempotencyKey: item.idempotencyKey, metadata: item.metadata }; });
+      const r = await pfetch(platform, platform.url + "/v1/queue/send-batch?" + q({ ns, queue }), { method: "POST", headers: { ...headers(platform, scopeToken), "content-type": "application/json" }, body: JSON.stringify({ messages: payload }) });
+      await must(r, "queue.sendBatch");
+      return { ids: (await r.json()).ids || [] };
+    },
   };
 }
+
+function base64Queue(bytes) { let s = ""; for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b); return btoa(s); }
+function encodeQueueBody(body, requested) {
+  const contentType = requested || (typeof body === "string" ? "text" : "json");
+  if (contentType === "text") return { contentType, mime: "text/plain", body: String(body) };
+  if (contentType === "bytes") { const b = body instanceof ArrayBuffer ? new Uint8Array(body) : ArrayBuffer.isView(body) ? new Uint8Array(body.buffer, body.byteOffset, body.byteLength) : null; if (!b) throw new TypeError("bytes contentType requires ArrayBuffer or view"); return { contentType, mime: "application/octet-stream", body: b }; }
+  if (contentType === "v8") return { contentType, mime: "application/octet-stream", body: JSON.stringify({ __cellhive_v8: encode(body) }) };
+  if (contentType !== "json") throw new TypeError("contentType must be json, text, bytes, or v8");
+  return { contentType, mime: "application/json", body: JSON.stringify(body) };
+}
+
 
 // makeWorkflow exposes the supported Workflows subset: create/createBatch,
 // instance lifecycle/status/delete/sendEvent, and instance listing.
@@ -604,7 +633,7 @@ export function makeWorkflow(platform, ns, name, scopeToken) {
   };
   const decode = (b64) => {
     if (!b64) return undefined;
-    try { return JSON.parse(atob(b64)); } catch (e) { return undefined; }
+    try { return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)))); } catch (e) { return undefined; }
   };
   return {
     async create(options = {}) {
@@ -624,7 +653,7 @@ export function makeWorkflow(platform, ns, name, scopeToken) {
         id,
         async status() {
           const out = await call("get", "GET", { id });
-          return { status: out.status, error: out.error || undefined, output: decode(out.output) };
+          return { status: out.status === "sleeping" ? "waiting" : out.status, error: out.error || undefined, output: decode(out.output) };
         },
         async pause() { await call("pause", "POST", { id }); },
         async resume() { await call("resume", "POST", { id }); },
