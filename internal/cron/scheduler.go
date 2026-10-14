@@ -18,16 +18,19 @@ type Target struct {
 	Cron      string
 }
 
+type WorkflowTarget struct{ Namespace, Workflow, Cron string }
+
 // Scheduler materializes due cron slots as KindCron timers (ADR-076). It is
 // idempotent (the timer token dedups repeated upserts of the same slot), so it
 // is safe to run on every node.
 type Scheduler struct {
-	Targets  func(ctx context.Context) ([]Target, error)
-	Open     func(ctx context.Context, sc cell.Scope) (*timer.Store, error)
-	Register func(scope string)
-	Interval time.Duration
-	Now      func() time.Time
-	Log      *slog.Logger
+	Targets         func(ctx context.Context) ([]Target, error)
+	WorkflowTargets func(ctx context.Context) ([]WorkflowTarget, error)
+	Open            func(ctx context.Context, sc cell.Scope) (*timer.Store, error)
+	Register        func(scope string)
+	Interval        time.Duration
+	Now             func() time.Time
+	Log             *slog.Logger
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -109,6 +112,33 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 			s.Register(sc.String())
 		}
 		upserts++
+	}
+	if s.WorkflowTargets != nil {
+		wfs, err := s.WorkflowTargets(ctx)
+		if err != nil {
+			return upserts, err
+		}
+		for _, tg := range wfs {
+			sch, ok := s.schedule(tg.Cron)
+			if !ok || !sch.Matches(slot) {
+				continue
+			}
+			sc := cell.Scope{Namespace: tg.Namespace, Class: "__workflow__", ID: tg.Workflow}
+			st, err := s.Open(ctx, sc)
+			if err != nil {
+				s.log().Warn("workflow schedule open failed", "scope", sc.String(), "err", err)
+				continue
+			}
+			t := timer.New(slot.UnixMilli(), timer.KindWorkflowSchedule, sc.String(), strconv.FormatInt(slot.Unix()/60, 10))
+			if err := st.Upsert(ctx, t); err != nil {
+				s.log().Warn("workflow schedule upsert failed", "scope", sc.String(), "err", err)
+				continue
+			}
+			if s.Register != nil {
+				s.Register(sc.String())
+			}
+			upserts++
+		}
 	}
 	return upserts, nil
 }

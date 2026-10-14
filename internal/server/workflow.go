@@ -79,7 +79,16 @@ func (s *Server) startWorkflowRun(ctx context.Context, ns, name, id string) {
 	}
 	token := ""
 	if s.Workflows != nil {
-		tok, _, _, ok, err := s.Workflows.ClaimRun(ctx, ns, name, id, 60000)
+		limit := 0
+		if s.Control != nil {
+			if raw, err := s.Control.ResourceConfig(ctx, ns, "workflow", name); err == nil {
+				var policy workflow.Policy
+				if json.Unmarshal(raw, &policy) == nil {
+					limit = policy.Concurrency
+				}
+			}
+		}
+		tok, _, _, ok, err := s.Workflows.ClaimRunLimited(ctx, ns, name, id, 60000, limit)
 		if err != nil || !ok {
 			return
 		}

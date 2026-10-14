@@ -99,8 +99,11 @@ func TestCloudflareAssetsAndWorkflows(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("asset upload %d %s", rr.Code, rr.Body.String())
 	}
-	if rr := call(http.MethodPut, "/client/v4/accounts/acme/workflows/daily", `{"script_name":"web","class_name":"Daily"}`); rr.Code != 200 {
+	if rr := call(http.MethodPut, "/client/v4/accounts/acme/workflows/daily", `{"script_name":"web","class_name":"Daily","concurrency":{"limit":2},"schedules":[{"cron":"*/5 * * * *"}],"default_retention":{"success_retention":"3 days","error_retention":86400000}}`); rr.Code != 200 {
 		t.Fatalf("workflow put %d %s", rr.Code, rr.Body.String())
+	}
+	if raw, err := s.Control.ResourceConfig(t.Context(), "acme", "workflow", "daily"); err != nil || !bytes.Contains(raw, []byte(`"success_retention_ms"`)) {
+		t.Fatalf("workflow policy was not persisted: %v %s", err, raw)
 	}
 	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workflows/daily", ""); rr.Code != 200 {
 		t.Fatalf("workflow get %d %s", rr.Code, rr.Body.String())

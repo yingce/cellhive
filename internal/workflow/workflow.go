@@ -121,6 +121,16 @@ type Target struct {
 	Version                      int
 }
 
+// Policy is the Cloudflare Workflow definition policy persisted by the
+// control-plane compatibility layer. Zero values preserve the historical
+// CellHive behavior.
+type Policy struct {
+	Concurrency        int      `json:"concurrency,omitempty"`
+	Schedules          []string `json:"schedules,omitempty"`
+	SuccessRetentionMs int64    `json:"success_retention_ms,omitempty"`
+	ErrorRetentionMs   int64    `json:"error_retention_ms,omitempty"`
+}
+
 func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, error) {
 	if ns == "" || name == "" {
 		return nil, fmt.Errorf("workflow: ns and name are required")
@@ -190,6 +200,12 @@ func newRunToken() string {
 // ClaimRun acquires the instance's run lease for a new attempt. ok=false when
 // the instance is paused/terminal or another run holds a live lease.
 func (s *Store) ClaimRun(ctx context.Context, ns, name, id string, ttlMs int64) (token string, generation uint64, status Status, ok bool, err error) {
+	return s.ClaimRunLimited(ctx, ns, name, id, ttlMs, 0)
+}
+
+// ClaimRunLimited atomically enforces a definition-wide concurrency limit when
+// limit is positive, while retaining the per-instance lease fence.
+func (s *Store) ClaimRunLimited(ctx context.Context, ns, name, id string, ttlMs int64, limit int) (token string, generation uint64, status Status, ok bool, err error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return "", 0, "", false, err
@@ -209,6 +225,15 @@ func (s *Store) ClaimRun(ctx context.Context, ns, name, id string, ttlMs int64) 
 		}
 		if lease > now {
 			return ErrRunActive
+		}
+		if limit > 0 {
+			var active int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM instances WHERE status IN (?, ?, ?) AND id <> ?`, string(StatusQueued), string(StatusRunning), string(StatusSleeping), id).Scan(&active); err != nil {
+				return err
+			}
+			if active >= limit {
+				return nil
+			}
 		}
 		token = newRunToken()
 		gen++
@@ -314,6 +339,47 @@ func (s *Store) Prune(ctx context.Context, ns, name string, beforeMs int64) (int
 		}
 	}
 	return len(ids), nil
+}
+
+// PruneRetention applies separate success/error retention windows. A zero
+// window leaves that terminal status untouched.
+func (s *Store) PruneRetention(ctx context.Context, ns, name string, successBefore, errorBefore int64) (int, error) {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT id,status FROM instances WHERE (status=? AND ? > 0 AND updated_ms < ?) OR (status=? AND ? > 0 AND updated_ms < ?)`, string(StatusComplete), successBefore, successBefore, string(StatusErrored), errorBefore, errorBefore)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id, st string
+			if err := rows.Scan(&id, &st); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			for _, tbl := range []string{"steps", "step_attempts", "events", "waits"} {
+				if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE instance_id = ?", id); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM instances WHERE id = ?", id); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
 }
 
 // Drop deletes every instance (and its steps/attempts/events/waits) of a

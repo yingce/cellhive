@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -333,8 +334,36 @@ func main() {
 			return control.WorkflowTarget{Namespace: ns, Worker: instance.TargetWorker, Name: name, ClassName: instance.TargetClass, BundleSHA: instance.TargetBundle, Version: instance.TargetVersion}, true, nil
 		},
 		Claim: func(cctx context.Context, ns, name, id string) (string, uint64, bool, error) {
-			tok, gen, _, ok, err := workflowStore.ClaimRun(cctx, ns, name, id, workflowLeaseMs)
+			limit := 0
+			if ctrlRef != nil {
+				if raw, err := ctrlRef.ResourceConfig(cctx, ns, "workflow", name); err == nil {
+					var policy workflow.Policy
+					if json.Unmarshal(raw, &policy) == nil {
+						limit = policy.Concurrency
+					}
+				}
+			}
+			tok, gen, _, ok, err := workflowStore.ClaimRunLimited(cctx, ns, name, id, workflowLeaseMs, limit)
 			return tok, gen, ok, err
+		},
+		CreateScheduled: func(cctx context.Context, ns, name, occurrence string) (string, error) {
+			if ctrlRef == nil {
+				return "", fmt.Errorf("workflow control unavailable")
+			}
+			proj, err := ctrlRef.Projection(cctx)
+			if err != nil {
+				return "", err
+			}
+			target, ok := proj.WorkflowTargetFor(ns, name)
+			if !ok {
+				return "", fmt.Errorf("workflow target not found")
+			}
+			id := "schedule-" + occurrence
+			in, err := workflowStore.CreateWithTarget(cctx, ns, name, id, nil, workflow.Target{Worker: target.Worker, BundleSHA: target.BundleSHA, Version: target.Version, ClassName: target.ClassName})
+			if err != nil {
+				return "", err
+			}
+			return in.ID, nil
 		},
 		Target: func(tctx context.Context, ns, name string) (control.WorkflowTarget, bool) {
 			if ctrlRef == nil {
@@ -500,6 +529,31 @@ func main() {
 				}
 				return out, nil
 			},
+			WorkflowTargets: func(cctx context.Context) ([]cron.WorkflowTarget, error) {
+				proj, err := ctrl.Projection(cctx)
+				if err != nil {
+					return nil, err
+				}
+				out := []cron.WorkflowTarget{}
+				for _, app := range proj.Apps {
+					for _, wk := range app.Workers {
+						for _, b := range wk.Version.Bindings {
+							if b.Type != "workflow" {
+								continue
+							}
+							if raw, e := ctrl.ResourceConfig(cctx, app.Namespace, "workflow", b.ID); e == nil {
+								var p workflow.Policy
+								if json.Unmarshal(raw, &p) == nil {
+									for _, expr := range p.Schedules {
+										out = append(out, cron.WorkflowTarget{Namespace: app.Namespace, Workflow: b.ID, Cron: expr})
+									}
+								}
+							}
+						}
+					}
+				}
+				return out, nil
+			},
 		}).Start(ctx)
 	}
 
@@ -507,6 +561,7 @@ func main() {
 		go runAuditPruneLoop(ctx, log, ctrl, cfg.AuditRetention)
 
 	}
+	go runWorkflowRetentionLoop(ctx, log, ctrl, workflowStore)
 
 	srv := server.New(server.Deps{
 		Cfg:              cfg,
@@ -1121,6 +1176,53 @@ func runAuditPruneLoop(ctx context.Context, log *slog.Logger, ctrl *control.Stor
 					log.Warn("audit prune failed", "ns", app.Namespace, "err", err)
 				} else if n > 0 {
 					log.Info("audit pruned", "ns", app.Namespace, "removed", n)
+				}
+			}
+		}
+	}
+}
+
+func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *control.Store, workflows *workflow.Store) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			proj, err := ctrl.Projection(ctx)
+			if err != nil {
+				log.Warn("workflow retention: projection failed", "err", err)
+				continue
+			}
+			now := time.Now().UnixMilli()
+			for _, app := range proj.Apps {
+				for _, wk := range app.Workers {
+					for _, b := range wk.Version.Bindings {
+						if b.Type != "workflow" {
+							continue
+						}
+						raw, e := ctrl.ResourceConfig(ctx, app.Namespace, "workflow", b.ID)
+						if e != nil {
+							continue
+						}
+						var p workflow.Policy
+						if json.Unmarshal(raw, &p) != nil {
+							continue
+						}
+						var sb, eb int64
+						if p.SuccessRetentionMs > 0 {
+							sb = now - p.SuccessRetentionMs
+						}
+						if p.ErrorRetentionMs > 0 {
+							eb = now - p.ErrorRetentionMs
+						}
+						if n, e := workflows.PruneRetention(ctx, app.Namespace, b.ID, sb, eb); e != nil {
+							log.Warn("workflow retention failed", "ns", app.Namespace, "workflow", b.ID, "err", e)
+						} else if n > 0 {
+							log.Info("workflow instances pruned", "ns", app.Namespace, "workflow", b.ID, "removed", n)
+						}
+					}
 				}
 			}
 		}

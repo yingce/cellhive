@@ -30,7 +30,8 @@ type WorkflowDispatcher struct {
 	// Params reads the durable instance input for every run and timer resume.
 	Params func(ctx context.Context, ns, name, id string) ([]byte, error)
 	// Claim acquires a run lease for the instance (nil = dispatch without lease).
-	Claim func(ctx context.Context, ns, name, id string) (token string, generation uint64, ok bool, err error)
+	Claim           func(ctx context.Context, ns, name, id string) (token string, generation uint64, ok bool, err error)
+	CreateScheduled func(ctx context.Context, ns, name, occurrence string) (string, error)
 	// Next receives non-workflow timer kinds.
 	Next   timer.Dispatcher
 	Client *http.Client
@@ -100,6 +101,21 @@ func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken str
 // Dispatch is the timer.Dispatcher facade: KindWorkflowSleep timers resume the
 // slept instance; everything else passes to Next.
 func (d *WorkflowDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
+	if t.Kind == timer.KindWorkflowSchedule {
+		ns, name, ok := splitWorkflowScope(t.Scope)
+		if !ok || d.CreateScheduled == nil {
+			return fmt.Errorf("workflow: bad schedule scope %q", t.Scope)
+		}
+		id, err := d.CreateScheduled(ctx, ns, name, t.Occurrence)
+		if err != nil {
+			return err
+		}
+		token, _, ok, err := d.Claim(ctx, ns, name, id)
+		if err != nil || !ok {
+			return err
+		}
+		return d.Run(ctx, ns, name, id, token)
+	}
 	if t.Kind != timer.KindWorkflowSleep {
 		if d.Next != nil {
 			return d.Next.Dispatch(ctx, t)
