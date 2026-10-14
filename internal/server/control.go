@@ -101,6 +101,10 @@ func decodeControl(w http.ResponseWriter, r *http.Request, v any) bool {
 // AdminHandler builds the admin mux (mounted on the admin listener only).
 func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
+	// Cloudflare API shaped routes used by the stock Wrangler client. These
+	// translate into the native CellHive control plane; account_id is the
+	// CellHive namespace for this compatibility surface.
+	s.registerCloudflareWorkerRoutes(mux)
 	mux.HandleFunc("GET /admin", s.adminAuth(s.handleAdminUI))
 	mux.HandleFunc("GET /v1/control/logs", s.adminAuth(s.handleLogQuery))
 	mux.HandleFunc("POST /v1/control/logs/subscribe", s.adminAuth(s.handleLogSubscribe))

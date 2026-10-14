@@ -62,7 +62,8 @@
 - **兼容命令组**：`versions`/`deployments`/`triggers`/`workflows`/`queues`/`types`/`init` 转发到原生实现或**结构化拒绝 + 替代说明**（ADR-148）；`d1`/`r2`/`kv` 转发到**原生每域命令**（ADR-157，仅数据面 verb 拒绝）；`vectorize`/`hyperdrive` 前缀透传到原生实现；
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`kv:bulk`→数据面（用 KV 绑定）、`unstable_*`→内部命令；
 - **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive releases`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`d1 execute`/`r2 object`/`kv key`→Worker 绑定 + `cellhive dev`、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
-- **真 wrangler 兼容（备选，未做）**：实测 wrangler 4.133.0 读 `CLOUDFLARE_API_BASE_URL`（旧名 `CF_API_BASE_URL`）与 SDK 的 `CLOUDFLARE_BASE_URL`，故可实现 CF API 子集让其原样运行；代价是跟随 CF API 漂移 + `content/v2` multipart 上传格式对拍，作为独立 spike，不在本条范围。
+- **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。
+- **第一阶段边界**：目前优先保证普通 Worker 发布主链路；复杂多模块上传、独立 versions/deployments 生命周期、Wrangler 资源自动创建、tail/login/dev 及 Cloudflare 专有资源 API 仍按兼容矩阵处理。后续按真实固定版本 Wrangler 的请求对拍逐项补齐，避免把 Cloudflare API 形状耦合进 CellHive 原生控制 API。
 
 ## `compatibility_flags` authority（ADR-153/186）
 

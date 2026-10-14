@@ -1,0 +1,66 @@
+package server
+
+import (
+	"bytes"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
+	s := newControlServer(t)
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, _ := w.CreateFormField("metadata")
+	_, _ = part.Write([]byte(`{"main_module":"worker.js","compatibility_date":"2026-09-23"}`))
+	part, _ = w.CreateFormFile("worker.js", "worker.js")
+	_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
+	_ = w.Close()
+	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions", &body)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"success":true`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"version_id"`)) {
+		t.Fatalf("response=%s", rr.Body.String())
+	}
+	releases, err := s.Control.Releases(t.Context(), "acme", "web")
+	if err != nil || len(releases) != 1 {
+		t.Fatalf("worker was not deployed: releases=%d err=%v", len(releases), err)
+	}
+}
+
+func TestParseCloudflareWorkerMultipart(t *testing.T) {
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	meta := `{"main_module":"worker.js","compatibility_date":"2026-09-23","bindings":[{"name":"DB","type":"d1","id":"db1"},{"name":"TOKEN","type":"plain_text","text":"ok"},{"name":"BUCKET","type":"r2_bucket","bucket_name":"files"}],"triggers":{"crons":["*/5 * * * *"]}}`
+	part, err := w.CreateFormField("metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte(meta))
+	part, err = w.CreateFormFile("worker.js", "worker.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/", &body)
+	r.Header.Set("Content-Type", w.FormDataContentType())
+	got, module, err := parseCloudflareWorkerMultipart(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MainModule != "worker.js" || string(module) == "" || got.CompatibilityDate != "2026-09-23" {
+		t.Fatalf("metadata/module = %+v %q", got, module)
+	}
+	if got.Vars["TOKEN"] != "ok" || len(got.Bindings) != 2 || got.Crons[0] != "*/5 * * * *" {
+		t.Fatalf("mapped metadata = %+v", got)
+	}
+}
