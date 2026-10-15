@@ -4,7 +4,7 @@ CellHive is a **self-hosted, Cloudflare Workers-compatible** runtime: the **comp
 
 This directory mirrors the **finalized design** docs in English (the Chinese originals are authoritative). When code and documentation conflict, the documentation takes precedence and both are synchronized; to change the design, update [`../decisions.md`](../decisions.md) first and update the matching docs with the code.
 
-> This `docs/en/` tree is the **English mirror** of the design docs. The **Chinese originals under [`docs/`](../README.md) are authoritative** and may be newer; `decisions.md` here is an English index that links to the full Chinese ADR record.
+> English is the default documentation route. The maintained Chinese entry point is [`../README.zh.md`](../README.zh.md); the Chinese design records remain authoritative when the mirrors differ. `decisions.md` here is an English index that links to the full Chinese ADR record.
 
 ## Start Here
 
@@ -119,7 +119,7 @@ Before changing code, read the corresponding contracts and test anchors; see [`c
 
 ## Documentation Rules
 
-- **Language**: `docs/` currently uses Chinese; the root `README.md` defaults to English, and `README.zh.md` is Chinese.
+- **Language**: English is the default route (`README.md`, `docs/README.md`, module and examples entry points); Chinese companions use the `.zh.md` suffix. Keep both maps and language links synchronized.
 - **Write contracts, not tutorials**: Internal documentation records ownership, interfaces, storage keys, failure semantics, deployment order, observability, and **test anchors**, rather than user-facing tutorials.
 - **Keep in sync with code**: When code changes, update the corresponding documentation; for design changes, update [`decisions.md`](decisions.md) first and append an ADR.
 - **Status terminology**: `Supported` (usable by ordinary applications) · `Partial` (with explicit boundaries) · `Rejected` (explicitly rejected during deployment/configuration) · `Internal` (platform surface, not a tenant API).
@@ -134,4 +134,4 @@ Before changing code, read the corresponding contracts and test anchors; see [`c
 - **owner / epoch / fence**: The single-writer lease, monotonically increasing generation, and fence for a cell.
 - **LTX**: The replication format for SQLite transaction logs (implementation follows LiteFS/`superfly/ltx`).
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-10-15_

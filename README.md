@@ -109,10 +109,10 @@ scripts/    CI and ops scripts
 
 ## Documentation
 
-> **Language:** design docs are available in English under [`docs/en/`](./docs/en/README.md) (the **Chinese originals** under [`docs/`](./docs/en/README.md) are authoritative and may be newer). This README, the module docs and the examples are the English entry points; for behavior, the source and tests are authoritative.
+> **Language:** English is the default documentation route. Start at [`docs/README.md`](./docs/README.md); the Chinese entry points are `docs/README.zh.md`, `docs/modules/README.zh.md`, and `examples/README.zh.md`. The Chinese design records remain authoritative when the mirrors differ; source and tests are authoritative for behavior.
 
-- **Docs home / start here:** [`docs/README.md`](./docs/en/README.md) — audience paths (operate · build Workers · contribute · protocol deep-dive) and a grouped map of every doc.
-- **Module docs:** [`docs/modules/`](./docs/en/modules/README.md) — per module: role, interfaces, an environment-variable table (with defaults), invariants, source layout and test anchors.
+- **Docs home / start here:** [`docs/README.md`](./docs/README.md) — audience paths (operate · build Workers · contribute · protocol deep-dive) and the English documentation map.
+- **Module docs:** [`docs/modules/`](./docs/modules/README.md) — per module: role, interfaces, an environment-variable table (with defaults), invariants, source layout and test anchors.
 - **Examples:** [`examples/`](./examples/README.md) — one runnable project per feature (KV, D1, R2, Queues, Cron, Durable Objects, Workflows, service bindings, assets, AI, Vectorize, …) plus a feature→source→doc code map.
 - **Concepts & design:** [`architecture.md`](./docs/en/architecture.md), [`cell-protocol.md`](./docs/en/cell-protocol.md), [`durable-objects.md`](./docs/en/durable-objects.md), [`protocol-formats.md`](./docs/en/protocol-formats.md), [`glossary.md`](./docs/en/glossary.md).
 - **Bindings & compatibility:** [`bindings.md`](./docs/en/bindings.md), [`compatibility-matrix.md`](./docs/en/compatibility-matrix.md), [`wrangler-compat.md`](./docs/en/wrangler-compat.md).

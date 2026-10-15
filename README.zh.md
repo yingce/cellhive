@@ -109,9 +109,9 @@ scripts/    CI 与运维脚本
 
 ## 文档
 
-- **文档首页 / 从这里开始**：[`docs/README.md`](./docs/README.md) — 按角色给路径（运维 · 写 Worker · 贡献 · 协议深挖），并按主题分组索引全部文档。
-- **模块文档**：[`docs/modules/`](./docs/modules/README.md) — 逐模块给出作用、关键接口、**环境变量表（含默认值）**、不变量、源码与测试锚点。
-- **示例代码**：[`examples/`](./examples/README.md) — 每个功能一个可运行示例（KV/D1/R2/Queue/Cron/DO/Workflow/service/assets/AI/Vectorize…），并附"功能→源码→文档"代码导航。
+- **文档首页 / 从这里开始**：[`docs/README.zh.md`](./docs/README.zh.md) — 按角色给路径（运维 · 写 Worker · 贡献 · 协议深挖），并按主题分组索引全部文档。
+- **模块文档**：[`docs/modules/`](./docs/modules/README.zh.md) — 逐模块给出作用、关键接口、**环境变量表（含默认值）**、不变量、源码与测试锚点。
+- **示例代码**：[`examples/`](./examples/README.zh.md) — 每个功能一个可运行示例（KV/D1/R2/Queue/Cron/DO/Workflow/service/assets/AI/Vectorize…），并附"功能→源码→文档"代码导航。
 - **概念与设计**：[`architecture.md`](./docs/architecture.md)、[`cell-protocol.md`](./docs/cell-protocol.md)、[`durable-objects.md`](./docs/durable-objects.md)、[`protocol-formats.md`](./docs/protocol-formats.md)、[`glossary.md`](./docs/glossary.md)。
 - **绑定与兼容**：[`bindings.md`](./docs/bindings.md)、[`compatibility-matrix.md`](./docs/compatibility-matrix.md)、[`wrangler-compat.md`](./docs/wrangler-compat.md)。
 - **存储、复制与伸缩**：[`storage-and-s3.md`](./docs/storage-and-s3.md)、[`scaling-and-ha.md`](./docs/scaling-and-ha.md)、[`timers-and-dispatch.md`](./docs/timers-and-dispatch.md)。

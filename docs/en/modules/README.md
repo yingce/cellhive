@@ -1,6 +1,6 @@
 # Module Documentation
 
-This directory splits the design notes by **module**: each module provides a one-sentence purpose, key interfaces, an **environment variables table (variable / default / purpose)**, invariants that must be preserved, source locations, and test anchors. For the **complete list** of configuration and parsing rules, see [`../configuration.md`](../configuration.md) (the authoritative source is the code).
+This directory splits the design notes by **module**: each module provides a one-sentence purpose, key interfaces, an **environment variables table (variable / default / purpose)**, invariants that must be preserved, source locations, and test anchors. For the **complete list** of configuration and parsing rules, see [`../configuration.md`](../configuration.md) (the authoritative source is the code). The Chinese entry point is [`../../modules/README.zh.md`](../../modules/README.zh.md).
 
 ## Module Navigation
 
@@ -23,4 +23,4 @@ This directory splits the design notes by **module**: each module provides a one
 - To write Workers: [`bindings`](bindings.md) → [`compatibility-matrix.md`](../compatibility-matrix.md) → [`wrangler-compat.md`](../wrangler-compat.md).
 - To modify code: [`../contributing.md`](../contributing.md) (reading paths and test anchors by change type).
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-10-15_
