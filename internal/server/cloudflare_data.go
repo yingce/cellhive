@@ -191,8 +191,8 @@ func (s *Server) handleCloudflareD1Query(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid_sql", "sql is required")
 		return
 	}
-	if migrationName, script, ok := cloudflareMigrationSQL(in.SQL); ok {
-		body, _ := json.Marshal(map[string]string{"name": migrationName, "sql": script})
+	if migrationTable, migrationName, script, ok := cloudflareMigrationSQL(in.SQL); ok {
+		body, _ := json.Marshal(map[string]string{"table": migrationTable, "name": migrationName, "sql": script})
 		rec, err := s.cloudflareBindingCall(r, "d1", name, http.MethodPost, "/v1/d1/migrations", url.Values{"db": {name}}, body)
 		if cloudflareBridgeError(w, rec, err) {
 			return
@@ -236,16 +236,17 @@ func (s *Server) handleCloudflareD1Query(w http.ResponseWriter, r *http.Request)
 	cloudflareResult(w, results)
 }
 
-var cloudflareMigrationPattern = regexp.MustCompile(`(?is)\s*INSERT\s+INTO\s+"d1_migrations"\s*\(\s*name\s*\)\s*values\s*\(\s*'((?:''|[^'])*)'\s*\)\s*;?\s*$`)
+var cloudflareMigrationPattern = regexp.MustCompile(`(?is)\s*INSERT\s+INTO\s+"((?:""|[^"])*)"\s*\(\s*name\s*\)\s*values\s*\(\s*'((?:''|[^'])*)'\s*\)\s*;?\s*$`)
 
-func cloudflareMigrationSQL(sqlText string) (name, script string, ok bool) {
+func cloudflareMigrationSQL(sqlText string) (table, name, script string, ok bool) {
 	loc := cloudflareMigrationPattern.FindStringSubmatchIndex(sqlText)
 	if loc == nil || loc[0] == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
-	name = strings.ReplaceAll(sqlText[loc[2]:loc[3]], "''", "'")
+	table = strings.ReplaceAll(sqlText[loc[2]:loc[3]], `""`, `"`)
+	name = strings.ReplaceAll(sqlText[loc[4]:loc[5]], "''", "'")
 	script = strings.TrimSpace(sqlText[:loc[0]])
-	return name, script, name != "" && script != ""
+	return table, name, script, table != "" && name != "" && script != ""
 }
 
 // cloudflareMultiSQL ignores semicolons in quoted values and comments. The

@@ -23,7 +23,11 @@ func (s *Server) handleD1MigrationsList(w http.ResponseWriter, r *http.Request) 
 	if s.forwardRead(w, r, d1.Scope(ns, db), nil) {
 		return
 	}
-	rows, err := s.D1.ListMigrations(r.Context(), ns, db)
+	table := r.URL.Query().Get("table")
+	if table == "" {
+		table = "d1_migrations"
+	}
+	rows, err := s.D1.ListMigrationsTable(r.Context(), ns, db, table)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "d1_migrations_error", err.Error())
 		return
@@ -40,8 +44,9 @@ func (s *Server) handleD1MigrationsApply(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
-		SQL  string `json:"sql"`
+		Name  string `json:"name"`
+		SQL   string `json:"sql"`
+		Table string `json:"table"`
 	}
 	if !decodeLimit(w, r, &req, 8<<20) {
 		return
@@ -53,7 +58,11 @@ func (s *Server) handleD1MigrationsApply(w http.ResponseWriter, r *http.Request)
 	var applied bool
 	if err := s.capturedWrite(r.Context(), d1.Scope(ns, db), func() error {
 		var e error
-		applied, e = s.D1.ApplyMigration(r.Context(), ns, db, req.Name, req.SQL)
+		table := req.Table
+		if table == "" {
+			table = "d1_migrations"
+		}
+		applied, e = s.D1.ApplyMigrationTable(r.Context(), ns, db, table, req.Name, req.SQL)
 		return e
 	}); err != nil {
 		s.captureErr(w, err, "d1_migrations_error")

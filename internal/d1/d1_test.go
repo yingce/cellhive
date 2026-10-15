@@ -134,6 +134,30 @@ func TestImportChecksDigestAndRetriesOnce(t *testing.T) {
 	}
 }
 
+func TestCustomMigrationTableIsIndependent(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, table := range []string{"d1_migrations", `custom"migrations`} {
+		applied, err := s.ApplyMigrationTable(ctx, "acme", "main", table, "0001_init.sql", "CREATE TABLE IF NOT EXISTS shared(v TEXT);")
+		if err != nil || !applied {
+			t.Fatalf("apply %q = %v, %v", table, applied, err)
+		}
+		rows, err := s.ListMigrationsTable(ctx, "acme", "main", table)
+		if err != nil || len(rows) != 1 || rows[0].Name != "0001_init.sql" {
+			t.Fatalf("list %q = %v, %v", table, rows, err)
+		}
+		if applied, err := s.ApplyMigrationTable(ctx, "acme", "main", table, "0001_init.sql", "CREATE TABLE IF NOT EXISTS shared(v TEXT);\n"); err != nil || applied {
+			t.Fatalf("whitespace retry %q = %v, %v", table, applied, err)
+		}
+	}
+	if _, err := s.ApplyMigrationTable(ctx, "acme", "main", `custom"migrations`, "0001_init.sql", "CREATE TABLE changed(v TEXT);"); err == nil {
+		t.Fatal("changed custom migration was accepted")
+	}
+	if _, err := s.ListMigrationsTable(ctx, "acme", "main", "sqlite_master"); err == nil {
+		t.Fatal("reserved table name was accepted")
+	}
+}
+
 func TestD1Errors(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

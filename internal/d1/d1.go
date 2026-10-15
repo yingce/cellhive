@@ -129,19 +129,34 @@ type Migration struct {
 
 // ListMigrations is read-only, including before the first migration.
 func (s *Store) ListMigrations(ctx context.Context, ns, db string) ([]Migration, error) {
+	return s.ListMigrationsTable(ctx, ns, db, "d1_migrations")
+}
+
+func migrationTable(table string) (string, error) {
+	if table == "" || len(table) > 128 || strings.ContainsRune(table, 0) || strings.HasPrefix(strings.ToLower(table), "sqlite_") {
+		return "", fmt.Errorf("d1: invalid migrations table")
+	}
+	return `"` + strings.ReplaceAll(table, `"`, `""`) + `"`, nil
+}
+
+func (s *Store) ListMigrationsTable(ctx context.Context, ns, db, table string) ([]Migration, error) {
+	quoted, err := migrationTable(table)
+	if err != nil {
+		return nil, err
+	}
 	c, err := s.cell(ctx, ns, db)
 	if err != nil {
 		return nil, err
 	}
 	out := []Migration{}
 	var present int
-	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='d1_migrations'`).Scan(&present); err != nil {
+	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&present); err != nil {
 		return nil, err
 	}
 	if present == 0 {
 		return out, nil
 	}
-	rows, err := c.DB.QueryContext(ctx, `SELECT name, unixepoch(applied_at) FROM d1_migrations ORDER BY id`)
+	rows, err := c.DB.QueryContext(ctx, `SELECT name, unixepoch(applied_at) FROM `+quoted+` ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -160,34 +175,56 @@ func (s *Store) ListMigrations(ctx context.Context, ns, db string) ([]Migration,
 // Retrying after an uncertain HTTP response is safe: the tracking row and SQL
 // are in the same cell transaction, including the cell txid capture advance.
 func (s *Store) ApplyMigration(ctx context.Context, ns, db, name, sqlText string) (bool, error) {
+	return s.ApplyMigrationTable(ctx, ns, db, "d1_migrations", name, sqlText)
+}
+
+func (s *Store) ApplyMigrationTable(ctx context.Context, ns, db, table, name, sqlText string) (bool, error) {
 	if name == "" || strings.ContainsAny(name, `/\\`) || !strings.HasSuffix(name, ".sql") || strings.TrimSpace(sqlText) == "" {
 		return false, fmt.Errorf("d1: invalid migration name or empty SQL")
+	}
+	quoted, err := migrationTable(table)
+	if err != nil {
+		return false, err
 	}
 	c, err := s.cell(ctx, ns, db)
 	if err != nil {
 		return false, err
 	}
 	applied := false
-	digest := sha256.Sum256([]byte(sqlText))
+	// Wrangler strips surrounding whitespace before sending the migration SQL.
+	// Normalize that difference so Wrangler and the native CLI identify the
+	// same file by the same digest.
+	digest := sha256.Sum256([]byte(strings.TrimSpace(sqlText)))
 	hash := hex.EncodeToString(digest[:])
+	legacyDigest := sha256.Sum256([]byte(sqlText))
+	legacyHash := hex.EncodeToString(legacyDigest[:])
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); err != nil {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS `+quoted+` (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_migration_hashes (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_migration_hashes_v2 (table_name TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(table_name, name))`); err != nil {
 			return err
 		}
 		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM d1_migrations WHERE name=?`, name).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM `+quoted+` WHERE name=?`, name).Scan(&exists); err != nil {
 			return err
 		}
 		if exists != 0 {
 			var stored string
-			err := tx.QueryRowContext(ctx, `SELECT sha256 FROM __cellhive_migration_hashes WHERE name=?`, name).Scan(&stored)
+			err := tx.QueryRowContext(ctx, `SELECT sha256 FROM __cellhive_migration_hashes_v2 WHERE table_name=? AND name=?`, table, name).Scan(&stored)
 			if err != nil && err != sql.ErrNoRows {
 				return err
 			}
-			if err == nil && stored != hash {
+			if err == sql.ErrNoRows && table == "d1_migrations" {
+				var legacy int
+				if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='__cellhive_migration_hashes'`).Scan(&legacy); err != nil {
+					return err
+				}
+				if legacy != 0 {
+					err = tx.QueryRowContext(ctx, `SELECT sha256 FROM __cellhive_migration_hashes WHERE name=?`, name).Scan(&stored)
+				}
+			}
+			if err == nil && stored != hash && stored != legacyHash {
 				return fmt.Errorf("d1: migration %q content changed after apply", name)
 			}
 			return nil
@@ -195,10 +232,10 @@ func (s *Store) ApplyMigration(ctx context.Context, ns, db, name, sqlText string
 		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO d1_migrations(name) VALUES(?)`, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO `+quoted+`(name) VALUES(?)`, name); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_migration_hashes(name, sha256) VALUES(?, ?)`, name, hash); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_migration_hashes_v2(table_name, name, sha256) VALUES(?, ?, ?)`, table, name, hash); err != nil {
 			return err
 		}
 		applied = true

@@ -1985,8 +1985,10 @@ func cmdD1Migrations(args []string) error {
 		message, options = options[0], options[1:]
 	}
 	dir := "migrations"
+	table := "d1_migrations"
 	fs := flag.NewFlagSet("d1 migrations", flag.ContinueOnError)
 	fs.StringVar(&dir, "directory", dir, "migration directory")
+	fs.StringVar(&table, "table", table, "migration tracking table (wrangler migrations_table)")
 	remote := fs.Bool("remote", true, "use the CellHive database")
 	local := fs.Bool("local", false, "local mode is not supported by this binary")
 	appliedOnly := fs.Bool("applied", false, "list applied records instead of pending files")
@@ -2033,7 +2035,7 @@ func cmdD1Migrations(args []string) error {
 		return nil
 	}
 	if verb == "list" || verb == "apply" {
-		out, err := scopeRawCall(http.MethodGet, "/v1/d1/migrations", ns, "d1", db, nil, url.Values{"db": {db}})
+		out, err := scopeRawCall(http.MethodGet, "/v1/d1/migrations", ns, "d1", db, nil, url.Values{"db": {db}, "table": {table}})
 		if err != nil {
 			return err
 		}
@@ -2078,7 +2080,7 @@ func cmdD1Migrations(args []string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := scopeCallKind(http.MethodPost, "/v1/d1/migrations", ns, "d1", db, map[string]any{"name": name, "sql": string(raw)}, url.Values{"db": {db}}); err != nil {
+			if _, err := scopeCallKind(http.MethodPost, "/v1/d1/migrations", ns, "d1", db, map[string]any{"table": table, "name": name, "sql": string(raw)}, url.Values{"db": {db}}); err != nil {
 				return fmt.Errorf("migration %s: %w", name, err)
 			}
 		}
@@ -2583,7 +2585,7 @@ Usage:
   cellhive d1 create|list|delete|info <namespace> <db> [--tables]
   cellhive d1 execute|query <namespace> <db> (--command <sql>|--file <path>)
   cellhive d1 migrations create <namespace> <db> <message> [--directory <dir>]
-  cellhive d1 migrations list|apply <namespace> <db> [--directory <dir>]  # list accepts --applied
+  cellhive d1 migrations list|apply <namespace> <db> [--directory <dir>] [--table <name>]  # list accepts --applied
   cellhive r2 bucket create|list|delete|stats <namespace> <bucket> [--prefix] [--limit N]
   cellhive r2 object put <namespace> <bucket> <key> --file <path> [--content-type <type>]
   cellhive r2 object get <namespace> <bucket> <key> [--file <path>]

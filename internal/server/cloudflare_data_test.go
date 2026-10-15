@@ -187,4 +187,15 @@ func TestCloudflareWranglerMigrationDetectsChangedFile(t *testing.T) {
 	if rr := call(changed); rr.Code == 200 || !strings.Contains(rr.Body.String(), "content changed") {
 		t.Fatalf("changed migration = %d: %s", rr.Code, rr.Body.String())
 	}
+	custom := "CREATE TABLE other(v TEXT);\nINSERT INTO \"custom_migrations\" (name) values ('0001_init.sql');"
+	if rr := call(custom); rr.Code != 200 {
+		t.Fatalf("custom migration = %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(custom); rr.Code != 200 {
+		t.Fatalf("custom migration retry = %d: %s", rr.Code, rr.Body.String())
+	}
+	rows, err := s.D1.ListMigrationsTable(t.Context(), "acme", "main", "custom_migrations")
+	if err != nil || len(rows) != 1 || rows[0].Name != "0001_init.sql" {
+		t.Fatalf("custom migration state = %v, %v", rows, err)
+	}
 }
