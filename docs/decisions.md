@@ -2462,6 +2462,11 @@
 - `cellhive types [output.d.ts] --config wrangler.jsonc [--env name] [--env-interface Env] [--check]` 复用部署配置解析，按名称排序生成 vars、bindings、assets 的 TypeScript `Env` 接口。重复名称或未知配置字段拒绝；`--check` 只比较文件，不写入。
 - 原版 `wrangler types` 仍在本地运行，不经过 CellHive API。原生命令只生成配置推导的 Env；完整 workerd 运行时类型交给 `@cloudflare/workers-types` 或原版 Wrangler。Vars 使用 `string`，不把配置值写入声明。Go CLI 的既有配置边界仍为 JSONC/JSON；TOML 可继续交给原版 Wrangler 或 Bun dev CLI。
 
+## ADR-200 原生 `init` 最小 Worker 模板（2026-10-15）✅实现
+
+- `cellhive init <worker-name> [--yes]` 与 `cellhive wrangler init` 在本地新建独立目录，写入 `wrangler.jsonc` 与 `src/index.js`，使用平台固定 workerd 的最大兼容日期；不访问网络、不安装依赖、不覆盖已有目录。名称限制为小写字母、数字和连字符。
+- 原版 `wrangler init` 仍由 Wrangler 自己在本地运行；CellHive 模板只覆盖最小可部署 Worker，不承诺复制原版交互式向导、框架模板或 Dashboard 下载。
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。

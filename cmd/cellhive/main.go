@@ -2347,7 +2347,7 @@ func cmdCompat(args []string) error {
 	case "types":
 		return cmdTypes(rest)
 	case "init":
-		return fmt.Errorf("wrangler init is not supported: create wrangler.jsonc yourself (name/main/compatibility_date) and run `cellhive wrangler deploy --namespace <ns>`")
+		return cmdInit(rest)
 	}
 	return fmt.Errorf("unknown command: %s", cmd)
 }
@@ -2716,6 +2716,7 @@ Usage:
   cellhive versions list|deployments list|status <ns> <worker>   # = releases
   cellhive versions view <namespace> <worker> <version-id>
   cellhive types [output.d.ts] [--config wrangler.jsonc] [--env name] [--env-interface Env] [--check]
+  cellhive init <worker-name> [--yes]  # create a minimal JSONC Worker project
   cellhive triggers list <namespace> <worker>
   cellhive workflows list <namespace> | cellhive queues list <namespace>
   cellhive vectorize create <namespace> <name> --dimensions <n> --metric <cosine|euclidean|dot-product>

@@ -281,7 +281,7 @@ func TestCmdCompatRejections(t *testing.T) {
 		{[]string{"kv", "key", "list"}, "usage"},
 		{[]string{"r2", "object", "put"}, "usage"},
 		{[]string{"types"}, "no wrangler.jsonc/json found"},
-		{[]string{"init"}, "not supported"},
+		{[]string{"init"}, "usage"},
 		{[]string{"versions", "upload"}, "publish atomically"},
 		{[]string{"versions", "view", "3"}, "usage"},
 		{[]string{"queues", "purge", "acme", "jobs"}, "not supported"},
