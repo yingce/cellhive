@@ -1,5 +1,17 @@
 # Test Strategy
 
+## Stock Wrangler 4.133.0 Admin Protocol Acceptance
+
+Install pinned Wrangler and point `CELLHIVE_WRANGLER_BIN` to its `bin/wrangler.js`, for example:
+
+```bash
+CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wrangler.js \
+  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
+  ./internal/server -run TestStockWrangler -count=1 -v
+```
+
+`internal/server/wrangler_real_e2e_test.go` runs stock Wrangler against an isolated in-process admin HTTP server. It covers `deployments list/status`, `versions list`, Queue consumer add/list/purge, Workflow trigger/instances list/describe, and Vectorize create/list/get/info, with durable control, Queue, and Workflow state checks. This validates the admin protocol, not a multi-node production deployment or complete runtime E2E. Without the environment variable, `make test` skips these optional tests. See the [Wrangler guide](wrangler-compat.md) for the acceptance boundary of other stock commands.
+
 ## Layering
 
 | Layer | Scope | Method |

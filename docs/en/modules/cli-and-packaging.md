@@ -5,7 +5,9 @@
 > The authoritative sources for configuration are [`../configuration.md`](../configuration.md) and the code; the table below is the subset relevant to this module.
 ## Key Interfaces
 
-CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`, `vectorize`, `domain/route`, `creds`, `token`, `tail`…); packaging via `internal/bundler` (esbuild).
+CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `d1`/`kv`/`r2` data commands, `versions`/`deployments`, `queues consumer|purge`, `workflows trigger|instances`, `vectorize`, `domain/route`, `creds`, `token`, `tail`, and others); packaging uses `internal/bundler` (esbuild). `cellhive wrangler <command>` translates supported Wrangler-style arguments to these native commands; it is not the official Wrangler API client.
+
+Stock Wrangler 4.133.0 can reach the compatible admin API with `CLOUDFLARE_API_BASE_URL=<CellHive admin URL>/client/v4`, `CLOUDFLARE_API_TOKEN=<admin token>`, and `CLOUDFLARE_ACCOUNT_ID=<namespace>`. Resources must be created explicitly before deploy. See the [Wrangler guide](../wrangler-compat.md) for tested commands and remaining boundaries. The Hyperdrive runtime binding works, but its official Wrangler management API is unavailable.
 
 **Credentials and scoped-token issuance (ADR-181)**:
 - `cellhive creds [role]`: print the 8 root-derived role credentials.
@@ -45,10 +47,10 @@ CLI command surface (`deploy --config`, `bundle build/put`, `resource`, `queue`,
 
 ## Test Anchors
 
-`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`; `cmd/cellhive TestMintScopeToken` (issuance), `internal/scopedtoken` (glob/issuer), `internal/server TestScopeAuthDelegated`.
+`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`, `cmd/cellhive TestTranslateWrangler`, `internal/server TestStockWrangler` (runs real Wrangler only when `CELLHIVE_WRANGLER_BIN` is set); `cmd/cellhive TestMintScopeToken` (issuance), `internal/scopedtoken` (glob/issuer), `internal/server TestScopeAuthDelegated`. Reproduction command: [test strategy](../testing.md).
 
 ## Related Documentation
 
 [`wrangler-compat.md`](../wrangler-compat.md), [`dev-mode.md`](../dev-mode.md), [`security.md`](../security.md) (scoped-token scope and delegation), [`control-plane.md`](../control-plane.md) (issuance CLI)
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-10-15_

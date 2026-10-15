@@ -5,7 +5,9 @@
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
 ## 关键接口
 
-CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、`vectorize`、`domain/route`、`creds`、`token`、`tail`…）；打包经 `internal/bundler`（esbuild）。
+CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`d1`/`kv`/`r2` 数据面、`versions`/`deployments`、`queues consumer|purge`、`workflows trigger|instances`、`vectorize`、`domain/route`、`creds`、`token`、`tail` 等）；打包经 `internal/bundler`（esbuild）。`cellhive wrangler <command>` 将受支持的 Wrangler 风格参数映射到这些原生命令，**不是**原版 Wrangler 的 API 客户端。
+
+原版 Wrangler 4.133.0 可通过 `CLOUDFLARE_API_BASE_URL=<CellHive 管理地址>/client/v4`、`CLOUDFLARE_API_TOKEN=<管理员令牌>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>` 连接兼容管理 API。资源先显式创建，部署不隐式 provisioning。已对拍的命令及未覆盖语义见 [Wrangler 兼容指南](../wrangler-compat.md)；Hyperdrive 运行时绑定可用，但原版 Wrangler 管理 API 未开放。
 
 **凭据与 scoped token 签发（ADR-181）**：
 - `cellhive creds [role]`：打印 root 派生的 8 个角色凭据。
@@ -45,10 +47,10 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`queue`、
 
 ## 测试锚点
 
-`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`；`cmd/cellhive TestMintScopeToken`（签发）、`internal/scopedtoken`（glob/issuer）、`internal/server TestScopeAuthDelegated`。
+`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`、`cmd/cellhive TestTranslateWrangler`、`internal/server TestStockWrangler`（设置 `CELLHIVE_WRANGLER_BIN` 才执行真实 Wrangler）；`cmd/cellhive TestMintScopeToken`（签发）、`internal/scopedtoken`（glob/issuer）、`internal/server TestScopeAuthDelegated`。复现命令见 [测试策略](../testing.md)。
 
 ## 相关文档
 
 [`wrangler-compat.md`](../wrangler-compat.md)、[`dev-mode.md`](../dev-mode.md)、[`security.md`](../security.md)（scoped token 范围与委派）、[`control-plane.md`](../control-plane.md)（签发 CLI）
 
-_最后更新：2026-09-20_
+_最后更新：2026-10-15_

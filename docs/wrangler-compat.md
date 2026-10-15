@@ -6,7 +6,7 @@
 
 1. **配置解析**：Go CLI 解析 `wrangler.jsonc`/`.json`，应用环境覆盖与兼容校验，再映射到平台元数据；原版 Wrangler 和 Bun dev CLI 可读取 TOML；
 2. **打包**：Go CLI 内嵌 **esbuild Go SDK**（esbuild 本身是 Go），进程内打包，**无 Node 依赖**；
-3. **CLI 面**（实际）：`deploy`（`--config <wrangler.jsonc>` 可直接映射 main/bindings/vars/crons/assets/migrations，或用显式 flags）、`bundle build`（Go+esbuild 打包）、`app`/`resource`（资源显式登记，**无 auto-provisioning**）、`promote`/`rollback`/`releases`、`route`、`secret put|get`、`worker delete`、`workflow create`、`tail`、`status`/`capacity`/`diagnose`/`audit`/`routes`、`gc bundles|assets`、`asset put`。〔`dev` 在 Bun CLI（`cli/`），不是这个二进制。〕
+3. **CLI 面**（实际）：`deploy`（`--config <wrangler.jsonc>` 映射 main/bindings/vars/crons/assets/migrations，或用显式 flags）、`bundle build`（Go+esbuild 打包）、`app`/`resource`（资源显式登记，**无 auto-provisioning**）、`versions`/`deployments`/`promote`/`rollback`、`queues consumer|purge`、`workflows trigger|instances`、`vectorize`、`route`、`secret`、`worker delete`、`tail`、`status`/`capacity`/`diagnose`/`audit`、`gc bundles|assets`、`asset put`。`dev` 在 Bun CLI（`cli/`）。
 
 > 本方案为 **Wrangler 兼容子集**：严格拒绝未知/不支持字段，并维护兼容矩阵（见 [`compatibility-matrix.md`](./compatibility-matrix.md) 规划）与契约测试。
 
@@ -38,7 +38,7 @@
 | 环境 | `env.<name>` | 每环境独立 app/namespace |
 | 自动 provisioning | 无 id 自动创建资源 | **拒绝**；生产资源先通过 Wrangler 资源命令显式创建，再把返回 ID 写入配置；部署不会隐式创建资源 |
 | 不支持 | `ai_search*` `dispatch_namespaces` `secrets_store_secrets` `send_email` `browser` `images` `containers` `flagship` `pipelines` `vpc` `placement` `site` | 显式拒绝 + 错误码 |
-| `vectorize` | **支持**（ADR-158）：`vectorize[{binding,index_name}]` → 注册资源（kind `vectorize`，配置 dims/metric）；CLI `wrangler vectorize create|list|delete|get|info|insert|upsert|query|get-vectors|delete-vectors|list-vectors|create-metadata-index|list-metadata-index|delete-metadata-index` 前缀透传；`--deprecated-v1` 接受但语义同 V2（无 V1 兼容模式） |
+| `vectorize` | **支持**（ADR-158）：`vectorize[{binding,index_name}]` → 注册资源（kind `vectorize`，配置 dims/metric）；`cellhive wrangler vectorize ...` 前缀透传原生命令；原版 Wrangler API 已提供 V2 `create/list/get/delete/info`，其余原版 Vectorize 数据面命令尚未对齐。原生 `--deprecated-v1` 接受但按 V2 处理，无 V1 兼容模式 |
 
 ## `cellhive wrangler` 前缀（ADR-138）
 
@@ -49,6 +49,9 @@
 | `wrangler deploy --namespace <ns> [-c file] [--env e] [--name w] [其它原生 flag]` | `cellhive deploy <ns> <w> --config <file> …`（`worker` 缺省取配置 `name`） |
 | `wrangler delete <ns> <worker>` | `cellhive worker delete` |
 | `wrangler versions list` / `wrangler deployments list` | `cellhive versions list` / `cellhive deployments list`（后者读取持久部署事件） |
+| `wrangler deployments status` | `cellhive deployments status <ns> <worker>`（读取当前 release） |
+| `wrangler queues consumer add/list/remove` / `queues purge` | `cellhive queues consumer add/list/remove <ns> <queue> [worker]` / `cellhive queues purge <ns> <queue>` |
+| `wrangler workflows trigger` / `workflows instances ...` | `cellhive workflows trigger <ns> <workflow>` / `cellhive workflows instances ... <ns> <workflow> [id]` |
 | `wrangler rollback` / `wrangler promote` | 同名命令 |
 | `wrangler secret put\|get\|delete\|list` | `cellhive secret ...`（含 `bulk`） |
 | `wrangler tail` | `cellhive tail` |
@@ -63,7 +66,7 @@
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。旧式 `kv:bulk` 映射到 `kv bulk`。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`unstable_*`→内部命令；
 - **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）；`queues consumer list\|add\|remove` 和 `queues purge`、`workflows trigger` 与 `workflows instances list\|describe\|pause\|resume\|terminate\|restart\|send-event\|delete` 均有原生命令；`types` 可用 `cellhive types` 生成配置 Env 声明，`init` 可用 `cellhive init` 创建最小 Worker；
 
-**本轮 Wrangler 4.133.0 验收**：原版 `deployments list/status`、`queues consumer add/list`、`workflows trigger`、`workflows instances list/describe`、`vectorize create/list/get/info` 已在隔离管理员服务中真实执行，并与持久控制/Workflow 状态交叉核对。`deployments list` 返回事务内提交的部署事件；`status` 取当前最新事件。Workflow `describe` 仅展示已持久化的完成步骤与输出，没有完整尝试日志、步骤计时或运行中步骤。列表支持页码、状态和 RFC3339 时间过滤；`restart --from` 不支持。Queue consumer `retry_delay` 不支持且显式报错；purge 通过 Queue owner/capture 路径写入。Vectorize 管理仅覆盖 V2 的 create/list/get/delete/info；点积 metric 不支持。Hyperdrive 原版管理命令仍未开放，因为其缓存/mTLS/连接池等语义与当前原生加密 origin URL 资源不同。
+**Wrangler 4.133.0 验收**：隔离管理员服务上的真实 CLI 测试覆盖 `deployments list/status`、`versions list`、`queues consumer add/list`、`queues purge`、`workflows trigger`、`workflows instances list/describe`、`vectorize create/list/get/info`，并检查持久控制、Queue、Workflow 状态。`deployments list` 返回事务内提交的部署事件；`status` 取当前最新事件。Workflow `describe` 仅展示已持久化的完成步骤与输出，没有完整尝试日志、步骤计时或运行中步骤。列表支持页码、状态和 RFC3339 时间过滤；`restart --from` 不支持。Queue consumer `retry_delay` 不支持且显式报错；purge 通过 Queue owner/capture 路径写入。Vectorize 管理仅覆盖 V2 的 create/list/get/delete/info；点积 metric 不支持。Hyperdrive 原版管理命令仍未开放，因为其缓存/mTLS/连接池等语义与当前原生加密 origin URL 资源不同。上述验收不代表每个列出的生命周期命令都已用原版 Wrangler 独立跑过。
 
 **D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用迁移表；Wrangler `migrations_table` 与原生 CLI `--table` 可选择同一个自定义表。`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更；摘要计算忽略 SQL 文件首尾空白，以匹配 Wrangler 提交行为。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
 
@@ -74,9 +77,9 @@
 **项目初始化**：`cellhive init <worker-name> [--yes]` 创建 `wrangler.jsonc` 与 `src/index.js`，不安装依赖，也不覆盖现有目录；`cellhive wrangler init` 同样可用。原版 `wrangler init` 继续执行它自己的本地向导，不需要平台 API。
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
-- **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。
+- **原版 Wrangler API 兼容**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name`、`/versions` 和 `/deployments` 已提供真实查询/激活语义。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>`。
 - **原版 Wrangler API 资源语义**：管理员兼容端点同时提供 KV/D1/R2/Queues 的 create/list/delete（分别映射到 `storage/kv/namespaces`、`d1/database`、`r2/buckets`、`queues`），以及 Workflow 的 create/list/get/delete。Worker 版本 list/get、Cron schedules、secret get 也已覆盖。Workflow 的 `concurrency.limit`、`schedules`、`default_retention.success_retention/error_retention` 会持久化并执行；`limits` 仍显式拒绝。Assets 使用 Wrangler 的 `assets-upload-session` + JWT 单文件或 multipart bulk 上传协议，上传内容进入版本资产 token。资源端点只登记 CellHive 资源，不改变“资源先创建、部署引用 ID”的控制面约束；绑定 ID 与资源登记名均可用于部署校验。Secrets 和 Workers routes 也提供 Cloudflare 形状的 CRUD。
-- **第一阶段边界**：目前优先保证普通 Worker 发布主链路；复杂多模块上传、login/dev 及 Cloudflare 专有资源 API 仍按兼容矩阵处理。账号发现、Worker 删除、版本查询与按版本发布已提供；tail 已提供短期 session 和 WebSocket 日志推送；资源 API 已按固定 Wrangler 4.133.0 的真实请求路径实现。
+- **兼容边界**：复杂多模块上传、官方 Wrangler 的本地 dev/login 及未列出的 Cloudflare 专有资源 API 不属于当前兼容端点。账号发现、Worker 删除、版本查询与按版本发布已提供；tail 有短期 session 和 WebSocket 日志推送。Workflow/Queue/Vectorize/Hyperdrive 的命令级边界见上文和兼容矩阵。
 
 ## `compatibility_flags` authority（ADR-153/186）
 
@@ -131,8 +134,8 @@ Next/OpenNext、SvelteKit、Astro、Nuxt(nitro)、Qwik、SolidStart 等通常自
 
 ## 安全 / 隐私
 
-- **绝不调用 Cloudflare API**，不做真实 `wrangler deploy`；
-- 若未来提供"可选高保真路径"（调用本机 pinned wrangler），必须强制关闭 `send_metrics` 与 `dependencies_instrumentation`；
+- `cellhive deploy` 不调用 Cloudflare API；原版 `wrangler deploy` 可以通过 `CLOUDFLARE_API_BASE_URL` 指向 CellHive 管理端。用户须自行关闭 Wrangler 遥测（如 `WRANGLER_SEND_METRICS=false`）；
+- 当前生产 CLI 不内嵌或代启动 Wrangler；固定 Wrangler 4.133.0 仅用于兼容测试与用户自行调用；
 - 默认路径（Go+esbuild）不产生任何对外遥测。
 
 ## 与 cf 运行时的能力边界

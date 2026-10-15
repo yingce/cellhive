@@ -1,5 +1,17 @@
 # 测试策略
 
+## 原版 Wrangler 4.133.0 管理协议验收
+
+安装固定版本 Wrangler 后，将 `CELLHIVE_WRANGLER_BIN` 指向其 `bin/wrangler.js`，例如：
+
+```bash
+CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wrangler.js \
+  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
+  ./internal/server -run TestStockWrangler -count=1 -v
+```
+
+`internal/server/wrangler_real_e2e_test.go` 在隔离的进程内管理员 HTTP 服务上运行原版 CLI，覆盖 `deployments list/status`、`versions list`、Queue consumer add/list/purge、Workflow trigger/instances list/describe、Vectorize create/list/get/info，并核对持久控制、Queue、Workflow 状态。它验证的是管理协议，不是多节点生产或完整运行时 E2E；未设置环境变量时，`make test` 会跳过这组可选测试。其余原版命令验收范围见 [Wrangler 指南](wrangler-compat.md)。
+
 ## Cron / Workflow / DO alarm 正确性验收（2026-10-15）
 
 见 [完整记录](archive/timer-correctness-2026-10-15.md)。新增回归覆盖同分钟独立 trigger、fired slot 不复活、scheduled noRetry、busy Workflow timer 保留、事务性 dispatch outbox/重开恢复、事件在 park 前后到达、无关事件不延长 deadline、DO alarm 交接失败/同时间新 generation/陈旧派发/重试重设。`scripts/runtime-baseline-e2e.sh` 使用真实 Docker cell-agent + user-runtime + gated do-runtime，包含待触发 alarm 跨 runtime 重启。
