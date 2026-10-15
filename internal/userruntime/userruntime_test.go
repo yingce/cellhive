@@ -2267,8 +2267,11 @@ export default {
     const batch = await env.DB.batch([
       env.DB.prepare("INSERT INTO blobs(v) VALUES (?)").bind(new Uint8Array([1, 2, 3])),
     ]);
-    const raw = await env.DB.prepare("SELECT v FROM blobs").raw({ columnNames: true });
-    return Response.json({
+     const raw = await env.DB.prepare("SELECT v FROM blobs").raw({ columnNames: true });
+     const session = env.DB.withSession("first-primary");
+     const sessionRows = await session.prepare("SELECT v FROM blobs").all();
+     const dump = await env.DB.dump();
+     return Response.json({
       put,
       conditionalPut, conditionalGet,
       head,
@@ -2279,10 +2282,13 @@ export default {
         ct: got.httpMetadata.contentType, who: got.customMetadata.who, md5: got.checksums.md5,
         text: await got.text(), bodyUsed: got.bodyUsed,
       },
-      run: run.meta,
+       run: run.meta,
+       runResults: run.results,
       batch: batch[0].meta,
-      raw,
-      err,
+       raw,
+       session: { rows: sessionRows.results.length, bookmark: session.getBookmark() },
+       dumpSize: dump.byteLength,
+       err,
     });
   },
 };
@@ -2385,7 +2391,7 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
-				"rows_affected": 1, "last_row_id": 42, "duration_ms": 0.3,
+				"rows_affected": 1, "last_row_id": 42, "duration_ms": 0.3, "bookmark": "42",
 			}}, "success": true})
 		case "/v1/d1/batch":
 			var req struct {
@@ -2409,8 +2415,11 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 			}}, "success": true})
 		case "/v1/d1/query":
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{
-				"columns": []string{"v"}, "rows": []any{[]any{[]int{1, 2, 3}}},
+				"columns": []string{"v"}, "rows": []any{[]any{[]int{1, 2, 3}}}, "bookmark": "42",
 			}}, "success": true})
+		case "/v1/d1/dump":
+			w.Header().Set("content-type", "application/octet-stream")
+			_, _ = w.Write([]byte("SQLite format 3\x00dump"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -2483,12 +2492,18 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 			LastRowID int64 `json:"last_row_id"`
 			ChangedDB bool  `json:"changed_db"`
 		} `json:"run"`
-		Batch struct {
+		RunResults []any `json:"runResults"`
+		Batch      struct {
 			Changes   int   `json:"changes"`
 			LastRowID int64 `json:"last_row_id"`
 		} `json:"batch"`
-		Raw [][]any `json:"raw"`
-		Err string  `json:"err"`
+		Raw     [][]any `json:"raw"`
+		Session struct {
+			Rows     int    `json:"rows"`
+			Bookmark string `json:"bookmark"`
+		} `json:"session"`
+		DumpSize int    `json:"dumpSize"`
+		Err      string `json:"err"`
 	}
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("decode %q: %v", body, err)
@@ -2519,11 +2534,23 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 	if got.Run.Changes != 1 || got.Run.LastRowID != 42 || !got.Run.ChangedDB {
 		t.Fatalf("d1 run meta = %+v", got.Run)
 	}
+	if len(got.RunResults) != 0 {
+		t.Fatalf("d1 run results = %+v, want empty array", got.RunResults)
+	}
 	if got.Batch.Changes != 1 || got.Batch.LastRowID != 43 {
 		t.Fatalf("d1 batch meta = %+v", got.Batch)
 	}
 	if len(got.Raw) != 2 || len(got.Raw[0]) != 1 || got.Raw[0][0] != "v" {
 		t.Fatalf("d1 raw = %+v", got.Raw)
+	}
+	if got.Session.Rows != 1 {
+		t.Fatalf("d1 session = %+v", got.Session)
+	}
+	if got.Session.Bookmark != "42" {
+		t.Fatalf("d1 bookmark = %q", got.Session.Bookmark)
+	}
+	if got.DumpSize != len("SQLite format 3\x00dump") {
+		t.Fatalf("d1 dump size = %d", got.DumpSize)
 	}
 	if got.Err != "D1_ERROR:d1_error" {
 		t.Fatalf("d1 error = %q (want D1_ERROR:d1_error)", got.Err)
@@ -3034,7 +3061,7 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%q", resp.StatusCode, body)
 	}
-	if body != `{"rows":[{"a":1}],"put":5,"got":"hello","q":"m1","v8":"m1","batch":["b1","b2"],"mp":"part-a|part-b","mpsize":13,"hd":"db.example.com:5432/appdb/u","sess":"d1 sessions are not supported by CellHive (no read replication or bookmarks)"}` {
+	if body != `{"rows":[{"a":1}],"put":5,"got":"hello","q":"m1","v8":"m1","batch":["b1","b2"],"mp":"part-a|part-b","mpsize":13,"hd":"db.example.com:5432/appdb/u","sess":"no-error"}` {
 		t.Fatalf("multi-binding response = %q", body)
 	}
 	queueMu.Lock()

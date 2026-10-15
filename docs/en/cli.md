@@ -7,6 +7,20 @@ Keep project identity separate from credentials:
 - `.cellhive/project.json` in the project: namespace, profile, and optional multi-Worker config; safe to commit;
 - `~/.config/cellhive/config.json`: Admin URL and token/JWT, mode `0600`; never commit it.
 
+The AI Skill bundle is published from the static manifest and can be installed
+or refreshed with:
+
+```bash
+CELLHIVE_SKILL_BASE_URL=https://cellhive.example.com \
+  bash scripts/install-cellhive-skill.sh
+
+cellhive skills status
+cellhive skills update
+```
+
+The online AI router is [`docs/ai/index.md`](ai/index.md); the machine-readable
+catalog is [`docs/ai/catalog.json`](ai/catalog.json).
+
 ## Login profiles
 
 ```bash

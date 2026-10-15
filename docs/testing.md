@@ -118,7 +118,7 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 - `internal/bundler TestBuildExternalizesPlatformModules`（`cloudflare:*` 恒外置；`node:*` 仅 nodejs_compat，否则打包失败）。
 - `internal/wranglercompat TestKnownFlagsMatchDevCLI`（Go 列表 ↔ `cli/src/validate.ts` 逐项一致）、`TestPinPairsWithCompatibilityDate`（pin ↔ 兼容上限）。
 - `internal/wrangler TestFrameworkPrebuiltLayouts`（OpenNext/SvelteKit/Astro 布局 + 打包）。
-- D1 sessions：真实 workerd e2e 断言 `withSession()` 报 "not supported"。
+- D1 parity：真实 workerd e2e 覆盖 `withSession()`/`getBookmark()` 的强一致 txid bookmark、Worker `dump()` 二进制快照、`run().results` 与 `exec().count`；无 read-replica/region 语义。
 
 ## dispatch / waker（ADR-152）
 - `internal/waker TestBackoffDelay`（指数退避到封顶、disabled、base=0 回退）。

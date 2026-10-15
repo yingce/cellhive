@@ -115,6 +115,23 @@ func (s *Server) handleD1Export(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(dump)
 }
 
+func (s *Server) handleD1Dump(w http.ResponseWriter, r *http.Request) {
+	if !s.requireD1(w) {
+		return
+	}
+	ns, db := s.scopeNS(r), r.URL.Query().Get("db")
+	if s.forwardRead(w, r, d1.Scope(ns, db), nil) {
+		return
+	}
+	dump, err := s.D1.Dump(r.Context(), ns, db)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "d1_dump_error", err.Error())
+		return
+	}
+	w.Header().Set("content-type", "application/octet-stream")
+	_, _ = w.Write(dump)
+}
+
 type d1QueryReq struct {
 	SQL    string `json:"sql"`
 	Params []any  `json:"params,omitempty"`

@@ -7,6 +7,18 @@ CellHive CLI 使用 Wrangler 配置，但通过 CellHive Admin API 发布。开�
 - 项目目录 `.cellhive/project.json`：namespace、profile、多 Worker 配置；可提交 Git；
 - 用户配置 `~/.config/cellhive/config.json`：Admin URL、token/JWT；权限 `0600`，不提交项目。
 
+AI Skill bundle 可通过仓库内的静态 manifest 安装或更新：
+
+```bash
+CELLHIVE_SKILL_BASE_URL=https://cellhive.example.com \
+  bash scripts/install-cellhive-skill.sh
+
+cellhive skills status
+cellhive skills update
+```
+
+在线 AI 路由目录是 [`docs/ai/index.md`](ai/index.md)，机器可读能力目录是 [`docs/ai/catalog.json`](ai/catalog.json)。
+
 ## 登录 profile
 
 ```bash

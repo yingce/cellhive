@@ -67,6 +67,8 @@ For a more complete description, see [`architecture.md`](architecture.md).
 | [`compatibility-matrix.md`](compatibility-matrix.md) | Support matrix for the CF runtime surface and Wrangler configuration surface (Supported/Partial/Rejected) |
 | [`wrangler-compat.md`](wrangler-compat.md) | Wrangler compatibility: Go+esbuild packaging, configuration parsing, DO lifecycle, routing, assets |
 | [`cli.md`](cli.md) | CLI login profiles, project namespaces, multi-Worker configuration, `cellhive wrangler`, and official Wrangler |
+| [`ai/index.md`](../ai/index.md) | AI routing, capability catalog, Skills, and online documentation protocol |
+| [`platform-hosting.md`](../platform-hosting.md) | Hosting docs, Skills, and the future management frontend on CellHive Workers |
 | [`workerd-integration.md`](workerd-integration.md) | stock workerd integration: workerLoader, wrapper, host adapter, networking/limits, version pin |
 | [`routing.md`](routing.md) | Entrypoints, route projections, version resolution, host forms, reserved namespaces |
 

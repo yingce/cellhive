@@ -6,11 +6,50 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+
+	"cellhive/internal/cellstore"
 )
 
 const maxExportBytes = 32 << 20
+
+// Dump returns a sanitized SQLite file containing only user schema/data. It is
+// intentionally built from the same bounded SQL export used by the CLI so
+// CellHive's internal cell metadata never crosses the D1 binding boundary.
+func (s *Store) Dump(ctx context.Context, ns, db string) ([]byte, error) {
+	sqlText, err := s.ExportSQL(ctx, ns, db, nil, true, true)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp("", "cellhive-d1-dump-*.sqlite")
+	if err != nil {
+		return nil, err
+	}
+	path := file.Name()
+	_ = file.Close()
+	defer os.Remove(path)
+	dbFile, err := sql.Open(cellstore.DriverName, path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = dbFile.ExecContext(ctx, string(sqlText)); err != nil {
+		_ = dbFile.Close()
+		return nil, err
+	}
+	if err = dbFile.Close(); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxExportBytes {
+		return nil, fmt.Errorf("d1: dump exceeds 32 MiB")
+	}
+	return data, nil
+}
 
 // ExportSQL creates a consistent SQL snapshot. SQLite owns the schema text;
 // values are escaped according to their actual SQLite storage class.

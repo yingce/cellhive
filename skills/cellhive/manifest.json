@@ -1,0 +1,7 @@
+{
+  "name": "cellhive",
+  "version": "2026.10.15.01",
+  "baseUrl": "https://cellhive.example.com",
+  "entrypoint": "SKILL.md",
+  "files": ["manifest.json", "SKILL.md", "agents/openai.yaml"]
+}

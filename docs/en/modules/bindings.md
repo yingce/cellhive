@@ -24,7 +24,7 @@ Map each type of Cloudflare binding to platform resources and host adapters, and
 - **Tenant env is entirely user-owned**: Tenant Worker and DO-facet env contains only user-declared vars, current managed secrets, and user-named binding stubs, with **zero** platform keys. Secrets are envelope-encrypted in the control cell and decrypted for runtime injection; a same-named secret overrides a var. `CH_*`, `CELL_*`, `__cellhive*`, `PLATFORM`, `LOG_*`, and `WF_*` are user names (ADR-185). DO WebSocket upgrades and calls use platform-side `fetch(request)`/`rpcObject(...)` stubs, with no tenant-visible private transport. A trusted internal host passes its dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` as a JSRPC argument to the wrapper; it is neither a cross-loader `ServiceStub` nor env.
 - One scoped token per binding (HMAC).
 - Reads are **strongly consistent** (forwarded to owner).
-- Cloudflare rejected items are **explicitly rejected** (Cache API, Sessions, SSE-C, etc.); unknown fields/flags are rejected at deployment time.
+- Cloudflare rejected items are **explicitly rejected** (Cache API, SSE-C, etc.); D1 Sessions/bookmarks expose the API shape with CellHive strong-consistency txid bookmarks but do not provide read-replica semantics; unknown fields/flags are rejected at deployment time.
 
 ## Source Locations
 

@@ -213,6 +213,7 @@ function d1Meta(res, readRows) {
     duration: res.duration_ms || 0,
     rows_read: readRows ? (res.rows || []).length : 0,
     rows_written: changes,
+    bookmark: res.bookmark || undefined,
   };
 }
 
@@ -223,6 +224,7 @@ class D1PreparedStatement extends RpcTarget {
     this.props = props;
     this.sql = sql;
     this.params = [];
+    this.lastBookmark = null;
   }
   bind(...p) {
     this.params = p;
@@ -234,35 +236,39 @@ class D1PreparedStatement extends RpcTarget {
   }
   async all() {
     const [res] = await d1call(this.env, this.props, "query", { sql: this.sql, params: this.params });
+    this.lastBookmark = res.bookmark || null;
     return { results: rowsToObjects(res), success: true, meta: d1Meta(res, true) };
   }
   async first(column) {
     const [res] = await d1call(this.env, this.props, "query", { sql: this.sql, params: this.params });
+    this.lastBookmark = res.bookmark || null;
     const objs = rowsToObjects(res);
     if (!objs.length) return null;
-    return column ? objs[0][column] : objs[0];
+    if (column) {
+      if (!Object.prototype.hasOwnProperty.call(objs[0], column)) throw new Error("D1_ERROR: column not found: " + column);
+      return objs[0][column];
+    }
+    return objs[0];
   }
   async run() {
     const [res] = await d1call(this.env, this.props, "exec", { sql: this.sql, params: this.params });
-    return { success: true, meta: d1Meta(res, false) };
+    this.lastBookmark = res.bookmark || null;
+    return { results: [], success: true, meta: d1Meta(res, false) };
   }
   async raw(options = {}) {
     const [res] = await d1call(this.env, this.props, "query", { sql: this.sql, params: this.params });
+    this.lastBookmark = res.bookmark || null;
     const rows = res.rows || [];
     return options.columnNames ? [res.columns || [], ...rows] : rows;
   }
 }
 
 export class D1Database extends WorkerEntrypoint {
-  // D1 Sessions / bookmarks (read replication) are not supported: CellHive D1 is
-  // a single-writer cell with no read replicas, so a "session" has no meaning
-  // (ADR-153). Fail loudly instead of silently ignoring the option.
-  session() {
-    throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)");
-  }
-  withSession() {
-    throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)");
-  }
+  // Sessions retain the D1 API shape. CellHive has a single strong owner rather
+  // than read replicas, so the bookmark is a monotonic cell txid and every
+  // session query already executes on the authoritative owner.
+  session(bookmark) { return makeD1Session(this, bookmark); }
+  withSession(bookmark) { return makeD1Session(this, bookmark); }
   prepare(sql) {
     return new D1PreparedStatement(this.env, this.ctx.props, sql);
   }
@@ -277,7 +283,7 @@ export class D1Database extends WorkerEntrypoint {
   async batchStatements(statements) {
     const encoded = statements.map((statement) => Object.assign({}, statement, { params: d1Params(statement.params) }));
     const results = await d1call(this.env, this.ctx.props, "batch", { statements: encoded });
-    return results.map((res) => ({ success: true, results: rowsToObjects(res), raw: res.rows || [], columns: res.columns || [], meta: d1Meta(res, false) }));
+    return results.map((res) => ({ success: true, results: rowsToObjects(res), raw: res.rows || [], columns: res.columns || [], meta: d1Meta(res, (res.columns || []).length > 0) }));
   }
   async batch(stmts) {
     const specs = await Promise.all(stmts.map((s) => s.spec()));
@@ -285,8 +291,32 @@ export class D1Database extends WorkerEntrypoint {
   }
   async exec(sql) {
     const [res] = await d1call(this.env, this.ctx.props, "exec", { sql });
-    return { count: res.rows_affected, duration: res.duration_ms };
+    return { count: res.statement_count || 1, duration: res.duration_ms };
   }
+  async dump() {
+    const p = this.ctx.props;
+    const r = await call(this.env, "/v1/d1/dump?" + q({ ns: p.ns, db: p.name }), { headers: scopeHeaders(p) });
+    await must(r, "d1.dump");
+    return r.arrayBuffer();
+  }
+}
+
+function makeD1Session(database, initialBookmark) {
+  let bookmark = initialBookmark || null;
+  const note = (statement) => { if (statement.lastBookmark) bookmark = statement.lastBookmark; };
+  const wrap = (statement) => ({
+    bind(...values) { statement.bind(...values); return this; },
+    async all() { const out = await statement.all(); note(statement); return out; },
+    async first(column) { const out = await statement.first(column); note(statement); return out; },
+    async run() { const out = await statement.run(); note(statement); return out; },
+    async raw(options) { const out = await statement.raw(options); note(statement); return out; },
+    spec() { return statement.spec(); },
+  });
+  return {
+    prepare(sql) { return wrap(database.prepare(sql)); },
+    async batch(statements) { const out = await database.batch(statements.map((s) => s._statement || s)); const last = out[out.length - 1]; if (last?.meta?.bookmark) bookmark = last.meta.bookmark; return out; },
+    getBookmark() { return bookmark; },
+  };
 }
 
 // R2 object helpers: the server returns the full R2Object as JSON on put/head/

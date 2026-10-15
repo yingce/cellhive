@@ -1,6 +1,7 @@
 package d1
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -236,6 +237,21 @@ func TestD1Errors(t *testing.T) {
 	}
 }
 
+func TestD1CloudflareInputLimits(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Query(ctx, "acme", "main", strings.Repeat("x", MaxSQLBytes+1), nil); err == nil {
+		t.Fatal("oversized SQL accepted")
+	}
+	params := make([]any, MaxParams+1)
+	if _, err := s.Query(ctx, "acme", "main", "SELECT 1", params); err == nil {
+		t.Fatal("too many params accepted")
+	}
+	if _, err := s.Query(ctx, "acme", "main", "SELECT ?", []any{strings.Repeat("x", MaxValueBytes+1)}); err == nil {
+		t.Fatal("oversized value accepted")
+	}
+}
+
 func TestLastInsertID(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -260,6 +276,44 @@ func TestLastInsertID(t *testing.T) {
 	})
 	if err != nil || len(b) != 2 || b[0].LastInsertID != 3 || b[1].LastInsertID != 4 {
 		t.Fatalf("batch last_row_id = %+v, %v", b, err)
+	}
+}
+
+func TestExecStatementCountIsNotRowsAffected(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Exec(ctx, "acme", "main", `INSERT INTO t(v) VALUES ('a'),('b'),('c')`, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := SQLStatementCount(`UPDATE t SET v='z'`); got != 1 {
+		t.Fatalf("single statement count = %d", got)
+	}
+	if got := SQLStatementCount("UPDATE t SET v='z';\nDELETE FROM t WHERE id=99;"); got != 2 {
+		t.Fatalf("multi statement count = %d", got)
+	}
+}
+
+func TestDumpReturnsSanitizedSQLite(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if _, err := s.Exec(ctx, "acme", "main", `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Exec(ctx, "acme", "main", `INSERT INTO users(name) VALUES ('alice')`, nil); err != nil {
+		t.Fatal(err)
+	}
+	dump, err := s.Dump(ctx, "acme", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(dump, []byte("SQLite format 3")) {
+		t.Fatalf("dump header = %q", dump[:min(len(dump), 16)])
+	}
+	if bytes.Contains(dump, []byte("cell_meta")) || bytes.Contains(dump, []byte("__cellhive")) {
+		t.Fatal("dump leaked CellHive internal tables")
 	}
 }
 

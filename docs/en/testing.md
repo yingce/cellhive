@@ -110,7 +110,7 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 - `internal/bundler TestBuildExternalizesPlatformModules` (`cloudflare:*` always externalized; `node:*` only with nodejs_compat, otherwise bundling fails).
 - `internal/wranglercompat TestKnownFlagsMatchDevCLI` (Go list ↔ `cli/src/validate.ts` exact per-item consistency), `TestPinPairsWithCompatibilityDate` (pin ↔ compatibility upper bound).
 - `internal/wrangler TestFrameworkPrebuiltLayouts` (OpenNext/SvelteKit/Astro layouts + bundling).
-- D1 sessions: real workerd e2e asserts `withSession()` reports "not supported".
+- D1 parity: real workerd e2e covers `withSession()`/`getBookmark()` strong-consistency txid bookmarks, Worker `dump()` binary snapshots, `run().results`, and `exec().count`; no read-replica/region semantics.
 
 ## dispatch / waker (ADR-152)
 - `internal/waker TestBackoffDelay` (exponential backoff to cap, disabled, base=0 fallback).

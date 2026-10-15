@@ -63,6 +63,8 @@ func dispatch(args []string) error {
 		return cmdProject(args[1:])
 	case "env":
 		return cmdEnv()
+	case "skills":
+		return cmdSkills(args[1:])
 	case "app":
 		return cmdApp(args[1:])
 	case "resource":
@@ -2771,6 +2773,7 @@ Usage:
   cellhive auth list|current|test|logout <profile>
   cellhive project init --namespace <ns> [--profile <profile>]
   cellhive env                                      # print official Wrangler env exports
+  cellhive skills status|update [--force]           # inspect/update the AI Skill bundle
   cellhive diagnose
   cellhive app create <namespace>
   cellhive app list

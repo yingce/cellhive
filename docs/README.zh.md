@@ -67,6 +67,8 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 | [`compatibility-matrix.md`](./compatibility-matrix.md) | CF 运行时面 + Wrangler 配置面的支持矩阵（Supported/Partial/Rejected） |
 | [`wrangler-compat.md`](./wrangler-compat.md) | Wrangler 兼容：Go+esbuild 打包、配置解析、DO 生命周期、路由、assets |
 | [`cli.md`](./cli.md) | CLI 登录 profile、项目 namespace、多 Worker 配置、`cellhive wrangler` 与官方 Wrangler |
+| [`ai/index.md`](./ai/index.md) | AI 路由、能力目录、Skill 与在线文档协议 |
+| [`platform-hosting.md`](./platform-hosting.md) | 文档、Skill 与未来管理平台前端在 CellHive Worker 上的托管拓扑和发布 |
 | [`workerd-integration.md`](./workerd-integration.md) | stock workerd 集成：workerLoader、wrapper、host adapter、网络/limits、版本 pin |
 | [`routing.md`](./routing.md) | 入口、路由投影、版本解析、host 形态、保留命名空间 |
 

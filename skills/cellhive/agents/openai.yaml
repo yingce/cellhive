@@ -1,0 +1,4 @@
+version: 1
+name: cellhive
+description: Route CellHive Worker, Wrangler, deployment, bindings, static assets, and operations tasks to the current online capability catalog.
+default_prompt: "Use $cellhive to inspect the project, route the task through the CellHive capability catalog, and verify the result with evidence."

@@ -1,0 +1,13 @@
+{
+  "version": "2026.10.15.01",
+  "product": "cellhive",
+  "catalog": "catalog.json",
+  "documents": [
+    {"id":"overview","path":"index.md","type":"router"},
+    {"id":"cli","path":"cli.md","type":"workflow"},
+    {"id":"capability-catalog","path":"catalog.json","type":"catalog"}
+  ],
+  "skills": [
+    {"name":"cellhive","manifest":"cellhive/manifest.json"}
+  ]
+}

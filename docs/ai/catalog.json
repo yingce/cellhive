@@ -1,0 +1,29 @@
+{
+  "version": "2026.10.15.01",
+  "product": "cellhive",
+  "docs_base": "/docs",
+  "skill_base": "/skills",
+  "capabilities": [
+    {"id":"runtime.worker","kind":"runtime","status":"supported","keywords":["Worker","fetch","workerd","JS module"],"reference":"/docs/compatibility-matrix.md","verification":"real workerd request"},
+    {"id":"runtime.assets","kind":"runtime","status":"supported","keywords":["assets","static site","React","Vite","SPA","ASSETS",".assetsignore"],"reference":"/docs/static-sites.md","verification":"REACT-STATIC-E2E"},
+    {"id":"runtime.bindings","kind":"runtime","status":"supported","keywords":["KV","D1","R2","Queue","Workflow","binding"],"reference":"/docs/bindings.md","verification":"binding-specific workerd E2E"},
+    {"id":"runtime.kv","kind":"runtime","status":"supported","keywords":["KV","get","put","incr","metadata","expiration"],"reference":"/docs/bindings.md","verification":"KV workerd E2E"},
+    {"id":"runtime.d1","kind":"runtime","status":"supported","keywords":["D1","SQL","prepare","batch","exec"],"reference":"/docs/bindings.md","verification":"D1 workerd E2E"},
+    {"id":"runtime.r2","kind":"runtime","status":"supported","keywords":["R2","bucket","put","get","head","multipart","presign"],"reference":"/docs/bindings.md","verification":"R2 workerd E2E"},
+    {"id":"runtime.queues","kind":"runtime","status":"partial","keywords":["Queues","send","sendBatch","queue handler","DLQ"],"reference":"/docs/compatibility-matrix.md","verification":"Queue runtime baseline"},
+    {"id":"runtime.cron","kind":"runtime","status":"supported","keywords":["Cron","scheduled","triggers"],"reference":"/docs/compatibility-matrix.md","verification":"timer/cron E2E"},
+    {"id":"runtime.secrets","kind":"runtime","status":"supported","keywords":["vars","secrets","managed secrets","secret put"],"reference":"/docs/bindings.md","verification":"secret version E2E"},
+    {"id":"runtime.service-rpc","kind":"runtime","status":"supported","keywords":["service binding","worker RPC","JSRPC","structured clone"],"reference":"/docs/bindings.md","verification":"TestUserRuntimeServiceBindingNativeRPC"},
+    {"id":"runtime.durable-objects","kind":"runtime","status":"partial","keywords":["Durable Objects","DO","SQLite","alarm","WebSocket","RPC"],"reference":"/docs/compatibility-matrix.md","verification":"internal/userruntime and doruntime E2E"},
+    {"id":"runtime.workflows","kind":"runtime","status":"partial","keywords":["Workflow","step.do","sleep","waitForEvent"],"reference":"/docs/compatibility-matrix.md","verification":"workflow workerd E2E"},
+    {"id":"runtime.ai","kind":"runtime","status":"partial","keywords":["AI","OpenAI compatible","AI.run","CELLHIVE_AI_URL"],"reference":"/docs/compatibility-matrix.md","verification":"configured BYO endpoint"},
+    {"id":"runtime.vectorize","kind":"runtime","status":"supported","keywords":["Vectorize","vec1","ANN","embeddings"],"reference":"/docs/compatibility-matrix.md","verification":"vectorize tests and real cell-agent"},
+    {"id":"runtime.rejected","kind":"runtime","status":"rejected","keywords":["Cache API","Browser Rendering","Email Workers","Python Workers","Images","AI Search"],"reference":"/docs/compatibility-matrix.md","verification":"deploy compatibility rejection"},
+    {"id":"cli.deploy","kind":"cli","status":"supported","keywords":["deploy","publish","release","rollback","promote"],"reference":"/docs/cli.md","verification":"CLI E2E + runtime baseline"},
+    {"id":"cli.dev","kind":"cli","status":"supported","keywords":["dev","Miniflare","hot reload","local development"],"reference":"/docs/dev-mode.md","verification":"make cli-test"},
+    {"id":"cli.auth-project","kind":"cli","status":"supported","keywords":["login","profile","namespace","project.json","multi Worker"],"reference":"/docs/cli.md","verification":"CLI profile deploy E2E"},
+    {"id":"cli.wrangler","kind":"cli","status":"partial","keywords":["Wrangler","wrangler.jsonc","Cloudflare API","CLOUDFLARE_API_TOKEN"],"reference":"/docs/wrangler-compat.md","verification":"compatibility tests and Wrangler E2E when configured"},
+    {"id":"ops.storage-gc","kind":"operations","status":"supported","keywords":["GC","assets cleanup","bundle cleanup","garbage collection"],"reference":"/docs/operations.md","verification":"gc endpoint tests"},
+    {"id":"ops.routing","kind":"operations","status":"supported","keywords":["domain","route","custom domain","path prefix"],"reference":"/docs/routing.md","verification":"route projection E2E"}
+  ]
+}

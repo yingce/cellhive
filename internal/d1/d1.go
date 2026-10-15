@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,13 @@ import (
 type Store struct {
 	cs *cellstore.Store
 }
+
+const (
+	MaxSQLBytes   = 100 * 1024
+	MaxParams     = 100
+	MaxValueBytes = 2 * 1024 * 1024
+	MaxQueryTime  = 30 * time.Second
+)
 
 // New creates a D1 store.
 func New(cs *cellstore.Store) *Store { return &Store{cs: cs} }
@@ -45,16 +53,86 @@ type Statement struct {
 // Result is one statement's outcome. Query results carry Columns/Rows; mutations
 // carry RowsAffected.
 type Result struct {
-	Columns      []string `json:"columns,omitempty"`
-	Rows         [][]any  `json:"rows,omitempty"`
-	RowsAffected int64    `json:"rows_affected"`
-	LastInsertID int64    `json:"last_row_id"`
-	DurationMs   float64  `json:"duration_ms"`
+	Columns        []string `json:"columns,omitempty"`
+	Rows           [][]any  `json:"rows,omitempty"`
+	RowsAffected   int64    `json:"rows_affected"`
+	LastInsertID   int64    `json:"last_row_id"`
+	DurationMs     float64  `json:"duration_ms"`
+	StatementCount int      `json:"statement_count"`
+	Bookmark       string   `json:"bookmark,omitempty"`
+}
+
+// SQLStatementCount counts top-level semicolon-delimited statements for the
+// D1 exec() result. It ignores semicolons in quoted strings and SQL comments.
+func SQLStatementCount(sqlText string) int {
+	count, start := 0, false
+	quote, lineComment, blockComment := byte(0), false, false
+	for i := 0; i < len(sqlText); i++ {
+		c := sqlText[i]
+		if lineComment {
+			if c == '\n' {
+				lineComment = false
+			}
+			continue
+		}
+		if blockComment {
+			if c == '*' && i+1 < len(sqlText) && sqlText[i+1] == '/' {
+				blockComment = false
+				i++
+			}
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(sqlText) && sqlText[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-' {
+			lineComment = true
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(sqlText) && sqlText[i+1] == '*' {
+			blockComment = true
+			i++
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			start = true
+			continue
+		}
+		if c == ';' {
+			if start {
+				count++
+				start = false
+			}
+			continue
+		}
+		if c > ' ' {
+			start = true
+		}
+	}
+	if start {
+		count++
+	}
+	return count
 }
 
 // Query runs a single statement and returns its rows (or affected count for a
 // mutation), mirroring D1's prepare().all()/run().
 func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any) (Result, error) {
+	if err := ValidateInput(sqlText, params); err != nil {
+		return Result{}, err
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, MaxQueryTime)
+	defer cancel()
 	c, err := s.cell(ctx, ns, db)
 	if err != nil {
 		return Result{}, err
@@ -64,7 +142,11 @@ func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any)
 	// IsReadOnly (not returnsRows) decides this: a WITH statement returns rows
 	// but may still mutate.
 	if IsReadOnly(sqlText) {
-		return runOne(ctx, c.DB, nil, sqlText, params)
+		res, err := runOne(ctx, c.DB, nil, sqlText, params)
+		if err == nil {
+			res.Bookmark = bookmark(ctx, c)
+		}
+		return res, err
 	}
 	var res Result
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
@@ -72,11 +154,20 @@ func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any)
 		res, e = runOne(ctx, nil, tx, sqlText, params)
 		return e
 	})
+	if err == nil {
+		res.Bookmark = bookmark(ctx, c)
+	}
 	return res, err
 }
 
 // Exec runs a single mutation statement and returns the affected count.
 func (s *Store) Exec(ctx context.Context, ns, db, sqlText string, params []any) (Result, error) {
+	if err := ValidateInput(sqlText, params); err != nil {
+		return Result{}, err
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, MaxQueryTime)
+	defer cancel()
 	c, err := s.cell(ctx, ns, db)
 	if err != nil {
 		return Result{}, err
@@ -95,11 +186,22 @@ func (s *Store) Exec(ctx context.Context, ns, db, sqlText string, params []any) 
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{RowsAffected: n, LastInsertID: id, DurationMs: msSince(start)}, nil
+	return Result{RowsAffected: n, LastInsertID: id, DurationMs: msSince(start), StatementCount: SQLStatementCount(sqlText), Bookmark: bookmark(ctx, c)}, nil
 }
 
 // Batch runs several statements in one transaction, so a failure rolls all back.
 func (s *Store) Batch(ctx context.Context, ns, db string, stmts []Statement) ([]Result, error) {
+	if len(stmts) == 0 {
+		return nil, fmt.Errorf("d1: batch requires at least one statement")
+	}
+	for _, st := range stmts {
+		if err := ValidateInput(st.SQL, st.Params); err != nil {
+			return nil, err
+		}
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, MaxQueryTime)
+	defer cancel()
 	c, err := s.cell(ctx, ns, db)
 	if err != nil {
 		return nil, err
@@ -118,7 +220,46 @@ func (s *Store) Batch(ctx context.Context, ns, db string, stmts []Statement) ([]
 	if err != nil {
 		return nil, err
 	}
+	mark := bookmark(ctx, c)
+	for i := range out {
+		out[i].Bookmark = mark
+	}
 	return out, nil
+}
+
+// ValidateInput applies the common Cloudflare D1 statement/value limits before
+// SQLite sees the request. The limits prevent a large body from becoming an
+// unbounded SQLite/JS result allocation.
+func ValidateInput(sqlText string, params []any) error {
+	if len(sqlText) > MaxSQLBytes {
+		return fmt.Errorf("d1: SQL statement exceeds %d bytes", MaxSQLBytes)
+	}
+	if len(params) > MaxParams {
+		return fmt.Errorf("d1: too many parameters: %d > %d", len(params), MaxParams)
+	}
+	for _, p := range params {
+		size := 0
+		switch v := p.(type) {
+		case string:
+			size = len(v)
+		case []byte:
+			size = len(v)
+		case []any:
+			size = len(v)
+		}
+		if size > MaxValueBytes {
+			return fmt.Errorf("d1: bound value exceeds %d bytes", MaxValueBytes)
+		}
+	}
+	return nil
+}
+
+func bookmark(ctx context.Context, c *cellstore.Cell) string {
+	id, err := c.TxID(ctx)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatUint(id, 10)
 }
 
 // Migration is an applied SQL file. The filename is its stable identity.
@@ -339,6 +480,18 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return Result{}, err
+		}
+		rowBytes := 0
+		for _, v := range vals {
+			switch x := v.(type) {
+			case string:
+				rowBytes += len(x)
+			case []byte:
+				rowBytes += len(x)
+			}
+		}
+		if rowBytes > MaxValueBytes {
+			return Result{}, fmt.Errorf("d1: result row exceeds %d bytes", MaxValueBytes)
 		}
 		for i, v := range vals {
 			if b, ok := v.([]byte); ok {

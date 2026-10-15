@@ -23,6 +23,7 @@
 node_modules/
 /cli/node_modules/
 /cli/dist/
+/docs-site/dist/
 
 # --- logs / profiles ---
 *.log

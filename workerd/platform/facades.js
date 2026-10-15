@@ -163,13 +163,14 @@ export function makeKVFromStub(stub) {
       for (const item of batch) item.reject(e);
     }
   };
-  return {
+  const database = {
     get: (key, options) => enqueue(key, kvReadType(options), false),
     getWithMetadata: (key, options) => enqueue(key, kvReadType(options), true),
     put: (...args) => stub.put(...args),
     delete: (...args) => stub.delete(...args),
     list: (...args) => stub.list(...args),
   };
+  return database;
 }
 
 export function makeKV(platform, ns, scopeToken) {
@@ -462,24 +463,27 @@ export function makeD1(platform, ns, db, scopeToken) {
       params,
       bind(...p) { params = p; stmt.params = p; return stmt; },
       async all() { const [res] = await call("query", { sql, params }); return { results: rowsToObjects(res), success: true, meta: d1Meta(res, true) }; },
-      async first(column) { const [res] = await call("query", { sql, params }); const objs = rowsToObjects(res); if (!objs.length) return null; return column ? objs[0][column] : objs[0]; },
-      async run() { const [res] = await call("exec", { sql, params }); return { success: true, meta: d1Meta(res, false) }; },
+       async first(column) { const [res] = await call("query", { sql, params }); const objs = rowsToObjects(res); if (!objs.length) return null; if (column) { if (!Object.prototype.hasOwnProperty.call(objs[0], column)) throw new Error("D1_ERROR: column not found: " + column); return objs[0][column]; } return objs[0]; },
+       async run() { const [res] = await call("exec", { sql, params }); return { results: [], success: true, meta: d1Meta(res, false) }; },
       async raw(options = {}) { const [res] = await call("query", { sql, params }); const rows = res.rows || []; return options.columnNames ? [res.columns || [], ...rows] : rows; },
     };
     return stmt;
   }
-  return {
+  const out = {
     prepare,
     async batch(stmts) {
-      const statements = stmts.map((s) => ({ sql: s.sql, params: (s.params || []).map(d1Param) }));
+      const statements = stmts.map((s) => { const spec = s.spec ? s.spec() : s; return { sql: spec.sql, params: (spec.params || []).map(d1Param) }; });
       const results = await call("batch", { statements });
-      return results.map((res) => ({ success: true, results: rowsToObjects(res), meta: d1Meta(res, false) }));
+       return results.map((res) => ({ success: true, results: rowsToObjects(res), meta: d1Meta(res, (res.columns || []).length > 0) }));
     },
     async exec(sql) {
       const [res] = await call("exec", { sql });
-      return { count: res.rows_affected, duration: res.duration_ms };
+      return { count: res.statement_count || 1, duration: res.duration_ms };
     },
   };
+  out.session = (bookmark) => makeD1Session(out, bookmark);
+  out.withSession = (bookmark) => makeD1Session(out, bookmark);
+  return out;
 }
 
 export function makeR2(platform, ns, bucket, scopeToken) {
@@ -740,20 +744,39 @@ export function makeD1FromStub(database) {
       params,
       bind(...values) { params = values; stmt.params = values; return stmt; },
       async all() { const res = await database.query(sql, params); return { results: res.results || [], success: true, meta: res.meta }; },
-      async first(column) { const res = await database.query(sql, params); const rows = res.results || []; if (!rows.length) return null; return column ? rows[0][column] : rows[0]; },
-      async run() { return database.execute(sql, params); },
+       async first(column) { const res = await database.query(sql, params); const rows = res.results || []; if (!rows.length) return null; if (column) { if (!Object.prototype.hasOwnProperty.call(rows[0], column)) throw new Error("D1_ERROR: column not found: " + column); return rows[0][column]; } return rows[0]; },
+       async run() { const result = await database.execute(sql, params); return { results: [], ...result }; },
       async raw(options = {}) { const res = await database.query(sql, params); const rows = res.raw || []; return options.columnNames ? [res.columns || [], ...rows] : rows; },
     };
     return stmt;
   }
-  return {
+  const out = {
     prepare,
     async batch(stmts) {
-      return database.batchStatements(stmts.map((stmt) => ({ sql: stmt.sql, params: stmt.params || [] })));
+      return database.batchStatements(stmts.map((stmt) => stmt.spec ? stmt.spec() : ({ sql: stmt.sql, params: stmt.params || [] })));
     },
     exec(sql) { return database.exec(sql); },
-    session() { throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)"); },
-    withSession() { throw new Error("d1 sessions are not supported by CellHive (no read replication or bookmarks)"); },
+    dump() { return database.dump(); },
+  };
+  out.session = (bookmark) => makeD1Session(out, bookmark);
+  out.withSession = (bookmark) => makeD1Session(out, bookmark);
+  return out;
+}
+
+function makeD1Session(database, initialBookmark) {
+  let bookmark = initialBookmark || null;
+  const wrap = (statement) => ({
+    bind(...values) { statement.bind(...values); return this; },
+    async all() { const out = await statement.all(); if (out.meta?.bookmark) bookmark = out.meta.bookmark; return out; },
+    async first(column) { const out = await statement.first(column); return out; },
+    async run() { const out = await statement.run(); if (out.meta?.bookmark) bookmark = out.meta.bookmark; return out; },
+    async raw(options) { return statement.raw(options); },
+    spec() { return statement.spec ? statement.spec() : { sql: statement.sql, params: statement.params || [] }; },
+  });
+  return {
+    prepare(sql) { return wrap(database.prepare(sql)); },
+    async batch(statements) { const out = await database.batch(statements); const last = out[out.length - 1]; if (last?.meta?.bookmark) bookmark = last.meta.bookmark; return out; },
+    getBookmark() { return bookmark; },
   };
 }
 

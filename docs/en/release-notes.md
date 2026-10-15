@@ -296,7 +296,7 @@ This release closes out the remaining items in roadmap P3–P5, all backed by re
 
 ### Compatibility matrix closure (ADR-153)
 - **Bug fix**: the platform bundler now externals `cloudflare:*` by default (`node:*` only with nodejs_compat), so prebuilt artifacts from frameworks such as OpenNext can `deploy --config` normally.
-- Precise list of `compatibility_flags`, mirrored with the dev CLI and enforced by tests; pin `1.20260916.1` ↔ compatibility ceiling `2026-09-23` binding; OpenNext/SvelteKit/Astro layout acceptance; D1 sessions/bookmarks explicitly rejected.
+- Precise list of `compatibility_flags`, mirrored with the dev CLI and enforced by tests; pin `1.20260916.1` ↔ compatibility ceiling `2026-09-23` binding; OpenNext/SvelteKit/Astro layout acceptance; D1 sessions/bookmarks now expose strong-consistency txid bookmark API shapes without read replicas.
 
 ### dispatch defect fixes (ADR-154)
 - Fixed: timer body missing `namespace` (cron/scheduled always 400), deployment artifact missing `CELLHIVE_DISPATCH_URL` (queue/timer loops silently not starting), empty `event.cron`, queue batch not in CF shape (`.messages`/`.queue`/`ackAll`/`retryAll`) and properties/trace lost across isolates.

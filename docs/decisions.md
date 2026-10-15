@@ -2006,16 +2006,17 @@
 
 ---
 
-## ADR-153 兼容矩阵收口：flag 精确列表 + 框架验收 + D1 sessions 拒绝 ✅实现
+## ADR-153 兼容矩阵收口：flag 精确列表 + 框架验收 + D1 sessions 初始边界 ✅部分取代
 
 - **背景**：`compatibility-matrix.md` 的"待细化"（`compatibility_flags` 精确列表、框架适配逐项验收）与 D1 "无 sessions/bookmark" 都只是口头结论；探索框架验收时发现**真 bug**：平台 bundler 从不把 `cloudflare:*`/`node:*` 标为 external，凡是 import `cloudflare:workers` 的框架预构建产物（OpenNext 等）在 `deploy --config` 时**打包失败**。
 - **决策/修复**：
   1. **bundler 修复**：`Build` 默认 `--external:cloudflare:*`，`NodeJSCompat` 时再加 `--external:node:*`（workerd 运行时提供；否则 esbuild unresolved import 直接失败）。回归测试 `TestBuildExternalizesPlatformModules`（含 node:* 在无 nodejs_compat 时必须失败关闭）。
   2. **flag 列表与 pin 绑定（由 ADR-186 升级）**：`internal/workerdcompat/manifest.json` 从固定上游 revision 生成；Go 与 Bun 消费同一清单，`TestKnownFlagsMatchDevCLI`/`TestPinPairsWithCompatibilityDate` 把 pin `1.20260916.1`、上限 `2026-09-23` 和生成产物绑成一个决定。
   3. **框架验收**：`internal/wrangler TestFrameworkPrebuiltLayouts`（OpenNext/SvelteKit/Astro 三种预构建布局：配置映射 + 平台打包；esbuild 缺失则 skip）。
-  4. **D1 sessions/bookmarks 显式拒绝**：`bindings.js` 的 `D1Database.session()`/`withSession()` 抛 `d1 sessions are not supported by CellHive (no read replication or bookmarks)`；真实 workerd e2e（`TestUserRuntimePublicLoaderD1R2Queue`）断言该错误文案。矩阵 D1 行标注。
+  4. **D1 sessions/bookmarks 初始边界**：原始实现曾让 `bindings.js` 的 `D1Database.session()`/`withSession()` 显式拒绝，因为 CellHive 没有 read replica。该边界已由后续兼容收口取代：现在提供 `withSession()`/`session()`/`getBookmark()` 的 API 形状，bookmark 使用强一致 cell txid；不伪造 Cloudflare read-replica/region 路由。
 - **验证**：新增 4 个测试（bundler 外置、flag 镜像、pin 配对、三框架验收）+ 既有 e2e 的 sessions 断言；`go test ./...` 50 包全绿。
 - **残余**：框架验收是"预构建产物路径 + 打包"级别（不跑真实框架构建工具链/SSR 运行时；三框架的产物形状以文档/适配器约定为准）。
+- **兼容收口（2026-10-15）**：D1 `run()` 返回 `results: []`，`exec().count` 统计 SQL 语句数，`first(column)` 缺列抛 `D1_ERROR`；新增 txid bookmark session API、脱敏 SQLite `dump()`（32MiB 上限），批量查询补读行统计。完整 replica/region meta 仍不模拟。
 
 ---
 
@@ -2537,6 +2538,17 @@
 - **调用记录**：每个 Queue batch/Cron attempt 独立 UUID invocation_id；logical_id 关联相同批次/slot 重试，attempt 在 namespace invocation cell 原子分配。可信 runtime host 在执行前持久化 running，之后持久化 success/failed/retry、时间、异常/stack、console 日志；native Tail ring 继续独立工作。AsyncLocalStorage 隔离重叠调用，ctx/importable waitUntil 在执行结束前等待并记录日志。未完成 running 不能伪报成功。
 - **预算/查询**：namespace 内 `__invocations__/main` SQLite，7 天/10,000 次历史，按写入有界清理；单条记录 <=128 KiB，最多 256 条 console/8192 字符，截断显式标记。按 namespace/Worker/kind/时间/调用 ID 分页查询，日志与结果同记录。`CELLHIVE_TENANT_LOG_CAPTURE=off` 仅关闭 native Tail；执行记录为必开控制面观测。
 - **协议发布**：新旧 cleanup/fence writer 不得混跑；先升级所有副本/恢复/consumer writer 再开放删除 API。详情/接口/验收见 `operations.md`、`superpowers/specs/2026-10-15-resource-operations-and-invocations.md`。
+
+---
+
+## ADR-207 平台文档与管理前端运行在 CellHive Worker（2026-10-15，实施中）
+
+- **决策**：CellHive 的在线 AI 文档、Skill bundle 和未来管理平台前端都作为专用 Worker 发布到同一个 CellHive 集群和对象存储；文档使用 `platform/docs`，管理前端使用 `platform/admin`，均以 Assets/Worker 版本管理、域名路由和 rollback。多个前端项目不再分别部署到外部静态托管平台。
+- **边界**：`cell-agent :8082` 仍是控制面 API，长期桶凭据、控制 cell、资源写入和管理鉴权留在 cell-agent；前端 Worker 只能通过受保护的 Admin API/公开只读 API 访问控制面，不能持有 root key、桶凭据或 internal token。Admin API 不因托管前端而变成租户通用 Worker binding。
+- **发布**：仓库源文件 `docs/ai/`、`skills/` 和未来 `platform-admin/` 构建为静态/Worker 产物，通过 `cellhive wrangler deploy` 发布；每次发布生成不可变 bundle/assets/version，active pointer 切换，失败可 rollback，未引用版本由 GC 清理。Skill installer 只访问 docs Worker 的公开 manifest；CLI profile/token 不进入前端产物。
+- **域名**：当前推荐分域：`docs.<base>` → `platform/docs`，`admin.<base>` → cell-agent 控制面（CLI/Wrangler），未来管理前端使用 `admin-ui.<base>` → `platform/admin`。不要求文档、控制 API 和前端共享一个 host；若未来采用单域路径，必须由边缘代理明确分流 `/v1/*`、`/client/v4/*`、`/docs/*`，不能让 docs Worker 抢走 CLI 控制请求。
+- **在线文档协议**：`/ai/catalog.json`、`/ai/manifest.json`、`/skills/manifest.json` 和 `/skills/<name>/...` 是 docs Worker 的版本化公开只读资源；`cellhive skills update` 和 shell/PowerShell installer 使用 manifest 校验版本和路径。文档源仍以仓库为准，在线站点是发布产物。
+- **理由**：减少独立部署项目和凭据面，复用 CellHive 已验证的 Assets、版本、路由、对象存储、GC、rollback 和真实 workerd E2E；同时保持控制面与前端不可信边界。
 
 ---
 
