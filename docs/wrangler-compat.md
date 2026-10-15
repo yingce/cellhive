@@ -52,7 +52,7 @@
 | `wrangler rollback` / `wrangler promote` | 同名命令 |
 | `wrangler secret put\|get\|delete\|list` | `cellhive secret ...` |
 | `wrangler tail` | `cellhive tail` |
-| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`；数据面支持 `execute\|query <ns> <db> <sql>` 与 `migrations list\|apply` |
+| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`；数据面支持 `execute\|query <ns> <db> <sql>` 与 `migrations create\|list\|apply` |
 | `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]`；数据面支持 `object put\|get\|delete\|list` |
 | `wrangler kv namespace\|key ...` | `cellhive kv ...`；`key put\|get\|delete\|list <ns> <binding> [key] [value]` 通过 scoped token 访问数据面 |
 | `wrangler triggers deploy` | 提示用 `cellhive deploy --config wrangler.jsonc`（`triggers.crons` 原子随版本应用） |
@@ -63,7 +63,9 @@
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`kv:bulk`→数据面（用 KV 绑定）、`unstable_*`→内部命令；
 - **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive releases`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
 
-**D1 SQL migrations**：`cellhive d1 migrations apply <ns> <db> [--directory migrations]` 按文件名顺序执行 `*.sql`；每个文件的 SQL 与 `__cellhive_migrations` 记录在同一数据库事务中提交，失败整文件回滚。`list` 仅读取已应用记录。该命令属于 CellHive CLI；原版 Wrangler 的 D1 数据面命令与迁移协议仍需单独对拍，不能从资源 CRUD 兼容推断可用。
+**D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用 `d1_migrations` 表；`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
+
+**KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
 - **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。
 - **原版 Wrangler API 资源语义**：管理员兼容端点同时提供 KV/D1/R2/Queues 的 create/list/delete（分别映射到 `storage/kv/namespaces`、`d1/database`、`r2/buckets`、`queues`），以及 Workflow 的 create/list/get/delete。Worker 版本 list/get、Cron schedules、secret get 也已覆盖。Workflow 的 `concurrency.limit`、`schedules`、`default_retention.success_retention/error_retention` 会持久化并执行；`limits` 仍显式拒绝。Assets 使用 Wrangler 的 `assets-upload-session` + JWT 单文件或 multipart bulk 上传协议，上传内容进入版本资产 token。资源端点只登记 CellHive 资源，不改变“资源先创建、部署引用 ID”的控制面约束；绑定 ID 与资源登记名均可用于部署校验。Secrets 和 Workers routes 也提供 Cloudflare 形状的 CRUD。
 - **第一阶段边界**：目前优先保证普通 Worker 发布主链路；复杂多模块上传、login/dev 及 Cloudflare 专有资源 API 仍按兼容矩阵处理。账号发现、Worker 删除、版本查询与按版本发布已提供；tail 已提供短期 session 和 WebSocket 日志推送；资源 API 已按固定 Wrangler 4.133.0 的真实请求路径实现。

@@ -62,6 +62,33 @@ func (s *Server) handleD1MigrationsApply(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"name": req.Name, "applied": applied})
 }
 
+func (s *Server) handleD1Import(w http.ResponseWriter, r *http.Request) {
+	if !s.requireD1(w) {
+		return
+	}
+	ns, db := s.scopeNS(r), r.URL.Query().Get("db")
+	if s.forwardOrClaim(w, r, d1.Scope(ns, db), nil) {
+		return
+	}
+	var req struct {
+		Digest string `json:"digest"`
+		SQL    string `json:"sql"`
+	}
+	if !decodeLimit(w, r, &req, 8<<20) {
+		return
+	}
+	var applied bool
+	if err := s.capturedWrite(r.Context(), d1.Scope(ns, db), func() error {
+		var e error
+		applied, e = s.D1.Import(r.Context(), ns, db, req.Digest, req.SQL)
+		return e
+	}); err != nil {
+		s.captureErr(w, err, "d1_import_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"applied": applied})
+}
+
 type d1QueryReq struct {
 	SQL    string `json:"sql"`
 	Params []any  `json:"params,omitempty"`
@@ -81,7 +108,7 @@ func (s *Server) handleD1Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req d1QueryReq
-	if !decode(w, r, &req) {
+	if !decodeLimit(w, r, &req, 8<<20) {
 		return
 	}
 	var res d1.Result
@@ -118,7 +145,7 @@ func (s *Server) handleD1Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req d1QueryReq
-	if !decode(w, r, &req) {
+	if !decodeLimit(w, r, &req, 8<<20) {
 		return
 	}
 	var res d1.Result

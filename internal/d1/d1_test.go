@@ -2,6 +2,8 @@ package d1
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"cellhive/internal/cellstore"
@@ -86,6 +88,9 @@ func TestMigrationAtomicAndIdempotent(t *testing.T) {
 	if err != nil || applied {
 		t.Fatalf("retry = %v, %v", applied, err)
 	}
+	if _, err := s.ApplyMigration(ctx, "acme", "main", "0001_init.sql", good+" SELECT 1;"); err == nil {
+		t.Fatal("changed migration was silently skipped")
+	}
 	rows, err = s.ListMigrations(ctx, "acme", "main")
 	if err != nil || len(rows) != 1 || rows[0].Name != "0001_init.sql" {
 		t.Fatalf("list = %v, %v", rows, err)
@@ -105,6 +110,27 @@ func TestMigrationAtomicAndIdempotent(t *testing.T) {
 	rows, err = s.ListMigrations(ctx, "acme", "main")
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("failed migration left tracking row = %v, %v", rows, err)
+	}
+}
+
+func TestImportChecksDigestAndRetriesOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	script := "CREATE TABLE imported(v TEXT); INSERT INTO imported VALUES ('once');"
+	if _, err := s.Import(ctx, "acme", "main", "wrong", script); err == nil {
+		t.Fatal("import accepted a mismatched digest")
+	}
+	hash := sha256.Sum256([]byte(script))
+	digest := hex.EncodeToString(hash[:])
+	for attempt := range 2 {
+		applied, err := s.Import(ctx, "acme", "main", digest, script)
+		if err != nil || applied != (attempt == 0) {
+			t.Fatalf("attempt %d = %v, %v", attempt, applied, err)
+		}
+	}
+	q, err := s.Query(ctx, "acme", "main", "SELECT count(*) FROM imported", nil)
+	if err != nil || q.Rows[0][0] != int64(1) {
+		t.Fatalf("import retry changed data: %v, %v", q, err)
 	}
 }
 

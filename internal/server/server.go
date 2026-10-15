@@ -145,6 +145,8 @@ type Server struct {
 	logFan        map[string]time.Time // ns/worker -> last peer fan-out
 	tailMu        sync.Mutex
 	tails         map[string]*cloudflareTailSession
+	importMu      sync.Mutex
+	d1Imports     map[string]*cloudflareD1Import
 	commits       atomic.Uint64
 	readyFlag     atomic.Bool
 
@@ -284,6 +286,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/d1/batch", s.scopeAuth("d1")(s.admit(s.handleD1Batch)))
 	mux.HandleFunc("GET /v1/d1/migrations", s.scopeAuth("d1")(s.handleD1MigrationsList))
 	mux.HandleFunc("POST /v1/d1/migrations", s.scopeAuth("d1")(s.admit(s.handleD1MigrationsApply)))
+	mux.HandleFunc("POST /v1/d1/import", s.scopeAuth("d1")(s.admit(s.handleD1Import)))
 	mux.HandleFunc("PUT /v1/r2/object", s.scopeAuth("r2")(s.admit(s.handleR2Put)))
 	mux.HandleFunc("GET /v1/r2/object", s.scopeAuth("r2")(s.handleR2Get))
 	mux.HandleFunc("GET /v1/r2/presign", s.scopeAuth("r2")(s.handleR2Presign))

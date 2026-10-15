@@ -286,7 +286,7 @@ func TestCmdCompatRejections(t *testing.T) {
 		{[]string{"queues", "purge", "acme", "jobs"}, "not supported"},
 	} {
 		// Route through dispatch: kv/d1/r2 are real per-domain commands now
-		// (ADR-157) and only their data-plane verbs are rejected.
+		// (ADR-157); supported data-plane verbs now validate their arguments.
 		err := dispatch(tc.args)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("dispatch(%v) = %v, want an error containing %q", tc.args, err, tc.want)

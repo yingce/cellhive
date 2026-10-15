@@ -5,7 +5,9 @@ package d1
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -133,13 +135,13 @@ func (s *Store) ListMigrations(ctx context.Context, ns, db string) ([]Migration,
 	}
 	out := []Migration{}
 	var present int
-	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='__cellhive_migrations'`).Scan(&present); err != nil {
+	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='d1_migrations'`).Scan(&present); err != nil {
 		return nil, err
 	}
 	if present == 0 {
 		return out, nil
 	}
-	rows, err := c.DB.QueryContext(ctx, `SELECT name, applied_at FROM __cellhive_migrations ORDER BY name`)
+	rows, err := c.DB.QueryContext(ctx, `SELECT name, unixepoch(applied_at) FROM d1_migrations ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +168,66 @@ func (s *Store) ApplyMigration(ctx context.Context, ns, db, name, sqlText string
 		return false, err
 	}
 	applied := false
+	digest := sha256.Sum256([]byte(sqlText))
+	hash := hex.EncodeToString(digest[:])
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_migration_hashes (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
 			return err
 		}
 		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM __cellhive_migrations WHERE name=?`, name).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM d1_migrations WHERE name=?`, name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			var stored string
+			err := tx.QueryRowContext(ctx, `SELECT sha256 FROM __cellhive_migration_hashes WHERE name=?`, name).Scan(&stored)
+			if err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if err == nil && stored != hash {
+				return fmt.Errorf("d1: migration %q content changed after apply", name)
+			}
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO d1_migrations(name) VALUES(?)`, name); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_migration_hashes(name, sha256) VALUES(?, ?)`, name, hash); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
+// Import executes an uploaded SQL file once per content digest. A retry after
+// a lost API response cannot apply the same file twice.
+func (s *Store) Import(ctx context.Context, ns, db, digest, sqlText string) (bool, error) {
+	if digest == "" || strings.TrimSpace(sqlText) == "" {
+		return false, fmt.Errorf("d1: import digest and SQL are required")
+	}
+	actual := sha256.Sum256([]byte(sqlText))
+	if digest != hex.EncodeToString(actual[:]) {
+		return false, fmt.Errorf("d1: import digest does not match SQL")
+	}
+	c, err := s.cell(ctx, ns, db)
+	if err != nil {
+		return false, err
+	}
+	applied := false
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_d1_imports (digest TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); err != nil {
+			return err
+		}
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM __cellhive_d1_imports WHERE digest=?`, digest).Scan(&exists); err != nil {
 			return err
 		}
 		if exists != 0 {
@@ -180,7 +236,7 @@ func (s *Store) ApplyMigration(ctx context.Context, ns, db, name, sqlText string
 		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_migrations(name, applied_at) VALUES(?, ?)`, name, time.Now().Unix()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_d1_imports(digest) VALUES(?)`, digest); err != nil {
 			return err
 		}
 		applied = true

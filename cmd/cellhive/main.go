@@ -131,7 +131,7 @@ func dispatch(args []string) error {
 // it (ADR-138).
 func cmdWrangler(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cellhive wrangler <deploy|delete|versions list|deployments list|secret|tail|rollback|promote> ...")
+		return fmt.Errorf("usage: cellhive wrangler <deploy|delete|versions|deployments|secret|tail|rollback|promote|d1|kv|r2|vectorize|hyperdrive> ...")
 	}
 	mapped, err := translateWrangler(args)
 	if err != nil {
@@ -1645,6 +1645,10 @@ func cmdKind(kind string, args []string) error {
 }
 
 func scopeRawCall(method, path, ns, kind, name string, raw []byte, q url.Values) ([]byte, error) {
+	return scopeRawCallHeaders(method, path, ns, kind, name, raw, q, nil)
+}
+
+func scopeRawCallHeaders(method, path, ns, kind, name string, raw []byte, q url.Values, headers http.Header) ([]byte, error) {
 	creds := config.DeriveCredentials(config.LoadRootKey())
 	if creds.Scope == "" {
 		return nil, fmt.Errorf("CELLHIVE_ROOT_KEY is required to mint a scoped token")
@@ -1665,6 +1669,11 @@ func scopeRawCall(method, path, ns, kind, name string, raw []byte, q url.Values)
 	if method == http.MethodPost || method == http.MethodPut {
 		req.Header.Set("content-type", "application/json")
 	}
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -1684,8 +1693,20 @@ func cmdKVData(args []string) error {
 	verb, ns, name := args[0], args[1], args[2]
 	if verb == "list" {
 		q := url.Values{}
-		if len(args) > 3 {
-			q.Set("prefix", args[3])
+		for i := 3; i < len(args); i++ {
+			if args[i] == "--remote" {
+				continue
+			}
+			if args[i] == "--prefix" && i+1 < len(args) {
+				q.Set("prefix", args[i+1])
+				i++
+				continue
+			}
+			if !strings.HasPrefix(args[i], "-") && q.Get("prefix") == "" {
+				q.Set("prefix", args[i])
+				continue
+			}
+			return fmt.Errorf("unsupported kv key list argument %q", args[i])
 		}
 		out, err := scopeRawCall(http.MethodGet, "/v1/kv/list", ns, "kv", name, nil, q)
 		if err != nil {
@@ -1698,13 +1719,59 @@ func cmdKVData(args []string) error {
 		return fmt.Errorf("usage: cellhive kv key put|get|delete <namespace> <binding> <key> [value]")
 	}
 	key := args[3]
+	if verb == "get" || verb == "delete" {
+		for _, arg := range args[4:] {
+			if arg != "--remote" {
+				return fmt.Errorf("unsupported kv key %s argument %q", verb, arg)
+			}
+		}
+	}
 	q := url.Values{"key": {key}}
 	switch verb {
 	case "put":
-		if len(args) < 5 {
-			return fmt.Errorf("usage: ... kv key put <namespace> <binding> <key> <value>")
+		var value, path string
+		for i := 4; i < len(args); i++ {
+			switch args[i] {
+			case "--remote":
+			case "--path", "--ttl", "--expiration", "--metadata":
+				if i+1 >= len(args) {
+					return fmt.Errorf("kv key put %s requires a value", args[i])
+				}
+				switch args[i] {
+				case "--path":
+					path = args[i+1]
+				case "--ttl":
+					q.Set("expiration_ttl", args[i+1])
+				case "--expiration":
+					q.Set("expiration", args[i+1])
+				case "--metadata":
+					if !json.Valid([]byte(args[i+1])) {
+						return fmt.Errorf("kv metadata must be JSON")
+					}
+					q.Set("metadata", base64.StdEncoding.EncodeToString([]byte(args[i+1])))
+				}
+				i++
+			default:
+				if strings.HasPrefix(args[i], "-") || value != "" {
+					return fmt.Errorf("unsupported kv key put argument %q", args[i])
+				}
+				value = args[i]
+			}
 		}
-		out, err := scopeRawCall(http.MethodPost, "/v1/kv/put", ns, "kv", name, []byte(args[4]), q)
+		if path != "" && value != "" {
+			return fmt.Errorf("kv key put accepts either a value or --path")
+		}
+		if path != "" {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			value = string(raw)
+		}
+		if value == "" && path == "" {
+			return fmt.Errorf("kv key put requires a value or --path")
+		}
+		out, err := scopeRawCall(http.MethodPost, "/v1/kv/put", ns, "kv", name, []byte(value), q)
 		if err != nil {
 			return err
 		}
@@ -1738,22 +1805,49 @@ func cmdKVData(args []string) error {
 
 func cmdD1Data(verb string, args []string) error {
 	if len(args) < 3 {
-		return fmt.Errorf("usage: cellhive d1 %s <namespace> <database> <sql>", verb)
+		return fmt.Errorf("usage: cellhive d1 %s <namespace> <database> <sql>|--command <sql>|--file <path> [--remote]", verb)
 	}
 	ns, db := args[0], args[1]
-	sqlArgs := args[2:]
-	if len(sqlArgs) >= 1 && sqlArgs[0] == "--command" {
-		if len(sqlArgs) < 2 {
-			return fmt.Errorf("d1 %s --command requires SQL", verb)
+	var sqlArgs []string
+	file := ""
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--remote":
+		case "--local":
+			return fmt.Errorf("local D1 uses `cellhive dev`; this command targets the CellHive database")
+		case "--file", "--command":
+			if i+1 >= len(args) {
+				return fmt.Errorf("d1 %s %s requires a value", verb, args[i])
+			}
+			if args[i] == "--file" {
+				file = args[i+1]
+			} else {
+				sqlArgs = append(sqlArgs, args[i+1])
+			}
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unsupported d1 %s flag %q", verb, args[i])
+			}
+			sqlArgs = append(sqlArgs, args[i])
 		}
-		sqlArgs = sqlArgs[1:2]
-	} else if len(sqlArgs) >= 1 && sqlArgs[0] == "--file" {
-		if len(sqlArgs) < 2 {
-			return fmt.Errorf("d1 %s --file requires a path", verb)
-		}
-		raw, err := os.ReadFile(sqlArgs[1])
+	}
+	if file != "" && len(sqlArgs) != 0 {
+		return fmt.Errorf("d1 %s accepts either SQL or --file", verb)
+	}
+	if file != "" {
+		raw, err := os.ReadFile(file)
 		if err != nil {
 			return err
+		}
+		if verb == "execute" {
+			digest := sha256.Sum256(raw)
+			out, err := scopeCallKind(http.MethodPost, "/v1/d1/import", ns, "d1", db, map[string]any{"digest": hex.EncodeToString(digest[:]), "sql": string(raw)}, url.Values{"db": {db}})
+			if err != nil {
+				return err
+			}
+			printJSON(out)
+			return nil
 		}
 		sqlArgs = []string{string(raw)}
 	}
@@ -1780,8 +1874,20 @@ func cmdR2Data(args []string) error {
 	verb, ns, bucket := args[0], args[1], args[2]
 	if verb == "list" {
 		q := url.Values{"bucket": {bucket}}
-		if len(args) > 3 {
-			q.Set("prefix", args[3])
+		for i := 3; i < len(args); i++ {
+			if args[i] == "--remote" {
+				continue
+			}
+			if args[i] == "--prefix" && i+1 < len(args) {
+				q.Set("prefix", args[i+1])
+				i++
+				continue
+			}
+			if !strings.HasPrefix(args[i], "-") && q.Get("prefix") == "" {
+				q.Set("prefix", args[i])
+				continue
+			}
+			return fmt.Errorf("unsupported r2 object list argument %q", args[i])
 		}
 		out, err := scopeRawCall(http.MethodGet, "/v1/r2/list", ns, "r2", bucket, nil, q)
 		if err != nil {
@@ -1794,17 +1900,50 @@ func cmdR2Data(args []string) error {
 		return fmt.Errorf("usage: cellhive r2 object put|get|delete <namespace> <bucket> <key> [file]")
 	}
 	key := args[3]
+	file := ""
+	metadata := map[string]string{}
+	for i := 4; i < len(args); i++ {
+		switch args[i] {
+		case "--remote":
+		case "--content-type", "--content-disposition", "--content-encoding", "--content-language", "--cache-control", "--expires":
+			if i+1 >= len(args) {
+				return fmt.Errorf("r2 object %s %s requires a value", verb, args[i])
+			}
+			field := map[string]string{"--content-type": "contentType", "--content-disposition": "contentDisposition", "--content-encoding": "contentEncoding", "--content-language": "contentLanguage", "--cache-control": "cacheControl", "--expires": "cacheExpiry"}[args[i]]
+			metadata[field] = args[i+1]
+			i++
+		case "--file":
+			if i+1 >= len(args) {
+				return fmt.Errorf("r2 object %s --file requires a path", verb)
+			}
+			file = args[i+1]
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") || file != "" {
+				return fmt.Errorf("unsupported r2 object argument %q", args[i])
+			}
+			file = args[i]
+		}
+	}
 	q := url.Values{"bucket": {bucket}, "key": {key}}
+	if verb != "put" && len(metadata) != 0 {
+		return fmt.Errorf("R2 HTTP metadata options require object put")
+	}
 	switch verb {
 	case "put":
-		if len(args) < 5 {
+		if file == "" {
 			return fmt.Errorf("r2 object put requires a file")
 		}
-		data, err := os.ReadFile(args[4])
+		data, err := os.ReadFile(file)
 		if err != nil {
 			return err
 		}
-		out, err := scopeRawCall(http.MethodPut, "/v1/r2/object", ns, "r2", bucket, data, q)
+		headers := http.Header{}
+		if len(metadata) != 0 {
+			encoded, _ := json.Marshal(metadata)
+			headers.Set("x-cellhive-r2-http-metadata", base64.StdEncoding.EncodeToString(encoded))
+		}
+		out, err := scopeRawCallHeaders(http.MethodPut, "/v1/r2/object", ns, "r2", bucket, data, q, headers)
 		if err != nil {
 			return err
 		}
@@ -1816,8 +1955,8 @@ func cmdR2Data(args []string) error {
 			return err
 		}
 		output := key
-		if len(args) > 4 {
-			output = args[4]
+		if file != "" {
+			output = file
 		}
 		return os.WriteFile(output, out, 0600)
 	case "delete":
@@ -1834,45 +1973,118 @@ func cmdR2Data(args []string) error {
 
 func cmdD1Migrations(args []string) error {
 	if len(args) < 3 {
-		return fmt.Errorf("usage: cellhive d1 migrations list|apply <namespace> <database> [--directory dir]")
+		return fmt.Errorf("usage: cellhive d1 migrations create|list|apply <namespace> <database> [message] [--directory dir]")
 	}
 	verb, ns, db := args[0], args[1], args[2]
+	options := args[3:]
+	message := ""
+	if verb == "create" {
+		if len(options) == 0 || strings.HasPrefix(options[0], "-") {
+			return fmt.Errorf("usage: cellhive d1 migrations create <namespace> <database> <message> [--directory dir]")
+		}
+		message, options = options[0], options[1:]
+	}
 	dir := "migrations"
-	if len(args) > 3 {
-		fs := flag.NewFlagSet("d1 migrations", flag.ContinueOnError)
-		fs.StringVar(&dir, "directory", dir, "migration directory")
-		if err := fs.Parse(args[3:]); err != nil {
+	fs := flag.NewFlagSet("d1 migrations", flag.ContinueOnError)
+	fs.StringVar(&dir, "directory", dir, "migration directory")
+	remote := fs.Bool("remote", true, "use the CellHive database")
+	local := fs.Bool("local", false, "local mode is not supported by this binary")
+	appliedOnly := fs.Bool("applied", false, "list applied records instead of pending files")
+	if err := fs.Parse(options); err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("unexpected migration arguments: %v", fs.Args())
+	}
+	if *local || !*remote {
+		return fmt.Errorf("local migrations use `cellhive dev`; this command targets the CellHive database")
+	}
+	if verb == "create" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
+		files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+		if err != nil {
+			return err
+		}
+		next := 1
+		for _, file := range files {
+			n, _ := strconv.Atoi(strings.SplitN(filepath.Base(file), "_", 2)[0])
+			if n >= next {
+				next = n + 1
+			}
+		}
+		slug := strings.ToLower(strings.Trim(strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+				return r
+			}
+			return '_'
+		}, message), "_"))
+		if slug == "" {
+			return fmt.Errorf("migration message must contain letters or digits")
+		}
+		path := filepath.Join(dir, fmt.Sprintf("%04d_%s.sql", next, slug))
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return err
+		}
+		_ = f.Close()
+		fmt.Println(path)
+		return nil
 	}
-	if verb == "list" {
+	if verb == "list" || verb == "apply" {
 		out, err := scopeRawCall(http.MethodGet, "/v1/d1/migrations", ns, "d1", db, nil, url.Values{"db": {db}})
 		if err != nil {
 			return err
 		}
-		printJSON(out)
+		if verb == "list" && *appliedOnly {
+			printJSON(out)
+			return nil
+		}
+		var state struct {
+			Migrations []struct {
+				Name string `json:"name"`
+			} `json:"migrations"`
+		}
+		if err := json.Unmarshal(out, &state); err != nil {
+			return err
+		}
+		applied := map[string]bool{}
+		for _, item := range state.Migrations {
+			applied[item.Name] = true
+		}
+		files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(dir); err != nil {
+			return err
+		}
+		sort.Strings(files)
+		pending := []string{}
+		for _, file := range files {
+			if !applied[filepath.Base(file)] {
+				pending = append(pending, filepath.Base(file))
+			}
+		}
+		if verb == "list" {
+			result, _ := json.Marshal(map[string]any{"pending": pending})
+			printJSON(result)
+			return nil
+		}
+		for _, file := range files {
+			name := filepath.Base(file)
+			raw, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return err
+			}
+			if _, err := scopeCallKind(http.MethodPost, "/v1/d1/migrations", ns, "d1", db, map[string]any{"name": name, "sql": string(raw)}, url.Values{"db": {db}}); err != nil {
+				return fmt.Errorf("migration %s: %w", name, err)
+			}
+		}
 		return nil
 	}
-	if verb != "apply" {
-		return fmt.Errorf("unknown d1 migrations verb %q (list|apply)", verb)
-	}
-	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
-	if err != nil {
-		return err
-	}
-	sort.Strings(files)
-	for _, file := range files {
-		name := filepath.Base(file)
-		raw, e := os.ReadFile(file)
-		if e != nil {
-			return e
-		}
-		_, e = scopeCallKind(http.MethodPost, "/v1/d1/migrations", ns, "d1", db, map[string]any{"name": name, "sql": string(raw)}, url.Values{"db": {db}})
-		if e != nil {
-			return fmt.Errorf("migration %s: %w", name, e)
-		}
-	}
-	return nil
+	return fmt.Errorf("unknown d1 migrations verb %q (create|list|apply)", verb)
 }
 
 // cmdQueue is operator queue tooling: status and dead-letter replay (ADR-156).
@@ -2365,8 +2577,18 @@ Usage:
   cellhive vectorize drop-ann <namespace> <name>            # back to the exact flat index
   cellhive vectorize create-metadata-index <namespace> <name> --property-name <p> --type string|number|boolean
   cellhive kv namespace create|list|delete|stats <namespace> <name> [--scope] [--exact]
+  cellhive kv key put <namespace> <binding> <key> (<value>|--path <file>) [--ttl <seconds>] [--expiration <unix>] [--metadata <json>]
+  cellhive kv key get|delete <namespace> <binding> <key>
+  cellhive kv key list <namespace> <binding> [--prefix <prefix>]
   cellhive d1 create|list|delete|info <namespace> <db> [--tables]
+  cellhive d1 execute|query <namespace> <db> (--command <sql>|--file <path>)
+  cellhive d1 migrations create <namespace> <db> <message> [--directory <dir>]
+  cellhive d1 migrations list|apply <namespace> <db> [--directory <dir>]  # list accepts --applied
   cellhive r2 bucket create|list|delete|stats <namespace> <bucket> [--prefix] [--limit N]
+  cellhive r2 object put <namespace> <bucket> <key> --file <path> [--content-type <type>]
+  cellhive r2 object get <namespace> <bucket> <key> [--file <path>]
+  cellhive r2 object delete <namespace> <bucket> <key>
+  cellhive r2 object list <namespace> <bucket> [--prefix <prefix>]
   cellhive queue create|list|delete|stats <namespace> <name>
   cellhive workflows create|list|delete|stats <namespace> <name> [--exact]
   cellhive hyperdrive create|list|delete|stats <namespace> <name> [--connection-string <url>]

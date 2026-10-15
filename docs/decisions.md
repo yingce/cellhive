@@ -2446,8 +2446,9 @@
 
 ## ADR-197 D1 SQL migration 的原子应用（2026-10-15）✅实现
 
-- **决策**：`cellhive d1 migrations apply` 的每个 SQL 文件通过 `/v1/d1/migrations` 以单次请求执行；服务端在同一 cell SQLite 事务里检查文件名、执行 SQL 并写入 `__cellhive_migrations`。重复请求返回 `applied:false`，失败整文件回滚。`list` 只读查询，不创建追踪表。端点沿用 D1 scoped token、owner 转发和持久化输出门。
-- **边界**：这是 CellHive CLI 的迁移协议；原版 Wrangler 的 D1 migration API 尚未对拍。迁移文件按文件名标识，未引入校验和或 Wrangler 专属字段。
+- **决策**：`cellhive d1 migrations apply` 的每个 SQL 文件通过 `/v1/d1/migrations` 以单次请求执行；服务端在同一 cell SQLite 事务里检查文件名、执行 SQL 并写入与 Wrangler 4.133.0 相同形状的 `d1_migrations`。重复请求返回 `applied:false`，失败整文件回滚。`list` 只读，CLI 对比目录显示待执行文件，`--applied` 显示表记录。原生 CLI 与 Wrangler 4.133.0 的标准迁移语句都经过同一原子路径，另存 SHA-256；原生 CLI 每次重查所有文件，因此可拒绝同名内容变更。端点沿用 D1 scoped token、owner 转发和持久化输出门。
+- **原版协议**：管理员兼容层接受 Wrangler 4.133.0 的 D1 `/query` 与 `/import`（init→短期随机 upload URL→ingest）；上传受 8 MiB 与 MD5 校验，实际执行按 SHA-256 在同一事务内去重。KV key、R2 object 管理员端点重用 scoped binding 数据路径，资源必须先登记。原生 CellHive CLI 提供对应数据面命令；本地模式保持 Miniflare 所有，不映射到生产库。
+- **边界**：Wrangler CLI 会跳过已应用文件，改写同名本地文件后重跑不会把 SQL 发给服务端，因此无法由服务端检测该本地改动；旧版无哈希记录的迁移也无法追溯。自定义 `migrations_table`、复杂 R2 存储策略与大于 8 MiB 的 D1 文件导入仍需单独验收。D1 文件上传 session 是单节点内存态（10 分钟、最多 32 个），`init/upload/ingest` 须经同一个管理员实例；若中途节点退出，重跑命令重新上传，SQL 真正应用由 SQLite 摘要表去重。
 
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
