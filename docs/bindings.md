@@ -1,5 +1,7 @@
 # 绑定映射
 
+> **原生扩展（2026-10-15）**：原生 KV `expiration_ttl` 支持 1 秒起；Cloudflare 管理兼容入口仍 >=60 秒。原生 `incr` 返回 `value_i64` 十进制字符串供 JS `BigInt()` 无损读取，保留旧数字 `value`。Queue 生产者幂等独立保留首次发送后的 24h，metadata 指纹规范化 JSON、数字不经过 float64；DLQ/重放完整保留 metadata 与业务幂等键，转移使用独立 receipt。delay 不属于逻辑指纹，重复发送不会更改首次消息的投递时间。详见 [合同](superpowers/specs/2026-10-15-kv-queue-native-semantics.md)。
+
 Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapter**（workerd 内的平台代码）把它转成对 `cell-agent` 的调用。binding 由不可变 props 唯一绑定到具体 cell。
 
 ## 映射表
@@ -18,7 +20,7 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 | **Durable Objects** | do-runtime 原生 facet | **同步 SQL**；绑定 `env.DO.get(...).fetch()` 与 **`getByName(...).method(...)` DO RPC**（ADR-080 shard/owner/hint/WS 1012；ADR-162 RPC tagged JSON + 原生 JSRPC） | workerd actor SQLite（工作副本）→ cell-agent 复制 | **do-runtime 节点** |
 | **ASSETS** | 对象存储（版本化） | 异步 | `assets/<ns>/<worker>/<token>/...` | 对象存储 |
 | **Service bindings** | workerd JSRPC | 同步/异步 | — | 目标 Worker |
-| **Vars / Secrets** | vars、当前 managed secrets 与用户命名 binding stub 在加载期注入 `env`；secret 与同名 var 冲突时覆盖 var | — | secrets 在 control cell（信封密文） | cell-agent |
+| **Vars / Secrets** | vars、当前 Worker 版本的 managed secrets 与用户命名 binding stub 在加载期注入 `env`；secret 与同名 var 冲突时覆盖 var；secret 变更创建并发布新版本（ADR-204） | — | secrets 在 control cell 按版本保存信封密文 | cell-agent |
 | **AI** | BYO OpenAI 兼容端点（`env.AI.run`） | 异步 | — | cell-agent（`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`；无平台托管目录） |
 
 ## host adapter 模型

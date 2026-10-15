@@ -2,6 +2,10 @@
 
 ## 未发布（main）
 
+### Secret 版本化发布（ADR-204）
+- 已有 Worker 的 secret put/delete/bulk 在 control cell 同一事务中创建并发布新版本，代码 bundle 不变；一次 bulk 只创建一个版本。deploy 捕获加密 Secret 快照，rollback/promote 恢复目标版本的值，运行时按版本解密。升级前的历史值无法追溯，迁移以升级时当前值初始化旧版本。
+- 运行时通过入口指针缓存发现新版本（默认 TTL 约 10 秒）；Service binding 的活跃目标查询也按该 TTL 重验。已加载的 isolate 不原地改值。
+
 本版把路线图 P3–P5 的剩余项收口，全部以真实运行/测试为证据。
 
 ### user-runtime Worker 热路径优化

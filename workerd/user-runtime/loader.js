@@ -50,7 +50,7 @@ class LRU {
 
 // hostCache: host -> { value(pointer view|null for known-404), etag, expiresAt, inflight }
 const hostCache = new LRU(10000);
-// envCache: "ns/worker" -> { version, value(immutable view) }
+// envCache: "ns/worker" -> { version, value(immutable view), activeExpiresAt }
 const envCache = new ByteLRU(2000, 16*1024*1024, jsonWeight);
 const envInflight = new Map(); // "ns/worker@version" -> Promise
 const bundleCache = new ByteLRU(2000, 32*1024*1024, textWeight); // sha -> source
@@ -939,10 +939,9 @@ function revalidateHost(env, host, e) {
   return e.inflight;
 }
 
-// workerEnv returns the immutable per-version env for a worker. wantVersion is
-// the version number from the host pointer; a mismatch (redeploy, including
-// binding-only deploys) refetches. Entries carry no TTL: a version never
-// changes, and the pointer tells us when it is superseded.
+// workerEnv returns the immutable per-version env for a worker. Public fetch
+// supplies the version from the host pointer. Service bindings do not have a
+// pointer, so active lookups must revalidate after a short TTL.
 async function workerEnv(env, ns, worker, wantVersion, wantSHA) {
   const key = ns + "/" + worker;
   const e = envCache.get(key);
@@ -950,7 +949,7 @@ async function workerEnv(env, ns, worker, wantVersion, wantSHA) {
     if (!entry) return false;
     if (wantSHA) return entry.value && entry.value.bundle_sha === wantSHA;
     if (wantVersion !== undefined) return entry.version === wantVersion;
-    return true;
+    return Date.now() < (entry.activeExpiresAt || 0);
   };
   if (matches(e)) return e.value;
   const inflightKey = key + "@" + (wantVersion === undefined ? "" : wantVersion) + (wantSHA ? "#" + wantSHA : "");
@@ -966,7 +965,7 @@ async function workerEnv(env, ns, worker, wantVersion, wantSHA) {
       });
       if (r.status === 404) {
         noteSuccess();
-        envCache.set(key, { version: wantVersion || 0, value: null });
+        envCache.set(key, { version: wantVersion || 0, value: null, activeExpiresAt: Date.now() + hostTtlMs(env) });
         return null;
       }
       if (!r.ok) throw new Error("worker env " + r.status);
@@ -976,7 +975,7 @@ async function workerEnv(env, ns, worker, wantVersion, wantSHA) {
       // Versions are monotonic: an older in-flight fetch must not overwrite a
       // newer version's env (ADR-134).
       if (!current || current.version === undefined || value.version >= current.version) {
-        envCache.set(key, { version: value.version, value });
+        envCache.set(key, { version: value.version, value, activeExpiresAt: Date.now() + hostTtlMs(env) });
       }
       return value;
     } catch (err) {

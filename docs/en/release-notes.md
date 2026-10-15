@@ -2,6 +2,10 @@
 
 ## Unreleased (main)
 
+### Versioned Secret Deployment (ADR-204)
+- Secret put/delete/bulk on an existing Worker creates and deploys a new version in one control-cell transaction without changing the code bundle; one bulk operation creates one version. Deploy captures encrypted secret snapshots, rollback/promote restores the selected version's values, and runtimes decrypt by version. Pre-upgrade historical values cannot be reconstructed; migration initializes old versions from the values current at upgrade time.
+- Runtimes discover the new version through the host pointer cache (roughly 10 seconds by default); active Service binding target lookups revalidate on the same TTL. Loaded isolates are not mutated in place.
+
 This release closes out the remaining items in roadmap P3–P5, all backed by real runtime/test evidence.
 
 ### user-runtime Worker hot-path optimization

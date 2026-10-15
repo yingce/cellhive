@@ -277,6 +277,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 - **Terraform 未做**（orchestration 由 Helm chart + kustomize base/overlay 提供，`make ci` 离线校验）。
 - **云 KMS 未接**（根密钥可用 env 或文件，ADR-150）；**mTLS/内部 CA 有意不做**（独立派生 secret + 私网隔离为主防线；触发条件见 security.md）。
+- **Secret 历史版本迁移**：ADR-204 升级前的 Secret 变更未按版本保存，无法追溯旧值；首次迁移以升级时的当前值初始化既有版本快照。升级后的 Secret 更新、发布和回滚按版本快照执行。
 
 ## purge / 上传 / WAL / r2.List（ADR-134 后更新）
 

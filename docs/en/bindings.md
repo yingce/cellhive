@@ -18,7 +18,7 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 | **Durable Objects** | do-runtime native facet | **Synchronous SQL**; bindings `env.DO.get(...).fetch()` and **`getByName(...).method(...)` DO RPC** (ADR-080 shard/owner/hint/WS 1012; ADR-162 RPC tagged JSON + native JSRPC) | workerd actor SQLite (working replica) → cell-agent replication | **do-runtime node** |
 | **ASSETS** | Object storage (versioned) | Async | `assets/<ns>/<worker>/<token>/...` | Object storage |
 | **Service bindings** | workerd JSRPC | Sync/async | — | Target Worker |
-| **Vars / Secrets** | Vars, current managed secrets, and user-named binding stubs are injected into `env` at load time; a secret overrides a same-named var | — | secrets in control cell (envelope ciphertext) | cell-agent |
+| **Vars / Secrets** | Vars, managed secrets captured by the current Worker version, and user-named binding stubs are injected into `env` at load time; a secret overrides a same-named var; secret changes create and deploy a new version (ADR-204) | — | per-version envelope ciphertext in the control cell | cell-agent |
 | **AI** | BYO OpenAI-compatible endpoint (`env.AI.run`) | Async | — | cell-agent (`CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY`; no platform-hosted catalog) |
 
 ## host adapter Model

@@ -20,7 +20,7 @@
 | ASSETS | Supported | 对象存储 + 版本化；完整资产管道 |
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
-| Vars / Secrets | Supported | vars、managed secrets 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secrets 在 control cell 信封加密，运行时由 cell-agent 解密注入 Worker/DO；同名 secret 覆盖 var |
+| Vars / Secrets | Supported | vars、版本化 managed secrets 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secret put/delete/bulk 对已有 Worker 创建并发布新版本，回滚恢复目标版本的 secret（ADR-204）；同名 secret 覆盖 var |
 | 租户 `console.*` 平台采集 | Supported | 默认由 host-bound 原生 Tail `Fetcher` 捕获 Worker/service target/DO facet 的 console 与异常，写入 ring/可选 OTLP；身份与 log 凭据不进入 tenant env（ADR-185）。可按 runtime 设 `CELLHIVE_TENANT_LOG_CAPTURE=off` 关闭并省去 Tail 开销（ADR-192） |
 | `nodejs_compat` | Supported | 随 workerd；需开启 |
 | Cache API | Rejected | 无边缘缓存 |

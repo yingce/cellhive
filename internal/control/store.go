@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS secrets (
   updated_ms  INTEGER NOT NULL,
   PRIMARY KEY (ns, worker, key)
 );
+CREATE TABLE IF NOT EXISTS version_secrets (
+  ns          TEXT NOT NULL,
+  worker      TEXT NOT NULL,
+  number      INTEGER NOT NULL,
+  key         TEXT NOT NULL,
+  wrapped_dek BLOB NOT NULL,
+  ciphertext  BLOB NOT NULL,
+  updated_ms  INTEGER NOT NULL,
+  PRIMARY KEY (ns, worker, number, key)
+);
 CREATE TABLE IF NOT EXISTS audit (
   id     INTEGER PRIMARY KEY AUTOINCREMENT,
   ns     TEXT NOT NULL,
@@ -283,7 +293,7 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 	cols := map[string][]string{
 		"apps":               {"deleted_ms INTEGER NOT NULL DEFAULT 0"},
 		"workers":            {"host_label TEXT NOT NULL DEFAULT ''", "created_ms INTEGER NOT NULL DEFAULT 0", "deleted_ms INTEGER NOT NULL DEFAULT 0"},
-		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'"},
+		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'", "secret_snapshot INTEGER NOT NULL DEFAULT 0"},
 		"deploy_idempotency": {"created_ms INTEGER NOT NULL DEFAULT 0"},
 		"audit":              {"actor_kind TEXT NOT NULL DEFAULT ''", "on_behalf_of TEXT NOT NULL DEFAULT ''", "request_id TEXT NOT NULL DEFAULT ''"},
 	}
@@ -345,6 +355,27 @@ func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 	}
 	if _, err := c.DB.ExecContext(ctx, schemaV2); err != nil {
 		return nil, fmt.Errorf("control: migrate: %w", err)
+	}
+	// Historical secret values cannot be reconstructed. Pin the values known
+	// at upgrade time once, before any new version or secret write occurs.
+	var pending int
+	if err := c.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM versions WHERE secret_snapshot=0)`).Scan(&pending); err != nil {
+		return nil, fmt.Errorf("control: inspect secret snapshots: %w", err)
+	}
+	if pending != 0 {
+		if err := tx(ctx, c, func(t *sql.Tx) error {
+			if _, err := t.ExecContext(ctx, `INSERT OR IGNORE INTO version_secrets
+				(ns,worker,number,key,wrapped_dek,ciphertext,updated_ms)
+				SELECT v.ns,v.worker,v.number,s.key,s.wrapped_dek,s.ciphertext,s.updated_ms
+				FROM versions v JOIN secrets s ON s.ns=v.ns AND s.worker=v.worker
+				WHERE v.secret_snapshot=0`); err != nil {
+				return err
+			}
+			_, err := t.ExecContext(ctx, `UPDATE versions SET secret_snapshot=1 WHERE secret_snapshot=0`)
+			return err
+		}); err != nil {
+			return nil, fmt.Errorf("control: migrate secret snapshots: %w", err)
+		}
 	}
 	s.mu.Lock()
 	s.migrated[c] = true
@@ -562,6 +593,7 @@ func (s *Store) PurgeAppRows(ctx context.Context, ns string) error {
 			`DELETE FROM hosts WHERE ns=?`,
 			`DELETE FROM resources WHERE ns=?`,
 			`DELETE FROM secrets WHERE ns=?`,
+			`DELETE FROM version_secrets WHERE ns=?`,
 			`DELETE FROM do_classes WHERE ns=?`,
 			`DELETE FROM delete_locks WHERE ns=?`,
 			`DELETE FROM deploy_idempotency WHERE ns=?`,
@@ -985,8 +1017,8 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		limits := jsonOr(v.Limits, "{}")
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO versions(ns, worker, number, bundle_sha, assets_sha, storage_id, session_policy,
-			                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor, secret_snapshot)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
 			ns, worker, v.Number, v.BundleSHA, v.AssetsSHA, v.StorageID, v.SessionPolicy,
 			jsonOr(v.Bindings, "[]"), jsonOr(v.Vars, "{}"), jsonOr(v.Consumers, "[]"),
 			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, v.CreatedMs, v.Actor); err != nil {
@@ -1023,6 +1055,9 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			}
 		}
 		if err := syncBindingsTx(ctx, t, ns, worker, next, v.Bindings); err != nil {
+			return err
+		}
+		if err := snapshotCurrentSecretsTx(ctx, t, ns, worker, next); err != nil {
 			return err
 		}
 		// A deploy resurrects a soft-deleted worker AND its app: the projection
@@ -1185,6 +1220,9 @@ func (s *Store) Promote(ctx context.Context, ns, worker string, version int, act
 			active, previous, ns, worker); err != nil {
 			return err
 		}
+		if err := restoreVersionSecretsTx(ctx, t, ns, worker, active); err != nil {
+			return err
+		}
 		if err := appendDeploymentEvent(ctx, t, ns, worker, active, actor, s.now().UnixMilli()); err != nil {
 			return err
 		}
@@ -1219,6 +1257,9 @@ func (s *Store) Rollback(ctx context.Context, ns, worker, actor string) (Worker,
 		active, previous = previous, active
 		if _, err := t.ExecContext(ctx, `UPDATE workers SET active=?, previous=? WHERE ns=? AND name=?`,
 			active, previous, ns, worker); err != nil {
+			return err
+		}
+		if err := restoreVersionSecretsTx(ctx, t, ns, worker, active); err != nil {
 			return err
 		}
 		if err := appendDeploymentEvent(ctx, t, ns, worker, active, actor, s.now().UnixMilli()); err != nil {
@@ -1281,6 +1322,7 @@ func (s *Store) PurgeWorkerRows(ctx context.Context, ns, worker string) error {
 		}
 		for _, stmt := range []string{
 			`DELETE FROM versions WHERE ns=? AND worker=?`,
+			`DELETE FROM version_secrets WHERE ns=? AND worker=?`,
 			`DELETE FROM bindings WHERE ns=? AND worker=?`,
 			`DELETE FROM version_bundle_refs WHERE ns=? AND worker=?`,
 			`DELETE FROM workers WHERE ns=? AND name=?`,
@@ -1390,7 +1432,10 @@ func (s *Store) PutSecret(ctx context.Context, ns, worker, key string, value []b
 			ns, worker, key, wrapped, nil, ct, s.now().UnixMilli()); err != nil {
 			return err
 		}
-		return txAudit(ctx, t, ns, actor, "secret.put", ns+"/"+worker+"/"+key)
+		if err := txAudit(ctx, t, ns, actor, "secret.put", ns+"/"+worker+"/"+key); err != nil {
+			return err
+		}
+		return s.publishSecretChangeTx(ctx, t, ns, worker, actor)
 	})
 }
 
@@ -1428,10 +1473,15 @@ func (s *Store) PatchSecrets(ctx context.Context, ns, worker string, changes map
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
+		changed := false
 		for _, key := range keys {
 			if changes[key] == nil {
-				if _, err := t.ExecContext(ctx, `DELETE FROM secrets WHERE ns=? AND worker=? AND key=?`, ns, worker, key); err != nil {
+				result, err := t.ExecContext(ctx, `DELETE FROM secrets WHERE ns=? AND worker=? AND key=?`, ns, worker, key)
+				if err != nil {
 					return err
+				}
+				if n, _ := result.RowsAffected(); n > 0 {
+					changed = true
 				}
 				if err := txAudit(ctx, t, ns, actor, "secret.delete", ns+"/"+worker+"/"+key); err != nil {
 					return err
@@ -1439,6 +1489,7 @@ func (s *Store) PatchSecrets(ctx context.Context, ns, worker string, changes map
 				continue
 			}
 			v := sealedValues[key]
+			changed = true
 			if _, err := t.ExecContext(ctx, `INSERT INTO secrets(ns, worker, key, wrapped_dek, value_nonce, ciphertext, updated_ms)
 				VALUES (?,?,?,?,?,?,?) ON CONFLICT(ns, worker, key) DO UPDATE SET
 				wrapped_dek=excluded.wrapped_dek, value_nonce=excluded.value_nonce,
@@ -1450,7 +1501,10 @@ func (s *Store) PatchSecrets(ctx context.Context, ns, worker string, changes map
 				return err
 			}
 		}
-		return nil
+		if !changed {
+			return nil
+		}
+		return s.publishSecretChangeTx(ctx, t, ns, worker, actor)
 	})
 }
 
@@ -1999,11 +2053,18 @@ func (s *Store) DeleteSecret(ctx context.Context, ns, worker, key, actor string)
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
-		if _, err := t.ExecContext(ctx,
-			`DELETE FROM secrets WHERE ns=? AND worker=? AND key=?`, ns, worker, key); err != nil {
+		result, err := t.ExecContext(ctx,
+			`DELETE FROM secrets WHERE ns=? AND worker=? AND key=?`, ns, worker, key)
+		if err != nil {
 			return err
 		}
-		return txAudit(ctx, t, ns, actor, "secret.delete", ns+"/"+worker+"/"+key)
+		if err := txAudit(ctx, t, ns, actor, "secret.delete", ns+"/"+worker+"/"+key); err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			return nil
+		}
+		return s.publishSecretChangeTx(ctx, t, ns, worker, actor)
 	})
 }
 

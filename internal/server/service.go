@@ -81,7 +81,10 @@ func (s *Server) handleServiceRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bindings, vars := s.bindingSpecFor(r.Context(), ns, target, tw.Version.Number)
-	vars = s.runtimeVars(r.Context(), ns, target, vars)
+	if bindings == nil {
+		writeErr(w, http.StatusServiceUnavailable, "worker_secret_failed", "worker bindings or secrets unavailable")
+		return
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": target, "bundle_sha": tw.Version.BundleSHA,
 		"version":     tw.Version.Number,
@@ -146,7 +149,10 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bindings, vars := s.bindingSpecFor(r.Context(), ns, target, tw.Version.Number)
-	vars = s.runtimeVars(r.Context(), ns, target, vars)
+	if bindings == nil {
+		writeErr(w, http.StatusServiceUnavailable, "worker_secret_failed", "worker bindings or secrets unavailable")
+		return
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": target, "bundle_sha": tw.Version.BundleSHA,
 		"version":     tw.Version.Number,

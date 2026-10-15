@@ -4217,7 +4217,7 @@ export default {
 const serviceNativeTargetBundle = `
 import { WorkerEntrypoint } from "cloudflare:workers";
 export class Api extends WorkerEntrypoint {
-  async greet(name) { return "hi-" + name; }
+  async greet(name) { return "hi-" + name + "-" + this.env.TOKEN; }
   async unbox(box) { return (await box.get()) + 1; }
 }
 export default { async fetch() { return new Response("B-default"); } };
@@ -4231,25 +4231,33 @@ func TestUserRuntimeServiceBindingNativeRPC(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	proj := map[string]any{"apps": []any{map[string]any{
-		"namespace": "acme",
-		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
-		"workers": []any{
-			map[string]any{"worker": "web", "active": 1, "version": map[string]any{
-				"number": 1, "bundle_sha": "shaA",
-				"bindings": []any{map[string]any{"type": "service", "name": "SVC", "id": "api", "entrypoint": "Api"}},
-			}},
-			map[string]any{"worker": "api", "active": 1, "version": map[string]any{
-				"number": 1, "bundle_sha": "shaB",
-			}},
-		},
-	}}}
+	targetVersion := atomic.Int64{}
+	targetVersion.Store(1)
+	projection := func() map[string]any {
+		number, secret := int(targetVersion.Load()), "old"
+		if number == 2 {
+			secret = "new"
+		}
+		return map[string]any{"apps": []any{map[string]any{
+			"namespace": "acme",
+			"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
+			"workers": []any{
+				map[string]any{"worker": "web", "active": 1, "version": map[string]any{
+					"number": 1, "bundle_sha": "shaA",
+					"bindings": []any{map[string]any{"type": "service", "name": "SVC", "id": "api", "entrypoint": "Api"}},
+				}},
+				map[string]any{"worker": "api", "active": number, "version": map[string]any{
+					"number": number, "bundle_sha": "shaB", "vars": map[string]string{"TOKEN": secret},
+				}},
+			},
+		}}}
+	}
 
 	var httpRuns atomic.Int64
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
-			serveProjection(proj, w, r)
+			serveProjection(projection(), w, r)
 		case "/v1/internal/bundle":
 			if r.URL.Query().Get("sha") == "shaB" {
 				_, _ = w.Write([]byte(serviceNativeTargetBundle))
@@ -4267,7 +4275,7 @@ func TestUserRuntimeServiceBindingNativeRPC(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret", HostCacheTTLMs: 20,
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4295,8 +4303,14 @@ func TestUserRuntimeServiceBindingNativeRPC(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	resp, body := fetchHost(t, client, public, "/")
-	if resp.StatusCode != 200 || body != "rpc:hi-bob:42" {
-		t.Fatalf("native rpc = %d %q (want rpc:hi-bob:42)", resp.StatusCode, body)
+	if resp.StatusCode != 200 || body != "rpc:hi-bob-old:42" {
+		t.Fatalf("native rpc = %d %q (want rpc:hi-bob-old:42)", resp.StatusCode, body)
+	}
+	targetVersion.Store(2)
+	time.Sleep(60 * time.Millisecond)
+	resp, body = fetchHost(t, client, public, "/")
+	if resp.StatusCode != 200 || body != "rpc:hi-bob-new:42" {
+		t.Fatalf("service secret update = %d %q (want rpc:hi-bob-new:42)", resp.StatusCode, body)
 	}
 	if n := httpRuns.Load(); n != 0 {
 		t.Fatalf("HTTP /v1/service/run was called %d times; native RPC should not use it", n)

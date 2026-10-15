@@ -468,22 +468,27 @@ retry_capture ALARM_STATE compose exec -T cell-agent sh -c \
   "curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/do/alarm/state | grep -F '\"count\":4,\"due\":null'" \
   || fail "pending alarm did not survive gated runtime restart"
 
-echo "== release rollback and worker deletion =="
-sed 's/"user-cell-url"/"release-two"/' "$TMP/app/wrangler.jsonc" >"$TMP/wrangler-v2.jsonc"
-compose cp "$TMP/wrangler-v2.jsonc" cell-agent:/tmp/runtime-baseline-app/wrangler-v2.jsonc
-compose exec -T -w /tmp/runtime-baseline-app cell-agent cellhive deploy e2e api --config wrangler-v2.jsonc >/dev/null
-RELEASES=$(compose exec -T cell-agent cellhive releases e2e api)
-[[ "$RELEASES" == *'"version": 2'* ]] || fail "second release absent: $RELEASES"
-V2=""
-retry_capture V2 compose exec -T cell-agent sh -c \
-  "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"CELL_URL\":\"release-two\"'" \
-  || fail "promoted release was not served"
-ROLLBACK=$(compose exec -T cell-agent cellhive rollback e2e api)
-[[ "$ROLLBACK" == *'"active": 1'* ]] || fail "rollback did not activate v1: $ROLLBACK"
-V1=""
-retry_capture V1 compose exec -T cell-agent sh -c \
-  "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"CELL_URL\":\"user-cell-url\"'" \
-  || fail "rolled-back release was not served"
+echo "== secret rotation publishes a live version and rollback restores it =="
+INITIAL_RELEASES=$(compose exec -T cell-agent cellhive releases e2e api)
+[[ "$INITIAL_RELEASES" == *'"version": 2'* ]] || fail "initial secret publish did not create v2: $INITIAL_RELEASES"
+compose exec -T cell-agent cellhive secret put e2e api MANAGED_SECRET --value cjB0YXRlZA== >/dev/null
+ROTATED_RELEASES=$(compose exec -T cell-agent cellhive releases e2e api)
+[[ "$ROTATED_RELEASES" == *'"version": 3'* ]] || fail "secret rotation did not create v3: $ROTATED_RELEASES"
+ROTATED_ENV=""
+retry_capture ROTATED_ENV compose exec -T cell-agent sh -c \
+  "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"managedSecret\":\"r0tated\"'" \
+  || fail "public worker did not receive rotated secret"
+SECRET_ROLLBACK=$(compose exec -T cell-agent cellhive rollback e2e api)
+[[ "$SECRET_ROLLBACK" == *'"active": 2'* ]] || fail "secret rollback did not activate v2: $SECRET_ROLLBACK"
+RESTORED_ENV=""
+retry_capture RESTORED_ENV compose exec -T cell-agent sh -c \
+  "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"managedSecret\":\"s3cr3t\"'" \
+  || fail "public worker did not receive restored secret"
+RELEASES_AFTER_ROLLBACK=$(compose exec -T cell-agent cellhive releases e2e api)
+[[ "$RELEASES_AFTER_ROLLBACK" != *'"version": 4'* ]] || fail "rollback unexpectedly created v4: $RELEASES_AFTER_ROLLBACK"
+echo "secret rotation: v2=s3cr3t, v3=r0tated, rollback=v2=s3cr3t; no v4"
+
+echo "== worker deletion =="
 compose exec -T cell-agent cellhive worker delete e2e api >/dev/null
 DELETED=""
 retry_capture DELETED compose exec -T cell-agent sh -c \

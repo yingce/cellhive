@@ -8,6 +8,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -452,8 +453,17 @@ func (s *Server) handleCloudflareWorkerSecretPut(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, "invalid_request", "name and secret_text type are required")
 		return
 	}
-	if err := s.Control.PutSecret(r.Context(), ns, worker, in.Name, []byte(in.Text), "wrangler"); err != nil {
-		writeErr(w, http.StatusBadRequest, "secret_put_failed", err.Error())
+	body, _ := json.Marshal(secretPutReq{Namespace: ns, Worker: worker, Key: in.Name, Value: base64.StdEncoding.EncodeToString([]byte(in.Text))})
+	req := r.Clone(r.Context())
+	req.Method = http.MethodPost
+	req.URL.Path = "/v1/control/secret"
+	req.URL.RawPath = ""
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if cloudflareBridgeError(w, rec, nil) {
 		return
 	}
 	cloudflareResult(w, map[string]any{"name": in.Name})
@@ -473,8 +483,15 @@ func (s *Server) handleCloudflareWorkerSecrets(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleCloudflareWorkerSecretDelete(w http.ResponseWriter, r *http.Request) {
 	ns, worker, key := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("secret_name")
-	if err := s.Control.DeleteSecret(r.Context(), ns, worker, key, "wrangler"); err != nil {
-		writeErr(w, http.StatusNotFound, "secret_delete_failed", err.Error())
+	req := r.Clone(r.Context())
+	req.Method = http.MethodDelete
+	req.URL.Path = "/v1/control/secret"
+	req.URL.RawPath = ""
+	req.URL.RawQuery = url.Values{"namespace": {ns}, "worker": {worker}, "key": {key}}.Encode()
+	req.Header.Set("x-cellhive-admin-token", s.Cfg.AdminToken)
+	rec := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rec, req)
+	if cloudflareBridgeError(w, rec, nil) {
 		return
 	}
 	cloudflareResult(w, nil)

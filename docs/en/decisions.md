@@ -193,5 +193,6 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-192 | Runtime-Optional Tenant Native-Tail Capture | Adds strict `CELLHIVE_TENANT_LOG_CAPTURE=on|off` (default `on`); `off` omits native Tails from every tenant Worker/DO load for roughly 10%–20% higher measured ping throughput while explicitly giving up platform capture of tenant console output and uncaught exceptions. |
 | ADR-193 | Direct No-Binding Public Fetch | Loads a no-binding Worker's default tenant entrypoint directly, preserving fetch-shaped workerLoader RPC while removing a redundant wrapper hop and supporting default-exported `WorkerEntrypoint` classes. |
 | ADR-194 | Gated DO Multi-Pod Takeover and Rolling-Update Closure | Uses per-host manifests, restores a claimed host before dispatch, drains before stopping workerd, and aligns Helm/Kustomize on two gated rolling Pods while forcing ungated runtime to one `Recreate` Pod. |
+| ADR-204 | Secret Writes Create and Deploy Worker Versions | Existing Workers get a new version on secret put/delete/bulk. Encrypted snapshots bind secrets to versions, and rollback/promote restores the selected snapshot; pre-upgrade historical values are initialized from the current value. |
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-10-15_

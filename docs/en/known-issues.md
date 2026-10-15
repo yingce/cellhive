@@ -277,6 +277,7 @@ Inventory against roadmap P1 “complete cell replication” and the current sta
 
 - **Terraform not done** (orchestration is provided by Helm chart + kustomize base/overlay; `make ci` performs offline validation).
 - **Cloud KMS not integrated** (root key can be env or file, ADR-150); **mTLS/internal CA intentionally not implemented** (independently derived secrets + private-network isolation are the main defense lines; trigger conditions are in security.md).
+- **Historical secret versions at upgrade**: Changes made before ADR-204 were not retained per version, so their old values cannot be reconstructed. The first migration initializes existing version snapshots from the values current at upgrade time. Later secret updates, deployments, and rollbacks use version snapshots.
 
 ## purge / uploads / WAL / r2.List (updates after ADR-134)
 

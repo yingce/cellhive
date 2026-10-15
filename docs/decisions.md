@@ -1257,7 +1257,7 @@
   2. `loader.js`：抽出 `workerStub(...)` 供 `runWorker` 与 service loader 共用；模块初始化时 `setServiceLoader(...)`：从 routing projection 解析目标 → `bundle` + `bindingSpec` → `workerStub`（同一实例）。`bindingSpec` 为 service binding 增加 `version`（目标 active `bundle_sha`）。
   3. `callMethod` 已按 JS 值直调租户命名 entrypoint（`new Entry(ctx, env)[method](...args)`），所以本地调用即原生语义。
 - **修了一个真 bug**：service loader 里把 `entry.deleted_classes` 传成 `|| {}` 而后处用 `|| []` → `new Set({})` 抛 "object is not iterable"；改为 `|| []`。
-- **验证**：新增 `TestUserRuntimeServiceBindingNativeRPC`（真 workerd）：caller `await env.SVC.greet("bob")` + `await env.SVC.unbox(new Box(41))`（`Box extends RpcTarget`），target 返回 `box.get()+1`；断言响应 `rpc:hi-bob:42` **且 `/v1/service/run` 调用次数为 0**（证明同实例、无 cell-agent、非 JSON）。原有 `TestUserRuntimeServiceBinding` / `...RPC` 也走新路径通过。
+- **验证**：`TestUserRuntimeServiceBindingNativeRPC`（真 workerd）：caller `await env.SVC.greet("bob")` + `await env.SVC.unbox(new Box(41))`（`Box extends RpcTarget`），target 返回 `box.get()+1`；断言响应 `rpc:hi-bob-old:42`，版本更新后变为 `rpc:hi-bob-new:42`，且 `/v1/service/run` 调用次数为 0（证明同实例、无 cell-agent、非 JSON）。原有 `TestUserRuntimeServiceBinding` / `...RPC` 也走新路径通过。
 - **边界（如实）**：
   - 目标版本**部署时 pin（ADR-104）**：`control.Binding.Version` 记录部署时目标的 active `bundle_sha`，目标重部署不影响已部署调用方；缺失（旧部署/目标无 active）时回退"渲染时解析"。
   - **DO 的 `env.DO.get(id).method()` 仍然是 owner 路由 + JSON-RPC**（状态亲和性，不能就地加载；见 ADR-084/101）。
@@ -2512,6 +2512,14 @@
   3. Workflow binding 增加 `createBatch(items)`；服务端限制 batch 1..100、请求总量 1 MiB，并在一个 workflow-cell transaction 中创建整批后再派发。create 同样限制 1 MiB。
 - **保留边界**：Workflow 仍不支持跨 worker、step 历史列举/progress 回调；`locationHint` 接受但忽略。云对象存储的 presigned 行为仍属供应商矩阵环境验证，本地 FS E2E 走明确回退。
 - **验证**：`internal/server` 覆盖 Worker/DO 执行视图 secret、secret env 超限拒绝且不落库、workflow payload/batch；`internal/workflow` 断言 batch 只推进一个 txid；真实 workerd 覆盖 presigned bundle 字节不经过内部 streaming endpoint 与 `env.WF.createBatch` facade；Docker runtime baseline 覆盖 Worker/DO managed secret、KV、gated DO 重启持久性和隔离扫描。
+
+## ADR-204 Secret 写入即创建并发布 Worker 版本（2026-10-15）✅实现
+
+- **目标**：对已有 active 版本的 Worker，`secret put/delete/bulk` 在同一个 control-cell 事务中修改加密 Secret、复制当前版本的代码和配置、生成递增的新版本号并切换 active。无需重新上传代码；Secret 写入成功即发布。尚无 active 版本时只预置 Secret，首次 deploy 捕获它们。
+- **版本语义**：每个版本保存自己的加密 Secret 快照；执行视图按请求的版本解密该快照，不能从 Worker 级可变表读取。普通 deploy 捕获当前 Secret。promote/rollback 恢复目标版本的 Secret 到当前表，后续写入和 deploy 以该版本为基线。旧版本历史 Secret 无法追溯，迁移时用升级当时的当前值初始化一次，之后保持不可变。
+- **原子性与缓存**：Secret 变更、版本及 Secret 快照、active/previous 指针、部署事件、bundle 引用和审计记录同事务提交。已有 `workerLoader` 的版本键使新请求加载新 env；DO facet 按版本惰性重建。Service binding 无 host pointer，主动版本查询按 host TTL 重验（默认约 10 秒），避免长期命中旧 env；公开入口仍受 host pointer TTL 约束。一次 bulk 只产生一个版本。删除不存在的 key 保持幂等，不产生空版本。
+- **安全与预算**：快照只存信封密文；API、日志、版本列表不得返回明文。secret put/bulk 和 deploy 在激活前检查完整 tenant env 的 1016 KiB 预算。保留当前读取/密文存储边界。
+- **验证**：`internal/control` 覆盖 Secret 更新→新版本、旧版本值保持、rollback/promotion、bulk 一次一版本、历史快照迁移与错误密钥拒绝；`internal/server` 覆盖按版本的 Worker/binding 执行视图及 Cloudflare 形状 Secret put/delete 发布；真实 workerd `TestUserRuntimeServiceBindingNativeRPC` 覆盖同 bundle 下 Service target 新版本 env 生效；`make test`、`make js-test`、`make vet`、`make build` 通过。
 
 ---
 

@@ -890,7 +890,8 @@ export class Host extends DurableObject {
       try {
         const r = await fetch(
           this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/do/bindings?ns=" +
-            encodeURIComponent(spec.namespace) + "&worker=" + encodeURIComponent(spec.worker),
+            encodeURIComponent(spec.namespace) + "&worker=" + encodeURIComponent(spec.worker) +
+            (spec.version === undefined || spec.version === null ? "" : "&version=" + encodeURIComponent(spec.version)),
           { headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN } },
         );
         if (r.ok) bs = await r.json();

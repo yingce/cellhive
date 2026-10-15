@@ -94,13 +94,34 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			spec[b.Name] = map[string]any{"kind": "service", "ns": targetNS, "caller_ns": ns, "name": b.Name, "target": target, "entrypoint": b.Entrypoint, "token": token}
 		}
 	}
-	return spec, s.runtimeVars(ctx, ns, worker, v.Vars)
+	vars, err := s.runtimeVars(ctx, ns, worker, v.Version, v.Vars)
+	if err != nil {
+		return nil, nil
+	}
+	return spec, vars
 }
 
-func (s *Server) runtimeVars(ctx context.Context, ns, worker string, declared map[string]string) map[string]string {
+func (s *Server) runtimeVars(ctx context.Context, ns, worker string, version int, declared map[string]string) (map[string]string, error) {
 	vars := make(map[string]string, len(declared))
 	for k, val := range declared {
 		vars[k] = val
+	}
+	secrets, err := s.Control.VersionSecrets(ctx, ns, worker, version)
+	if err != nil {
+		return nil, err
+	}
+	for key, val := range secrets {
+		vars[key] = val
+	}
+	return vars, nil
+}
+
+// currentRuntimeVars is used only before a deploy/secret write. Execution
+// views always use the immutable per-version secret snapshot above.
+func (s *Server) currentRuntimeVars(ctx context.Context, ns, worker string, declared map[string]string) map[string]string {
+	vars := make(map[string]string, len(declared))
+	for key, val := range declared {
+		vars[key] = val
 	}
 	if metas, err := s.Control.ListSecrets(ctx, ns, worker); err == nil {
 		for _, meta := range metas {
@@ -140,7 +161,7 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	}
 	spec, vars := s.bindingSpecFor(r.Context(), ns, worker, version)
 	if spec == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
+		writeErr(w, http.StatusServiceUnavailable, "worker_secret_failed", "worker bindings or secrets unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

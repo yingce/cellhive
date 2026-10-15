@@ -20,7 +20,7 @@ Status: **Supported** (available to regular applications) · **Partial** (with e
 | ASSETS | Supported | Object storage + versioning; complete asset pipeline |
 | AI | Partial (optional) | **BYO OpenAI-compatible endpoint** (`env.AI.run`, `CELLHIVE_AI_URL/_KEY`); no platform-hosted catalog, no workers-ai catalog models |
 | Service / Platform bindings | Supported | Version pinning + ACL; **worker↔worker RPC = same-instance native JSRPC (ADR-102)**; **DO RPC = owner-routed JSON+tagged (ADR-162)** |
-| Vars / Secrets | Supported | Vars, managed secrets, and user-named binding stubs enter tenant env; tenant env has zero platform keys and no reserved prefixes (ADR-185). Secrets are envelope-encrypted in the control cell and decrypted by cell-agent for Worker/DO runtime injection; a same-named secret overrides a var |
+| Vars / Secrets | Supported | Vars, versioned managed secrets, and user-named binding stubs enter tenant env; tenant env has zero platform keys and no reserved prefixes (ADR-185). Secret put/delete/bulk creates and deploys a new version for an existing Worker; rollback restores the target version's secrets (ADR-204). A same-named secret overrides a var |
 | Platform capture of tenant `console.*` | Supported | Host-bound native Tail Fetchers capture console output and exceptions from Workers, service targets, and DO facets into the ring and optional OTLP by default; identity and log credentials stay outside tenant env (ADR-185). Set runtime-level `CELLHIVE_TENANT_LOG_CAPTURE=off` to disable capture and its Tail overhead (ADR-192) |
 | `nodejs_compat` | Supported | Provided by workerd; must be enabled |
 | Cache API | Rejected | No edge cache |
