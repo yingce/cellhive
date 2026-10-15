@@ -31,6 +31,19 @@ func TestKVCasAndIncrE2E(t *testing.T) {
 	}
 	tok := mint(t, s, "acme", "kv", "KV")
 	h := s.Handler()
+	for _, value := range []string{"9007199254740993", "9223372036854775807", "-9223372036854775808"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/kv/incr?ns=acme&key=wide-"+value+"&by="+value, nil)
+		req.Header.Set("x-cellhive-scope-token", tok)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		var result map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if rr.Code != 200 || result["value_i64"] != value {
+			t.Fatalf("lossless incr %s: %d %s", value, rr.Code, rr.Body.String())
+		}
+	}
 	do := func(method, target, token string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, newBodyReader(body))
 		req.Header.Set("x-cellhive-scope-token", token)

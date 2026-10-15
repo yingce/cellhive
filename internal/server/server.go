@@ -325,6 +325,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/service/fetch", s.scopeAuth("service")(s.admit(s.handleServiceFetch)))
 	mux.HandleFunc("POST /v1/service/run", s.scopeAuth("service")(s.admit(s.handleServiceRun)))
 	mux.HandleFunc("POST /v1/queue/send", s.scopeAuth("queue")(s.admit(s.handleQueueSend)))
+	mux.HandleFunc("POST /v1/internal/queue/transfer", s.auth(s.pinNSMW(s.handleQueueTransfer)))
 	mux.HandleFunc("POST /v1/queue/send-batch", s.scopeAuth("queue")(s.admit(s.handleQueueSendBatch)))
 	mux.HandleFunc("POST /v1/queue/claim", s.scopeAuth("queue")(s.admit(s.handleQueueClaim)))
 	mux.HandleFunc("POST /v1/queue/ack", s.scopeAuth("queue")(s.admit(s.handleQueueAck)))
@@ -1775,11 +1776,11 @@ func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 
 // kvExpiry derives an absolute expiry (unix millis) from the expiration (unix
 // seconds) or expiration_ttl (seconds from now) query parameter. ok is false
-// when the parameter is outside Cloudflare's valid range.
+// when the parameter is outside the native API's valid range.
 // KV limits (docs/bindings.md): a key is at most 512 bytes, metadata at most
 // 1 KiB, and an absolute expiration must be in the future. Values are capped
-// at 25 MiB by the body reader in handleKVPut. expirationTtl follows
-// Cloudflare's minimum 60 second constraint.
+// at 25 MiB by the body reader in handleKVPut. Native expirationTtl permits
+// positive seconds; Cloudflare compatibility handlers enforce their own floor.
 const (
 	kvMaxKeyBytes      = 512
 	kvMaxMetadataBytes = 1024
@@ -1802,6 +1803,9 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 		if err != nil || sec <= 0 {
 			return 0, errKVExpirationBad
 		}
+		if sec > (1<<63-1)/1000 {
+			return 0, errKVExpirationBad
+		}
 		ms := sec * 1000
 		if ms <= now.UnixMilli() {
 			return 0, errKVExpirationPast
@@ -1810,7 +1814,7 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 	}
 	if v := q.Get("expiration_ttl"); v != "" {
 		sec, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || sec < 60 {
+		if err != nil || sec < 1 || sec > int64((1<<63-1)/time.Second) {
 			return 0, errKVExpirationBad
 		}
 		return now.Add(time.Duration(sec) * time.Second).UnixMilli(), nil
@@ -1997,10 +2001,11 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleKVIncr atomically adds the "by" query value (default 1; may be
-// negative) to a key's unsigned integer value, creating the key at the delta
+// negative) to a key's signed integer value, creating the key at the delta
 // when missing. The read-add-write runs in one captured transaction, so
 // concurrent incrementers serialize per cell. The response carries the new
-// value and the cell txid. An optional if_exists performs the increment only
+// value and the cell txid; value_i64 is a lossless decimal string for JS clients.
+// An optional if_exists performs the increment only
 // when the key's existence state satisfies the condition (absent/present;
 // a failed condition yields 200 {applied:false}); optional
 // expiration/expiration_ttl/metadata follow the put semantics (a refreshed
@@ -2125,7 +2130,7 @@ func (s *Server) handleKVIncr(w http.ResponseWriter, r *http.Request) {
 	if expiresMs > 0 {
 		s.armKVExpiry(r.Context(), scope)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"value": next, "applied": true, "txid": txid})
+	writeJSON(w, http.StatusOK, map[string]any{"value": next, "value_i64": strconv.FormatInt(next, 10), "applied": true, "txid": txid})
 }
 
 func (s *Server) handleKVDelete(w http.ResponseWriter, r *http.Request) {

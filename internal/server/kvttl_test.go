@@ -46,10 +46,8 @@ func TestKVTTLAndMetadataE2E(t *testing.T) {
 	}
 
 	// A key past its deadline is invisible from the moment it expires. An
-	// absolute expiration in the past is rejected (Cloudflare/celld parity), so
-	// arm a near-future one and wait it out.
-	soon := time.Now().Add(time.Second).Unix()
-	if rr := do(http.MethodPost, "/v1/kv/put?ns=acme&key=e&expiration="+strconv.FormatInt(soon, 10), tok, []byte("ve")); rr.Code != http.StatusOK {
+	// Arm a native one-second TTL and verify actual read-time expiry.
+	if rr := do(http.MethodPost, "/v1/kv/put?ns=acme&key=e&expiration_ttl=1", tok, []byte("ve")); rr.Code != http.StatusOK {
 		t.Fatalf("put e = %d %s", rr.Code, rr.Body.String())
 	}
 	time.Sleep(1200 * time.Millisecond)
@@ -98,8 +96,10 @@ func TestKVValidationLimits(t *testing.T) {
 		t.Fatalf("big metadata = %d %s, want 400 metadata_too_large", rr.Code, rr.Body.String())
 	}
 	future := time.Now().Add(time.Hour).Unix()
-	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=59", []byte("v")); rr.Code != http.StatusBadRequest {
-		t.Fatalf("ttl 59 = %d %s, want 400 (Cloudflare minimum)", rr.Code, rr.Body.String())
+	for _, ttl := range []string{"1", "10", "59"} {
+		if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl="+ttl, []byte("v")); rr.Code != http.StatusOK {
+			t.Fatalf("ttl %s = %d %s, want 200", ttl, rr.Code, rr.Body.String())
+		}
 	}
 	if rr := do("/v1/kv/put?ns=acme&key=m&expiration_ttl=60", []byte("v")); rr.Code != http.StatusOK {
 		t.Fatalf("ttl 60 = %d %s, want 200", rr.Code, rr.Body.String())

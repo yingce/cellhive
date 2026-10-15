@@ -193,10 +193,9 @@ func TestRunnerDeadLetterPreservesIdempotencyKey(t *testing.T) {
 	if claimed[0].IdempotencyKey != "biz-key-1" {
 		t.Fatalf("dlq idempotency key = %q, want biz-key-1", claimed[0].IdempotencyKey)
 	}
-	// A replay Send with the same key into the original queue dedupes when a
-	// live twin exists (the unique-index path), proving the key survived the
-	// dead-letter round trip.
-	id, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, "biz-key-1")
+	// An explicit replay can enqueue again despite the original producer's
+	// retained receipt, while preserving its business key.
+	id, err := st.Transfer(ctx, "demo", "jobs", claimed[0])
 	if err != nil {
 		t.Fatalf("replay send: %v", err)
 	}

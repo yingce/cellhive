@@ -202,13 +202,26 @@ export default {
       await env.KV.put("runtime-baseline", "kv-round-trip");
       return new Response(await env.KV.get("runtime-baseline"));
     }
+    if (path === "/native/kv-short") {
+      await env.KV.put("native-short", "short", { expirationTtl: 1 });
+      return new Response("armed");
+    }
+    if (path === "/native/kv-short-state") {
+      return new Response(String(await env.KV.get("native-short")));
+    }
+    if (path === "/native/queue-idempotency") {
+      const messages = [{ body: { id: "native-idempotent" }, idempotencyKey: "native-key", metadata: { trace: "native-trace", n: "9007199254740993" } }];
+      const first = await env.JOBS.sendBatch(messages);
+      const second = await env.JOBS.sendBatch(messages);
+      return Response.json({ first: first.ids, second: second.ids });
+    }
     if (path === "/queue") {
       const id = new URL(req.url).searchParams.get("id") || "job-1";
       return Response.json(await env.JOBS.send({ id }));
     }
     if (path === "/receipt") {
       const id = new URL(req.url).searchParams.get("id") || "job-1";
-      return Response.json({ queue: await env.KV.get("queue:" + id), cron: await env.KV.get("cron:last"), cronA: await env.KV.get("cron:* * * * *"), cronB: await env.KV.get("cron:*/1 * * * *"), duplicate: await env.KV.get("cron:duplicate") });
+      return Response.json({ queue: await env.KV.get("queue:" + id), metadata: await env.KV.get("queue:metadata"), lastBody: await env.KV.get("queue:last-body"), cron: await env.KV.get("cron:last"), cronA: await env.KV.get("cron:* * * * *"), cronB: await env.KV.get("cron:*/1 * * * *"), duplicate: await env.KV.get("cron:duplicate") });
     }
     if (path === "/recover-queue") {
       await env.KV.put("queue:recover", "yes");
@@ -241,11 +254,13 @@ export default {
   },
   async queue(batch: any, env: Record<string, any>): Promise<void> {
     for (const message of batch.messages) {
+      await env.KV.put("queue:last-body", JSON.stringify(message.body));
       if (message.body.id === "poison" && await env.KV.get("queue:recover") !== "yes") {
         message.retry();
         continue;
       }
       await env.KV.put("queue:" + message.body.id, "processed");
+      if (message.body.id === "native-idempotent") await env.KV.put("queue:metadata", JSON.stringify(message.metadata));
       message.ack();
     }
   },
@@ -439,6 +454,26 @@ assert_not_contains "$ENV_JSON" "$HOST_URL_CANARY" "tenant env"
 assert_not_contains "$ENV_JSON" "$CELLHIVE_ROOT_KEY" "tenant env"
 KV_RESULT=$(fetch_path /kv)
 assert_eq "kv-round-trip" "$KV_RESULT" "KV put/get"
+
+echo "== native short TTL and queue idempotency/metadata =="
+assert_eq armed "$(fetch_path /native/kv-short)" "native one-second TTL arm"
+sleep 2
+assert_eq null "$(fetch_path /native/kv-short-state)" "native one-second TTL expiry"
+NATIVE_QUEUE=$(fetch_path /native/queue-idempotency)
+[[ "$NATIVE_QUEUE" == *'"first":["'* && "$NATIVE_QUEUE" == *'"second":["'* ]] || fail "native queue sendBatch response: $NATIVE_QUEUE"
+NATIVE_FIRST=$(printf '%s' "$NATIVE_QUEUE" | sed -n 's/.*"first":\["\([^"]*\)"\].*/\1/p')
+NATIVE_SECOND=$(printf '%s' "$NATIVE_QUEUE" | sed -n 's/.*"second":\["\([^"]*\)"\].*/\1/p')
+assert_eq "$NATIVE_FIRST" "$NATIVE_SECOND" "native queue idempotency"
+NATIVE_RECEIPT=""
+retry_capture NATIVE_RECEIPT compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=native-idempotent' | grep -F '\"queue\":\"processed\"'" \
+  || { fetch_path /receipt?id=native-idempotent >&2 || true; compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose logs --tail=120 cell-agent user-runtime >&2 || true; fail "native idempotent queue was not consumed"; }
+META_RECEIPT=""
+retry_capture META_RECEIPT compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=native-idempotent' | grep -F '\"queue\":\"processed\"'" \
+  || fail "native queue metadata message missing"
+META_JSON=$(fetch_path /receipt?id=native-idempotent)
+[[ "$META_JSON" == *'"metadata":"{\"trace\":\"native-trace\",\"n\":\"9007199254740993\"}"'* ]] || fail "native queue metadata was not preserved: $META_JSON"
 
 INTERNAL_TOKEN=$(compose exec -T cell-agent cellhive creds internal | tr -d '\r\n')
 [[ -n "$INTERNAL_TOKEN" ]] || fail "could not derive host internal token"

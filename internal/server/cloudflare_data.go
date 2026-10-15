@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -397,6 +398,13 @@ func cloudflareMultiSQL(sqlText string) bool {
 func cloudflareKVKey(r *http.Request) string { return r.PathValue("key") }
 
 func (s *Server) handleCloudflareKVValuePut(w http.ResponseWriter, r *http.Request) {
+	if value := r.URL.Query().Get("expiration_ttl"); value != "" {
+		sec, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || sec < 60 {
+			writeErr(w, 400, "bad_expiration", "Cloudflare expiration_ttl must be at least 60 seconds")
+			return
+		}
+	}
 	name, key := r.PathValue("resource_id"), cloudflareKVKey(r)
 	if key == "" {
 		writeErr(w, 400, "invalid_key", "key is required")
@@ -501,7 +509,7 @@ func (s *Server) handleCloudflareKVBulkPut(w http.ResponseWriter, r *http.Reques
 	}
 	values := make([][]byte, len(entries))
 	for i, entry := range entries {
-		if entry.Key == "" || entry.Expiration < 0 || entry.ExpirationTTL < 0 || (entry.Expiration != 0 && entry.ExpirationTTL != 0) {
+		if entry.Key == "" || entry.Expiration < 0 || entry.ExpirationTTL < 0 || (entry.ExpirationTTL > 0 && entry.ExpirationTTL < 60) || (entry.Expiration != 0 && entry.ExpirationTTL != 0) {
 			writeErr(w, 400, "invalid_bulk", "invalid key or expiration in bulk entry")
 			return
 		}

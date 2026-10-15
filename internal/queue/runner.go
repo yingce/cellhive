@@ -248,13 +248,13 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 
 // deadLetter moves a message that exhausted its retries to the configured
 // dead-letter queue, or drops it (with a warning) when none is configured.
-// The idempotency key travels with the replayed send so the DLQ message
-// dedupes against any still-live twin (ADR-182 review fix).
+// The original business key/metadata travel with the message. A source-ID
+// transfer receipt prevents a retried move from inserting another DLQ message.
 func (r *Runner) deadLetter(ctx context.Context, ref Ref, m Message, cause error) {
 	if ref.DeadLetterQueue != "" {
 		send := func() error {
 			return r.commit(ctx, ref.Namespace, ref.DeadLetterQueue, func() error {
-				_, e := r.Store.Send(ctx, ref.Namespace, ref.DeadLetterQueue, m.Body, m.ContentType, 0, m.IdempotencyKey)
+				_, e := r.Store.Transfer(ctx, ref.Namespace, ref.DeadLetterQueue, m)
 				return e
 			})
 		}

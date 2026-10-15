@@ -517,7 +517,10 @@ export class QueueProducer extends WorkerEntrypoint {
   }
 }
 
-function base64Queue(bytes) { let s = ""; for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b); return btoa(s); }
+function base64Queue(bytes) {
+  const view = typeof bytes === "string" ? new TextEncoder().encode(bytes) : new Uint8Array(bytes);
+  let s = ""; for (const b of view) s += String.fromCharCode(b); return btoa(s);
+}
 function encodeQueueBody(body, requested) {
   const contentType = requested || (typeof body === "string" ? "text" : "json");
   if (contentType === "text") return { contentType, mime: "text/plain", body: String(body) };

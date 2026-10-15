@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS messages (
   metadata        TEXT,
   created_ms      INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_visible ON messages(visible_at_ms);
+CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, message_id TEXT NOT NULL, fingerprint TEXT NOT NULL, expires_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idempotency_expiry ON idempotency(expires_ms);
+CREATE TABLE IF NOT EXISTS queue_meta (key TEXT PRIMARY KEY);
 `
 
 // Store persists queue messages in a cell.
@@ -77,7 +79,7 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 				return e
 			}
 		}
-		return nil
+		return migrateIdempotency(ctx, tx, s.now().UnixMilli())
 	}); err != nil {
 		return nil, err
 	}
@@ -96,7 +98,8 @@ type Message struct {
 	TimestampMs  int64           `json:"timestamp_ms"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	// IdempotencyKey travels with the message so a dead-letter replay can
-	// preserve it (the replayed send dedupes against live messages again).
+	// preserve it. Transfers use separate durable receipts so an operator can
+	// replay a consumed message without bypassing producer deduplication.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -127,6 +130,23 @@ type SendMessage struct {
 // SendBatch atomically enqueues all messages. Reusing an idempotency key with
 // a different payload is a conflict; an identical message returns its old id.
 func (s *Store) SendBatch(ctx context.Context, ns, name string, messages []SendMessage) ([]string, error) {
+	return s.sendBatch(ctx, ns, name, messages, "")
+}
+
+// Transfer is a privileged DLQ/replay operation. Source message ID is the
+// transfer receipt identity; the original producer key remains message data.
+func (s *Store) Transfer(ctx context.Context, ns, name string, m Message) (string, error) {
+	if m.ID == "" {
+		return "", fmt.Errorf("queue: transfer source id is required")
+	}
+	ids, err := s.sendBatch(ctx, ns, name, []SendMessage{{Body: m.Body, ContentType: m.ContentType, Metadata: m.Metadata, IdempotencyKey: m.IdempotencyKey}}, m.ID)
+	if err != nil {
+		return "", err
+	}
+	return ids[0], nil
+}
+
+func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendMessage, transferID string) ([]string, error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, err
@@ -145,16 +165,29 @@ func (s *Store) SendBatch(ctx context.Context, ns, name string, messages []SendM
 		if len(m.Body) > 128*1024 {
 			return nil, fmt.Errorf("queue: message exceeds 128 KiB")
 		}
+		if _, err := messageFingerprint(m); err != nil {
+			return nil, err
+		}
 	}
 	now := s.now().UnixMilli()
 	ids := make([]string, len(messages))
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE expires_ms<=?`, now); err != nil {
+			return err
+		}
 		for i, m := range messages {
 			m.ContentType = normalizeContentType(m.ContentType)
-			fingerprint := fmt.Sprintf("%x:%s:%d:%s", m.Body, m.ContentType, m.DelaySeconds, string(m.Metadata))
+			fingerprint, _ := messageFingerprint(m)
+			ledgerKey := ""
 			if m.IdempotencyKey != "" {
+				ledgerKey = "send:" + m.IdempotencyKey
+			}
+			if transferID != "" {
+				ledgerKey = "transfer:" + transferID
+			}
+			if ledgerKey != "" {
 				var oldID, oldFP string
-				e := tx.QueryRowContext(ctx, `SELECT id, COALESCE(idempotency_fingerprint,'') FROM messages WHERE idempotency_key=?`, m.IdempotencyKey).Scan(&oldID, &oldFP)
+				e := tx.QueryRowContext(ctx, `SELECT message_id,fingerprint FROM idempotency WHERE key=?`, ledgerKey).Scan(&oldID, &oldFP)
 				if e == nil {
 					if oldFP != "" && oldFP != fingerprint {
 						return fmt.Errorf("queue: idempotency key %q conflicts with a different message", m.IdempotencyKey)
@@ -180,6 +213,11 @@ func (s *Store) SendBatch(ctx context.Context, ns, name string, messages []SendM
 				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms)
 				 VALUES(?,?,?,?,0,0,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now); e != nil {
 				return e
+			}
+			if ledgerKey != "" {
+				if err := recordIdempotency(ctx, tx, ledgerKey, id, fingerprint, now); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

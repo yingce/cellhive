@@ -12,6 +12,27 @@ import (
 
 const maxQueueBodyBytes = 128 * 1024
 
+func (s *Server) handleQueueTransfer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireQueue(w) {
+		return
+	}
+	ns, name := r.URL.Query().Get("ns"), r.URL.Query().Get("queue")
+	if s.queueGate(w, r, ns, name) {
+		return
+	}
+	var message queuepkg.Message
+	if err := json.NewDecoder(io.LimitReader(r.Body, 2*1024*1024)).Decode(&message); err != nil {
+		writeErr(w, 400, "queue_invalid_transfer", err.Error())
+		return
+	}
+	var id string
+	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error { var err error; id, err = s.Queue.Transfer(r.Context(), ns, name, message); return err }); err != nil {
+		s.captureErr(w, err, "queue_transfer_failed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": id})
+}
+
 func queueContentType(r *http.Request) string {
 	if v := r.Header.Get("x-cellhive-queue-content-type"); v != "" {
 		return v

@@ -1,5 +1,9 @@
 # 决策记录（ADR）
 
+## 2026-10-15 原生 KV / Queue 合同补充
+
+原生 KV 支持正整数秒 TTL（包括 1–59），Cloudflare 管理兼容入口保留 60 秒下限；`incr` 增加稳定的十进制字符串 `value_i64`，旧数字字段兼容保留。Queue 生产者幂等按首次发送起 24h 存独立 ledger，消费/清空消息不清除凭证；body/type/规范化 metadata 定义逻辑身份，delay 属于投递参数、不参与指纹。DLQ/重放保留 metadata 与业务键，通过源消息 ID 的独立转移 receipt 去重，跨 owner 用内部鉴权端点。旧活消息的键在迁移时回填，已消费的历史消息无法追溯回填。见 `superpowers/specs/2026-10-15-kv-queue-native-semantics.md`。max_batch_timeout 和逐 Worker CPU/内存硬隔离仍另定合同。
+
 本文件是 CellHive 设计过程中已锁定决策的**当前版本**。设计过程中多条 ADR 被修订（见文末"修订记录"）；此处保留编号、更新内容以保持文档一致。
 
 状态图例：✅ 已定 · ⏳ 待 P0 实测确认 · 🕓 待定（尚未收口）。

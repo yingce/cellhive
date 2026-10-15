@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"cellhive/internal/control"
 	"cellhive/internal/ownerclient"
 	queuepkg "cellhive/internal/queue"
-	"cellhive/internal/scopedtoken"
 )
 
 // R4 (ADR-156): queue observability and dead-letter replay for operators.
@@ -163,8 +163,8 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 }
 
 // EnqueueToQueueOwner sends to the destination queue's owner, claiming it if
-// unowned. A remote owner receives an authenticated scoped send.
-// The content type and idempotency key survive DLQ delivery and replay.
+// unowned. A remote owner receives an internal-authenticated transfer.
+// The content type, metadata and business key survive DLQ delivery and replay.
 func (s *Server) EnqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
 	return s.enqueueToQueueOwner(ctx, ns, queue, m)
 }
@@ -174,7 +174,7 @@ func (s *Server) EnqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
 	sc := queuepkg.Scope(ns, queue)
 	if s.Owner == nil {
-		_, err := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
+		_, err := s.Queue.Transfer(ctx, ns, queue, m)
 		return err
 	}
 	now := time.Now()
@@ -202,24 +202,21 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 	}
 	if owned {
 		return s.capturedWrite(ctx, sc, func() error {
-			_, e := s.Queue.Send(ctx, ns, queue, m.Body, m.ContentType, 0, m.IdempotencyKey)
+			_, e := s.Queue.Transfer(ctx, ns, queue, m)
 			return e
 		})
 	}
-	tok, err := scopedtoken.Mint(s.scopeSecret(), scopedtoken.Claims{Namespace: ns, Kind: "queue", Name: queue})
+	url := ownerclient.OwnerURL(ownerclient.Hint{Address: addr}) + "/v1/internal/queue/transfer?ns=" + neturl.QueryEscape(ns) + "&queue=" + neturl.QueryEscape(queue)
+	body, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	url := ownerclient.OwnerURL(ownerclient.Hint{Address: addr}) + "/v1/queue/send?ns=" + ns + "&queue=" + queue
-	if m.IdempotencyKey != "" {
-		url += "&idempotency_key=" + neturl.QueryEscape(m.IdempotencyKey)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(m.Body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("content-type", m.ContentType)
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
 	client := s.ForwardClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}

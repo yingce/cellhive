@@ -189,6 +189,12 @@ func TestCloudflareD1ExportAndKVBulk(t *testing.T) {
 		t.Fatalf("download = %d %s", get.Code, get.Body.String())
 	}
 	bulkPath := base + "/storage/kv/namespaces/KV/bulk"
+	if rr := call(http.MethodPut, base+"/storage/kv/namespaces/KV/values/short?expiration_ttl=59", []byte("v")); rr.Code != 400 {
+		t.Fatalf("Cloudflare short TTL accepted: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPut, bulkPath, []byte(`[{"key":"short","value":"v","expiration_ttl":59}]`)); rr.Code != 400 {
+		t.Fatalf("Cloudflare bulk short TTL accepted: %d %s", rr.Code, rr.Body.String())
+	}
 	put := call(http.MethodPut, bulkPath, []byte(`[{"key":"a","value":"one"},{"key":"b","value":"dHdv","base64":true}]`))
 	if put.Code != 200 {
 		t.Fatalf("bulk put = %d %s", put.Code, put.Body.String())
