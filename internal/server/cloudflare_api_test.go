@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
+	"cellhive/internal/cellstore"
 	"cellhive/internal/control"
 	"cellhive/internal/logbuf"
+	"cellhive/internal/queue"
 	"github.com/gorilla/websocket"
 )
 
@@ -121,6 +124,150 @@ func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {
 	}
 	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/workers/scripts/web", ""); rr.Code != 200 {
 		t.Fatalf("worker delete %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareDeploymentsReflectCommittedActivations(t *testing.T) {
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	path := "/client/v4/accounts/acme/workers/scripts/web/deployments"
+	if rr := call(http.MethodGet, path, ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"deployments":[]`)) {
+		t.Fatalf("initial deployments = %d %s", rr.Code, rr.Body.String())
+	}
+	for _, sha := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
+		if _, err := s.Control.Deploy(t.Context(), "acme", "web", control.DeploySpec{BundleSHA: sha}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rr := call(http.MethodPost, path, `{"strategy":"percentage","versions":[{"version_id":"1","percentage":50},{"version_id":"2","percentage":50}]}`); rr.Code != 400 {
+		t.Fatalf("traffic split should fail: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, path, `{"strategy":"percentage","versions":[{"version_id":"1","percentage":100}]}`); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"version_id":"1"`)) {
+		t.Fatalf("promote = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, path, ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"version_id":"1"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"version_id":"2"`)) {
+		t.Fatalf("deployment history = %d %s", rr.Code, rr.Body.String())
+	}
+	releases, err := s.Control.Releases(t.Context(), "acme", "web")
+	if err != nil || len(releases) != 2 || !releases[1].Active {
+		t.Fatalf("persisted active version = %+v, %v", releases, err)
+	}
+}
+
+func TestCloudflareWorkflowInstancesReadPersistedStepsAndPages(t *testing.T) {
+	s := newControlServer(t)
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.CreateResource(t.Context(), "acme", "workflow", "flow", "acme/__workflow__/flow", "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"one", "two", "three"} {
+		if _, err := s.Workflows.Create(t.Context(), "acme", "flow", id, []byte(`{"value":1}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Workflows.PutStep(t.Context(), "acme", "flow", "one", "saved", []byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	base := "/client/v4/accounts/acme/workflows/flow/instances"
+	if rr := call(http.MethodGet, base+"/one", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"name":"saved"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"ok":true`)) {
+		t.Fatalf("describe=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base+"?page=2&per_page=2", ""); rr.Code != 200 || bytes.Count(rr.Body.Bytes(), []byte(`"created_on"`)) != 1 {
+		t.Fatalf("page=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base+"?page=2&per_page=2&status=complete", ""); rr.Code != 200 || bytes.Contains(rr.Body.Bytes(), []byte(`"created_on"`)) {
+		t.Fatalf("filtered page=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base+"?page=0", ""); rr.Code != 400 {
+		t.Fatalf("invalid page=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPatch, base+"/one/status", `{"status":"pause","ignored":true}`); rr.Code != 400 {
+		t.Fatalf("unknown status option=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, base+"/batch/delete", `{"instances":["one"]}`); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"deleted":[{"id":"one"}]`)) {
+		t.Fatalf("delete=%d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareVectorizeManagement(t *testing.T) {
+	s := newVectorizeServer(t)
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h := s.AdminHandler()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	base := "/client/v4/accounts/acme/vectorize/v2/indexes"
+	if rr := call(http.MethodPost, base, `{"name":"docs","config":{"dimensions":3,"metric":"cosine"}}`); rr.Code != 200 {
+		t.Fatalf("create=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base, ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"name":"docs"`)) {
+		t.Fatalf("list=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base+"/docs", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"dimensions":3`)) {
+		t.Fatalf("get=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, base+"/docs/info", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"vectorCount":0`)) {
+		t.Fatalf("info=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, base, `{"name":"bad","config":{"dimensions":3,"metric":"dot-product"}}`); rr.Code != 400 {
+		t.Fatalf("unsupported metric=%d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodDelete, base+"/docs", ""); rr.Code != 200 {
+		t.Fatalf("delete=%d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareQueuePurgeClearsPersistedMessages(t *testing.T) {
+	s := newControlServer(t)
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Queue = queue.New(cs)
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.CreateResource(t.Context(), "acme", "queue", "jobs", "acme/__queue__/jobs", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Queue.Send(t.Context(), "acme", "jobs", []byte(`{"n":1}`), "json", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/purge", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rr := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("purge=%d %s", rr.Code, rr.Body.String())
+	}
+	if n, err := s.Queue.Depth(t.Context(), "acme", "jobs"); err != nil || n != 0 {
+		t.Fatalf("depth=%d err=%v", n, err)
 	}
 }
 

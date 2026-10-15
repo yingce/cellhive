@@ -2473,6 +2473,21 @@
 - `cellhive init <worker-name> [--yes]` 与 `cellhive wrangler init` 在本地新建独立目录，写入 `wrangler.jsonc` 与 `src/index.js`，使用平台固定 workerd 的最大兼容日期；不访问网络、不安装依赖、不覆盖已有目录。名称限制为小写字母、数字和连字符。
 - 原版 `wrangler init` 仍由 Wrangler 自己在本地运行；CellHive 模板只覆盖最小可部署 Worker，不承诺复制原版交互式向导、框架模板或 Dashboard 下载。
 
+## ADR-201 Wrangler deployment 必须反映持久状态（2026-10-15）
+
+- 控制 cell 在部署、提升和回滚的同一 SQLite 事务内追加 deployment event（namespace、worker、version、actor、时间）；列表只读取已提交事件。旧版本升级时不伪造历史事件，可根据当前 active 指针返回当前状态。
+- Cloudflare 形状的 `GET /deployments` 返回真实单版本 100% 事件，`POST /deployments` 只接受单版本 100% 并在真实 Promote 成功后返回；多版本流量分割显式拒绝。`versions/{id}/deploy` 共用该激活语义。不得再返回固定空列表或固定成功 ID。
+
+## ADR-202 Wrangler Workflow 实例详情与查询（2026-10-15）
+
+- `instances describe` 应从 Workflow cell 读取真实已提交步骤结果；实例列表须按请求的页码、状态和创建时间过滤。未知查询字段或不支持的操作明确拒绝，不能返回看似完整的假步骤或错误页。
+- 当前步骤存储没有 Cloudflare 完整的尝试日志、开始结束时间和运行中步骤记录；兼容端仅展示可证明的已完成步骤及输出，绝不合成尝试记录。原生 CLI 与 Wrangler 兼容端使用同一持久状态。
+
+## ADR-203 Wrangler Vectorize 管理适配（2026-10-15）
+
+- 仅将已有 Vectorize 注册资源可忠实表达的 `create/list/get/delete/info` 映射到原生资源与统计接口；索引配置保持 dimensions/metric/description 的原生验证。点积 metric 仍拒绝。
+- Hyperdrive 的原生资源只是加密存储的 origin URL，没有 Cloudflare 缓存池、mTLS、连接池和完整配置更新语义；原版 Wrangler 若提交这些参数，应明确拒绝，管理命令需继续审查后逐项开放，不能用占位成功回执。
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。

@@ -118,6 +118,34 @@ type Instance struct {
 	TargetClass   string `json:"target_class,omitempty"`
 }
 
+// CompletedStep is a persisted memoized result. The store does not record
+// Cloudflare's per-attempt timing or in-progress step history.
+type CompletedStep struct {
+	Name   string `json:"name"`
+	Result []byte `json:"result"`
+}
+
+func (s *Store) CompletedSteps(ctx context.Context, ns, name, id string) ([]CompletedStep, error) {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.DB.QueryContext(ctx, `SELECT name, result FROM steps WHERE instance_id=? ORDER BY rowid`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	steps := make([]CompletedStep, 0)
+	for rows.Next() {
+		var step CompletedStep
+		if err := rows.Scan(&step.Name, &step.Result); err != nil {
+			return nil, err
+		}
+		steps = append(steps, step)
+	}
+	return steps, rows.Err()
+}
+
 // Target pins the Worker version/class used by a workflow instance.
 type Target struct {
 	Worker, BundleSHA, ClassName string
@@ -661,6 +689,11 @@ func (s *Store) Get(ctx context.Context, ns, name, id string) (Instance, error) 
 
 // List returns recent instances (operator/diagnostic use).
 func (s *Store) List(ctx context.Context, ns, name string, limit int) ([]Instance, error) {
+	return s.ListPage(ctx, ns, name, limit, 0, "", 0, 0)
+}
+
+// ListPage reads a stable newest-first page from the workflow cell.
+func (s *Store) ListPage(ctx context.Context, ns, name string, limit, offset int, status Status, fromMs, toMs int64) ([]Instance, error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, err
@@ -668,8 +701,13 @@ func (s *Store) List(ctx context.Context, ns, name string, limit int) ([]Instanc
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	if offset < 0 {
+		return nil, fmt.Errorf("negative workflow page offset")
+	}
 	rows, err := c.DB.QueryContext(ctx,
-		`SELECT id, params, status, output, error, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class FROM instances ORDER BY created_ms DESC LIMIT ?`, limit)
+		`SELECT id, params, status, output, error, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class FROM instances
+		 WHERE (?='' OR status=?) AND (?=0 OR created_ms>=?) AND (?=0 OR created_ms<=?)
+		 ORDER BY created_ms DESC, id DESC LIMIT ? OFFSET ?`, string(status), string(status), fromMs, fromMs, toMs, toMs, limit, offset)
 	if err != nil {
 		return nil, err
 	}

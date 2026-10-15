@@ -4,6 +4,17 @@
 
 _最后更新：2026-10-15_
 
+## 2026-10-15 KV / Queue 原生语义第一轮
+
+- 原生 KV `expiration_ttl` 已支持 1 秒起；Cloudflare 兼容入口仍执行 60 秒下限。
+- `incr` 已增加无损 `value_i64` 十进制字符串；旧 `value` 字段保留兼容。
+- Queue 幂等 ledger 已从消息行分离，ack 后仍保留 24 小时；metadata 指纹使用 SHA-256 和 UseNumber JSON 解码；DLQ/transfer 保留 metadata 和业务 idempotency key，并通过独立 transfer receipt 去重。
+- `max_batch_timeout` 与逐 Worker CPU/内存硬隔离仍未在本轮实现，需单独确认 VWork 合同。
+
+## 2026-10-15 Wrangler 命令兼容边界
+
+Workflow 实例详情当前只持久化完成步骤的结果，不记录 Cloudflare 的逐次尝试、步骤开始结束时间及运行中步骤；Wrangler `instances describe` 只展示可证明的完成步骤。`restart --from`、跨 Worker Workflow 仍不支持。Queue consumer `retry_delay` 未进入原生派发语义，兼容 API 显式拒绝；purge 为持久 owner 写入。Vectorize 原版管理只覆盖 V2 create/list/get/delete/info，点积 metric 不支持。Hyperdrive 原版管理命令尚未开放；当前原生能力只是加密的 origin URL，不承诺 Cloudflare 缓存、mTLS 或连接池语义。详见 `wrangler-compat.md`、ADR-202/203。
+
 ## 2026-10-15 调度正确性修复
 
 Cron 同分钟不同表达式独立物化；`noRetry()` 返回租户执行结果，避免跨 isolate 闭包失效。Workflow busy claim 不消费 timer，create/event/resume/restart 有事务性 `workflow-run` outbox；等待事件原子 park/释放租约，防事件竞态丢唤醒。DO alarm 采用先持久化 timer 的可靠交接、generation 校验、active/pending 消费与重试；上报失败不静默成功。真实 workerd 专项、Go/race 与 Docker 完整调度链路验证见 `timers-and-dispatch.md` 和 `testing.md`。剩余边界：DO 重试不是 CF 原生指数退避/次数上限；外部副作用仍至少一次；`transactionSync` 内 alarm 不支持。旧数字 alarm 惰性兼容，新旧 dispatcher 不能混用忽略 `workflow-run`/alarm generation 的版本。

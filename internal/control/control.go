@@ -114,6 +114,14 @@ type Release struct {
 	Crons     []string `json:"crons,omitempty"`
 }
 
+// DeploymentEvent records one committed change to the active Worker version.
+type DeploymentEvent struct {
+	ID        int64  `json:"id"`
+	Version   int    `json:"version"`
+	Actor     string `json:"actor"`
+	CreatedMs int64  `json:"created_ms"`
+}
+
 // Worker tracks a worker's active and previous (promoted-from) version.
 type Worker struct {
 	Name     string `json:"name"`

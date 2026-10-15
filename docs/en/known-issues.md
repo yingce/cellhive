@@ -4,6 +4,17 @@ This document records all issues found during the system review, as well as **th
 
 _Last updated: 2026-10-15_
 
+## 2026-10-15 KV / Queue native semantics (first pass)
+
+- Native KV `expiration_ttl` now accepts one second and above; the Cloudflare-compatible entrypoint keeps the 60-second minimum.
+- `incr` now returns lossless decimal-string `value_i64`; the legacy numeric `value` remains for compatibility.
+- Queue idempotency is held in a separate 24-hour ledger after ack; fingerprints use SHA-256 and JSON `UseNumber`; DLQ/transfer preserves metadata and the business idempotency key while using an independent transfer receipt.
+- `max_batch_timeout` and hard per-Worker CPU/memory isolation remain out of scope pending the VWork contract.
+
+## 2026-10-15 Wrangler command compatibility limits
+
+Workflow instances persist completed step results, but not Cloudflare's per-attempt logs, step start/end times, or in-progress steps. Wrangler `instances describe` displays only provable completed steps. `restart --from` and cross-Worker Workflows remain unsupported. Queue consumer `retry_delay` has no native dispatch semantics and is rejected; purge uses a durable owner write. Stock Vectorize management covers V2 create/list/get/delete/info; dot-product metric is unsupported. Stock Hyperdrive management is not exposed: the current native resource is a sealed origin URL and does not provide Cloudflare cache, mTLS, or connection-pool semantics. See `wrangler-compat.md` and ADR-202/203.
+
 ## 2026-10-15 scheduling correctness fixes
 
 Coincident Cron expressions have distinct persisted identities; scheduled `noRetry()` is implemented inside the tenant wrapper and returned as data. Workflow busy claims retain timers; create/event/resume/restart have transactional `workflow-run` outboxes, and event waits atomically park/release their lease and check raced events. DO alarms pre-publish a durable timer before changing object alarm state, validate generations, consume active alarms into pending deliveries and retain failures for retry. Failed handoffs fail closed. See `../timers-and-dispatch.md` and `../testing.md` for verification. Remaining limits: DO retries use the unified runner rather than CF's native backoff/retry cap; external side effects remain at-least-once; alarms inside `transactionSync` are unsupported. Numeric legacy alarms remain readable; do not mix dispatchers that ignore the new timer kind/generation fields.

@@ -48,7 +48,7 @@
 |---|---|
 | `wrangler deploy --namespace <ns> [-c file] [--env e] [--name w] [其它原生 flag]` | `cellhive deploy <ns> <w> --config <file> …`（`worker` 缺省取配置 `name`） |
 | `wrangler delete <ns> <worker>` | `cellhive worker delete` |
-| `wrangler versions list` / `wrangler deployments list` | `cellhive releases` |
+| `wrangler versions list` / `wrangler deployments list` | `cellhive versions list` / `cellhive deployments list`（后者读取持久部署事件） |
 | `wrangler rollback` / `wrangler promote` | 同名命令 |
 | `wrangler secret put\|get\|delete\|list` | `cellhive secret ...`（含 `bulk`） |
 | `wrangler tail` | `cellhive tail` |
@@ -61,7 +61,9 @@
 - **`deploy` flag**：`--dry-run`（服务端预检不落状态）、`--var NAME=VALUE`、`--secrets-file <JSON>` 已支持并透传；其余不支持的 flag 直接报错并给替代（如 `--minify`→`build.minify`、`--compatibility-date`→`compatibility_date`）；
 - **兼容命令组**：`versions`/`deployments`/`triggers`/`workflows`/`queues`/`types`/`init` 转发到原生实现或**结构化拒绝 + 替代说明**（ADR-148）；`d1`/`r2`/`kv` 转发到原生每域命令，已支持上述常用数据面命令；`vectorize`/`hyperdrive` 前缀透传到原生实现；
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。旧式 `kv:bulk` 映射到 `kv bulk`。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`unstable_*`→内部命令；
-- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）；`types` 可用 `cellhive types` 生成配置 Env 声明，`init` 可用 `cellhive init` 创建最小 Worker；
+- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）；`queues consumer list\|add\|remove` 和 `queues purge`、`workflows trigger` 与 `workflows instances list\|describe\|pause\|resume\|terminate\|restart\|send-event\|delete` 均有原生命令；`types` 可用 `cellhive types` 生成配置 Env 声明，`init` 可用 `cellhive init` 创建最小 Worker；
+
+**本轮 Wrangler 4.133.0 验收**：原版 `deployments list/status`、`queues consumer add/list`、`workflows trigger`、`workflows instances list/describe`、`vectorize create/list/get/info` 已在隔离管理员服务中真实执行，并与持久控制/Workflow 状态交叉核对。`deployments list` 返回事务内提交的部署事件；`status` 取当前最新事件。Workflow `describe` 仅展示已持久化的完成步骤与输出，没有完整尝试日志、步骤计时或运行中步骤。列表支持页码、状态和 RFC3339 时间过滤；`restart --from` 不支持。Queue consumer `retry_delay` 不支持且显式报错；purge 通过 Queue owner/capture 路径写入。Vectorize 管理仅覆盖 V2 的 create/list/get/delete/info；点积 metric 不支持。Hyperdrive 原版管理命令仍未开放，因为其缓存/mTLS/连接池等语义与当前原生加密 origin URL 资源不同。
 
 **D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用迁移表；Wrangler `migrations_table` 与原生 CLI `--table` 可选择同一个自定义表。`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更；摘要计算忽略 SQL 文件首尾空白，以匹配 Wrangler 提交行为。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
 

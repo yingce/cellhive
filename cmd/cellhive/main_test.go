@@ -284,7 +284,7 @@ func TestCmdCompatRejections(t *testing.T) {
 		{[]string{"init"}, "usage"},
 		{[]string{"versions", "upload"}, "publish atomically"},
 		{[]string{"versions", "view", "3"}, "usage"},
-		{[]string{"queues", "purge", "acme", "jobs"}, "not supported"},
+		{[]string{"queues", "purge", "acme"}, "usage"},
 	} {
 		// Route through dispatch: kv/d1/r2 are real per-domain commands now
 		// (ADR-157); supported data-plane verbs now validate their arguments.
@@ -364,10 +364,10 @@ func TestWranglerRejectionsAreActionable(t *testing.T) {
 		}
 	}
 	// Subcommand-level messages.
-	if err := cmdCompat([]string{"queues", "consumer", "add"}); err == nil || !strings.Contains(err.Error(), "queues.consumers") {
+	if err := cmdCompat([]string{"queues", "consumer", "add"}); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Errorf("queues consumer = %v", err)
 	}
-	if err := cmdCompat([]string{"workflows", "status", "acme", "w"}); err == nil || !strings.Contains(err.Error(), "runtime-only") {
+	if err := cmdCompat([]string{"workflows", "status", "acme", "w"}); err == nil || !strings.Contains(err.Error(), "instances describe") {
 		t.Errorf("workflows status = %v", err)
 	}
 }

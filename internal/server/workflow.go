@@ -205,10 +205,16 @@ func (s *Server) handleWorkflowGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "workflow_not_found", err.Error())
 		return
 	}
+	steps, err := s.Workflows.CompletedSteps(r.Context(), ns, name, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "workflow_steps_failed", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": in.ID, "status": in.Status, "error": in.Error,
 		"output":     base64.StdEncoding.EncodeToString(in.Output),
 		"created_ms": in.CreatedMs, "updated_ms": in.UpdatedMs,
+		"target_version": in.TargetVersion, "steps": steps,
 	})
 }
 
@@ -308,7 +314,34 @@ func (s *Server) handleWorkflowList(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("limit"); v != "" {
 		limit, _ = strconv.Atoi(v)
 	}
-	instances, err := s.Workflows.List(r.Context(), ns, name, limit)
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	if r.URL.Query().Get("offset") == "" {
+		offset = 0
+		err = nil
+	}
+	if err != nil || offset < 0 {
+		writeErr(w, 400, "invalid_offset", "offset must be nonnegative")
+		return
+	}
+	fromMs, err := strconv.ParseInt(r.URL.Query().Get("from_ms"), 10, 64)
+	if r.URL.Query().Get("from_ms") == "" {
+		fromMs = 0
+		err = nil
+	}
+	if err != nil {
+		writeErr(w, 400, "invalid_date", "from_ms must be milliseconds")
+		return
+	}
+	toMs, err := strconv.ParseInt(r.URL.Query().Get("to_ms"), 10, 64)
+	if r.URL.Query().Get("to_ms") == "" {
+		toMs = 0
+		err = nil
+	}
+	if err != nil {
+		writeErr(w, 400, "invalid_date", "to_ms must be milliseconds")
+		return
+	}
+	instances, err := s.Workflows.ListPage(r.Context(), ns, name, limit, offset, workflow.Status(r.URL.Query().Get("status")), fromMs, toMs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "workflow_list_failed", err.Error())
 		return

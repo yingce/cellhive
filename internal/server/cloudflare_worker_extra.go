@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"time"
 
 	"cellhive/internal/control"
 )
@@ -64,12 +65,32 @@ func (s *Server) handleCloudflareWorkerVersionDeploy(w http.ResponseWriter, r *h
 		writeErr(w, http.StatusNotFound, "version_not_found", "version does not exist")
 		return
 	}
-	wk, err := s.Control.Promote(r.Context(), ns, worker, version, "wrangler")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "version_deploy_failed", err.Error())
+	if !s.cloudflarePromote(w, r, ns, worker, version) {
 		return
 	}
-	cloudflareResult(w, map[string]any{"id": wanted, "version_id": wanted, "script_name": wk.Name})
+	cloudflareResult(w, map[string]any{"id": strconv.Itoa(version), "version_id": strconv.Itoa(version), "script_name": worker})
+}
+
+func (s *Server) cloudflarePromote(w http.ResponseWriter, r *http.Request, ns, worker string, version int) bool {
+	body, _ := json.Marshal(map[string]any{"namespace": ns, "worker": worker, "version": version})
+	req := r.Clone(r.Context())
+	req.Method = http.MethodPost
+	req.URL.Path = "/v1/control/promote"
+	req.URL.RawPath = ""
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return !cloudflareBridgeError(w, rec, nil)
+}
+
+func cloudflareDeploymentResult(event control.DeploymentEvent) map[string]any {
+	return map[string]any{
+		"id": strconv.FormatInt(event.ID, 10), "created_on": time.UnixMilli(event.CreatedMs).UTC().Format(time.RFC3339Nano),
+		"author_email": event.Actor, "source": "api", "strategy": "percentage",
+		"versions": []any{map[string]any{"version_id": strconv.Itoa(event.Version), "percentage": 100}},
+	}
 }
 
 func (s *Server) activeCloudflareVersion(r *http.Request) (control.Version, error) {
@@ -104,9 +125,10 @@ func (s *Server) handleCloudflareWorkerVersions(w http.ResponseWriter, r *http.R
 	}
 	out := make([]any, 0, len(releases))
 	for _, rel := range releases {
-		out = append(out, map[string]any{"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA, "created_on": rel.CreatedMs, "modified_on": rel.CreatedMs, "deployment_id": strconv.Itoa(rel.Version)})
+		created := time.UnixMilli(rel.CreatedMs).UTC().Format(time.RFC3339Nano)
+		out = append(out, map[string]any{"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA, "created_on": created, "modified_on": created, "deployment_id": strconv.Itoa(rel.Version), "metadata": map[string]any{"created_on": created, "author_email": rel.Actors, "source": "api"}})
 	}
-	cloudflareResult(w, out)
+	cloudflareResult(w, map[string]any{"items": out})
 }
 
 func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +171,7 @@ func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http
 			}
 			cloudflareResult(w, map[string]any{
 				"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA,
-				"metadata": map[string]any{"created_on": rel.CreatedMs, "author_email": rel.Actors, "source": "api"},
+				"metadata": map[string]any{"created_on": time.UnixMilli(rel.CreatedMs).UTC().Format(time.RFC3339Nano), "author_email": rel.Actors, "source": "api"},
 				"resources": map[string]any{
 					"script":         map[string]any{"etag": rel.BundleSHA, "handlers": []string{}},
 					"script_runtime": map[string]any{"compatibility_date": view.CompatDate, "compatibility_flags": view.CompatFlags},

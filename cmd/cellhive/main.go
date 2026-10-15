@@ -2261,6 +2261,8 @@ func cmdQueue(args []string) error {
 	case "create", "list", "ls", "delete", "rm", "revoke", "stats", "info":
 		// Registry operations live under the per-domain surface (ADR-157).
 		return cmdKind("queue", args)
+	case "purge":
+		return cmdQueuePurge(args[1:])
 	default:
 		return fmt.Errorf("usage: cellhive queue create|list|delete|stats <ns> <name> | queue status|replay-dlq <ns> <queue>")
 	}
@@ -2305,7 +2307,16 @@ func cmdCompat(args []string) error {
 			if len(rest) < 3 {
 				return fmt.Errorf("usage: cellhive deployments %s <namespace> <worker>", first)
 			}
-			return cmdReleases(rest[1:])
+			if first == "status" {
+				return cmdReleases(rest[1:])
+			}
+			path := "/client/v4/accounts/" + url.PathEscape(rest[1]) + "/workers/scripts/" + url.PathEscape(rest[2]) + "/deployments"
+			out, err := adminCall(http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			printJSON(out)
+			return nil
 		}
 		return fmt.Errorf("usage: cellhive deployments list|status <namespace> <worker>")
 	case "triggers":
@@ -2325,8 +2336,12 @@ func cmdCompat(args []string) error {
 			return cmdKind("workflow", []string{"list", rest[1]})
 		case "create", "delete", "stats", "info":
 			return cmdKind("workflow", rest)
-		case "status", "describe", "trigger":
-			return fmt.Errorf("workflows %s is not supported: instances are runtime-only; use the `env.WF` binding (create/get/sendEvent) from a Worker, or `cellhive workflows create|list|delete|stats <ns> <name>` for definitions", first)
+		case "trigger":
+			return cmdWorkflowTrigger(rest[1:])
+		case "instances":
+			return cmdWorkflowInstances(rest[1:])
+		case "status", "describe":
+			return fmt.Errorf("use `cellhive workflows instances describe <ns> <workflow> <id>` for instance status, or `cellhive workflows info <ns> <workflow>` for the definition")
 		default:
 			return fmt.Errorf("workflows %s is not supported: use `cellhive workflows create|list|delete|stats <ns> <name>` (definitions) and the runtime API (env.WF) for instances", first)
 		}
@@ -2340,7 +2355,9 @@ func cmdCompat(args []string) error {
 		case "create", "delete", "stats", "info":
 			return cmdKind("queue", rest)
 		case "consumer":
-			return fmt.Errorf("queues consumer is not supported: consumer settings come from `queues.consumers` in wrangler.jsonc and are applied by `cellhive deploy --config`; inspect backlog with `cellhive queue status <ns> <name>`")
+			return cmdQueueConsumer(rest[1:])
+		case "purge":
+			return cmdQueuePurge(rest[1:])
 		default:
 			return fmt.Errorf("queues %s is not supported: use `cellhive queue create|list|delete|stats <ns> <name>` (or the `cellhive resource` generic form)", first)
 		}

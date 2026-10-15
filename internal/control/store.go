@@ -115,6 +115,15 @@ CREATE TABLE IF NOT EXISTS versions (
   actor          TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (ns, worker, number)
 );
+CREATE TABLE IF NOT EXISTS deployment_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ns         TEXT NOT NULL,
+  worker     TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  actor      TEXT NOT NULL DEFAULT '',
+  created_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deployment_events_worker ON deployment_events(ns, worker, id DESC);
 CREATE TABLE IF NOT EXISTS version_bundle_refs (
   ns     TEXT NOT NULL,
   worker TEXT NOT NULL,
@@ -989,6 +998,9 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			ns, worker, next, active, storageID); err != nil {
 			return err
 		}
+		if err := appendDeploymentEvent(ctx, t, ns, worker, next, actor, v.CreatedMs); err != nil {
+			return err
+		}
 		// Bundle refs: the version's own sha plus any pinned service targets.
 		refs := map[string]bool{v.BundleSHA: true}
 		for _, b := range v.Bindings {
@@ -1103,6 +1115,42 @@ func (s *Store) Releases(ctx context.Context, ns, worker string) ([]Release, err
 	return out, rows.Err()
 }
 
+// appendDeploymentEvent runs inside the activation transaction.
+func appendDeploymentEvent(ctx context.Context, t *sql.Tx, ns, worker string, version int, actor string, createdMs int64) error {
+	_, err := t.ExecContext(ctx, `INSERT INTO deployment_events(ns, worker, version, actor, created_ms) VALUES (?,?,?,?,?)`, ns, worker, version, actor, createdMs)
+	return err
+}
+
+// DeploymentEvents returns committed activations, newest first. A pre-upgrade
+// worker has no fabricated history; the current active pointer is still read
+// separately by callers that need a status view.
+func (s *Store) DeploymentEvents(ctx context.Context, ns, worker string, limit int) ([]DeploymentEvent, error) {
+	if err := validateNS(ns); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+	c, err := s.cell(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.DB.QueryContext(ctx, `SELECT id, version, actor, created_ms FROM deployment_events WHERE ns=? AND worker=? ORDER BY id DESC LIMIT ?`, ns, worker, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeploymentEvent
+	for rows.Next() {
+		var item DeploymentEvent
+		if err := rows.Scan(&item.ID, &item.Version, &item.Actor, &item.CreatedMs); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // Promote switches a worker's active version, remembering the previous one.
 func (s *Store) Promote(ctx context.Context, ns, worker string, version int, actor string) (Worker, error) {
 	if err := validateNS(ns); err != nil {
@@ -1137,6 +1185,9 @@ func (s *Store) Promote(ctx context.Context, ns, worker string, version int, act
 			active, previous, ns, worker); err != nil {
 			return err
 		}
+		if err := appendDeploymentEvent(ctx, t, ns, worker, active, actor, s.now().UnixMilli()); err != nil {
+			return err
+		}
 		out = Worker{Name: worker, Active: active, Previous: previous}
 		return txAudit(ctx, t, ns, actor, "promote", fmt.Sprintf("%s/%s@%d", ns, worker, version))
 	})
@@ -1168,6 +1219,9 @@ func (s *Store) Rollback(ctx context.Context, ns, worker, actor string) (Worker,
 		active, previous = previous, active
 		if _, err := t.ExecContext(ctx, `UPDATE workers SET active=?, previous=? WHERE ns=? AND name=?`,
 			active, previous, ns, worker); err != nil {
+			return err
+		}
+		if err := appendDeploymentEvent(ctx, t, ns, worker, active, actor, s.now().UnixMilli()); err != nil {
 			return err
 		}
 		out = Worker{Name: worker, Active: active, Previous: previous}

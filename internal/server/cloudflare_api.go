@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cellhive/internal/control"
+	"cellhive/internal/queue"
 )
 
 func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
@@ -90,6 +91,11 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}/consumers/{consumer_id}", compat(s.handleCloudflareQueueConsumerDelete))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/queues/{resource_id}/purge", compat(s.handleCloudflareQueuePurge))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues/{resource_id}/purge", compat(s.handleCloudflareQueuePurgeStatus))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/vectorize/v2/indexes", compat(s.handleCloudflareVectorizeCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/vectorize/v2/indexes", compat(s.handleCloudflareVectorizeList))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/vectorize/v2/indexes/{index_name}", compat(s.handleCloudflareVectorizeGet))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/vectorize/v2/indexes/{index_name}", compat(s.handleCloudflareVectorizeDelete))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/vectorize/v2/indexes/{index_name}/info", compat(s.handleCloudflareVectorizeInfo))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/assets-upload-session", compat(s.handleCloudflareAssetsSession))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload", s.handleCloudflareAssetsUpload)
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/assets/upload/{asset_hash}", s.handleCloudflareAssetsUpload)
@@ -97,6 +103,12 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowGet))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowPut))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workflows/{workflow_name}", compat(s.handleCloudflareWorkflowDelete))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances", compat(s.handleCloudflareWorkflowInstanceCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances", compat(s.handleCloudflareWorkflowInstanceList))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances/{instance_id}", compat(s.handleCloudflareWorkflowInstanceGet))
+		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances/{instance_id}/status", compat(s.handleCloudflareWorkflowInstanceStatus))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances/{instance_id}/events/{event_type}", compat(s.handleCloudflareWorkflowInstanceEvent))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workflows/{workflow_name}/instances/batch/delete", compat(s.handleCloudflareWorkflowInstanceDeleteBatch))
 	}
 }
 
@@ -120,15 +132,49 @@ func (s *Server) handleCloudflareWorkerService(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCloudflareWorkerDeployments(w http.ResponseWriter, r *http.Request) {
-	// An empty deployment list is a valid Cloudflare response and makes a
-	// first Wrangler publish proceed without a prior deployment lookup.
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": map[string]any{"deployments": []any{}}})
+	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
+	events, err := s.Control.DeploymentEvents(r.Context(), ns, worker, 10)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "deployments_failed", err.Error())
+		return
+	}
+	deployments := make([]any, 0, len(events))
+	for _, event := range events {
+		deployments = append(deployments, cloudflareDeploymentResult(event))
+	}
+	cloudflareResult(w, map[string]any{"deployments": deployments})
 }
 
 func (s *Server) handleCloudflareWorkerDeploymentCreate(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": map[string]any{
-		"id": "cellhive-deployment", "strategy": "percentage",
-	}})
+	var in struct {
+		Strategy string `json:"strategy"`
+		Versions []struct {
+			VersionID  string  `json:"version_id"`
+			Percentage float64 `json:"percentage"`
+		} `json:"versions"`
+	}
+	if !decodeLimit(w, r, &in, 1<<20) {
+		return
+	}
+	if in.Strategy != "percentage" || len(in.Versions) != 1 || in.Versions[0].Percentage != 100 {
+		writeErr(w, http.StatusBadRequest, "unsupported_traffic_split", "CellHive supports one version at 100% traffic")
+		return
+	}
+	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
+	version, err := strconv.Atoi(in.Versions[0].VersionID)
+	if err != nil || version <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_version", "version_id must be a positive version number")
+		return
+	}
+	if !s.cloudflarePromote(w, r, ns, worker, version) {
+		return
+	}
+	events, err := s.Control.DeploymentEvents(r.Context(), ns, worker, 1)
+	if err != nil || len(events) == 0 || events[0].Version != version {
+		writeErr(w, http.StatusInternalServerError, "deployment_readback_failed", "committed deployment event is unavailable")
+		return
+	}
+	cloudflareResult(w, cloudflareDeploymentResult(events[0]))
 }
 
 func (s *Server) handleCloudflareWorkerSettings(w http.ResponseWriter, r *http.Request) {
@@ -600,7 +646,7 @@ func (s *Server) handleCloudflareR2List(w http.ResponseWriter, r *http.Request) 
 	cloudflareResult(w, map[string]any{"buckets": out})
 }
 func (s *Server) handleCloudflareQueueList(w http.ResponseWriter, r *http.Request) {
-	s.cloudflareResourceList(w, r, "queue", func(x control.ResourceRef) any { return map[string]any{"queue_id": x.Name, "queue_name": x.Name} })
+	s.cloudflareResourceList(w, r, "queue", func(x control.ResourceRef) any { return s.cloudflareQueueResult(r, x.Name) })
 }
 func (s *Server) handleCloudflareResourceDelete(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -675,7 +721,14 @@ type cloudflareQueueConsumerRequest struct {
 }
 
 func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Request, remove bool) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, queue := r.PathValue("account_id"), r.PathValue("resource_id")
+	if _, err := s.Control.GetResource(r.Context(), ns, "queue", queue); err != nil {
+		writeErr(w, 404, "queue_not_found", "queue does not exist")
+		return
+	}
 	var in cloudflareQueueConsumerRequest
 	if !remove {
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || in.Type != "worker" || in.ScriptName == "" {
@@ -685,29 +738,49 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 	} else {
 		in.ScriptName = r.PathValue("consumer_id")
 	}
-	v, err := s.activeCloudflareVersionForWorker(r.Context(), ns, in.ScriptName)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())
-		return
-	}
-	consumers := make([]control.Consumer, 0, len(v.Consumers)+1)
-	for _, c := range v.Consumers {
-		if c.Queue == queue && in.ScriptName == r.PathValue("consumer_id") && remove {
-			continue
-		}
-		if c.Queue == queue && in.ScriptName == in.ScriptName && !remove {
-			continue
-		}
-		consumers = append(consumers, c)
-	}
 	if !remove {
-		consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: in.Settings.MaxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: in.Settings.MaxWaitTimeMs / 1000})
+		if in.Settings.RetryDelay != 0 {
+			writeErr(w, http.StatusBadRequest, "unsupported_retry_delay", "queue consumer retry_delay is not supported")
+			return
+		}
+		if in.Settings.BatchSize < 0 || in.Settings.MaxRetries < 0 || in.Settings.MaxConcurrency < 0 || in.Settings.MaxWaitTimeMs < 0 || in.Settings.MaxWaitTimeMs%1000 != 0 {
+			writeErr(w, http.StatusBadRequest, "invalid_consumer", "invalid queue consumer settings")
+			return
+		}
+		if id := r.PathValue("consumer_id"); id != "" && id != in.ScriptName {
+			writeErr(w, http.StatusBadRequest, "consumer_mismatch", "consumer_id must match script_name")
+			return
+		}
 	}
-	nv, err := s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits}, "wrangler-queue-consumer")
+	var nv control.Version
+	err := s.capturedWrite(r.Context(), control.ScopeFor(ns), func() error {
+		v, err := s.activeCloudflareVersionForWorker(r.Context(), ns, in.ScriptName)
+		if err != nil {
+			return err
+		}
+		consumers := make([]control.Consumer, 0, len(v.Consumers)+1)
+		found := false
+		for _, c := range v.Consumers {
+			if c.Queue == queue {
+				found = true
+				continue
+			}
+			consumers = append(consumers, c)
+		}
+		if remove && !found {
+			return control.ErrNotFound
+		}
+		if !remove {
+			consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: in.Settings.MaxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: in.Settings.MaxWaitTimeMs / 1000})
+		}
+		nv, err = s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, SessionPolicy: v.SessionPolicy}, "wrangler-queue-consumer")
+		return err
+	})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "consumer_update_failed", err.Error())
 		return
 	}
+	s.invalidateBindings(ns)
 	cloudflareResult(w, map[string]any{"consumer_id": in.ScriptName, "type": "worker", "script": in.ScriptName, "queue_name": queue, "version": nv.Number})
 }
 
@@ -757,11 +830,19 @@ func (s *Server) handleCloudflareQueuePurge(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusServiceUnavailable, "queue_unavailable", "queue store is not configured")
 		return
 	}
-	if err := s.Queue.Purge(r.Context(), r.PathValue("account_id"), r.PathValue("resource_id")); err != nil {
+	ns, name := r.PathValue("account_id"), r.PathValue("resource_id")
+	if _, err := s.Control.GetResource(r.Context(), ns, "queue", name); err != nil {
+		writeErr(w, http.StatusNotFound, "queue_not_found", err.Error())
+		return
+	}
+	if s.forwardOrClaim(w, r, queue.Scope(ns, name), nil) {
+		return
+	}
+	if err := s.capturedWrite(r.Context(), queue.Scope(ns, name), func() error { return s.Queue.Purge(r.Context(), ns, name) }); err != nil {
 		writeErr(w, http.StatusBadRequest, "queue_purge_failed", err.Error())
 		return
 	}
-	cloudflareResult(w, map[string]any{"queue_id": r.PathValue("resource_id"), "status": "complete"})
+	cloudflareResult(w, map[string]any{"queue_id": name, "status": "complete"})
 }
 
 func (s *Server) handleCloudflareQueuePurgeStatus(w http.ResponseWriter, r *http.Request) {
