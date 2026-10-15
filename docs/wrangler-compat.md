@@ -1,10 +1,10 @@
 # Wrangler / Workers 兼容
 
-目标：让用户沿用标准 `wrangler.jsonc`/`wrangler.toml` 与 Workers 编程模型，`cellhive deploy` 完成本地打包并发布到 CellHive 平台，**绝不触碰 Cloudflare**。
+目标：让用户沿用 Workers 编程模型；原版 Wrangler 可使用 `wrangler.jsonc`/`wrangler.toml`，Go 版 `cellhive deploy --config` 当前解析 JSONC/JSON，本地打包并发布到 CellHive 平台，**绝不触碰 Cloudflare**。
 
 ## 三板斧
 
-1. **配置解析**：解析 `wrangler.jsonc`/`.json`/`.toml` + 环境继承 + schema 校验，映射到平台元数据；
+1. **配置解析**：Go CLI 解析 `wrangler.jsonc`/`.json`，应用环境覆盖与兼容校验，再映射到平台元数据；原版 Wrangler 和 Bun dev CLI 可读取 TOML；
 2. **打包**：Go CLI 内嵌 **esbuild Go SDK**（esbuild 本身是 Go），进程内打包，**无 Node 依赖**；
 3. **CLI 面**（实际）：`deploy`（`--config <wrangler.jsonc>` 可直接映射 main/bindings/vars/crons/assets/migrations，或用显式 flags）、`bundle build`（Go+esbuild 打包）、`app`/`resource`（资源显式登记，**无 auto-provisioning**）、`promote`/`rollback`/`releases`、`route`、`secret put|get`、`worker delete`、`workflow create`、`tail`、`status`/`capacity`/`diagnose`/`audit`/`routes`、`gc bundles|assets`、`asset put`。〔`dev` 在 Bun CLI（`cli/`），不是这个二进制。〕
 
@@ -61,11 +61,13 @@
 - **`deploy` flag**：`--dry-run`（服务端预检不落状态）、`--var NAME=VALUE`、`--secrets-file <JSON>` 已支持并透传；其余不支持的 flag 直接报错并给替代（如 `--minify`→`build.minify`、`--compatibility-date`→`compatibility_date`）；
 - **兼容命令组**：`versions`/`deployments`/`triggers`/`workflows`/`queues`/`types`/`init` 转发到原生实现或**结构化拒绝 + 替代说明**（ADR-148）；`d1`/`r2`/`kv` 转发到原生每域命令，已支持上述常用数据面命令；`vectorize`/`hyperdrive` 前缀透传到原生实现；
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。旧式 `kv:bulk` 映射到 `kv bulk`。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`unstable_*`→内部命令；
-- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
+- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`init`→不支持（自建 wrangler.jsonc）；`types` 可用 `cellhive types` 生成配置 Env 声明；
 
 **D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用迁移表；Wrangler `migrations_table` 与原生 CLI `--table` 可选择同一个自定义表。`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更；摘要计算忽略 SQL 文件首尾空白，以匹配 Wrangler 提交行为。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
 
 **新增命令对齐**：原版 Wrangler 4.133.0 的 `d1 export --remote`、`kv bulk put/delete --remote`、`secret bulk`、`versions view` 均有对应的 CellHive 原生命令。D1 导出上限 32 MiB，省略内层事务标记，可由 `d1 execute --file` 恢复；下载链接保存在单管理员实例一小时。KV bulk 先校验整批，再逐 key 写入，后续失败可能留下前面已写的 key。Secret bulk 在控制 cell 内一次事务提交（1-100 项），JSON `null` 删除对应 Secret。
+
+**类型生成**：`cellhive types [worker-configuration.d.ts] [--config wrangler.jsonc] [--env name] [--env-interface Env] [--check]` 生成配置里的 vars、bindings、assets 的 `Env` 接口；变量声明为 `string`，不写入值。完整运行时声明仍使用 `@cloudflare/workers-types` 或原版 `wrangler types`。原版命令是本地操作，不连接 CellHive；原生 Go CLI 当前只解析 JSONC/JSON，`wrangler.toml` 可由原版命令处理。
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
 - **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。

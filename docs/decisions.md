@@ -2457,6 +2457,11 @@
 - **KV/Secret bulk**：KV bulk 与单 key 写入复用 scoped binding 路径，最多 1000 项、8 MiB，先校验整批，逐 key 执行，部分成功边界显式说明；Secret bulk 最多 100 项、1 MiB，控制 cell 内一次事务完成 puts/deletes，JSON null 表示删除。两者都有原生 CLI。
 - **versions view**：按历史版本号或 bundle SHA 返回版本详情，原生 CLI 与 Wrangler 共用接口；Cloudflare 形状的版本 ID 使用唯一版本号字符串，bundle SHA 只作 etag（相同 bundle 可部署成多个不同版本），不会把非活动版本误判为不存在。
 
+## ADR-199 原生 `types` 只生成配置 Env 声明（2026-10-15）✅实现
+
+- `cellhive types [output.d.ts] --config wrangler.jsonc [--env name] [--env-interface Env] [--check]` 复用部署配置解析，按名称排序生成 vars、bindings、assets 的 TypeScript `Env` 接口。重复名称或未知配置字段拒绝；`--check` 只比较文件，不写入。
+- 原版 `wrangler types` 仍在本地运行，不经过 CellHive API。原生命令只生成配置推导的 Env；完整 workerd 运行时类型交给 `@cloudflare/workers-types` 或原版 Wrangler。Vars 使用 `string`，不把配置值写入声明。Go CLI 的既有配置边界仍为 JSONC/JSON；TOML 可继续交给原版 Wrangler 或 Bun dev CLI。
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。

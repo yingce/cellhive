@@ -361,6 +361,7 @@ Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、1
 | R2 stats 是诊断性近似（ADR-157） | ⚠️ **有意**：R2 对象无本地索引，`/v1/r2/stats` 走**有界 List**（`limit` 默认 1000/上限 10000），大桶给 `truncated`+`cursor` 而非精确总数；它会计入 `cellhive_list_calls_total`（运维路径，允许但要有意识） |
 | Wrangler D1/KV/R2 数据面（ADR-197） | ⚠️ **固定版本边界**：原版 Wrangler 4.133.0 的远端 D1 query/file import/migrations、KV key、R2 object 已真实验收；自定义 `migrations_table` 可由 Wrangler 配置或原生 CLI `--table` 指定。D1 文件导入限 8 MiB，上传 session 是单管理员实例内存态（需同实例路由）；R2 jurisdiction/storage class 显式拒绝。生产资源仍须先登记。 |
 | Wrangler 批量命令与 D1 export（ADR-198） | ⚠️ **已验收的边界**：D1 导出限 32 MiB，虚拟表拒绝，下载链接为单管理员实例内存态（一小时）；KV bulk 逐 key 提交，后续错误可能留下前面已写入的 key；Secret bulk 最多 100 项并在控制 cell 内原子提交。 |
+| 原生 `types`（ADR-199） | ⚠️ **生成范围**：只按 JSONC/JSON 配置生成 Env 接口，变量统一为 `string`；完整运行时类型和 TOML 类型生成仍由原版 Wrangler 提供。 |
 | 行数只能是估计（ADR-157） | ⚠️ **SQLite 无行数元数据**：默认给 dbstat 叶页 `ncell` 估计（KV `rows_estimate`、D1 每表、workflow `instances_estimate`）；精确计数须 `?exact=1`（`count(*)`，KV 走最小索引/index-only，仍是 O(rows)）。不提供"永远精确且永远便宜"的选项（`cell_meta` 计数器方案未采纳） |
 | Workflow `by_status`/DO stats 的前提（ADR-157） | ⚠️ **边界**：workflow 状态分解只在 `?exact=1` 时给（未加 `instances(status)` 索引，避免写放大）；DO stats 只在对象索引开启（`CELLHIVE_DO_OBJECT_INDEX`，ADR-109）时有数据，否则 `available:false` |
 | `resource delete` 语义边界（ADR-156） | ⚠️ **有意**：只吊销**登记**（墓碑 fail-closed）并**不删**数据 cell（KV 条目/队列消息/DO SQLite 仍在）——vwork 的"关停"不是"销毁"；彻底回收需删除对应 cell（当前无运维端点）。`replay-dlq` 为**至少一次**（主队列入队成功后 DLQ ack 失败会重复重放），且要求队列已被 producer binding 登记并声明了 `dead_letter_queue` |

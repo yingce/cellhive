@@ -2345,7 +2345,7 @@ func cmdCompat(args []string) error {
 			return fmt.Errorf("queues %s is not supported: use `cellhive queue create|list|delete|stats <ns> <name>` (or the `cellhive resource` generic form)", first)
 		}
 	case "types":
-		return fmt.Errorf("wrangler types is not supported: write your own Env interface (see docs/wrangler-compat.md) or use `cellhive dev` which understands the wrangler config")
+		return cmdTypes(rest)
 	case "init":
 		return fmt.Errorf("wrangler init is not supported: create wrangler.jsonc yourself (name/main/compatibility_date) and run `cellhive wrangler deploy --namespace <ns>`")
 	}
@@ -2715,6 +2715,7 @@ Usage:
                                          # mint a scoped binding token (single issuance point)
   cellhive versions list|deployments list|status <ns> <worker>   # = releases
   cellhive versions view <namespace> <worker> <version-id>
+  cellhive types [output.d.ts] [--config wrangler.jsonc] [--env name] [--env-interface Env] [--check]
   cellhive triggers list <namespace> <worker>
   cellhive workflows list <namespace> | cellhive queues list <namespace>
   cellhive vectorize create <namespace> <name> --dimensions <n> --metric <cosine|euclidean|dot-product>
