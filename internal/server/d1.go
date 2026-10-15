@@ -98,6 +98,23 @@ func (s *Server) handleD1Import(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"applied": applied})
 }
 
+func (s *Server) handleD1Export(w http.ResponseWriter, r *http.Request) {
+	if !s.requireD1(w) {
+		return
+	}
+	ns, db := s.scopeNS(r), r.URL.Query().Get("db")
+	if s.forwardRead(w, r, d1.Scope(ns, db), nil) {
+		return
+	}
+	dump, err := s.D1.ExportSQL(r.Context(), ns, db, r.URL.Query()["table"], r.URL.Query().Get("no_schema") != "1", r.URL.Query().Get("no_data") != "1")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "d1_export_error", err.Error())
+		return
+	}
+	w.Header().Set("content-type", "application/sql")
+	_, _ = w.Write(dump)
+}
+
 type d1QueryReq struct {
 	SQL    string `json:"sql"`
 	Params []any  `json:"params,omitempty"`

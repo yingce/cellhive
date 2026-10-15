@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"cellhive/internal/cellstore"
@@ -131,6 +132,69 @@ func TestImportChecksDigestAndRetriesOnce(t *testing.T) {
 	q, err := s.Query(ctx, "acme", "main", "SELECT count(*) FROM imported", nil)
 	if err != nil || q.Rows[0][0] != int64(1) {
 		t.Fatalf("import retry changed data: %v, %v", q, err)
+	}
+}
+
+func TestExportSQLRoundTripAndTableFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, statement := range []string{
+		`CREATE TABLE witness(v TEXT, b BLOB)`,
+		`INSERT INTO witness VALUES ('O''Brien', X'00ff')`,
+		`CREATE TABLE excluded(v TEXT)`,
+	} {
+		if _, err := s.Exec(ctx, "acme", "source", statement, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dump, err := s.ExportSQL(ctx, "acme", "source", []string{"witness"}, true, true)
+	if err != nil || strings.Contains(string(dump), "excluded") {
+		t.Fatalf("filtered export = %s, %v", dump, err)
+	}
+	if strings.Contains(string(dump), "BEGIN TRANSACTION") {
+		t.Fatal("export nested a transaction inside D1 import")
+	}
+	digest := sha256.Sum256(dump)
+	if _, err := s.Import(ctx, "acme", "restored", hex.EncodeToString(digest[:]), string(dump)); err != nil {
+		t.Fatalf("restore: %v\n%s", err, dump)
+	}
+	res, err := s.Query(ctx, "acme", "restored", `SELECT v, hex(b) FROM witness`, nil)
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != "O'Brien" || res.Rows[0][1] != "00FF" {
+		t.Fatalf("restored values = %+v, %v", res, err)
+	}
+	schemaOnly, err := s.ExportSQL(ctx, "acme", "source", []string{"witness"}, true, false)
+	if err != nil || !strings.Contains(string(schemaOnly), "CREATE TABLE witness") || strings.Contains(string(schemaOnly), "INSERT INTO") {
+		t.Fatalf("schema-only export = %s, %v", schemaOnly, err)
+	}
+	dataOnly, err := s.ExportSQL(ctx, "acme", "source", []string{"witness"}, false, true)
+	if err != nil || strings.Contains(string(dataOnly), "CREATE TABLE") || !strings.Contains(string(dataOnly), "O''Brien") {
+		t.Fatalf("data-only export = %s, %v", dataOnly, err)
+	}
+	importSQL := "CREATE TABLE imported_by_file(v TEXT);"
+	importHash := sha256.Sum256([]byte(importSQL))
+	if _, err := s.Import(ctx, "acme", "source", hex.EncodeToString(importHash[:]), importSQL); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ExportSQL(ctx, "acme", "source", nil, true, true)
+	if err != nil || strings.Contains(string(all), "__cellhive_d1_imports") {
+		t.Fatalf("internal import ledger leaked into SQL export: %v, %s", err, all)
+	}
+	for _, statement := range []string{`CREATE TABLE seqtest(id INTEGER PRIMARY KEY AUTOINCREMENT)`, `INSERT INTO seqtest DEFAULT VALUES`, `INSERT INTO seqtest DEFAULT VALUES`, `DELETE FROM seqtest WHERE id=2`} {
+		if _, err := s.Exec(ctx, "acme", "source", statement, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err = s.ExportSQL(ctx, "acme", "source", nil, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allHash := sha256.Sum256(all)
+	if _, err := s.Import(ctx, "acme", "restored_all", hex.EncodeToString(allHash[:]), string(all)); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := s.Exec(ctx, "acme", "restored_all", `INSERT INTO seqtest DEFAULT VALUES`, nil)
+	if err != nil || inserted.LastInsertID != 3 {
+		t.Fatalf("autoincrement after restore = %+v, %v", inserted, err)
 	}
 }
 

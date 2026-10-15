@@ -145,6 +145,63 @@ func TestCloudflareD1FileImportRetry(t *testing.T) {
 	}
 }
 
+func TestCloudflareD1ExportAndKVBulk(t *testing.T) {
+	s := newScopeServer(t)
+	s.Cfg.AdminToken = "admin-tok"
+	h := s.AdminHandler()
+	call := func(method, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	base := "/client/v4/accounts/acme"
+	if rr := call(http.MethodPost, base+"/d1/database", []byte(`{"name":"main"}`)); rr.Code != 200 {
+		t.Fatalf("create D1: %s", rr.Body.String())
+	}
+	if rr := call(http.MethodPost, base+"/storage/kv/namespaces", []byte(`{"title":"KV"}`)); rr.Code != 200 {
+		t.Fatalf("create KV: %s", rr.Body.String())
+	}
+	if rr := call(http.MethodPost, base+"/d1/database/main/query", []byte(`{"sql":"CREATE TABLE witness(v TEXT); INSERT INTO witness VALUES ('exported');"}`)); rr.Code != 200 {
+		t.Fatalf("seed D1: %s", rr.Body.String())
+	}
+	export := call(http.MethodPost, base+"/d1/database/main/export", []byte(`{"output_format":"polling","dump_options":{"tables":["witness"]}}`))
+	if export.Code != 200 {
+		t.Fatalf("export = %d %s", export.Code, export.Body.String())
+	}
+	var envelope struct {
+		Result struct {
+			Result struct {
+				SignedURL string `json:"signed_url"`
+			} `json:"result"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(export.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	path := strings.TrimPrefix(envelope.Result.Result.SignedURL, "http://example.com")
+	if path == "" || path == envelope.Result.Result.SignedURL {
+		t.Fatalf("export URL: %s", export.Body.String())
+	}
+	get := call(http.MethodGet, path, nil)
+	if get.Code != 200 || !strings.Contains(get.Body.String(), "exported") || !strings.Contains(get.Body.String(), "CREATE TABLE witness") {
+		t.Fatalf("download = %d %s", get.Code, get.Body.String())
+	}
+	bulkPath := base + "/storage/kv/namespaces/KV/bulk"
+	put := call(http.MethodPut, bulkPath, []byte(`[{"key":"a","value":"one"},{"key":"b","value":"dHdv","base64":true}]`))
+	if put.Code != 200 {
+		t.Fatalf("bulk put = %d %s", put.Code, put.Body.String())
+	}
+	if got := call(http.MethodGet, base+"/storage/kv/namespaces/KV/values/b", nil); got.Body.String() != "two" {
+		t.Fatalf("bulk value = %s", got.Body.String())
+	}
+	del := call(http.MethodDelete, bulkPath, []byte(`["a","b"]`))
+	if del.Code != 200 {
+		t.Fatalf("bulk delete = %d %s", del.Code, del.Body.String())
+	}
+}
+
 func TestCloudflareMultiSQL(t *testing.T) {
 	for _, tc := range []struct {
 		sql  string

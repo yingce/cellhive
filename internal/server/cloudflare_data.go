@@ -27,6 +27,98 @@ type cloudflareD1Import struct {
 	expires      time.Time
 }
 
+type cloudflareD1Export struct {
+	ns, db  string
+	data    []byte
+	expires time.Time
+}
+
+func (s *Server) handleCloudflareD1Export(w http.ResponseWriter, r *http.Request) {
+	ns, db := r.PathValue("account_id"), r.PathValue("resource_id")
+	if _, err := s.Control.GetResource(r.Context(), ns, "d1", db); err != nil {
+		writeErr(w, 404, "not_found", err.Error())
+		return
+	}
+	var in struct {
+		OutputFormat string `json:"output_format"`
+		DumpOptions  struct {
+			NoSchema bool     `json:"no_schema"`
+			NoData   bool     `json:"no_data"`
+			Tables   []string `json:"tables"`
+		} `json:"dump_options"`
+	}
+	if !decodeLimit(w, r, &in, 1<<20) {
+		return
+	}
+	if in.OutputFormat != "polling" || in.DumpOptions.NoSchema && in.DumpOptions.NoData {
+		writeErr(w, 400, "invalid_export", "polling export requires schema or data")
+		return
+	}
+	q := url.Values{"db": {db}}
+	if in.DumpOptions.NoSchema {
+		q.Set("no_schema", "1")
+	}
+	if in.DumpOptions.NoData {
+		q.Set("no_data", "1")
+	}
+	for _, table := range in.DumpOptions.Tables {
+		q.Add("table", table)
+	}
+	rec, err := s.cloudflareBindingCall(r, "d1", db, http.MethodGet, "/v1/d1/export", q, nil)
+	if cloudflareBridgeError(w, rec, err) {
+		return
+	}
+	dump := rec.Body.Bytes()
+	idBytes := make([]byte, 24)
+	if _, err := rand.Read(idBytes); err != nil {
+		writeErr(w, 500, "random_failed", err.Error())
+		return
+	}
+	id := hex.EncodeToString(idBytes)
+	s.exportMu.Lock()
+	if s.d1Exports == nil {
+		s.d1Exports = map[string]*cloudflareD1Export{}
+	}
+	totalBytes := len(dump)
+	for key, item := range s.d1Exports {
+		if time.Now().After(item.expires) {
+			delete(s.d1Exports, key)
+		} else {
+			totalBytes += len(item.data)
+		}
+	}
+	if len(s.d1Exports) >= 8 || totalBytes > 64<<20 {
+		s.exportMu.Unlock()
+		writeErr(w, 429, "too_many_exports", "pending D1 exports exceed count or memory budget")
+		return
+	}
+	s.d1Exports[id] = &cloudflareD1Export{ns: ns, db: db, data: dump, expires: time.Now().Add(time.Hour)}
+	s.exportMu.Unlock()
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	prefix := ""
+	if strings.HasPrefix(r.URL.Path, "/client/v4/") {
+		prefix = "/client/v4"
+	}
+	link := fmt.Sprintf("%s://%s%s/accounts/%s/d1/database/%s/export/download/%s", scheme, r.Host, prefix, url.PathEscape(ns), url.PathEscape(db), id)
+	cloudflareResult(w, map[string]any{"success": true, "status": "complete", "messages": []string{}, "result": map[string]any{"signed_url": link}})
+}
+
+func (s *Server) handleCloudflareD1ExportDownload(w http.ResponseWriter, r *http.Request) {
+	s.exportMu.Lock()
+	item := s.d1Exports[r.PathValue("download_id")]
+	s.exportMu.Unlock()
+	if item == nil || item.ns != r.PathValue("account_id") || item.db != r.PathValue("resource_id") || time.Now().After(item.expires) {
+		writeErr(w, 404, "not_found", "export download not found or expired")
+		return
+	}
+	w.Header().Set("content-type", "application/sql")
+	w.Header().Set("cache-control", "no-store")
+	_, _ = w.Write(item.data)
+}
+
 func (s *Server) handleCloudflareD1Import(w http.ResponseWriter, r *http.Request) {
 	name, ns := r.PathValue("resource_id"), r.PathValue("account_id")
 	if _, err := s.Control.GetResource(r.Context(), ns, "d1", name); err != nil {
@@ -385,6 +477,92 @@ func (s *Server) handleCloudflareKVKeys(w http.ResponseWriter, r *http.Request) 
 		keys = append(keys, key)
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "result": keys, "result_info": map[string]any{"cursor": out.Cursor}})
+}
+
+type cloudflareKVBulkEntry struct {
+	Key           string          `json:"key"`
+	Value         string          `json:"value"`
+	Base64        bool            `json:"base64"`
+	Expiration    int64           `json:"expiration"`
+	ExpirationTTL int64           `json:"expiration_ttl"`
+	Metadata      json.RawMessage `json:"metadata"`
+}
+
+const cloudflareKVBulkLimit = 1000
+
+func (s *Server) handleCloudflareKVBulkPut(w http.ResponseWriter, r *http.Request) {
+	var entries []cloudflareKVBulkEntry
+	if !decodeLimit(w, r, &entries, 8<<20) {
+		return
+	}
+	if len(entries) == 0 || len(entries) > cloudflareKVBulkLimit {
+		writeErr(w, 400, "invalid_bulk", "bulk put requires 1 to 1000 entries")
+		return
+	}
+	values := make([][]byte, len(entries))
+	for i, entry := range entries {
+		if entry.Key == "" || entry.Expiration < 0 || entry.ExpirationTTL < 0 || (entry.Expiration != 0 && entry.ExpirationTTL != 0) {
+			writeErr(w, 400, "invalid_bulk", "invalid key or expiration in bulk entry")
+			return
+		}
+		if entry.Base64 {
+			decoded, err := base64.StdEncoding.DecodeString(entry.Value)
+			if err != nil {
+				writeErr(w, 400, "invalid_bulk", "invalid base64 value")
+				return
+			}
+			values[i] = decoded
+		} else {
+			values[i] = []byte(entry.Value)
+		}
+		if len(entry.Metadata) != 0 && !json.Valid(entry.Metadata) {
+			writeErr(w, 400, "invalid_bulk", "invalid metadata JSON")
+			return
+		}
+	}
+	name := r.PathValue("resource_id")
+	for i, entry := range entries {
+		q := url.Values{"key": {entry.Key}}
+		if entry.Expiration != 0 {
+			q.Set("expiration", fmt.Sprint(entry.Expiration))
+		}
+		if entry.ExpirationTTL != 0 {
+			q.Set("expiration_ttl", fmt.Sprint(entry.ExpirationTTL))
+		}
+		if len(entry.Metadata) != 0 {
+			q.Set("metadata", base64.StdEncoding.EncodeToString(entry.Metadata))
+		}
+		rec, err := s.cloudflareBindingCall(r, "kv", name, http.MethodPost, "/v1/kv/put", q, values[i])
+		if cloudflareBridgeError(w, rec, err) {
+			return
+		}
+	}
+	cloudflareResult(w, nil)
+}
+
+func (s *Server) handleCloudflareKVBulkDelete(w http.ResponseWriter, r *http.Request) {
+	var keys []string
+	if !decodeLimit(w, r, &keys, 8<<20) {
+		return
+	}
+	if len(keys) == 0 || len(keys) > cloudflareKVBulkLimit {
+		writeErr(w, 400, "invalid_bulk", "bulk delete requires 1 to 1000 keys")
+		return
+	}
+	for _, key := range keys {
+		if key == "" {
+			writeErr(w, 400, "invalid_bulk", "bulk key is required")
+			return
+		}
+	}
+	name := r.PathValue("resource_id")
+	for _, key := range keys {
+		rec, err := s.cloudflareBindingCall(r, "kv", name, http.MethodDelete, "/v1/kv/delete", url.Values{"key": {key}}, nil)
+		if cloudflareBridgeError(w, rec, err) {
+			return
+		}
+	}
+	cloudflareResult(w, nil)
 }
 
 func (s *Server) cloudflareR2Object(w http.ResponseWriter, r *http.Request, method string) {

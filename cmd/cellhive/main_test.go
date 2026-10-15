@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -282,7 +283,7 @@ func TestCmdCompatRejections(t *testing.T) {
 		{[]string{"types"}, "not supported"},
 		{[]string{"init"}, "not supported"},
 		{[]string{"versions", "upload"}, "publish atomically"},
-		{[]string{"versions", "view", "3"}, "use `cellhive releases"},
+		{[]string{"versions", "view", "3"}, "usage"},
 		{[]string{"queues", "purge", "acme", "jobs"}, "not supported"},
 	} {
 		// Route through dispatch: kv/d1/r2 are real per-domain commands now
@@ -336,6 +337,13 @@ func TestWranglerKnownCommandsHaveOutcomes(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "unknown wrangler command") {
 			t.Errorf("%s fell through to unknown command: %v", sub, err)
 		}
+	}
+}
+
+func TestWranglerLegacyKVBulkAlias(t *testing.T) {
+	got, err := translateWrangler([]string{"kv:bulk", "put", "demo", "CACHE", "keys.json"})
+	if err != nil || !reflect.DeepEqual(got, []string{"kv", "bulk", "put", "demo", "CACHE", "keys.json"}) {
+		t.Fatalf("legacy KV bulk alias = %v, %v", got, err)
 	}
 }
 

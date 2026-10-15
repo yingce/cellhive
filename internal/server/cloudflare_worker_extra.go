@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 
@@ -89,10 +92,7 @@ func (s *Server) activeCloudflareVersion(r *http.Request) (control.Version, erro
 }
 
 func cloudflareVersionResult(v control.Version) map[string]any {
-	id := v.BundleSHA
-	if id == "" {
-		id = strconv.Itoa(v.Number)
-	}
+	id := strconv.Itoa(v.Number)
 	return map[string]any{"id": id, "number": v.Number, "etag": v.BundleSHA, "created_on": v.CreatedMs, "modified_on": v.CreatedMs, "resources": map[string]any{"script": map[string]any{"etag": v.BundleSHA}}}
 }
 
@@ -104,23 +104,63 @@ func (s *Server) handleCloudflareWorkerVersions(w http.ResponseWriter, r *http.R
 	}
 	out := make([]any, 0, len(releases))
 	for _, rel := range releases {
-		out = append(out, map[string]any{"id": rel.BundleSHA, "number": rel.Version, "etag": rel.BundleSHA, "created_on": rel.CreatedMs, "modified_on": rel.CreatedMs, "deployment_id": rel.BundleSHA})
+		out = append(out, map[string]any{"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA, "created_on": rel.CreatedMs, "modified_on": rel.CreatedMs, "deployment_id": strconv.Itoa(rel.Version)})
 	}
 	cloudflareResult(w, out)
 }
 
 func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http.Request) {
-	v, err := s.activeCloudflareVersion(r)
+	ns, worker, wanted := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("version_id")
+	releases, err := s.Control.Releases(r.Context(), ns, worker)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "version_not_found", err.Error())
 		return
 	}
-	wanted := r.PathValue("version_id")
-	if wanted != "" && wanted != v.BundleSHA && wanted != strconv.Itoa(v.Number) {
-		writeErr(w, http.StatusNotFound, "version_not_found", "version is not active")
-		return
+	for _, rel := range releases {
+		if wanted == rel.BundleSHA || wanted == strconv.Itoa(rel.Version) {
+			view, ok, err := s.Control.VersionEnv(r.Context(), ns, worker, rel.Version)
+			if err != nil || !ok {
+				writeErr(w, 500, "version_failed", "version environment unavailable")
+				return
+			}
+			bindings := make([]map[string]any, 0, len(view.Bindings))
+			for _, binding := range view.Bindings {
+				item := map[string]any{"name": binding.Name}
+				switch binding.Type {
+				case "kv":
+					item["type"], item["namespace_id"] = "kv_namespace", binding.ID
+				case "d1":
+					item["type"], item["id"] = "d1", binding.ID
+				case "r2":
+					item["type"], item["bucket_name"] = "r2_bucket", binding.ID
+				case "queue":
+					item["type"], item["queue_name"] = "queue", binding.ID
+				case "service":
+					item["type"], item["service"] = "service", binding.ID
+					if binding.Entrypoint != "" {
+						item["entrypoint"] = binding.Entrypoint
+					}
+				case "workflow":
+					item["type"], item["workflow_name"] = "workflow", binding.ID
+				default:
+					continue
+				}
+				bindings = append(bindings, item)
+			}
+			cloudflareResult(w, map[string]any{
+				"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA,
+				"metadata": map[string]any{"created_on": rel.CreatedMs, "author_email": rel.Actors, "source": "api"},
+				"resources": map[string]any{
+					"script":         map[string]any{"etag": rel.BundleSHA, "handlers": []string{}},
+					"script_runtime": map[string]any{"compatibility_date": view.CompatDate, "compatibility_flags": view.CompatFlags},
+					"bindings":       bindings,
+				},
+				"active": rel.Active, "crons": rel.Crons,
+			})
+			return
+		}
 	}
-	cloudflareResult(w, cloudflareVersionResult(v))
+	writeErr(w, http.StatusNotFound, "version_not_found", "version does not exist")
 }
 
 func (s *Server) handleCloudflareWorkerSchedules(w http.ResponseWriter, r *http.Request) {
@@ -167,4 +207,48 @@ func (s *Server) handleCloudflareWorkerSecretGet(w http.ResponseWriter, r *http.
 		return
 	}
 	cloudflareResult(w, map[string]any{"name": r.PathValue("secret_name"), "type": "secret_text", "text": string(val)})
+}
+
+func (s *Server) handleCloudflareWorkerSecretBulk(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Secrets map[string]*struct {
+			Name string `json:"name"`
+			Text string `json:"text"`
+			Type string `json:"type"`
+		} `json:"secrets"`
+	}
+	if !decodeLimit(w, r, &in, 1<<20) {
+		return
+	}
+	changes := make(map[string]*string, len(in.Secrets))
+	for key, value := range in.Secrets {
+		if key == "" {
+			writeErr(w, 400, "invalid_secret", "secret key is required")
+			return
+		}
+		if value == nil {
+			changes[key] = nil
+			continue
+		}
+		if value.Name != key || value.Type != "secret_text" {
+			writeErr(w, 400, "invalid_secret", "secret name and secret_text type are required")
+			return
+		}
+		text := value.Text
+		changes[key] = &text
+	}
+	body, _ := json.Marshal(map[string]any{"namespace": r.PathValue("account_id"), "worker": r.PathValue("script_name"), "changes": changes})
+	req := r.Clone(r.Context())
+	req.Method = http.MethodPatch
+	req.URL.Path = "/v1/control/secrets/bulk"
+	req.URL.RawPath = ""
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if cloudflareBridgeError(w, rec, nil) {
+		return
+	}
+	cloudflareResult(w, map[string]any{"success": true})
 }

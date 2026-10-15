@@ -2451,6 +2451,12 @@
 - **自定义迁移表**：Wrangler `migrations_table` 的建表、读取和写入按请求中的表名处理；原生 CLI 用 `--table` 指定同一表。表名作为 SQLite 标识符转义，哈希按表名和文件名隔离，SQL 首尾空白归一化以匹配 Wrangler；既有默认表的哈希记录仍可读取。
 - **边界**：Wrangler CLI 会跳过已应用文件，改写同名本地文件后重跑不会把 SQL 发给服务端，因此无法由服务端检测该本地改动；旧版无哈希记录的迁移也无法追溯。复杂 R2 存储策略与大于 8 MiB 的 D1 文件导入仍需单独验收。D1 文件上传 session 是单节点内存态（10 分钟、最多 32 个），`init/upload/ingest` 须经同一个管理员实例；若中途节点退出，重跑命令重新上传，SQL 真正应用由 SQLite 摘要表去重。
 
+## ADR-198 Wrangler 常用管理命令补齐（2026-10-15）✅实现
+
+- **D1 export**：从 D1 cell 的 SQLite 读事务生成 SQL 快照；支持全库、指定表、仅 schema、仅数据，排除 cellstore 的 `kv`/`cell_meta` 与 `__cellhive_*` 内部账本，保留 AUTOINCREMENT 序列。导出限 32 MiB，虚拟表显式拒绝；不写内层 `BEGIN/COMMIT`，可交给现有原子 D1 文件导入恢复。Wrangler polling API 返回一小时的单实例下载链接；原生 CLI 同样提供 `d1 export --output`。
+- **KV/Secret bulk**：KV bulk 与单 key 写入复用 scoped binding 路径，最多 1000 项、8 MiB，先校验整批，逐 key 执行，部分成功边界显式说明；Secret bulk 最多 100 项、1 MiB，控制 cell 内一次事务完成 puts/deletes，JSON null 表示删除。两者都有原生 CLI。
+- **versions view**：按历史版本号或 bundle SHA 返回版本详情，原生 CLI 与 Wrangler 共用接口；Cloudflare 形状的版本 ID 使用唯一版本号字符串，bundle SHA 只作 etag（相同 bundle 可部署成多个不同版本），不会把非活动版本误判为不存在。
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。

@@ -1096,6 +1096,33 @@ type secretPutReq struct {
 	Value     string `json:"value"` // base64
 }
 
+func (s *Server) handleControlSecretsBulk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireControl(w) {
+		return
+	}
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
+	var req struct {
+		Namespace string             `json:"namespace"`
+		Worker    string             `json:"worker"`
+		Changes   map[string]*string `json:"changes"`
+	}
+	if !decodeLimit(w, r, &req, 1<<20) {
+		return
+	}
+	if !s.authorizeNS(w, r, req.Namespace) {
+		return
+	}
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		return s.Control.PatchSecrets(r.Context(), req.Namespace, req.Worker, req.Changes, actorFor(r.Context()))
+	}); err != nil {
+		s.captureErr(w, err, "secret_bulk_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) handleControlSecretPut(w http.ResponseWriter, r *http.Request) {
 	if !s.requireControl(w) {
 		return

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets", compat(s.handleCloudflareWorkerSecrets))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets/{secret_name}", compat(s.handleCloudflareWorkerSecretGet))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets", compat(s.handleCloudflareWorkerSecretPut))
+		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets-bulk", compat(s.handleCloudflareWorkerSecretBulk))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/secrets/{secret_name}", compat(s.handleCloudflareWorkerSecretDelete))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/tails", compat(s.handleCloudflareTailCreate))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/tails/{tail_id}", compat(s.handleCloudflareTailDelete))
@@ -61,11 +63,15 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/d1/database/{resource_id}", compat(s.handleCloudflareD1Get))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/d1/database/{resource_id}/query", compat(s.handleCloudflareD1Query))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/d1/database/{resource_id}/import", compat(s.handleCloudflareD1Import))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/d1/database/{resource_id}/export", compat(s.handleCloudflareD1Export))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/d1/database/{resource_id}/export/download/{download_id}", s.handleCloudflareD1ExportDownload)
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/d1/database/{resource_id}/import/upload/{upload_id}", s.handleCloudflareD1ImportUpload)
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/values/{key...}", compat(s.handleCloudflareKVValuePut))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/values/{key...}", compat(s.handleCloudflareKVValueGet))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/values/{key...}", compat(s.handleCloudflareKVValueDelete))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/keys", compat(s.handleCloudflareKVKeys))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/bulk", compat(s.handleCloudflareKVBulkPut))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/storage/kv/namespaces/{resource_id}/bulk", compat(s.handleCloudflareKVBulkDelete))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/r2/buckets", compat(s.handleCloudflareR2Create))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/r2/buckets", compat(s.handleCloudflareR2List))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}", compat(s.handleCloudflareResourceDelete("r2")))
@@ -266,8 +272,8 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"result": map[string]any{
-			"id":              version.BundleSHA,
-			"version_id":      version.BundleSHA,
+			"id":              strconv.Itoa(version.Number),
+			"version_id":      strconv.Itoa(version.Number),
 			"etag":            version.BundleSHA,
 			"number":          version.Number,
 			"startup_time_ms": 0,

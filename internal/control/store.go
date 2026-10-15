@@ -1340,6 +1340,66 @@ func (s *Store) PutSecret(ctx context.Context, ns, worker, key string, value []b
 	})
 }
 
+// PatchSecrets applies up to 100 puts/deletes in one control-cell transaction.
+// A nil value removes the key, matching Wrangler secret bulk's merge patch.
+func (s *Store) PatchSecrets(ctx context.Context, ns, worker string, changes map[string]*string, actor string) error {
+	if err := validateNS(ns); err != nil {
+		return err
+	}
+	if s.env == nil {
+		return ErrNoEnvelope
+	}
+	if worker == "" || len(changes) == 0 || len(changes) > 100 {
+		return fmt.Errorf("control: secret bulk requires worker and 1 to 100 entries")
+	}
+	type sealed struct{ wrapped, ciphertext []byte }
+	sealedValues := make(map[string]sealed, len(changes))
+	keys := make([]string, 0, len(changes))
+	for key, value := range changes {
+		if key == "" {
+			return fmt.Errorf("control: secret key is required")
+		}
+		keys = append(keys, key)
+		if value != nil {
+			wrapped, ciphertext, err := s.env.Seal([]byte(*value))
+			if err != nil {
+				return err
+			}
+			sealedValues[key] = sealed{wrapped, ciphertext}
+		}
+	}
+	sort.Strings(keys)
+	c, err := s.cell(ctx)
+	if err != nil {
+		return err
+	}
+	return tx(ctx, c, func(t *sql.Tx) error {
+		for _, key := range keys {
+			if changes[key] == nil {
+				if _, err := t.ExecContext(ctx, `DELETE FROM secrets WHERE ns=? AND worker=? AND key=?`, ns, worker, key); err != nil {
+					return err
+				}
+				if err := txAudit(ctx, t, ns, actor, "secret.delete", ns+"/"+worker+"/"+key); err != nil {
+					return err
+				}
+				continue
+			}
+			v := sealedValues[key]
+			if _, err := t.ExecContext(ctx, `INSERT INTO secrets(ns, worker, key, wrapped_dek, value_nonce, ciphertext, updated_ms)
+				VALUES (?,?,?,?,?,?,?) ON CONFLICT(ns, worker, key) DO UPDATE SET
+				wrapped_dek=excluded.wrapped_dek, value_nonce=excluded.value_nonce,
+				ciphertext=excluded.ciphertext, updated_ms=excluded.updated_ms`,
+				ns, worker, key, v.wrapped, nil, v.ciphertext, s.now().UnixMilli()); err != nil {
+				return err
+			}
+			if err := txAudit(ctx, t, ns, actor, "secret.put", ns+"/"+worker+"/"+key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // GetSecret returns a decrypted secret value.
 func (s *Store) GetSecret(ctx context.Context, ns, worker, key string) ([]byte, error) {
 	if s.env == nil {

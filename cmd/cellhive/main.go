@@ -179,7 +179,6 @@ var wranglerReject = map[string]string{
 	"check":            "use `cellhive deploy --dry-run` for a server-side preflight of the config",
 	"docs":             "see the docs/ directory in the CellHive repository",
 	"telemetry":        "CellHive sends no usage telemetry; nothing to configure",
-	"kv:bulk":          "bulk KV upload is a data-plane op; use a Worker with a KV binding or `cellhive dev`",
 }
 
 // translateWrangler converts a wrangler-style invocation into native cellhive
@@ -213,11 +212,12 @@ func translateWrangler(args []string) ([]string, error) {
 		// structured rejection with the alternative (ADR-148).
 		return append([]string{sub}, rest...), nil
 	case "d1", "r2":
-		// Real per-domain commands (ADR-157): registry verbs work, data-plane
-		// verbs get a structured rejection from cmdKind (ADR-148).
+		// Both registry and supported data-plane verbs dispatch to the native CLI.
 		return append([]string{sub}, rest...), nil
 	case "kv", "kv:key", "kv:namespace":
 		return append([]string{"kv"}, rest...), nil
+	case "kv:bulk":
+		return append([]string{"kv", "bulk"}, rest...), nil
 	case "vectorize", "hyperdrive":
 		return append([]string{sub}, rest...), nil
 	default:
@@ -888,9 +888,57 @@ func cmdRoute(args []string) error {
 
 func cmdSecret(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cellhive secret put|get|delete|list ...")
+		return fmt.Errorf("usage: cellhive secret put|get|delete|list|bulk ...")
 	}
 	switch args[0] {
+	case "bulk":
+		if len(args) != 4 {
+			return fmt.Errorf("usage: cellhive secret bulk <namespace> <worker> <json-or-env-file>")
+		}
+		raw, err := os.ReadFile(args[3])
+		if err != nil {
+			return err
+		}
+		if len(raw) > 1<<20 {
+			return fmt.Errorf("secret bulk file exceeds 1 MiB")
+		}
+		changes := map[string]*string{}
+		if strings.HasSuffix(strings.ToLower(args[3]), ".env") {
+			for _, line := range strings.Split(string(raw), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				key, value, ok := strings.Cut(line, "=")
+				if !ok || strings.TrimSpace(key) == "" {
+					return fmt.Errorf("invalid .env secret line")
+				}
+				value = strings.TrimSuffix(value, "\r")
+				changes[strings.TrimSpace(key)] = &value
+			}
+		} else if err := json.Unmarshal(raw, &changes); err != nil {
+			return fmt.Errorf("secret bulk JSON: %w", err)
+		}
+		if len(changes) == 0 || len(changes) > 100 {
+			return fmt.Errorf("secret bulk requires 1 to 100 entries")
+		}
+		secrets := map[string]any{}
+		for key, value := range changes {
+			if key == "" {
+				return fmt.Errorf("secret bulk key is required")
+			}
+			if value == nil {
+				secrets[key] = nil
+			} else {
+				secrets[key] = map[string]string{"name": key, "text": *value, "type": "secret_text"}
+			}
+		}
+		path := "/client/v4/accounts/" + url.PathEscape(args[1]) + "/workers/scripts/" + url.PathEscape(args[2]) + "/secrets-bulk"
+		out, err := adminCall(http.MethodPatch, path, map[string]any{"secrets": secrets})
+		if err != nil {
+			return err
+		}
+		printJSON(out)
 	case "list":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: cellhive secret list <namespace> <worker>")
@@ -943,7 +991,7 @@ func cmdSecret(args []string) error {
 		}
 		printJSON(data)
 	default:
-		return fmt.Errorf("usage: cellhive secret put|get|delete|list ...")
+		return fmt.Errorf("usage: cellhive secret put|get|delete|list|bulk ...")
 	}
 	return nil
 }
@@ -1539,8 +1587,14 @@ func cmdKind(kind string, args []string) error {
 	if kind == "kv" && verb == "key" {
 		return cmdKVData(rest[1:])
 	}
+	if kind == "kv" && verb == "bulk" {
+		return cmdKVBulk(rest[1:])
+	}
 	if kind == "d1" && (verb == "execute" || verb == "query") {
 		return cmdD1Data(verb, rest[1:])
+	}
+	if kind == "d1" && verb == "export" {
+		return cmdD1Export(rest[1:])
 	}
 	if kind == "r2" && verb == "object" {
 		return cmdR2Data(rest[1:])
@@ -1686,6 +1740,30 @@ func scopeRawCallHeaders(method, path, ns, kind, name string, raw []byte, q url.
 	return out, nil
 }
 
+func cmdKVBulk(args []string) error {
+	if len(args) != 4 || (args[0] != "put" && args[0] != "delete") {
+		return fmt.Errorf("usage: cellhive kv bulk put|delete <namespace> <binding> <json-file>")
+	}
+	raw, err := os.ReadFile(args[3])
+	if err != nil {
+		return err
+	}
+	if len(raw) > 8<<20 || !json.Valid(raw) {
+		return fmt.Errorf("KV bulk file must contain valid JSON within 8 MiB")
+	}
+	method := http.MethodPut
+	if args[0] == "delete" {
+		method = http.MethodDelete
+	}
+	path := "/client/v4/accounts/" + url.PathEscape(args[1]) + "/storage/kv/namespaces/" + url.PathEscape(args[2]) + "/bulk"
+	out, err := adminCall(method, path, json.RawMessage(raw))
+	if err != nil {
+		return err
+	}
+	printJSON(out)
+	return nil
+}
+
 func cmdKVData(args []string) error {
 	if len(args) < 3 {
 		return fmt.Errorf("usage: cellhive kv key put|get|delete <namespace> <binding> <key> [value]")
@@ -1801,6 +1879,66 @@ func cmdKVData(args []string) error {
 	default:
 		return fmt.Errorf("unknown kv key verb %q (put|get|delete|list)", verb)
 	}
+}
+
+func cmdD1Export(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cellhive d1 export <namespace> <database> --output <file> [--table <name>] [--no-schema|--no-data]")
+	}
+	fs := flag.NewFlagSet("d1 export", flag.ContinueOnError)
+	output := fs.String("output", "", "SQL output file")
+	noSchema := fs.Bool("no-schema", false, "export only data")
+	noData := fs.Bool("no-data", false, "export only schema")
+	var tables listFlag
+	fs.Var(&tables, "table", "table to include; repeat for multiple tables")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	if *output == "" || *noSchema && *noData || len(fs.Args()) != 0 {
+		return fmt.Errorf("d1 export requires --output and at least schema or data")
+	}
+	path := "/client/v4/accounts/" + url.PathEscape(args[0]) + "/d1/database/" + url.PathEscape(args[1]) + "/export"
+	body := map[string]any{"output_format": "polling", "dump_options": map[string]any{"no_schema": *noSchema, "no_data": *noData, "tables": []string(tables)}}
+	response, err := adminCall(http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Result struct {
+			Result struct {
+				SignedURL string `json:"signed_url"`
+			} `json:"result"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response, &envelope); err != nil || envelope.Result.Result.SignedURL == "" {
+		return fmt.Errorf("invalid D1 export response: %v", err)
+	}
+	resp, err := httpClient.Get(envelope.Result.Result.SignedURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("D1 export download: %s", resp.Status)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(*output), ".cellhive-export-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	bytesWritten, err := io.Copy(tmp, io.LimitReader(resp.Body, (32<<20)+1))
+	if err != nil {
+		tmp.Close()
+		return err
+	}
+	if bytesWritten > 32<<20 {
+		tmp.Close()
+		return fmt.Errorf("D1 export exceeds 32 MiB")
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), *output)
 }
 
 func cmdD1Data(verb string, args []string) error {
@@ -2149,7 +2287,16 @@ func cmdCompat(args []string) error {
 		case "upload":
 			return fmt.Errorf("versions upload is not supported: CellHive deploys publish atomically; use `cellhive deploy` (or `cellhive promote --version` to roll back to a version)")
 		case "view":
-			return fmt.Errorf("versions view is not supported: use `cellhive releases <namespace> <worker>` (versions + bundle sha + crons + bindings)")
+			if len(rest) < 4 {
+				return fmt.Errorf("usage: cellhive versions view <namespace> <worker> <version-id>")
+			}
+			path := "/client/v4/accounts/" + url.PathEscape(rest[1]) + "/workers/scripts/" + url.PathEscape(rest[2]) + "/versions/" + url.PathEscape(rest[3])
+			out, err := adminCall(http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			printJSON(out)
+			return nil
 		default:
 			return fmt.Errorf("usage: cellhive versions list <namespace> <worker>")
 		}
@@ -2558,6 +2705,7 @@ Usage:
   cellhive secret get <namespace> <worker> <KEY>
   cellhive secret delete <namespace> <worker> <KEY>
   cellhive secret list <namespace> <worker>
+  cellhive secret bulk <namespace> <worker> <json-or-env-file>  # JSON null deletes a key
   cellhive routes            # pull the routing projection (internal listener)
   cellhive releases <namespace> <worker>
   cellhive workflow create <namespace> <name>
@@ -2566,6 +2714,7 @@ Usage:
   cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <issuer>] [--ttl 5m] [--key <b64>]
                                          # mint a scoped binding token (single issuance point)
   cellhive versions list|deployments list|status <ns> <worker>   # = releases
+  cellhive versions view <namespace> <worker> <version-id>
   cellhive triggers list <namespace> <worker>
   cellhive workflows list <namespace> | cellhive queues list <namespace>
   cellhive vectorize create <namespace> <name> --dimensions <n> --metric <cosine|euclidean|dot-product>
@@ -2582,7 +2731,9 @@ Usage:
   cellhive kv key put <namespace> <binding> <key> (<value>|--path <file>) [--ttl <seconds>] [--expiration <unix>] [--metadata <json>]
   cellhive kv key get|delete <namespace> <binding> <key>
   cellhive kv key list <namespace> <binding> [--prefix <prefix>]
+  cellhive kv bulk put|delete <namespace> <binding> <json-file>
   cellhive d1 create|list|delete|info <namespace> <db> [--tables]
+  cellhive d1 export <namespace> <db> --output <file> [--table <name>] [--no-schema|--no-data]
   cellhive d1 execute|query <namespace> <db> (--command <sql>|--file <path>)
   cellhive d1 migrations create <namespace> <db> <message> [--directory <dir>]
   cellhive d1 migrations list|apply <namespace> <db> [--directory <dir>] [--table <name>]  # list accepts --applied

@@ -106,11 +106,48 @@ func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := s.Control.Deploy(t.Context(), "acme", "web", control.DeploySpec{BundleSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	versions := call(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions", "")
+	if versions.Code != 200 || !bytes.Contains(versions.Body.Bytes(), []byte(`"id":"1"`)) || !bytes.Contains(versions.Body.Bytes(), []byte(`"id":"3"`)) {
+		t.Fatalf("versions with reused bundle SHA = %d %s", versions.Code, versions.Body.String())
+	}
 	if rr := call(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions/1/deploy", "{}"); rr.Code != 200 {
 		t.Fatalf("version deploy %d %s", rr.Code, rr.Body.String())
 	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions/2", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"number":2`)) {
+		t.Fatalf("inactive version view %d %s", rr.Code, rr.Body.String())
+	}
 	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/workers/scripts/web", ""); rr.Code != 200 {
 		t.Fatalf("worker delete %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCloudflareSecretBulkPatch(t *testing.T) {
+	s := newControlServer(t)
+	h := s.AdminHandler()
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/client/v4/accounts/acme/workers/scripts/web/secrets-bulk", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := call(`{"secrets":{"A":{"name":"A","type":"secret_text","text":"one"},"B":{"name":"B","type":"secret_text","text":"two"}}}`); rr.Code != 200 {
+		t.Fatalf("bulk put %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(`{"secrets":{"A":null,"B":{"name":"wrong","type":"secret_text","text":"changed"}}}`); rr.Code == 200 {
+		t.Fatalf("invalid bulk accepted: %s", rr.Body.String())
+	}
+	if value, err := s.Control.GetSecret(t.Context(), "acme", "web", "A"); err != nil || string(value) != "one" {
+		t.Fatalf("invalid bulk changed A: %s, %v", value, err)
+	}
+	if rr := call(`{"secrets":{"A":null,"B":{"name":"B","type":"secret_text","text":"changed"}}}`); rr.Code != 200 {
+		t.Fatalf("bulk patch %d %s", rr.Code, rr.Body.String())
+	}
+	if value, err := s.Control.GetSecret(t.Context(), "acme", "web", "B"); err != nil || string(value) != "changed" {
+		t.Fatalf("bulk changed B: %s, %v", value, err)
 	}
 }
 

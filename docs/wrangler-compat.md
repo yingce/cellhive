@@ -50,20 +50,22 @@
 | `wrangler delete <ns> <worker>` | `cellhive worker delete` |
 | `wrangler versions list` / `wrangler deployments list` | `cellhive releases` |
 | `wrangler rollback` / `wrangler promote` | 同名命令 |
-| `wrangler secret put\|get\|delete\|list` | `cellhive secret ...` |
+| `wrangler secret put\|get\|delete\|list` | `cellhive secret ...`（含 `bulk`） |
 | `wrangler tail` | `cellhive tail` |
-| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`；数据面支持 `execute\|query <ns> <db> <sql>` 与 `migrations create\|list\|apply` |
+| `wrangler d1 <verb> ...` | `cellhive d1 create\|list\|delete\|stats <ns> [name]`；数据面支持 `execute\|query\|export <ns> <db> ...` 与 `migrations create\|list\|apply` |
 | `wrangler r2 bucket <verb> ...` | `cellhive r2 create\|list\|delete\|stats <ns> [name]`；数据面支持 `object put\|get\|delete\|list` |
-| `wrangler kv namespace\|key ...` | `cellhive kv ...`；`key put\|get\|delete\|list <ns> <binding> [key] [value]` 通过 scoped token 访问数据面 |
+| `wrangler kv namespace\|key ...` | `cellhive kv ...`；`key put\|get\|delete\|list <ns> <binding> [key] [value]` 通过 scoped token 访问数据面；另支持 `bulk put\|delete` |
 | `wrangler triggers deploy` | 提示用 `cellhive deploy --config wrangler.jsonc`（`triggers.crons` 原子随版本应用） |
 
 - **命名空间**：CellHive 无账号概念，`--namespace <ns>`（= 租户）必填；
 - **`deploy` flag**：`--dry-run`（服务端预检不落状态）、`--var NAME=VALUE`、`--secrets-file <JSON>` 已支持并透传；其余不支持的 flag 直接报错并给替代（如 `--minify`→`build.minify`、`--compatibility-date`→`compatibility_date`）；
 - **兼容命令组**：`versions`/`deployments`/`triggers`/`workflows`/`queues`/`types`/`init` 转发到原生实现或**结构化拒绝 + 替代说明**（ADR-148）；`d1`/`r2`/`kv` 转发到原生每域命令，已支持上述常用数据面命令；`vectorize`/`hyperdrive` 前缀透传到原生实现；
-- **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`kv:bulk`→数据面（用 KV 绑定）、`unstable_*`→内部命令；
-- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive releases`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
+- **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。旧式 `kv:bulk` 映射到 `kv bulk`。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`unstable_*`→内部命令；
+- **子命令级替代**：`versions upload`→`cellhive deploy`（原子发布）、`versions view`→`cellhive versions view`、`triggers deploy`→`cellhive deploy --config`（crons 随版本原子应用）、`queues consumer`→`queues.consumers` + `deploy`（积压看 `queue status`）、`workflows status\|describe\|trigger`→`env.WF`（实例是运行期的）、`types`/`init`→不支持（自己写 `Env` 接口 / 自建 wrangler.jsonc）；
 
 **D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用迁移表；Wrangler `migrations_table` 与原生 CLI `--table` 可选择同一个自定义表。`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更；摘要计算忽略 SQL 文件首尾空白，以匹配 Wrangler 提交行为。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
+
+**新增命令对齐**：原版 Wrangler 4.133.0 的 `d1 export --remote`、`kv bulk put/delete --remote`、`secret bulk`、`versions view` 均有对应的 CellHive 原生命令。D1 导出上限 32 MiB，省略内层事务标记，可由 `d1 execute --file` 恢复；下载链接保存在单管理员实例一小时。KV bulk 先校验整批，再逐 key 写入，后续失败可能留下前面已写的 key。Secret bulk 在控制 cell 内一次事务提交（1-100 项），JSON `null` 删除对应 Secret。
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
 - **原版 Wrangler API 兼容（第一阶段已实现）**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并接受原版 Wrangler 的 Bearer token 与 `content/v2` multipart（`metadata` + 主模块）。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name` 和 `/deployments` 的首发查询也已提供。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`。
