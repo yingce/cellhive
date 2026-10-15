@@ -70,6 +70,44 @@ func TestD1BatchAtomic(t *testing.T) {
 	}
 }
 
+func TestMigrationAtomicAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	rows, err := s.ListMigrations(ctx, "acme", "main")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("empty list = %v, %v", rows, err)
+	}
+	good := `CREATE TABLE migrated (v TEXT); INSERT INTO migrated VALUES ('once');`
+	applied, err := s.ApplyMigration(ctx, "acme", "main", "0001_init.sql", good)
+	if err != nil || !applied {
+		t.Fatalf("first apply = %v, %v", applied, err)
+	}
+	applied, err = s.ApplyMigration(ctx, "acme", "main", "0001_init.sql", good)
+	if err != nil || applied {
+		t.Fatalf("retry = %v, %v", applied, err)
+	}
+	rows, err = s.ListMigrations(ctx, "acme", "main")
+	if err != nil || len(rows) != 1 || rows[0].Name != "0001_init.sql" {
+		t.Fatalf("list = %v, %v", rows, err)
+	}
+	q, err := s.Query(ctx, "acme", "main", `SELECT count(*) FROM migrated`, nil)
+	if err != nil || q.Rows[0][0] != int64(1) {
+		t.Fatalf("duplicate SQL execution = %v, %v", q, err)
+	}
+	_, err = s.ApplyMigration(ctx, "acme", "main", "0002_bad.sql", `INSERT INTO migrated VALUES ('rollback'); INSERT INTO missing VALUES (1);`)
+	if err == nil {
+		t.Fatal("bad migration succeeded")
+	}
+	q, err = s.Query(ctx, "acme", "main", `SELECT count(*) FROM migrated`, nil)
+	if err != nil || q.Rows[0][0] != int64(1) {
+		t.Fatalf("failed migration left data = %v, %v", q, err)
+	}
+	rows, err = s.ListMigrations(ctx, "acme", "main")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("failed migration left tracking row = %v, %v", rows, err)
+	}
+}
+
 func TestD1Errors(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

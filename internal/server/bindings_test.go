@@ -138,6 +138,33 @@ func TestBindingAPIs(t *testing.T) {
 	}
 }
 
+func TestD1MigrationBindingEndpoint(t *testing.T) {
+	s := newScopeServer(t)
+	ctx := context.Background()
+	if _, err := s.Control.CreateResource(ctx, "acme", "d1", "main", "acme/__d1__/main", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	tok := mint(t, s, "acme", "d1", "main")
+	path := "/v1/d1/migrations?ns=acme&db=main"
+	if rr := scopeDo(t, s, http.MethodGet, path, tok, nil); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"migrations":[]`)) {
+		t.Fatalf("initial list = %d: %s", rr.Code, rr.Body.String())
+	}
+	body, _ := json.Marshal(map[string]string{"name": "0001_init.sql", "sql": "CREATE TABLE migrated (v TEXT); INSERT INTO migrated VALUES ('once');"})
+	if rr := scopeDo(t, s, http.MethodPost, path, tok, body); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"applied":true`)) {
+		t.Fatalf("apply = %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := scopeDo(t, s, http.MethodPost, path, tok, body); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"applied":false`)) {
+		t.Fatalf("retry = %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := scopeDo(t, s, http.MethodGet, path, tok, nil); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`0001_init.sql`)) {
+		t.Fatalf("list = %d: %s", rr.Code, rr.Body.String())
+	}
+	other := mint(t, s, "acme", "d1", "other")
+	if rr := scopeDo(t, s, http.MethodGet, path, other, nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-resource access = %d", rr.Code)
+	}
+}
+
 func TestQueueSendRejectsOversizedBodyWithoutTruncation(t *testing.T) {
 	s := newScopeServer(t)
 	if _, err := s.Control.CreateResource(context.Background(), "acme", "queue", "jobs", "acme/__queue__/jobs", "ops"); err != nil {

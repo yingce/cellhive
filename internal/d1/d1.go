@@ -119,6 +119,76 @@ func (s *Store) Batch(ctx context.Context, ns, db string, stmts []Statement) ([]
 	return out, nil
 }
 
+// Migration is an applied SQL file. The filename is its stable identity.
+type Migration struct {
+	Name      string `json:"name"`
+	AppliedAt int64  `json:"applied_at"`
+}
+
+// ListMigrations is read-only, including before the first migration.
+func (s *Store) ListMigrations(ctx context.Context, ns, db string) ([]Migration, error) {
+	c, err := s.cell(ctx, ns, db)
+	if err != nil {
+		return nil, err
+	}
+	out := []Migration{}
+	var present int
+	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='__cellhive_migrations'`).Scan(&present); err != nil {
+		return nil, err
+	}
+	if present == 0 {
+		return out, nil
+	}
+	rows, err := c.DB.QueryContext(ctx, `SELECT name, applied_at FROM __cellhive_migrations ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m Migration
+		if err := rows.Scan(&m.Name, &m.AppliedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ApplyMigration commits a whole SQL file and its tracking row together.
+// Retrying after an uncertain HTTP response is safe: the tracking row and SQL
+// are in the same cell transaction, including the cell txid capture advance.
+func (s *Store) ApplyMigration(ctx context.Context, ns, db, name, sqlText string) (bool, error) {
+	if name == "" || strings.ContainsAny(name, `/\\`) || !strings.HasSuffix(name, ".sql") || strings.TrimSpace(sqlText) == "" {
+		return false, fmt.Errorf("d1: invalid migration name or empty SQL")
+	}
+	c, err := s.cell(ctx, ns, db)
+	if err != nil {
+		return false, err
+	}
+	applied := false
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+			return err
+		}
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM __cellhive_migrations WHERE name=?`, name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO __cellhive_migrations(name, applied_at) VALUES(?, ?)`, name, time.Now().Unix()); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
 func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params []any) (Result, error) {
 	start := time.Now()
 	if sqlText = strings.TrimSpace(sqlText); sqlText == "" {

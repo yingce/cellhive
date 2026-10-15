@@ -1846,10 +1846,12 @@ func cmdD1Migrations(args []string) error {
 		}
 	}
 	if verb == "list" {
-		if _, err := cmdD1ExecSQL(ns, db, "CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)"); err != nil {
+		out, err := scopeRawCall(http.MethodGet, "/v1/d1/migrations", ns, "d1", db, nil, url.Values{"db": {db}})
+		if err != nil {
 			return err
 		}
-		return cmdD1Data("query", []string{ns, db, "SELECT name, applied_at FROM __cellhive_migrations ORDER BY name"})
+		printJSON(out)
+		return nil
 	}
 	if verb != "apply" {
 		return fmt.Errorf("unknown d1 migrations verb %q (list|apply)", verb)
@@ -1859,40 +1861,18 @@ func cmdD1Migrations(args []string) error {
 		return err
 	}
 	sort.Strings(files)
-	_, err = cmdD1ExecSQL(ns, db, "CREATE TABLE IF NOT EXISTS __cellhive_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)")
-	if err != nil {
-		return err
-	}
 	for _, file := range files {
 		name := filepath.Base(file)
 		raw, e := os.ReadFile(file)
 		if e != nil {
 			return e
 		}
-		q := fmt.Sprintf("SELECT name FROM __cellhive_migrations WHERE name='%s'", strings.ReplaceAll(name, "'", "''"))
-		existing, e := cmdD1QuerySQL(ns, db, q)
+		_, e = scopeCallKind(http.MethodPost, "/v1/d1/migrations", ns, "d1", db, map[string]any{"name": name, "sql": string(raw)}, url.Values{"db": {db}})
 		if e != nil {
-			return e
-		}
-		if strings.Contains(string(existing), name) {
-			continue
-		}
-		if _, e = cmdD1ExecSQL(ns, db, string(raw)); e != nil {
 			return fmt.Errorf("migration %s: %w", name, e)
-		}
-		if _, e = cmdD1ExecSQL(ns, db, fmt.Sprintf("INSERT INTO __cellhive_migrations(name, applied_at) VALUES('%s', strftime('%%s','now'))", strings.ReplaceAll(name, "'", "''"))); e != nil {
-			return e
 		}
 	}
 	return nil
-}
-
-func cmdD1ExecSQL(ns, db, sqlText string) ([]byte, error) {
-	return scopeCallKind(http.MethodPost, "/v1/d1/exec", ns, "d1", db, map[string]any{"sql": sqlText}, url.Values{"db": {db}})
-}
-
-func cmdD1QuerySQL(ns, db, sqlText string) ([]byte, error) {
-	return scopeCallKind(http.MethodPost, "/v1/d1/query", ns, "d1", db, map[string]any{"sql": sqlText}, url.Values{"db": {db}})
 }
 
 // cmdQueue is operator queue tooling: status and dead-letter replay (ADR-156).

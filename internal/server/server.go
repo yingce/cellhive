@@ -282,6 +282,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/d1/query", s.scopeAuth("d1")(s.admit(s.handleD1Query)))
 	mux.HandleFunc("POST /v1/d1/exec", s.scopeAuth("d1")(s.admit(s.handleD1Exec)))
 	mux.HandleFunc("POST /v1/d1/batch", s.scopeAuth("d1")(s.admit(s.handleD1Batch)))
+	mux.HandleFunc("GET /v1/d1/migrations", s.scopeAuth("d1")(s.handleD1MigrationsList))
+	mux.HandleFunc("POST /v1/d1/migrations", s.scopeAuth("d1")(s.admit(s.handleD1MigrationsApply)))
 	mux.HandleFunc("PUT /v1/r2/object", s.scopeAuth("r2")(s.admit(s.handleR2Put)))
 	mux.HandleFunc("GET /v1/r2/object", s.scopeAuth("r2")(s.handleR2Get))
 	mux.HandleFunc("GET /v1/r2/presign", s.scopeAuth("r2")(s.handleR2Presign))

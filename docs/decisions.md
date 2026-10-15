@@ -2444,6 +2444,11 @@
 
 ---
 
+## ADR-197 D1 SQL migration 的原子应用（2026-10-15）✅实现
+
+- **决策**：`cellhive d1 migrations apply` 的每个 SQL 文件通过 `/v1/d1/migrations` 以单次请求执行；服务端在同一 cell SQLite 事务里检查文件名、执行 SQL 并写入 `__cellhive_migrations`。重复请求返回 `applied:false`，失败整文件回滚。`list` 只读查询，不创建追踪表。端点沿用 D1 scoped token、owner 转发和持久化输出门。
+- **边界**：这是 CellHive CLI 的迁移协议；原版 Wrangler 的 D1 migration API 尚未对拍。迁移文件按文件名标识，未引入校验和或 Wrangler 专属字段。
+
 ## ADR-186 stock workerd 运行时基线与安全加固（已实现并通过 Docker 全门禁）
 
 - **背景（实施前基线）**：旧 pin 为 `1.20260615.1`，宿主 URL/token 被模板渲染进 capnp，user-runtime 还把 `CELL_URL`/`CELL_TOKEN` 序列化进最终 WorkerCode；生产镜像缺少 ADR-005 要求的外部 esbuild。compatibility date/flags 依靠人工清单，最终 WorkerCode 与 workerLoader env 也没有前置预算。
