@@ -1,8 +1,8 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
-import { ByteLRU, textWeight, jsonWeight, quotaSource } from "lifecycle.js";
-import { decode } from "rpc-codec.js";
+import { ByteLRU, textWeight, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
+import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 //
@@ -72,10 +72,12 @@ async function dispatchQueues(req, env, ctx) {
   if (!namespace || !worker || !bundle_sha || !queue || !Array.isArray(messages)) {
     return json({ error: "bad_request", message: "namespace, worker, bundle_sha, queue, messages are required" }, 400);
   }
+  const invocation = await startInvocation(env, body, "queue");
   let stub;
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
+    await finishInvocation(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
   const batch = messages.map((m) => ({
@@ -93,16 +95,21 @@ async function dispatchQueues(req, env, ctx) {
   // the tenant-side wrapper build the CF MessageBatch (ADR-154).
   const payload = { messages: batch, queue, traceparent: body.traceparent };
   try {
-    const out = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
+    const execution = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
+    await finishInvocation(env, invocation, execution);
+    if (execution.error) return json({ error:"handler_failed", message:execution.error, invocation_id:invocation.invocation_id },500);
+    const out = execution.value;
     // The wrapper returns {result, ack, retry}; older returns are the raw value.
-    const result = out && typeof out === "object" && "result" in out ? out.result : out;
+    const result = publicInvocationResult(out && typeof out === "object" && "result" in out ? out.result : out);
     return json({
       ok: true, queue, worker, handled: batch.length,
       result: result === undefined ? null : result,
       ack: (out && out.ack) || [],
       retry: (out && out.retry) || [],
+      invocation_id: invocation.invocation_id,
     });
   } catch (e) {
+    await finishInvocation(env, invocation, {error:String(e)});
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
 }
@@ -114,20 +121,78 @@ async function dispatchTimers(req, env, ctx) {
   if (!namespace || !worker || !bundle_sha) {
     return json({ error: "bad_request", message: "namespace, worker, bundle_sha are required" }, 400);
   }
+  const invocation = await startInvocation(env, body, "cron");
   let stub;
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
+    await finishInvocation(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
-    const out = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
-    return json({ ...out, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime });
+    const execution = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
+    await finishInvocation(env, invocation, execution);
+    if (execution.error) return json({error:"handler_failed",message:execution.error,invocation_id:invocation.invocation_id},500);
+    return json({ ...execution.value,result:publicInvocationResult(execution.value?.result), kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime,invocation_id:invocation.invocation_id });
   } catch (e) {
+    await finishInvocation(env, invocation, {error:String(e)});
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
+}
+
+async function persistInvocation(env, record) {
+  if (env.CH_INVOCATION_LOGS !== "1") return record;
+  const url = new URL(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/invocations");
+  url.searchParams.set("ns", record.namespace);
+  const response = await env.PLATFORM.fetch(url, {
+    method:"POST",headers:{"content-type":"application/json","x-cellhive-internal-token":env.CELL_TOKEN},body:JSON.stringify(record),
+  });
+  if (!response.ok) throw new Error("invocation persistence failed: " + response.status);
+  return (await response.json()).invocation;
+}
+
+async function startInvocation(env,body,kind) {
+  const source = kind === "queue" ? [body.namespace,body.worker,body.queue,(body.messages||[]).map(m=>m.id).sort()] : [body.namespace,body.worker,body.token||"",body.scheduled_time_ms,body.cron];
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(source))));
+  const logical = [...digest].map(b=>b.toString(16).padStart(2,"0")).join("");
+  const messages=[];
+  if(kind==="queue")for(const message of body.messages||[]){
+    const identity=[body.namespace,message.source_queue||body.queue,message.source_generation||"",message.source_id||message.id];
+    const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(identity))));
+    messages.push({id:message.id,logical_id:"message:"+[...digest].map(b=>b.toString(16).padStart(2,"0")).join(""),attempt:Math.max(1,message.attempts||1)});
+  }
+  return persistInvocation(env,{
+    invocation_id:crypto.randomUUID(),logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||"",
+    attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):1,
+    started_ms:Date.now(),status:"running",logs:[],messages,
+  });
+}
+
+async function finishInvocation(env, record, execution) {
+  const value=execution.value||{};
+  const error=execution.error || (value.ok===false?value.error:"") || "";
+  const retry=(value.retry||[]).length>0;
+  let result=null,resultEncoding="cellhive-tagged-json",resultTruncated=false;
+  try{result=encode(value.result);if(new TextEncoder().encode(JSON.stringify(result)).length>8192){result=null;resultTruncated=true;}}catch{resultEncoding="unsupported";result=null;}
+  const retries=execution.error?[]:(value.retry||[]);
+  const retryIDs=new Set(retries.map(r=>r.id));
+  const ack=execution.error?[]:(record.messages||[]).filter(m=>!retryIDs.has(m.id)).map(m=>m.id);
+  const completed={
+    ...record,finished_ms:Date.now(),status:error?"failed":retry?"retry":"success",
+    error:String(error).slice(0,2048),retry_requested:retry||!!error&&!value.no_retry,no_retry:!!value.no_retry,
+    error_stack:String(execution.error_stack||value.error_stack||"").slice(0,4096),
+    logs:execution.logs||[],logs_truncated:!!execution.logs_truncated,
+    result,result_encoding:resultEncoding,result_truncated:resultTruncated,ack,retry:retries,
+  };
+  while(new TextEncoder().encode(JSON.stringify(completed)).length>120*1024&&completed.logs.length){completed.logs.pop();completed.logs_truncated=true;}
+  return persistInvocation(env,completed);
+}
+
+function publicInvocationResult(value){
+  if(value===undefined)return null;
+  try{JSON.stringify(value);return value;}catch{return encode(value);}
 }
 
 async function dispatchServiceFetch(req, env, ctx) {
@@ -289,14 +354,16 @@ function tenantEnv(env, ctx, spec, vars) {
 }
 
 async function loadWorker(env, ctx, body) {
-  const source = await loadSource(env, body.bundle_sha);
+  const source = (await loadSource(env, body.bundle_sha))
+    .replaceAll('"cloudflare:workers"','"__cellhive-invocation-workers.js"')
+    .replaceAll("'cloudflare:workers'","'__cellhive-invocation-workers.js'");
   const spec = await specFor(env, body);
   // Same id format as loader.js workerStub (ADR-126/127): a worker's fetch and
   // queue/scheduled/service handlers share one isolate per (worker, version).
   const ver = body.version != null ? `${body.version}-` : "";
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
-    compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
+    compatibilityFlags: [...new Set([...(body.compat_flags || spec.compat_flags || []).filter(f=>f!=="no_nodejs_als"), "nodejs_als"])],
     limits: workerLimits(body.limits || spec.limits),
     mainModule: "wrapper.js",
     modules: {
@@ -305,6 +372,8 @@ async function loadWorker(env, ctx, body) {
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
       "__cellhive-quota.js": quotaSource((body.limits || spec.limits)?.subrequests, spec.bindings),
+      "__cellhive-invocation.js": invocationSource(),
+      "__cellhive-invocation-workers.js": `export * from 'cloudflare:workers'; import {waitUntil as nativeWaitUntil} from 'cloudflare:workers'; import {trackBackground} from '__cellhive-invocation.js'; export const waitUntil=p=>trackBackground(p,nativeWaitUntil);`,
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,

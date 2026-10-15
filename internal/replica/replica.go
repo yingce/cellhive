@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -22,7 +23,8 @@ import (
 
 // Manager reads and writes replication segments for cells.
 type Manager struct {
-	B bucket.Bucket
+	B             bucket.Bucket
+	resourceLocks [64]sync.RWMutex
 }
 
 // New creates a Manager.
@@ -107,6 +109,11 @@ func (m *Manager) LatestEpoch(ctx context.Context, s cell.Scope, maxEpoch uint64
 
 // Append validates and stores a segment, returning its object key and etag.
 func (m *Manager) Append(ctx context.Context, s cell.Scope, epoch uint64, segment []byte) (string, string, error) {
+	release, err := m.resourceWriteGuard(ctx, s, epoch)
+	if err != nil {
+		return "", "", err
+	}
+	defer release()
 	h, _, err := ltx.Decode(segment)
 	if err != nil {
 		return "", "", fmt.Errorf("replica: invalid segment: %w", err)
@@ -115,7 +122,7 @@ func (m *Manager) Append(ctx context.Context, s cell.Scope, epoch uint64, segmen
 		return "", "", fmt.Errorf("replica: segment epoch %d != requested %d", h.Epoch, epoch)
 	}
 	key := Prefix(s, epoch) + ltx.SegmentName(h)
-	etag, err := m.B.Put(ctx, key, segment)
+	etag, err := m.putResourceObject(ctx, s, epoch, key, segment)
 	if err != nil {
 		return "", "", err
 	}
@@ -125,6 +132,11 @@ func (m *Manager) Append(ctx context.Context, s cell.Scope, epoch uint64, segmen
 // AppendBatch concatenates several segments into one object (group commit) and
 // returns its key and etag.
 func (m *Manager) AppendBatch(ctx context.Context, s cell.Scope, epoch uint64, segments [][]byte) (string, string, error) {
+	release, guardErr := m.resourceWriteGuard(ctx, s, epoch)
+	if guardErr != nil {
+		return "", "", guardErr
+	}
+	defer release()
 	if len(segments) == 0 {
 		return "", "", fmt.Errorf("replica: empty batch")
 	}
@@ -149,7 +161,7 @@ func (m *Manager) AppendBatch(ctx context.Context, s cell.Scope, epoch uint64, s
 		name = ltx.SegmentName(first)
 	}
 	key := Prefix(s, epoch) + name
-	etag, err := m.B.Put(ctx, key, buf)
+	etag, err := m.putResourceObject(ctx, s, epoch, key, buf)
 	if err != nil {
 		return "", "", err
 	}
@@ -185,6 +197,11 @@ func (m *Manager) ListL0Segments(ctx context.Context, s cell.Scope, epoch uint64
 
 // AppendL1 stores a compacted snapshot part under the L1 prefix.
 func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segment []byte) (string, string, error) {
+	release, err := m.resourceWriteGuard(ctx, s, epoch)
+	if err != nil {
+		return "", "", err
+	}
+	defer release()
 	h, _, err := ltx.Decode(segment)
 	if err != nil {
 		return "", "", fmt.Errorf("replica: invalid L1 segment: %w", err)
@@ -193,7 +210,7 @@ func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segm
 		return "", "", fmt.Errorf("replica: L1 segment epoch %d != requested %d", h.Epoch, epoch)
 	}
 	key := L1Prefix(s, epoch) + ltx.SegmentName(h)
-	etag, err := m.B.Put(ctx, key, segment)
+	etag, err := m.putResourceObject(ctx, s, epoch, key, segment)
 	if err != nil {
 		return "", "", err
 	}
@@ -202,6 +219,11 @@ func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segm
 
 // PutManifest writes the L1 manifest for a scope/epoch.
 func (m *Manager) PutManifest(ctx context.Context, s cell.Scope, epoch uint64, man Manifest) error {
+	release, err := m.resourceWriteGuard(ctx, s, epoch)
+	if err != nil {
+		return err
+	}
+	defer release()
 	man.Epoch = epoch
 	if man.CreatedMs == 0 {
 		man.CreatedMs = time.Now().UnixMilli()
@@ -210,7 +232,7 @@ func (m *Manager) PutManifest(ctx context.Context, s cell.Scope, epoch uint64, m
 	if err != nil {
 		return err
 	}
-	_, err = m.B.Put(ctx, ManifestName(s, epoch), data)
+	_, err = m.putResourceObject(ctx, s, epoch, ManifestName(s, epoch), data)
 	return err
 }
 
@@ -273,6 +295,13 @@ type Segment struct {
 // L0 chain. Ordering: snapshot(s) by EndTxID, then link markers, then deltas by
 // StartTxID. This is the basis for takeover restore (docs/cell-protocol.md §6).
 func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Segment, error) {
+	fence, _, ferr := m.readResourceFence(ctx, s)
+	if ferr != nil {
+		return nil, ferr
+	}
+	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
+		return nil, nil
+	}
 	man, ok, err := m.ReadManifest(ctx, s, epoch)
 	if err != nil {
 		return nil, err

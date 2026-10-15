@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 
 	"cellhive/internal/control"
@@ -42,6 +43,8 @@ func (s *Server) registerResourceRoutes(mux *http.ServeMux, wrap func(http.Handl
 	}
 	// Queue dead-letter replay lives with the rest of the queue operations.
 	mux.HandleFunc("POST /v1/queue/dead-letters/replay", wrap(s.handleControlQueueReplayDLQ))
+	mux.HandleFunc("GET /v1/queue/dead-letters", wrap(s.handleControlQueueDLQPreview))
+	mux.HandleFunc("POST /v1/queue/dead-letters/ack", wrap(s.handleControlQueueDLQAck))
 }
 
 func (s *Server) resourceCreate(kind string) http.HandlerFunc {
@@ -168,9 +171,6 @@ func (s *Server) doResourceList(w http.ResponseWriter, r *http.Request, kind str
 
 // doResourceDelete revokes a registry entry (ADR-156 semantics).
 func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind string) {
-	if s.forwardOrClaim(w, r, control.Scope(), nil) {
-		return
-	}
 	if !s.requireControl(w) {
 		return
 	}
@@ -186,10 +186,23 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	scope, ok, err := s.Control.Binding(r.Context(), ns, kind, name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "resource_lookup_failed", err.Error())
 		return
+	}
+	if !ok {
+		if job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name); err == nil {
+			if err := s.capturedWrite(r.Context(), control.Scope(), func() error { return s.Control.DeleteResource(r.Context(), ns, kind, name, actorFor(r.Context())) }); err != nil {
+				writeErr(w, 503, "resource_revocation_failed", err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]any{"ok": true, "cleanup": job})
+			return
+		}
 	}
 	// The live declaration may come from a worker version rather than the
 	// registry; the referencing set tells us whether revoking breaks something.
@@ -213,16 +226,30 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(ns), func() error {
 		return s.Control.DeleteResource(r.Context(), ns, kind, name, actorFor(r.Context()))
 	}); err != nil {
+		if errors.Is(err, control.ErrResourceScopeShared) {
+			writeErr(w, 409, "resource_scope_shared", err.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "resource_delete_failed", err.Error())
 		return
 	}
 	s.invalidateBindings(ns)
+	var cleanup *control.ResourceCleanup
+	if kind == "kv" || kind == "queue" {
+		job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name)
+		if err != nil {
+			writeErr(w, 500, "cleanup_lookup_failed", err.Error())
+			return
+		}
+		cleanup = &job
+	}
 	if kind == "vectorize" {
 		s.invalidateVectorizeConfig(ns, name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "namespace": ns, "kind": kind, "name": name,
 		"referenced_by": refs, "forced": len(refs) > 0,
+		"cleanup": cleanup,
 	})
 }
 

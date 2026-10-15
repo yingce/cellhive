@@ -102,6 +102,10 @@ type Config struct {
 	// DisableTenantLogs omits native Tail Workers from loaded tenant code. The
 	// default keeps console and exception capture enabled.
 	DisableTenantLogs bool
+	// InvocationLogging persists Queue/Cron results and console output in the
+	// cell-agent. Production cmd/user-runtime enables it; embedded test hosts
+	// without a cell-agent invocation store may leave it disabled.
+	InvocationLogging bool
 	// HostCacheTTLMs overrides the loader's per-host routing cache TTL (ADR-115);
 	// 0 = the 10s default. Tests set a short TTL.
 	HostCacheTTLMs int
@@ -173,6 +177,7 @@ const config :Workerd.Config = (
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "CH_INVOCATION_LOGS", text = "{{if .InvocationLogging}}1{{else}}0{{end}}"),
         (name = "CH_POOL_MODE", text = "{{if .PoolMode}}1{{else}}0{{end}}"),
         (name = "CH_POOL_TARGET", text = {{printf "%q" .PoolTargetJSON}}),
       ],

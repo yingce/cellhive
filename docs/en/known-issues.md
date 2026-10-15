@@ -4,6 +4,12 @@ This document records all issues found during the system review, as well as **th
 
 _Last updated: 2026-10-15_
 
+## Resource operations and invocation records (ADR-205, 2026-10-15)
+
+DLQ preview uses read-only keyset pagination; selected acknowledgement is idempotent and owner-routed/captured. KV/Queue deletion records a durable cleanup job with status, retry/backoff and a physical-scope snapshot. Cleanup removes owner SQLite/WAL, wake and authoritative LTX payloads while retaining small monotonic generation/fence metadata to reject late uploads. Independent DLQ resources and unrelated messages remain. Legacy dead letters without source provenance require operator preview/ack before cleanup can complete. Shared physical scopes are rejected. Historical follower session logs follow their existing session reclamation lifecycle, not immediate per-resource secure erasure.
+
+Queue/Cron attempt UUIDs, logical retry IDs, results/errors/stacks and console lines are persisted and queryable by namespace/worker/time/id. History is bounded to seven days/10,000 attempts per namespace; truncation is explicit. A crashed unfinished attempt remains running. Native Tail disable does not disable these records. Upgrade every writer/recovery node before enabling destructive deletion.
+
 ## 2026-10-15 KV / Queue native semantics (first pass)
 
 - Native KV `expiration_ttl` now accepts one second and above; the Cloudflare-compatible entrypoint keeps the 60-second minimum.

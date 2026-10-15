@@ -30,6 +30,7 @@ func newDomainServer(t *testing.T) *Server {
 	s.Store = cs
 	s.D1 = d1.New(cs)
 	s.Queue = queuepkg.New(cs)
+	s.configureQueueStore(s.Queue)
 	s.Workflows = workflow.New(cs)
 	s.R2 = r2.New(s.Bucket)
 	return s

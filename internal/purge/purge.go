@@ -64,7 +64,13 @@ func (p *Purger) Run(ctx context.Context, ns, worker string) (bool, error) {
 			}
 		}
 		return p.delete(ctx, []target{
-			{dir: "cells/" + ns + "/"},
+			{dir: "cells/" + ns + "/", match: func(key string) bool {
+				// Small resource fences and monotonic owner generations must
+				// outlive app metadata: offline writers/recovery can finish after
+				// this payload purge, and the durable retirement sweeper still
+				// needs these guards to reject/remove their old epochs.
+				return !strings.HasSuffix(key, "/resource-fence.json") && !strings.HasSuffix(key, "/owner-gen")
+			}},
 			{dir: "assets/" + ns + "/"},
 		})
 	}

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +48,13 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "bad_request", "namespace and queue are required")
 		return
 	}
+	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, name)); err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
 	if s.forwardRead(w, r, queuepkg.Scope(ns, name), nil) {
 		return
 	}
@@ -64,11 +72,144 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleControlQueueDLQPreview reads DLQ messages without Claim: attempts,
+// leases and visibility remain unchanged. The queue query names the main queue;
+// its configured independent DLQ is resolved from the projection.
+func (s *Server) deadLetterConsumer(r *http.Request, ns, name string) (control.Consumer, bool) {
+	if r.URL.Query().Get("direct") == "1" {
+		if s.Control == nil {
+			return control.Consumer{}, false
+		}
+		_, ok, err := s.Control.Binding(r.Context(), ns, "queue", name)
+		return control.Consumer{DeadLetterQueue: name}, ok && err == nil
+	}
+	return s.queueConsumerTarget(r.Context(), ns, name)
+}
+
+func (s *Server) handleControlQueueDLQPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.requireQueue(w) {
+		return
+	}
+	q := r.URL.Query()
+	ns, name := q.Get("namespace"), q.Get("queue")
+	if ns == "" || name == "" {
+		writeErr(w, 400, "bad_request", "namespace and queue are required")
+		return
+	}
+	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	consumer, ok := s.deadLetterConsumer(r, ns, name)
+	if !ok || consumer.DeadLetterQueue == "" {
+		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
+		return
+	}
+	if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, consumer.DeadLetterQueue)); err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
+	if s.forwardRead(w, r, queuepkg.Scope(ns, consumer.DeadLetterQueue), nil) {
+		return
+	}
+	end, err := s.BeginResourceRequest(r.Context(), queuepkg.Scope(ns, consumer.DeadLetterQueue))
+	if err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
+	defer end()
+	limit := 100
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	after := ""
+	if cursor := q.Get("cursor"); cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		var v struct{ Namespace, Queue, After string }
+		if err != nil || json.Unmarshal(raw, &v) != nil || v.Namespace != ns || v.Queue != consumer.DeadLetterQueue {
+			writeErr(w, 400, "invalid_cursor", "cursor must belong to this namespace and DLQ")
+			return
+		}
+		after = v.After
+	}
+	items, next, err := s.Queue.PeekPage(r.Context(), ns, consumer.DeadLetterQueue, after, limit)
+	if err != nil {
+		writeErr(w, 500, "dlq_preview_failed", err.Error())
+		return
+	}
+	if next != "" {
+		raw, _ := json.Marshal(struct{ Namespace, Queue, After string }{ns, consumer.DeadLetterQueue, next})
+		next = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	writeJSON(w, 200, map[string]any{"namespace": ns, "queue": name, "dead_letter_queue": consumer.DeadLetterQueue, "messages": items, "next_cursor": next, "body_encoding": "base64"})
+}
+
+// handleControlQueueDLQAck is idempotent: Ack deletes the selected message if
+// present and returns success when it is already absent.
+func (s *Server) handleControlQueueDLQAck(w http.ResponseWriter, r *http.Request) {
+	if !s.requireQueue(w) {
+		return
+	}
+	q := r.URL.Query()
+	ns, name, id := q.Get("namespace"), q.Get("queue"), q.Get("message_id")
+	if ns == "" || name == "" {
+		writeErr(w, 400, "bad_request", "namespace and queue are required")
+		return
+	}
+	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	consumer, ok := s.deadLetterConsumer(r, ns, name)
+	if !ok || consumer.DeadLetterQueue == "" {
+		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
+		return
+	}
+	if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, consumer.DeadLetterQueue)); err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
+	scope := queuepkg.Scope(ns, consumer.DeadLetterQueue)
+	if s.forwardOrClaim(w, r, scope, nil) {
+		return
+	}
+	end, err := s.BeginResourceRequest(r.Context(), scope)
+	if err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
+	defer end()
+	ids := []string{id}
+	if id == "" {
+		var body struct {
+			IDs []string `json:"message_ids"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
+			writeErr(w, 400, "bad_request", "message_id or message_ids is required")
+			return
+		}
+		ids = body.IDs
+	}
+	if len(ids) < 1 || len(ids) > 100 {
+		writeErr(w, 400, "bad_request", "message_ids requires 1..100 entries")
+		return
+	}
+	for _, id := range ids {
+		if id == "" || len(id) > 256 {
+			writeErr(w, 400, "bad_request", "invalid message ID")
+			return
+		}
+	}
+	if err := s.capturedWrite(r.Context(), scope, func() error { return s.Queue.AckMany(r.Context(), ns, consumer.DeadLetterQueue, ids) }); err != nil {
+		writeErr(w, 500, "dlq_ack_failed", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "message_ids": ids})
+}
+
 // queueStatusPayload builds the queue status fields shared by the legacy
 // /v1/control/queue/status endpoint and the per-domain /v1/queue/stats
 // (ADR-156/157). The ADR-157 lag fields are additive.
 func (s *Server) queueStatusPayload(ctx context.Context, ns, name string) (map[string]any, error) {
-	st, err := s.Queue.Status(ctx, ns, name)
+	st, err := s.readQueueStatus(ctx, ns, name)
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +220,35 @@ func (s *Server) queueStatusPayload(ctx context.Context, ns, name string) (map[s
 	}
 	if consumer, ok := s.queueConsumerTarget(ctx, ns, name); ok && consumer.DeadLetterQueue != "" {
 		out["dead_letter_queue"] = consumer.DeadLetterQueue
-		if dlq, derr := s.Queue.Status(ctx, ns, consumer.DeadLetterQueue); derr == nil {
+		if s.resourceReplica() != nil {
+			blocked, err := s.resourceReplica().ResourceBlocked(ctx, queuepkg.Scope(ns, consumer.DeadLetterQueue))
+			if err != nil {
+				return nil, err
+			}
+			if blocked {
+				out["dead_letter_deleted"] = true
+				return out, nil
+			}
+		}
+		if dlq, derr := s.readQueueStatus(ctx, ns, consumer.DeadLetterQueue); derr == nil {
 			out["dead_letter_depth"] = dlq.Depth
 			out["dead_letter_visible"] = dlq.Visible
 			out["dead_letter_oldest_visible_ms"] = dlq.OldestVisibleMs
 		}
 	}
 	return out, nil
+}
+
+func (s *Server) readQueueStatus(ctx context.Context, ns, name string) (queuepkg.Status, error) {
+	if err := s.PrepareResourceAccess(ctx, queuepkg.Scope(ns, name)); err != nil {
+		return queuepkg.Status{}, err
+	}
+	end, err := s.BeginResourceRequest(ctx, queuepkg.Scope(ns, name))
+	if err != nil {
+		return queuepkg.Status{}, err
+	}
+	defer end()
+	return s.Queue.Status(ctx, ns, name)
 }
 
 // handleControlQueueReplayDLQ moves up to limit messages from a queue's dead
@@ -102,6 +265,9 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusBadRequest, "bad_request", "namespace and queue are required")
 		return
 	}
+	if !s.authorizeNS(w, r, ns) {
+		return
+	}
 	limit := 100
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
@@ -115,10 +281,22 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	dlq := consumer.DeadLetterQueue
+	for _, target := range []string{name, dlq} {
+		if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, target)); err != nil {
+			writeErr(w, 410, "resource_deleted", err.Error())
+			return
+		}
+	}
 	// Run on the DLQ cell's owner so claim/ack are authoritative.
 	if s.forwardOrClaim(w, r, queuepkg.Scope(ns, dlq), nil) {
 		return
 	}
+	end, err := s.BeginResourceRequest(r.Context(), queuepkg.Scope(ns, dlq))
+	if err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
+	defer end()
 	if !s.requireControl(w) {
 		return
 	}
@@ -173,9 +351,16 @@ func (s *Server) EnqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 
 func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m queuepkg.Message) error {
 	sc := queuepkg.Scope(ns, queue)
-	if s.Owner == nil {
-		_, err := s.Queue.Transfer(ctx, ns, queue, m)
+	if err := s.PrepareResourceAccess(ctx, sc); err != nil {
 		return err
+	}
+	if m.SourceQueue != "" && m.SourceQueue != queue {
+		if err := s.PrepareResourceAccess(ctx, queuepkg.Scope(ns, m.SourceQueue)); err != nil {
+			return err
+		}
+	}
+	if s.Owner == nil {
+		return s.acceptLocalQueueTransfer(ctx, ns, queue, m)
 	}
 	now := time.Now()
 	addr := ""
@@ -201,10 +386,7 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 		}
 	}
 	if owned {
-		return s.capturedWrite(ctx, sc, func() error {
-			_, e := s.Queue.Transfer(ctx, ns, queue, m)
-			return e
-		})
+		return s.acceptLocalQueueTransfer(ctx, ns, queue, m)
 	}
 	url := ownerclient.OwnerURL(ownerclient.Hint{Address: addr}) + "/v1/internal/queue/transfer?ns=" + neturl.QueryEscape(ns) + "&queue=" + neturl.QueryEscape(queue)
 	body, err := json.Marshal(m)

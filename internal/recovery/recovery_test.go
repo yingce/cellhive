@@ -93,6 +93,64 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	}
 }
 
+func TestRecoverySkipsDeletedResourcesButRecoversLiveScopes(t *testing.T) {
+	for _, mode := range []string{"legacy", "sealed"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			shared, err := bucket.NewFSBucket(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			spool, err := peer.NewSpool(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted := cell.Scope{Namespace: "acme", Class: "__queue__", ID: "deleted"}
+			live := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "live"}
+			for _, sc := range []cell.Scope{deleted, live} {
+				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte(sc.ID))
+				if mode == "sealed" {
+					_, _, err = spool.AppendBatchSession(ctx, "session", sc, 1, [][]byte{seg})
+				} else {
+					_, _, err = spool.AppendBatch(ctx, sc, 1, [][]byte{seg})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok"}, Spool: spool})
+			http := httptest.NewServer(follower.Handler())
+			defer http.Close()
+			rep := replica.New(shared)
+			if err := rep.BlockResource(ctx, deleted, "delete-job"); err != nil {
+				t.Fatal(err)
+			}
+			rec := recovery.New(rep, peer.NewHTTPTransport("tok", nil))
+			var n int
+			if mode == "sealed" {
+				nl := nodelog.New(shared, "dead")
+				if _, err := nl.Open(ctx, "session", 1, []string{http.URL}); err != nil {
+					t.Fatal(err)
+				}
+				n, err = rec.Recover(ctx, nl, "dead", "session")
+			} else {
+				n, err = rec.Collect(ctx, []string{http.URL})
+			}
+			if err != nil || n != 1 {
+				t.Fatalf("deleted scope blocked recovery: segments=%d err=%v", n, err)
+			}
+			keys, err := rep.ListSegments(ctx, deleted, 1)
+			if err != nil || len(keys) != 0 {
+				t.Fatalf("deleted scope resurrected: %v %v", keys, err)
+			}
+			keys, err = rep.ListSegments(ctx, live, 1)
+			if err != nil || len(keys) != 1 {
+				t.Fatalf("live acked data lost: %v %v", keys, err)
+			}
+		})
+	}
+}
+
 func TestRecoverLegacyNodeLogUsesHeldSpool(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

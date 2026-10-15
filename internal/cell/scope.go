@@ -2,6 +2,7 @@
 package cell
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -20,6 +21,10 @@ type Scope struct {
 
 // ErrInvalidScope is returned by ParseScope for malformed input.
 var ErrInvalidScope = fmt.Errorf("invalid cell scope")
+
+// ErrResourceDeleted fences asynchronous writes/recovery for an intentionally
+// deleted resource incarnation. It is permanent for that epoch, not an outage.
+var ErrResourceDeleted = errors.New("cell: resource incarnation is deleted")
 
 // reservedClassPrefix marks platform-owned classes.
 const reservedClassPrefix = "__"

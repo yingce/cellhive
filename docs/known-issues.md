@@ -4,6 +4,14 @@
 
 _最后更新：2026-10-15_
 
+## 2026-10-15 资源运维与调用审计（ADR-205）
+
+DLQ 已新增只读 keyset 预览及按 ID 批量幂等 ack（owner 路由/capture）；预览不 claim、不改 lease/attempts/visibility。KV/Queue 删除已有持久化 cleanup job、查询、自动退避和手动重试；物理 scope owner 清理本地 SQLite/WAL 和权威 LTX，保留小型 generation/fence 元数据，防止异步上传恢复旧数据。独立 DLQ 不删除，仅清理来源可证明属于主 Queue 的消息；旧来源缺失消息需人工 preview/ack 后 retry，否则作失败报告。共享物理 scope 当前拒绝破坏性删除。旧 sealed follower logs 仍按 session 回收，不逐资源立即清除历史副本。
+
+Queue/Cron 调用 UUID、逻辑重试关联、结果/异常/console 日志已独立持久化，可按 namespace/worker/time/id 查询。retention 7 天/10,000 次每 namespace，console 截断有标记；进程在完成报告前崩溃留 running 状态。native Tail `off` 不关闭调用记录。所有 replica/consumer/recovery 节点需同步升级后才开放删除。
+
+复核问题已修复并重新验收：本地 incarnation marker + 世代准入阻止离线/迟到请求回退，retirement GC 义务跨 namespace 清理保留，已 claim 旧批次不能跨重建执行；目的地事务验证 source_generation，历史 DLQ 与 transfer-only 目的地均入清理快照。混合批次部分重试按消息 lineage/前驱关联，返回值和 ack/retry 明细已持久化。最终全量/race/JS/vet/build 和 Docker 启动 E2E 均通过，见 `archive/resource-operations-invocations-2026-10-15.md`。
+
 ## 2026-10-15 KV / Queue 原生语义第一轮
 
 - 原生 KV `expiration_ttl` 已支持 1 秒起；Cloudflare 兼容入口仍执行 60 秒下限。

@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS messages (
   idempotency_key TEXT,
   idempotency_fingerprint TEXT,
   metadata        TEXT,
+  source_queue    TEXT NOT NULL DEFAULT '',
+  source_generation TEXT NOT NULL DEFAULT '',
+  source_id       TEXT NOT NULL DEFAULT '',
+  source_attempts INTEGER NOT NULL DEFAULT 0,
+  source_created_ms INTEGER NOT NULL DEFAULT 0,
   created_ms      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_visible ON messages(visible_at_ms);
@@ -39,9 +44,10 @@ CREATE TABLE IF NOT EXISTS queue_meta (key TEXT PRIMARY KEY);
 
 // Store persists queue messages in a cell.
 type Store struct {
-	cs       *cellstore.Store
-	now      func() time.Time
-	migrated sync.Map // scope string -> migrated once per process
+	cs                 *cellstore.Store
+	now                func() time.Time
+	migrated           sync.Map // scope string -> migrated once per process
+	ResourceGeneration func(context.Context, string, string) (string, error)
 }
 
 // New creates a queue store.
@@ -61,7 +67,7 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := s.migrated.Load(scope.String()); ok {
+	if previous, ok := s.migrated.Load(scope.String()); ok && previous == c {
 		return c, nil
 	}
 	// The schema is idempotent; run it once per process so a read API does not
@@ -74,16 +80,24 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 		for _, stmt := range []string{
 			`ALTER TABLE messages ADD COLUMN idempotency_fingerprint TEXT`,
 			`ALTER TABLE messages ADD COLUMN metadata TEXT`,
+			`ALTER TABLE messages ADD COLUMN source_queue TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN source_attempts INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE messages ADD COLUMN source_created_ms INTEGER NOT NULL DEFAULT 0`,
 		} {
 			if _, e := tx.ExecContext(ctx, stmt); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 				return e
 			}
 		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_source ON messages(source_queue)`); err != nil {
+			return err
+		}
 		return migrateIdempotency(ctx, tx, s.now().UnixMilli())
 	}); err != nil {
 		return nil, err
 	}
-	s.migrated.Store(scope.String(), struct{}{})
+	s.migrated.Store(scope.String(), c)
 	return c, nil
 }
 
@@ -100,7 +114,56 @@ type Message struct {
 	// IdempotencyKey travels with the message so a dead-letter replay can
 	// preserve it. Transfers use separate durable receipts so an operator can
 	// replay a consumed message without bypassing producer deduplication.
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	IdempotencyKey   string `json:"idempotency_key,omitempty"`
+	SourceQueue      string `json:"source_queue,omitempty"`
+	SourceGeneration string `json:"source_generation"`
+	ClaimGeneration  string `json:"claim_generation"`
+	SourceID         string `json:"source_id,omitempty"`
+	SourceAttempts   int    `json:"source_attempts,omitempty"`
+	SourceCreatedMs  int64  `json:"source_created_ms,omitempty"`
+}
+
+// PeekPage reads messages without claiming them. It never changes attempts,
+// leases, visibility, or any other delivery state. The cursor is the last ID
+// returned by the previous page; IDs are ordered lexicographically.
+func (s *Store) PeekPage(ctx context.Context, ns, name, after string, limit int) ([]Message, string, error) {
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := c.DB.QueryContext(ctx, `SELECT id,body,content_type,visible_at_ms,attempts,lease_until_ms,COALESCE(idempotency_key,''),created_ms,COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms FROM messages WHERE id>? ORDER BY id LIMIT ?`, after, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	items := make([]Message, 0, limit)
+	hasMore := false
+	for rows.Next() {
+		var m Message
+		var metadata string
+		if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs); err != nil {
+			return nil, "", err
+		}
+		if metadata != "" {
+			m.Metadata = json.RawMessage(metadata)
+		}
+		if len(items) < limit {
+			items = append(items, m)
+		} else {
+			hasMore = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if hasMore && len(items) > 0 {
+		next = items[len(items)-1].ID
+	}
+	return items, next, nil
 }
 
 func newID() string {
@@ -120,33 +183,68 @@ func (s *Store) Send(ctx context.Context, ns, name string, body []byte, contentT
 
 // SendMessage is one Cloudflare Queue message in an atomic batch.
 type SendMessage struct {
-	Body           []byte
-	ContentType    string
-	DelaySeconds   int
-	IdempotencyKey string
-	Metadata       json.RawMessage
+	Body             []byte
+	ContentType      string
+	DelaySeconds     int
+	IdempotencyKey   string
+	Metadata         json.RawMessage
+	sourceQueue      string
+	sourceGeneration string
+	sourceID         string
+	sourceAttempts   int
+	sourceCreatedMs  int64
 }
 
 // SendBatch atomically enqueues all messages. Reusing an idempotency key with
 // a different payload is a conflict; an identical message returns its old id.
 func (s *Store) SendBatch(ctx context.Context, ns, name string, messages []SendMessage) ([]string, error) {
-	return s.sendBatch(ctx, ns, name, messages, "")
+	return s.sendBatch(ctx, ns, name, messages, "", nil)
 }
 
 // Transfer is a privileged DLQ/replay operation. Source message ID is the
 // transfer receipt identity; the original producer key remains message data.
 func (s *Store) Transfer(ctx context.Context, ns, name string, m Message) (string, error) {
+	return s.TransferValidated(ctx, ns, name, m, nil)
+}
+
+// TransferValidated checks the source inside the destination write transaction
+// so delayed transfers serialize with source-specific DLQ cleanup.
+func (s *Store) TransferValidated(ctx context.Context, ns, name string, m Message, validate func(context.Context) error) (string, error) {
 	if m.ID == "" {
 		return "", fmt.Errorf("queue: transfer source id is required")
 	}
-	ids, err := s.sendBatch(ctx, ns, name, []SendMessage{{Body: m.Body, ContentType: m.ContentType, Metadata: m.Metadata, IdempotencyKey: m.IdempotencyKey}}, m.ID)
+	if s.ResourceGeneration != nil && m.SourceQueue != "" {
+		next := validate
+		validate = func(ctx context.Context) error {
+			current, err := s.ResourceGeneration(ctx, ns, m.SourceQueue)
+			if err != nil {
+				return err
+			}
+			if current != m.SourceGeneration {
+				return cell.ErrResourceDeleted
+			}
+			if next != nil {
+				return next(ctx)
+			}
+			return nil
+		}
+	}
+	ids, err := s.sendBatch(ctx, ns, name, []SendMessage{{Body: m.Body, ContentType: m.ContentType, Metadata: m.Metadata, IdempotencyKey: m.IdempotencyKey, sourceQueue: m.SourceQueue, sourceGeneration: m.SourceGeneration, sourceID: m.SourceID, sourceAttempts: m.SourceAttempts, sourceCreatedMs: m.SourceCreatedMs}}, m.ID, validate)
 	if err != nil {
 		return "", err
 	}
 	return ids[0], nil
 }
 
-func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendMessage, transferID string) ([]string, error) {
+func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendMessage, transferID string, validate func(context.Context) error) ([]string, error) {
+	generation := ""
+	var err error
+	if s.ResourceGeneration != nil {
+		generation, err = s.ResourceGeneration(ctx, ns, name)
+		if err != nil {
+			return nil, err
+		}
+	}
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, err
@@ -172,6 +270,11 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 	now := s.now().UnixMilli()
 	ids := make([]string, len(messages))
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		if validate != nil {
+			if err := validate(ctx); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE expires_ms<=?`, now); err != nil {
 			return err
 		}
@@ -184,6 +287,9 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 			}
 			if transferID != "" {
 				ledgerKey = "transfer:" + transferID
+				if m.sourceGeneration != "" {
+					ledgerKey = "transfer:" + m.sourceGeneration + ":" + transferID
+				}
 			}
 			if ledgerKey != "" {
 				var oldID, oldFP string
@@ -200,6 +306,12 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 				}
 			}
 			id := newID()
+			if transferID == "" {
+				m.sourceQueue = name
+				m.sourceGeneration = generation
+				m.sourceID = id
+				m.sourceCreatedMs = now
+			}
 			ids[i] = id
 			visible := now + int64(m.DelaySeconds)*1000
 			var idem, metadata any
@@ -210,8 +322,8 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 				metadata = string(m.Metadata)
 			}
 			if _, e := tx.ExecContext(ctx,
-				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms)
-				 VALUES(?,?,?,?,0,0,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now); e != nil {
+				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms,source_queue,source_generation,source_id,source_attempts,source_created_ms)
+				 VALUES(?,?,?,?,0,0,?,?,?,?,?,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now, m.sourceQueue, m.sourceGeneration, m.sourceID, m.sourceAttempts, m.sourceCreatedMs); e != nil {
 				return e
 			}
 			if ledgerKey != "" {
@@ -242,6 +354,14 @@ func normalizeContentType(v string) string {
 
 // Claim returns up to limit visible messages and leases them until now+leaseMs.
 func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs int64) ([]Message, error) {
+	generation := ""
+	var err error
+	if s.ResourceGeneration != nil {
+		generation, err = s.ResourceGeneration(ctx, ns, name)
+		if err != nil {
+			return nil, err
+		}
+	}
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, err
@@ -256,7 +376,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 	var out []Message
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,''), created_ms, COALESCE(metadata,'') FROM messages
+			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,''), created_ms, COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms FROM messages
 			 WHERE visible_at_ms <= ? AND lease_until_ms <= ? ORDER BY visible_at_ms, id LIMIT ?`,
 			now, now, limit)
 		if err != nil {
@@ -265,7 +385,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 		for rows.Next() {
 			var m Message
 			var metadata string
-			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata); err != nil {
+			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs); err != nil {
 				rows.Close()
 				return err
 			}
@@ -279,6 +399,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 			return err
 		}
 		for i := range out {
+			out[i].ClaimGeneration = generation
 			lease := now + leaseMs
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE messages SET lease_until_ms=?, attempts=attempts+1 WHERE id=?`, lease, out[i].ID); err != nil {
@@ -296,13 +417,30 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 
 // Ack removes a message.
 func (s *Store) Ack(ctx context.Context, ns, name, id string) error {
+	return s.AckMany(ctx, ns, name, []string{id})
+}
+
+// AckMany confirms selected messages atomically; missing IDs are safe no-ops.
+func (s *Store) AckMany(ctx context.Context, ns, name string, ids []string) error {
+	if len(ids) == 0 || len(ids) > 100 {
+		return fmt.Errorf("queue: acknowledge requires 1..100 IDs")
+	}
+	for _, id := range ids {
+		if id == "" || len(id) > 256 {
+			return fmt.Errorf("queue: invalid message ID")
+		}
+	}
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, id)
-		return err
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, id); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return err
 }
@@ -330,6 +468,36 @@ func (s *Store) Purge(ctx context.Context, ns, name string) error {
 	}
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM messages`)
+		return err
+	})
+	return err
+}
+
+// RemoveSource removes only dead letters belonging to one source queue. A
+// legacy un-attributed DLQ cannot be safely classified; cleanup reports a
+// retriable error instead of deleting unrelated messages or claiming success.
+func (s *Store) RemoveSource(ctx context.Context, ns, name, source string, generation ...string) error {
+	if source == "" || source == name {
+		return fmt.Errorf("queue: source cleanup must address an independent DLQ")
+	}
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return err
+	}
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		var legacy int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE source_queue=''`).Scan(&legacy); err != nil {
+			return err
+		}
+		if legacy > 0 {
+			return fmt.Errorf("queue: DLQ has %d legacy messages without source provenance; preview/ack classification is required before cleanup", legacy)
+		}
+		var err error
+		if len(generation) > 0 {
+			_, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE source_queue=? AND source_generation=?`, source, generation[0])
+		} else {
+			_, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE source_queue=?`, source)
+		}
 		return err
 	})
 	return err

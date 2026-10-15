@@ -13,7 +13,7 @@
 
 import { bindingStub, setServiceLoader } from "bindings.js";
 import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
-import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource } from "lifecycle.js";
+import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 
@@ -371,7 +371,7 @@ function workerPlan(env, version, source, spec) {
     } : null,
     workerCode: {
       compatibilityDate: version.compat_date || "2026-06-15",
-      compatibilityFlags,
+      compatibilityFlags: [...new Set([...compatibilityFlags.filter(f=>f!=="no_nodejs_als"), "nodejs_als"])],
       limits: workerLimits(version.limits),
       mainModule: "wrapper.js",
       modules: {
@@ -380,6 +380,7 @@ function workerPlan(env, version, source, spec) {
         "facades.js": env.FACADES_SRC,
         "rpc-codec.js": env.RPC_CODEC_SRC,
         "__cellhive-quota.js": quotaSource(version.limits?.subrequests, spec),
+        "__cellhive-invocation.js": invocationSource(),
       },
       // globalOutbound is request-scoped and attached by workerStub.
     },

@@ -68,6 +68,7 @@ func main() {
 		DispatchToken:     dispatchToken,
 		LogToken:          logToken,
 		DisableTenantLogs: !tenantLogCapture,
+		InvocationLogging: true,
 		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
 		TraceSampleRatio:  traceRatio(),
 		DoDirect:          getenv("CELLHIVE_DO_DIRECT", ""),

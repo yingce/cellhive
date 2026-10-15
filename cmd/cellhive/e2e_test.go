@@ -315,7 +315,8 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 	if err := cmdQueue([]string{"replay-dlq", "acme", "JOBS"}); err == nil {
 		t.Fatal("cli queue replay-dlq without a DLQ should fail")
 	}
-	// Revoke: an unbound resource deletes cleanly; an unknown one errors.
+	// Deletion is a durable job: a repeated known delete is idempotent, while
+	// a resource that never existed still reports not found.
 	if err := cmdResource([]string{"create", "acme", "kv", "TMP", "--scope", "acme/__kv__/tmp"}); err != nil {
 		t.Fatalf("cli tmp resource create: %v", err)
 	}
@@ -325,7 +326,10 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 	if ok, err := srv.Control.HasBinding(ctx, "acme", "kv", "TMP"); err != nil || ok {
 		t.Fatalf("tmp resource still bound after delete = %v, %v", ok, err)
 	}
-	if err := cmdResource([]string{"delete", "acme", "kv", "TMP"}); err == nil {
+	if err := cmdResource([]string{"delete", "acme", "kv", "TMP"}); err != nil {
+		t.Fatalf("repeat resource delete should preserve its cleanup job: %v", err)
+	}
+	if err := cmdResource([]string{"delete", "acme", "kv", "NEVER_REGISTERED"}); err == nil {
 		t.Fatal("cli resource delete of an unknown resource should fail")
 	}
 

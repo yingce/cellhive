@@ -142,6 +142,38 @@ func (o *Objects) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, err
 }
 
+// GetVersion/ConditionalCreate/CAS preserve prefix ownership on coordination
+// records as well as ordinary payload objects.
+func (o *Objects) GetVersion(ctx context.Context, key string) ([]byte, string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return nil, "", err
+	}
+	return o.B.Get(ctx, k)
+}
+func (o *Objects) ConditionalCreate(ctx context.Context, key string, value []byte) (string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return "", err
+	}
+	return o.B.ConditionalCreate(ctx, k, value)
+}
+func (o *Objects) CAS(ctx context.Context, key string, value []byte, etag string) (string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return "", err
+	}
+	return o.B.CAS(ctx, k, value, etag)
+}
+
+func (o *Objects) ConditionalDelete(ctx context.Context, key, etag string) error {
+	k, err := o.key(key)
+	if err != nil {
+		return err
+	}
+	return o.B.ConditionalDelete(ctx, k, etag)
+}
+
 // Stat returns an object's size and etag through a point lookup. It never
 // falls back to List or a full-body read when the backend lacks Stat support.
 func (o *Objects) Stat(ctx context.Context, key string) (int64, string, error) {

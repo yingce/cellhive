@@ -176,7 +176,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade 源 |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `user-runtime/`） |
-| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 捕获租户 `console.*`/未捕获异常；`off` 不附加 native Tail，换取更高 Worker 吞吐；仅接受 `on`/`off` |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 捕获租户 `console.*`/未捕获异常；`off` 不附加 native Tail，换取更高 Worker 吞吐；不关闭 Queue/Cron 的持久调用记录（ADR-205）；仅接受 `on`/`off` |
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |

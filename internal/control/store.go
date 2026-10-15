@@ -50,8 +50,14 @@ type Store struct {
 	env *Envelope
 	now func() time.Time
 
-	mu       sync.Mutex
-	migrated map[*cellstore.Cell]bool
+	mu         sync.Mutex
+	migrated   map[*cellstore.Cell]bool
+	resourceMu sync.Mutex
+	// Lifecycle hooks run after the metadata transaction but before its caller
+	// acknowledges it. Coordination failures must be returned to the caller.
+	OnResourceActivated func(context.Context, string, string, string) error
+	OnResourceRevoked   func(context.Context, string, string, string) error
+	ResourceGeneration  func(context.Context, cell.Scope) (string, error)
 }
 
 // New builds a control store. env may be nil when secrets are unused.
@@ -254,6 +260,26 @@ CREATE TABLE IF NOT EXISTS purges (
   attempts     INTEGER NOT NULL DEFAULT 0,
   last_error   TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (ns, worker)
+);
+CREATE TABLE IF NOT EXISTS resource_cleanups (
+  ns TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+  job_id TEXT NOT NULL, data_scope TEXT NOT NULL,
+  source_generation TEXT NOT NULL DEFAULT '',
+  dead_letters TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL DEFAULT 'pending', requested_ms INTEGER NOT NULL,
+  updated_ms INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '', next_retry_ms INTEGER NOT NULL DEFAULT 0,
+  lease_token TEXT NOT NULL DEFAULT '', lease_until_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(ns,kind,name)
+);
+CREATE TABLE IF NOT EXISTS queue_transfer_destinations (
+  ns TEXT NOT NULL, source_queue TEXT NOT NULL, source_generation TEXT NOT NULL,
+  destination_queue TEXT NOT NULL, PRIMARY KEY(ns,source_queue,source_generation,destination_queue)
+);
+CREATE TABLE IF NOT EXISTS resource_retirements (
+  ns TEXT NOT NULL, data_scope TEXT PRIMARY KEY, job_id TEXT NOT NULL,
+  epoch_floor INTEGER NOT NULL, gc_cursor TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '', updated_ms INTEGER NOT NULL
 );
 
 -- Target-side allowlist for service bindings (ADR-144): (ns, worker) may be
@@ -592,6 +618,8 @@ func (s *Store) PurgeAppRows(ctx context.Context, ns string) error {
 			`DELETE FROM routes WHERE ns=?`,
 			`DELETE FROM hosts WHERE ns=?`,
 			`DELETE FROM resources WHERE ns=?`,
+			`DELETE FROM resource_cleanups WHERE ns=?`,
+			`DELETE FROM queue_transfer_destinations WHERE ns=?`,
 			`DELETE FROM secrets WHERE ns=?`,
 			`DELETE FROM version_secrets WHERE ns=?`,
 			`DELETE FROM do_classes WHERE ns=?`,
@@ -617,6 +645,8 @@ func (s *Store) CreateResource(ctx context.Context, ns, kind, name, scope, actor
 // config blob (e.g. a Hyperdrive origin connection string). A non-empty config
 // requires the envelope (root key); plaintext is never stored (ADR-129).
 func (s *Store) CreateResourceWithConfig(ctx context.Context, ns, kind, name, scope string, config []byte, actor string) (Resource, error) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if err := validateNS(ns); err != nil {
 		return Resource{}, err
 	}
@@ -640,6 +670,20 @@ func (s *Store) CreateResourceWithConfig(ctx context.Context, ns, kind, name, sc
 	}
 	err = tx(ctx, c, func(t *sql.Tx) error {
 		// Registering clears any revoke tombstone (ADR-156).
+		if kind == "kv" || kind == "queue" {
+			physical, err := ResourceDataScope(ns, kind, name, scope)
+			physicalKey := ""
+			if err == nil {
+				physicalKey = physical.String()
+			}
+			var count int
+			if err := t.QueryRowContext(ctx, `SELECT COUNT(*) FROM resource_cleanups WHERE state<>'complete' AND ns=? AND ((kind=? AND name=?) OR (data_scope=? AND ?<>''))`, ns, kind, name, physicalKey, physicalKey).Scan(&count); err != nil {
+				return err
+			}
+			if count > 0 {
+				return ErrCleanupPending
+			}
+		}
 		if _, err := t.ExecContext(ctx,
 			`DELETE FROM revoked_resources WHERE ns=? AND kind=? AND name=?`, ns, kind, name); err != nil {
 			return err
@@ -654,6 +698,9 @@ func (s *Store) CreateResourceWithConfig(ctx context.Context, ns, kind, name, sc
 		}
 		return txAudit(ctx, t, ns, actor, "resource.create", kind+"/"+name)
 	})
+	if err == nil && s.OnResourceActivated != nil {
+		err = s.OnResourceActivated(ctx, ns, kind, name)
+	}
 	return r, err
 }
 
@@ -2124,10 +2171,13 @@ func (s *Store) ResourceReferencedBy(ctx context.Context, ns, kind, name, scope 
 	return out, rows.Err()
 }
 
-// DeleteResource revokes a resource registration. The resource's data cells are
-// intentionally left in place (revoking stops the binding from resolving; it is
-// not a data purge). Missing rows are not an error (idempotent).
+// DeleteResource revokes registration and, for KV/Queue, atomically snapshots a
+// durable cleanup job. Lifecycle coordination is completed before acknowledging;
+// the asynchronous owner-routed job subsequently removes data. Repeats preserve
+// the same job and are safe even when the original acknowledgement was lost.
 func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string) error {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if err := validateNS(ns); err != nil {
 		return err
 	}
@@ -2138,7 +2188,114 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 	if err != nil {
 		return err
 	}
-	return tx(ctx, c, func(t *sql.Tx) error {
+	err = tx(ctx, c, func(t *sql.Tx) error {
+		dataScope, generation := "", ""
+		deadLetters := []string{}
+		if kind == "kv" || kind == "queue" {
+			var ref string
+			lookup := t.QueryRowContext(ctx, `SELECT scope FROM resources WHERE ns=? AND kind=? AND name=?`, ns, kind, name).Scan(&ref)
+			if lookup != nil && !errors.Is(lookup, sql.ErrNoRows) {
+				return lookup
+			}
+			if errors.Is(lookup, sql.ErrNoRows) {
+				var jobs int
+				if err := t.QueryRowContext(ctx, `SELECT COUNT(*) FROM resource_cleanups WHERE ns=? AND kind=? AND name=?`, ns, kind, name).Scan(&jobs); err != nil {
+					return err
+				}
+				if jobs > 0 {
+					return nil
+				}
+				// Active-version derived declarations are snapshotted under the
+				// same transaction, rather than through a separate connection.
+				lookup = t.QueryRowContext(ctx, `SELECT b.id FROM bindings b JOIN workers w ON b.ns=w.ns AND b.worker=w.name AND b.number=w.active WHERE b.ns=? AND b.type=? AND b.name=? LIMIT 1`, ns, kind, name).Scan(&ref)
+				if lookup != nil && !errors.Is(lookup, sql.ErrNoRows) {
+					return lookup
+				}
+			}
+			physical, err := ResourceDataScope(ns, kind, name, ref)
+			if err != nil {
+				return err
+			}
+			dataScope = physical.String()
+			rows, err := t.QueryContext(ctx, `SELECT name,scope FROM resources WHERE ns=? AND kind=? AND name<>?`, ns, kind, name)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var otherName, otherRef string
+				if err := rows.Scan(&otherName, &otherRef); err != nil {
+					rows.Close()
+					return err
+				}
+				other, err := ResourceDataScope(ns, kind, otherName, otherRef)
+				if err == nil && other.String() == dataScope {
+					rows.Close()
+					return ErrResourceScopeShared
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+			if s.ResourceGeneration != nil {
+				generation, err = s.ResourceGeneration(ctx, physical)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if kind == "queue" {
+			rows, err := t.QueryContext(ctx, `SELECT consumers FROM versions WHERE ns=?`, ns)
+			if err != nil {
+				return err
+			}
+			seen := map[string]bool{}
+			for rows.Next() {
+				var raw string
+				if err := rows.Scan(&raw); err != nil {
+					rows.Close()
+					return err
+				}
+				var consumers []Consumer
+				if err := json.Unmarshal([]byte(raw), &consumers); err != nil {
+					rows.Close()
+					return err
+				}
+				for _, consumer := range consumers {
+					dlq := consumer.DeadLetterQueue
+					if consumer.Queue == name && dlq != "" && dlq != name && !seen[dlq] {
+						seen[dlq] = true
+						deadLetters = append(deadLetters, dlq)
+					}
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+			edges, err := t.QueryContext(ctx, `SELECT destination_queue FROM queue_transfer_destinations WHERE ns=? AND source_queue=? AND source_generation=?`, ns, name, generation)
+			if err != nil {
+				return err
+			}
+			for edges.Next() {
+				var dlq string
+				if err := edges.Scan(&dlq); err != nil {
+					edges.Close()
+					return err
+				}
+				if dlq != name && !seen[dlq] {
+					seen[dlq] = true
+					deadLetters = append(deadLetters, dlq)
+				}
+			}
+			if err := edges.Err(); err != nil {
+				edges.Close()
+				return err
+			}
+			edges.Close()
+		}
 		if _, err := t.ExecContext(ctx,
 			`DELETE FROM resources WHERE ns=? AND kind=? AND name=?`, ns, kind, name); err != nil {
 			return err
@@ -2156,6 +2313,16 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 			`DELETE FROM bindings WHERE ns=? AND type=? AND name=?`, ns, kind, name); err != nil {
 			return err
 		}
+		if kind == "kv" || kind == "queue" {
+			dlqs, _ := json.Marshal(deadLetters)
+			if _, err := t.ExecContext(ctx, `INSERT INTO resource_cleanups(ns,kind,name,job_id,data_scope,source_generation,dead_letters,state,requested_ms,updated_ms) VALUES(?,?,?,?,?,?,?,'pending',?,?) ON CONFLICT(ns,kind,name) DO UPDATE SET job_id=excluded.job_id,data_scope=excluded.data_scope,source_generation=excluded.source_generation,dead_letters=excluded.dead_letters,state='pending',requested_ms=excluded.requested_ms,updated_ms=excluded.updated_ms,attempts=0,last_error='',next_retry_ms=0,lease_token='',lease_until_ms=0`, ns, kind, name, newStorageID(), dataScope, generation, string(dlqs), s.now().UnixMilli(), s.now().UnixMilli()); err != nil {
+				return err
+			}
+		}
 		return txAudit(ctx, t, ns, actor, "resource.delete", kind+"/"+name)
 	})
+	if err == nil && s.OnResourceRevoked != nil {
+		err = s.OnResourceRevoked(ctx, ns, kind, name)
+	}
+	return err
 }

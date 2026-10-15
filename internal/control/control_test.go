@@ -952,7 +952,18 @@ func TestResourceRevoke(t *testing.T) {
 	if len(refs) != 0 {
 		t.Fatalf("refs after revoke = %v; want none (declarations dropped)", refs)
 	}
-	// Re-registering clears the revoke, even though the version still declares it.
+	// Destructive deletion blocks recreation until cleanup has completed.
+	job, err := s.ResourceCleanup(ctx, "acme", "kv", "KV")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, claimed, err := s.ClaimResourceCleanup(ctx, job)
+	if err != nil || !claimed {
+		t.Fatal(err)
+	}
+	if err := s.FinishResourceCleanup(ctx, job, nil); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.CreateResource(ctx, "acme", "kv", "KV", "acme/__kv__/main", "ops"); err != nil {
 		t.Fatal(err)
 	}

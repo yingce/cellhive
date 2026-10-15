@@ -289,6 +289,22 @@ func main() {
 	// fleet waker finds due work without listing every cell (ADR-099).
 	wakeIdx := wake.New(b)
 	openTimer := func(tctx context.Context, sc cell.Scope) (*timer.Store, error) {
+		if sc.Class == "__kv__" || sc.Class == "__queue__" {
+			blocked, err := rep.ResourceBlocked(tctx, sc)
+			if err != nil {
+				return nil, err
+			}
+			if blocked {
+				return nil, replica.ErrResourceDeleted
+			}
+			generation, err := rep.ResourceGeneration(tctx, sc)
+			if err != nil {
+				return nil, err
+			}
+			if err := store.EnsureResourceGeneration(tctx, sc, generation, func() (string, error) { return rep.ResourceGeneration(tctx, sc) }); err != nil {
+				return nil, err
+			}
+		}
 		c, err := store.Cell(tctx, sc)
 		if err != nil {
 			return nil, err
@@ -641,18 +657,39 @@ func main() {
 		if cfg.QueueInterval > 0 {
 			if qd := queue.NewHTTP(cfg.DispatchURL, cfg.TokenDispatch); qd != nil {
 				(&queue.Runner{
-					Store:        queue.New(store),
+					Store:        srv.Queue,
 					Dispatch:     qd,
 					Interval:     cfg.QueueInterval,
 					Batch:        cfg.QueueBatch,
 					LeaseMs:      cfg.QueueLease.Milliseconds(),
 					RetryDelayMs: cfg.QueueRetryDelay.Milliseconds(),
 					Log:          log,
-					Filter:       queue.OwnerGate(om),
+					Filter: func(qctx context.Context, ref queue.Ref) (bool, error) {
+						if err := srv.PrepareResourceAccess(qctx, queue.Scope(ref.Namespace, ref.Name)); err != nil {
+							return false, err
+						}
+						return queue.OwnerGate(om)(qctx, ref)
+					},
 					Commit: func(cctx context.Context, ns, name string, fn func() error) error {
+						sc := queue.Scope(ns, name)
+						end, err := srv.BeginResourceRequest(cctx, sc)
+						if err != nil {
+							return err
+						}
+						defer end()
+						blocked, err := rep.ResourceBlocked(cctx, sc)
+						if err != nil {
+							return err
+						}
+						if blocked {
+							return replica.ErrResourceDeleted
+						}
 						return srv.CaptureWrite(cctx, queue.Scope(ns, name), fn)
 					},
 					DeadLetterSend: srv.EnqueueToQueueOwner,
+					AdmitDispatch: func(ctx context.Context, ref queue.Ref) (func(), error) {
+						return srv.BeginResourceRequest(ctx, queue.Scope(ref.Namespace, ref.Name))
+					},
 					Queues: func(qctx context.Context) ([]queue.Ref, error) {
 						queues, err := ctrl.ResourcesByKind(qctx, "queue")
 						if err != nil {
@@ -750,6 +787,7 @@ func main() {
 		}
 	}()
 	srv.SetReady(true)
+	go srv.RunResourceCleanupLoop(ctx)
 
 	// Graceful handoff (cell-protocol §7): mark draining as soon as shutdown
 	// begins so no new cell is claimed, then serialize the actual handoff with

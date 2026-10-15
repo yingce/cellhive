@@ -24,6 +24,7 @@ function setTraceContext(tp) {
 const tenant = tenantMod.default;
 import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
+import { loggedInvocation } from "__cellhive-invocation.js";
 
 // Patch the importable env with local facades for binding API portions that
 // cannot cross RPC synchronously or must mutate caller-isolate state.
@@ -85,6 +86,10 @@ export class CellHiveHost extends WorkerEntrypoint {
   }
 
   async handleQueue(payload) {
+    return loggedInvocation(() => this.handleQueueBody(payload), this.ctx);
+  }
+
+  async handleQueueBody(payload) {
     if (typeof tenant.queue !== "function") throw new Error("worker has no queue() handler");
     // CF MessageBatch parity (ADR-154): the batch is array-like (length/index,
     // what the platform has always passed) and also exposes .messages/.queue/
@@ -133,6 +138,10 @@ export class CellHiveHost extends WorkerEntrypoint {
   }
 
   async handleScheduled(event) {
+    return loggedInvocation(() => this.handleScheduledBody(event), this.ctx);
+  }
+
+  async handleScheduledBody(event) {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
     let noRetry = false;
     const controller = { ...event, noRetry() { noRetry = true; } };
@@ -141,7 +150,7 @@ export class CellHiveHost extends WorkerEntrypoint {
       const result = await runInvocation(() => tenant.scheduled(controller, this.#bindings(), this.ctx));
       return { ok: true, no_retry: noRetry, result: result === undefined ? null : result };
     } catch (e) {
-      if (noRetry) return { ok: false, no_retry: true, error: String(e) };
+      if (noRetry) return { ok: false, no_retry: true, error: String(e), error_stack: typeof e?.stack === "string" ? e.stack.slice(0,4096) : "" };
       throw e;
     } finally {
       setTraceContext(undefined);

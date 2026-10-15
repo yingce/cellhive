@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"strings"
 	"time"
 
+	"cellhive/internal/replica"
 	"cellhive/internal/scopedtoken"
 	"cellhive/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
@@ -99,6 +101,19 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 					return
 				}
 			}
+			if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
+				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
+					err := s.PrepareResourceAccess(r.Context(), sc)
+					if err != nil {
+						if errors.Is(err, replica.ErrResourceDeleted) {
+							writeErr(w, 403, "resource_deleted", "resource has been deleted")
+							return
+						}
+						writeErr(w, 503, "revocation_check_failed", err.Error())
+						return
+					}
+				}
+			}
 			telemetry.SpanFromContext(r.Context()).SetAttributes(
 				telemetry.ScopeAttrs(claims.Namespace, kind, claims.Name, "")...)
 			if s.Store != nil {
@@ -109,7 +124,21 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
 					s.invalidateStaleLocal(r.Context(), sc)
 				}
-				end := s.Store.BeginRequest(s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
+				var end func()
+				if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
+					sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query())
+					if ok {
+						var err error
+						end, err = s.BeginResourceRequest(r.Context(), sc)
+						if err != nil {
+							writeErr(w, 403, "resource_generation_changed", err.Error())
+							return
+						}
+					}
+				}
+				if end == nil {
+					end = s.Store.BeginRequest(s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
+				}
 				defer end()
 			}
 			nsForMetrics = claims.Namespace

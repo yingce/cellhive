@@ -247,6 +247,30 @@ func TestQueueSendClaimAck(t *testing.T) {
 	}
 }
 
+func TestPeekPageHasNoDeliverySideEffects(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	id, err := s.Send(ctx, "acme", "q", []byte("body"), "text", 0, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Status(ctx, "acme", "q")
+	items, next, err := s.PeekPage(ctx, "acme", "q", "", 1)
+	if err != nil || len(items) != 1 || items[0].ID != id || next != "" {
+		t.Fatalf("peek=%+v %q %v", items, next, err)
+	}
+	after, _ := s.Status(ctx, "acme", "q")
+	if before != after {
+		t.Fatalf("peek changed delivery state: before=%+v after=%+v", before, after)
+	}
+	if err := s.Ack(ctx, "acme", "q", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ack(ctx, "acme", "q", id); err != nil {
+		t.Fatal("repeat ack should be safe")
+	}
+}
+
 func TestQueueRetryAndDelay(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

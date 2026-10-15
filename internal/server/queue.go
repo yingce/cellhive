@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -17,6 +18,10 @@ func (s *Server) handleQueueTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.URL.Query().Get("ns"), r.URL.Query().Get("queue")
+	if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, name)); err != nil {
+		writeErr(w, 410, "resource_deleted", err.Error())
+		return
+	}
 	if s.queueGate(w, r, ns, name) {
 		return
 	}
@@ -26,7 +31,21 @@ func (s *Server) handleQueueTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id string
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error { var err error; id, err = s.Queue.Transfer(r.Context(), ns, name, message); return err }); err != nil {
+	if err := s.recordQueueDestination(r.Context(), ns, name, message); err != nil {
+		s.captureErr(w, err, "queue_transfer_failed")
+		return
+	}
+	end, err := s.BeginResourceRequest(r.Context(), queuepkg.Scope(ns, name))
+	if err != nil {
+		s.captureErr(w, err, "queue_transfer_failed")
+		return
+	}
+	defer end()
+	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error {
+		var err error
+		id, err = s.Queue.TransferValidated(r.Context(), ns, name, message, func(ctx context.Context) error { return s.validateQueueTransfer(ctx, ns, message) })
+		return err
+	}); err != nil {
 		s.captureErr(w, err, "queue_transfer_failed")
 		return
 	}

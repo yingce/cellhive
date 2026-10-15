@@ -57,7 +57,8 @@ type Runner struct {
 	// Filter, when set, decides whether this node should consume a queue (e.g.
 	// OwnerGate: only queues whose cell this node owns, ADR-119). An error skips
 	// the queue for this pass.
-	Filter func(ctx context.Context, ref Ref) (bool, error)
+	Filter        func(ctx context.Context, ref Ref) (bool, error)
+	AdmitDispatch func(context.Context, Ref) (func(), error)
 	// Commit, when set, wraps every store mutation (claim/ack/retry/dead-letter)
 	// so it is captured and proven durable before the runner proceeds (RPO=0).
 	// nil means plain local writes (tests / capture disabled).
@@ -191,6 +192,37 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 // dispatchBatch delivers one claimed batch and acks (or retries/dead-letters)
 // its messages, returning the number acked.
 func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int {
+	release := func() {}
+	if r.AdmitDispatch != nil {
+		var err error
+		release, err = r.AdmitDispatch(ctx, ref)
+		if err != nil {
+			return 0
+		}
+	}
+	held := true
+	defer func() {
+		if held {
+			release()
+		}
+	}()
+	if r.Store.ResourceGeneration != nil {
+		current, err := r.Store.ResourceGeneration(ctx, ref.Namespace, ref.Name)
+		if err != nil {
+			return 0
+		}
+		for _, m := range msgs {
+			if m.ClaimGeneration != current {
+				return 0
+			}
+		}
+	}
+	if r.Filter != nil {
+		allowed, err := r.Filter(ctx, ref)
+		if err != nil || !allowed {
+			return 0
+		}
+	}
 	var res DispatchResult
 	var derr error
 	if dd, ok := r.Dispatch.(DetailedDispatcher); ok {
@@ -198,6 +230,8 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 	} else {
 		derr = r.Dispatch.Dispatch(ctx, ref, msgs)
 	}
+	release()
+	held = false
 	if derr != nil {
 		for _, m := range msgs {
 			// Attempts was incremented when the message was claimed above.
@@ -251,6 +285,14 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 // The original business key/metadata travel with the message. A source-ID
 // transfer receipt prevents a retried move from inserting another DLQ message.
 func (r *Runner) deadLetter(ctx context.Context, ref Ref, m Message, cause error) {
+	if m.SourceQueue == "" {
+		m.SourceQueue = ref.Name
+		m.SourceID = m.ID
+		m.SourceCreatedMs = m.TimestampMs
+	}
+	if m.Attempts > m.SourceAttempts {
+		m.SourceAttempts = m.Attempts
+	}
 	if ref.DeadLetterQueue != "" {
 		send := func() error {
 			return r.commit(ctx, ref.Namespace, ref.DeadLetterQueue, func() error {
@@ -327,12 +369,15 @@ type DetailedDispatcher interface {
 }
 
 type dispatchMessage struct {
-	ID          string          `json:"id"`
-	Body        string          `json:"body"` // base64
-	ContentType string          `json:"content_type"`
-	Attempts    int             `json:"attempts"`
-	Timestamp   int64           `json:"timestamp"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	ID               string          `json:"id"`
+	Body             string          `json:"body"` // base64
+	ContentType      string          `json:"content_type"`
+	Attempts         int             `json:"attempts"`
+	Timestamp        int64           `json:"timestamp"`
+	Metadata         json.RawMessage `json:"metadata,omitempty"`
+	SourceQueue      string          `json:"source_queue"`
+	SourceGeneration string          `json:"source_generation"`
+	SourceID         string          `json:"source_id"`
 }
 
 // Dispatch delivers a batch to the consumer endpoint (whole-batch semantics).
@@ -353,6 +398,7 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 			Attempts:    m.Attempts,
 			Timestamp:   m.TimestampMs,
 			Metadata:    m.Metadata,
+			SourceQueue: m.SourceQueue, SourceGeneration: m.SourceGeneration, SourceID: m.SourceID,
 		})
 	}
 	body, err := json.Marshal(map[string]any{

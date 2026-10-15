@@ -1,5 +1,9 @@
 # 测试策略
 
+## DLQ / 资源清理 / Queue-Cron 调用记录（ADR-205）
+
+验收记录：[resource-operations-invocations-2026-10-15.md](archive/resource-operations-invocations-2026-10-15.md)。包含无副作用分页 preview/幂等 ack、物理 SQLite/LTX 删除、远程 owner 路由、bucket 故障 retry、重建/异步上传/恢复栅栏，以及真实 pinned workerd 并发日志和结果关联。Docker 启动/部署验收为 `bash scripts/runtime-baseline-e2e.sh`，JSON 断言由 `scripts/runtime-operations-check.mjs` 执行。
+
 ## 原版 Wrangler 4.133.0 管理协议验收
 
 安装固定版本 Wrangler 后，将 `CELLHIVE_WRANGLER_BIN` 指向其 `bin/wrangler.js`，例如：

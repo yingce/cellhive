@@ -60,7 +60,8 @@ type Store struct {
 	IdleTTL      time.Duration
 	Drop         func(ctx context.Context, sc cell.Scope) error
 
-	openMu sync.Mutex // serializes cold opens so one file is opened once
+	openMu                  sync.Mutex // serializes cold opens so one file is opened once
+	resourceGenerationLocks [64]sync.Mutex
 
 	evicted atomic.Uint64
 	sweeps  atomic.Uint64

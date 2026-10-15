@@ -253,7 +253,10 @@ export default {
     return new Response("fetch-ok:" + builtInImage);
   },
   async queue(batch: any, env: Record<string, any>): Promise<void> {
+    console.log("queue invocation", batch.queue);
     for (const message of batch.messages) {
+      console.info("queue message", message.body.id, "attempt", message.attempts);
+      if (message.body.id === "invocation-fail" && message.attempts === 1) throw new Error("invocation failure probe");
       await env.KV.put("queue:last-body", JSON.stringify(message.body));
       if (message.body.id === "poison" && await env.KV.get("queue:recover") !== "yes") {
         message.retry();
@@ -265,6 +268,7 @@ export default {
     }
   },
   async scheduled(event: any, env: Record<string, any>): Promise<void> {
+    console.warn("cron invocation", event.cron);
     const key = "cron-slot:" + event.cron + ":" + event.scheduledTime;
     const count = Number(await env.KV.get(key) || 0) + 1;
     await env.KV.put(key, String(count));
@@ -390,6 +394,23 @@ DLQ_STATUS=""
 retry_capture DLQ_STATUS compose exec -T cell-agent sh -c \
   "out=\$(cellhive queue status e2e JOBS); echo \"\$out\" | grep -E '\"dead_letter_depth\"[[:space:]]*:[[:space:]]*[1-9]' >/dev/null && printf '%s' \"\$out\"" \
   || { compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose exec -T cell-agent cellhive queue status e2e DLQ >&2 || true; compose logs --tail=80 cell-agent user-runtime >&2 || true; fail "poison message did not reach the DLQ"; }
+admin_api() {
+  compose exec -T cell-agent curl -fsS -H "x-cellhive-admin-token: $ADMIN_TOKEN" "$@"
+}
+echo "== read-only DLQ preview and selected idempotent ack =="
+DLQ_PREVIEW=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=e2e&queue=JOBS&limit=1')
+DLQ_PREVIEW_AGAIN=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=e2e&queue=JOBS&limit=1')
+assert_eq "$DLQ_PREVIEW" "$DLQ_PREVIEW_AGAIN" "DLQ preview is immutable"
+bun "$ROOT/scripts/runtime-operations-check.mjs" preview "$DLQ_PREVIEW"
+DLQ_ID=$(bun -e 'console.log(JSON.parse(process.argv.at(-1)).messages[0].id)' "$DLQ_PREVIEW")
+for repeat in 1 2; do admin_api -X POST "http://127.0.0.1:8082/v1/queue/dead-letters/ack?namespace=e2e&queue=JOBS&message_id=$DLQ_ID" >/dev/null; done
+DLQ_EMPTY=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=e2e&queue=JOBS')
+bun "$ROOT/scripts/runtime-operations-check.mjs" empty "$DLQ_EMPTY"
+# Preserve the existing replay journey with a new poison delivery.
+fetch_path '/queue?id=poison' >/dev/null
+retry_capture DLQ_STATUS compose exec -T cell-agent sh -c \
+  "out=\$(cellhive queue status e2e JOBS); echo \"\$out\" | grep -E '\"dead_letter_depth\"[[:space:]]*:[[:space:]]*[1-9]' >/dev/null && printf '%s' \"\$out\"" \
+  || fail "replacement poison message did not reach DLQ"
 assert_eq ready "$(fetch_path /recover-queue)" "queue recovery toggle"
 REPLAY=$(compose exec -T cell-agent cellhive queue replay-dlq e2e JOBS --limit 1)
 [[ "$REPLAY" == *'"replayed": 1'* ]] || fail "DLQ replay did not move a message: $REPLAY"
@@ -478,6 +499,51 @@ META_JSON=$(fetch_path /receipt?id=native-idempotent)
 INTERNAL_TOKEN=$(compose exec -T cell-agent cellhive creds internal | tr -d '\r\n')
 [[ -n "$INTERNAL_TOKEN" ]] || fail "could not derive host internal token"
 assert_not_contains "$ENV_JSON" "$INTERNAL_TOKEN" "tenant env"
+
+echo "== durable Queue/Cron invocation ID, outcomes and console query =="
+fetch_path '/queue?id=invocation-fail' >/dev/null
+INVOCATION_RECEIPT=""
+retry_capture INVOCATION_RECEIPT compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=invocation-fail' | grep -F '\"queue\":\"processed\"'" \
+  || fail "failed queue invocation did not retry successfully"
+INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&limit=100')
+INVOCATION_ID=$(bun "$ROOT/scripts/runtime-operations-check.mjs" invocations "$INVOCATIONS")
+ONE_INVOCATION=$(admin_api "http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&invocation_id=$INVOCATION_ID")
+bun "$ROOT/scripts/runtime-operations-check.mjs" one "$ONE_INVOCATION" "$INVOCATION_ID"
+
+echo "== destructive resource cleanup and independent DLQ preservation =="
+compose exec -T cell-agent cellhive kv namespace create cleanup KV --scope cleanup/__kv__/physical >/dev/null
+compose exec -T cell-agent cellhive queue create cleanup JOBS >/dev/null
+compose exec -T cell-agent cellhive queue create cleanup DLQ >/dev/null
+admin_api -X PUT --data 'kv-cleanup-payload' \
+  'http://127.0.0.1:8082/client/v4/accounts/cleanup/storage/kv/namespaces/KV/values/secret' >/dev/null
+assert_eq kv-cleanup-payload "$(admin_api 'http://127.0.0.1:8082/client/v4/accounts/cleanup/storage/kv/namespaces/KV/values/secret')" "KV cleanup seed"
+# The Worker journey above proves scoped data-plane execution; internal transfer
+# seeds delayed data for a separate resource without an attached consumer.
+compose exec -T cell-agent curl -fsS -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+  --data '{"id":"cleanup-seed","body":"cGF5bG9hZA==","content_type":"text"}' \
+  'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=JOBS' >/dev/null
+compose exec -T cell-agent curl -fsS -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+  --data '{"id":"dlq-seed","body":"a2VlcA==","content_type":"text"}' \
+  'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=DLQ' >/dev/null
+compose exec -T cell-agent sh -c 'test -f /data/state/cells/cleanup/__kv__/physical.db && test -f /data/state/cells/cleanup/__queue__/JOBS.db' \
+  || fail "cleanup resources were not backed by real SQLite data"
+admin_api -X DELETE 'http://127.0.0.1:8082/v1/kv/resources?namespace=cleanup&name=KV' >/dev/null
+admin_api -X DELETE 'http://127.0.0.1:8082/v1/queue/resources?namespace=cleanup&name=JOBS' >/dev/null
+CLEANUP_STATE=""
+for resource in kv:KV queue:JOBS; do
+  kind=${resource%%:*}; name=${resource##*:}
+  retry_capture CLEANUP_STATE compose exec -T cell-agent sh -c \
+    "curl -fsS -H 'x-cellhive-admin-token: $ADMIN_TOKEN' 'http://127.0.0.1:8082/v1/control/resource/cleanup?namespace=cleanup&kind=$kind&name=$name' | grep -F '\"state\":\"complete\"'" \
+    || { compose logs --tail=100 cell-agent >&2 || true; fail "resource cleanup did not complete: $resource"; }
+done
+compose exec -T cell-agent sh -c 'test ! -e /data/state/cells/cleanup/__kv__/physical.db && test ! -e /data/state/cells/cleanup/__queue__/JOBS.db && test -z "$(find /data/bucket/cells/cleanup/__kv__/physical/ltx /data/bucket/cells/cleanup/__queue__/JOBS/ltx -type f -print 2>/dev/null)"' \
+  || fail "completed cleanup retained local SQLite or authoritative replica payloads"
+PRESERVED_DLQ=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=cleanup&queue=DLQ&direct=1')
+bun "$ROOT/scripts/runtime-operations-check.mjs" preserved "$PRESERVED_DLQ"
+DELETED_TRANSFER_CODE=$(compose exec -T cell-agent curl -sS -o /dev/null -w '%{http_code}' -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+  --data '{"id":"late","body":"eA==","content_type":"text"}' 'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=JOBS')
+assert_eq 410 "$DELETED_TRANSFER_CODE" "deleted queue rejects late writes"
 
 echo "== gated DO durability and restart =="
 DO1=$(fetch_path /do)

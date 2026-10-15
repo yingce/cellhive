@@ -4,6 +4,7 @@ package upload
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"log/slog"
 	"sync"
@@ -38,10 +39,11 @@ type Batcher struct {
 	maxBytes    int
 	interval    time.Duration
 
-	batches  atomic.Uint64
-	segments atomic.Uint64
-	errors   atomic.Uint64
-	dropped  atomic.Uint64
+	batches   atomic.Uint64
+	segments  atomic.Uint64
+	errors    atomic.Uint64
+	dropped   atomic.Uint64
+	discarded atomic.Uint64
 
 	// Durable queue for async (RPO>0) uploads: persisted before enqueue,
 	// removed on success, replayed on start and retried until it drains.
@@ -169,6 +171,14 @@ func (b *Batcher) replayOnce(ctx context.Context) {
 			return
 		}
 		if _, _, err := b.sink.AppendBatch(ctx, e.Scope, e.Epoch, e.Segments); err != nil {
+			if errors.Is(err, cell.ErrResourceDeleted) {
+				if err := b.spool.Remove(e.ID); err != nil {
+					b.spoolErrors.Add(1)
+				} else {
+					b.discarded.Add(uint64(len(e.Segments)))
+				}
+				continue
+			}
 			b.errors.Add(1)
 			if b.log != nil {
 				b.log.Warn("spooled upload replay failed", "scope", e.Scope.String(), "epoch", e.Epoch, "segments", len(e.Segments), "err", err)
@@ -254,6 +264,9 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 			if _, _, err = b.sink.AppendBatch(ctx, g.scope, g.epoch, g.segments); err == nil {
 				break
 			}
+			if errors.Is(err, cell.ErrResourceDeleted) {
+				break
+			}
 			if ctx.Err() != nil {
 				// Canceled: stop retrying and record the cancellation rather than
 				// the sink's transient error (the batch is deferred/dropped either
@@ -266,7 +279,17 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 			case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
 			}
 		}
-		if err != nil {
+		if errors.Is(err, cell.ErrResourceDeleted) {
+			for _, it := range g.items {
+				if it.spoolID != 0 && b.spool != nil {
+					if err := b.spool.Remove(it.spoolID); err != nil {
+						b.spoolErrors.Add(1)
+						continue
+					}
+				}
+				b.discarded.Add(1)
+			}
+		} else if err != nil {
 			// A spooled segment is not lost: its file stays for replay. Only a
 			// segment we could not persist is really dropped (counted + alerted).
 			b.errors.Add(1)
@@ -388,12 +411,13 @@ func (b *Batcher) Stop() {
 // Stats returns batcher counters.
 func (b *Batcher) Stats() map[string]uint64 {
 	st := map[string]uint64{
-		"batches":  b.batches.Load(),
-		"segments": b.segments.Load(),
-		"errors":   b.errors.Load(),
-		"dropped":  b.dropped.Load(),
-		"deferred": b.deferred.Load(),
-		"replayed": b.replayed.Load(),
+		"batches":           b.batches.Load(),
+		"segments":          b.segments.Load(),
+		"errors":            b.errors.Load(),
+		"dropped":           b.dropped.Load(),
+		"deferred":          b.deferred.Load(),
+		"replayed":          b.replayed.Load(),
+		"discarded_deleted": b.discarded.Load(),
 	}
 	if b.spool != nil {
 		st["spool"] = uint64(b.spool.Count())

@@ -2527,6 +2527,19 @@
 
 ---
 
+## ADR-205 DLQ 只读管理、资源数据清理与 Queue/Cron 调用记录（2026-10-15）
+
+- **复核收口**：物理 scope/共享别名检查与清理快照同事务；资源生命周期 hook 与 create/delete 串行。独立持久本地 incarnation marker 在锁内重验权威 generation 并绑定请求准入；claim 保存 consumed Queue generation，dispatch 持准入至 handler 返回，旧批次不能跨重建执行。源 Queue generation 的转移 intent 先入 control，再由目的地消息事务验证，清理发现全部历史/转移目的地。退休 GC ledger 跨 namespace purge 保留并轮转清迟到旧 epoch，payload PUT 后重验 fence；新 epoch 不受影响。调用记录保存 tagged result、逐消息 ack/retry 延迟、message logical lineage/前驱调用，重组批次仍可追踪。全部具体复核问题已关闭，见验收记录。
+
+- **定位**：CellHive 控制面扩展，不声称 Cloudflare 提供同名、同语义 API。无副作用 DLQ peek 不得复用 claim；按 ID ack 走 owner/capture，缺失 ID 幂等成功。keyset cursor 绑定 namespace/DLQ，body 明确为 base64，返回原消息来源和失败尝试次数。
+- **删除**：KV/Queue revoke 和 cleanup job 在 control cell 同事务提交，快照物理 scope（KV 支持自定义 ID）、主 Queue 引用的 DLQ。删除栅栏先于删除成功响应建立；所有原生 data 请求/consumer 及异步副本写入点查栅栏，不依赖短 TTL binding cache。清理按 scope owner 执行，停止 capture/排空请求、删除 SQLite/WAL、wake 和全部 LTX；保留无业务数据的 owner-generation 与资源 epoch fence，拒绝旧 epoch 上传/恢复。后台 bounded pass、租约/失败次数/退避、手动 retry；完成前禁止同名/同 scope 重建，共享 scope 拒绝破坏性删除。重建沿用单调 owner epoch，旧节点本地副本按 epoch floor 失效。
+- **Queue 边界**：删 Q 覆盖 Q 的全部消息（普通/延迟/作为 DLQ 自身收到的消息）与 ledger；可按持久来源删除独立 DLQ 中由 Q 转来的 dead letters，但不删除 DLQ 资源或其他来源消息。旧消息缺 provenance 时返回可查询失败，须 preview/ack 后重试，不猜测归属。purge 保持只清空消息。异步 upload spool 遇持久删除错误丢弃旧 payload；recovery 跳过已删除 epoch，不阻塞同 session 活资源恢复。已 sealed follower recovery logs 仍服从原 session 回收生命周期，不承诺立即逐资源抹除历史副本。
+- **调用记录**：每个 Queue batch/Cron attempt 独立 UUID invocation_id；logical_id 关联相同批次/slot 重试，attempt 在 namespace invocation cell 原子分配。可信 runtime host 在执行前持久化 running，之后持久化 success/failed/retry、时间、异常/stack、console 日志；native Tail ring 继续独立工作。AsyncLocalStorage 隔离重叠调用，ctx/importable waitUntil 在执行结束前等待并记录日志。未完成 running 不能伪报成功。
+- **预算/查询**：namespace 内 `__invocations__/main` SQLite，7 天/10,000 次历史，按写入有界清理；单条记录 <=128 KiB，最多 256 条 console/8192 字符，截断显式标记。按 namespace/Worker/kind/时间/调用 ID 分页查询，日志与结果同记录。`CELLHIVE_TENANT_LOG_CAPTURE=off` 仅关闭 native Tail；执行记录为必开控制面观测。
+- **协议发布**：新旧 cleanup/fence writer 不得混跑；先升级所有副本/恢复/consumer writer 再开放删除 API。详情/接口/验收见 `operations.md`、`superpowers/specs/2026-10-15-resource-operations-and-invocations.md`。
+
+---
+
 ## ADR-185 租户 env 完全由用户拥有：零平台键
 
 - **背景**：ADR-184 把传输与凭据收敛到平台侧 stub，但仍把 `CH_PLATFORM` 写入 loaded Worker 的 `env`，并因此保留 `CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称。平台键即使没有直接暴露凭据，仍占用用户命名空间，也允许租户代码直接触达平台能力。

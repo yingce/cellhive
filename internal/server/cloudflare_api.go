@@ -668,8 +668,8 @@ func (s *Server) handleCloudflareQueueList(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleCloudflareResourceDelete(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ns, name := r.PathValue("account_id"), r.PathValue("resource_id")
-		if err := s.Control.DeleteResource(r.Context(), ns, kind, name, "wrangler"); err != nil {
-			writeErr(w, http.StatusNotFound, "resource_delete_failed", err.Error())
+		rec := s.cloudflareAdminBridge(r, http.MethodDelete, "/v1/"+kind+"/resources", url.Values{"namespace": {ns}, "name": {name}, "force": {"1"}}, nil)
+		if cloudflareBridgeError(w, rec, nil) {
 			return
 		}
 		cloudflareResult(w, nil)

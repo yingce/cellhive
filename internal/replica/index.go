@@ -182,11 +182,16 @@ func DecodeIndex(data []byte) (PageIndex, error) {
 
 // PutIndex writes the page index for a scope/epoch.
 func (m *Manager) PutIndex(ctx context.Context, s cell.Scope, epoch uint64, idx PageIndex) error {
+	release, guardErr := m.resourceWriteGuard(ctx, s, epoch)
+	if guardErr != nil {
+		return guardErr
+	}
+	defer release()
 	data, err := EncodeIndex(idx)
 	if err != nil {
 		return err
 	}
-	_, err = m.B.Put(ctx, IndexName(s, epoch), data)
+	_, err = m.putResourceObject(ctx, s, epoch, IndexName(s, epoch), data)
 	return err
 }
 

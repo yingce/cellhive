@@ -34,6 +34,7 @@ import (
 	"cellhive/internal/config"
 	"cellhive/internal/control"
 	"cellhive/internal/d1"
+	"cellhive/internal/invocation"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/ltx"
@@ -103,7 +104,8 @@ type Deps struct {
 	// DispatchWorkflow runs (or resumes) a workflow instance; set by cell-agent.
 	DispatchWorkflow func(ctx context.Context, ns, name, id, runToken string) error
 	// Logs is the bounded per-worker log buffer backing `cellhive tail`.
-	Logs *logbuf.Buffer
+	Logs        *logbuf.Buffer
+	Invocations *invocation.Store
 	// Capture wires cellstore-backed cells into the replication chain (nil =
 	// no capture; KV/D1 writes stay local). See internal/cellcapture.
 	Capture *cellcapture.Manager
@@ -128,6 +130,9 @@ type Deps struct {
 // Server wires the HTTP surface for a cell-agent node.
 type Server struct {
 	Deps
+	resourceRep       *replica.Manager
+	resourceCleanupMu sync.Mutex
+	retirementAfter   string
 
 	requests atomic.Uint64
 	claims   atomic.Uint64
@@ -193,7 +198,21 @@ type bindingEntry struct {
 
 // New builds a Server.
 func New(d Deps) *Server {
-	return &Server{Deps: d, ordered: newOrderedDispatcher(), tails: make(map[string]*cloudflareTailSession)}
+	if d.Invocations == nil && d.Store != nil {
+		d.Invocations = invocation.New(d.Store)
+	}
+	s := &Server{Deps: d, ordered: newOrderedDispatcher(), tails: make(map[string]*cloudflareTailSession)}
+	s.resourceRep = d.Replica
+	if s.resourceRep == nil && d.Bucket != nil {
+		s.resourceRep = replica.New(d.Bucket)
+	}
+	s.configureQueueStore(s.Queue)
+	if d.Control != nil && d.Bucket != nil {
+		d.Control.OnResourceActivated = s.activateResource
+		d.Control.OnResourceRevoked = s.revokeResource
+		d.Control.ResourceGeneration = s.resourceReplica().ResourceGeneration
+	}
+	return s
 }
 
 // SetReady marks the node ready.
@@ -207,6 +226,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /v1/diagnose", s.auth(s.handleDiagnose))
 	mux.HandleFunc("POST /v1/internal/telemetry/spans", s.auth(s.handleTelemetrySpans))
+	mux.HandleFunc("POST /v1/internal/invocations", s.auth(s.handleInvocationPut))
+	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
+	mux.HandleFunc("POST /v1/internal/queue/remove-source", s.auth(s.handleQueueRemoveSource))
+	mux.HandleFunc("GET /v1/control/resource/cleanup", s.auth(s.handleResourceCleanupStatus))
+	mux.HandleFunc("POST /v1/control/resource/cleanup/retry", s.auth(s.handleResourceCleanupRetry))
+	mux.HandleFunc("GET /v1/control/invocations", s.auth(s.handleInvocationList))
+	mux.HandleFunc("GET /v1/control/queue/dlq/messages", s.auth(s.handleControlQueueDLQPreview))
+	mux.HandleFunc("POST /v1/control/queue/dlq/ack", s.auth(s.handleControlQueueDLQAck))
 	mux.HandleFunc("GET /v1/internal/resolve", s.auth(s.handleResolve))
 	mux.HandleFunc("POST /v1/internal/claim", s.auth(s.handleClaim))
 	mux.HandleFunc("POST /v1/internal/renew", s.auth(s.handleRenew))
@@ -326,6 +353,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/service/run", s.scopeAuth("service")(s.admit(s.handleServiceRun)))
 	mux.HandleFunc("POST /v1/queue/send", s.scopeAuth("queue")(s.admit(s.handleQueueSend)))
 	mux.HandleFunc("POST /v1/internal/queue/transfer", s.auth(s.pinNSMW(s.handleQueueTransfer)))
+	mux.HandleFunc("POST /v1/internal/queue/transfer-destination", s.auth(s.handleQueueTransferDestination))
 	mux.HandleFunc("POST /v1/queue/send-batch", s.scopeAuth("queue")(s.admit(s.handleQueueSendBatch)))
 	mux.HandleFunc("POST /v1/queue/claim", s.scopeAuth("queue")(s.admit(s.handleQueueClaim)))
 	mux.HandleFunc("POST /v1/queue/ack", s.scopeAuth("queue")(s.admit(s.handleQueueAck)))

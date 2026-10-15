@@ -52,6 +52,9 @@ func (m *Manager) Collect(ctx context.Context, followers []string) (int, error) 
 				continue
 			}
 			if _, _, err := m.Replica.Append(ctx, sc, h.Epoch, h.Segment); err != nil {
+				if errors.Is(err, replica.ErrResourceDeleted) {
+					continue
+				}
 				lastErr = fmt.Errorf("recovery: append %s: %w", h.Scope, err)
 				continue
 			}
@@ -100,6 +103,12 @@ func (m *Manager) collectSealed(ctx context.Context, followers []string, session
 				}
 				for _, segment := range fragment.Segments {
 					if _, _, err := m.Replica.Append(ctx, sc, fragment.Epoch, segment); err != nil {
+						// A durable resource-delete fence intentionally supersedes
+						// these old payloads. Advance the session sequence without
+						// resurrecting them or blocking unrelated live cells.
+						if errors.Is(err, replica.ErrResourceDeleted) {
+							continue
+						}
 						return total, covered, fmt.Errorf("recovery: append %s: %w", fragment.Scope, err)
 					}
 					total++

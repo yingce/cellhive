@@ -175,7 +175,7 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade source |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | runtime directory (subdirectory `user-runtime/`) |
-| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` captures tenant `console.*`/uncaught exceptions; `off` omits the native Tail for higher Worker throughput; accepts only `on`/`off` |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` captures tenant `console.*`/uncaught exceptions; `off` omits native Tail for higher Worker throughput; it does not disable persistent Queue/Cron invocation records (ADR-205); accepts only `on`/`off` |
 | `CELLHIVE_SERVICE_NATIVE` | empty=enabled | `0` disables native service RPC |
 | `CELLHIVE_DO_DIRECT` | empty=enabled | `0` disables owner-hint direct access |
 | `CELLHIVE_TENANT_OUTBOUND` | empty→`public` | egress category `public`/`private`/`local` |
