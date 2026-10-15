@@ -2,7 +2,11 @@
 
 This document records all issues found during the system review, as well as **the resolution decision for each issue**. See the appendix at the end for the original severity levels. The design documents (architecture / cell-protocol / durable-objects / networking / decisions) have been synchronized accordingly.
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-10-15_
+
+## 2026-10-15 scheduling correctness fixes
+
+Coincident Cron expressions have distinct persisted identities; scheduled `noRetry()` is implemented inside the tenant wrapper and returned as data. Workflow busy claims retain timers; create/event/resume/restart have transactional `workflow-run` outboxes, and event waits atomically park/release their lease and check raced events. DO alarms pre-publish a durable timer before changing object alarm state, validate generations, consume active alarms into pending deliveries and retain failures for retry. Failed handoffs fail closed. See `../timers-and-dispatch.md` and `../testing.md` for verification. Remaining limits: DO retries use the unified runner rather than CF's native backoff/retry cap; external side effects remain at-least-once; alarms inside `transactionSync` are unsupported. Numeric legacy alarms remain readable; do not mix dispatchers that ignore the new timer kind/generation fields.
 
 ---
 

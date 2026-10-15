@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
@@ -70,6 +71,25 @@ func TestDOOwnerEndpoints(t *testing.T) {
 	}
 	if rr := do(t, h, http.MethodPost, "/v1/internal/do/claim", "tok", []byte(do2)); rr.Code != http.StatusOK {
 		t.Fatalf("claim after release = %d", rr.Code)
+	}
+}
+
+func TestDOAlarmPrepareDoesNotErasePreviousGeneration(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, generation := range []string{"old", "replacement"} {
+		body := []byte(`{"namespace":"demo","worker":"w","class":"C","id":"one","due_ms":1900000000000,"alarm_id":"` + generation + `"}`)
+		rr := do(t, s.Handler(), http.MethodPost, "/v1/internal/do/alarm/upsert", "tok", body)
+		if rr.Code != 200 {
+			t.Fatalf("prepare=%d %s", rr.Code, rr.Body.String())
+		}
+	}
+	st, err := s.OpenTimer(t.Context(), cell.Scope{Namespace: "demo", Class: "__timer__", ID: "do"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.Due(t.Context(), 1900000000000, 100)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("replacement prepare lost old committed timer: %+v %v", due, err)
 	}
 }
 

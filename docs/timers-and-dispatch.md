@@ -1,15 +1,26 @@
 # 计时器与派发
 
+## 调度正确性修订（2026-10-15）
+
+- Cron occurrence 对新任务包含分钟 slot 和完整表达式；同分钟不同表达式独立触发，重复物化同一表达式仍去重。旧分钟 occurrence 继续可读。`scheduled.noRetry()` 在租户 wrapper 中构造，通过普通数据返回派发结果，禁止依赖跨 isolate 的闭包状态。
+- Workflow 的临时 claim 拒绝不能视为成功消费；初次启动必须具有持久化重试入口。等待事件和 sleep 统一可靠 park，事件与 park 交错不能丢唤醒；终态/暂停与暂时繁忙须区分。
+- DO alarm 必须可靠交接到 cell-agent 定时器，不能在上报未确认时静默确认设置成功；须覆盖对象写入与索引建立之间的崩溃恢复。派发携带 alarm 身份，陈旧/已取消任务不得执行业务 handler；成功消费旧任务不得清除 handler 新设置的 alarm，失败保留可重试身份。
+- 验收：真实 pinned workerd 覆盖 scheduled/noRetry 与 DO alarm；Docker 完整链路覆盖双 Cron、Workflow 并发排队/事件唤醒、alarm 重试/重设及待触发 alarm 跨 runtime 重启。命令与结果见 [验收记录](archive/timer-correctness-2026-10-15.md)。
+
+实现细节：Workflow `workflow-run` outbox 与实例/事件同事务提交，claim 同事务建立 lease 过期恢复任务；wait park 原子释放租约并检查已到达事件。DO `setAlarm()` 在 `blockConcurrencyWhile` 中经对象绑定 capability **先建立 timer，再写 alarm ID/时间**；失败不确认。触发时 active 原子移入 pending，成功消费 pending、失败保留供重试；新设置的 active 不被旧任务清除。准备过程崩溃留下的陈旧 timer 由 generation 检查安全跳过。
+
+注意：DO 重试仍为 runner 轮询重投，不承诺 Cloudflare 原生指数退避/重试上限；普通 JS step 的外部副作用与 DO alarm handler 均需按至少一次执行设计。旧版本 task 格式采用惰性读取兼容；升级不能混用忽略新 kind/generation 的旧 dispatcher。
+
 ## 统一定时器抽象
 
 所有定时事件统一为：
 
 ```
 timer = { dueAt, kind, scope, token }
-kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-timeout }
+kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-timeout, workflow-run, workflow-schedule, kv-expire }
 ```
 
-- **存储**：due 记录落在**各自所属 cell 的 SQLite**（时间索引/时间桶）；**不建 bucket 计时索引**；
+- **存储**：due 记录落在**各自所属 cell 的 SQLite**（权威）；桶 `wake/` 只索引每个 timer scope 最早到期时间，供故障恢复发现，不承载逐任务权威状态；
 - **去重**：`token = hash(scope, kind, dueAt, occurrence)`；cell SQLite 记 `fired:<token>`（TTL）；**已 fired 跳过**（ADR-033）。
 
 ## 触发：两层
@@ -20,7 +31,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 | **单 fleet waker** | bucket 租约选出的一个 leader | owner 已死/失联的项 | 接管时点查 owner 记录 |
 
 - **派发寻址**：发给 `user-runtime` 的**逻辑服务名**（mesh），任一健康副本；**不需要节点表**；
-- **前提**：含待触发计时器的 cell 必须 **resident/pinned**。
+- **驻留**：不要求 resident/pinned；按需重开与 wake 索引恢复见下方 ADR-152 定稿。
 
 ## 各类语义
 
@@ -43,7 +54,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 > **状态（2026-09-15）**：**全链路已实现**——调度器（ADR-076：`internal/cron`，5 字段 UTC，物化 slot 为 `KindCron` 定时器，`CELLHIVE_CRON_INTERVAL` 默认 30s）→ 派发（ADR-070：`Projection.CronTargets()` → `cronEnricher` 补 worker/bundle → user-runtime `POST /v1/timers/dispatch` → `scheduled(event, env, ctx)`，真实 workerd e2e）。scope 约定 `<ns>/__cron__/<worker>`、occurrence=slot、token 去重、best-effort 不补跑、每节点可跑。
 
 - cron 配置存 `__cron__` cell；owner 的 cell-agent 计算下一次触发时间；
-- 分钟 slot 唯一键保证**每 slot 单次**；错过不补跑。
+- 新 occurrence 包含分钟 slot + 表达式，保证**每表达式每 slot 去重**；错过不补跑。派发成功但 fired 尚未持久化的崩溃仍可能重投。
 
 ## DO alarm
 

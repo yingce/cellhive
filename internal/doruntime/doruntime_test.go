@@ -65,22 +65,24 @@ func noProxyClient() *http.Client {
 }
 
 type ownerStub struct {
-	claims    int
-	renews    int
-	releases  int
-	claimKeys []string // "<ns>/<worker>/<class>/shard<N>" from each claim
-	epoch     uint64
-	live      map[string]bool   // class -> another node holds a live lease
-	lease     bool              // when set, every claim gets 409 owner_live (lease held)
-	forwardTo string            // when set, claim returns 409 owner_live with this address
-	alarms    []int64           // due_ms values reported by the host
-	bundles   map[string]string // sha -> source (overrides the single bundle)
-	bindings  map[string]any    // facet binding spec served by /v1/internal/do/bindings
-	vars      map[string]any    // tenant vars served by /v1/internal/do/bindings
-	self      atomic.Value      // string: this runtime's base URL, for DO->DO proxying
-	ownerMu   sync.Mutex        // guards live/lease/forwardTo (mutated while serving)
-	spanMu    sync.Mutex        // guards spans
-	spans     []map[string]any  // JS-reported OTLP spans (ADR-167)
+	claims      int
+	renews      int
+	releases    int
+	claimKeys   []string // "<ns>/<worker>/<class>/shard<N>" from each claim
+	epoch       uint64
+	live        map[string]bool // class -> another node holds a live lease
+	lease       bool            // when set, every claim gets 409 owner_live (lease held)
+	forwardTo   string          // when set, claim returns 409 owner_live with this address
+	alarms      []int64         // due_ms values reported by the host
+	alarmIDs    []string
+	alarmReject atomic.Bool
+	bundles     map[string]string // sha -> source (overrides the single bundle)
+	bindings    map[string]any    // facet binding spec served by /v1/internal/do/bindings
+	vars        map[string]any    // tenant vars served by /v1/internal/do/bindings
+	self        atomic.Value      // string: this runtime's base URL, for DO->DO proxying
+	ownerMu     sync.Mutex        // guards live/lease/forwardTo (mutated while serving)
+	spanMu      sync.Mutex        // guards spans
+	spans       []map[string]any  // JS-reported OTLP spans (ADR-167)
 }
 
 // setLive marks a class as held by another node, for tests that force a
@@ -203,10 +205,16 @@ func (o *ownerStub) handler(bundle string) http.HandlerFunc {
 			_, _ = w.Write(rb)
 			return
 		case "/v1/internal/do/alarm/upsert":
+			if o.alarmReject.Load() {
+				http.Error(w, "alarm index unavailable", 503)
+				return
+			}
 			var req map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if due, ok := req["due_ms"].(float64); ok {
 				o.alarms = append(o.alarms, int64(due))
+				id, _ := req["alarm_id"].(string)
+				o.alarmIDs = append(o.alarmIDs, id)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 			return
@@ -1404,6 +1412,9 @@ func TestDoRuntimeMetricsReportedToSupervisor(t *testing.T) {
 	base, stop := startRuntimeGate(t, o, t.TempDir(), gate.URL)
 	defer stop()
 
+	if resp, body := invokeSpec(t, base, map[string]any{"namespace": "demo", "worker": "counter", "bundle_sha": "sha1", "class": "Tenant", "id": "m1", "request": map[string]any{"path": "/arm"}}); resp.StatusCode != 200 {
+		t.Fatalf("arm=%d %s", resp.StatusCode, body)
+	}
 	resp, body := invokeSpec(t, base, map[string]any{
 		"namespace": "demo", "worker": "counter", "bundle_sha": "sha1", "class": "Tenant", "id": "m1",
 		"kind": "alarm",

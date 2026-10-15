@@ -60,6 +60,7 @@ func (d *DoAlarmDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 		StorageClass string `json:"sc"`
 		StorageID    string `json:"sid"`
 		ID           string `json:"id"`
+		AlarmID      string `json:"a"`
 	}
 	if err := json.Unmarshal([]byte(t.Occurrence), &occ); err != nil {
 		return fmt.Errorf("do alarm: bad occurrence %q: %w", t.Occurrence, err)
@@ -87,6 +88,7 @@ func (d *DoAlarmDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 		"namespace": sc.Namespace, "worker": worker, "class": class, "shard": shard,
 		"id": id, "bundle_sha": sha, "version": ver, "kind": "alarm",
 		"storage_class": occ.StorageClass, "storage_id": occ.StorageID,
+		"alarm_id": occ.AlarmID, "alarm_due_ms": t.DueAtMs,
 	})
 	// do-runtime addresses are advertised as host:port (ADR-080); add the
 	// scheme before URL parsing or the dispatcher fails every tick

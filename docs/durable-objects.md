@@ -1,5 +1,7 @@
 # Durable Objects
 
+> **2026-10-15 alarm 修订（取代下方历史上报/消费描述）**：`setAlarm` 经对象绑定 capability 先确认统一 timer 持久化，再写对象时间/generation；交接失败不静默确认。派发验证 generation，active→pending 原子消费，失败保留重试、成功不误删 handler 新设 alarm。retryCount/isRetry 记录在 pending 中，重试节奏仍为统一 runner，非 CF 原生退避/次数上限。旧数字 alarm 惰性兼容。见 [计时器契约](timers-and-dispatch.md) 与 [验收](archive/timer-correctness-2026-10-15.md)。
+
 > **状态（2026-09-15）**：**host-actor 骨架 + 归属/栅栏/排空/驻留已实现并验证**（ADR-077/078：facets + `workerLoader.getDurableObjectClass` + localDisk；`/v1/do/invoke`；shard、owner record + **单调 generation**（`owner-gen`）、pre-dispatch guard/renew、`/v1/do/drain`、`DO_PREVENT_EVICTION` resident/evictable；真实 workerd e2e）。
 > **alarm（ADR-079）**：facet 原生 alarm 不可用（pinned `alarms are not yet implemented for SQLite-backed Durable Objects`；最新 2026-09-15 仍 `Facets currently cannot set alarms`）→ 平台 shim：`cellhive-do.js` 基类把 setAlarm/getAlarm/deleteAlarm 落到对象 storage 保留键，host 上报 cell-agent，统一 timer（`KindDOAlarm`）+ `DoAlarmDispatcher` → do-runtime `kind:"alarm"` 调 `alarm()`；真实 workerd e2e 通过。**CF 差异**：无 native retry 计数、`transactionSync` 内不支持、无 per-alarm lease。
 > **WebSocket（ADR-080）**：`GET /v1/do/connect` 原样升级到 facet（hibernation API），重启/abort 先 `__chCloseAll(1012)` 再 `facets.abort()` → 客户端收 1012（真实 bun e2e）。**租户接线（ADR-175）**：`env.DO.get(id).fetch(升级请求)` 由 facade 检测 `Upgrade` 后，先向 cell-agent `GET /v1/do/connect` 取 `{owner,ticket}`（scoped token），再带 ticket 直连 owner 的 `/v1/do/connect`；do-runtime 允许 ticket 用于 connect 且校验仅本 shard。

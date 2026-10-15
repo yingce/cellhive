@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS fired (
 CREATE INDEX IF NOT EXISTS fired_expires ON fired(expires_ms);
 `
 
+// InsertTx allows a producer sharing the timer cell to commit its state and
+// dispatch outbox atomically. The producer must publish the wake index before
+// committing, and register the scope after commit (as Store.Upsert does).
+func InsertTx(ctx context.Context, tx *sql.Tx, t Timer) error {
+	if !t.Kind.Valid() || t.Token == "" {
+		return fmt.Errorf("timer: invalid transactional timer")
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO timers(token,due_ms,kind,scope,occurrence) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM fired WHERE token=?) ON CONFLICT(token) DO UPDATE SET due_ms=excluded.due_ms,kind=excluded.kind,scope=excluded.scope,occurrence=excluded.occurrence`, t.Token, t.DueAtMs, string(t.Kind), t.Scope, t.Occurrence, t.Token)
+	return err
+}
+
 // Index mirrors a scope's earliest pending timer into the bucket wake index so
 // the fleet waker can find due work without listing every cell (ADR-099).
 type Index interface {
@@ -111,11 +122,7 @@ func (s *Store) Upsert(ctx context.Context, t Timer) error {
 	// Every cell write goes through Cell.Tx so it advances the cell's txid and
 	// the capture watermark covers it before the caller is acknowledged (RPO=0).
 	_, err := s.cell.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `
-INSERT INTO timers(token, due_ms, kind, scope, occurrence) VALUES(?,?,?,?,?)
-ON CONFLICT(token) DO UPDATE SET due_ms=excluded.due_ms, kind=excluded.kind, scope=excluded.scope, occurrence=excluded.occurrence`,
-			t.Token, t.DueAtMs, string(t.Kind), t.Scope, t.Occurrence)
-		return err
+		return InsertTx(ctx, tx, t)
 	})
 	// Correct the entry after the commit, and also on failure (the pre-published
 	// entry may name a timer that never committed).

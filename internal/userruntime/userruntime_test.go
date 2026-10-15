@@ -1600,7 +1600,7 @@ func TestUserRuntimePublicLoaderServesAssets(t *testing.T) {
 const scheduledTenantBundle = `
 export default {
   async fetch() { return new Response("tenant"); },
-  async scheduled(event, env, ctx) { return "scheduled:" + event.cron + ":" + event.scheduledTime; },
+  async scheduled(event, env, ctx) { if(event.cron === "no-retry") { event.noRetry(); throw new Error("intentional failure"); } if(event.cron === "retry") throw new Error("retry failure"); return "scheduled:" + event.cron + ":" + event.scheduledTime; },
 };
 `
 
@@ -1674,6 +1674,28 @@ func TestUserRuntimeDispatchesTimerToTenantHandler(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || !out.OK || out.Result != "scheduled:0 * * * *:1700000000000" {
 		t.Fatalf("scheduled result = %d %+v", resp.StatusCode, out)
+	}
+	for _, cron := range []string{"no-retry", "retry"} {
+		payload["cron"] = cron
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, base+"/v1/timers/dispatch", bytes.NewReader(body))
+		req.Header.Set("x-cellhive-internal-token", "tok")
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result map[string]any
+		err = json.NewDecoder(res.Body).Decode(&result)
+		res.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cron == "no-retry" && (res.StatusCode != 200 || result["no_retry"] != true || result["ok"] != false) {
+			t.Fatalf("noRetry = %d %+v", res.StatusCode, result)
+		}
+		if cron == "retry" && res.StatusCode != 500 {
+			t.Fatalf("retry = %d %+v", res.StatusCode, result)
+		}
 	}
 
 	cancel()

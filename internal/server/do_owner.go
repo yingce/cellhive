@@ -146,6 +146,7 @@ type doAlarmReq struct {
 	StorageClass string `json:"storage_class"`
 	StorageID    string `json:"storage_id"`
 	DueMs        int64  `json:"due_ms"`
+	AlarmID      string `json:"alarm_id"`
 }
 
 // doAlarmOccurrence is the timer occurrence carrying the full object identity.
@@ -157,9 +158,13 @@ func doAlarmOccurrence(r doAlarmReq) (string, error) {
 	if sc == "" {
 		sc = r.Class
 	}
-	b, err := json.Marshal(map[string]any{
+	identity := map[string]any{
 		"w": r.Worker, "c": r.Class, "s": r.Shard, "sc": sc, "sid": r.StorageID, "id": r.ID,
-	})
+	}
+	if r.AlarmID != "" {
+		identity["a"] = r.AlarmID
+	}
+	b, err := json.Marshal(identity)
 	return string(b), err
 }
 
@@ -203,8 +208,12 @@ func (s *Server) handleDOAlarmUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 	cleared := req.DueMs <= 0
 	err = s.capturedWrite(r.Context(), scope, func() error {
-		if err := st.RemoveByOccurrence(r.Context(), occ); err != nil {
-			return err
+		// New alarm generations are append-only until dispatched. Preparing a
+		// replacement must not remove the old alarm before the DO commits it.
+		if req.AlarmID == "" {
+			if err := st.RemoveByOccurrence(r.Context(), occ); err != nil {
+				return err
+			}
 		}
 		if cleared {
 			return nil

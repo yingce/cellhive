@@ -1,5 +1,9 @@
 # 测试策略
 
+## Cron / Workflow / DO alarm 正确性验收（2026-10-15）
+
+见 [完整记录](archive/timer-correctness-2026-10-15.md)。新增回归覆盖同分钟独立 trigger、fired slot 不复活、scheduled noRetry、busy Workflow timer 保留、事务性 dispatch outbox/重开恢复、事件在 park 前后到达、无关事件不延长 deadline、DO alarm 交接失败/同时间新 generation/陈旧派发/重试重设。`scripts/runtime-baseline-e2e.sh` 使用真实 Docker cell-agent + user-runtime + gated do-runtime，包含待触发 alarm 跨 runtime 重启。
+
 ## 分层
 
 | 层 | 范围 | 方式 |

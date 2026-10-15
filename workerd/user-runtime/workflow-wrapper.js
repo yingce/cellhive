@@ -239,11 +239,8 @@ function makeStep(bridge, id) {
           throw new WorkflowTimeoutError();
         }
       }
-      await call(bridge, "wait.put", Object.assign(named(name), { deadline_ms: deadline }));
-      if (deadline > 0) {
-        const sr = await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: deadline }));
-        if (!sr.ok) throw new Error("waitForEvent sleep " + sr.status);
-      }
+      const parked = await call(bridge, "wait.put", Object.assign(named(name), { deadline_ms: deadline, type }));
+      if (!parked.ok) throw new Error("waitForEvent park " + parked.status);
       throw new SleepSignal();
     },
     async sleepUntil(name, timestamp) {

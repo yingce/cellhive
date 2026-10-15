@@ -2,7 +2,11 @@
 
 本文件记录系统评审发现的全部问题，以及**每条问题的解决决议**。原始分级见文末附录。设计文档（architecture / cell-protocol / durable-objects / networking / decisions）已按此同步。
 
-_最后更新：2026-09-25_
+_最后更新：2026-10-15_
+
+## 2026-10-15 调度正确性修复
+
+Cron 同分钟不同表达式独立物化；`noRetry()` 返回租户执行结果，避免跨 isolate 闭包失效。Workflow busy claim 不消费 timer，create/event/resume/restart 有事务性 `workflow-run` outbox；等待事件原子 park/释放租约，防事件竞态丢唤醒。DO alarm 采用先持久化 timer 的可靠交接、generation 校验、active/pending 消费与重试；上报失败不静默成功。真实 workerd 专项、Go/race 与 Docker 完整调度链路验证见 `timers-and-dispatch.md` 和 `testing.md`。剩余边界：DO 重试不是 CF 原生指数退避/次数上限；外部副作用仍至少一次；`transactionSync` 内 alarm 不支持。旧数字 alarm 惰性兼容，新旧 dispatcher 不能混用忽略 `workflow-run`/alarm generation 的版本。
 
 ---
 

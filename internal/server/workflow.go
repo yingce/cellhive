@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"cellhive/internal/timer"
 	"cellhive/internal/workflow"
 )
 
@@ -487,7 +486,7 @@ func (s *Server) handleWorkflowWait(w http.ResponseWriter, r *http.Request) {
 			deadline, _ = strconv.ParseInt(v, 10, 64)
 		}
 		if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
-			return s.Workflows.SetWait(r.Context(), ns, name, id, step, deadline)
+			return s.Workflows.ParkWait(r.Context(), ns, name, id, step, q.Get("run"), q.Get("type"), deadline)
 		}); err != nil {
 			writeErr(w, http.StatusInternalServerError, "workflow_wait_failed", err.Error())
 			return
@@ -567,6 +566,9 @@ func (s *Server) handleWorkflowSleep(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ns, name, id := q.Get("ns"), q.Get("workflow"), q.Get("id")
+	if s.workflowGate(w, r, ns, name) {
+		return
+	}
 	if !s.fenceRun(w, r, ns, name, id) {
 		return
 	}
@@ -580,14 +582,8 @@ func (s *Server) handleWorkflowSleep(w http.ResponseWriter, r *http.Request) {
 	}
 	// Timer scope: the workflow definition's cell; occurrence = instance id.
 	sc := workflow.Scope(ns, name)
-	store, err := s.OpenTimer(r.Context(), sc)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "timer_open_failed", err.Error())
-		return
-	}
-	t := timer.New(wakeAt, timer.KindWorkflowSleep, sc.String(), id)
 	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
-		return store.Upsert(r.Context(), t)
+		return s.Workflows.ParkSleep(r.Context(), ns, name, id, q.Get("run"), wakeAt)
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "timer_upsert_failed", err.Error())
 		return
@@ -595,8 +591,6 @@ func (s *Server) handleWorkflowSleep(w http.ResponseWriter, r *http.Request) {
 	if s.Timers != nil {
 		s.Timers.Add(sc.String())
 	}
-	_ = s.Workflows.SetStatus(r.Context(), ns, name, id, workflow.StatusSleeping, "")
-	_ = s.Workflows.ReleaseRun(r.Context(), ns, name, id, q.Get("run"))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "wake_at_ms": wakeAt})
 }
 

@@ -120,14 +120,12 @@ async function dispatchTimers(req, env, ctx) {
   } catch (e) {
     return workerLoadFailure(e);
   }
-  let noRetry = false;
-  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, noRetry() { noRetry = true; } };
+  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
-    const result = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
-    return json({ ok: true, no_retry: noRetry, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, result: result === undefined ? null : result });
+    const out = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
+    return json({ ...out, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime });
   } catch (e) {
-    if (noRetry) return json({ ok: false, no_retry: true, kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime, error: String(e) });
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
 }

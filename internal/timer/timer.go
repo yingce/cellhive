@@ -25,6 +25,7 @@ const (
 	KindWorkflowSleep    Kind = "workflow-sleep"
 	KindWorkflowTimeout  Kind = "workflow-timeout"
 	KindWorkflowSchedule Kind = "workflow-schedule"
+	KindWorkflowRun      Kind = "workflow-run"
 	// KindKVExpire is the per-KV-cell cleanup timer that deletes expired keys
 	// (ADR-098). There is one row per cell, occurrence "kv-expire".
 	KindKVExpire Kind = "kv-expire"
@@ -33,7 +34,7 @@ const (
 // Valid reports whether k is a known kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindDOAlarm, KindCron, KindQueueDelay, KindQueueRetry, KindWorkflowSleep, KindWorkflowTimeout, KindWorkflowSchedule, KindKVExpire:
+	case KindDOAlarm, KindCron, KindQueueDelay, KindQueueRetry, KindWorkflowSleep, KindWorkflowTimeout, KindWorkflowSchedule, KindWorkflowRun, KindKVExpire:
 		return true
 	}
 	return false

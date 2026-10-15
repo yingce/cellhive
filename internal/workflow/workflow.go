@@ -23,6 +23,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/timer"
 )
 
 // Status is an instance's lifecycle state.
@@ -89,6 +90,8 @@ type Store struct {
 	cs       *cellstore.Store
 	now      func() time.Time
 	migrated sync.Map // scope string -> migrated once per process
+	Index    timer.Index
+	Register func(string)
 }
 
 // New creates a workflow store.
@@ -173,6 +176,10 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 			return nil, fmt.Errorf("workflow: migrate %s: %w", scope.String(), err)
 		}
 	}
+	if _, err := timer.NewStore(ctx, c); err != nil {
+		s.migrated.Delete(scope.String())
+		return nil, err
+	}
 	s.migrated.Store(scope.String(), struct{}{})
 	return c, nil
 }
@@ -215,7 +222,7 @@ func (s *Store) ClaimRunLimited(ctx context.Context, ns, name, id string, ttlMs 
 	var gen uint64
 	now := s.now().UnixMilli()
 	var leased bool
-	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+	if _, err := s.writeWake(ctx, c, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `SELECT status, lease_until_ms, generation FROM instances WHERE id = ?`, id).Scan(&cur, &lease, &gen); err != nil {
 			return err
 		}
@@ -228,7 +235,7 @@ func (s *Store) ClaimRunLimited(ctx context.Context, ns, name, id string, ttlMs 
 		}
 		if limit > 0 {
 			var active int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM instances WHERE status IN (?, ?, ?) AND id <> ?`, string(StatusQueued), string(StatusRunning), string(StatusSleeping), id).Scan(&active); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM instances WHERE status = ? AND lease_until_ms > ? AND id <> ?`, string(StatusRunning), now, id).Scan(&active); err != nil {
 				return err
 			}
 			if active >= limit {
@@ -240,6 +247,11 @@ func (s *Store) ClaimRunLimited(ctx context.Context, ns, name, id string, ttlMs 
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE instances SET run_token = ?, lease_until_ms = ?, generation = ?, status = ?, updated_ms = ? WHERE id = ?`,
 			token, now+ttlMs, gen, string(StatusRunning), now, id); err != nil {
+			return err
+		}
+		// A crashed attempt is retried after its lease expires, without relying
+		// on an in-memory goroutine or another external event.
+		if err := s.queueTx(ctx, tx, c, id, now+ttlMs); err != nil {
 			return err
 		}
 		leased = true
@@ -567,10 +579,18 @@ func (s *Store) CreateWithTarget(ctx context.Context, ns, name, id string, param
 		return Instance{}, err
 	}
 	now := s.now().UnixMilli()
-	if _, err := execCell(ctx, c,
-		`INSERT INTO instances(id, params, status, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class) VALUES(?,?,?,?,?,?,?,?,?)
+	if _, err := s.writeWake(ctx, c, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `INSERT INTO instances(id, params, status, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class) VALUES(?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		id, params, string(StatusQueued), now, now, target.Worker, target.BundleSHA, target.Version, target.ClassName); err != nil {
+			id, params, string(StatusQueued), now, now, target.Worker, target.BundleSHA, target.Version, target.ClassName)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil
+		}
+		return s.queueTx(ctx, tx, c, id, now)
+	}); err != nil {
 		return Instance{}, err
 	}
 	return s.Get(ctx, ns, name, id)
@@ -589,7 +609,7 @@ func (s *Store) CreateBatchWithTarget(ctx context.Context, ns, name string, inst
 	}
 	now := s.now().UnixMilli()
 	ids := make([]string, len(instances))
-	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+	if _, err := s.writeWake(ctx, c, func(tx *sql.Tx) error {
 		for i, in := range instances {
 			id := in.ID
 			if id == "" {
@@ -600,6 +620,9 @@ func (s *Store) CreateBatchWithTarget(ctx context.Context, ns, name string, inst
 				`INSERT INTO instances(id, params, status, created_ms, updated_ms, target_worker, target_bundle, target_version, target_class) VALUES(?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO NOTHING`,
 				id, in.Params, string(StatusQueued), now, now, target.Worker, target.BundleSHA, target.Version, target.ClassName); err != nil {
+				return err
+			}
+			if err := s.queueTx(ctx, tx, c, id, now); err != nil {
 				return err
 			}
 		}
@@ -727,7 +750,17 @@ func (s *Store) Pause(ctx context.Context, ns, name, id string) error {
 }
 
 func (s *Store) Resume(ctx context.Context, ns, name, id string) error {
-	return s.SetStatus(ctx, ns, name, id, StatusQueued, "")
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return err
+	}
+	_, err = s.writeWake(ctx, c, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE instances SET status=?,updated_ms=? WHERE id=?`, string(StatusQueued), s.now().UnixMilli(), id); err != nil {
+			return err
+		}
+		return s.queueTx(ctx, tx, c, id, s.now().UnixMilli())
+	})
+	return err
 }
 
 func (s *Store) Terminate(ctx context.Context, ns, name, id string) error {
@@ -744,7 +777,7 @@ func (s *Store) Restart(ctx context.Context, ns, name, id string) error {
 		return err
 	}
 	now := s.now().UnixMilli()
-	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+	_, err = s.writeWake(ctx, c, func(tx *sql.Tx) error {
 		for _, tbl := range []string{"steps", "step_attempts", "events", "waits"} {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE instance_id = ?", id); err != nil {
 				return err
@@ -753,7 +786,10 @@ func (s *Store) Restart(ctx context.Context, ns, name, id string) error {
 		_, err := tx.ExecContext(ctx,
 			`UPDATE instances SET status = ?, output = NULL, error = '', updated_ms = ?, run_token = '', lease_until_ms = 0 WHERE id = ?`,
 			string(StatusQueued), now, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.queueTx(ctx, tx, c, id, now)
 	})
 	return err
 }
@@ -794,8 +830,15 @@ func (s *Store) AppendEvent(ctx context.Context, ns, name, id string, payload []
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c,
-		`INSERT INTO events(instance_id, payload, created_ms) VALUES(?,?,?)`, id, payload, s.now().UnixMilli())
+	_, err = s.writeWake(ctx, c, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(instance_id,payload,created_ms) VALUES(?,?,?)`, id, payload, s.now().UnixMilli()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE instances SET status=? WHERE id=? AND status=?`, string(StatusQueued), id, string(StatusSleeping)); err != nil {
+			return err
+		}
+		return s.queueTx(ctx, tx, c, id, s.now().UnixMilli())
+	})
 	return err
 }
 

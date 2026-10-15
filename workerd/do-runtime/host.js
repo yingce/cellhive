@@ -16,7 +16,7 @@
 //   POST /v1/do/renew    renew all held leases
 //   POST /v1/do/drain    stop new work, wait in-flight, release leases
 
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { bindingStub } from "bindings.js";
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
@@ -427,6 +427,15 @@ function buildFacetEnv(ctx, hostEnv, bs, spec) {
   return env;
 }
 
+// This narrow per-object capability never exposes the cell-agent URL/token to
+// tenant code. It only publishes alarms for the identity chosen by the host.
+export class AlarmScheduler extends WorkerEntrypoint {
+  async prepare(dueMs, alarmId) {
+    if (!Number.isFinite(dueMs) || typeof alarmId !== "string" || !alarmId) throw new TypeError("invalid alarm");
+    await reportAlarm(this.env, this.ctx.props, dueMs, alarmId);
+  }
+}
+
 // proxyConnect forwards an upgraded WebSocket to the owning do-runtime and pipes
 // frames both ways (ADR-084). No resume: a peer/migration close propagates its
 // code (e.g. 1012) so the client reconnects per ADR-032/080.
@@ -783,7 +792,7 @@ export class Host extends DurableObject {
     let res;
     if (spec.kind === "alarm") {
       try {
-        const r = await facet.__chRunAlarm();
+        const r = await facet.__chRunAlarm({ dueMs: spec.alarm_due_ms, alarmId: spec.alarm_id });
         doStats.alarmsOk++;
         res = new Response(typeof r === "string" ? r : "");
       } catch (e) {
@@ -808,7 +817,10 @@ export class Host extends DurableObject {
     }
     // Report the (possibly changed) alarm so the platform scheduler can deliver.
     const state = await facet.__chAlarmState();
-    await reportAlarm(this.env, spec, state.dueMs);
+    // Generation-bearing alarms were durably pre-published by setAlarm(). Do
+    // not replace/recreate their timers after execution. Legacy numeric alarms
+    // are still mirrored while old objects migrate lazily.
+    if (!state.alarmId) await reportAlarm(this.env, spec, state.dueMs);
     await reportDoStats(this.env);
     // Output gate (ADR-083): do not ack until the supervisor has captured and
     // proven durability; unknown => result_unknown (do not silently ack).
@@ -925,6 +937,10 @@ export class Host extends DurableObject {
       const cls = loaded.getDurableObjectClass(spec.class, {
         props: {
           namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
+          alarmBridge: this.ctx.exports.AlarmScheduler({ props: {
+            namespace: spec.namespace, worker: spec.worker, class: spec.class,
+            shard: spec.shard, id: spec.id, storage_class: spec.storage_class, storage_id: spec.storage_id,
+          } }),
         },
       });
       return { class: cls, id: facetId };
@@ -1036,20 +1052,18 @@ async function gateSync(env, parentSpan) {
 }
 
 // reportAlarm tells cell-agent this object's current alarm due time (0 = clear).
-async function reportAlarm(env, spec, dueMs) {
-  try {
-    await fetch(env.CELL_URL + "/v1/internal/do/alarm/upsert", {
-      method: "POST",
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
-      body: JSON.stringify({
-        namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
-        id: spec.id, bundle_sha: spec.bundle_sha, storage_class: spec.storage_class || spec.class,
-        storage_id: spec.storage_id || "", due_ms: typeof dueMs === "number" ? dueMs : 0,
-      }),
-    });
-  } catch (e) {
-    // Alarm reporting is best-effort; the next invocation re-reports.
-  }
+async function reportAlarm(env, spec, dueMs, alarmId) {
+  const response = await fetch(env.CELL_URL + "/v1/internal/do/alarm/upsert", {
+    method: "POST",
+    headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({
+      namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
+      id: spec.id, bundle_sha: spec.bundle_sha, storage_class: spec.storage_class || spec.class,
+      storage_id: spec.storage_id || "", due_ms: typeof dueMs === "number" ? dueMs : 0,
+      alarm_id: alarmId || "",
+    }),
+  });
+  if (!response.ok) throw new Error("alarm handoff failed: " + response.status);
 }
 
 // authorize accepts the internal token (full access) or a signed owner ticket

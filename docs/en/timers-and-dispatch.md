@@ -1,5 +1,9 @@
 # Timers and Dispatch
 
+## Scheduling correctness update (2026-10-15)
+
+The current contract is described in [the Chinese source](../timers-and-dispatch.md). Cron persists `{slot,cron}` identities and constructs `noRetry()` in the tenant isolate. Workflow mutations atomically enqueue `workflow-run` outbox timers, while wait/sleep park transitions release the run lease atomically. DO `setAlarm()` pre-publishes a durable generation-bearing timer through a per-object capability before writing object state; active/pending delivery state prevents stale execution and preserves retries/rearms. The bucket `wake/` index is advisory scope discovery; SQLite remains authoritative and timer cells need not be pinned. DO retry timing/caps are not identical to Cloudflare native alarms.
+
 ## Unified Timer Abstraction
 
 All timed events are unified as:

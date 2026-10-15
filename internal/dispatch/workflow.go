@@ -13,6 +13,7 @@ import (
 
 	"cellhive/internal/control"
 	"cellhive/internal/timer"
+	"cellhive/internal/workflow"
 )
 
 // WorkflowDispatcher runs/resumes a workflow instance on user-runtime, and
@@ -32,6 +33,9 @@ type WorkflowDispatcher struct {
 	// Claim acquires a run lease for the instance (nil = dispatch without lease).
 	Claim           func(ctx context.Context, ns, name, id string) (token string, generation uint64, ok bool, err error)
 	CreateScheduled func(ctx context.Context, ns, name, occurrence string) (string, error)
+	// Skip acknowledges obsolete wakes (terminal/missing instances, or a run
+	// recovery wake whose attempt has already parked). Busy is never obsolete.
+	Skip func(context.Context, string, string, string, timer.Kind) (bool, error)
 	// Next receives non-workflow timer kinds.
 	Next   timer.Dispatcher
 	Client *http.Client
@@ -110,13 +114,22 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, t timer.Timer) error 
 		if err != nil {
 			return err
 		}
+		if d.Skip != nil {
+			skip, err := d.Skip(ctx, ns, name, id, t.Kind)
+			if err != nil || skip {
+				return err
+			}
+		}
 		token, _, ok, err := d.Claim(ctx, ns, name, id)
 		if err != nil || !ok {
-			return err
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("workflow: scheduled run temporarily unavailable")
 		}
 		return d.Run(ctx, ns, name, id, token)
 	}
-	if t.Kind != timer.KindWorkflowSleep {
+	if t.Kind != timer.KindWorkflowSleep && t.Kind != timer.KindWorkflowRun {
 		if d.Next != nil {
 			return d.Next.Dispatch(ctx, t)
 		}
@@ -126,13 +139,30 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, t timer.Timer) error 
 	if !ok {
 		return fmt.Errorf("workflow: bad sleep scope %q", t.Scope)
 	}
+	id := t.Occurrence
+	if t.Kind == timer.KindWorkflowRun {
+		var occurrence workflow.RunOccurrence
+		if err := json.Unmarshal([]byte(t.Occurrence), &occurrence); err != nil {
+			return err
+		}
+		id = occurrence.ID
+	}
+	if d.Skip != nil {
+		skip, err := d.Skip(ctx, ns, name, id, t.Kind)
+		if err != nil || skip {
+			return err
+		}
+	}
 	// Timer-driven resume: claim a fresh run attempt (the previous attempt
 	// released its lease when it parked).
-	token, _, ok, err := d.Claim(ctx, ns, name, t.Occurrence)
+	token, _, ok, err := d.Claim(ctx, ns, name, id)
 	if err != nil || !ok {
-		return err
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("workflow: run temporarily unavailable")
 	}
-	return d.Run(ctx, ns, name, t.Occurrence, token)
+	return d.Run(ctx, ns, name, id, token)
 }
 
 // splitWorkflowScope parses "<ns>/__workflow__/<name>".

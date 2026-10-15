@@ -834,6 +834,8 @@
 
 ## ADR-076 cron 调度器（生成 slot 定时器）✅实现
 
+**2026-10-15 修订**：新 Cron occurrence 为 JSON `{slot,cron}`，不同表达式在同分钟独立触发；派发直接读取已持久化表达式，不受后续配置变化影响。旧分钟 occurrence 保留读取兼容。Timer upsert 不复活仍在 fired 表的 token。scheduled controller 在租户 wrapper 内构造，`noRetry` 通过普通数据返回，不能依赖跨 isolate 的闭包。回归与 Docker 验收见 `timers-and-dispatch.md`。
+
 > 状态：**已实现并验证（2026-09-15）**。补齐 ADR-070 的前半段：`Version.Crons` → `scheduled()` 全链路闭环。
 
 - **决策**：新增 `internal/cron`：
@@ -881,6 +883,8 @@
 ---
 
 ## ADR-079 DO alarm shim（facet 原生 alarm 不可用→平台 shim；统一 timer 派发）✅实现
+
+**2026-10-15 修订（取代下述历史 best-effort 上报和无消费行为）**：`setAlarm` 在 `blockConcurrencyWhile` 内先通过对象身份绑定的 `AlarmScheduler` entrypoint capability 确认 cell-agent timer 持久化，再原子写入时间与随机 alarm ID。准备失败不写对象状态；准备成功后崩溃只允许留下可跳过的陈旧 timer。新 generation timer 追加，不能在 DO 提交前删除旧 generation；派发传 `alarm_id/alarm_due_ms`。执行前原子迁移 active→pending，使 `getAlarm()` 返回 null；成功删 pending，失败保留 pending 和 retryCount；新设 active alarm 不受旧 pending 消费影响。相同 generation 运行中拒绝重入；陈旧/取消/已消费 generation 不调用 handler。原有数字键仍可读取并按 due 校验。重试仍使用统一 runner（非 CF 原生指数退避/次数上限）；外部副作用仍为至少一次，`transactionSync` 内设置 alarm 不支持。
 
 > 状态：**已实现并验证（2026-09-15，真实 workerd）**。alarm 需要 shim；复用 CellHive 统一 timer + waker，**不引入外部工作流/租约存储**。
 
@@ -1014,6 +1018,8 @@
 ---
 
 ## ADR-086 Workflows 自研引擎（Partial）✅
+
+**2026-10-15 修订**：create/batch、事件、resume/restart 与 `workflow-run` outbox timer 同 SQLite 事务提交；run claim 同事务建立 lease-expiry 恢复 timer。wake 索引先保守发布，提交后注册本地 runner。并发限制只计持有效租约的 running attempt；临时 claim 拒绝返回可重试错误，终态/缺失实例和已 park 的 run-recovery timer 才可消费。wait/sleep 的 park、释放 run token、deadline timer 同事务；wait park 检查竞态到达的匹配事件，有则排队，原截止时间不得被无关事件延长。新 run wake 不能提前唤醒 sleeping attempt；sleep/deadline 使用原 KindWorkflowSleep。客户端 sleeping 仍映射 waiting。验证见 `timers-and-dispatch.md`。
 
 > 状态：**已实现并验证（真实 workerd e2e）**。支持子集见 `compatibility-matrix.md`（Partial）。
 

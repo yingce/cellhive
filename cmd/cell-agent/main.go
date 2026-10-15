@@ -312,10 +312,13 @@ func main() {
 	// pass through to user-runtime (control plane is wired just below via ctrlRef).
 	ltx.CompressionEnabled = cfg.LTXCompression
 	workflowStore := workflow.New(store)
+	workflowStore.Index = wakeIdx
+	workflowStore.Register = timerReg.Add
 	const workflowLeaseMs = int64(60_000)
 	var ctrlRef *control.Store
 	wfDisp := &dispatch.WorkflowDispatcher{
 		URL: cfg.DispatchURL, Token: cfg.TokenDispatch, Log: log, Next: dispatcher,
+		Skip: workflowStore.SkipWake,
 		Params: func(cctx context.Context, ns, name, id string) ([]byte, error) {
 			instance, err := workflowStore.Get(cctx, ns, name, id)
 			if err != nil {
@@ -1327,6 +1330,9 @@ func (e *cronEnricher) Dispatch(ctx context.Context, t timer.Timer) error {
 // has one cron; with several we re-evaluate the schedules against the slot so
 // scheduled(event) still sees the exact expression (ADR-154).
 func cronExprForSlot(targets []control.CronTarget, t timer.Timer) string {
+	if expr := cron.Expression(t.Occurrence); expr != "" {
+		return expr
+	}
 	if len(targets) == 1 {
 		return targets[0].Cron
 	}

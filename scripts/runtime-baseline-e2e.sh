@@ -123,7 +123,7 @@ cat >"$TMP/app/wrangler.jsonc" <<'JSON'
     "consumers": [{ "queue": "JOBS", "max_batch_size": 10, "max_retries": 2, "dead_letter_queue": "DLQ" }]
   },
   "workflows": [{ "binding": "REPORTS", "name": "REPORTS", "class_name": "ReportBuilder" }],
-  "triggers": { "crons": ["* * * * *"] },
+  "triggers": { "crons": ["* * * * *", "*/1 * * * *"] },
   "assets": { "directory": "./public", "run_worker_first": ["/env", "/kv", "/do", "/ws", "/queue", "/receipt", "/workflow"] },
   "durable_objects": { "bindings": [{ "name": "COUNTER", "class_name": "Counter" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Counter"] }]
@@ -154,6 +154,12 @@ export class Counter extends DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/alarm/arm") {
+      await this.ctx.storage.setAlarm(Date.now() + 1500);
+      return new Response("armed");
+    }
+    if (path === "/alarm/state") return Response.json({ count: (await this.ctx.storage.get("alarm-count")) || 0, due: await this.ctx.storage.getAlarm() });
     if ((request.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -166,10 +172,19 @@ export class Counter extends DurableObject {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     ws.send(JSON.stringify({ echo: String(message), count: this.increment() }));
   }
+  async alarm(): Promise<void> {
+    const n = ((await this.ctx.storage.get("alarm-count")) as number || 0) + 1;
+    await this.ctx.storage.put("alarm-count", n);
+    // Prove retries retain the original alarm and successful rearm survives
+    // consumption of that original delivery.
+    if (n === 1) throw new Error("alarm retry probe");
+    if (n === 2) await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
 }
 
 export class ReportBuilder extends WorkflowEntrypoint {
   async run(event: any, step: any): Promise<any> {
+    if (event.payload?.wait) return await step.waitForEvent("ready", { type: "ready" });
     const first = await step.do("first", async () => Number(event.payload?.seed || 0) + 1);
     await step.sleep("pause", "1 second");
     return { value: first * 2, secret: this.env.MANAGED_SECRET };
@@ -193,14 +208,14 @@ export default {
     }
     if (path === "/receipt") {
       const id = new URL(req.url).searchParams.get("id") || "job-1";
-      return Response.json({ queue: await env.KV.get("queue:" + id), cron: await env.KV.get("cron:last") });
+      return Response.json({ queue: await env.KV.get("queue:" + id), cron: await env.KV.get("cron:last"), cronA: await env.KV.get("cron:* * * * *"), cronB: await env.KV.get("cron:*/1 * * * *"), duplicate: await env.KV.get("cron:duplicate") });
     }
     if (path === "/recover-queue") {
       await env.KV.put("queue:recover", "yes");
       return new Response("ready");
     }
     if (path === "/workflow/create") {
-      const instance = await env.REPORTS.create({ params: { seed: 20 } });
+      const instance = await env.REPORTS.create({ params: { seed: 20, wait: new URL(req.url).searchParams.has("wait") } });
       return Response.json({ id: instance.id });
     }
     if (path === "/workflow/batch") {
@@ -210,6 +225,12 @@ export default {
       const id = new URL(req.url).searchParams.get("id");
       return Response.json(await (await env.REPORTS.get(id)).status());
     }
+    if (path === "/workflow/event") {
+      const instance = await env.REPORTS.get(new URL(req.url).searchParams.get("id"));
+      await instance.sendEvent({ type: "ready", payload: { value: 77 } });
+      return new Response("sent");
+    }
+    if (path.startsWith("/do/alarm/")) return env.COUNTER.getByName("alarm-probe").fetch("http://alarm" + path.slice(3));
     if (path === "/do") {
       return env.COUNTER.getByName("counter-1").fetch("https://counter.invalid/increment");
     }
@@ -229,7 +250,13 @@ export default {
     }
   },
   async scheduled(event: any, env: Record<string, any>): Promise<void> {
+    const key = "cron-slot:" + event.cron + ":" + event.scheduledTime;
+    const count = Number(await env.KV.get(key) || 0) + 1;
+    await env.KV.put(key, String(count));
+    if (count > 1) await env.KV.put("cron:duplicate", "yes");
+    await env.KV.put("cron:" + event.cron, "ran");
     await env.KV.put("cron:last", String(event.cron));
+    if (event.cron === "* * * * *") { event.noRetry(); throw new Error("scheduled noRetry probe"); }
   }
 };
 TS
@@ -264,6 +291,13 @@ if [[ $DEPLOY_RC -ne 0 ]]; then
 fi
 [[ "$DEPLOY_OUTPUT" == *"uploaded bundle"* ]] || fail "source deploy did not upload an esbuild bundle"
 compose exec -T cell-agent cellhive secret put e2e api MANAGED_SECRET --value czNjcjN0 >/dev/null
+
+# Force the batch to contend for a single execution lease. Queued instances
+# must wait durably rather than blocking each other or losing their wake.
+ADMIN_TOKEN=$(compose exec -T cell-agent cellhive creds admin | tr -d '\r\n')
+compose exec -T cell-agent curl -fsS -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"script_name":"api","class_name":"ReportBuilder","concurrency":{"limit":1}}' \
+  http://127.0.0.1:8082/client/v4/accounts/e2e/workflows/REPORTS >/dev/null
 
 fetch_path() {
   local path=$1
@@ -371,12 +405,34 @@ for id in batch-a batch-b; do
     || fail "workflow batch instance $id did not complete"
 done
 
+echo "== workflow event wait without timeout and durable resume =="
+WF_WAIT=$(fetch_path '/workflow/create?wait=1')
+WF_WAIT_ID=$(printf '%s' "$WF_WAIT" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[[ -n "$WF_WAIT_ID" ]] || fail "event workflow returned no id"
+WAITING=""
+retry_capture WAITING compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/workflow/status?id=$WF_WAIT_ID' | grep -F '\"status\":\"waiting\"'" \
+  || { fetch_path "/workflow/status?id=$WF_WAIT_ID" >&2 || true; compose logs --tail=120 cell-agent user-runtime >&2 || true; fail "event workflow never parked"; }
+assert_eq sent "$(fetch_path "/workflow/event?id=$WF_WAIT_ID")" "event send"
+retry_capture WAITING compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/workflow/status?id=$WF_WAIT_ID' | grep -F '\"status\":\"complete\"'" \
+  || fail "event workflow remained blocked by its old lease"
+[[ "$WAITING" == *'"value":77'* ]] || fail "workflow event payload lost: $WAITING"
+
+echo "== DO alarm timer delivery, failure retry, rearm and consumption =="
+assert_eq armed "$(fetch_path /do/alarm/arm)" "alarm arm"
+ALARM_STATE=""
+retry_capture ALARM_STATE compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/do/alarm/state | grep -F '\"count\":3,\"due\":null'" \
+  || { compose logs --tail=120 cell-agent do-runtime-gated >&2 || true; fail "alarm retry/rearm did not complete"; }
+
 # Cron remains minute-aligned; the accelerated scheduler/timer polling only
 # removes extra polling latency around the next real minute slot.
 CRON_RECEIPT=""
 retry_capture CRON_RECEIPT compose exec -T cell-agent sh -c \
-  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=job-42' | grep -F '\"cron\":\"* * * * *\"'" \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=job-42' | grep -F '\"cronA\":\"ran\",\"cronB\":\"ran\"'" \
   || fail "cron scheduler did not invoke the tenant scheduled() handler"
+[[ "$CRON_RECEIPT" == *'"duplicate":null'* ]] || fail "noRetry cron was retried: $CRON_RECEIPT"
 [[ "$ENV_JSON" == *'"CELL_TOKEN":"user-cell-token"'* ]] || fail "user CELL_TOKEN is not visible"
 [[ "$ENV_JSON" == *'"managedSecret":"s3cr3t"'* ]] || fail "managed secret is not visible in tenant worker env"
 assert_not_contains "$ENV_JSON" "$HOST_URL_CANARY" "tenant env"
@@ -397,6 +453,7 @@ retry_capture WS1 websocket_roundtrip before-restart 2 \
 assert_eq '{"echo":"before-restart","count":2}' "$WS1" "public DO WebSocket before restart"
 LTX_PROOF=$(compose exec -T cell-agent sh -c "find /data/bucket/cells -type f -name '*.ltx' -print -quit" 2>/dev/null || true)
 [[ -n "$LTX_PROOF" ]] || fail "gated DO produced no authoritative bucket LTX object"
+assert_eq armed "$(fetch_path /do/alarm/arm)" "alarm armed before runtime restart"
 compose restart do-runtime-gated >/dev/null
 retry_capture READY compose exec -T cell-agent curl -fsS http://do-runtime-gated:8788/ready \
   || fail "gated do-runtime did not recover after restart"
@@ -407,6 +464,9 @@ assert_eq '{"echo":"after-restart","count":3}' "$WS2" "public DO WebSocket after
 DO2=""
 retry_capture DO2 fetch_path /do || fail "DO invoke failed after runtime restart"
 assert_eq '{"count":4,"secret":"s3cr3t"}' "$DO2" "gated DO count and managed secret after restart"
+retry_capture ALARM_STATE compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/do/alarm/state | grep -F '\"count\":4,\"due\":null'" \
+  || fail "pending alarm did not survive gated runtime restart"
 
 echo "== release rollback and worker deletion =="
 sed 's/"user-cell-url"/"release-two"/' "$TMP/app/wrangler.jsonc" >"$TMP/wrangler-v2.jsonc"

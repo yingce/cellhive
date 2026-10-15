@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"cellhive/internal/cellstore"
+	"cellhive/internal/timer"
 )
 
 func newStore(t *testing.T) *Store {
@@ -18,6 +20,123 @@ func newStore(t *testing.T) *Store {
 	}
 	defer cs.Close()
 	return New(cs)
+}
+
+func TestQueuedInstancesDoNotBlockEachOther(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"a", "b"} {
+		if _, err := s.Create(ctx, "acme", "wf", id, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tok, _, _, ok, err := s.ClaimRunLimited(ctx, "acme", "wf", "a", 60000, 1)
+	if err != nil || !ok {
+		t.Fatalf("first queued run blocked: %v %v", ok, err)
+	}
+	_, _, _, ok, err = s.ClaimRunLimited(ctx, "acme", "wf", "b", 60000, 1)
+	if ok {
+		t.Fatal("concurrency exceeded")
+	}
+	if err := s.ReleaseRun(ctx, "acme", "wf", "a", tok); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, ok, err = s.ClaimRunLimited(ctx, "acme", "wf", "b", 60000, 1)
+	if err != nil || !ok {
+		t.Fatalf("second queued run blocked after release: %v %v", ok, err)
+	}
+}
+
+func TestCreatePersistsDispatchWake(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, "acme", "wf", "i", nil); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.cell(ctx, "acme", "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.Due(ctx, time.Now().Add(time.Second).UnixMilli(), 100)
+	if err != nil || len(due) == 0 {
+		t.Fatalf("created instance has no durable retry: %+v %v", due, err)
+	}
+}
+
+func TestWaitParkAndEventCannotLoseWake(t *testing.T) {
+	for _, eventFirst := range []bool{true, false} {
+		t.Run(fmt.Sprint(eventFirst), func(t *testing.T) {
+			s := newStore(t)
+			ctx := context.Background()
+			if _, err := s.Create(ctx, "acme", "wf", "i", nil); err != nil {
+				t.Fatal(err)
+			}
+			token, _, _, ok, err := s.ClaimRun(ctx, "acme", "wf", "i", 60000)
+			if err != nil || !ok {
+				t.Fatal(err)
+			}
+			// Both requests can have the same millisecond timestamp.
+			s.now = func() time.Time { return time.UnixMilli(1000) }
+			event := func() {
+				if err := s.AppendEvent(ctx, "acme", "wf", "i", []byte(`{"type":"ready","payload":7}`)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if eventFirst {
+				event()
+			}
+			if err := s.ParkWait(ctx, "acme", "wf", "i", "event", token, "ready", 0); err != nil {
+				t.Fatal(err)
+			}
+			if !eventFirst {
+				event()
+			}
+			in, err := s.Get(ctx, "acme", "wf", "i")
+			if err != nil || in.Status != StatusQueued {
+				t.Fatalf("event wake lost: %+v %v", in, err)
+			}
+			_, _, _, ok, err = s.ClaimRun(ctx, "acme", "wf", "i", 60000)
+			if err != nil || !ok {
+				t.Fatalf("event lease blocked: %v %v", ok, err)
+			}
+			payload, found, err := s.ConsumeEvent(ctx, "acme", "wf", "i", "ready")
+			if err != nil || !found || string(payload) != `{"type":"ready","payload":7}` {
+				t.Fatalf("event lost: %s %v %v", payload, found, err)
+			}
+		})
+	}
+}
+
+func TestWaitParkUnrelatedEventPreservesDeadline(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, "acme", "wf", "i", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, deadline := range []int64{5000, 9000} {
+		tok, _, _, ok, err := s.ClaimRun(ctx, "acme", "wf", "i", 60000)
+		if err != nil || !ok {
+			t.Fatal(err)
+		}
+		if err := s.AppendEvent(ctx, "acme", "wf", "i", []byte(`{"type":"unrelated"}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ParkWait(ctx, "acme", "wf", "i", "event", tok, "ready", deadline); err != nil {
+			t.Fatal(err)
+		}
+		in, err := s.Get(ctx, "acme", "wf", "i")
+		if err != nil || in.Status != StatusSleeping {
+			t.Fatalf("unrelated event creates busy replay: %+v %v", in, err)
+		}
+	}
+	deadline, found, err := s.GetWait(ctx, "acme", "wf", "i", "event")
+	if err != nil || !found || deadline != 5000 {
+		t.Fatalf("deadline extended: %d %v %v", deadline, found, err)
+	}
 }
 
 func TestCreateGetAndStatus(t *testing.T) {

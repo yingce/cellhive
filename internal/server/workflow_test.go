@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cellhive/internal/workflow"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -253,5 +254,29 @@ func TestWorkflowRunLeasePreventsDoubleDispatch(t *testing.T) {
 	// Fenced: a stale token cannot renew.
 	if err := srv.Workflows.RenewRun(ctx, "acme", "MY_WF", in.ID, "bogus", 1000); err == nil {
 		t.Fatal("stale token renewed")
+	}
+}
+
+func TestWorkflowWaitReleasesRunLease(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.Workflows.Create(ctx, "acme", "wf", "i", nil); err != nil {
+		t.Fatal(err)
+	}
+	token, _, _, ok, err := srv.Workflows.ClaimRun(ctx, "acme", "wf", "i", 60000)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	rr := do(t, srv.Handler(), http.MethodPost, "/v1/internal/workflow/wait?ns=acme&workflow=wf&id=i&name=event&run="+token, "tok", nil)
+	if rr.Code != 200 {
+		t.Fatalf("park: %d %s", rr.Code, rr.Body.String())
+	}
+	in, err := srv.Workflows.Get(ctx, "acme", "wf", "i")
+	if err != nil || in.Status != workflow.StatusSleeping {
+		t.Fatalf("parked: %+v %v", in, err)
+	}
+	_, _, _, ok, err = srv.Workflows.ClaimRun(ctx, "acme", "wf", "i", 60000)
+	if err != nil || !ok {
+		t.Fatalf("event cannot resume parked run: ok=%v err=%v", ok, err)
 	}
 }

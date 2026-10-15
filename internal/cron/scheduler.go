@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -103,7 +104,7 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 			s.log().Warn("cron open store failed", "scope", sc.String(), "err", err)
 			continue
 		}
-		t := timer.New(slot.UnixMilli(), timer.KindCron, sc.String(), strconv.FormatInt(slot.Unix()/60, 10))
+		t := timer.New(slot.UnixMilli(), timer.KindCron, sc.String(), Occurrence(slot, tg.Cron))
 		if err := st.Upsert(ctx, t); err != nil {
 			s.log().Warn("cron upsert failed", "scope", sc.String(), "err", err)
 			continue
@@ -141,6 +142,27 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 		}
 	}
 	return upserts, nil
+}
+
+// Occurrence keeps coincident expressions distinct while repeated scheduler
+// passes still address the same durable timer. Legacy minute-only rows remain
+// readable by dispatchers during rolling upgrades.
+func Occurrence(slot time.Time, expr string) string {
+	b, _ := json.Marshal(struct {
+		Slot int64  `json:"slot"`
+		Cron string `json:"cron"`
+	}{slot.Unix() / 60, expr})
+	return string(b)
+}
+
+func Expression(occurrence string) string {
+	var v struct {
+		Cron string `json:"cron"`
+	}
+	if json.Unmarshal([]byte(occurrence), &v) != nil {
+		return ""
+	}
+	return v.Cron
 }
 
 func (s *Scheduler) schedule(expr string) (Schedule, bool) {

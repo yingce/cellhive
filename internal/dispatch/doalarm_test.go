@@ -37,7 +37,7 @@ func TestDoAlarmDispatcherRoutesAlarms(t *testing.T) {
 		},
 		Bundle: func(context.Context, string, string) (string, int, bool) { return "sha1", 3, true },
 	}
-	tm := timer.New(1234, timer.KindDOAlarm, "demo/__timer__/do", `{"w":"w","c":"C","s":0,"sc":"C","sid":"ds_1","id":"a1"}`)
+	tm := timer.New(1234, timer.KindDOAlarm, "demo/__timer__/do", `{"w":"w","c":"C","s":0,"sc":"C","sid":"ds_1","id":"a1","a":"generation-1"}`)
 	if err := d.Dispatch(context.Background(), tm); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -48,6 +48,9 @@ func TestDoAlarmDispatcherRoutesAlarms(t *testing.T) {
 		got["shard"] != float64(0) || got["bundle_sha"] != "sha1" || got["namespace"] != "demo" ||
 		got["storage_id"] != "ds_1" || got["storage_class"] != "C" {
 		t.Fatalf("body = %+v", got)
+	}
+	if got["alarm_id"] != "generation-1" || got["alarm_due_ms"] != float64(1234) {
+		t.Fatalf("alarm delivery lost identity: %+v", got)
 	}
 	if next.n != 0 {
 		t.Fatalf("next should not be called for alarms")

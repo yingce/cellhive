@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"cellhive/internal/cellstore"
 	"cellhive/internal/control"
 	"cellhive/internal/timer"
+	"cellhive/internal/workflow"
 )
 
 func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
@@ -74,3 +77,74 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 type recorder struct{ calls int }
 
 func (r *recorder) Dispatch(context.Context, timer.Timer) error { r.calls++; return nil }
+
+func TestWorkflowBusyClaimKeepsWakePending(t *testing.T) {
+	d := &WorkflowDispatcher{Claim: func(context.Context, string, string, string) (string, uint64, bool, error) { return "", 0, false, nil }, CreateScheduled: func(context.Context, string, string, string) (string, error) { return "i", nil }}
+	for _, kind := range []timer.Kind{timer.KindWorkflowSleep, timer.KindWorkflowSchedule} {
+		if err := d.Dispatch(context.Background(), timer.New(1, kind, "acme/__workflow__/wf", "i")); err == nil {
+			t.Fatalf("%s consumed while claim unavailable", kind)
+		}
+	}
+}
+
+func TestWorkflowOutboxRetriesBusyRunAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	store := workflow.New(cs)
+	for _, id := range []string{"a", "b"} {
+		if _, err := store.Create(ctx, "acme", "wf", id, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, _, ok, err := store.ClaimRunLimited(ctx, "acme", "wf", "a", 60000, 1); err != nil || !ok {
+		t.Fatalf("claim a: %v %v", ok, err)
+	}
+	// A new store has no original request goroutine or run bookkeeping.
+	store = workflow.New(cs)
+	c, err := cs.Cell(ctx, workflow.Scope("acme", "wf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if err := store.SetOutput(r.Context(), "acme", "wf", in.ID, []byte(`"done"`)); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+	d := &WorkflowDispatcher{URL: server.URL, Target: func(context.Context, string, string) (control.WorkflowTarget, bool) {
+		return control.WorkflowTarget{Worker: "web", BundleSHA: "sha", ClassName: "WF", Version: 1}, true
+	}, Params: func(context.Context, string, string, string) ([]byte, error) { return nil, nil }, Skip: store.SkipWake, Claim: func(ctx context.Context, ns, name, id string) (string, uint64, bool, error) {
+		token, gen, _, ok, err := store.ClaimRunLimited(ctx, ns, name, id, 60000, 1)
+		return token, gen, ok, err
+	}}
+	if n, err := timer.DispatchDue(ctx, st, d, time.Now().UnixMilli(), 100, time.Hour, nil); err != nil || n != 0 {
+		t.Fatalf("busy wakes consumed: %d %v", n, err)
+	}
+	if err := store.SetOutput(ctx, "acme", "wf", "a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := timer.DispatchDue(ctx, st, d, time.Now().UnixMilli(), 100, time.Hour, nil); err != nil {
+		t.Fatal(err)
+	}
+	in, err := store.Get(ctx, "acme", "wf", "b")
+	if err != nil || in.Status != workflow.StatusComplete || string(in.Output) != `"done"` {
+		t.Fatalf("queued run lost after reopen: %+v %v", in, err)
+	}
+}

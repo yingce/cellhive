@@ -134,9 +134,15 @@ export class CellHiveHost extends WorkerEntrypoint {
 
   async handleScheduled(event) {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
+    let noRetry = false;
+    const controller = { ...event, noRetry() { noRetry = true; } };
     setTraceContext(traceOf(event));
     try {
-      return await runInvocation(() => tenant.scheduled(event, this.#bindings(), this.ctx));
+      const result = await runInvocation(() => tenant.scheduled(controller, this.#bindings(), this.ctx));
+      return { ok: true, no_retry: noRetry, result: result === undefined ? null : result };
+    } catch (e) {
+      if (noRetry) return { ok: false, no_retry: true, error: String(e) };
+      throw e;
     } finally {
       setTraceContext(undefined);
     }

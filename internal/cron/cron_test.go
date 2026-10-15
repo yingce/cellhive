@@ -117,6 +117,15 @@ func TestSchedulerMaterializesAndDedups(t *testing.T) {
 	if cnt, _ := st.Count(ctx); cnt != 1 {
 		t.Fatalf("count = %d, want 1 (dedup by token)", cnt)
 	}
+	if err := st.MarkFired(ctx, due[0].Token, slot.Add(24*time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if cnt, _ := st.Count(ctx); cnt != 0 {
+		t.Fatalf("scheduler resurrected a fired slot: %d pending", cnt)
+	}
 
 	// Non-matching minute -> nothing.
 	now = utc(2026, time.January, 5, 10, 1)
@@ -136,6 +145,36 @@ func TestSchedulerSkipsBadExpression(t *testing.T) {
 	}
 	if n, err := s.Pass(ctx); err != nil || n != 0 {
 		t.Fatalf("bad expr pass = %d, %v; want 0, nil", n, err)
+	}
+}
+
+func TestSchedulerKeepsCoincidentTriggersDistinct(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Open(ctx, cell.Scope{Namespace: "acme", Class: CronClass, ID: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := utc(2026, time.January, 5, 10, 0)
+	s := &Scheduler{Now: func() time.Time { return slot }, Open: func(context.Context, cell.Scope) (*timer.Store, error) { return st, nil }, Targets: func(context.Context) ([]Target, error) {
+		return []Target{{Namespace: "acme", Worker: "web", Cron: "* * * * *"}, {Namespace: "acme", Worker: "web", Cron: "*/5 * * * *"}}, nil
+	}}
+	for i := 0; i < 2; i++ {
+		if _, err := s.Pass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due, err := st.Due(ctx, slot.UnixMilli(), 10)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("coincident triggers = %+v, %v; want 2", due, err)
 	}
 }
 
