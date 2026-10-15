@@ -1,5 +1,6 @@
 // services/caller: 通过 service binding 调同一命名空间的目标 Worker：
-//   env.API.fetch(...)          普通 fetch
+//   env.API.fetch(...)          普通 fetch；Request URL 只是传给目标 Worker 的请求 URL，
+//                               不用于选择 service-api
 //   await env.API.greet("bob")  原生 JSRPC 到入口类（结构化克隆）
 export default {
   async fetch(request, env) {

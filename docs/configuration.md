@@ -26,6 +26,36 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 ## 安全 / 凭据
 
+### CLI profile 与项目配置
+
+生产/开发 CLI 可以把非敏感项目归属放在项目目录的 `.cellhive/project.json`：
+
+```json
+{"profile":"staging","namespace":"acme","workers":{"web":"apps/web/wrangler.jsonc","api":"apps/api/wrangler.jsonc"}}
+```
+
+凭据放在用户配置目录（默认 `~/.config/cellhive/config.json`，权限 `0600`），通过：
+
+```bash
+cellhive login --profile staging --url https://cellhive.example.com --token "$CELLHIVE_DEPLOY_TOKEN"
+cellhive project init --namespace acme --profile staging
+cellhive wrangler deploy
+# 或使用官方 Wrangler：
+eval "$(cellhive env)"
+npx wrangler deploy
+```
+
+`CELLHIVE_CLI_CONFIG` 可指定 profile 文件路径，`CELLHIVE_PROFILE` 可覆盖项目 profile。命令行环境变量优先于 profile，显式 `--namespace` 优先于项目配置。项目文件不得保存 root key、admin token 或 JWT。
+
+多 Worker 项目可以写入 `workers` 映射，然后按名称部署：
+
+```bash
+cellhive wrangler deploy --name api
+cellhive wrangler deploy --name web
+```
+
+命令会自动选择对应的 Wrangler 配置；也可以继续显式传 `--config` 覆盖。
+
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `CELLHIVE_ROOT_KEY` | 空 | 平台根密钥（base64 或 hex，≥16 字节，建议 32）；派生全部角色凭据。生产**只配这一个**（无文件时的首选） |

@@ -1,6 +1,6 @@
 # CellHive 示例
 
-每个目录是一个可运行的 Cloudflare Workers 小项目（`index.js` + `wrangler.jsonc`），覆盖一项平台能力。示例既是**用法文档**，也是**兼容性对拍**：都能通过 CellHive 的生产部署链路，也能用开发 CLI（Miniflare）本地跑。
+每个目录是一个可运行的 Cloudflare Workers 小项目（`index.js` + `wrangler.jsonc`），覆盖一项平台能力。示例既是**用法文档**，也是**兼容性对拍**：都能通过 CellHive 的生产部署链路，也能用开发 CLI（Miniflare）本地跑。`services` 展示 service binding 的 fetch + 入口类 RPC；`worker-rpc` 专门展示 native JSRPC 的结构化克隆边界。
 
 > 示例是演示，不是生产产物。配置里的 `compatibility_date` 取 `2026-01-01`（≤ 平台上限）。
 
@@ -53,7 +53,7 @@ cellhive route add demo kv.example.test kv
 | [`body`](./body) | 请求/响应体（json/text/arrayBuffer/流） | — | `POST /`（JSON 或二进制） |
 | [`kv`](./kv) | KV put/get/delete/list + TTL + metadata | `kv KV` | `PUT /k`、`GET /k` |
 | [`d1`](./d1) | SQL 建表/参数化插入/查询/`meta.last_row_id` | `d1 DB` | `POST /`、`GET /` |
-| [`r2`](./r2) | R2 put/get/head/list/delete + metadata | `r2 FILES` | `PUT /k`、`GET /k`、`GET /` |
+| [`r2`](./r2) | R2 put/get/head/list/delete + metadata | `r2 FILES` | `PUT /k`、`HEAD /k`、`GET /k`、`GET /` |
 | [`queues`](./queues) | 生产者 send + 消费者 batch + DLQ | `queue JOBS`、`queue DLQ` | `GET /?n=1` |
 | [`cron`](./cron) | `scheduled` + `triggers.crons` | — | 每分钟触发（看日志） |
 | [`do-counter`](./do-counter) | 经典 DO 类 + SQLite storage | — | `GET /?name=a` |

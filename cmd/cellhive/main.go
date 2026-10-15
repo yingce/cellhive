@@ -55,6 +55,14 @@ func dispatch(args []string) error {
 		return nil
 	case "diagnose":
 		return diagnose()
+	case "login":
+		return cmdLogin(args[1:])
+	case "auth":
+		return cmdAuth(args[1:])
+	case "project":
+		return cmdProject(args[1:])
+	case "env":
+		return cmdEnv()
 	case "app":
 		return cmdApp(args[1:])
 	case "resource":
@@ -169,7 +177,7 @@ var wranglerReject = map[string]string{
 	"dev":              "use `cellhive dev` (Bun CLI, cli/) for local development; it reads the same wrangler config",
 	"pages":            "Cloudflare Pages is not supported; deploy a Worker with `assets` instead (docs/wrangler-compat.md)",
 	"dispatch":         "dispatch namespaces are not supported (rejected at deploy)",
-	"login":            "CellHive has no Cloudflare account; use `cellhive creds` for platform credentials",
+	"login":            "use `cellhive login --profile <name> --url <admin-url> --token <token>`",
 	"logout":           "CellHive has no Cloudflare account; nothing to log out",
 	"whoami":           "CellHive has no Cloudflare account; use `cellhive creds` / `cellhive status`",
 	"containers":       "Containers are not supported (docs/compatibility-matrix.md)",
@@ -280,7 +288,15 @@ func translateWranglerDeploy(rest []string) ([]string, error) {
 		}
 	}
 	if ns == "" {
-		return nil, fmt.Errorf("wrangler deploy: pass --namespace <ns> (CellHive has no account concept; the namespace is the tenant)")
+		ns = projectNamespace()
+	}
+	if ns == "" {
+		return nil, fmt.Errorf("wrangler deploy: pass --namespace <ns> or run `cellhive project init --namespace <ns>`")
+	}
+	if configPath == "" {
+		if name != "" {
+			configPath = projectWorkerConfig(name)
+		}
 	}
 	if configPath == "" {
 		if found := discoverWranglerConfig("."); found != "" {
@@ -322,12 +338,23 @@ func discoverWranglerConfig(dir string) string {
 	return ""
 }
 
-func adminURL() string { return getenv("CELLHIVE_ADMIN_URL", "http://127.0.0.1:8082") }
+func adminURL() string {
+	if v := getenv("CELLHIVE_ADMIN_URL", ""); v != "" {
+		return v
+	}
+	if v := activeProfile().AdminURL; v != "" {
+		return v
+	}
+	return "http://127.0.0.1:8082"
+}
 
 // adminToken prefers the explicit CELLHIVE_ADMIN_TOKEN (rotatable separately)
 // and otherwise uses the root-derived credential (ADR-137).
 func adminToken() string {
 	if v := getenv("CELLHIVE_ADMIN_TOKEN", ""); v != "" {
+		return v
+	}
+	if v := activeProfile().AdminToken; v != "" {
 		return v
 	}
 	return config.DeriveCredentials(config.LoadRootKey()).Admin
@@ -352,7 +379,11 @@ func adminCall(method, path string, body any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if jwt := strings.TrimSpace(os.Getenv("CELLHIVE_ADMIN_JWT")); jwt != "" {
+	jwt := strings.TrimSpace(os.Getenv("CELLHIVE_ADMIN_JWT"))
+	if jwt == "" {
+		jwt = activeProfile().AdminJWT
+	}
+	if jwt != "" {
 		// Namespace-scoped OIDC/JWT credential (ADR-131).
 		req.Header.Set("Authorization", "Bearer "+jwt)
 	} else {
@@ -2736,6 +2767,10 @@ func usage() {
 
 Usage:
   cellhive version
+  cellhive login --profile <name> --url <admin-url> [--token <token>|--jwt <jwt>]
+  cellhive auth list|current|test|logout <profile>
+  cellhive project init --namespace <ns> [--profile <profile>]
+  cellhive env                                      # print official Wrangler env exports
   cellhive diagnose
   cellhive app create <namespace>
   cellhive app list

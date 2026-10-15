@@ -13,7 +13,7 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 | 你是 | 建议顺序 |
 |---|---|
 | **要跑起来 / 运维** | [`deployment.md`](./deployment.md) → [`configuration.md`](./configuration.md) → [`operations.md`](./operations.md)；本地试跑看 [`dev-mode.md`](./dev-mode.md) |
-| **写 Worker 应用**（绑定/兼容） | [`bindings.md`](./bindings.md) → [`compatibility-matrix.md`](./compatibility-matrix.md) → [`wrangler-compat.md`](./wrangler-compat.md) |
+| **写 Worker 应用**（绑定/兼容） | [`cli.md`](./cli.md) → [`bindings.md`](./bindings.md) → [`compatibility-matrix.md`](./compatibility-matrix.md) → [`wrangler-compat.md`](./wrangler-compat.md) |
 | **平台贡献者** | [`architecture.md`](./architecture.md) → [`cell-protocol.md`](./cell-protocol.md) → [`contributing.md`](./contributing.md)（按改动类型的阅读路径） → [`testing.md`](./testing.md) |
 | **协议 / 复制 / DO 深挖** | [`cell-protocol.md`](./cell-protocol.md) → [`protocol-formats.md`](./protocol-formats.md) → [`durable-objects.md`](./durable-objects.md) → [`storage-and-s3.md`](./storage-and-s3.md) |
 | **想直接跑起来看代码** | [`../examples/`](../examples/README.zh.md)：每个功能一个可运行示例（KV/D1/R2/Queue/DO/Workflow/service/assets/AI/Vectorize…）+ 代码导航 |
@@ -66,6 +66,7 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 | [`bindings.md`](./bindings.md) | 每种 CF binding → cell 映射、host adapter、同步/异步边界 |
 | [`compatibility-matrix.md`](./compatibility-matrix.md) | CF 运行时面 + Wrangler 配置面的支持矩阵（Supported/Partial/Rejected） |
 | [`wrangler-compat.md`](./wrangler-compat.md) | Wrangler 兼容：Go+esbuild 打包、配置解析、DO 生命周期、路由、assets |
+| [`cli.md`](./cli.md) | CLI 登录 profile、项目 namespace、多 Worker 配置、`cellhive wrangler` 与官方 Wrangler |
 | [`workerd-integration.md`](./workerd-integration.md) | stock workerd 集成：workerLoader、wrapper、host adapter、网络/limits、版本 pin |
 | [`routing.md`](./routing.md) | 入口、路由投影、版本解析、host 形态、保留命名空间 |
 

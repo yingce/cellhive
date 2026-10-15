@@ -13,7 +13,7 @@ Choose a path based on your role; the first two steps are enough to get started:
 | You are | Recommended order |
 |---|---|
 | **Running it / operations** | [`deployment.md`](deployment.md) → [`configuration.md`](configuration.md) → [`operations.md`](operations.md); for a local trial run, see [`dev-mode.md`](dev-mode.md) |
-| **Writing Worker applications** (bindings/compatibility) | [`bindings.md`](bindings.md) → [`compatibility-matrix.md`](compatibility-matrix.md) → [`wrangler-compat.md`](wrangler-compat.md) |
+| **Writing Worker applications** (bindings/compatibility) | [`cli.md`](cli.md) → [`bindings.md`](bindings.md) → [`compatibility-matrix.md`](compatibility-matrix.md) → [`wrangler-compat.md`](wrangler-compat.md) |
 | **Platform contributor** | [`architecture.md`](architecture.md) → [`cell-protocol.md`](cell-protocol.md) → [`contributing.md`](contributing.md) (reading paths by change type) → [`testing.md`](testing.md) |
 | **Protocol / replication / DO deep dive** | [`cell-protocol.md`](cell-protocol.md) → [`protocol-formats.md`](protocol-formats.md) → [`durable-objects.md`](durable-objects.md) → [`storage-and-s3.md`](storage-and-s3.md) |
 | **Want to run it directly and read code** | [`../examples/`](../../examples/README.md): one runnable example per feature (KV/D1/R2/Queue/DO/Workflow/service/assets/AI/Vectorize…) + code navigation |
@@ -66,6 +66,7 @@ For a more complete description, see [`architecture.md`](architecture.md).
 | [`bindings.md`](bindings.md) | Each CF binding → cell mapping, host adapter, sync/async boundaries |
 | [`compatibility-matrix.md`](compatibility-matrix.md) | Support matrix for the CF runtime surface and Wrangler configuration surface (Supported/Partial/Rejected) |
 | [`wrangler-compat.md`](wrangler-compat.md) | Wrangler compatibility: Go+esbuild packaging, configuration parsing, DO lifecycle, routing, assets |
+| [`cli.md`](cli.md) | CLI login profiles, project namespaces, multi-Worker configuration, `cellhive wrangler`, and official Wrangler |
 | [`workerd-integration.md`](workerd-integration.md) | stock workerd integration: workerLoader, wrapper, host adapter, networking/limits, version pin |
 | [`routing.md`](routing.md) | Entrypoints, route projections, version resolution, host forms, reserved namespaces |
 

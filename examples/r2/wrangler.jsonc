@@ -5,7 +5,8 @@
   "r2_buckets": [
     {
       "binding": "FILES",
-      "bucket_name": "demo/__r2__/FILES"
+      // Logical R2 resource name. CellHive maps it to <namespace>/__r2__/FILES.
+      "bucket_name": "FILES"
     }
   ]
 }

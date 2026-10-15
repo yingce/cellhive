@@ -61,6 +61,7 @@
 | `wrangler triggers deploy` | 提示用 `cellhive deploy --config wrangler.jsonc`（`triggers.crons` 原子随版本应用） |
 
 - **命名空间**：CellHive 无账号概念，`--namespace <ns>`（= 租户）必填；
+- **项目 profile**：`cellhive project init --namespace <ns> --profile <profile>` 写入 `.cellhive/project.json`；`cellhive login` 将 Admin URL/token 保存到用户级 profile，之后 `cellhive wrangler deploy` 可省略 `--namespace` 和环境变量。官方 `npx wrangler` 仍使用标准 `CLOUDFLARE_API_BASE_URL`/`CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`，CellHive 不改写官方进程环境；
 - **`deploy` flag**：`--dry-run`（服务端预检不落状态）、`--var NAME=VALUE`、`--secrets-file <JSON>` 已支持并透传；其余不支持的 flag 直接报错并给替代（如 `--minify`→`build.minify`、`--compatibility-date`→`compatibility_date`）；
 - **兼容命令组**：`versions`/`deployments`/`triggers`/`workflows`/`queues`/`types`/`init` 转发到原生实现或**结构化拒绝 + 替代说明**（ADR-148）；`d1`/`r2`/`kv` 转发到原生每域命令，已支持上述常用数据面命令；`vectorize`/`hyperdrive` 前缀透传到原生实现；
 - **表驱动的已知命令覆盖**：`translateWrangler` 内置已知 wrangler 命令的"映射或替代"表（`wranglerReject`），**任何已知命令都不会落入 `unknown command`**；未知名字才报 unknown。旧式 `kv:bulk` 映射到 `kv bulk`。明确不支持（带替代）：`dev`→`cellhive dev`、`pages`→用 `assets` 部署 Worker、`dispatch`/`containers`/`pubsub`/`mtls-certificate`/`cert` → 不支持、`login`/`logout`/`whoami`→无 CF 账号（用 `cellhive creds`/`status`）、`check`→`cellhive deploy --dry-run`、`docs`→仓库 `docs/`、`telemetry`→无遥测、`unstable_*`→内部命令；
