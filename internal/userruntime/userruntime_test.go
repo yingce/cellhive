@@ -1840,6 +1840,20 @@ func TestUserRuntimeAssetRouterConfig(t *testing.T) {
 	})
 }
 
+func TestUserRuntimeAssetsBindingFetchesVersionAssets(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	proj := projectWithAssets(map[string]any{"binding": "ASSETS"})
+	bundle := `export default { async fetch(req, env) { return env.ASSETS.fetch(new Request(new URL("/index.html", req.url))); } };`
+	public, stop := startLoader(t, proj, map[string]string{"index.html": "react-shell"}, bundle)
+	defer stop()
+	resp, body := fetchHost(t, noProxyClient(), public, "/api/data")
+	if resp.StatusCode != 200 || body != "react-shell" {
+		t.Fatalf("ASSETS.fetch = %d %q", resp.StatusCode, body)
+	}
+}
+
 const kvTenantBundle = `
 export default {
   async fetch(req, env) {

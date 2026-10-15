@@ -399,7 +399,10 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		Assets             struct {
 			JWT    string `json:"jwt"`
 			Config struct {
+				Binding          string `json:"binding"`
 				NotFoundHandling string `json:"not_found_handling"`
+				HTMLHandling     string `json:"html_handling"`
+				RunWorkerFirst   bool   `json:"run_worker_first"`
 			} `json:"config"`
 		} `json:"assets"`
 		Triggers struct {
@@ -413,7 +416,7 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 	out.Migrations, out.Crons = raw.Migrations, raw.Triggers.Crons
 	if raw.Assets.JWT != "" {
 		out.AssetsJWT = raw.Assets.JWT
-		out.Assets = &control.AssetsConfig{NotFoundHandling: raw.Assets.Config.NotFoundHandling}
+		out.Assets = &control.AssetsConfig{Binding: raw.Assets.Config.Binding, NotFoundHandling: raw.Assets.Config.NotFoundHandling, HTMLHandling: raw.Assets.Config.HTMLHandling, RunWorkerFirst: raw.Assets.Config.RunWorkerFirst}
 	}
 	for _, b := range raw.Bindings {
 		name, typ := stringValue(b["name"]), stringValue(b["type"])

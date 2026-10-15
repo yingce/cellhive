@@ -968,7 +968,32 @@ export function bindingStub(ctx, spec) {
       return ctx.exports.WorkflowBinding({ props });
     case "vectorize":
       return ctx.exports.Vectorize({ props });
+    case "assets":
+      return ctx.exports.Assets({ props });
     default:
       return undefined;
   }
+}
+
+// Workers Static Assets binding. The trusted platform worker is the only code
+// that knows the namespace, worker and immutable asset token.
+export class Assets extends WorkerEntrypoint {
+  async fetch(input) {
+    const req = input instanceof Request ? input : new Request(input);
+    const p = this.ctx.props || {};
+    const u = new URL(req.url);
+    const path = u.pathname.replace(/^\/+/, "") || "index.html";
+    const q = `?ns=${encodeURIComponent(p.ns)}&worker=${encodeURIComponent(p.worker)}&token=${encodeURIComponent(p.token)}&path=${encodeURIComponent(path)}`;
+    const r = await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/asset" + q, { headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" } });
+    if (r.status === 404) return new Response(null, { status: 404 });
+    if (!r.ok) return new Response("asset fetch failed", { status: 502 });
+    const headers = new Headers({ "content-type": contentType(path) });
+    const body = await r.arrayBuffer();
+    return new Response(req.method === "HEAD" ? null : body, { status: 200, headers });
+  }
+}
+
+function contentType(path) {
+  const ext = (path.match(/\.([a-zA-Z0-9]+)$/) || [])[1]?.toLowerCase();
+  return ({ html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", json: "application/json; charset=utf-8", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", woff2: "font/woff2" })[ext] || "application/octet-stream";
 }

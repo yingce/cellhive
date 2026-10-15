@@ -14,7 +14,7 @@
 import { bindingStub, setServiceLoader } from "bindings.js";
 import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
 import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
-export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
+export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
@@ -202,9 +202,7 @@ export default {
       try {
         if (shouldRunWorkerFirst(assetsCfg, effURL.pathname)) {
           const wres = await runWorker(effReq, env, ctx, app, route.worker, version, version.class_storage || {}, version.deleted_classes || []);
-          if (wres.status !== 404) return wres;
-          const served = await serveAsset(effReq, env, app, route.worker, version, effURL);
-          return served || wres;
+          return wres;
         }
         const served = await serveAsset(effReq, env, app, route.worker, version, effURL);
         if (served) return served;
@@ -222,8 +220,7 @@ async function fixedFetch(req,env,ctx,app,worker,version,url){
   if(version.assets_sha&&(req.method==='GET'||req.method==='HEAD')){
     const cfg=version.assets||{};
     if(shouldRunWorkerFirst(cfg,url.pathname)){
-      const res=await runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
-      if(res.status!==404)return res;return(await serveAsset(req,env,app,worker,version,url))||res;
+      return await runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
     }
     const asset=await serveAsset(req,env,app,worker,version,url);if(asset)return asset;
   }
@@ -472,19 +469,25 @@ function platformConsts(spec) {
 // --- assets ---------------------------------------------------------------
 
 function shouldRunWorkerFirst(cfg, pathname) {
-  if (cfg.run_worker_first) return true;
+  if (cfg.run_worker_first === true) return true;
+  let matched = false;
   for (const p of cfg.run_worker_first_paths || []) {
     if (!p) continue;
-    if (p.endsWith("*") ? pathname.startsWith(p.slice(0, -1)) : pathname === p || pathname.startsWith(p + "/")) {
-      return true;
-    }
+    const negative = p.startsWith("!");
+    const pattern = negative ? p.slice(1) : p;
+    const hit = pattern.endsWith("*") ? pathname.startsWith(pattern.slice(0, -1)) : pathname === pattern || pathname.startsWith(pattern + "/");
+    if (hit && negative) return false;
+    if (hit) matched = true;
   }
-  return false;
+  return matched;
 }
 
 async function serveAsset(req, env, app, worker, version, url) {
   const token = version.assets_sha;
   const pathname = decodeURIComponent(url.pathname);
+	if (pathname === "/_headers" || pathname === "/_redirects") return null;
+	const canonical = await htmlCanonicalRedirect(req, env, app, worker, token, pathname, (version.assets || {}).html_handling);
+	if (canonical) return canonical;
 
   for (const rule of await redirectRules(env, app, worker, token)) {
     const dest = matchRedirect(rule, pathname);
@@ -504,6 +507,28 @@ async function serveAsset(req, env, app, worker, version, url) {
   if (nf === "single-page-application") return assetResponse(req, env, app, worker, token, "index.html", 200, pathname);
   if (nf === "404-page") return assetResponse(req, env, app, worker, token, "404.html", 404, pathname);
   return null; // "none"/unset -> caller falls back to the worker
+}
+
+async function htmlCanonicalRedirect(req, env, app, worker, token, pathname, mode) {
+  if (!mode || mode === "none") return null;
+  const redirect = (location) => new Response(null, { status: 307, headers: { location: location + new URL(req.url).search } });
+  if (mode === "drop-trailing-slash" && pathname.length > 1 && pathname.endsWith("/")) return redirect(pathname.slice(0, -1));
+  if ((mode === "auto-trailing-slash" || mode === "force-trailing-slash") && pathname.endsWith(".html")) {
+    const base = pathname.slice(0, -5);
+    return redirect(mode === "force-trailing-slash" ? base + "/" : base || "/");
+  }
+  if ((mode === "auto-trailing-slash" || mode === "force-trailing-slash") && !pathname.endsWith("/") && !pathname.match(/\.[^/]+$/)) {
+    const base = pathname.replace(/^\/+/, "");
+    const hit = await asset(env, app, worker, token, base + ".html");
+    const index = hit || await asset(env, app, worker, token, base + "/index.html");
+    if (index) return redirect(pathname + "/");
+  }
+  if (mode === "auto-trailing-slash" && pathname.length > 1 && pathname.endsWith("/")) {
+    const base = pathname.slice(1, -1);
+    const hit = await asset(env, app, worker, token, base + ".html");
+    if (hit) return redirect(pathname.slice(0, -1));
+  }
+  return null;
 }
 
 // assetResponse serves one asset. `pathname` is the file to serve; `matchPath`
@@ -1105,6 +1130,10 @@ async function hyperdriveConnString(env, ns, ref, name) {
 
 async function bindingSpec(env, app, worker, version, classStorage, deletedClasses) {
   const spec = {};
+  if (version.assets_sha && version.assets && version.assets.binding) {
+    spec[version.assets.binding] = { kind: "assets", ns: app.namespace, worker,
+      token: version.assets_sha, config: version.assets };
+  }
   const deleted = new Set(deletedClasses || []);
   for (const b of version.bindings || []) {
     if (b.type === "do") {

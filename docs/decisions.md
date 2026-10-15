@@ -2540,6 +2540,17 @@
 
 ---
 
+## ADR-206 Workers Static Assets 部署契约（2026-10-15，实施中）
+
+- **目标**：同一份标准 Wrangler assets 配置可用于纯静态 React/Vite 产物与 Worker+assets；支持原生 CLI、官方 Wrangler 上传、生产及本地开发。生产保持 stock workerd、唯一 cell-agent 桶凭据和点查热路径。
+- **配置**：`directory`、`binding`、`html_handling` 四模式、`not_found_handling`、`run_worker_first` bool/最多 100 条 glob（否定规则优先）。无 main 的部署由平台创建固定 404 bundle，版本 assets 配置记录 `assets_only`；平台 stub 固定到版本 token，租户不得选择 namespace/worker/token。
+- **路由**：worker-first 直接返回 Worker 响应（包括 404）；assets-first 区分资源命中和 not-found handling。导航优先受 compatibility date/flags 控制，显式路径数组关闭自动导航检测；ASSETS.fetch 只进入资产服务，不递归用户 Worker。HTML canonical redirect 为 307；保留查询参数。SPA fallback 遵循官方资产服务行为，不按扩展名自行过滤。
+- **发布**：资产逐键条件创建，相同字节重试幂等，冲突失败；manifest 点查校验完成后才激活版本。`.assetsignore` 使用 gitignore 风格匹配，元数据文件只作配置不公开。CLI 本地 build.command 与 assets-only 均需真实验收；服务端不执行构建命令。
+- **部署**：边缘继续由运维管理，但仓库提供可用 Compose/Helm 配置与 React/Vite 示例；不声称自带全球 CDN 或所有 SSR 框架完全兼容。
+- **验收依据**：CF 官方 Static Assets binding、worker-script、single-page-application、HTML handling 文档及固定 Wrangler/Miniflare 实测。实施进度与边界记录在 `docs/static-sites.md`，未运行的验证不得标为通过。
+
+---
+
 ## ADR-185 租户 env 完全由用户拥有：零平台键
 
 - **背景**：ADR-184 把传输与凭据收敛到平台侧 stub，但仍把 `CH_PLATFORM` 写入 loaded Worker 的 `env`，并因此保留 `CH_*`、`CELL_*`、`__cellhive*` 与历史平台名称。平台键即使没有直接暴露凭据，仍占用用户命名空间，也允许租户代码直接触达平台能力。

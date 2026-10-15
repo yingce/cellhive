@@ -1021,7 +1021,7 @@ func registeredResources(ns string) func(kind, name string) bool {
 // --no-bundle uploads the file as-is).
 func bundleFromConfig(m *wrangler.Deploy) (string, error) {
 	if m.Main == "" {
-		return "", fmt.Errorf("config has no main; pass --bundle-sha")
+		return uploadBundleBytes([]byte(`export default { fetch() { return new Response(null, { status: 404 }); } };`))
 	}
 	if m.NoBundle {
 		return uploadBundle(m.Main)
@@ -1132,6 +1132,7 @@ func cmdRoutes() error {
 func assetsDirToken(dir string) (string, []string, error) {
 	type entry struct{ rel, sum string }
 	var entries []entry
+	patterns := readAssetsIgnore(dir)
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1144,6 +1145,9 @@ func assetsDirToken(dir string) (string, []string, error) {
 			return rerr
 		}
 		rel = filepath.ToSlash(rel)
+		if rel == ".assetsignore" || assetIgnored(rel, patterns) {
+			return nil
+		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return rerr
@@ -1166,6 +1170,46 @@ func assetsDirToken(dir string) (string, []string, error) {
 		rels = append(rels, e.rel)
 	}
 	return hex.EncodeToString(h.Sum(nil)), rels, nil
+}
+
+func readAssetsIgnore(dir string) []string {
+	raw, err := os.ReadFile(filepath.Join(dir, ".assetsignore"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func assetIgnored(path string, patterns []string) bool {
+	ignored := false
+	for _, pattern := range patterns {
+		neg := strings.HasPrefix(pattern, "!")
+		if neg {
+			pattern = strings.TrimPrefix(pattern, "!")
+		}
+		pattern = strings.TrimPrefix(strings.TrimSpace(pattern), "/")
+		match := path == strings.TrimSuffix(pattern, "/") || strings.HasPrefix(path, strings.TrimSuffix(pattern, "/")+"/")
+		if strings.HasSuffix(pattern, "/") {
+			match = strings.HasPrefix(path, strings.TrimSuffix(pattern, "/")+"/")
+		}
+		if strings.ContainsAny(pattern, "*?") {
+			match, _ = filepath.Match(pattern, path)
+			if !match && !strings.Contains(pattern, "/") {
+				match, _ = filepath.Match(pattern, filepath.Base(path))
+			}
+		}
+		if match {
+			ignored = !neg
+		}
+	}
+	return ignored
 }
 
 func uploadAssetsDir(ns, worker, dir string) (string, error) {

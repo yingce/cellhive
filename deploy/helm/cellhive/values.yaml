@@ -80,5 +80,6 @@ ingress:
   enabled: false
   className: ""
   host: ""            # e.g. cellhive.example.com (admin/API host)
+  publicHost: ""       # optional public static/Worker host
   tlsSecret: ""       # optional TLS secret name
   annotations: {}

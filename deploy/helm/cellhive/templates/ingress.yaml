@@ -1,0 +1,51 @@
+{{- if .Values.ingress.enabled }}
+{{- $annotations := .Values.ingress.annotations }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecret }}
+  tls:
+    - secretName: {{ . | quote }}
+      hosts:
+        {{- with $.Values.ingress.host }}
+        - {{ . | quote }}
+        {{- end }}
+        {{- with $.Values.ingress.publicHost }}
+        - {{ . | quote }}
+        {{- end }}
+  {{- end }}
+  rules:
+    {{- with .Values.ingress.host }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-cell-agent
+                port: {number: 8082}
+    {{- end }}
+    {{- with .Values.ingress.publicHost }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-user-runtime
+                port: {number: 8081}
+    {{- end }}
+{{- end }}

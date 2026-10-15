@@ -6,6 +6,7 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -232,8 +233,18 @@ func (s *Store) PutAssetAt(ctx context.Context, ns, worker, token, path string, 
 	if err != nil {
 		return "", err
 	}
-	if _, err := objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts).Put(ctx, key, data); err != nil {
-		return "", err
+	objects := objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts)
+	if _, err := objects.ConditionalCreate(ctx, key, data); err != nil {
+		if !errors.Is(err, bucket.ErrPrecondition) {
+			return "", err
+		}
+		existing, readErr := objects.Get(ctx, key)
+		if readErr != nil {
+			return "", readErr
+		}
+		if !bytes.Equal(existing, data) {
+			return "", fmt.Errorf("artifacts: immutable asset conflict: %s", path)
+		}
 	}
 	return key, nil
 }

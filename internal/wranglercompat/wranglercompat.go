@@ -40,6 +40,7 @@ var SupportedBindingKinds = map[string]bool{
 	// vectorize indexes are registered resources with an immutable
 	// dimensions/metric config (ADR-158).
 	"vectorize": true,
+	"assets":    true,
 }
 
 // ResourceKinds are the binding kinds that must reference a registered

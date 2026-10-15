@@ -78,6 +78,15 @@ func TestAssetsDirTokenDeterministic(t *testing.T) {
 	}
 }
 
+func TestAssetIgnored(t *testing.T) {
+	patterns := []string{"private.txt", "*.map", "dist/"}
+	for path, want := range map[string]bool{"private.txt": true, "app.js.map": true, "dist/app.js": true, "app.js": false} {
+		if got := assetIgnored(path, patterns); got != want {
+			t.Fatalf("assetIgnored(%q)=%v want %v", path, got, want)
+		}
+	}
+}
+
 // TestConsumeSpecs covers --consumer parsing, including the maxConcurrency
 // field (ADR-112).
 func TestConsumeSpecs(t *testing.T) {

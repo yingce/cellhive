@@ -75,6 +75,7 @@ export function assetsOptions(
   if (!a) return undefined;
   const assetConfig: Record<string, unknown> = {};
   if (a.notFoundHandling) assetConfig.not_found_handling = a.notFoundHandling;
+  if (a.htmlHandling) assetConfig.html_handling = a.htmlHandling;
   return {
     directory: resolve(projectDir, a.directory),
     binding: a.binding,
@@ -102,10 +103,6 @@ function workerFirst(config, pathname) {
   return false;
 }
 
-function asset404IsFinal(config) {
-  return config.notFoundHandling === "404-page" && config.has404Page;
-}
-
 export default {
   async fetch(request, env) {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -114,13 +111,10 @@ export default {
     const pathname = new URL(request.url).pathname;
     if (workerFirst(env.ROUTING, pathname)) {
       const workerResponse = await env.USER_WORKER.fetch(request);
-      if (workerResponse.status !== 404) return workerResponse;
-      const assetResponse = await env.ASSET_WORKER.fetch(request);
-      if (assetResponse.status !== 404 || asset404IsFinal(env.ROUTING)) return assetResponse;
       return workerResponse;
     }
     const assetResponse = await env.ASSET_WORKER.fetch(request);
-    if (assetResponse.status !== 404 || asset404IsFinal(env.ROUTING)) return assetResponse;
+    if (assetResponse.status !== 404 || env.ROUTING.notFoundHandling === "404-page") return assetResponse;
     return env.USER_WORKER.fetch(request);
   }
 };

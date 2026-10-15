@@ -85,11 +85,9 @@ test("dev assets pipeline matches the production loader", async () => {
     expect(api.status).toBe(200);
     expect(await api.json()).toEqual({ worker: true, path: "/api/hi" });
 
-    // Production runs the worker first, then falls back to an existing asset
-    // when the worker explicitly returns 404.
+    // Cloudflare runs the worker first and preserves its explicit 404.
     const worker404 = await get("/api/existing.txt");
-    expect(worker404.status).toBe(200);
-    expect(await worker404.text()).toBe("worker-404-asset");
+    expect(worker404.status).toBe(404);
 
     const binding = await get("/binding");
     expect(binding.status).toBe(200);

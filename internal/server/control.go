@@ -907,6 +907,18 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	if !decodeControl(w, r, &req) {
 		return
 	}
+	if req.Assets != nil && req.Assets.Binding != "" {
+		found := false
+		for _, b := range req.Bindings {
+			if b.Type == "assets" && b.Name == req.Assets.Binding {
+				found = true
+				break
+			}
+		}
+		if !found {
+			req.Bindings = append(req.Bindings, control.Binding{Type: "assets", Name: req.Assets.Binding, ID: req.AssetsSHA})
+		}
+	}
 	res, bundleSize := s.validateDeploy(r.Context(), req)
 	if !res.OK() {
 		writeJSON(w, http.StatusBadRequest, map[string]any{

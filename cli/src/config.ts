@@ -28,6 +28,7 @@ export type WranglerConfig = {
     runWorkerFirstPaths?: string[];
     // not_found_handling: "none" | "404-page" | "single-page-application".
     notFoundHandling?: string;
+    htmlHandling?: "auto-trailing-slash" | "force-trailing-slash" | "drop-trailing-slash" | "none";
   };
   envName?: string;
   raw: Record<string, unknown>;
@@ -149,6 +150,7 @@ function parseAssets(raw: Record<string, unknown>): WranglerConfig["assets"] {
       invokeUserWorkerAhead: typeof rw === "boolean" ? rw : paths !== undefined ? paths.length > 0 : undefined,
       runWorkerFirstPaths: paths && paths.length > 0 ? paths : undefined,
       notFoundHandling: nfh === "none" || nfh === "404-page" || nfh === "single-page-application" ? nfh : undefined,
+      htmlHandling: a.html_handling === "auto-trailing-slash" || a.html_handling === "force-trailing-slash" || a.html_handling === "drop-trailing-slash" || a.html_handling === "none" ? a.html_handling : undefined,
     };
   }
   // Legacy [site] bucket = "./public"

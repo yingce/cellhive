@@ -195,7 +195,7 @@ func TestWorkflowBindingRequiresClassName(t *testing.T) {
 // docs/compatibility-matrix.md cannot drift silently (P5 regression guard).
 func TestVendorMatrixContract(t *testing.T) {
 	// vectorize is supported as of ADR-158 (registered resource + exact KNN).
-	wantBindings := []string{"kv", "d1", "r2", "queue", "workflow", "do", "service", "ai", "hyperdrive", "vectorize"}
+	wantBindings := []string{"kv", "d1", "r2", "queue", "workflow", "do", "service", "ai", "hyperdrive", "vectorize", "assets"}
 	if len(SupportedBindingKinds) != len(wantBindings) {
 		t.Fatalf("supported bindings = %v", SupportedBindingKinds)
 	}

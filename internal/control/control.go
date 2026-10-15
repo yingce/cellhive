@@ -74,6 +74,9 @@ type Consumer struct {
 
 // AssetsConfig is the static-asset router configuration (ADR-071).
 type AssetsConfig struct {
+	Binding      string `json:"binding,omitempty"`
+	HTMLHandling string `json:"html_handling,omitempty"`
+	AssetsOnly   bool   `json:"assets_only,omitempty"`
 	// NotFoundHandling: "", "none", "404-page" or "single-page-application".
 	NotFoundHandling string `json:"not_found_handling,omitempty"`
 	// RunWorkerFirst runs the worker before assets (all paths or the listed ones).

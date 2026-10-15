@@ -126,6 +126,17 @@ func Load(path, envName string) (*Deploy, error) {
 	d.mapBindings(base)
 	d.mapBuild(base)
 	d.mapAssets(base, path)
+	if d.Assets != nil {
+		if d.Assets.HTMLHandling != "" && d.Assets.HTMLHandling != "auto-trailing-slash" && d.Assets.HTMLHandling != "force-trailing-slash" && d.Assets.HTMLHandling != "drop-trailing-slash" && d.Assets.HTMLHandling != "none" {
+			return nil, fmt.Errorf("assets.html_handling: unsupported value %q", d.Assets.HTMLHandling)
+		}
+		if d.Assets.NotFoundHandling != "" && d.Assets.NotFoundHandling != "none" && d.Assets.NotFoundHandling != "404-page" && d.Assets.NotFoundHandling != "single-page-application" {
+			return nil, fmt.Errorf("assets.not_found_handling: unsupported value %q", d.Assets.NotFoundHandling)
+		}
+		if len(d.Assets.RunWorkerFirstPaths) > 100 {
+			return nil, fmt.Errorf("assets.run_worker_first: at most 100 patterns are supported")
+		}
+	}
 	d.mapMigrations(base)
 	d.mapCrons(base)
 	// Resolve `main` relative to the config file (wrangler does the same), so the
@@ -323,8 +334,8 @@ func (d *Deploy) mapAssets(m map[string]any, configPath string) {
 		d.AssetsDir = resolveDir(configPath, dir)
 	}
 	d.AssetsBinding = str(a["binding"])
-	cfg := &control.AssetsConfig{}
-	changed := false
+	cfg := &control.AssetsConfig{Binding: d.AssetsBinding, HTMLHandling: str(a["html_handling"]), AssetsOnly: d.Main == ""}
+	changed := cfg.Binding != "" || cfg.HTMLHandling != "" || cfg.AssetsOnly
 	if nf := str(a["not_found_handling"]); nf != "" {
 		cfg.NotFoundHandling = nf
 		changed = true
