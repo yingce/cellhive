@@ -6,7 +6,6 @@ metadata:
     {{- include "cellhive.labels" . | nindent 4 }}
     app: cell-agent
 spec:
-  clusterIP: None
   selector:
     app: cell-agent
     app.kubernetes.io/instance: {{ .Release.Name }}
