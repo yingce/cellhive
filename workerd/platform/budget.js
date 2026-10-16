@@ -12,6 +12,7 @@ export function workerLimits(value) {
   if (!value || typeof value !== "object") return undefined;
   const out = {};
   if (Number.isInteger(value.subrequests) && value.subrequests > 0) out.subRequests = value.subrequests;
+  if (Number.isInteger(value.deadline_ms) && value.deadline_ms > 0) out.deadlineMs = value.deadline_ms;
   return Object.keys(out).length ? out : undefined;
 }
 

@@ -93,7 +93,7 @@ async function dispatchQueues(req, env, ctx) {
   // The batch crosses an isolate boundary over RPC, and structured clone drops
   // non-index array properties and functions — so send a plain payload and let
   // the tenant-side wrapper build the CF MessageBatch (ADR-154).
-  const payload = { messages: batch, queue, traceparent: body.traceparent };
+  const payload = { messages: batch, queue, traceparent: body.traceparent, invocation_id: invocation.invocation_id };
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
     await finishInvocation(env, invocation, execution);
@@ -129,7 +129,7 @@ async function dispatchTimers(req, env, ctx) {
     await finishInvocation(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
-  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
+  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, invocation_id: invocation.invocation_id };
   if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
@@ -218,6 +218,8 @@ async function dispatchServiceFetch(req, env, ctx) {
     init.headers = { "content-type": content_type || "text/plain" };
   }
   if (body.traceparent) init.headers = Object.assign({}, init.headers, { traceparent: body.traceparent });
+  const invocationId = req.headers.get("x-cellhive-invocation-id");
+  if (invocationId) init.headers = Object.assign({}, init.headers, { "x-cellhive-invocation-id": invocationId });
   try {
     const host = stub.getEntrypoint("CellHiveHost");
     const req = new Request(targetURL || "http://service/", init);
@@ -246,7 +248,8 @@ async function dispatchServiceRun(req, env, ctx) {
   }
   try {
     const host = stub.getEntrypoint("CellHiveHost");
-    const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent);
+    const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent,
+      req.headers.get("x-cellhive-invocation-id"));
     return json({ result: result === undefined ? null : result });
   } catch (e) {
     return json({ error: "service_failed", message: String(e) }, 500);

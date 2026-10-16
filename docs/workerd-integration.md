@@ -67,6 +67,17 @@ user-runtime loader：
 - **租户 loaded worker 的 `globalOutbound` = 公网 only**，不含 RFC1918/cell-agent；
 - 平台代码（loader/host adapter/DO host actor）使用单独的 private network binding。
 
+## CellHive fork 实验能力（非默认生产路径）
+
+`/opt/cellhive-workerd-fork` 保留一个与 pinned revision 对齐的实验 fork，用于验证平台需要而 stock workerd 没有的观测接口。当前 fork 只增加低耦合 hook，不承载状态或控制面：
+
+- binding 调用携带 value-only `invocationId` 与 `traceId`；开始、完成、失败、取消由 `RequestObserver` 统一回调；异常和断连分别映射为 `FAILED`/`CANCELED`。Cache binding 同样收到 correlation metadata；其完成状态仍由调用方的 HTTP promise 观测。
+- fork 支持可选的 `limits.deadline_ms`：IoContext 在 invocation 创建时快照绝对 deadline，并将其随 binding/Cache metadata 传播；未配置时保持 `none`，不会伪造 deadline。CellHive 控制面已校验正数并传给 loader/workerd。
+- 请求体和响应体仍使用 workerd 原生 `AsyncInputStream`/writable stream，背压由原生流实现；`ByteStreamObserver` 可统计 enqueue/dequeue，不把 body 聚合成 base64。
+- D1/KV/R2/Queue/Workflow 的数据、owner/epoch、租约、WAL、RPO=0 和输出门仍由 Go/cell-agent 负责，fork 不新增第二套存储。
+
+该 fork 需单独构建、运行基线 E2E 后才能升级；生产默认仍使用上面的 stock pin。
+
 ## 限制
 
 - **standalone enforcement 边界**：当前 pinned standalone workerd 使用 `NullIsolateLimitEnforcer` 和空的 subrequest enforcement；`WorkerCode.limits.cpuMs/subRequests` 仅被 API 接受，实测 `cpuMs=1` 的 250ms 忙循环与 `subRequests=1` 的五次请求均完成。没有可配置的 per-isolate heap quota；不能把 Cloudflare 托管运行时的限额当作本地保证。

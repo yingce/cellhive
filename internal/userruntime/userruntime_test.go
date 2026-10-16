@@ -46,6 +46,28 @@ export default {
 };
 `
 
+const streamingTenantBundle = `
+export default {
+  async fetch(req) {
+    if (new URL(req.url).pathname !== "/stream") return new Response("ok");
+    const chunk = new Uint8Array(256 * 1024);
+    chunk.fill(65);
+    let sent = 0;
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk);
+        sent++;
+        const timer = setInterval(() => {
+          if (sent === 4) { clearInterval(timer); controller.close(); return; }
+          controller.enqueue(chunk);
+          sent++;
+        }, 100);
+      }
+    }));
+  }
+};
+`
+
 func TestDynamicWorkerCodeContainsNoPlatformCredential(t *testing.T) {
 	for _, path := range []string{
 		"../../workerd/user-runtime/loader.js",
@@ -5969,6 +5991,7 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 
 	var mu sync.Mutex
 	var facadeTrace string
+	var facadeInvocation string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -5978,6 +6001,7 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 		case "/v1/kv/get":
 			mu.Lock()
 			facadeTrace = r.Header.Get("traceparent")
+			facadeInvocation = r.Header.Get("x-cellhive-invocation-id")
 			mu.Unlock()
 			_, _ = w.Write([]byte("v"))
 		default:
@@ -6048,6 +6072,98 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 	defer mu.Unlock()
 	if facadeTrace != given {
 		t.Fatalf("props-bound facade traceparent = %q, want %q", facadeTrace, given)
+	}
+	if !regexp.MustCompile(`^[0-9a-fA-F-]{16,128}$`).MatchString(facadeInvocation) {
+		t.Fatalf("props-bound facade invocation id = %q, want a value-only id", facadeInvocation)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
+// TestUserRuntimeForkStreamingBackpressure exercises the fork with a response
+// that stays open while producing several large chunks. The first read must be
+// observable before the producer closes the stream; this guards the native
+// workerd stream bridge against eager whole-body aggregation.
+func TestUserRuntimeForkStreamingBackpressure(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	proj := map[string]any{"apps": []any{map[string]any{
+		"namespace": "acme",
+		"routes":    []any{map[string]any{"host": "stream.test", "worker": "web"}},
+		"workers": []any{map[string]any{"worker": "web", "active": 1, "version": map[string]any{
+			"number": 1, "bundle_sha": "shaStream",
+		}}},
+	}}}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(proj, w, r)
+		case "/v1/internal/bundle":
+			_, _ = w.Write([]byte(streamingTenantBundle))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	client := noProxyClient()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("loader not healthy: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, public+"/stream", nil)
+	req.Host = "stream.test"
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(resp.Body, first); err != nil {
+		resp.Body.Close()
+		t.Fatalf("first stream chunk: %v", err)
+	}
+	firstAt := time.Since(start)
+	rest, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("stream body: %v", err)
+	}
+	if first[0] != 'A' || len(rest)+1 != 4*256*1024 {
+		t.Fatalf("stream payload first=%q bytes=%d, want first A and %d bytes", first, len(rest)+1, 4*256*1024)
+	}
+	if time.Since(start)-firstAt < 100*time.Millisecond {
+		t.Fatalf("stream completed without observable producer delay: first=%s total=%s", firstAt, time.Since(start))
 	}
 	cancel()
 	select {
