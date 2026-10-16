@@ -10,7 +10,7 @@ _Last updated: 2026-10-16_
 - Deadline propagation is now conditionally GO: with a positive `limits.deadline_ms`, the fork snapshots an absolute deadline at IoContext creation and propagates it through binding/Cache metadata; without configuration it is `none`. This is not a CPU deadline and does not change standalone workerd CPU/heap enforcement boundaries.
 - Cache requests have a start hook and correlation IDs, but no dedicated terminal `cacheRequestFinished` hook; completion/failure/cancel is still inferred from the returned promise.
 - The complete Docker runtime baseline has not been rerun with a fork image. Current evidence is direct fork-binary user-runtime/do-runtime E2E; production still defaults to stock workerd.
-- `scripts/workerd-fork-upgrade-rehearsal.sh` is now available. On 2026-10-16 the fork (`sha256=745119c2f515fdd5839ca0c8f191e8c7899c27487c5572f8efedff3924af532f`) and rollback candidate (`sha256=fcaac1783cbd1cafd6e400ba73250aca04464cf4222cd9288404358fec7d5c29`) both passed `workerd-compat-probe.sh` (version `2026-09-16`, max date `2026-09-23`, 288 flags). This proves probe-level rollback compatibility, not production traffic cutover acceptance.
+- `scripts/workerd-fork-upgrade-rehearsal.sh` is now available. On 2026-10-16 the fork (`sha256=8098a44bfe044dc2540fbbd98c106fe3d864e164ad32d0fce6cd35053d4cbd37`) and rollback candidate (`sha256=fcaac1783cbd1cafd6e400ba73250aca04464cf4222cd9288404358fec7d5c29`) both passed `workerd-compat-probe.sh` (version `2026-09-16`, max date `2026-09-23`, 288 flags). This proves probe-level rollback compatibility, not production traffic cutover acceptance.
 
 ## Resource operations and invocation records (ADR-205, 2026-10-15)
 
