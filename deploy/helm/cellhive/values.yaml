@@ -22,7 +22,7 @@ config:
   bucketDir: /data/bucket
   # Set off for throughput-first runtimes that do not need platform capture of
   # tenant console output and uncaught exceptions.
-  tenantLogCapture: on
+  tenantLogCapture: "on"
   # Multiple cell-agent replicas require a shared bucket. Supported schemes:
   # s3://, oss://, cos://. Put endpoint and credentials below or in existingSecret.
   bucket: s3://cellhive
