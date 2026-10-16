@@ -19,7 +19,7 @@ func TestEgressAllowListRendering(t *testing.T) {
 	// 模板渲染：EgressAllowList 填进 capnp 的 cap-egress 行
 	rendered := strings.ReplaceAll(capnpTemplate, "{{.EgressAllowList}}", (Config{EgressAllow: []string{"10.20.0.0/16"}}).EgressAllowList())
 	rendered = strings.ReplaceAll(rendered, "{{.OutboundAllowList}}", (Config{}).OutboundAllowList())
-	if !strings.Contains(rendered, `(name = "cap-egress", network = ( allow = ["public", "10.20.0.0/16"] ))`) {
+	if !strings.Contains(rendered, `(name = "cap-egress", network = ( allow = ["public", "10.20.0.0/16"], tlsOptions = (trustBrowserCas = true) ))`) {
 		t.Fatalf("cap-egress line not rendered as expected")
 	}
 	if strings.Contains(rendered, "{{.EgressAllowList}}") {

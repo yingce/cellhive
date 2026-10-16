@@ -137,8 +137,8 @@ const config :Workerd.Config = (
     )),
 
     (name = "do-disk", disk = (path = "{{.DiskDir}}", writable = true)),
-    (name = "public-network", network = ( allow = [{{.OutboundAllowList}}] )),
-    (name = "private-outbound", network = ( allow = ["public", "private"] )),
+    (name = "public-network", network = ( allow = [{{.OutboundAllowList}}], tlsOptions = (trustBrowserCas = true) )),
+    (name = "private-outbound", network = ( allow = ["public", "private"], tlsOptions = (trustBrowserCas = true) )),
   ],
   sockets = [ (name = "do", address = "{{.Addr}}", http = (), service = "do" ) ],
 );

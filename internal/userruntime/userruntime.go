@@ -224,9 +224,9 @@ const config :Workerd.Config = (
       globalOutbound = "private-outbound",
     )),
 
-    (name = "public-network", network = ( allow = [{{.OutboundAllowList}}] )),
-    (name = "private-outbound", network = ( allow = ["public", "private"] )),
-    (name = "cap-egress", network = ( allow = [{{.EgressAllowList}}] )),
+    (name = "public-network", network = ( allow = [{{.OutboundAllowList}}], tlsOptions = (trustBrowserCas = true) )),
+    (name = "private-outbound", network = ( allow = ["public", "private"], tlsOptions = (trustBrowserCas = true) )),
+    (name = "cap-egress", network = ( allow = [{{.EgressAllowList}}], tlsOptions = (trustBrowserCas = true) )),
   ],
   sockets = [
     (name = "internal", address = "*:{{.InternalPort}}", http = (), service = "internal" ),
