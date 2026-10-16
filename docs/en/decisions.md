@@ -1,6 +1,6 @@
 # Decision records (English index)
 
-CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record (ADR-001 ~ 192). This page is an English index of the titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
+CellHive records every design decision as an ADR. **The full ADR text is written in Chinese**: [`../decisions.md`](../decisions.md) is the authoritative record. This page is a selected English index of titles and one-line summaries; read the Chinese record for the full rationale, evidence and cost of each decision.
 
 > Generated from `docs/decisions.md`. If the two disagree, the Chinese record wins.
 
@@ -158,7 +158,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 | ADR-150 | Root Key Sources: Environment and File, KMS Seam, and mTLS Tradeoff Implementation | Supports root keys from environment or files, leaves a KMS seam, and excludes cloud KMS implementation. |
 | ADR-151 | scaling-and-ha Finalization: Autoscaler Cooldown and Cross-AZ Follower Placement Implementation | Implements autoscaler cooldown behavior and places followers across availability zones for improved high availability. |
 | ADR-152 | timers-and-dispatch Finalization: Batch/Retry/DLQ Defaults, Waker Backoff, and Timer Cell Strategy Implementation | Defines timer and dispatch defaults, waker backoff, and timer cell placement strategy. |
-| ADR-153 | Compatibility Matrix Closure: Exact Flag List, Framework Acceptance, and D1 Sessions Rejection Implementation | Finalizes compatibility flags, acceptance criteria, and explicit rejection of unsupported D1 sessions. |
+| ADR-153 | Compatibility Matrix Closure: Exact Flag List, Framework Acceptance, and D1 Sessions Initial Boundary | Finalizes compatibility flags and framework acceptance; the original D1 session rejection was later replaced by a txid-bookmark API shape without read-replica semantics. |
 | ADR-154 | Full-Service E2E Dispatch Defect Fixes: Timer Namespace, event.cron, DISPATCH_URL, and MessageBatch Implementation | Fixes dispatch issues exposed by full-service end-to-end testing. |
 | ADR-155 | Queue: Per-Message ack()/retry({delaySeconds}), Delayed Production, and Typed Body Implementation | Adds per-message acknowledgements, delayed retries, delayed enqueueing, and typed queue bodies. |
 | ADR-156 | vwork Operations API: Resource Revocation, Queue Status/DLQ Replay, Readiness and Drain Probes Implementation | Adds operational controls for resources, queues, dead-letter replay, readiness, and draining. |

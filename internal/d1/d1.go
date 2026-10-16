@@ -23,10 +23,12 @@ type Store struct {
 }
 
 const (
-	MaxSQLBytes   = 100 * 1024
-	MaxParams     = 100
-	MaxValueBytes = 2 * 1024 * 1024
-	MaxQueryTime  = 30 * time.Second
+	MaxSQLBytes    = 100 * 1024
+	MaxParams      = 100
+	MaxValueBytes  = 2 * 1024 * 1024
+	MaxQueryTime   = 30 * time.Second
+	MaxResultRows  = 100000
+	MaxResultBytes = 32 << 20
 )
 
 // New creates a D1 store.
@@ -41,7 +43,11 @@ func (s *Store) cell(ctx context.Context, ns, db string) (*cellstore.Cell, error
 	if ns == "" || db == "" {
 		return nil, fmt.Errorf("d1: ns and db are required")
 	}
-	return s.cs.Cell(ctx, Scope(ns, db))
+	c, err := s.cs.Cell(ctx, Scope(ns, db))
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Statement is one parameterized statement in a batch.
@@ -127,7 +133,7 @@ func SQLStatementCount(sqlText string) int {
 // Query runs a single statement and returns its rows (or affected count for a
 // mutation), mirroring D1's prepare().all()/run().
 func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any) (Result, error) {
-	if err := ValidateInput(sqlText, params); err != nil {
+	if err := ValidatePreparedSQL(sqlText, params); err != nil {
 		return Result{}, err
 	}
 	var cancel context.CancelFunc
@@ -162,7 +168,7 @@ func (s *Store) Query(ctx context.Context, ns, db, sqlText string, params []any)
 
 // Exec runs a single mutation statement and returns the affected count.
 func (s *Store) Exec(ctx context.Context, ns, db, sqlText string, params []any) (Result, error) {
-	if err := ValidateInput(sqlText, params); err != nil {
+	if err := ValidateExecSQL(sqlText, params); err != nil {
 		return Result{}, err
 	}
 	var cancel context.CancelFunc
@@ -195,7 +201,7 @@ func (s *Store) Batch(ctx context.Context, ns, db string, stmts []Statement) ([]
 		return nil, fmt.Errorf("d1: batch requires at least one statement")
 	}
 	for _, st := range stmts {
-		if err := ValidateInput(st.SQL, st.Params); err != nil {
+		if err := ValidatePreparedSQL(st.SQL, st.Params); err != nil {
 			return nil, err
 		}
 	}
@@ -242,16 +248,133 @@ func ValidateInput(sqlText string, params []any) error {
 		switch v := p.(type) {
 		case string:
 			size = len(v)
+		case bool, nil, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+			// Scalar values are accepted by the D1 binding contract.
 		case []byte:
 			size = len(v)
 		case []any:
+			for _, b := range v {
+				f, ok := b.(float64)
+				if !ok || f < 0 || f > 255 || f != float64(byte(f)) {
+					return fmt.Errorf("d1: unsupported parameter type %T", p)
+				}
+			}
 			size = len(v)
+		default:
+			return fmt.Errorf("d1: unsupported parameter type %T", p)
 		}
 		if size > MaxValueBytes {
 			return fmt.Errorf("d1: bound value exceeds %d bytes", MaxValueBytes)
 		}
 	}
 	return nil
+}
+
+func ValidatePreparedSQL(sqlText string, params []any) error {
+	if err := ValidateInput(sqlText, params); err != nil {
+		return err
+	}
+	if SQLStatementCount(sqlText) != 1 {
+		return fmt.Errorf("d1: prepared statement must contain exactly one SQL statement")
+	}
+	words := sqlWords(sqlText)
+	for _, word := range words {
+		switch word {
+		case "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "ATTACH", "DETACH", "VACUUM":
+			return fmt.Errorf("d1: SQL statement %s is not supported", word)
+		case "LOAD_EXTENSION":
+			return fmt.Errorf("d1: load_extension is not supported")
+		}
+	}
+	for i := 0; i+1 < len(words); i++ {
+		if words[i] == "CREATE" && (words[i+1] == "TEMP" || words[i+1] == "TEMPORARY") {
+			return fmt.Errorf("d1: temporary objects are not supported")
+		}
+	}
+	return nil
+}
+
+func ValidateExecSQL(sqlText string, params []any) error {
+	if err := ValidateInput(sqlText, params); err != nil {
+		return err
+	}
+	words := sqlWords(sqlText)
+	for _, word := range words {
+		switch word {
+		case "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "ATTACH", "DETACH", "VACUUM":
+			return fmt.Errorf("d1: SQL statement %s is not supported", word)
+		case "LOAD_EXTENSION":
+			return fmt.Errorf("d1: load_extension is not supported")
+		}
+	}
+	for i := 0; i+1 < len(words); i++ {
+		if words[i] == "CREATE" && (words[i+1] == "TEMP" || words[i+1] == "TEMPORARY") {
+			return fmt.Errorf("d1: temporary objects are not supported")
+		}
+	}
+	return nil
+}
+
+func sqlWords(sqlText string) []string {
+	var words []string
+	var b strings.Builder
+	quote, line, block := byte(0), false, false
+	flush := func() {
+		if b.Len() > 0 {
+			words = append(words, strings.ToUpper(b.String()))
+			b.Reset()
+		}
+	}
+	for i := 0; i < len(sqlText); i++ {
+		c := sqlText[i]
+		if line {
+			if c == '\n' {
+				line = false
+			}
+			continue
+		}
+		if block {
+			if c == '*' && i+1 < len(sqlText) && sqlText[i+1] == '/' {
+				block = false
+				i++
+			}
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(sqlText) && sqlText[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-' {
+			flush()
+			line = true
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(sqlText) && sqlText[i+1] == '*' {
+			flush()
+			block = true
+			i++
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			flush()
+			quote = c
+			continue
+		}
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' {
+			b.WriteByte(c)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return words
 }
 
 func bookmark(ctx context.Context, c *cellstore.Cell) string {
@@ -493,6 +616,12 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		if rowBytes > MaxValueBytes {
 			return Result{}, fmt.Errorf("d1: result row exceeds %d bytes", MaxValueBytes)
 		}
+		if len(out.Rows) >= MaxResultRows {
+			return Result{}, fmt.Errorf("d1: result exceeds %d rows", MaxResultRows)
+		}
+		if totalResultBytes(out.Rows)+rowBytes > MaxResultBytes {
+			return Result{}, fmt.Errorf("d1: result exceeds %d bytes", MaxResultBytes)
+		}
 		for i, v := range vals {
 			if b, ok := v.([]byte); ok {
 				encoded := make([]int, len(b))
@@ -523,6 +652,23 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		}
 	}
 	return out, nil
+}
+
+func totalResultBytes(rows [][]any) int {
+	total := 0
+	for _, row := range rows {
+		for _, value := range row {
+			switch v := value.(type) {
+			case string:
+				total += len(v)
+			case []byte:
+				total += len(v)
+			case []int:
+				total += len(v) * 8
+			}
+		}
+	}
+	return total
 }
 
 // IsReadOnly reports whether a statement can never write, so the capture layer

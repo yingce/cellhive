@@ -252,6 +252,21 @@ func TestD1CloudflareInputLimits(t *testing.T) {
 	}
 }
 
+func TestD1PreparedSQLAndParameterTypes(t *testing.T) {
+	if err := ValidatePreparedSQL("SELECT 1; SELECT 2", nil); err == nil {
+		t.Fatal("multi-statement prepare accepted")
+	}
+	if err := ValidatePreparedSQL("BEGIN", nil); err == nil {
+		t.Fatal("transaction SQL accepted")
+	}
+	if err := ValidateInput("SELECT ?", []any{map[string]any{"x": 1}}); err == nil {
+		t.Fatal("object parameter accepted")
+	}
+	if err := ValidateInput("SELECT ?", []any{true}); err != nil {
+		t.Fatalf("boolean parameter rejected: %v", err)
+	}
+}
+
 func TestLastInsertID(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
