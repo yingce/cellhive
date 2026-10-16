@@ -128,7 +128,6 @@ test("budget errors expose only bounded aggregate fields", () => {
 
 test("worker limits translate positive subrequest values", () => {
   assert.deepEqual(budget.workerLimits({ subrequests: 7 }), { subRequests: 7 });
-  assert.deepEqual(budget.workerLimits({ deadline_ms: 250 }), { deadlineMs: 250 });
   assert.equal(budget.workerLimits({ subrequests: 0 }), undefined);
   assert.equal(budget.workerLimits({ subrequests: "7" }), undefined);
 });

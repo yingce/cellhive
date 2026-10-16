@@ -67,17 +67,6 @@ user-runtime loader:
 - **The tenant loaded worker's `globalOutbound` = public Internet only**, excluding RFC1918/cell-agent;
 - Platform code (loader/host adapter/DO host actor) uses a separate private network binding.
 
-## CellHive fork capabilities (experimental, not the default production path)
-
-`/opt/cellhive-workerd-fork` keeps an experimental fork aligned with the pinned revision to validate platform observability hooks that stock workerd does not expose. The fork remains deliberately small and does not own state or control-plane behavior:
-
-- Binding calls carry value-only `invocationId` and `traceId`; `RequestObserver` receives unified start, completed, failed, and canceled callbacks. Rejections and disconnects map to `FAILED` and `CANCELED`. Cache bindings receive the same correlation metadata; their terminal status is still observed through the caller HTTP promise.
-- The fork supports an optional `limits.deadline_ms`: IoContext snapshots an absolute deadline when the invocation is created and propagates it through binding/Cache metadata. With no configuration it remains `none`; no deadline is fabricated. The CellHive control plane validates positive values and passes them to loader/workerd.
-- Request and response bodies continue to use native workerd `AsyncInputStream`/writable streams. Native streams provide backpressure, while `ByteStreamObserver` can account for enqueue/dequeue events; bodies are not aggregated into base64.
-- D1/KV/R2/Queue/Workflow data, owner/epoch, leases, WAL, RPO=0, and the output gate remain Go/cell-agent authority. The fork does not introduce a second storage plane.
-
-The fork requires its own build and runtime-baseline E2E before an upgrade; production continues to use the stock pin above by default.
-
 ## Limits
 
 - **Standalone enforcement boundary**: the pinned standalone binary uses `NullIsolateLimitEnforcer` and no-op subrequest enforcement. `WorkerCode.limits.cpuMs/subRequests` are accepted by the API, but a 250ms busy loop with `cpuMs=1` and five requests with `subRequests=1` both completed in real probes. There is no configurable per-isolate heap quota; hosted Cloudflare enforcement is not a local guarantee.

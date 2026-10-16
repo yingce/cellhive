@@ -31,32 +31,18 @@ export function setTraceContext(traceparent) {
   else delete globalThis.__cellhiveTraceparent;
 }
 
-// A value-only invocation identity lets the host correlate binding traffic with
-// the current request without exposing an IoContext capability across RPC.
-export function setInvocationContext(invocationId) {
-  if (invocationId) globalThis.__cellhiveInvocationId = String(invocationId);
-  else delete globalThis.__cellhiveInvocationId;
-}
-
 function call(env, path, init) {
   const url = env.CELL_URL.replace(/\/$/, "") + path;
   const opts = Object.assign({}, init || {});
   opts.headers = Object.assign({}, (init && init.headers) || {});
   const tp = globalThis.__cellhiveTraceparent;
   if (tp && !opts.headers["traceparent"]) opts.headers["traceparent"] = tp;
-  const invocationId = globalThis.__cellhiveInvocationId;
-  if (invocationId && !opts.headers["x-cellhive-invocation-id"]) {
-    opts.headers["x-cellhive-invocation-id"] = invocationId;
-  }
   if (env.PLATFORM && typeof env.PLATFORM.fetch === "function") return env.PLATFORM.fetch(url, opts);
   return fetch(url, opts);
 }
 
 function scopeHeaders(props) {
-  const headers = { "x-cellhive-scope-token": props.token || "" };
-  const invocationId = globalThis.__cellhiveInvocationId;
-  if (invocationId) headers["x-cellhive-invocation-id"] = invocationId;
-  return headers;
+  return { "x-cellhive-scope-token": props.token || "" };
 }
 
 // must throws a Cloudflare-shaped binding error. The server returns

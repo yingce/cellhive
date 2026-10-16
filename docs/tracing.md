@@ -50,7 +50,6 @@ client ──traceparent──▶ loader http.server ──header──▶ cell-
 - **断点 2（peer 复制）**：`peer.append` 跑在捕获流水线（`context.Background()` 派生 + group commit 合并多请求）上，**不是**某个请求 trace 的子 span；按"批"独立成 trace。
 - 租户 isolate 的 `facades.js` 回退路径不上报 JS span，但其 `pfetch` 仍带 `traceparent`，所以 cell-agent 的服务端 span 仍能挂到该 worker 的 trace 上。
 - 采样为**入口头部采样**：未采样只透传、不产生 span。
-- **调用级关联（fork/loader）**：每个 user-runtime 请求生成 value-only `invocation_id`；Queue/Cron 复用已持久化的 invocation ID。binding facade 通过 `x-cellhive-invocation-id` 送到 cell-agent，scope middleware 只把它写入 OTEL span 的 `cellhive.invocation_id` 属性，不参与鉴权、owner 或 epoch 判断。
 
 ## 3. 对接 OpenObserve（重点）
 

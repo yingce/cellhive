@@ -20,37 +20,6 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 
 见 [完整记录](archive/timer-correctness-2026-10-15.md)。新增回归覆盖同分钟独立 trigger、fired slot 不复活、scheduled noRetry、busy Workflow timer 保留、事务性 dispatch outbox/重开恢复、事件在 park 前后到达、无关事件不延长 deadline、DO alarm 交接失败/同时间新 generation/陈旧派发/重试重设。`scripts/runtime-baseline-e2e.sh` 使用真实 Docker cell-agent + user-runtime + gated do-runtime，包含待触发 alarm 跨 runtime 重启。
 
-## CellHive fork runtime acceptance (experimental)
-
-The experimental fork is tested independently from the production stock pin. The following current evidence was collected on 2026-10-16:
-
-```bash
-/opt/cellhive-tools/bazelisk test //src/workerd/io:io-context-abort-test@ --config=opt --test_output=errors
-/opt/cellhive-tools/bazelisk build //src/workerd/server:workerd --config=opt
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/userruntime -run 'TestUserRuntimeTraceContextPropagation|TestUserRuntimePublicLoaderD1R2Queue|TestUserRuntimeKVPutStreamAndBytes' -count=1
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/doruntime -run 'TestDoRuntimeBindingInsideDO|TestDoRuntimeRPCDispatch' -count=1
-```
-
-These pass for the fork binary. The fork remains experimental: the CellHive storage authority stays in Go/cell-agent, and the production Docker baseline still uses stock workerd.
-
-补充验收（2026-10-16）：
-
-```bash
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/userruntime -run TestUserRuntimeForkStreamingBackpressure -count=1 -v
-
-CELLHIVE_WORKERD_FORK_CURRENT=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-CELLHIVE_WORKERD_FORK_ROLLBACK=./cli/node_modules/workerd/bin/workerd \
-bash scripts/workerd-fork-upgrade-rehearsal.sh
-```
-
-流测试验证首块在 producer 关闭前可读、总响应为 4×256 KiB；C++ 回归验证配置的 `deadline_ms` 被快照并进入 binding metadata；rehearsal 对升级候选和回滚候选分别执行版本/兼容日期/flag 探针并记录 SHA-256。独立 cache terminal hook、fork Docker baseline 仍按 `known-issues.md` 标为未完成。
-
 ## 分层
 
 | 层 | 范围 | 方式 |

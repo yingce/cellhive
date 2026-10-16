@@ -12,37 +12,6 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 
 `internal/server/wrangler_real_e2e_test.go` runs stock Wrangler against an isolated in-process admin HTTP server. It covers `deployments list/status`, `versions list`, Queue consumer add/list/purge, Workflow trigger/instances list/describe, and Vectorize create/list/get/info, with durable control, Queue, and Workflow state checks. This validates the admin protocol, not a multi-node production deployment or complete runtime E2E. Without the environment variable, `make test` skips these optional tests. See the [Wrangler guide](wrangler-compat.md) for the acceptance boundary of other stock commands.
 
-## CellHive fork runtime acceptance (experimental)
-
-The experimental fork is tested separately from the production stock pin. The following evidence was collected on 2026-10-16:
-
-```bash
-/opt/cellhive-tools/bazelisk test //src/workerd/io:io-context-abort-test@ --config=opt --test_output=errors
-/opt/cellhive-tools/bazelisk build //src/workerd/server:workerd --config=opt
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/userruntime -run 'TestUserRuntimeTraceContextPropagation|TestUserRuntimePublicLoaderD1R2Queue|TestUserRuntimeKVPutStreamAndBytes' -count=1
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-  go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/doruntime -run 'TestDoRuntimeBindingInsideDO|TestDoRuntimeRPCDispatch' -count=1
-```
-
-These tests pass with the fork binary. The fork remains experimental: Go/cell-agent remains the storage authority, and the production Docker baseline still uses stock workerd.
-
-Additional acceptance evidence (2026-10-16):
-
-```bash
-CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
-  ./internal/userruntime -run TestUserRuntimeForkStreamingBackpressure -count=1 -v
-
-CELLHIVE_WORKERD_FORK_CURRENT=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
-CELLHIVE_WORKERD_FORK_ROLLBACK=./cli/node_modules/workerd/bin/workerd \
-bash scripts/workerd-fork-upgrade-rehearsal.sh
-```
-
-The stream test verifies that the first chunk is readable before the producer closes and that the response contains 4×256 KiB. A C++ regression verifies that configured `deadline_ms` is snapshotted and enters binding metadata. The rehearsal runs version, compatibility-date, and flag probes for both candidates and records SHA-256 values. A dedicated cache terminal hook and the fork Docker baseline remain incomplete as documented in `known-issues.md`.
-
 ## Layering
 
 | Layer | Scope | Method |

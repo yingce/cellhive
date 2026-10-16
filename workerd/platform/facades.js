@@ -13,8 +13,6 @@ function headers(platform, scopeToken) {
   // internal token is never sent from a tenant-adjacent worker.
   const h = {};
   if (scopeToken) h["x-cellhive-scope-token"] = scopeToken;
-  const invocationId = globalThis.__cellhiveInvocationId;
-  if (invocationId) h["x-cellhive-invocation-id"] = invocationId;
   return h;
 }
 

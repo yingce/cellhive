@@ -50,7 +50,6 @@ client ──traceparent──▶ loader http.server ──header──▶ cell-
 - **Break point 2 (peer replication)**: `peer.append` runs on the capture pipeline (derived from `context.Background()` + group commit merging multiple requests) and is **not** a child span of any request trace; it forms an independent trace per "batch".
 - The fallback path in the tenant isolate's `facades.js` does not report JS spans, but its `pfetch` still carries `traceparent`, so cell-agent's server span can still attach to that worker's trace.
 - Sampling is **entry head sampling**: unsampled traces are only propagated and do not produce spans.
-- **Invocation correlation (fork/loader)**: each user-runtime request gets a value-only `invocation_id`; Queue/Cron reuses the persisted invocation ID. The binding facade sends it to cell-agent as `x-cellhive-invocation-id`, and scope middleware records it only as the OTEL span attribute `cellhive.invocation_id`; it is never used for auth, owner, or epoch decisions.
 
 ## 3. Integrating with OpenObserve (key points)
 

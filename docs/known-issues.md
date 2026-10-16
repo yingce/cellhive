@@ -4,15 +4,7 @@
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-16_
-
-## 2026-10-16 workerd fork 验收边界
-
-- fork 已增加 binding 子请求的 start/completion/failure/cancel 观测与 invocation/trace 关联；请求体和响应体继续使用 workerd 原生流与背压。真实 user-runtime、do-runtime 定向 E2E 已用 fork 二进制通过。
-- deadline 传播已支持（条件 GO）：`limits.deadline_ms` 为正数时，fork 在 IoContext 创建时快照绝对 deadline，并传播到 binding/Cache metadata；未配置时为 `none`。这不是 CPU deadline，也不改变 workerd 的 standalone CPU/heap enforcement 边界。
-- cache 请求有 start 观测和关联 ID，但没有独立的 terminal `cacheRequestFinished` hook；完成/失败/取消仍从返回 promise 推断。
-- fork 的完整 Docker runtime-baseline 尚未用 fork 镜像重跑；当前证据是直接 fork 二进制的 user-runtime/do-runtime E2E。生产默认仍为 stock workerd。
-- 已新增 `scripts/workerd-fork-upgrade-rehearsal.sh`。2026-10-16 用 fork `sha256=8098a44bfe044dc2540fbbd98c106fe3d864e164ad32d0fce6cd35053d4cbd37` 及回滚候选 `sha256=fcaac1783cbd1cafd6e400ba73250aca04464cf4222cd9288404358fec7d5c29`，两者均通过 `workerd-compat-probe.sh`（version `2026-09-16`、max date `2026-09-23`、288 flags）。这证明兼容探针可回滚，不等同于生产流量切换验收。
+_最后更新：2026-10-15_
 
 ## 2026-10-15 资源运维与调用审计（ADR-205）
 

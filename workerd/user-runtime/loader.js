@@ -247,7 +247,6 @@ function prepareRequest(req, env) {
   }
   globalThis.__cellhiveTraceparent = tp;
   globalThis.__cellhiveTraceSampled = sampled;
-  globalThis.__cellhiveInvocationId = crypto.randomUUID();
   const headers = new Headers(req.headers);
   for (const k of [...headers.keys()]) {
     if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);

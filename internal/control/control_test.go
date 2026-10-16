@@ -142,15 +142,6 @@ func TestDeployPersistsWorkerLimits(t *testing.T) {
 	if err != nil || !ok || view.Limits == nil || *view.Limits.SubRequests != sub {
 		t.Fatalf("view limits = %+v ok=%v err=%v", view.Limits, ok, err)
 	}
-	deadline := 250
-	v2, err := s.Deploy(ctx, "acme", "api-deadline", DeploySpec{BundleSHA: "sha2", Limits: &WorkerLimits{DeadlineMs: &deadline}}, "ops")
-	if err != nil || v2.Limits == nil || v2.Limits.DeadlineMs == nil || *v2.Limits.DeadlineMs != deadline {
-		t.Fatalf("deadline limits = %+v err=%v", v2.Limits, err)
-	}
-	badDeadline := 0
-	if _, err := s.Deploy(ctx, "acme", "bad-deadline", DeploySpec{BundleSHA: "sha3", Limits: &WorkerLimits{DeadlineMs: &badDeadline}}, "ops"); err == nil {
-		t.Fatal("expected non-positive deadline to be rejected")
-	}
 }
 
 func TestProjectionAndETag(t *testing.T) {

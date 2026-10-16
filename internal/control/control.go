@@ -29,9 +29,6 @@ type Binding struct {
 
 type WorkerLimits struct {
 	SubRequests *int `json:"subrequests,omitempty"`
-	// DeadlineMs is an optional elapsed wall-clock deadline propagated to the
-	// workerd invocation and its binding metadata.
-	DeadlineMs *int `json:"deadline_ms,omitempty"`
 }
 
 // Version is an immutable worker version. Deploys always allocate a new number.
