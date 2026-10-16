@@ -476,7 +476,7 @@ async function fetchBundle(env, sha) {
   const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
   if (signed.ok) {
     const { url } = await signed.json();
-    if (url && !url.startsWith("file:")) {
+    if (url && !url.startsWith("file:") && !url.startsWith("https:")) {
       const direct = await fetch(url);
       if (!direct.ok) throw new Error("GET bundle " + sha + " -> " + direct.status);
       return await direct.text();

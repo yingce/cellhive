@@ -580,7 +580,7 @@ async function asset(env, app, worker, token, path) {
   let r;
   if (signed.ok) {
     const { url } = await signed.json();
-    if (url && !url.startsWith("file:")) r = await fetch(url);
+    if (url && !url.startsWith("file:") && !url.startsWith("https:")) r = await fetch(url);
   } else if (signed.status === 404) {
     assetCache.set(key, null);
     return null;
@@ -1069,7 +1069,13 @@ async function bundle(env, sha) {
       let r;
       if (signed.ok) {
         const { url } = await signed.json();
-        if (url && !url.startsWith("file:")) r = await fetch(url);
+        // The pinned user-runtime workerd is intentionally built without a
+        // TLS network. Provider presigned URLs (COS/S3) are normally HTTPS,
+        // so attempting them produces a low-level `tlsNetwork` error and
+        // prevents every tenant bundle from loading. Keep presigning for
+        // HTTP/file-compatible stores, but use the authenticated cell-agent
+        // HTTP stream for HTTPS URLs.
+        if (url && !url.startsWith("file:") && !url.startsWith("https:")) r = await fetch(url);
       } else if (signed.status !== 404 && signed.status !== 501) {
         throw new Error("GET bundle URL " + sha + " -> " + signed.status);
       }
