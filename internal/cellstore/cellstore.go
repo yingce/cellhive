@@ -645,7 +645,7 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 	if paged {
 		dsn += "&vfs=" + pagedvfs.VFSName
 	}
-	db, err := sql.Open(DriverName, dsn)
+	db, err := sql.Open(driverForScope(sc), dsn)
 	if err != nil {
 		return nil, err
 	}

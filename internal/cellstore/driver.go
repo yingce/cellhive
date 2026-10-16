@@ -7,6 +7,7 @@ import (
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 
+	"cellhive/internal/cell"
 	"cellhive/internal/pagedvfs"
 )
 
@@ -16,6 +17,7 @@ import (
 // (CGo, the real C SQLite) in ADR-159. The driver is isolated here: everything
 // else keeps using database/sql.
 const DriverName = "cellhive-sqlite"
+const D1DriverName = "cellhive-d1-sqlite"
 
 var registerOnce sync.Once
 
@@ -47,7 +49,48 @@ func RegisterDriver() {
 				return nil
 			},
 		})
+		sql.Register(D1DriverName, &sqlite3.SQLiteDriver{ConnectHook: d1ConnectHook})
 	})
+}
+
+func d1ConnectHook(c *sqlite3.SQLiteConn) error {
+	for _, pragma := range []string{"PRAGMA wal_autocheckpoint=0", "PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=1", "PRAGMA busy_timeout=5000"} {
+		if _, err := c.Exec(pragma, nil); err != nil {
+			return fmt.Errorf("cellstore: d1 %s: %w", pragma, err)
+		}
+	}
+	for id, value := range map[int]int{
+		sqlite3.SQLITE_LIMIT_LENGTH: 2_200_000, sqlite3.SQLITE_LIMIT_SQL_LENGTH: 100_000,
+		sqlite3.SQLITE_LIMIT_COLUMN: 100, sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER: 100,
+		sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH: 50, sqlite3.SQLITE_LIMIT_ATTACHED: 1,
+		sqlite3.SQLITE_LIMIT_COMPOUND_SELECT: 5, sqlite3.SQLITE_LIMIT_EXPR_DEPTH: 100,
+		sqlite3.SQLITE_LIMIT_VDBE_OP: 25_000, sqlite3.SQLITE_LIMIT_FUNCTION_ARG: 127,
+		sqlite3.SQLITE_LIMIT_TRIGGER_DEPTH: 10, sqlite3.SQLITE_LIMIT_WORKER_THREADS: 0,
+	} {
+		c.SetLimit(id, value)
+	}
+	c.RegisterAuthorizer(func(op int, arg1, arg2, _ string) int {
+		switch op {
+		case sqlite3.SQLITE_CREATE_TEMP_INDEX, sqlite3.SQLITE_CREATE_TEMP_TABLE,
+			sqlite3.SQLITE_CREATE_TEMP_TRIGGER, sqlite3.SQLITE_CREATE_TEMP_VIEW,
+			sqlite3.SQLITE_DROP_TEMP_INDEX, sqlite3.SQLITE_DROP_TEMP_TABLE,
+			sqlite3.SQLITE_DROP_TEMP_TRIGGER, sqlite3.SQLITE_DROP_TEMP_VIEW:
+			return sqlite3.SQLITE_DENY
+		case sqlite3.SQLITE_FUNCTION:
+			if arg1 == "load_extension" || arg2 == "load_extension" {
+				return sqlite3.SQLITE_DENY
+			}
+		}
+		return sqlite3.SQLITE_OK
+	})
+	return nil
+}
+
+func driverForScope(sc cell.Scope) string {
+	if sc.Class == "__d1__" {
+		return D1DriverName
+	}
+	return DriverName
 }
 
 func init() { RegisterDriver() }

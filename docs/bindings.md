@@ -10,7 +10,7 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 |---|---|---|---|---|
 | **KV** | KV cell | 异步 | SQLite（`__kv__` cell） | cell-agent 节点 |
 | **D1** | D1 cell | 异步（`prepare/bind/all/first/run/raw/batch/exec`） | SQLite（`__d1__` cell） | cell-agent 节点 |
-| 　└ 契约保真 | `prepare()`/`bind()` 是租户 isolate 内同步本地对象，可直接传给 `batch()`；TypedArray 按 BLOB 往返；`run()` 返回 `results: []`；`exec().count` 是 SQL 语句数；`meta` 含常用 `changes/last_row_id/changed_db/duration/rows_read/rows_written`；`withSession()/session()/getBookmark()` 已提供强一致 txid bookmark；`dump()` 返回脱敏 SQLite 快照（32MiB 上限）；错误 `err.name=D1_ERROR` + `err.code`（ADR-163）。不提供 Cloudflare read replica 路由/region 语义。 | | | |
+| 　└ 契约保真 | `prepare()`/`bind()` 是租户 isolate 内同步本地对象，可直接传给 `batch()`；TypedArray 按 BLOB 往返；`run()` 返回 `results: []`；`exec().count` 是 SQL 语句数；`meta` 含常用 `changes/last_row_id/changed_db/duration/rows_read/rows_written`；`withSession()/session()/getBookmark()` 已提供强一致 txid bookmark；`dump()` 返回脱敏 SQLite 快照（32MiB 上限）；输入限制对齐 SQL 100KiB/参数100/值和结果行2MiB/查询30s；D1 connection 还设置列数、LIKE、compound、表达式、VDBE、函数参数、trigger 深度和 ATTACH limits，并用 SQLite authorizer 拦截临时对象/动态扩展；禁止 `BEGIN/COMMIT/ROLLBACK/ATTACH/VACUUM/load_extension`；错误 `err.name=D1_ERROR` + `err.code`（ADR-163）。不提供 Cloudflare read replica 路由/region 语义。 | | | |
 | **R2** | 对象存储 S3 兼容 | 异步 | `r2/<ns>/<bucket>/...` + `r2meta/...`（metadata sidecar） | 对象存储 |
 | 　└ 契约保真 | `R2Object/R2ObjectBody` 全字段（`key/version/size/etag/httpEtag/uploaded/httpMetadata/customMetadata/checksums` + `text/json/arrayBuffer/blob`）；`put` 支持 `{httpMetadata,customMetadata,md5,sha256}`（校验）；`head()`；list `truncated/cursor` + `include`（按需 metadata）+ `delimiter`/`delimitedPrefixes`（ADR-163/168） | | | |
 | **Queues 生产者** | Queue cell | 异步 | SQLite（`__queue__` cell） | cell-agent 节点 |
