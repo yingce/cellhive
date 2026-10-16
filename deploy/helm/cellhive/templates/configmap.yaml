@@ -23,6 +23,16 @@ data:
   {{- if .Values.config.bucket }}
   CELLHIVE_BUCKET: {{ .Values.config.bucket | quote }}
   {{- end }}
+  {{- with .Values.config.awsEndpoint }}
+  AWS_ENDPOINT_URL: {{ . | quote }}
+  AWS_REGION: {{ $.Values.config.awsRegion | default "us-east-1" | quote }}
+  {{- end }}
+  {{- with .Values.config.ossEndpoint }}
+  OSS_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.cosEndpoint }}
+  COS_ENDPOINT: {{ . | quote }}
+  {{- end }}
   CELLHIVE_USER_RUNTIME_PORT: "8081"
   CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
   CELLHIVE_DO_ADDR: "*:8788"

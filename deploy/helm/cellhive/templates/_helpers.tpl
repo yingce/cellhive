@@ -13,6 +13,10 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- if .Values.doRuntime.gate }}{{ .Release.Name }}-do-runtime-gated{{ else }}{{ .Release.Name }}-do-runtime{{ end -}}
 {{- end -}}
 
+{{- define "cellhive.image" -}}
+{{- if .image.digest }}{{ .image.repository }}@{{ .image.digest }}{{ else }}{{ .image.repository }}:{{ .image.tag }}{{ end -}}
+{{- end -}}
+
 {{- define "cellhive.commonEnv" -}}
 - name: CELLHIVE_CELL_URL
   value: "http://{{ .Release.Name }}-cell-agent:7001"

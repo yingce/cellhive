@@ -47,7 +47,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: do-runtime
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if .Values.doRuntime.gate }}
           # ADR-083/140: do-supervisor renders, spawns workerd and gates every

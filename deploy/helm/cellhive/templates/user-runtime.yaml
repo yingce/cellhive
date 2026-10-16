@@ -38,7 +38,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: user-runtime
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["user-runtime"]
           envFrom:

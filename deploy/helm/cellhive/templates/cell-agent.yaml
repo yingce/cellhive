@@ -41,7 +41,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: cell-agent
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["cell-agent"]
           envFrom:

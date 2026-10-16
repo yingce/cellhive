@@ -4,6 +4,8 @@
 image:
   repository: cellhive
   tag: dev
+  # Prefer a digest for production. When empty, tag is used for local/dev use.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # Provide the platform root key either inline (rootKey) or via a pre-created

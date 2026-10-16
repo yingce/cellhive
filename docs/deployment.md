@@ -98,6 +98,25 @@ helm template my deploy/helm/cellhive --set rootKey="$(openssl rand -base64 32)"
 helm upgrade --install cellhive deploy/helm/cellhive --set existingSecret=cellhive-secrets
 ```
 
+生产双区域部署使用独立运维目录 `/opt/cellhive-helm`。该目录复用本仓库的
+`deploy/helm/cellhive` chart，并为 `sg`、`usw` 保留独立 namespace、release、PVC
+和对象存储 bucket；不要让两个区域共用 filesystem bucket。先在每个 namespace
+创建 `cellhive-secrets`（根密钥和对象存储凭据），再设置对应镜像 digest、endpoint
+和 kubeconfig/context：
+
+```bash
+cd /opt/cellhive-helm
+bin/sync-charts check
+bin/cellhive-helm sg preflight
+bin/cellhive-helm sg upgrade
+bin/cellhive-helm usw preflight
+bin/cellhive-helm usw upgrade
+```
+
+`bin/cellhive-helm` 会执行 chart 同步检查、lint、render、namespace 检查，并用
+`helm upgrade --install --atomic --wait` 部署；后续升级继续复用同一入口。详见
+`/opt/cellhive-helm/README.md`。
+
 values 覆盖：镜像/副本/资源/存储、共享 `config.bucket`（默认 `s3://cellhive`，多 cell-agent 副本必须使用通过探针的共享 `s3://`/`oss://`/`cos://` 对象存储）、`doRuntime.gate`（true → gated `StatefulSet` + 每 Pod PVC，DO RPO=0；false → ungated OnDelete StatefulSet）、`existingSecret` 或内联 `rootKey`、PDB、NetworkPolicy（`adminIngressFrom` 追加 admin 入站来源）、ingress。Chart 与 `deploy/k8s/`（base + `overlays/rpo0`）等价；`make k8s-render` / `make helm-lint` 离线校验。
 
 默认资源：cell-agent 2 副本（250m/256Mi request、2Gi memory limit）；user-runtime 2→10 副本（250m/256Mi request、1 CPU/2Gi limit，HPA CPU 70% + memory 70%）；gated do-runtime 2 副本（500m/512Mi request、2 CPU/4Gi limit、每 Pod 20Gi PVC）。
