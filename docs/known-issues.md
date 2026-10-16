@@ -12,7 +12,7 @@ _最后更新：2026-10-16_
 - deadline 传播已支持（条件 GO）：`limits.deadline_ms` 为正数时，fork 在 IoContext 创建时快照绝对 deadline，并传播到 binding/Cache metadata；未配置时为 `none`。这不是 CPU deadline，也不改变 workerd 的 standalone CPU/heap enforcement 边界。
 - cache 请求有 start 观测和关联 ID，但没有独立的 terminal `cacheRequestFinished` hook；完成/失败/取消仍从返回 promise 推断。
 - fork 的完整 Docker runtime-baseline 尚未用 fork 镜像重跑；当前证据是直接 fork 二进制的 user-runtime/do-runtime E2E。生产默认仍为 stock workerd。
-- 已新增 `scripts/workerd-fork-upgrade-rehearsal.sh`。2026-10-16 用 fork `sha256=1217f1eff0922ce491bd73bbcc728fe12ea1957ec42b7e68ce4ad58bf169fc91` 及回滚候选 `sha256=fcaac1783cbd1cafd6e400ba73250aca04464cf4222cd9288404358fec7d5c29`，两者均通过 `workerd-compat-probe.sh`（version `2026-09-16`、max date `2026-09-23`、288 flags）。这证明兼容探针可回滚，不等同于生产流量切换验收。
+- 已新增 `scripts/workerd-fork-upgrade-rehearsal.sh`。2026-10-16 用 fork `sha256=745119c2f515fdd5839ca0c8f191e8c7899c27487c5572f8efedff3924af532f` 及回滚候选 `sha256=fcaac1783cbd1cafd6e400ba73250aca04464cf4222cd9288404358fec7d5c29`，两者均通过 `workerd-compat-probe.sh`（version `2026-09-16`、max date `2026-09-23`、288 flags）。这证明兼容探针可回滚，不等同于生产流量切换验收。
 
 ## 2026-10-15 资源运维与调用审计（ADR-205）
 
