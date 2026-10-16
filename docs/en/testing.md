@@ -29,6 +29,20 @@ CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd
 
 These tests pass with the fork binary. The fork remains experimental: Go/cell-agent remains the storage authority, and the production Docker baseline still uses stock workerd.
 
+Additional acceptance evidence (2026-10-16):
+
+```bash
+CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
+go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
+  ./internal/userruntime -run TestUserRuntimeForkStreamingBackpressure -count=1 -v
+
+CELLHIVE_WORKERD_FORK_CURRENT=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
+CELLHIVE_WORKERD_FORK_ROLLBACK=./cli/node_modules/workerd/bin/workerd \
+bash scripts/workerd-fork-upgrade-rehearsal.sh
+```
+
+The stream test verifies that the first chunk is readable before the producer closes and that the response contains 4×256 KiB. A C++ regression verifies that configured `deadline_ms` is snapshotted and enters binding metadata. The rehearsal runs version, compatibility-date, and flag probes for both candidates and records SHA-256 values. A dedicated cache terminal hook and the fork Docker baseline remain incomplete as documented in `known-issues.md`.
+
 ## Layering
 
 | Layer | Scope | Method |

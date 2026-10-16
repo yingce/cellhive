@@ -37,6 +37,20 @@ CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd
 
 These pass for the fork binary. The fork remains experimental: the CellHive storage authority stays in Go/cell-agent, and the production Docker baseline still uses stock workerd.
 
+补充验收（2026-10-16）：
+
+```bash
+CELLHIVE_WORKERD=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
+go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' \
+  ./internal/userruntime -run TestUserRuntimeForkStreamingBackpressure -count=1 -v
+
+CELLHIVE_WORKERD_FORK_CURRENT=/opt/cellhive-workerd-fork/bazel-bin/src/workerd/server/workerd \
+CELLHIVE_WORKERD_FORK_ROLLBACK=./cli/node_modules/workerd/bin/workerd \
+bash scripts/workerd-fork-upgrade-rehearsal.sh
+```
+
+流测试验证首块在 producer 关闭前可读、总响应为 4×256 KiB；C++ 回归验证配置的 `deadline_ms` 被快照并进入 binding metadata；rehearsal 对升级候选和回滚候选分别执行版本/兼容日期/flag 探针并记录 SHA-256。独立 cache terminal hook、fork Docker baseline 仍按 `known-issues.md` 标为未完成。
+
 ## 分层
 
 | 层 | 范围 | 方式 |

@@ -995,6 +995,9 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 	if spec.Limits != nil && spec.Limits.SubRequests != nil && *spec.Limits.SubRequests <= 0 {
 		return Version{}, fmt.Errorf("control: limits.subrequests must be positive")
 	}
+	if spec.Limits != nil && spec.Limits.DeadlineMs != nil && *spec.Limits.DeadlineMs <= 0 {
+		return Version{}, fmt.Errorf("control: limits.deadline_ms must be positive")
+	}
 	c, err := s.cell(ctx)
 	if err != nil {
 		return Version{}, err

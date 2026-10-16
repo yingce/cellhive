@@ -72,6 +72,7 @@ user-runtime loader:
 `/opt/cellhive-workerd-fork` keeps an experimental fork aligned with the pinned revision to validate platform observability hooks that stock workerd does not expose. The fork remains deliberately small and does not own state or control-plane behavior:
 
 - Binding calls carry value-only `invocationId` and `traceId`; `RequestObserver` receives unified start, completed, failed, and canceled callbacks. Rejections and disconnects map to `FAILED` and `CANCELED`. Cache bindings receive the same correlation metadata; their terminal status is still observed through the caller HTTP promise.
+- The fork supports an optional `limits.deadline_ms`: IoContext snapshots an absolute deadline when the invocation is created and propagates it through binding/Cache metadata. With no configuration it remains `none`; no deadline is fabricated. The CellHive control plane validates positive values and passes them to loader/workerd.
 - Request and response bodies continue to use native workerd `AsyncInputStream`/writable streams. Native streams provide backpressure, while `ByteStreamObserver` can account for enqueue/dequeue events; bodies are not aggregated into base64.
 - D1/KV/R2/Queue/Workflow data, owner/epoch, leases, WAL, RPO=0, and the output gate remain Go/cell-agent authority. The fork does not introduce a second storage plane.
 
