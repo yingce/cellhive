@@ -116,6 +116,13 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			}
 			telemetry.SpanFromContext(r.Context()).SetAttributes(
 				telemetry.ScopeAttrs(claims.Namespace, kind, claims.Name, "")...)
+			// The runtime supplies a value-only invocation identity. Keep it as a
+			// bounded span attribute for correlation; never use it for auth or
+			// ownership decisions.
+			if invocationID := r.Header.Get("x-cellhive-invocation-id"); len(invocationID) > 0 && len(invocationID) <= 128 {
+				telemetry.SpanFromContext(r.Context()).SetAttributes(
+					attribute.String("cellhive.invocation_id", invocationID))
+			}
 			if s.Store != nil {
 				// Before gating in-flight requests, drop a local cell this node
 				// does not own (a stale foreign lineage after a restart or

@@ -5969,6 +5969,7 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 
 	var mu sync.Mutex
 	var facadeTrace string
+	var facadeInvocation string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -5978,6 +5979,7 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 		case "/v1/kv/get":
 			mu.Lock()
 			facadeTrace = r.Header.Get("traceparent")
+			facadeInvocation = r.Header.Get("x-cellhive-invocation-id")
 			mu.Unlock()
 			_, _ = w.Write([]byte("v"))
 		default:
@@ -6048,6 +6050,9 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 	defer mu.Unlock()
 	if facadeTrace != given {
 		t.Fatalf("props-bound facade traceparent = %q, want %q", facadeTrace, given)
+	}
+	if !regexp.MustCompile(`^[0-9a-fA-F-]{16,128}$`).MatchString(facadeInvocation) {
+		t.Fatalf("props-bound facade invocation id = %q, want a value-only id", facadeInvocation)
 	}
 	cancel()
 	select {

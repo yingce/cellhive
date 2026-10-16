@@ -20,6 +20,13 @@ function setTraceContext(tp) {
   if (tp) globalThis.__cellhiveTraceparent = tp;
   else delete globalThis.__cellhiveTraceparent;
 }
+function setInvocationContext(id) {
+  if (id) globalThis.__cellhiveInvocationId = String(id);
+  else delete globalThis.__cellhiveInvocationId;
+}
+function invocationOf(x) {
+  return x && (x.invocation_id || x.invocationId);
+}
 
 const tenant = tenantMod.default;
 import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
@@ -74,10 +81,16 @@ export class CellHiveHost extends WorkerEntrypoint {
   async fetch(req) {
     if (typeof tenant.fetch !== "function") return new Response("worker has no fetch handler", { status: 501 });
     setTraceContext(traceOf(req));
+    const invocationId = req.headers.get("x-cellhive-invocation-id");
+    setInvocationContext(invocationId);
+    const headers = new Headers(req.headers);
+    headers.delete("x-cellhive-invocation-id");
+    const tenantReq = new Request(req, { headers });
     try {
-      return await runInvocation(() => tenant.fetch(req, this.#bindings(), this.ctx));
+      return await runInvocation(() => tenant.fetch(tenantReq, this.#bindings(), this.ctx));
     } finally {
       setTraceContext(undefined);
+      setInvocationContext(undefined);
     }
   }
 
@@ -98,6 +111,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     const batch = Array.isArray(payload) ? payload : (payload && payload.messages) || [];
     const queueName = (payload && payload.queue) || "";
     const traceparent = (payload && payload.traceparent) || undefined;
+    const invocationId = invocationOf(payload);
     // Per-message CF semantics (ADR-155): message.ack() / message.retry({delaySeconds})
     // and batch.ackAll() / batch.retryAll({delaySeconds}). Messages that are
     // neither acked nor retried are implicitly acked when the handler returns.
@@ -129,11 +143,13 @@ export class CellHiveHost extends WorkerEntrypoint {
     batch.ackAll = () => { for (const m of batch) if (m && m.id) markAck(m.id); };
     batch.retryAll = (opts) => { for (const m of batch) if (m && m.id) markRetry(m.id, opts && opts.delaySeconds); };
     setTraceContext(traceparent || traceOf(batch));
+    setInvocationContext(invocationId);
     try {
       const result = await runInvocation(() => tenant.queue(batch, this.#bindings(), this.ctx));
       return { result, ack: outcomes.ack, retry: outcomes.retry };
     } finally {
       setTraceContext(undefined);
+      setInvocationContext(undefined);
     }
   }
 
@@ -146,6 +162,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     let noRetry = false;
     const controller = { ...event, noRetry() { noRetry = true; } };
     setTraceContext(traceOf(event));
+    setInvocationContext(invocationOf(event));
     try {
       const result = await runInvocation(() => tenant.scheduled(controller, this.#bindings(), this.ctx));
       return { ok: true, no_retry: noRetry, result: result === undefined ? null : result };
@@ -154,6 +171,7 @@ export class CellHiveHost extends WorkerEntrypoint {
       throw e;
     } finally {
       setTraceContext(undefined);
+      setInvocationContext(undefined);
     }
   }
 
@@ -169,10 +187,12 @@ export class CellHiveHost extends WorkerEntrypoint {
     }
     if (typeof inst[method] !== "function") throw new Error("entrypoint has no method " + method);
     setTraceContext(traceparent);
+    setInvocationContext(undefined);
     try {
       return await runInvocation(() => inst[method](...(args || [])));
     } finally {
       setTraceContext(undefined);
+      setInvocationContext(undefined);
     }
   }
 }
