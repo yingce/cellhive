@@ -218,6 +218,8 @@ async function dispatchServiceFetch(req, env, ctx) {
     init.headers = { "content-type": content_type || "text/plain" };
   }
   if (body.traceparent) init.headers = Object.assign({}, init.headers, { traceparent: body.traceparent });
+  const invocationId = req.headers.get("x-cellhive-invocation-id");
+  if (invocationId) init.headers = Object.assign({}, init.headers, { "x-cellhive-invocation-id": invocationId });
   try {
     const host = stub.getEntrypoint("CellHiveHost");
     const req = new Request(targetURL || "http://service/", init);
@@ -246,7 +248,8 @@ async function dispatchServiceRun(req, env, ctx) {
   }
   try {
     const host = stub.getEntrypoint("CellHiveHost");
-    const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent);
+    const result = await host.callMethod(entrypoint || "", method, args || [], body.traceparent,
+      req.headers.get("x-cellhive-invocation-id"));
     return json({ result: result === undefined ? null : result });
   } catch (e) {
     return json({ error: "service_failed", message: String(e) }, 500);

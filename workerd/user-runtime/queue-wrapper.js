@@ -178,7 +178,7 @@ export class CellHiveHost extends WorkerEntrypoint {
   // callMethod invokes a named tenant entrypoint method (service bindings, RPC).
   // A class entrypoint is constructed with (ctx, env); a plain object is used
   // as-is. Empty entrypoint targets the default export.
-  async callMethod(entrypoint, method, args, traceparent) {
+  async callMethod(entrypoint, method, args, traceparent, invocationId) {
     const exp = entrypoint ? tenantMod[entrypoint] : tenantMod.default;
     if (exp === undefined) throw new Error("no entrypoint " + entrypoint);
     let inst = exp;
@@ -186,8 +186,13 @@ export class CellHiveHost extends WorkerEntrypoint {
       inst = new exp(this.ctx, this.#bindings());
     }
     if (typeof inst[method] !== "function") throw new Error("entrypoint has no method " + method);
+    if (method === "fetch" && args && args[0] instanceof Request) {
+      const headers = new Headers(args[0].headers);
+      headers.delete("x-cellhive-invocation-id");
+      args = [new Request(args[0], { headers }), ...args.slice(1)];
+    }
     setTraceContext(traceparent);
-    setInvocationContext(undefined);
+    setInvocationContext(invocationId);
     try {
       return await runInvocation(() => inst[method](...(args || [])));
     } finally {
