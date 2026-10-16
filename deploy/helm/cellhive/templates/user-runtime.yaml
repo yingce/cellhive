@@ -85,3 +85,9 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.userRuntime.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.userRuntime.targetMemoryUtilizationPercentage }}

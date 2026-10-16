@@ -20,12 +20,22 @@ config:
   # Set off for throughput-first runtimes that do not need platform capture of
   # tenant console output and uncaught exceptions.
   tenantLogCapture: on
-  # Use S3 instead of the filesystem bucket:
-  # bucket: s3://cellhive
-  # awsEndpoint / awsRegion / awsAccessKey / awsSecretKey -> put in the Secret.
+  # Multiple cell-agent replicas require a shared bucket. Supported schemes:
+  # s3://, oss://, cos://. Put endpoint and credentials below or in existingSecret.
+  bucket: s3://cellhive
+  awsEndpoint: ""
+  awsRegion: us-east-1
+  awsAccessKey: ""
+  awsSecretKey: ""
+  ossEndpoint: ""
+  ossAccessKeyID: ""
+  ossAccessKeySecret: ""
+  cosEndpoint: ""
+  cosSecretID: ""
+  cosSecretKey: ""
 
 cellAgent:
-  replicas: 1
+  replicas: 2
   storage: 20Gi
   resources:
     requests: {cpu: 250m, memory: 256Mi}
@@ -36,6 +46,7 @@ userRuntime:
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 70
   pool:
     # opt-in only: adaptive mode starts Go-managed workerd slots behind the
     # user-runtime ports; default keeps the proven single workerd path.
@@ -57,6 +68,8 @@ doRuntime:
     requests: {cpu: 500m, memory: 512Mi}
     # Gated runtime shares this budget with its supervisor and WAL capture.
     limits: {cpu: "2", memory: 4Gi}
+  storage: 20Gi
+  storageClassName: ""
 
 podSecurityContext:
   runAsNonRoot: true

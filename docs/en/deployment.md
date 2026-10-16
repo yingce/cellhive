@@ -95,13 +95,13 @@ helm template my deploy/helm/cellhive --set rootKey="$(openssl rand -base64 32)"
 helm upgrade --install cellhive deploy/helm/cellhive --set existingSecret=cellhive-secrets
 ```
 
-values overrides: image/replicas/resources/storage, `doRuntime.gate` (true → `do-runtime-gated`, DO RPO=0), `existingSecret` or inline `rootKey`, PDB, NetworkPolicy (`adminIngressFrom` appends admin ingress sources), ingress. The Chart is equivalent to `deploy/k8s/` (base + `overlays/rpo0`); `make k8s-render` / `make helm-lint` validate offline.
+Values override image/replicas/resources/storage, shared `config.bucket` (default `s3://cellhive`; multi-agent mode also accepts `oss://`/`cos://` after provider conformance checks), `doRuntime.gate` (true → gated StatefulSet with one PVC per Pod and DO RPO=0; false → ungated OnDelete StatefulSet), `existingSecret` or inline `rootKey`, PDB, NetworkPolicy (`adminIngressFrom` appends admin ingress sources), and ingress. The Chart is aligned with `deploy/k8s/` (base + `overlays/rpo0`); `make k8s-render` / `make helm-lint` validate offline.
 
 ## One-Command Gate
 
 ### Container resource quotas
 
-Helm/Kustomize defaults are **1 CPU / 2 GiB** per user-runtime container and **2 CPU / 4 GiB** per DO runtime container (including the gated supervisor). Requests remain user `250m/256Mi` and DO `500m/512Mi`; HPA utilization remains relative to CPU requests. Override `userRuntime.resources` / `doRuntime.resources` as needed. These are aggregate container budgets, not invocation `cpuMs` or isolate heap quotas: excess CPU is throttled and excess memory may cause OOMKilled.
+Default resources are: cell-agent 2 replicas at `250m/256Mi` request and `2Gi` memory limit; user-runtime 2→10 replicas at `250m/256Mi` request and `1 CPU/2Gi` limit with CPU and memory HPA targets at 70%; gated do-runtime 2 replicas at `500m/512Mi` request and `2 CPU/4Gi` limit with one 20Gi PVC per Pod. Override `userRuntime.resources` / `doRuntime.resources` as needed. These are aggregate container budgets, not invocation `cpuMs` or isolate heap quotas: excess CPU is throttled and excess memory may cause OOMKilled.
 
 Compose uses the same quotas, configurable through `CELLHIVE_USER_RUNTIME_CPUS/MEMORY` and `CELLHIVE_DO_RUNTIME_CPUS/MEMORY`; equal `memswap_limit` and `mem_limit` disable container swap. Runtime nofile is 65536. Supply Compose interpolation settings via export or `--env-file deploy/compose/.env` (see `.env.example`). Kubernetes has no Pod ulimits field; check the inherited container-runtime nofile on TKE independently.
 

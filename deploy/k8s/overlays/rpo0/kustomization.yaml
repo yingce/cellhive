@@ -15,7 +15,7 @@ patches:
       - op: replace
         path: /data/CELLHIVE_DO_RUNTIMES
         value: do-runtime-gated:8788
-  - target: {kind: Deployment, name: do-runtime}
+  - target: {kind: StatefulSet, name: do-runtime}
     patch: |-
       - op: replace
         path: /spec/replicas

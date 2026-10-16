@@ -51,7 +51,7 @@ docker compose -f deploy/compose/docker-compose.yml up --build -d
 
 ## Kubernetes
 
-`deploy/k8s/` 提供 Kustomize base 与 `overlays/rpo0`。base 是**单 cell-agent + 单无门 DO runtime**，无门 runtime 没有权威捕获，保持 `Recreate`，不承诺 Pod 替换后的 DO 状态恢复。生产 `rpo0` overlay 使用 **2 个 gated DO Pod**：ClusterIP Service 负载均衡任意首次落点，每个 Pod 通过 `CELLHIVE_DO_ADVERTISE=$(POD_IP):8788` 写入 owner 记录，非 owner 定向转发；owner Pod 替换时，新 owner 在首次派发前按确定性 `host_id` 从 cell-agent 恢复该 host actor/facet/sidecar。gated Deployment 使用 `RollingUpdate(maxUnavailable=1,maxSurge=1)`，PDB `minAvailable=1`。user-runtime 按 HPA 水平扩展。`CELLHIVE_CELL_URL` 固定指向 `cell-agent-0.cell-agent.cellhive.svc.cluster.local:7001`；节点租约的 `CELLHIVE_PEER_URL` 使用 Pod IP。
+`deploy/k8s/` 提供 Kustomize base 与 `overlays/rpo0`。base 是**单 cell-agent + 单无门 DO StatefulSet**，每个 DO Pod 使用独立 PVC；无门 runtime 没有权威捕获，不承诺 Pod 替换后的 DO 状态恢复。生产 `rpo0` overlay 使用 **2 个 gated DO StatefulSet Pod**：ClusterIP Service 负载均衡任意首次落点，每个 Pod 通过 `CELLHIVE_DO_ADVERTISE=$(POD_IP):8788` 写入 owner 记录，非 owner 定向转发；owner Pod 替换时，新 owner 在首次派发前按确定性 `host_id` 从 cell-agent 恢复该 host actor/facet/sidecar。gated StatefulSet 使用 RollingUpdate，PDB `minAvailable=1`。user-runtime 按 CPU+memory HPA 水平扩展。`CELLHIVE_CELL_URL` 固定指向 `cell-agent-0.cell-agent.cellhive.svc.cluster.local:7001`；节点租约的 `CELLHIVE_PEER_URL` 使用 Pod IP。
 
 ```bash
 python3 scripts/deploy-preflight.py k8s --path deploy/k8s/overlays/rpo0
@@ -94,17 +94,19 @@ kubectl apply -k deploy/k8s/overlays/rpo0
 
 ```bash
 helm lint deploy/helm/cellhive
-helm template my deploy/helm/cellhive --set rootKey="$(openssl rand -base64 32)" >/dev/null
+helm template my deploy/helm/cellhive --set rootKey="$(openssl rand -base64 32)" --set config.bucket=s3://cellhive >/dev/null
 helm upgrade --install cellhive deploy/helm/cellhive --set existingSecret=cellhive-secrets
 ```
 
-values 覆盖：镜像/副本/资源/存储、`doRuntime.gate`（true → `do-runtime-gated`，DO RPO=0）、`existingSecret` 或内联 `rootKey`、PDB、NetworkPolicy（`adminIngressFrom` 追加 admin 入站来源）、ingress。Chart 与 `deploy/k8s/`（base + `overlays/rpo0`）等价；`make k8s-render` / `make helm-lint` 离线校验。
+values 覆盖：镜像/副本/资源/存储、共享 `config.bucket`（默认 `s3://cellhive`，多 cell-agent 副本必须使用通过探针的共享 `s3://`/`oss://`/`cos://` 对象存储）、`doRuntime.gate`（true → gated `StatefulSet` + 每 Pod PVC，DO RPO=0；false → ungated OnDelete StatefulSet）、`existingSecret` 或内联 `rootKey`、PDB、NetworkPolicy（`adminIngressFrom` 追加 admin 入站来源）、ingress。Chart 与 `deploy/k8s/`（base + `overlays/rpo0`）等价；`make k8s-render` / `make helm-lint` 离线校验。
+
+默认资源：cell-agent 2 副本（250m/256Mi request、2Gi memory limit）；user-runtime 2→10 副本（250m/256Mi request、1 CPU/2Gi limit，HPA CPU 70% + memory 70%）；gated do-runtime 2 副本（500m/512Mi request、2 CPU/4Gi limit、每 Pod 20Gi PVC）。
 
 ## 一键门禁
 
 ### 容器资源配额
 
-Helm/Kustomize 默认：user-runtime 每容器 **1 CPU / 2 GiB**，do-runtime（含 gated supervisor）每容器 **2 CPU / 4 GiB**；requests 保留 user `250m/256Mi`、DO `500m/512Mi`，HPA 仍基于 CPU request 计算。可以通过 `userRuntime.resources` / `doRuntime.resources` 覆盖。配额不是每个 function 的 `cpuMs` 或 isolate heap quota：CPU 超额会限速，内存超额可能 OOMKilled。
+Helm/Kustomize 默认 user-runtime 每容器 **1 CPU / 2 GiB**，do-runtime（含 gated supervisor）每容器 **2 CPU / 4 GiB**；requests 保留 user `250m/256Mi`、DO `500m/512Mi`。user-runtime HPA 同时看 CPU 和 memory request 利用率（目标均为 70%）。可以通过 `userRuntime.resources` / `doRuntime.resources` 覆盖。配额不是每个 function 的 `cpuMs` 或 isolate heap quota：CPU 超额会限速，内存超额可能 OOMKilled。
 
 Compose 默认相同配额，通过 `CELLHIVE_USER_RUNTIME_CPUS/MEMORY`、`CELLHIVE_DO_RUNTIME_CPUS/MEMORY` 覆盖；`memswap_limit=mem_limit` 禁用容器 swap，runtime `nofile` 为 65536。参数是 Compose 插值配置，须用 `--env-file deploy/compose/.env` 或 export 提供，详见 `.env.example`。Kubernetes 没有 Pod `ulimits` 字段，TKE 需检查容器运行时继承的 nofile，不能假定和 Compose 一致。
 

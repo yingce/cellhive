@@ -40,7 +40,7 @@ ci:
 # Validate the Helm chart offline (no cluster).
 helm-lint:
 	helm lint deploy/helm/cellhive
-	helm template cellhive deploy/helm/cellhive --set rootKey=$${CELLHIVE_ROOT_KEY:-dummy} >/dev/null && echo "helm template ok"
+	helm template cellhive deploy/helm/cellhive --set rootKey=$${CELLHIVE_ROOT_KEY:-dummy} --set config.bucket=$${CELLHIVE_BUCKET:-s3://cellhive} >/dev/null && echo "helm template ok"
 
 build:
 	@mkdir -p $(BIN)

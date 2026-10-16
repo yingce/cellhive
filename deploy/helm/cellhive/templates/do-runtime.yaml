@@ -16,20 +16,20 @@ spec:
     {{- end }}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "cellhive.doRuntimeService" . }}
   labels:
     {{- include "cellhive.labels" . | nindent 4 }}
     app: do-runtime
 spec:
+  serviceName: {{ include "cellhive.doRuntimeService" . }}
   replicas: {{ if .Values.doRuntime.gate }}{{ .Values.doRuntime.replicas }}{{ else }}1{{ end }}
   {{- if .Values.doRuntime.gate }}
-  strategy:
+  updateStrategy:
     type: RollingUpdate
-    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
   {{- else }}
-  strategy: {type: Recreate}
+  updateStrategy: {type: OnDelete}
   {{- end }}
   selector:
     matchLabels:
@@ -88,6 +88,14 @@ spec:
             {{- toYaml .Values.doRuntime.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /data}
-      volumes:
-        - name: data
-          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.doRuntime.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.doRuntime.storage }}
