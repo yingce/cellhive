@@ -93,6 +93,99 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	}
 }
 
+func TestRecoverLiveScopeLeavesOtherCellWritable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool, err := peer.NewSpool(filepath.Join(dir, "spool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	fh := httptest.NewServer(f.Handler())
+	defer fh.Close()
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("shared")
+	nl := nodelog.New(b, "agent-a")
+	target := cell.Scope{Namespace: "demo", Class: "__do__", ID: "facet-a"}
+	other := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "other"}
+	if _, err := nl.Open(ctx, "shared", 1, []string{fh.URL}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range []cell.Scope{target, other} {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte(sc.ID))
+		if err := transport.Append(ctx, fh.URL, sc, 1, seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, _, err := nl.Get(ctx, "agent-a", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := recovery.New(replica.New(b), transport)
+	n, err := r.RecoverLiveScope(ctx, rec, target)
+	if err != nil || n != 1 {
+		t.Fatalf("recover target = %d, %v", n, err)
+	}
+	if keys, err := r.Replica.ListSegments(ctx, target, 1); err != nil || len(keys) != 1 {
+		t.Fatalf("target segments = %v, %v", keys, err)
+	}
+	if keys, err := r.Replica.ListSegments(ctx, other, 1); err != nil || len(keys) != 0 {
+		t.Fatalf("other unexpectedly uploaded = %v, %v", keys, err)
+	}
+	// A process-wide seal here would reject this still-live unrelated cell.
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("still-live"))
+	if err := transport.Append(ctx, fh.URL, other, 1, seg); err != nil {
+		t.Fatalf("other cell blocked: %v", err)
+	}
+}
+
+func TestRecoverOneSessionAcrossCellEpochs(t *testing.T) {
+	ctx := t.Context()
+	shared, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool, err := peer.NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok"}, Spool: spool})
+	http := httptest.NewServer(follower.Handler())
+	defer http.Close()
+	nl := nodelog.New(shared, "dead-owner")
+	transport := peer.NewHTTPTransport("tok", nil).WithSession("multi-cell")
+	for _, tc := range []struct {
+		id    string
+		epoch uint64
+	}{{"first", 15}, {"second", 23}} {
+		if _, err := nl.Open(ctx, "multi-cell", tc.epoch, []string{http.URL}); err != nil {
+			t.Fatalf("open epoch %d: %v", tc.epoch, err)
+		}
+		sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: tc.id}
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: tc.epoch, StartTxID: 1, EndTxID: 1}, []byte(tc.id))
+		if err := transport.Append(ctx, http.URL, sc, tc.epoch, seg); err != nil {
+			t.Fatalf("append epoch %d: %v", tc.epoch, err)
+		}
+	}
+	rep := replica.New(shared)
+	if n, err := recovery.New(rep, transport).Recover(ctx, nl, "dead-owner", "multi-cell"); err != nil || n != 2 {
+		t.Fatalf("recover two epochs: segments=%d err=%v", n, err)
+	}
+	for _, tc := range []struct {
+		id    string
+		epoch uint64
+	}{{"first", 15}, {"second", 23}} {
+		sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: tc.id}
+		keys, err := rep.ListSegments(ctx, sc, tc.epoch)
+		if err != nil || len(keys) != 1 {
+			t.Fatalf("%s epoch %d: keys=%v err=%v", tc.id, tc.epoch, keys, err)
+		}
+	}
+}
+
 func TestRecoverySkipsDeletedResourcesButRecoversLiveScopes(t *testing.T) {
 	for _, mode := range []string{"legacy", "sealed"} {
 		t.Run(mode, func(t *testing.T) {

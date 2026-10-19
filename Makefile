@@ -62,7 +62,9 @@ build:
 	$(GO) build $(GOTAGS) -o $(BIN)/recoververify ./cmd/recoververify
 
 test:
-	$(GO) test $(GOTAGS) ./...
+	# doruntime and userruntime spawn workerd on freePort() listeners; serialize
+	# packages so their real-process integration tests do not race those ports.
+	$(GO) test $(GOTAGS) -p 1 ./...
 
 # js-test checks the platform JS for syntax and runs the workerd integration
 # tests that exercise the binding facades (KV TTL/metadata, D1/R2/Queue, DO,

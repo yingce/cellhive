@@ -32,8 +32,10 @@ const (
 
 // Record is a node-log entry.
 type Record struct {
-	Node         string            `json:"node"`
-	Session      string            `json:"session"`
+	Node    string `json:"node"`
+	Session string `json:"session"`
+	// Epoch is the first cell epoch observed in this process session. Each v2
+	// follower fragment carries its own scope and epoch for recovery.
 	Epoch        uint64            `json:"epoch"`
 	Followers    []string          `json:"followers"`
 	Status       Status            `json:"status"`
@@ -64,7 +66,8 @@ func Key(node, session string) string { return "node-logs/" + node + "/" + sessi
 
 // Open creates an open record for a session (conditional create). Reopening is
 // a no-op only when the immutable recovery coordinates match. Follower order
-// is not significant.
+// is not significant. Cell epochs may differ within one process session: each
+// v2 follower fragment persists its own epoch.
 func (m *Manager) Open(ctx context.Context, session string, epoch uint64, followers []string) (Record, error) {
 	followers = canonicalFollowers(followers)
 	r := Record{
@@ -84,7 +87,7 @@ func (m *Manager) Open(ctx context.Context, session string, epoch uint64, follow
 			if gerr != nil {
 				return Record{}, gerr
 			}
-			if existing.Node != m.NodeID || existing.Session != session || existing.Epoch != epoch || existing.ProtoVersion != ProtoVersionSession || !sameFollowers(existing.Followers, followers) {
+			if existing.Node != m.NodeID || existing.Session != session || existing.ProtoVersion != ProtoVersionSession || !sameFollowers(existing.Followers, followers) {
 				return Record{}, ErrEnsembleMismatch
 			}
 			return existing, nil

@@ -2,6 +2,7 @@ package server
 
 import (
 	"cellhive/internal/invocation"
+	"cellhive/internal/telemetry"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -45,6 +46,22 @@ func (s *Server) handleInvocationPut(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.captureErr(w, err, "invocation_write_failed")
 		return
+	}
+	if record.Status != "running" {
+		traceID, spanID := telemetry.TraceIDs(record.Traceparent)
+		var links json.RawMessage
+		if len(record.ProducerLinks) > 0 {
+			links, _ = json.Marshal(record.ProducerLinks)
+		}
+		telemetry.ExportLogWithMetadata(record.Namespace, record.Worker, "info", "invocation", record.FinishedMs, traceID, spanID,
+			telemetry.LogMetadata{EventType: record.Kind, RequestID: record.RequestID, Outcome: record.Status, Invocation: true, ProducerLinks: links})
+		if record.Kind == "queue" {
+			queueLinks := make([]telemetry.QueueLink, 0, len(record.ProducerLinks))
+			for _, link := range record.ProducerLinks {
+				queueLinks = append(queueLinks, telemetry.QueueLink{MessageID: link.MessageID, RequestID: link.RequestID, Traceparent: link.Traceparent})
+			}
+			telemetry.ExportQueueConsumerSpan(record.Traceparent, record.Namespace, record.Worker, record.Resource, record.Status, record.StartedMs, record.FinishedMs, queueLinks)
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "invocation_id": record.ID, "invocation": record})
 }

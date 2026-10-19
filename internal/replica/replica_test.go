@@ -53,6 +53,28 @@ func TestAppendListRead(t *testing.T) {
 	}
 }
 
+func TestAppendDoesNotOverwriteAcknowledgedSegment(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__do__", ID: "host"}
+	first := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("A"))
+	second := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("B"))
+	key, _, err := m.Append(ctx, sc, 1, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Append(ctx, sc, 1, first); err != nil {
+		t.Fatalf("identical replay: %v", err)
+	}
+	if _, _, err := m.Append(ctx, sc, 1, second); err == nil {
+		t.Fatal("conflicting replay overwrote acknowledged segment")
+	}
+	got, err := m.ReadSegment(ctx, key)
+	if err != nil || string(got) != string(first) {
+		t.Fatalf("retained segment = %q, err=%v", got, err)
+	}
+}
+
 func TestAppendRejectsEpochMismatch(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)

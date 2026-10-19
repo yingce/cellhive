@@ -48,6 +48,10 @@ spec:
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
           env:
+            {{- if .Values.telemetry.enabled }}
+            - name: CELLHIVE_OTLP_ENDPOINT
+              valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_OTLP_ENDPOINT}}
+            {{- end }}
             - name: CELLHIVE_ROOT_KEY
               valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_ROOT_KEY}}
           ports:

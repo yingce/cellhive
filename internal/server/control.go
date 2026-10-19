@@ -90,6 +90,24 @@ func (s *Server) requireControl(w http.ResponseWriter) bool {
 	return true
 }
 
+// handleControlBinding is an internal point read for scoped-token ACL checks.
+// A non-owner must never authorize from its stale local control SQLite.
+func (s *Server) handleControlBinding(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
+	if !s.requireControl(w) {
+		return
+	}
+	q := r.URL.Query()
+	id, ok, err := s.Control.Binding(r.Context(), q.Get("ns"), q.Get("kind"), q.Get("name"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "binding_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "ok": ok})
+}
+
 func decodeControl(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(v); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -382,6 +400,9 @@ func (s *Server) handleControlApps(w http.ResponseWriter, r *http.Request) {
 // is not the owner. The response is returned to the caller (not proxied) so the
 // namespace filter always runs under the caller's own authorization.
 func (s *Server) appsForRequest(r *http.Request) ([]control.App, error) {
+	if err := s.claimForRead(r.Context(), control.Scope()); err != nil {
+		return nil, err
+	}
 	resp, forwarded, err := s.fetchViaOwner(r, control.Scope())
 	if !forwarded {
 		return s.Control.Apps(r.Context())
@@ -706,6 +727,7 @@ type deployReq struct {
 	CompatibilityDate  string                `json:"compatibility_date,omitempty"`
 	CompatibilityFlags []string              `json:"compatibility_flags,omitempty"`
 	Limits             *control.WorkerLimits `json:"limits,omitempty"`
+	LogPolicy          *control.LogPolicy    `json:"log_policy,omitempty"`
 	Consumers          []control.Consumer    `json:"consumers,omitempty"`
 	Crons              []string              `json:"crons,omitempty"`
 	Assets             *control.AssetsConfig `json:"assets,omitempty"`
@@ -972,6 +994,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			CompatDate:     req.CompatibilityDate,
 			CompatFlags:    req.CompatibilityFlags,
 			Limits:         req.Limits,
+			LogPolicy:      req.LogPolicy,
 		}, "admin")
 		return e
 	}); err != nil {
@@ -1026,8 +1049,9 @@ func (s *Server) handleControlPromote(w http.ResponseWriter, r *http.Request) {
 }
 
 type rollbackReq struct {
-	Namespace string `json:"namespace"`
-	Worker    string `json:"worker"`
+	Namespace      string `json:"namespace"`
+	Worker         string `json:"worker"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (s *Server) handleControlRollback(w http.ResponseWriter, r *http.Request) {
@@ -1047,7 +1071,7 @@ func (s *Server) handleControlRollback(w http.ResponseWriter, r *http.Request) {
 	var wk control.Worker
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
 		var e error
-		wk, e = s.Control.Rollback(r.Context(), req.Namespace, req.Worker, actorFor(r.Context()))
+		wk, e = s.Control.RollbackWithKey(r.Context(), req.Namespace, req.Worker, req.IdempotencyKey, actorFor(r.Context()))
 		return e
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "rollback_failed", err.Error())

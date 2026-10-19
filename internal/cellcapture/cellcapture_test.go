@@ -2,6 +2,7 @@ package cellcapture
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,141 @@ import (
 type recCommitter struct {
 	mu   sync.Mutex
 	segs int
+}
+
+func TestSnapshotFailureCannotStartUnprovenCapture(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "snapshot-fail"}
+	c, err := cs.Cell(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(context.Background(), "seed", []byte("value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	var fail atomic.Bool
+	fail.Store(true)
+	m := &Manager{Store: cs, AutoSnapshot: true, Checkpoint: time.Hour,
+		Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		Committer: committerFunc(func(context.Context, cell.Scope, uint64, []byte) error {
+			if fail.Load() {
+				return errors.New("injected bucket failure")
+			}
+			return nil
+		}),
+	}
+	if _, err := m.Ensure(context.Background(), scope); err == nil {
+		t.Fatal("snapshot failure was accepted")
+	}
+	m.mu.Lock()
+	_, started := m.caps[scope.String()]
+	m.mu.Unlock()
+	if started {
+		t.Fatal("failed snapshot left a capture instance")
+	}
+	fail.Store(false)
+	if _, err := m.Ensure(context.Background(), scope); err != nil {
+		t.Fatalf("retry snapshot: %v", err)
+	}
+	txid, err := c.TxID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Wait(context.Background(), scope, txid); err != nil {
+		t.Fatalf("baseline not durable: %v", err)
+	}
+	m.Stop()
+}
+
+func TestFailedCaptureRestartsFromDurableSnapshot(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "restart-fail"}
+	c, err := cs.Cell(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(context.Background(), "seed", []byte("value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	var fail atomic.Bool
+	m := &Manager{Store: cs, AutoSnapshot: true, Checkpoint: time.Hour,
+		Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		Committer: committerFunc(func(context.Context, cell.Scope, uint64, []byte) error {
+			if fail.Load() {
+				return errors.New("injected bucket failure")
+			}
+			return nil
+		}),
+	}
+	if _, err := m.Ensure(context.Background(), scope); err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	if err := c.Put(context.Background(), "pending", []byte("write"), nil); err != nil {
+		t.Fatal(err)
+	}
+	txid, err := c.TxID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Wait(ctx, scope, txid); err == nil {
+		t.Fatal("failed capture acknowledged the write")
+	}
+	fail.Store(false)
+	if _, err := m.Ensure(ctx, scope); err != nil {
+		t.Fatalf("restart snapshot: %v", err)
+	}
+	if err := m.Wait(ctx, scope, txid); err != nil {
+		t.Fatalf("restarted capture did not prove pending txid: %v", err)
+	}
+	m.Stop()
+}
+
+func TestFailedCaptureWithoutSnapshotStaysClosed(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "no-snapshot"}
+	m := &Manager{Store: cs, Checkpoint: time.Hour,
+		Owner:     func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		Committer: committerFunc(func(context.Context, cell.Scope, uint64, []byte) error { return errors.New("injected failure") }),
+	}
+	ctx := context.Background()
+	if _, err := m.Ensure(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Cell(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(ctx, "pending", []byte("write"), nil); err != nil {
+		t.Fatal(err)
+	}
+	txid, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := m.Wait(wctx, scope, txid); err == nil {
+		t.Fatal("failed commit acknowledged")
+	}
+	if _, err := m.Ensure(ctx, scope); err == nil {
+		t.Fatal("dead capture without snapshot was restarted")
+	}
+	m.Stop()
 }
 
 func (r *recCommitter) Commit(context.Context, cell.Scope, uint64, []byte) error {

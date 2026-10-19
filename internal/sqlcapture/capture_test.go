@@ -167,6 +167,51 @@ func TestHTTPCommitterDurabilityProofs(t *testing.T) {
 	}
 }
 
+func TestHTTPCommitterRequireBucketProof(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/internal/commit_binary" || r.Header.Get("x-cellhive-bucket-proof") != "1" {
+			http.Error(w, "bucket proof header missing", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"mode":"bucket"}`))
+	}))
+	defer server.Close()
+	client := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	client.RequireBucket = true
+	if err := client.Commit(context.Background(), cell.Scope{Namespace: "demo", Class: "__do__", ID: "host"}, 1, []byte("segment")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPCommitterDOOwnerProofOrBucketFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-cellhive-do-owner-epoch") == "3" {
+			if r.Header.Get("x-cellhive-do-owner-node") != "do-b" || r.Header.Get("x-cellhive-bucket-proof") != "" {
+				http.Error(w, "bad DO fleet identity", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"mode":"fleet"}`))
+			return
+		}
+		if r.Header.Get("x-cellhive-bucket-proof") != "1" {
+			http.Error(w, "missing bucket fallback", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"mode":"bucket"}`))
+	}))
+	defer server.Close()
+	client := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	client.RequireDOOwner = true
+	scope := cell.Scope{Namespace: "workerd", Class: "__do__", ID: "facet"}
+	if err := client.Commit(context.Background(), scope, 1, []byte("segment")); err != nil {
+		t.Fatal(err)
+	}
+	doOwner := DOOwnerIdentity{Scope: cell.Scope{Namespace: "demo", Class: "__do__", ID: "w~C~shard0"}, Node: "do-b", Epoch: 3}
+	if err := client.Commit(WithDOOwner(context.Background(), doOwner), scope, 1, []byte("segment")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChunkTransactionsBoundsCountAndSize(t *testing.T) {
 	page := make([]byte, 64)
 	total := maxCaptureTransactions + 44

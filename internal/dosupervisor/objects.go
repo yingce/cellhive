@@ -359,6 +359,12 @@ func (s *Supervisor) RestoreObject(ctx context.Context, outDir, storageID, class
 // The runtime calls it after winning a shard claim and before opening the workerd
 // Durable Object stub, so no tenant code can observe an empty replacement disk.
 func (s *Supervisor) RestoreHost(ctx context.Context, outDir, hostID string) (int, error) {
+	return s.RestoreHostClaimed(ctx, outDir, hostID, RecoveryClaim{})
+}
+
+// RestoreHostClaimed first fills the COS chain with follower-confirmed writes
+// for every file of a newly claimed DO shard.
+func (s *Supervisor) RestoreHostClaimed(ctx context.Context, outDir, hostID string, claim RecoveryClaim) (int, error) {
 	doc, err := s.readManifestDocKey(ctx, s.hostManifestKey(hostID))
 	if errors.Is(err, bucket.ErrNotFound) {
 		doc, err = s.readManifestDoc(ctx) // migration fallback for pre-host manifests
@@ -386,6 +392,15 @@ func (s *Supervisor) RestoreHost(ctx context.Context, outDir, hostID string) (in
 		}
 		if err != nil {
 			return n, err
+		}
+		if claim.Epoch != 0 {
+			recoverySource, ok := s.Segments.(ScopeRecoverySource)
+			if !ok {
+				return n, fmt.Errorf("dosupervisor: DO recovery source unavailable")
+			}
+			if err := recoverySource.RecoverScope(ctx, scope, claim); err != nil {
+				return n, err
+			}
 		}
 		if err := s.restoreScope(ctx, scope, filepath.Join(outDir, filepath.FromSlash(rel))); err != nil {
 			return n, err

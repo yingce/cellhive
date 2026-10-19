@@ -1,5 +1,120 @@
 # 决策记录（ADR）
 
+## ADR-233 Queue 生产者上下文按消息持久化，消费批次用 OTel links 关联（2026-10-19）
+
+一个 Queue 批次可能包含来自不同请求、不同 trace 的消息，不能把整个消费调用指定为其中一个生产者的子 span。入队时从可信绑定调用的当前请求上下文读取 `x-request-id` 和 W3C `traceparent`，随每条消息持久化；批量入队、重试、DLQ 转移保留各自原始上下文，同一幂等键返回原消息及其原上下文。每次消费尝试继续生成独立 `invocation_id=request_id` 和 traceparent；调用记录保存按消息 ID 对应的生产者 links，OTLP 调用日志带可查询的 links 属性，消费 span 用标准 OTel links 指向有效的生产者 span context。未带合法 traceparent 的消息不产生 trace link；跨消息批次不臆造单一父调用。外部 Queue API 的请求头可提供自己的上下文，租户的 CF 形状 Queue binding 不暴露平台密钥或额外参数。
+
+## ADR-232 捕获快照失败须拒绝写入，失败实例须重新建立证明（2026-10-19）
+
+权威 cell 的首次捕获快照是后续 LTX 链的恢复基线。快照提交失败时，`cellcapture.Ensure` 必须返回错误，不得启动以未证明的本地 txid 为基线的捕获循环。运行中的捕获若因提交失败终止，下一次 `Ensure` 不得复用已停止的实例；启用 `AutoSnapshot` 的生产路径重新创建实例并提交当前完整快照后才能继续写入和给出持久确认。未启用快照的测试/特殊配置须保持失败关闭，避免跳过失败的 LTX 尾部。重新建链可能把先前本地已提交但未获确认的写入一并持久化；调用方仍须通过幂等键和版本读回对账，不得把前一次错误当作确定回滚。真实 COS 持久确认失败及跨 AZ 恢复仍须独立验收。
+
+## ADR-231 发布前资源读取失败不得伪装为资源未注册（2026-10-19）
+
+`cell-agent` 被强杀后，`/readyz` 可先于 control cell 的认领和恢复变为就绪。CLI 的 `registeredResources` 曾忽略资源列表 HTTP/JSON 错误，拿空集合做 Wrangler 兼容检查，误报 KV、Queue、Workflow 均未注册。发布前读取失败现在明确返回错误，只有成功读到的资源列表才用于本地检查；服务端仍独立做权威检查。运行时基线在强杀恢复后等待资源读回，再发布 v4，不把监听器就绪当成控制状态已恢复。现有资源保持原样，故障期间不得自动创建替代资源。
+
+## ADR-230 Queue/Cron Tail 载荷由可信派发包装层补齐（2026-10-19）
+
+stock workerd 对动态 RPC entrypoint 只报告 `rpcMethod`。Queue/Cron 派发包装层在调用租户处理器前，把实际 `queue`、批次大小或 `cron`、计划时间写为一次调用的内部诊断 console 记录；每个已加载 Worker 的包装模块与 Tail props 共享随机密钥，租户 env 不含密钥。Tail 仅在对应 `rpcMethod` 的同一原生 Trace 中接受密钥匹配的首条内部记录，并从公开日志移除；无可信记录时保留 `{rpcMethod}`，不推测载荷。由此保持 workerd 原生 outcome、异常和普通日志，同时在 TailItem 中提供 CF 形状的 `event.queue` / `event.cron`。密钥按加载实例生成，不跨版本复用；仅日志捕获开启时产生内部记录。stock workerd 仍会把这条诊断记录写到进程 stdout/stderr，每次 Queue/Cron 调用增加一条底层日志，需按实际异步调用量评估容器日志成本。验收须由原版 Wrangler 和原始 WebSocket 分别读取实际 Queue/Cron 载荷，验证并发调用互不串值、租户伪造记录不能污染事件。
+
+## ADR-229 control 接管与读取不得沿用旧节点本地 SQLite（2026-10-19）
+
+隔离双节点故障验收：A 发布的 v4–v6 在 A 停止前由 B 读回；A 停止后 B 接管 control owner，却从自己的旧 SQLite 只返回 v1–v3。`ResourceCleanupPass` 会在 owner 过期后直接 `Claim`，但未丢弃非 owner 时打开的旧本地副本；普通 `forwardRead` 对过期 owner 也会退回本地读。接管前必须恢复旧 session 已确认但未落桶的尾部，丢弃外节点遗留的本地 control 副本，再从权威链打开；读取过期/unowned scope 需认领并完成恢复后才读，不准直接使用本地副本。接管后核对发布版本集合、active 指针和 Cron fired 状态。清理本地副本须发生在 `BeginRequest` 之前，否则 `Store.Forget` 会等待当前请求自身，导致 Workflow 创建自锁。隔离双节点 E2E 已验证接管前后的版本集合无缺失；生产 COS 与跨 AZ 故障仍须独立验收。
+
+## ADR-228 user-runtime 版本配置必须从 control owner 读取（2026-10-19）
+
+原版 Wrangler 从非 owner 节点发布新版本后，user-runtime 通过另一节点的 `/v1/internal/worker/bindings?version=N` 查询版本环境。该端点若直接读取接入节点的旧 control SQLite，查不到 N 时会回退为 `log_policy.console=false`、`invocation=false`：租户 handler 仍执行，但 Tail 和调用记录静默缺失。此端点按 control scope 先转发到当前 owner，再读取不可变版本及 Secret；owner 不可达时返回错误，不把本地旧版本当作授权或日志策略。双节点回归和真实 Wrangler 发布后异步 Tail/调用记录是验收门禁。
+
+## ADR-227 Wrangler 重部署保留异步触发配置（2026-10-19）
+
+真实双节点验收发现：同一 `wrangler.jsonc` 第二次 deploy 的 multipart 元数据未带 `triggers.crons`，compat 上传却把空切片当作显式删除，生成不带 Cron 的新 active 版本；Queue consumer 也在上传版本中短暂消失，后续 Wrangler 的 consumer API 才重新添加。按 API 语义，上传代码省略触发配置时继承当前 active 版本的 Cron 与 Queue consumer；显式提供 `triggers.crons: []` 才清除 Cron。专用 schedules PUT 与 Queue consumer API 负责显式变更，须经 control owner 转发并等待捕获证明。验收要核对原版 Wrangler 重部署后的 active 版本、随后每分钟的 Cron 调用、旧 owner 崩溃后的版本与 fired 恢复；不得只看发布 HTTP 200。
+
+## ADR-226 Cron/timer 后台写入遵守 cell owner 与捕获门禁（2026-10-19）
+
+真实双 cell-agent 验收发现：同一 Cron UTC slot 在无故障时有两个 `success` invocation，`logical_id` 相同、相隔约 0.85 秒。根因是 Cron Scheduler 与本地 Timer Runner 直接打开各自节点的 SQLite 副本，未先判定 cell owner，也未让 timer upsert/fired 写入等待捕获证明。`token` 只能在同一权威 SQLite 内去重，无法让两个本地副本互斥。
+
+- Scheduler 对 `__cron__` 与 Workflow schedule 的所属 cell 先点查/认领 owner；活跃 peer 持有时跳过。只有本节点当前 session 可物化 slot，写入走捕获证明。认领过期 owner 前丢弃外节点遗留的本地副本并从权威链恢复。
+- 本地 Timer Runner 每次派发前确认 scope 仍属于本节点当前 session，成功派发后的 fired/retry 记账走捕获证明。单 fleet waker 接管 dead scope 后使用同一 owner 与捕获门禁。Timer Runner 不直接派发 peer 的本地副本。
+- 保留至少一次边界：业务 handler 成功后、fired 持久确认前进程崩溃仍可按同一 occurrence 重投；业务外部副作用须幂等。不能把无故障双节点重复派发归入这一允许边界。
+- 验收要覆盖同 slot 双节点竞争、owner 停止后的分钟窗口、新 owner 从权威链恢复、fired 持久读回和旧 owner 返回后的不重发。对象存储只用点查/条件写，不在热路径 List。
+
+## ADR-225 原版 Wrangler 的异步 Tail 和 WebSocket 心跳（2026-10-19）
+
+当前异步处理经 stock workerd 的动态 RPC entrypoint 执行，因此原生 Tail 的 `event` 是 `{rpcMethod:"handleQueue"}` / `{rpcMethod:"handleScheduled"}`，不含原生 Queue 名或 Cron 表达式。`event_type` 可由可信 entrypoint 名稳定映射为 `queue` / `scheduled`，Queue/Cron 载荷补齐见 ADR-230。Wrangler 4.133.0 在 Tail 握手后明确发送 `mask:false` 的 debug 帧，标准 Gorilla reader 会拒绝 `bad MASK`；故识别 `wrangler/*` 且 `trace-v1` 的连接为只写，并定期发送合法的、载荷为 `wrangler tail ping` 的 Pong 以回应其固定心跳。其他 WebSocket 客户端仍使用标准 reader/control-frame 路径。Wrangler 的十秒心跳如无 Pong 会断线重连并重复回放有界 ring。
+
+## ADR-224 Workflow 每次运行尝试的关联记录（2026-10-19）
+
+Workflow 实例 ID 是业务身份；每次领取运行 lease（首次、sleep/event 唤醒、故障恢复）产生新的 `invocation_id`、`request_id` 和 W3C traceparent，保存到与 Queue/Cron 共用的调用记录并在完成时导出 OTLP。WorkflowBridgeTarget 的 step 回调沿用该 traceparent。一次尝试的 `logical_id` 固定关联 namespace、worker、workflow 名和实例 ID，重跑保留业务身份但不复用 trace。版本化 `log_policy.invocation` 对 Workflow 同样生效。stock workerd 的 Workflow 原生 Tail 是 RPC 事件，没有 HTTP 请求头，TailItem 不伪造 requestId；关联查询以调用记录和 OTLP 为准。创建请求的 HTTP trace 不自动成为异步尝试的父级，除非后续给 Workflow cell 增加持久父链协议。
+
+## ADR-223 Queue/Cron 异步尝试关联（2026-10-19）
+
+Queue 每次领取批次、Cron 每次 timer 派发都生成新的 `invocation_id` 和 W3C traceparent；`request_id` 默认等于该尝试的 `invocation_id`。二者随 user-runtime 派发进入租户 handler 与其 binding 调用，写入持久调用记录，并在完成后输出 OTLP 调用日志。重试保留业务 `logical_id` / message lineage，但有新的尝试 ID 与 trace，避免把两次执行合并成一次。外部入站 HTTP 的 request ID 和 traceparent 不自动冒充后台尝试的 ID；Queue 生产者上下文的持久关联由 ADR-233 补齐。stock workerd 原生 Queue/Cron Tail 事件没有 HTTP request headers，公共 Tail 不能凭空声称包含该尝试的 `requestId`；持久调用记录和 OTLP 是异步尝试的关联查询面。
+
+## ADR-222 OTLP 日志关联 ID 的后端检索（2026-10-19）
+
+stock workerd 的 Tail 事件已含 `traceparent`，`TenantTail` 将它作为内部字段上报；接收端必须解码保留，不能因为公共 TailItem 的 JSON 不展示该字段而丢失。OTLP LogRecord 保留原生 trace_id/span_id；同时在有效 ID 时写入 `cellhive.trace_id` / `cellhive.span_id` 字符串属性，供不把 LogRecord 顶层 trace_id 索引为可查询列的后端使用。公共 Wrangler Tail 消息不新增顶层 `traceparent`。不得从 request ID 推导 trace ID，也不得为空或无效 traceparent 制造虚假的关联。OpenObserve 实测以 `cellhive_trace_id` 查询到与 trace pipeline 同一 ID，验证端到端关联。
+
+## ADR-221 Wrangler 上传跨节点控制写入（2026-10-19）
+
+Wrangler 上传先将 bundle 写入共享对象存储，再通过原生 `/v1/control/app`、`/v1/control/resource`、`/v1/control/deploy` 内部请求完成 namespace、Workflow 预留和版本发布。每个控制请求使用原生路径和 JSON body，由现有 owner 转发、捕获与 fsync 门禁处理；不能复用 Cloudflare 上传 URL 转发至内部端口，也不能在接入节点直接修改本地控制 SQLite。上传成功后从 control owner 的发布事件和 active 指针读回对账。跨节点原版 Wrangler 发布及 Tail 分别作为验收门禁。
+
+## ADR-220 发布重试与回滚幂等（2026-10-19）
+
+`Deploy` 的幂等键同时保存不可变部署参数的 SHA-256 指纹；同键同参数返回原版本，同键异参数拒绝，防止发布客户端在未知结果重试时静默接受别的内容。升级前无指纹的旧记录按旧行为读回。`Promote` 指向已 active 的版本是无操作，不重复写部署事件或交换 previous。`Rollback` 的无键形式保留旧的“切换到 previous”语义；自动重试必须传 `idempotency_key`，第一次在控制 cell 事务内保存 resulting active/previous，后续同键直接读回原结果，不再次切换。调用方在未知结果后用相同键重试，再读 `deployments` 与 active 指针核对；不能把新键的再次 rollback 当作同一操作。删除 Worker 时清理其幂等记录。
+
+## ADR-219 HTTP 请求关联 ID（2026-10-19）
+
+user-runtime 入口保留客户端提供的 `x-request-id`；缺失时为当前 HTTP 调用生成 UUID 并转发给租户 Worker。stock workerd Tail 事件读取实际传给租户的 Request headers，因此同一 `requestId` 可出现在 TailItem 与可选 OTLP logs 中。此规则只覆盖 HTTP fetch；Queue/Cron/Workflow 的异步关联规则还需单独定义和验证，不把 HTTP 入站 ID 假称为所有后台尝试的 ID。
+
+## ADR-218 多节点 Wrangler Tail 读取（2026-10-19）
+
+Wrangler 的单条 WebSocket 订阅由接入的 cell-agent 同时读取本机及 lease 发现的其他活跃 cell-agent 的有界 Tail 事件 ring。内部读取端点只对 peer 角色开放，按 namespace/worker 点查、按节点 session + ring seq 维护游标；节点重启 session 变化后从新 ring 的起点读取。每次请求与返回量有界，peer 暂时不可达时保留其游标并重试；ring 被挤出或节点长期不可达仍是实时 Tail 的 best-effort 边界。lease 发现使用已有缓存，不在每条事件上 List 桶。WebSocket 只输出 CF TailItem，内部 seq/session 不暴露给 Wrangler。跨节点事件没有全局严格顺序。
+
+## ADR-217 按 Worker 版本控制日志采集（2026-10-19）
+
+部署版本保存可选 `log_policy.console` 与 `log_policy.invocation` 布尔值；省略时沿用运行时默认值。`CH_LOG_CAPTURE=0` 与 `CH_INVOCATION_LOGS=0` 是节点级硬上限，Worker 不能自行打开已关闭的采集。显式关闭 console 时不挂载租户 Tail，因此 Tail/console OTLP 均无该 Worker 事件；显式关闭 invocation 时不写 Queue/Cron 调用记录。版本环境读回、secret 引起的新版本、Queue/Cron 配置重发布均保留该策略；旧版本默认继承。内部 dispatch 查不到版本策略时按关闭采集处理，避免控制面故障导致已关闭 Worker 泄露日志。此设置不改变业务执行与 Queue ack，且运行中旧版本按旧策略继续运行。
+
+## ADR-216 Queue 消费等待与重试配置（2026-10-19）
+
+Queue consumer 的 `max_batch_timeout_seconds` 从最早可领取消息的可见时间起算：达到 `max_batch_size` 立即领取，不足一批则到超时后领取；显式 0 时立即领取。Wrangler 配置与 Cloudflare API 省略该字段时默认 5 秒，合法范围 0–60 秒；原生旧版本已存储的 0 继续即时派发。等待状态由消息自身的持久 `visible_at_ms` 推导，不增加节点本地计时器。`retry_delay` 为每 consumer 的秒数，失败自动重试使用该值；消息显式 `retry({delaySeconds})` 优先。省略 `max_retries` 采用默认 3 次重试（首次投递加 3 次，最多 4 次尝试），兼容 API 显式 0 无效；旧版已存储的 0 也按默认 3 次重试解释，不再无限重试。每次 `Claim` 增加 attempts，超过重试上限后进入 DLQ；未配置 DLQ 时确认并记录丢弃。已领取的批次在本次进程内派发继续使用领取时的 worker 版本与配置；发布新版不会中途替换正在运行的 handler。消息行只持久化 lease/attempts，不持久化领取时的 Worker 版本。cell-agent 在领取后崩溃或派发失败后，消息到期重新领取视为**新投递**，按当时的 active Worker 版本和 consumer 配置运行；因此同一消息的后续尝试可跨版本，旧版 handler 的外部副作用必须可与新版幂等兼容。移除 consumer 后未确认消息保留在队列，直到重新配置 consumer；需要保持旧版处理时应延后发布或暂停消费并排空。Queue 仍是至少一次投递，消费者须为外部副作用做幂等。
+
+## ADR-215 调用事件与结构化 OTLP 日志（2026-10-19）
+
+stock workerd Tail 事件入站后，cell-agent 除保留有界 Tail 事件外，向可选 OTLP logs 导出一条调用记录（即使没有 console 输出），再逐条导出 console/exception 记录。记录属性包含 `cellhive.event_type`、`cellhive.script_version`（原始 JSON）、`cellhive.request_id`、`cellhive.outcome`、`cellhive.exceptions`（原始 JSON）；console 记录另含 `cellhive.message_args`（原始 JSON 数组）。由事件派生的本地 `logbuf.Entry` 同样保留事件类型、结果、版本和异常。保留 `CELLHIVE_OTLP_LOGS=off|tail|all` 门控，导出是异步、best-effort，不能替代权威业务写入或持久日志。每次调用额外一条 OTLP 记录会增加日志量；按 Worker 的独立采集策略与多节点 Tail 聚合另行验收。
+
+原版 Wrangler 4.133.0 的 Tail WebSocket 使用 `trace-v1` 子协议；服务端只在客户端请求该协议时回传它。无子协议的普通 WebSocket 客户端仍可使用。流中仅发送 TailItem，不发送 Wrangler 无法解析的自定义连接提示；Queue 事件以 `event.queue` 字符串和 `event.batchSize` 数字输出。`TestCloudflareTailWebSocket` 验证握手协商；原版客户端渲染需另做真实服务验收。
+
+## ADR-214 Wrangler Tail 使用限定范围的短期流凭据（2026-10-19）
+
+Tail session 创建仍用管理员鉴权；返回的 WebSocket URL 仅包含 10 分钟有效、按 namespace/worker/session 限定的 HMAC 凭据，不再包含 AdminToken。凭据用共享 `ScopeSecret` 派生独立 issuer key，内含搜索条件，因此任一 cell-agent 均可校验，不依赖创建节点的内存 session 表；过期、错 namespace/worker/session 拒绝。DELETE 是幂等的客户端生命周期结束信号，已签发凭据在到期前不会跨节点即时吊销。Tail 日志 ring 仍在各 cell-agent 本地，跨节点凭据校验不等于全节点日志聚合。
+
+## ADR-213 Worker CPU 参数先兼容、执行限额后置（2026-10-19）
+
+`WorkerLimits.cpuMs`（Wrangler 配置与 Cloudflare 上传元数据使用 `limits.cpu_ms`）在部署时要求正整数，保存在不可变版本并在原生版本环境与 Cloudflare 版本查询中读回。`subrequests` 保持现有执行语义。当前固定的 stock workerd 未执行逐调用 CPU 限额：`cpuMs` 不传给 workerd，不产生 `exceededCpu` 保证；后续验证可强制的 workerd 能力时再单独验收。配置接受不代表限额生效，兼容矩阵必须显式标为 Partial。
+
+## ADR-212 DO 与普通 cell 共用 follower 确认语义（2026-10-19，本地实现与 k3d 故障验收通过）
+
+DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 LTX 交给 cell-agent；带有效 DO owner scope/node/epoch 的输出门写入，先建立 node-log 和该捕获 scope 的持久恢复指针，再允许 follower fsync 确认，COS 后台上传。恢复指针单调按 DO owner epoch 更新，且在 cell-agent 释放捕获 scope owner 记录后仍保留。缺少 DO owner 身份的运维全目录捕获继续等 bucket 确认。DO 接管先 claim 新 shard epoch，然后在新 workerd 打开本地库之前，逐个恢复 host manifest 所列的捕获 scope：若原 cell-agent 节点已死，先走整节点 node-log seal/recovery；若该节点仍活着，对其 follower session 取固定尾部水位并只补传该 scope 的片段，不封存混有其他活跃 cell 的进程级 session。任何 follower 缺失、尾部缺口、上传失败均阻断冷恢复；新 owner 只读补齐后的持久链。单节点或 follower 不可用时仍以 COS 确认兜底。当前 `make test/js-test/vet/build` 已通过，协议测试覆盖 owner record 释放后的恢复、其他 cell 可继续写和 A→B→A 指针单调；单 agent 与双 agent 独立 k3d 的真实 workerd A→B→A 均返回 `1→2→3`，滚动写入最终 `124`；双 agent 还验证恢复指针与 follower spool 均非空。双 agent k3d 以共享 FS bucket 的 LTX 目录只读注入“follower 已确认、COS 尚未上传”窗口，确认桶内 LTX 数量未增加后强杀 A；B 接管返回 `5`，随后 120 次滚动请求和最终读取返回 `126`，脚本 `CELLHIVE_K3D_FLEET=1 CELLHIVE_K3D_FLEET_FAULT=1 bash scripts/k3d-runtime-e2e.sh` 退出 0。活 session 的按 scope 尾部、follower 重启游标和封存尾部均流式读取，避免把约 20Gi 的共享日志一次载入内存；大日志冷接管耗时仍需在 SG/USW 测量。另以三副本 do-runtime 验证 A→B→C：在 B 写入 `3` 已获 follower 确认但桶内 LTX 未增加时强杀 B，首次接管的 C 返回 `4`；`CELLHIVE_K3D_FLEET=1 CELLHIVE_K3D_ABC=1 bash scripts/k3d-runtime-e2e.sh` 退出 0。生产部署尚未切换，真实 COS 故障窗口也尚未验证。
+
+## ADR-211 失败 cron 的持久化重试退避（2026-10-18）
+
+派发失败不能标记 fired；旧版每轮（约 1 秒）立即重试，租户 cron 持续报错时会放大调用记录、对象存储写入和日志。cron token 增加随 cell SQLite 同步复制的 retry 状态，首次失败等待 5 秒，后续指数退避至 5 分钟上限；其他 timer 类型的重试语义不变。原 `due_ms` 和 occurrence 不变，故 `scheduledTime` 仍是原 slot；同 token 重新物化不重置退避。`Due`、`NextDue` 和 wake index 按 retry 时间唤醒；成功 fired、移除 occurrence 时清除 retry 状态。存储失败时仍不确认派发，避免丢任务。租户 handler 的配置或代码错误仍须在租户端修正。
+
+## ADR-210 同一 owner session 覆盖多个 cell epoch（2026-10-18）
+
+一个 cell-agent 进程会同时持有多个 cell，各 cell 的 owner epoch 独立递增。`node-log` 的 v2 session 是进程级 follower 恢复坐标；它必须固定 follower 集合，但记录中的 `epoch` 仅表示首次开启时的 cell epoch，不能作为后续所有 fragment 的共同 epoch。follower 的 `fragments.log` 为每条 fragment 保存 scope 和 epoch，恢复逐条按该 epoch 上传。重新打开同一 session 时只校验 node、session、协议版本和 follower 集合；服务端缓存也只校验 follower 集合。follower 集合变化仍退回 bucket 确认，不能在原 session 下向未记录的 follower 取得 fleet ACK。修复前多 cell epoch 写入会持续退回 bucket 并逐次打印 `fleet recovery ensemble unavailable`。
+
+## ADR-209 多 cell-agent 的绑定授权读取（2026-10-18）
+
+内部 scoped token 的绑定声明必须从 control cell 当前 owner 读取；非 owner 的本地 control SQLite 可能停留在旧版本，即使 `/v1/control/worker` 已正确转发。绑定缓存只缓存 owner 读取结果，owner 不可达时拒绝请求，不把本地旧副本当作授权依据。内部只读绑定查询通过原有 control owner 转发路径；每次缓存失效后重新解析 owner，防止接管后的旧 owner 返回过期否定结果。双节点回归覆盖非 owner 旧副本和 owner 切换；SG、USW 各自的临时 Worker→DO 写入返回 `1→2` 且 HTTP 200。
+
+## ADR-208 DO 接管后的 LTX 水位与不可变段（2026-10-18）
+
+- **故障**：DO shard owner epoch 随 A→B→A 递增，supervisor 的捕获 scope epoch 却固定为 1；每次新进程把文件序号从 0 开始。B 返回写入 `2` 后，持久链冷恢复可能仍为 `1`；等待 30 秒不能修复编号冲突。
+- **决策**：新 supervisor 对每个 SQLite 文件首次捕获前，从 cell-agent 的该 scope/epoch 持久链冷读取并校验完整性，以最大 txid 的下一号建立 baseline snapshot；后续 WAL delta 连续推进。该读取只发生在首次捕获。请求输出门携带当前 host 身份，仅捕获其 host actor/facet/sidecar；旧 PVC 上已迁走 shard 的文件不能由其他 shard 的请求再次发布。DO shard owner epoch 与捕获 scope epoch 是两个独立概念。读取、校验或 host 绑定失败时输出门拒绝确认。
+- **防覆盖**：LTX 段对象使用条件创建；同键同字节重放幂等成功，同键不同字节拒绝。COS/OSS ProviderBucket 的普通 PutObject 不支持该条件，因此 LTX 新段由原生 AppendObject(position=0) 原子创建；旧普通对象存在时拒绝覆盖。可变的 compaction manifest/index 仍按原协议更新。历史版本已覆盖的段不能由此恢复原字节，升级前需验收现有恢复值。
+- **DO 证明源（由 ADR-212 修订）**：原实现要求每次等待 bucket，以免接管时从落后的持久链恢复。ADR-212 增加按捕获 scope 的 follower 尾部补传后，本地新代码允许 DO 用 fleet fsync 证明；未带 DO owner 身份的提交仍等 bucket。生产镜像尚未切换，仍保持旧行为。
+- **验证**：`TestCaptureTakeoverRoundTripKeepsDurableHead` 模拟保留 A 旧盘的 A→B→A，检查旧 snapshot 不变和最终冷恢复值；`TestHostGateDoesNotPublishStaleOtherShard` 防止旧 PVC 上迁走的 shard 被其他请求重发；`TestAppendDoesNotOverwriteAcknowledgedSegment` 检查冲突拒绝与同字节重放；`TestCommitBinaryBucketProofForDO` 在 follower 可用时仍要求 bucket ack。2026-10-18 独立单节点 k3d 双 Pod/每 Pod PVC、真实 workerd 验收：指定 A→B→A，计数 `1→2→3`，A PVC volumeName 不变；滚动期间再做 120 次逻辑写，最终 `124`，脚本 `scripts/k3d-runtime-e2e.sh` 退出 0。该环境使用 FS bucket；SG、USW 真实 COS 桶的原子 LTX 新建和冲突拒绝探针通过，两区线上临时 Worker→DO 写入各自返回 `1→2`、HTTP 200。跨主机 COS A→B→A 接管仍未在生产集群触发。
+
 ## 2026-10-15 原生 KV / Queue 合同补充
 
 原生 KV 支持正整数秒 TTL（包括 1–59），Cloudflare 管理兼容入口保留 60 秒下限；`incr` 增加稳定的十进制字符串 `value_i64`，旧数字字段兼容保留。Queue 生产者幂等按首次发送起 24h 存独立 ledger，消费/清空消息不清除凭证；body/type/规范化 metadata 定义逻辑身份，delay 属于投递参数、不参与指纹。DLQ/重放保留 metadata 与业务键，通过源消息 ID 的独立转移 receipt 去重，跨 owner 用内部鉴权端点。旧活消息的键在迁移时回填，已消费的历史消息无法追溯回填。见 `superpowers/specs/2026-10-15-kv-queue-native-semantics.md`。max_batch_timeout 和逐 Worker CPU/内存硬隔离仍另定合同。
@@ -845,7 +960,7 @@
 - **决策**：新增 `internal/cron`：
   1. **解析**：自研标准 **5 字段** cron（`min hour dom month dow`），支持 `*`/`a`/`a-b`/`a,b`/`*/n`/`a-b/n`；范围 min 0-59、hour 0-23、dom 1-31、month 1-12、dow 0-7（7=周日）；**UTC**；`dom` 与 `dow` 同时受限时按 vixie 取 **OR**。
   2. **物化**：`Scheduler.Pass` 把当前分钟（截断）与每个 `Projection.CronTargets()` 匹配，命中则向 `<ns>/__cron__/<worker>` cell `Upsert` 一条 `KindCron` 定时器：`dueAt`=slot 起始、`occurrence`=slot（unix 分钟）、scope 约定 `<ns>/__cron__/<worker>`；并 `Register(scope)` 让 timer runner 轮询。表达式解析**带缓存**，非法表达式仅告警跳过。
-  3. **语义**：**幂等**（timer token 去重，重复 tick/多节点重复 upsert 只留一条）；**best-effort 不补跑**（错过的 slot 不回溯）；**每节点可跑**（幂等，无需选举）。
+  3. **语义（ADR-226 修订）**：各节点可以计算同一 UTC slot，但仅当前 cell owner 的 session 物化和派发，写入经捕获确认；token 只负责同一权威 cell 内去重。**best-effort 不补跑**（错过的 slot 不回溯）。
 - **配置**：`CELLHIVE_CRON_INTERVAL`（默认 30s，0 关闭）。`cmd/cell-agent` 在控制面就绪后启动。
 - **验证**：`internal/cron` 单测——解析/匹配（`*/5`、范围/列表/步长、dow 7=0、dom/dow OR、UTC）、非法表达式、**物化+去重**（同分钟重复 Pass 后 `Count==1`）、**handoff**（`Scheduler` 物化 → `timer.Runner` 派发到 fake dispatcher，scope/kind 正确）；`cmd/cell-agent` 编译通过、全量 32 包全绿。
 - **边界**：UTC（不做 per-app 时区）；不做秒级/6 字段；不补跑；DO alarm→do-runtime 不在此列。
@@ -1845,6 +1960,7 @@
 
 - **A2 非 root**：镜像固定 `USER 65532:65532`（/data 与 /app 归该 UID），k8s 所有工作负载加 `securityContext{runAsNonRoot,runAsUser/Group,fsGroup:65532}`。验证：容器内 `id` = 65532:65532，cell-agent `/readyz` ready，gated DO invoke 正常且 LTX 落桶，续租失败 0。
 - **A3 Helm chart**：`deploy/helm/cellhive`（`helm lint` 0 failed、`helm template` 16 docs）。values 控制镜像/副本/资源/存储/`doRuntime.gate`（true → `do-runtime-gated`）/`existingSecret` 或内联 `rootKey`/PDB/NetworkPolicy/ingress；缺 rootKey 时模板报清晰错误。
+- **DO 可选部署（2026-10-18）**：Helm `doRuntime.enabled` 默认 true；设为 false 时不创建 DO Service、StatefulSet、PDB、NetworkPolicy，并将 `CELLHIVE_DO_RUNTIMES` 设为空。DO 调用返回 `503 no_do_runtimes`；非 DO 功能保留。已有 DO 工作负载须确认停用后才能切换；Helm 移除 StatefulSet 不自动删除 PVC。
 - **A4 CI 门禁**：`scripts/ci.sh`（`make ci`）一键跑 gofmt/vet/test/build/js-test/cli-test/perf-test/rpo-test/s3-test(MInIO)/docker-build/compose-config/k8s-render/helm-lint，工具缺失则 skip（`REQUIRE_ALL=1` 转硬失败），末尾汇总 PASS/FAIL；`.github/workflows/ci.yml` 分 go/js/cli/deploy 四个 job（js job 装 pinned workerd，deploy job 跑镜像与编排校验）。
 - **A5 编排完整性**：kustomize base 与 Helm 都提供 ServiceAccount（关闭 SA token 自动挂载）、PDB（minAvailable 1）、NetworkPolicy（cell-agent/do-runtime 仅同 release pod 入站；user-runtime 出网允许 DNS + 公网、排除私网段；admin 入站可用 values 追加）、startup/readiness/liveness 三类探针。
 - **k8s 结构**：`deploy/k8s/base` + `overlays/rpo0`（gated），`deploy/k8s/kustomization.yaml` 作为兼容入口；`kubectl kustomize` 与 `helm template` 都离线验证。
@@ -2775,4 +2891,4 @@
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-09-25_
+_最后更新：2026-10-19_

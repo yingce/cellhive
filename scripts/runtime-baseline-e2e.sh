@@ -33,6 +33,10 @@ compose() {
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
+  if [[ $rc -ne 0 && ${CELLHIVE_RUNTIME_BASELINE_KEEP_ON_FAIL:-0} == 1 ]]; then
+    echo "RUNTIME-BASELINE-E2E: retained project=$PROJECT tmp=$TMP" >&2
+    exit "$rc"
+  fi
   if [[ -f "$COMPOSE_OVERRIDE" ]]; then
     compose --profile rpo0 down --volumes --remove-orphans >/dev/null 2>&1 || true
   fi
@@ -87,6 +91,7 @@ services:
       CELLHIVE_CRON_INTERVAL: 1s
       CELLHIVE_TIMER_INTERVAL: 200ms
       CELLHIVE_QUEUE_INTERVAL: 200ms
+      CELLHIVE_QUEUE_LEASE: 30s
       CELLHIVE_QUEUE_RETRY_DELAY: 1s
     networks:
       default:
@@ -120,7 +125,7 @@ cat >"$TMP/app/wrangler.jsonc" <<'JSON'
   "kv_namespaces": [{ "binding": "KV", "id": "e2e/__kv__/main" }],
   "queues": {
     "producers": [{ "binding": "JOBS", "queue": "JOBS" }],
-    "consumers": [{ "queue": "JOBS", "max_batch_size": 10, "max_retries": 2, "dead_letter_queue": "DLQ" }]
+    "consumers": [{ "queue": "JOBS", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 2, "retry_delay": 1, "dead_letter_queue": "DLQ" }]
   },
   "workflows": [{ "binding": "REPORTS", "name": "REPORTS", "class_name": "ReportBuilder" }],
   "triggers": { "crons": ["* * * * *", "*/1 * * * *"] },
@@ -184,7 +189,10 @@ export class Counter extends DurableObject {
 
 export class ReportBuilder extends WorkflowEntrypoint {
   async run(event: any, step: any): Promise<any> {
-    if (event.payload?.wait) return await step.waitForEvent("ready", { type: "ready" });
+    if (event.payload?.wait) {
+      const ready = await step.waitForEvent("ready", { type: "ready" });
+      return { ...ready, releaseTag: this.env.RELEASE_TAG || "original", secret: this.env.MANAGED_SECRET };
+    }
     const first = await step.do("first", async () => Number(event.payload?.seed || 0) + 1);
     await step.sleep("pause", "1 second");
     return { value: first * 2, secret: this.env.MANAGED_SECRET };
@@ -256,13 +264,19 @@ export default {
     console.log("queue invocation", batch.queue);
     for (const message of batch.messages) {
       console.info("queue message", message.body.id, "attempt", message.attempts);
+      if (message.body.id === "version-probe" && env.RELEASE_TAG !== "v2") {
+        // The E2E kills cell-agent after this claim. This old handler must not
+        // write a receipt; a lease-expired redelivery migrates to active v2.
+        await new Promise(resolve => setTimeout(resolve, 60000));
+        throw new Error("old version must not complete version-probe");
+      }
       if (message.body.id === "invocation-fail" && message.attempts === 1) throw new Error("invocation failure probe");
       await env.KV.put("queue:last-body", JSON.stringify(message.body));
       if (message.body.id === "poison" && await env.KV.get("queue:recover") !== "yes") {
         message.retry();
         continue;
       }
-      await env.KV.put("queue:" + message.body.id, "processed");
+      await env.KV.put("queue:" + message.body.id, message.body.id === "version-probe" ? "processed:v2" : "processed");
       if (message.body.id === "native-idempotent") await env.KV.put("queue:metadata", JSON.stringify(message.metadata));
       message.ack();
     }
@@ -314,6 +328,10 @@ compose exec -T cell-agent cellhive secret put e2e api MANAGED_SECRET --value cz
 # Force the batch to contend for a single execution lease. Queued instances
 # must wait durably rather than blocking each other or losing their wake.
 ADMIN_TOKEN=$(compose exec -T cell-agent cellhive creds admin | tr -d '\r\n')
+CONSUMER_SETTINGS=$(compose exec -T cell-agent curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8082/client/v4/accounts/e2e/queues/JOBS/consumers)
+[[ "$CONSUMER_SETTINGS" == *'"retry_delay":1'* && "$CONSUMER_SETTINGS" == *'"max_wait_time_ms":2000'* ]] \
+  || fail "Queue consumer timeout/retry config was not persisted: $CONSUMER_SETTINGS"
 compose exec -T cell-agent curl -fsS -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' --data '{"script_name":"api","class_name":"ReportBuilder","concurrency":{"limit":1}}' \
   http://127.0.0.1:8082/client/v4/accounts/e2e/workflows/REPORTS >/dev/null
@@ -382,12 +400,18 @@ if [[ "$ASSET" != "asset-from-versioned-object-storage" ]]; then
   fail "versioned static asset: got '$ASSET'"
 fi
 
+QUEUE_SENT_MS=$(date +%s%3N)
 QUEUE_SEND=$(fetch_path '/queue?id=job-42')
 [[ "$QUEUE_SEND" == *'"id"'* ]] || fail "queue producer did not return a message id: $QUEUE_SEND"
 QUEUE_RECEIPT=""
 retry_capture QUEUE_RECEIPT compose exec -T cell-agent sh -c \
   "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=job-42' | grep -F '\"queue\":\"processed\"' >/dev/null && printf processed" \
   || fail "real queue consumer did not persist its receipt"
+QUEUE_DONE_MS=$(date +%s%3N)
+QUEUE_WAIT_MS=$((QUEUE_DONE_MS - QUEUE_SENT_MS))
+((QUEUE_WAIT_MS >= 1500 && QUEUE_WAIT_MS <= 15000)) \
+  || fail "Queue batch timeout=2s fired outside the real-service window: ${QUEUE_WAIT_MS}ms"
+echo "queue partial-batch delivery after ${QUEUE_WAIT_MS}ms (configured max_wait_time_ms=2000)"
 echo "== queue DLQ and operator replay =="
 fetch_path '/queue?id=poison' >/dev/null
 DLQ_STATUS=""
@@ -430,6 +454,8 @@ retry_capture WF_STATUS compose exec -T cell-agent sh -c \
   || { echo "-- workflow status --" >&2; fetch_path "/workflow/status?id=$WF_ID" >&2 || true; echo "-- workflow logs --" >&2; compose logs --tail=150 cell-agent user-runtime >&2 || true; fail "workflow did not resume from sleep and complete"; }
 [[ "$WF_STATUS" == *'"value":42'* ]] || fail "workflow output mismatch: $WF_STATUS"
 [[ "$WF_STATUS" == *'"secret":"s3cr3t"'* ]] || fail "workflow env omitted managed secret: $WF_STATUS"
+WF_INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&kind=workflow&limit=100')
+bun "$ROOT/scripts/runtime-operations-check.mjs" workflow "$WF_INVOCATIONS"
 
 WF_BATCH=$(fetch_path /workflow/batch)
 [[ "$WF_BATCH" == *'"id":"batch-a"'* && "$WF_BATCH" == *'"id":"batch-b"'* ]] \
@@ -569,6 +595,14 @@ retry_capture ALARM_STATE compose exec -T cell-agent sh -c \
   "curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/do/alarm/state | grep -F '\"count\":4,\"due\":null'" \
   || fail "pending alarm did not survive gated runtime restart"
 
+WF_PIN=$(fetch_path '/workflow/create?wait=1')
+WF_PIN_ID=$(printf '%s' "$WF_PIN" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[[ -n "$WF_PIN_ID" ]] || fail "pinned workflow create returned no id: $WF_PIN"
+PIN_WAITING=""
+retry_capture PIN_WAITING compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/workflow/status?id=$WF_PIN_ID' | grep -F '\"status\":\"waiting\"'" \
+  || fail "pinned workflow did not durably park before publish and crash"
+
 echo "== secret rotation publishes a live version and rollback restores it =="
 INITIAL_RELEASES=$(compose exec -T cell-agent cellhive releases e2e api)
 [[ "$INITIAL_RELEASES" == *'"version": 2'* ]] || fail "initial secret publish did not create v2: $INITIAL_RELEASES"
@@ -579,8 +613,10 @@ ROTATED_ENV=""
 retry_capture ROTATED_ENV compose exec -T cell-agent sh -c \
   "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"managedSecret\":\"r0tated\"'" \
   || fail "public worker did not receive rotated secret"
-SECRET_ROLLBACK=$(compose exec -T cell-agent cellhive rollback e2e api)
+SECRET_ROLLBACK=$(compose exec -T cell-agent cellhive rollback e2e api --idempotency-key secret-rollback-v2)
 [[ "$SECRET_ROLLBACK" == *'"active": 2'* ]] || fail "secret rollback did not activate v2: $SECRET_ROLLBACK"
+SECRET_ROLLBACK_RETRY=$(compose exec -T cell-agent cellhive rollback e2e api --idempotency-key secret-rollback-v2)
+[[ "$SECRET_ROLLBACK_RETRY" == *'"active": 2'* ]] || fail "retried rollback unexpectedly toggled active: $SECRET_ROLLBACK_RETRY"
 RESTORED_ENV=""
 retry_capture RESTORED_ENV compose exec -T cell-agent sh -c \
   "out=\$(curl -fsS -H 'Host: e2e-api.cell.test' http://user-runtime:8081/env); echo \"\$out\" | grep -F '\"managedSecret\":\"s3cr3t\"'" \
@@ -588,6 +624,47 @@ retry_capture RESTORED_ENV compose exec -T cell-agent sh -c \
 RELEASES_AFTER_ROLLBACK=$(compose exec -T cell-agent cellhive releases e2e api)
 [[ "$RELEASES_AFTER_ROLLBACK" != *'"version": 4'* ]] || fail "rollback unexpectedly created v4: $RELEASES_AFTER_ROLLBACK"
 echo "secret rotation: v2=s3cr3t, v3=r0tated, rollback=v2=s3cr3t; no v4"
+
+echo "== queue claim crash, lease expiry, and active-version migration =="
+fetch_path '/queue?id=version-probe' >/dev/null
+LEASED=""
+retry_capture LEASED compose exec -T cell-agent sh -c \
+  "out=\$(cellhive queue status e2e JOBS); echo \"\$out\" | grep -E '\"leased\"[[:space:]]*:[[:space:]]*[1-9]' >/dev/null && printf '%s' \"\$out\"" \
+  || fail "version-probe was not durably claimed before crash"
+compose kill -s SIGKILL cell-agent >/dev/null
+compose up -d --no-build cell-agent >/dev/null
+retry_capture READY compose exec -T cell-agent curl -fsS http://127.0.0.1:7001/readyz \
+  || fail "cell-agent did not recover after SIGKILL"
+# /readyz only proves the listener is up. The control cell may still be
+# reclaiming and opening its authoritative state after an unclean exit.
+RECOVERED_RESOURCES=""
+for _ in $(seq 1 60); do
+  RECOVERED_RESOURCES=$(compose exec -T cell-agent cellhive resource list e2e 2>/dev/null || true)
+  if [[ "$RECOVERED_RESOURCES" == *'"name": "KV"'* &&
+        "$RECOVERED_RESOURCES" == *'"name": "JOBS"'* &&
+        "$RECOVERED_RESOURCES" == *'"name": "REPORTS"'* ]]; then break; fi
+  sleep 1
+done
+[[ "$RECOVERED_RESOURCES" == *'"name": "KV"'* &&
+   "$RECOVERED_RESOURCES" == *'"name": "JOBS"'* &&
+   "$RECOVERED_RESOURCES" == *'"name": "REPORTS"'* ]] \
+  || fail "registered resources did not recover after SIGKILL: $RECOVERED_RESOURCES"
+VERSION_DEPLOY=$(compose exec -T -w /tmp/runtime-baseline-app cell-agent \
+  cellhive deploy e2e - --config wrangler.jsonc --var RELEASE_TAG=v2)
+[[ "$VERSION_DEPLOY" == *'"number": 4'* ]] || fail "post-crash publish did not create version 4: $VERSION_DEPLOY"
+VERSION_RECEIPT=""
+retry_capture VERSION_RECEIPT compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=version-probe' | grep -F '\"queue\":\"processed:v2\"'" \
+  || { compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose logs --tail=100 cell-agent user-runtime >&2 || true; fail "leased message was not redelivered to active v2"; }
+VERSION_INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&limit=100')
+[[ "$VERSION_INVOCATIONS" == *'version-probe'* ]] || fail "version-probe invocation was not observable"
+assert_eq sent "$(fetch_path "/workflow/event?id=$WF_PIN_ID")" "post-crash workflow wake"
+WF_PIN_DONE=""
+retry_capture WF_PIN_DONE compose exec -T cell-agent sh -c \
+  "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/workflow/status?id=$WF_PIN_ID' | grep -F '\"status\":\"complete\"'" \
+  || fail "pinned workflow did not resume after agent SIGKILL and version 4 publish"
+[[ "$WF_PIN_DONE" == *'"value":77'* && "$WF_PIN_DONE" == *'"releaseTag":"original"'* && "$WF_PIN_DONE" == *'"secret":"s3cr3t"'* ]] \
+  || fail "workflow resumed with wrong pinned version or output: $WF_PIN_DONE"
 
 echo "== worker deletion =="
 compose exec -T cell-agent cellhive worker delete e2e api >/dev/null

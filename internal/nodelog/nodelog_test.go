@@ -64,6 +64,11 @@ func TestOpenRejectsDifferentEnsemble(t *testing.T) {
 	if _, err := m.Open(ctx, "s1", 1, []string{"c", "b"}); err != nil {
 		t.Fatalf("same ensemble in another order: %v", err)
 	}
+	// One owner process serves cells with independent ownership epochs. The
+	// follower session contains each fragment's own scope and epoch.
+	if _, err := m.Open(ctx, "s1", 23, []string{"c", "b"}); err != nil {
+		t.Fatalf("same followers across cell epochs: %v", err)
+	}
 	if _, err := m.Open(ctx, "s1", 1, []string{"b", "d"}); !errors.Is(err, ErrEnsembleMismatch) {
 		t.Fatalf("changed ensemble error = %v, want ErrEnsembleMismatch", err)
 	}

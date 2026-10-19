@@ -2,6 +2,8 @@
 
 CellHive 使用**标准 OpenTelemetry OTLP/HTTP** 导出分布式追踪（ADR-167）。CellHive **不自存 trace**：只把 span 发给你配置的 OTLP 后端（OpenObserve / OTel Collector / Tempo / Jaeger / 云），**换后端只改环境变量**。
 
+Queue、Cron 和 Workflow 每次后台执行尝试有独立 `invocation_id`、`request_id` 与 W3C traceparent；完成记录可通过调用记录 API 查询，启用 OTLP logs 后也可按 `cellhive.request_id` / `cellhive.trace_id` 查询。Queue 入队时每条消息持久保存生产者 `request_id` 和 `traceparent`，消费记录的 `producer_links` 按消息 ID 列出；消费 span 是独立根 span，以标准 OTel links 关联有效生产者上下文，OTLP 调用日志的 `cellhive.producer_links` 保留原始 JSON。一个批次可能跨多个生产者 trace，因此不指定单一父 span；无效 traceparent 仍可在调用记录中看到，但不生成 OTel link。Workflow step 回调沿用该尝试的 traceparent。stock workerd 的异步原生 Tail 事件没有 HTTP 请求头，公共 TailItem 不保证携带这些关联 ID（ADR-223/224/233）。
+
 - 实现：`internal/telemetry`（官方 `go.opentelemetry.io/otel` SDK + `otlptracehttp`）；workerd 侧 `workerd/platform/telemetry.js`。
 - 默认**关闭**（`CELLHIVE_OTLP_ENDPOINT` 为空 = 无 span、无额外开销）。
 
@@ -16,12 +18,12 @@ loader/host (JS) ─┘        ▲
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `CELLHIVE_OTLP_ENDPOINT` | 空（关） | OTLP/HTTP 端点。可以是 base（自动补 `/v1/traces`）或**完整** `/v1/traces` URL。`http://` 自动按 insecure 处理 |
+| `CELLHIVE_OTLP_ENDPOINT` | 空（关） | OTLP/HTTP 端点。可以是 base（自动补 `/v1/traces`），或完整 `/v1/traces`、阿里云 ARMS `/api/otlp/traces` URL。`http://` 自动按 insecure 处理；带凭据的 URL 应放 Secret |
 | `CELLHIVE_OTLP_HEADERS` | 空 | 导出请求头，`k=v,k2=v2`（值可含空格，按第一个 `=` 切分） |
 | `CELLHIVE_TRACES_SAMPLE_RATIO` | `0.01` | 入口新 trace 的头部采样比例；上游 `traceparent` 的 sampled 位优先（`ParentBased`） |
 | `CELLHIVE_SERVICE_NAME` | `cellhive-cell-agent` | OTLP Resource `service.name`（user-runtime 的入口采样也用该比例） |
 
-启动日志出现 `otel export enabled endpoint=… ratio=…` 即生效。
+启动日志出现 `otel export enabled ratio=…` 即生效；带凭据的 OTLP URL 不进入日志。
 
 ## 2. 采了哪些 span
 

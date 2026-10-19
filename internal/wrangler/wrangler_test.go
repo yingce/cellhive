@@ -16,6 +16,32 @@ func write(t *testing.T, name, body string) string {
 	return p
 }
 
+func TestLoadWorkerCpuLimitMetadata(t *testing.T) {
+	p := write(t, "wrangler.jsonc", `{"name":"api","main":"worker.js","limits":{"cpu_ms":50,"subrequests":7}}`)
+	d, err := Load(p, "")
+	if err != nil || d.Limits == nil || d.Limits.CpuMs == nil || *d.Limits.CpuMs != 50 || d.Limits.SubRequests == nil || *d.Limits.SubRequests != 7 {
+		t.Fatalf("limits = %+v, err = %v", d.Limits, err)
+	}
+	for _, body := range []string{`{"limits":{"cpu_ms":0}}`, `{"limits":{"cpu_ms":1.5}}`, `{"limits":{"cpu_ms":50,"cpuMs":60}}`} {
+		if _, err := Load(write(t, "invalid.jsonc", body), ""); err == nil {
+			t.Fatalf("accepted invalid limits %s", body)
+		}
+	}
+}
+
+func TestLoadQueueConsumerDefaults(t *testing.T) {
+	p := write(t, "wrangler.jsonc", `{"queues":{"consumers":[{"queue":"jobs"}]}}`)
+	d, err := Load(p, "")
+	if err != nil || len(d.Consumers) != 1 || d.Consumers[0].MaxRetries != 3 || d.Consumers[0].MaxBatchTimeoutSeconds != 5 {
+		t.Fatalf("queue defaults = %+v, err=%v", d.Consumers, err)
+	}
+	p = write(t, "wrangler.jsonc", `{"queues":{"consumers":[{"queue":"jobs","max_batch_timeout":0}]}}`)
+	d, err = Load(p, "")
+	if err != nil || len(d.Consumers) != 1 || d.Consumers[0].MaxBatchTimeoutSeconds != 0 {
+		t.Fatalf("explicit zero timeout = %+v, err=%v", d.Consumers, err)
+	}
+}
+
 // TestLoadJSONCAndMapping covers jsonc parsing (comments + trailing commas),
 // binding mapping, build/rules, assets and migrations.
 func TestLoadJSONCAndMapping(t *testing.T) {
@@ -31,7 +57,7 @@ func TestLoadJSONCAndMapping(t *testing.T) {
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "files" }],
   "queues": {
     "producers": [{ "binding": "JOBS", "queue": "jobs" }],
-    "consumers": [{ "queue": "jobs", "max_retries": 3, "dead_letter_queue": "dlq", "max_concurrency": 4 }]
+    "consumers": [{ "queue": "jobs", "max_retries": 3, "retry_delay": 7, "max_batch_timeout": 5, "dead_letter_queue": "dlq", "max_concurrency": 4 }]
   },
   "services": [{ "binding": "SVC", "service": "other", "entrypoint": "fetch" }],
   "workflows": [{ "binding": "WF", "name": "my-wf", "class_name": "MyWorkflow" }],
@@ -69,7 +95,7 @@ func TestLoadJSONCAndMapping(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("missing bindings: %v", want)
 	}
-	if len(d.Consumers) != 1 || d.Consumers[0].MaxRetries != 3 || d.Consumers[0].MaxConcurrency != 4 || d.Consumers[0].DeadLetterQueue != "dlq" {
+	if len(d.Consumers) != 1 || d.Consumers[0].MaxRetries != 3 || d.Consumers[0].RetryDelaySeconds != 7 || d.Consumers[0].MaxBatchTimeoutSeconds != 5 || d.Consumers[0].MaxConcurrency != 4 || d.Consumers[0].DeadLetterQueue != "dlq" {
 		t.Fatalf("consumers = %+v", d.Consumers)
 	}
 	if len(d.Crons) != 1 || d.Crons[0] != "*/5 * * * *" {

@@ -4,7 +4,45 @@
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-15_
+_最后更新：2026-10-19_
+
+## 2026-10-19 捕获失败后重新建立持久证明（ADR-232）
+
+首次快照提交失败时，旧 `cellcapture.Ensure` 只记警告仍启动捕获；运行中的 LTX 提交失败后，下一次 `Ensure` 也会复用已停止的实例，发布重试持续得不到持久证明。本地代码现让快照失败直接拒绝写入，并在失败实例上先用完整快照重建证明，再允许后续写入；无快照配置保持失败关闭。进程内故障注入确认部署首次返回错误，同幂等键重试只产生一个版本和一条 deployment event，隔离 FS 对象桶恢复也只读到该版本。首次错误后本地事务可能已提交，调用方必须读回对账；真实 COS 持久确认失败与跨 AZ 接管仍需验收。
+
+## 2026-10-19 强杀恢复后的 CLI 发布误报（ADR-231）
+
+本地完整基线两次在 `cell-agent` 被 `SIGKILL`、`/readyz` 刚返回后立即发布 v4 时误报 KV、Queue、Workflow 均未注册。保留失败现场后，同一资源列表完整可读、同一发布命令成功创建 v4，说明旧 CLI 把暂时失败的控制资源读取静默变为空列表。现已改为读取失败明确报错，基线脚本等待资源读回后再发布；最终完整复跑 `RUNTIME-BASELINE-E2E: PASS`。`/readyz` 仅代表监听器就绪，不承诺所有 namespace 的 control cell 已恢复。
+
+## 2026-10-19 Wrangler 重发布与跨节点版本配置（ADR-227/228）
+
+隔离双节点复验发现，第二次原版 Wrangler 上传的 multipart 元数据省略 `triggers.crons`，兼容层曾把省略当成清空，active 版本失去 Cron 和短时 Queue consumer；Cron 后续分钟因此停止。另一个问题是 user-runtime 指向非 control owner 的 B 时，B 的内部版本配置端点从本地过期副本读取，找不到新版本便返回关闭 console/invocation 的策略：业务继续执行，但 Tail 和调用记录缺失。本地代码已改为上传省略时继承当前触发器、显式空列表才清除 Cron；专用 schedules PUT 等待控制写持久证明，内部版本配置先转发到 control owner。相关定向回归与隔离双节点 E2E 已通过；真实 COS 跨 AZ 故障仍待验收。
+
+## 2026-10-19 双节点 Cron 重复派发（ADR-226）
+
+隔离双 cell-agent E2E 在无故障时发现同一 UTC slot 有两条成功调用记录，相隔约 0.85 秒。旧 Scheduler、Timer Runner 与 waker 各自读写本地 SQLite，未先判 owner，也未等待 timer 状态的捕获证明。现已在本地代码中接入 owner session 判定、过期 owner 认领后恢复、fired/retry 捕获确认，并避免空闲轮询产生清理写事务。固定版本双节点 E2E 读回无故障阶段 3 个唯一成功 slot，A 停止后 B 对目标 slot 只有 1 次成功执行，A 返回后未重发。业务执行成功至 fired 持久确认之间的崩溃重投仍属至少一次边界。
+
+## 2026-10-19 OTLP 日志与 trace 关联（ADR-222）
+
+真实 OpenObserve 验收发现 Worker 的请求和 traceparent 已正确进入租户，但 Tail 事件内部 `traceparent` 在 Go JSON 解码时被忽略，导致 OTLP 日志只有 request ID、没有 trace ID。现已保留入站关联值，公共 Wrangler Tail JSON 仍不展示内部字段；有效 ID 同时作为 OTLP 原生 trace/span ID 和可索引的 `cellhive.trace_id` / `cellhive.span_id` 属性输出。真实 Collector→OpenObserve 查询确认 HTTP fetch 的日志与 8 个 trace span 同 ID，也分别读回 Queue/Cron/Workflow 完成记录的 request ID 和 trace ID，见 `cf-compatibility-acceptance.md`。Queue 生产者上下文按消息持久关联，消费调用保持独立 trace 并通过 OTel links 关联；Workflow 创建请求到异步尝试的持久父链仍未实现。
+
+## 2026-10-19 Wrangler 多节点发布与 Tail（ADR-221）
+
+原版 Wrangler 上传落在非 control owner 的 cell-agent 时，旧桥接把 Cloudflare URL 留给原生部署转发，owner 的内部路由返回 404。现已让上传先按 control owner 转发，再由 owner 做 app/Workflow 预留和持久化发布；版本及部署读回也按 owner 转发。隔离 Compose 的双 cell-agent、共享 FS bucket、真实 user-runtime 验证了从非 owner B 发布，B 上的原版 Wrangler Tail 读取 A 执行的 fetch、Queue、Cron、Workflow 事件；100 秒会话无重连，主动重启 B 后 Wrangler 也完成重连。异步原生 Trace 只有 RPC 方法；现由带实例密钥的可信派发包装层补齐 Queue/Cron 的 CF 载荷，并在隔离双节点的原版 Wrangler 与原始 WebSocket 中验证（ADR-230）。更多 Cloudflare 资源管理端点的跨节点写入和真实 COS 跨 AZ 故障仍需验收，见 `cf-compatibility-acceptance.md`。
+
+## 2026-10-19 DO follower 确认接管（ADR-212）
+
+本地代码改为带 DO shard owner 身份的写入先记录持久恢复指针，再以 follower fsync 证明打开输出门；接管先按 host manifest 逐文件补传 follower 尾部，活跃 cell-agent 的共享 session 不封存。缺少 follower 时写入回退到等 COS；恢复失败时拒绝 DO 激活。协议测试覆盖捕获 owner 记录释放后的恢复、其他 cell 不受阻断、缺失或损坏的 follower 日志和 A→B→A 单调指针。独立 k3d 的双 cell-agent 真实 workerd A→B→A 返回 `1→2→3`；确定性阻断 FS bucket 的 LTX 上传，确认 follower-only 写入 `4` 未落桶后强杀 A，B 接管返回 `5`，滚动请求最终返回 `126`，脚本退出 0。三副本 DO runtime 另做 A→B→C：B 的第三次写入由 follower 确认且未落桶，强杀 B 后首次接管的 C 返回 `4`；独立脚本模式退出 0。生产仍是旧镜像，真实 COS 的故障窗口尚未验收。活 session 按 scope、follower 重启和封存尾部改为流式读，避免一次载入约 20Gi 日志；冷接管仍需顺序扫描共享日志，生产发布前须测量 SG/USW 现有 spool 规模下的恢复时间。
+
+## 2026-10-18 SG 高频日志与 fleet session（ADR-210）
+
+SG 同一 `cell-agent` 服务的多个 cell epoch 不同；旧版 node-log 和服务端 session 缓存把首个 epoch 错当成整个进程 session 的不变量，导致其他 epoch 的写入每次退回 bucket 并打印 WARN。修复后仅 follower 集合保持不可变，fragment 的 scope/epoch 仍由 follower 日志逐条记录和恢复。cron 重复 500 另有租户 handler 错误：`vwork-24/kv-cache-counter` 报 `VWORK runtime context is invalid`，`vwork-40/vlog-automation` 报 `SUPABASE_URL is required`；失败 timer 改为持久化指数退避（ADR-211），但租户错误本身仍须修正。COS/OSS S3 兼容数据面按需校验响应 checksum，避免 AWS SDK 对每个不带可选 checksum 的成功 GET 打 WARN；TLS 和应用层 LTX 校验仍保留。
+
+## 2026-10-18 DO 接管持久链（ADR-208）
+
+SG 的 `cell-agent-0` PVC 曾被一个约 20GB 的旧 peer session `fragments.log` 占满，导致 queue/cron 和上传报磁盘满。2026-10-18 经授权把该 PVC 在线扩到 40Gi，容器内显示剩余约 20G；旧文件未删除（可能包含尚未覆盖到 bucket 的已确认数据）。该 session 的回收和增长原因仍需单独核查，当前扩容仅解决容量阻塞。
+
+旧版 supervisor 在 DO 接管后把捕获序号重置为 0，可能覆盖同 epoch 的 LTX 段；全目录输出门还可能重发旧 PVC 上已迁走 shard 的状态。fleet 确认早于 bucket 上传时，旧版 DO 冷恢复还可能读到落后的 bucket。修复版首次捕获先读取并校验持久链水位，新段从更高序号继续；请求输出门仅捕获当前 host；同名不同内容的段写入被拒绝；DO 提交等待 bucket 确认。COS/OSS 的新 LTX 段以原生 AppendObject(position=0) 原子创建。已被旧版覆盖的数据不能由升级自动找回，需按持久副本冷恢复结果确认。单元回归和单节点 k3d 双 Pod/保留 PVC 的 A→B→A 通过（`1→2→3`，滚动 120 次写后 `124`）；SG、USW 真实 COS 桶原子 LTX 探针及线上 Worker→DO 连续写入 `1→2` 通过。生产集群跨主机 COS A→B→A 接管尚未触发验证。
 
 ## 2026-10-15 资源运维与调用审计（ADR-205）
 
@@ -23,7 +61,7 @@ Queue/Cron 调用 UUID、逻辑重试关联、结果/异常/console 日志已独
 
 ## 2026-10-15 Wrangler 命令兼容边界
 
-Workflow 实例详情当前只持久化完成步骤的结果，不记录 Cloudflare 的逐次尝试、步骤开始结束时间及运行中步骤；Wrangler `instances describe` 只展示可证明的完成步骤。`restart --from`、跨 Worker Workflow 仍不支持。Queue consumer `retry_delay` 未进入原生派发语义，兼容 API 显式拒绝；purge 为持久 owner 写入。Vectorize 原版管理只覆盖 V2 create/list/get/delete/info，点积 metric 不支持。Hyperdrive 原版管理命令尚未开放；当前原生能力只是加密的 origin URL，不承诺 Cloudflare 缓存、mTLS 或连接池语义。详见 `wrangler-compat.md`、ADR-202/203。
+Workflow 实例详情当前只持久化完成步骤的结果，不记录 Cloudflare 的逐次尝试、步骤开始结束时间及运行中步骤；Wrangler `instances describe` 只展示可证明的完成步骤。`restart --from`、跨 Worker Workflow 仍不支持。Queue consumer `retry_delay`、`max_batch_timeout` 与有限重试已接入（ADR-216）；固定版本 Docker E2E 已对领取中的消息强杀 cell-agent、重启并发布新版本，确认 lease 到期后按新 active 版本重新投递。跨节点故障与长时压力仍待验收；purge 为持久 owner 写入。Vectorize 原版管理只覆盖 V2 create/list/get/delete/info，点积 metric 不支持。Hyperdrive 原版管理命令尚未开放；当前原生能力只是加密的 origin URL，不承诺 Cloudflare 缓存、mTLS 或连接池语义。详见 `wrangler-compat.md`、ADR-202/203。
 
 ## 2026-10-15 调度正确性修复
 
@@ -321,7 +359,7 @@ P0 先枚举 workerd 实际文件布局（共享 metadata + 每 actor SQLite）�
 
 ## P2 Queue 兼容边界（Partial）
 
-Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、128 KiB 上限、metadata、原始 timestamp、delay 校验和幂等冲突已补齐。剩余差异是 `max_batch_timeout`、跨批顺序以及部分 retry/DLQ 边界，继续按 [`compatibility-matrix.md`](./compatibility-matrix.md#queue--workflow-的调用边界) 验收。
+Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、128 KiB 上限、metadata、原始 timestamp、delay 校验和幂等冲突已补齐。剩余差异是跨批顺序以及部分 retry/DLQ 边界；`max_batch_timeout` 已接入并做真实服务回归，继续按 [`compatibility-matrix.md`](./compatibility-matrix.md#queue--workflow-的调用边界) 验收。
 
 ## P2 Workflows 绑定（ADR-086，Partial）
 
@@ -372,6 +410,7 @@ Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、1
 | Vectorize 的 CF 差异（ADR-158） | ⚠️ **超集/边界**：metadata index **不强制**（CF 要先建 metadata index 才能过滤；我们允许直接过滤完整 metadata，且未模拟 indexed string 的 64B 截断）；`describe`/`insert` 返回 `{mutationId,count,ids}`（CF 只保证 `mutationId`）；`--deprecated-v1` 无 V1 语义（按 V2 处理）；批量上限 1000；`listVectors` 是扩展（CF 仅 wrangler） |
 | L1 快照分片预算保守（ADR-160） | ✅ **有意接受，不做**：`EncodeSnapshotParts` 按 v1「每页 4KiB」估算 → 分片偏小（安全）。注意**分片本身是 CellHive 的 HTTP `maxSegmentBytes` 传输约束**（LTX 是"一文件一对象、无分片概念"，对象数量靠 compaction level 控）；按实际压缩帧字节精确分片只在"大且高压缩"的快照上少几个对象，收益小、不值得加复杂度 |
 | 租户 console 日志（ADR-185） | ✅ **已实现**：pinned stock `workerd 1.20260916.1` 接受动态 Worker 的真实 `Fetcher`：宿主用 `ctx.exports.TenantTail({props})` 固定 `namespace/worker/version`，捕获 Worker、service target 与 DO facet 的 `console.*`/未捕获异常并写入 ring/可选 OTLP。旧失败只因误传 capnp 风格 `{name:"tenant-tail"}`。log token/URL/private transport 仅在可信宿主，不进入 tenant env；投递仍是 best-effort。 |
+| Wrangler Tail 与结构化 OTLP（ADR-214/215/217/225） | ⚠️ **部分验收**：调用事件保留 outcome、exceptions、版本和 `event_type`；OTLP 导出原始参数、关联 ID，且无 console 的调用仍有一条记录。版本化 Worker 日志策略已通过真实 workerd 的同 App 双 Worker console 隔离及 Queue/Cron 调用记录关闭测试；真实 Collector→OpenObserve 已查询到 HTTP、Queue、Cron、Workflow 的关联记录。原版 Wrangler 4.133.0 已在双 cell-agent 上订阅另一节点的四类事件，长连接无意外重连；主动重启订阅节点后 Wrangler 重连并收到新日志。Queue/Cron 的 CF 载荷已由可信派发包装层补齐并通过双节点原版 Wrangler/原始 WebSocket 验收；真实 COS 跨 AZ 故障仍未验收。 |
 | workerd 运行时基线（ADR-186） | ✅ **第一阶段已验收**：pin `1.20260916.1`、esbuild `0.28.2`、宿主 `fromEnvironment`、生成式 compatibility manifest、最终 WorkerCode 64 MiB 与 env 1016 KiB 双层预算均已落地；隔离 Docker E2E 验证源码打包、env 隔离、KV、gated DO 桶持久化与重启续数，`REQUIRE_ALL=1` 为 **GATE: PASS 14/14**。原生 Tail 已通过真实 Fetcher 接线；兼容多模块 artifact 仍是独立阶段。 |
 | OTLP 追踪覆盖（ADR-167） | ⚠️ **边界**：**DO 内 `this.env.<binding>`（props-bound）调用不带 DO traceparent、自成一条 trace**（workerd 三个 isolate 各自 globalThis + CF 绑定 API 无按请求参数；`TestDoRuntimeBindingInsideDO` 断言当前为空）；**`peer.append` 是捕获流水线按批的独立 trace**（group commit 合并多请求，无法归属单一 trace）；租户 isolate `facades.js` 回退路径无 JS span（服务端 span 仍能挂上）；DO `/v1/do/connect`·abort、compaction/upload 后台循环无 span；JS span 毫秒精度；入口头部采样；端点空时 no-op |
 | peer 复制冗余（ADR-164） | ⚠️ **默认语义**：adaptive hedge 下常态是 **owner 本地 + 1 个 follower**（慢时才补第 2 份），`CELLHIVE_PEER_HEDGE_MS=0` 永远单份；要"始终 2 份 follower"需显式接受常态双发（当前不提供该模式）。单节点故障可恢复（owner 死→从 follower spool `/v1/peer/held` 恢复；follower 死→owner 本地段后台上传），同时坏 owner+follower 才丢；一致性不受影响（单写者/顺序/epoch/quorum-1 不变） |

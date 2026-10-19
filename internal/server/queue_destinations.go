@@ -59,6 +59,7 @@ func (s *Server) recordQueueDestination(ctx context.Context, ns, name string, m 
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, control.Scope())
 		if err != nil || o.Expired(time.Now()) {
+			s.invalidateStaleLocal(ctx, control.Scope())
 			o, err = s.Owner.Claim(ctx, control.Scope(), time.Now())
 			if err != nil {
 				return err

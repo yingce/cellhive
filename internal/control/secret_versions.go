@@ -49,10 +49,10 @@ func (s *Store) publishSecretChangeTx(ctx context.Context, t *sql.Tx, ns, worker
 	now := s.now().UnixMilli()
 	res, err := t.ExecContext(ctx, `INSERT INTO versions
 		(ns,worker,number,bundle_sha,assets_sha,storage_id,session_policy,
-		 bindings,vars,consumers,crons,assets,compat_date,compat_flags,limits,
+		 bindings,vars,consumers,crons,assets,compat_date,compat_flags,limits,log_policy,
 		 created_ms,actor,secret_snapshot)
 		SELECT ns,worker,?,bundle_sha,assets_sha,storage_id,session_policy,
-		 bindings,vars,consumers,crons,assets,compat_date,compat_flags,limits,
+		 bindings,vars,consumers,crons,assets,compat_date,compat_flags,limits,log_policy,
 		 ?,?,1 FROM versions WHERE ns=? AND worker=? AND number=?`,
 		next, now, actor, ns, worker, active)
 	if err != nil {

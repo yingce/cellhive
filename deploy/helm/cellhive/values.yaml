@@ -16,6 +16,14 @@ imagePullSecrets: []
 rootKey: ""
 existingSecret: ""
 
+telemetry:
+  # Enable OTLP traces using CELLHIVE_OTLP_ENDPOINT from existingSecret.
+  # Keep credential-bearing collector URLs out of values and ConfigMaps.
+  enabled: false
+  tracesSampleRatio: "0.01"
+  # ARMS traces endpoints do not accept OTLP logs; use a logs-capable backend.
+  logs: "off"
+
 config:
   dataDir: /data/state
   runtimeDir: /data/runtime
@@ -64,6 +72,8 @@ userRuntime:
     limits: {cpu: "1", memory: 2Gi}
 
 doRuntime:
+  # Set false when this installation has no Durable Object workloads.
+  enabled: true
   replicas: 2
   # gate=true deploys do-runtime-gated (ADR-083/140: DO RPO=0 via the output
   # gate); false deploys the ungated runtime.

@@ -13,15 +13,17 @@
 | Wrangler Assets / Workflows API | Partial | Assets upload session + JWT 单文件或 multipart bulk 上传、Workflow create/list/get/delete 与 trigger/instances list/describe 已映射；`concurrency.limit`、`schedules`、`default_retention` 已持久化并执行；`limits` 与实例 `restart --from` 仍不支持。 |
 | D1 | Partial（核心 Supported） | SQL + `prepare`/`bind`/`all`/`first`/`run`/`raw`/`batch`/`exec`；`prepare()`/`bind()` 同步返回本地语句对象，Drizzle/Kysely 等 D1 adapter 的普通 CRUD 可用；`ArrayBuffer`/TypedArray 按 BLOB 绑定与回读；单写者；`batch()` 是原子事务边界；Sessions/bookmarks 与 Worker `dump()` API 形状已支持，但 bookmark 是 CellHive 强一致 txid、没有 CF read replica；dump 是受 32MiB 限制的脱敏 SQLite 快照；已补 SQL 100KiB、参数 100、单值/结果行 2MiB、查询 30s 的基础 D1 limits；显式 `BEGIN/COMMIT` 拒绝；`D1Result` 常用 meta/error 已对齐，完整 Cloudflare served/timing/replica meta 仍有边界（ADR-153/163） |
 | R2 | Supported | S3 兼容 + **presign（`createPresignedUrl`）** + **multipart（ADR-113）** + **cursor 分页 list（ADR-145）**；**R2Object 全字段 + `put` http/custom metadata/checksums + `head()`（ADR-163）**；**list 支持 `include`（按需回填逐对象 metadata）与 `delimiter`/`delimitedPrefixes`（ADR-168）**；**`R2ObjectBody.body` + `writeHttpMetadata`（ADR-174/175）**；`onlyIf` 的 exists/etagMatches/etagDoesNotMatch 已支持；无 SSE-C/jurisdiction、无 object versioning |
-| Queues | Partial | `send()`/`sendBatch()`、原子批量、`json`/`text`/`bytes`/`v8`、128 KiB 限制、metadata、原始 timestamp、delay 和幂等冲突已实现；仍有 `max_batch_timeout`、跨批顺序和部分 retry/DLQ 边界待收口。 |
+| Queues | Partial | `send()`/`sendBatch()`、原子批量、`json`/`text`/`bytes`/`v8`、128 KiB 限制、metadata、原始 timestamp、delay 和幂等冲突已实现；`max_batch_timeout` 与有限重试/DLQ 已接入；仍有跨批顺序和部分 retry/DLQ 边界待收口。 |
 | Cron | Supported | UTC 五字段数字 cron（支持列表/范围/步长，Vixie DOM/DOW OR）；分钟对齐、best-effort、不补跑；调度器默认每 30 秒扫描，故不保证恰好一次或准点触发 |
 | Durable Objects | Partial | 原生 facet + 同步 SQL；**DO 内 bindings ✅（ADR-090）**；仅同 worker class；部署默认**惰性重启**（可 `do_eager_restart`/`session_policy`）；WS 迁移/重启 1012；**DO RPC ✅（ADR-162）**：`env.NS.get(id|name).method(...)`，tagged JSON + host→facet 原生 JSRPC（≤8 MiB；无函数/stub/流）；**legacy（未 `extends DurableObject`）类由 facet 包装支持（ADR-174）**；**DO `fetch` 的非 2xx 原样返回（状态/content-type，ADR-174）** |
-| Workflows | Partial | 自研引擎；支持 create/createBatch/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；create/createBatch payload 总量 ≤1 MiB、batch 1..100。不支持跨 worker；管理 API 的 describe 可读取已持久化的完成步骤与输出，缺逐次尝试日志、步骤计时和运行中步骤；无 progress 回调。`locationHint` 接受但忽略；duration 字符串、Date/time sleepUntil、wait 超时错误、step.do timeout、创建时 worker/bundle/version pin 已支持；sensitive 与部分 lifecycle 选项仍为 Partial。 |
+| Workflows | Partial | 自研引擎；支持 create/createBatch/get/status/lifecycle/delete/list + `step.do`（含 `retries{limit,delay,backoff}`）/`sleep`/`waitForEvent` + `sendEvent`；create/createBatch payload 总量 ≤1 MiB、batch 1..100。不支持跨 worker；CellHive 调用记录保存每次运行的 ID/状态/trace，但 Cloudflare 管理 API 的 describe 仅能读取已持久化的完成步骤与输出，缺步骤计时和运行中步骤；无 progress 回调。`locationHint` 接受但忽略；duration 字符串、Date/time sleepUntil、wait 超时错误、step.do timeout、创建时 worker/bundle/version pin 已支持；sensitive 与部分 lifecycle 选项仍为 Partial。 |
 | ASSETS | Supported | 对象存储 + 版本化；完整资产管道 |
 | AI | Partial（可选） | **BYO OpenAI 兼容端点**（`env.AI.run`，`CELLHIVE_AI_URL/_KEY`）；无平台托管目录、无 workers-ai 目录模型 |
 | Service / Platform bindings | Supported | 版本冻结 + ACL；**worker↔worker RPC = 同实例原生 JSRPC（ADR-102）**；**DO RPC = owner 路由 JSON+tagged（ADR-162）** |
 | Vars / Secrets | Supported | vars、版本化 managed secrets 与用户命名 binding stub 注入 tenant env；tenant env 为零平台键、无保留前缀（ADR-185）。secret put/delete/bulk 对已有 Worker 创建并发布新版本，回滚恢复目标版本的 secret（ADR-204）；同名 secret 覆盖 var |
 | 租户 `console.*` 平台采集 | Supported | 默认由 host-bound 原生 Tail `Fetcher` 捕获 Worker/service target/DO facet 的 console 与异常，写入 ring/可选 OTLP；身份与 log 凭据不进入 tenant env（ADR-185）。可按 runtime 设 `CELLHIVE_TENANT_LOG_CAPTURE=off` 关闭并省去 Tail 开销（ADR-192） |
+| Wrangler Tail 流 | Partial | 已按调用保留真实 outcome、logs、exceptions、事件和版本；stream URL 用限定 namespace/worker/session 的 10 分钟凭据，不含 AdminToken（ADR-214）。可选 OTLP logs 导出调用记录、原始参数、事件类型、版本及关联 ID（ADR-215）。原版 Wrangler 4.133.0 在双节点 A 执行/B 订阅的 fetch、Queue、Cron、Workflow 均已通过；B 重启后 Wrangler 自动重连并收到新事件。stock workerd 的异步原生 Trace 只有 `{rpcMethod}`，`event_type` 按可信入口映射；可信派发包装层已补齐 Queue/Cron 的 CF 载荷，并通过原版 Wrangler 与原始 WebSocket 验证（ADR-230）。仅验证短时重连，超过 10 分钟 token 有效期的无缝续接未验收。ring 在各节点本地有界保存，跨节点读取为 best-effort；DELETE 不会跨节点即时吊销已签凭据。 |
+| Worker `limits` | Partial | `subrequests` 由动态 Worker 的 invocation quota 执行；`cpuMs` / Wrangler `limits.cpu_ms` 接受正整数、写入不可变版本并可读回，但当前 stock workerd **不执行**逐调用 CPU 限额，不承诺 `exceededCpu`（ADR-213）。 |
 | `nodejs_compat` | Supported | 随 workerd；需开启 |
 | Cache API | Rejected | 无边缘缓存 |
 | AI Search / Browser / Email / Analytics Engine | Rejected | workerd 未提供；Vectorize 由 CellHive 的 SQLite vec1 facade 提供（见下，ADR-158/159），Hyperdrive 已支持 |
@@ -36,7 +38,7 @@
 | Queue `send()` 的消息格式 | 已使用 `json`/`text`/`bytes`/`v8` 枚举；v8 使用 CellHive 的 tagged structured encoding，消费者按枚举还原。 |
 | Queue `sendBatch()` | 已实现 1..100 条、单事务原子入队、输入顺序返回 ID；重复幂等键同内容复用 ID，不同内容返回冲突。 |
 | Queue 大小/延迟 | body 上限 128 KiB；`delaySeconds` 严格校验 0..86400。 |
-| Queue 消费配置 | `max_batch_size`、`max_concurrency` 生效；`max_batch_timeout`、跨批顺序和 `max_retries=0` 的 CF 精确语义仍待收口。 |
+| Queue 消费配置 | `max_batch_size`、`max_batch_timeout`、`max_concurrency`、`retry_delay` 和有限重试/DLQ 已接入（ADR-216）；跨批顺序尚待验收；真实 Docker 已验证 cell-agent 在消息领取后被 SIGKILL、重启并发布新版，lease 到期后按新 active 版本消费（ADR-216）。 |
 | Queue 消息元数据 | 保存并传递原始入队 timestamp 和 metadata；批次间不保证顺序。 |
 | Workflow `step.sleep/sleepUntil` | 已支持数字、常见时长字符串和 `Date`/时间字符串。 |
 | Workflow `step.waitForEvent` | 数字和常见时长字符串可用；超时抛 `WorkflowTimeoutError`；事件载荷仍是 CellHive 保存的 JSON 事件对象。 |

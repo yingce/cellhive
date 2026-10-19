@@ -5,6 +5,7 @@
 // WorkerEntrypoint class the platform can call. The tenant never sees platform
 // values: it receives only binding facades built from a cloneable spec.
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
+import { loggedInvocation, dispatchDebug } from "__cellhive-invocation.js";
 import * as tenantMod from "tenant.js";
 
 // Trace context travels with the request/event (W3C traceparent): the loader
@@ -22,9 +23,8 @@ function setTraceContext(tp) {
 }
 
 const tenant = tenantMod.default;
-import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
+import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
-import { loggedInvocation } from "__cellhive-invocation.js";
 
 // Patch the importable env with local facades for binding API portions that
 // cannot cross RPC synchronously or must mutate caller-isolate state.
@@ -52,6 +52,11 @@ try {
       Object.defineProperty(__env, name, { value: makeD1FromStub(__env[name]), writable: true, configurable: true, enumerable: true });
     }
   }
+  for (const name of __cellhivePlatform.queueBindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeQueueFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
+    }
+  }
   // R2ObjectBody.writeHttpMetadata must run in the tenant isolate to mutate the
   // caller's Headers (RPC serializes arguments by value): wrap each R2 binding.
   if (__cellhivePlatform.r2Bindings.length > 0) {
@@ -74,10 +79,12 @@ export class CellHiveHost extends WorkerEntrypoint {
   async fetch(req) {
     if (typeof tenant.fetch !== "function") return new Response("worker has no fetch handler", { status: 501 });
     setTraceContext(traceOf(req));
+    globalThis.__cellhiveRequestId = req.headers.get("x-request-id") || "";
     try {
       return await runInvocation(() => tenant.fetch(req, this.#bindings(), this.ctx));
     } finally {
       setTraceContext(undefined);
+      delete globalThis.__cellhiveRequestId;
     }
   }
 
@@ -86,6 +93,13 @@ export class CellHiveHost extends WorkerEntrypoint {
   }
 
   async handleQueue(payload) {
+    // The native Trace for this RPC exposes only rpcMethod. Emit the trusted
+    // dispatch payload before tenant code runs; TenantTail consumes this one
+    // record from the same invocation and removes it from public logs.
+    if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
+      queue: typeof payload?.queue === "string" ? payload.queue : "",
+      batchSize: Array.isArray(payload?.messages) ? payload.messages.length : 0,
+    });
     return loggedInvocation(() => this.handleQueueBody(payload), this.ctx);
   }
 
@@ -129,23 +143,30 @@ export class CellHiveHost extends WorkerEntrypoint {
     batch.ackAll = () => { for (const m of batch) if (m && m.id) markAck(m.id); };
     batch.retryAll = (opts) => { for (const m of batch) if (m && m.id) markRetry(m.id, opts && opts.delaySeconds); };
     setTraceContext(traceparent || traceOf(batch));
+    globalThis.__cellhiveRequestId = (payload && payload.request_id) || "";
     try {
       const result = await runInvocation(() => tenant.queue(batch, this.#bindings(), this.ctx));
       return { result, ack: outcomes.ack, retry: outcomes.retry };
     } finally {
       setTraceContext(undefined);
+      delete globalThis.__cellhiveRequestId;
     }
   }
 
   async handleScheduled(event) {
+    if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
+      cron: typeof event?.cron === "string" ? event.cron : "",
+      scheduledTime: Number(event?.scheduledTime) || 0,
+    });
     return loggedInvocation(() => this.handleScheduledBody(event), this.ctx);
   }
 
   async handleScheduledBody(event) {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
     let noRetry = false;
-    const controller = { ...event, noRetry() { noRetry = true; } };
+    const controller = { scheduledTime: event.scheduledTime, cron: event.cron, noRetry() { noRetry = true; } };
     setTraceContext(traceOf(event));
+    globalThis.__cellhiveRequestId = event.request_id || "";
     try {
       const result = await runInvocation(() => tenant.scheduled(controller, this.#bindings(), this.ctx));
       return { ok: true, no_retry: noRetry, result: result === undefined ? null : result };
@@ -154,6 +175,7 @@ export class CellHiveHost extends WorkerEntrypoint {
       throw e;
     } finally {
       setTraceContext(undefined);
+      delete globalThis.__cellhiveRequestId;
     }
   }
 

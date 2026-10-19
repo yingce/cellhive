@@ -331,6 +331,14 @@ type StreamTransport struct {
 	streams  map[string]*rawStream
 }
 
+func (t *StreamTransport) Head(ctx context.Context, baseURL, session string) (uint64, error) {
+	return t.fallback.Head(ctx, baseURL, session)
+}
+
+func (t *StreamTransport) TailOpen(ctx context.Context, baseURL, session, scope string, after, final uint64, offset int64) ([]SessionFragment, uint64, int64, error) {
+	return t.fallback.TailOpen(ctx, baseURL, session, scope, after, final, offset)
+}
+
 func NewStreamTransport(token string, lanes, pipeline int) *StreamTransport {
 	return NewSessionStreamTransport(token, "", lanes, pipeline)
 }

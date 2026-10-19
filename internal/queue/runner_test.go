@@ -43,6 +43,18 @@ func staticRefs(ns, name string) func(context.Context) ([]queue.Ref, error) {
 	}
 }
 
+// seedFirstAttempt leaves a message ready for its one configured retry.
+func seedFirstAttempt(t *testing.T, st *queue.Store, ns, name string) {
+	t.Helper()
+	msgs, err := st.Claim(context.Background(), ns, name, 1, 1000)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("seed claim = %d, %v", len(msgs), err)
+	}
+	if err := st.Retry(context.Background(), ns, name, msgs[0].ID, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunnerClaimsDispatchesAcks(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)
@@ -149,6 +161,7 @@ func TestRunnerDeadLettersExhaustedMessage(t *testing.T) {
 	if _, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, ""); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	seedFirstAttempt(t, st, "demo", "jobs")
 	fd := &fakeDispatcher{err: errors.New("consumer down")}
 	r := &queue.Runner{
 		Store: st, Dispatch: fd,
@@ -176,6 +189,7 @@ func TestRunnerDeadLetterPreservesIdempotencyKey(t *testing.T) {
 	if _, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, "biz-key-1"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	seedFirstAttempt(t, st, "demo", "jobs")
 	fd := &fakeDispatcher{err: errors.New("consumer down")}
 	r := &queue.Runner{
 		Store: st, Dispatch: fd,
@@ -211,6 +225,7 @@ func TestRunnerDropsWhenNoDeadLetterQueue(t *testing.T) {
 	if _, err := st.Send(ctx, "demo", "jobs", []byte("m1"), "text/plain", 0, ""); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	seedFirstAttempt(t, st, "demo", "jobs")
 	fd := &fakeDispatcher{err: errors.New("boom")}
 	r := &queue.Runner{
 		Store: st, Dispatch: fd,

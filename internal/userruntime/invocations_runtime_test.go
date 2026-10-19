@@ -37,7 +37,11 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		case "/v1/internal/bundle":
 			io.WriteString(w, bundle)
 		case "/v1/internal/worker/bindings":
-			io.WriteString(w, `{"bindings":{},"vars":{}}`)
+			if r.URL.Query().Get("worker") == "quiet" {
+				io.WriteString(w, `{"bindings":{},"vars":{},"log_policy":{"invocation":false}}`)
+			} else {
+				io.WriteString(w, `{"bindings":{},"vars":{}}`)
+			}
 		case "/v1/internal/invocations":
 			if r.Header.Get("x-cellhive-internal-token") != "tok" {
 				http.Error(w, "auth", 401)
@@ -129,7 +133,14 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 			if index == 1 && id == "a" {
 				attempt = 2
 			}
-			messages = append(messages, map[string]any{"id": id, "body": "eA==", "content_type": "text", "attempts": attempt})
+			producer := "00-11111111111111111111111111111111-2222222222222222-01"
+			if id == "b" {
+				producer = "00-33333333333333333333333333333333-4444444444444444-01"
+			}
+			if id == "c" {
+				producer = "invalid"
+			}
+			messages = append(messages, map[string]any{"id": id, "body": "eA==", "content_type": "text", "attempts": attempt, "producer_request_id": "producer-" + id, "producer_traceparent": producer})
 		}
 		raw, _ := json.Marshal(map[string]any{"namespace": "acme", "worker": "web", "bundle_sha": "sha", "version": 1, "queue": "queue-partial", "messages": messages})
 		req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(raw))
@@ -150,6 +161,9 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		t.Fatalf("records=%+v %v", items, err)
 	}
 	for _, r := range items {
+		if r.RequestID != r.ID || !strings.HasPrefix(r.Traceparent, "00-") || len(r.Traceparent) != 55 {
+			t.Fatalf("async attempt correlation missing: %+v", r)
+		}
 		if r.Resource == "queue-partial" {
 			continue
 		}
@@ -189,10 +203,29 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 	if first.LogicalID == second.LogicalID {
 		t.Fatal("batch membership test did not regroup")
 	}
+	if len(first.ProducerLinks) != 2 || first.ProducerLinks[0].MessageID != "a" || first.ProducerLinks[1].MessageID != "b" || first.ProducerLinks[0].Traceparent == first.ProducerLinks[1].Traceparent || len(second.ProducerLinks) != 2 || second.ProducerLinks[0].RequestID != "producer-a" || second.ProducerLinks[1].Traceparent != "invalid" {
+		t.Fatalf("producer links lost across mixed batch and retry: %+v %+v", first.ProducerLinks, second.ProducerLinks)
+	}
 	if len(first.Retry) != 1 || first.Retry[0].ID != "a" || first.Retry[0].DelaySeconds != 7 || len(first.Ack) != 1 || first.Ack[0] != "b" {
 		t.Fatalf("detailed outcome lost: %+v", first)
 	}
 	if string(first.Result) != `"partial-result:2"` || first.ResultEncoding != "cellhive-tagged-json" || len(second.Ack) != 2 {
 		t.Fatalf("execution result lost: %+v %+v", first, second)
+	}
+	quietBody, _ := json.Marshal(map[string]any{"namespace": "acme", "worker": "quiet", "bundle_sha": "sha", "version": 1, "queue": "queue-ok", "messages": []any{map[string]any{"id": "quiet-message", "body": "eA==", "content_type": "text", "attempts": 1}}})
+	quietReq, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(quietBody))
+	quietReq.Header.Set("x-cellhive-internal-token", "tok")
+	quietRes, err := client.Do(quietReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quietResult, _ := io.ReadAll(quietRes.Body)
+	quietRes.Body.Close()
+	if quietRes.StatusCode != http.StatusOK {
+		t.Fatalf("quiet queue result = %d %s", quietRes.StatusCode, quietResult)
+	}
+	quietRecords, err := records.List(t.Context(), invocation.Filter{Namespace: "acme", Worker: "quiet"})
+	if err != nil || len(quietRecords) != 0 {
+		t.Fatalf("quiet worker persisted invocation: %+v %v", quietRecords, err)
 	}
 }

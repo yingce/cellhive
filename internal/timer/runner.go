@@ -26,8 +26,12 @@ func (n NoopDispatcher) Dispatch(_ context.Context, t Timer) error {
 // Dispatch is at-least-once: a timer is marked fired only after a successful
 // dispatch, so a failure (or a crash) leaves it for a later pass.
 type Runner struct {
-	Registry   *Registry
-	Open       func(ctx context.Context, scope string) (*Store, error)
+	Registry *Registry
+	Open     func(ctx context.Context, scope string) (*Store, error)
+	// Own confirms this process owns the scope before opening its local SQLite.
+	// It may claim an unowned scope and restore its authoritative state.
+	Own        func(ctx context.Context, scope string) (bool, error)
+	Commit     func(ctx context.Context, scope string, fn func() error) error
 	Dispatcher Dispatcher
 	Interval   time.Duration
 	Batch      int
@@ -97,12 +101,27 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 	now := r.nowMs()
 	dispatched := 0
 	for _, scope := range r.Registry.Due(now) {
+		if r.Own != nil {
+			owned, err := r.Own(ctx, scope)
+			if err != nil {
+				r.log().Warn("timer ownership check failed", "scope", scope, "err", err)
+				continue
+			}
+			if !owned {
+				r.Registry.Remove(scope)
+				continue
+			}
+		}
 		st, err := r.Open(ctx, scope)
 		if err != nil {
 			r.log().Warn("timer open store failed", "scope", scope, "err", err)
 			continue
 		}
-		n, err := DispatchDue(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.log())
+		var commit Commit
+		if r.Commit != nil {
+			commit = func(cctx context.Context, fn func() error) error { return r.Commit(cctx, scope, fn) }
+		}
+		n, err := DispatchDueWithCommit(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.log(), commit)
 		if err != nil {
 			r.log().Warn("timer dispatch pass failed", "scope", scope, "err", err)
 			continue

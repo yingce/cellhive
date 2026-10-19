@@ -21,6 +21,7 @@ type exportedSpan struct {
 	trace  [16]byte
 	span   [8]byte
 	parent [8]byte
+	links  [][3]string
 }
 
 type otlpSink struct {
@@ -53,6 +54,15 @@ func newOTLPSink(t *testing.T) *otlpSink {
 					copy(got.trace[:], sp.TraceId)
 					copy(got.span[:], sp.SpanId)
 					copy(got.parent[:], sp.ParentSpanId)
+					for _, link := range sp.Links {
+						messageID := ""
+						for _, kv := range link.Attributes {
+							if kv.Key == "messaging.message.id" {
+								messageID = kv.Value.GetStringValue()
+							}
+						}
+						got.links = append(got.links, [3]string{fmt.Sprintf("%x", link.TraceId), fmt.Sprintf("%x", link.SpanId), messageID})
+					}
 					s.spans = append(s.spans, got)
 				}
 			}
@@ -62,6 +72,29 @@ func newOTLPSink(t *testing.T) *otlpSink {
 	}))
 	t.Cleanup(s.srv.Close)
 	return s
+}
+
+func TestQueueConsumerSpanLinksMixedProducerTraces(t *testing.T) {
+	sink := newOTLPSink(t)
+	tel, err := New(context.Background(), Config{Endpoint: sink.srv.URL, Ratio: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ExportQueueConsumerSpan("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01", "acme", "consumer", "events", "success", 100, 200, []QueueLink{
+		{MessageID: "m1", RequestID: "r1", Traceparent: "00-11111111111111111111111111111111-2222222222222222-01"},
+		{MessageID: "m2", RequestID: "r2", Traceparent: "00-33333333333333333333333333333333-4444444444444444-01"},
+		{MessageID: "m3", Traceparent: "invalid"},
+	})
+	if err := tel.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	spans := sink.exported()
+	if len(spans) != 1 || spans[0].name != "queue.consume" || fmt.Sprintf("%x", spans[0].trace) != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || fmt.Sprintf("%x", spans[0].span) != "bbbbbbbbbbbbbbbb" || fmt.Sprintf("%x", spans[0].parent) != "0000000000000000" {
+		t.Fatalf("consumer identity/parent: %+v", spans)
+	}
+	if got := spans[0].links; len(got) != 2 || got[0] != [3]string{"11111111111111111111111111111111", "2222222222222222", "m1"} || got[1] != [3]string{"33333333333333333333333333333333", "4444444444444444", "m2"} {
+		t.Fatalf("producer links: %+v", got)
+	}
 }
 
 func (s *otlpSink) exported() []exportedSpan {
@@ -213,6 +246,7 @@ func TestEndpointPathVariants(t *testing.T) {
 	}{
 		{"base", "/api/default", "/api/default/v1/traces"},
 		{"full", "/api/default/v1/traces", "/api/default/v1/traces"},
+		{"arms", "/adapt-example/api/otlp/traces", "/adapt-example/api/otlp/traces"},
 		{"root", "", "/v1/traces"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

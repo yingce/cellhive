@@ -167,6 +167,7 @@ nodes/<node>.json
 - 只有 **无可用 follower**（单节点，或 ensemble 不可用降级）时，ack 才退化为**等 bucket 块上传**（`bucket-batch`，同区 ~90ms）；显式 `BUCKET_WAIT=false` 才改为 ack-on-enqueue（RPO>0）。
 - 后端 B（DO）：do-runtime 上报给 cell-agent 后，由该 cell-agent 作为 owner 向其他 cell-agent（follower）做同样的 ensemble 证明。
 - 后端 B 的写 ack 路径为：workerd 提交 → supervisor 捕获 → **cell-agent（可能跨节点）** → 证明 → 输出门；跨节点内网延迟必须纳入 P0 性能门。
+- 后端 B 的 fleet 证明在冷接管前还需 ADR-212 的 per-capture-scope 恢复：首次 follower ack 前持久记录恢复指针；新 DO shard owner 先按 host manifest 补传其文件在活跃 cell-agent session 中的已确认尾部，期间不封存其他 cell 共用的进程 session。恢复失败则拒绝激活；未提供有效 DO owner 身份的全目录捕获等 bucket 证明。
 - 响应体流式输出时，逐块同样受输出门约束——调用方不会基于"可能丢失"的值行动。
 - **RPO=0**：已确认（acknowledged）的写不会因单节点故障丢失。
 

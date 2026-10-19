@@ -520,18 +520,18 @@ export class R2Bucket extends WorkerEntrypoint {
 }
 
 export class QueueProducer extends WorkerEntrypoint {
-  async send(body, options = {}) {
+  async send(body, options = {}, context = {}) {
     const p = this.ctx.props;
     const encoded = encodeQueueBody(body, options.contentType);
     const r = await call(this.env, "/v1/queue/send?" + q({ ns: p.ns, queue: p.name, delay_seconds: options.delaySeconds, idempotency_key: options.idempotencyKey }), {
       method: "POST",
-      headers: Object.assign({ "content-type": encoded.mime, "x-cellhive-queue-content-type": encoded.contentType }, scopeHeaders(p)),
+      headers: Object.assign({ "content-type": encoded.mime, "x-cellhive-queue-content-type": encoded.contentType, "traceparent": context.traceparent || "", "x-request-id": context.requestId || "" }, scopeHeaders(p)),
       body: encoded.body,
     });
     await must(r, "queue.send");
     return { id: (await r.json()).id };
   }
-  async sendBatch(messages = []) {
+  async sendBatch(messages = [], context = {}) {
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 100) throw new TypeError("sendBatch requires 1..100 messages");
     const payload = messages.map((item) => {
       if (!item || typeof item !== "object" || !("body" in item)) throw new TypeError("sendBatch message must contain body");
@@ -540,7 +540,7 @@ export class QueueProducer extends WorkerEntrypoint {
     });
     const p = this.ctx.props;
     const r = await call(this.env, "/v1/queue/send-batch?" + q({ ns: p.ns, queue: p.name }), {
-      method: "POST", headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(p)), body: JSON.stringify({ messages: payload }),
+      method: "POST", headers: Object.assign({ "content-type": "application/json", "traceparent": context.traceparent || "", "x-request-id": context.requestId || "" }, scopeHeaders(p)), body: JSON.stringify({ messages: payload }),
     });
     await must(r, "queue.sendBatch");
     return { ids: (await r.json()).ids || [] };
@@ -963,7 +963,8 @@ export class WorkflowBridgeTarget extends RpcTarget {
       this.#env.CELL_URL.replace(/\/$/, "") + path + "?" + qs.join("&"),
       {
         method,
-        headers: { "x-cellhive-internal-token": this.#env.CELL_TOKEN || "" },
+        headers: { "x-cellhive-internal-token": this.#env.CELL_TOKEN || "",
+          ...(props.traceparent ? { traceparent: props.traceparent } : {}) },
         body: body === undefined || body === null ? undefined : body,
       },
     );

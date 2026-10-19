@@ -19,6 +19,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"cellhive/internal/objectstore"
 	"cellhive/internal/replica"
 	"cellhive/internal/restore"
+	"cellhive/internal/sqlcapture"
 	"cellhive/internal/telemetry"
 	"cellhive/internal/wal"
 )
@@ -132,9 +134,8 @@ func (s *Supervisor) recordDoStats(alarmsOk, alarmsErr, gateTimeouts, wsDelta in
 	}
 }
 
-// blobUnchanged reports whether data is byte-identical to what this process last
-// wrote for key. Unchanged blobs are skipped so a steady-state gate call performs
-// no object-store writes.
+// blobUnchanged reports whether data is byte-identical to a successfully
+// persisted value. A failed bucket write must remain retryable at the next gate.
 func (s *Supervisor) blobUnchanged(key string, data []byte) bool {
 	sum := sha256.Sum256(data)
 	s.blobMu.Lock()
@@ -145,13 +146,32 @@ func (s *Supervisor) blobUnchanged(key string, data []byte) bool {
 	if prev, ok := s.blobSums[key]; ok && prev == sum {
 		return true
 	}
-	s.blobSums[key] = sum
 	return false
+}
+
+func (s *Supervisor) rememberBlob(key string, data []byte) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	if s.blobSums == nil {
+		s.blobSums = map[string][32]byte{}
+	}
+	s.blobSums[key] = sha256.Sum256(data)
 }
 
 // SegmentSource restores the ordered LTX parts needed to rebuild a scope/epoch.
 type SegmentSource interface {
 	Restore(ctx context.Context, scope cell.Scope, epoch uint64) ([][]byte, error)
+}
+
+// RecoveryClaim identifies the new DO shard owner that is about to restore.
+type RecoveryClaim struct {
+	Scope cell.Scope
+	Node  string
+	Epoch uint64
+}
+
+type ScopeRecoverySource interface {
+	RecoverScope(ctx context.Context, scope cell.Scope, claim RecoveryClaim) error
 }
 
 // PageSource optionally exposes a page-on-demand fetcher, enabling a paged cold
@@ -235,6 +255,33 @@ func (h *HTTPStore) Restore(ctx context.Context, scope cell.Scope, epoch uint64)
 		out = append(out, seg.Raw)
 	}
 	return out, nil
+}
+
+func (h *HTTPStore) RecoverScope(ctx context.Context, scope cell.Scope, claim RecoveryClaim) error {
+	body, err := json.Marshal(map[string]any{
+		"scope": scope.String(), "owner_scope": claim.Scope.String(),
+		"owner_node": claim.Node, "owner_epoch": claim.Epoch,
+	})
+	if err != nil {
+		return err
+	}
+	u := strings.TrimRight(h.Base, "/") + "/v1/internal/do/recover-scope"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("x-cellhive-internal-token", h.Token)
+	req.Header.Set("content-type", "application/json")
+	resp, err := h.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("dosupervisor: recover %s: status %d: %s", scope.String(), resp.StatusCode, msg)
+	}
+	return nil
 }
 
 // PageFetcher builds a page-on-demand fetcher backed by cell-agent, so a paged
@@ -416,9 +463,16 @@ func (s *Supervisor) putManifest(ctx context.Context, key string, doc manifestDo
 		return nil
 	}
 	if s.Blobs != nil {
-		return s.Blobs.PutBlob(ctx, key, data)
+		if err := s.Blobs.PutBlob(ctx, key, data); err != nil {
+			return err
+		}
+		s.rememberBlob(key, data)
+		return nil
 	}
 	_, err = s.Bucket.Put(ctx, key, data)
+	if err == nil {
+		s.rememberBlob(key, data)
+	}
 	return err
 }
 
@@ -463,6 +517,32 @@ func (s *Supervisor) writeManifest(ctx context.Context, rels, rawRels []string) 
 		if err := s.putManifest(ctx, s.hostManifestKey(hostID), hostDoc); err != nil {
 			return err
 		}
+	}
+	return s.putManifest(ctx, s.manifestKey(), doc)
+}
+
+// writeHostManifest publishes one host without touching other hosts' manifests.
+// The legacy global index remains best-effort for older restore tooling.
+func (s *Supervisor) writeHostManifest(ctx context.Context, hostID string, rels, rawRels []string) error {
+	if s.Blobs == nil && s.Bucket == nil {
+		return nil
+	}
+	host := s.hostSnapshot()[hostID]
+	if host.HostHash == "" {
+		return fmt.Errorf("dosupervisor: unknown host %s", hostID)
+	}
+	sort.Strings(rels)
+	s.refreshFacets()
+	doc := manifestDoc{
+		Files: rels, Raw: rawRels,
+		Hosts:   map[string]hostBinding{hostID: host},
+		Objects: s.buildObjects(rels),
+	}
+	if names := s.facetSnapshot()[host.HostHash]; len(names) > 0 {
+		doc.Facets = map[string][]string{host.HostHash: names}
+	}
+	if err := s.putManifest(ctx, s.hostManifestKey(hostID), doc); err != nil {
+		return err
 	}
 	return s.putManifest(ctx, s.manifestKey(), doc)
 }
@@ -612,12 +692,39 @@ func (s *Supervisor) concurrency() int {
 }
 
 func (s *Supervisor) SyncAll(ctx context.Context) (int, error) {
+	return s.syncFiles(ctx, "")
+}
+
+// SyncHost proves only files belonging to the host whose request is leaving
+// the output gate. Old PVCs can contain shards now owned by another Pod.
+func (s *Supervisor) SyncHost(ctx context.Context, hostID string) (int, error) {
+	if hostID == "" {
+		return 0, fmt.Errorf("dosupervisor: host id required")
+	}
+	return s.syncFiles(ctx, hostID)
+}
+
+func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) {
+	var hostHash string
+	if hostID != "" {
+		host := s.hostSnapshot()[hostID]
+		if host.HostHash == "" {
+			return 0, fmt.Errorf("dosupervisor: unknown host %s", hostID)
+		}
+		hostHash = host.HostHash
+	}
 	// Refresh the facet tables first so each facet file is replicated under its
 	// object-addressed scope (ADR-084).
 	s.refreshFacets()
 	paths, err := s.sqliteFiles()
 	if err != nil {
 		return 0, err
+	}
+	if hostHash != "" {
+		paths = filterHostPaths(paths, hostHash)
+		if len(paths) == 0 {
+			return 0, fmt.Errorf("dosupervisor: no SQLite files for host %s", hostID)
+		}
 	}
 	// Capture files concurrently so per-scope commits overlap their durability
 	// proof RTTs; each file still commits in its own txid order (fileState.mu).
@@ -663,6 +770,9 @@ func (s *Supervisor) SyncAll(ctx context.Context) (int, error) {
 	if err != nil {
 		return n, err
 	}
+	if hostHash != "" {
+		extras = filterHostPaths(extras, hostHash)
+	}
 	rawRels := make([]string, 0, len(extras))
 	for _, p := range extras {
 		rel, rerr := filepath.Rel(s.Dir, p)
@@ -686,13 +796,30 @@ func (s *Supervisor) SyncAll(ctx context.Context) (int, error) {
 			} else if _, err := s.Bucket.Put(ctx, s.rawKey(rel), data); err != nil {
 				return n, fmt.Errorf("dosupervisor: put sidecar %s: %w", rel, err)
 			}
+			s.rememberBlob(s.rawKey(rel), data)
 		}
 		rawRels = append(rawRels, rel)
 	}
-	if err := s.writeManifest(ctx, rels, rawRels); err != nil {
+	if hostID != "" {
+		err = s.writeHostManifest(ctx, hostID, rels, rawRels)
+	} else {
+		err = s.writeManifest(ctx, rels, rawRels)
+	}
+	if err != nil {
 		return n, err
 	}
 	return n, nil
+}
+
+func filterHostPaths(paths []string, hash string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if base == hash+".sqlite" || strings.HasPrefix(base, hash+".") {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func (s *Supervisor) sqliteFiles() ([]string, error) {
@@ -861,6 +988,9 @@ func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 		return err
 	}
 	if !fs.baseline {
+		if err := s.seedCaptureWatermark(ctx, fs); err != nil {
+			return err
+		}
 		if err := s.snapshot(ctx, fs, "baseline"); err != nil {
 			return err
 		}
@@ -879,6 +1009,46 @@ func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// seedCaptureWatermark runs once per file and supervisor process. DO ownership
+// can move without changing the capture scope's epoch, so a replacement must
+// continue after the durable chain rather than reusing snapshot/txid keys.
+func (s *Supervisor) seedCaptureWatermark(ctx context.Context, fs *fileState) error {
+	var raw [][]byte
+	if s.Segments != nil {
+		var err error
+		raw, err = s.Segments.Restore(ctx, fs.scope, s.Epoch)
+		if err != nil {
+			return fmt.Errorf("dosupervisor: read capture head %s: %w", fs.scope, err)
+		}
+	} else if rep := s.store(); rep != nil {
+		segs, err := rep.Restore(ctx, fs.scope, s.Epoch)
+		if err != nil {
+			return fmt.Errorf("dosupervisor: read capture head %s: %w", fs.scope, err)
+		}
+		for _, seg := range segs {
+			raw = append(raw, seg.Raw)
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	// A complete chain is required before publishing a newer baseline. Merely
+	// taking the maximum header would hide a missing acknowledged delta.
+	compacted, err := restore.Compact(raw, ltx.DefaultSnapshotPartBytes)
+	if err != nil {
+		return fmt.Errorf("dosupervisor: invalid capture head %s: %w", fs.scope, err)
+	}
+	h, _, err := ltx.Decode(compacted[0])
+	if err != nil {
+		return err
+	}
+	if h.Epoch != s.Epoch || h.EndTxID == math.MaxUint64 {
+		return fmt.Errorf("dosupervisor: invalid capture head epoch/watermark for %s", fs.scope)
+	}
+	fs.seq = h.EndTxID + 1
 	return nil
 }
 
@@ -1005,7 +1175,40 @@ func (s *Supervisor) Handler() http.Handler {
 	gate := func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := telemetry.Tracer().Start(telemetry.Extract(r.Context(), r.Header), "do.gate",
 			trace.WithSpanKind(trace.SpanKindServer))
-		n, err := s.SyncAll(ctx)
+		var req struct {
+			HostID     string `json:"host_id"`
+			HostHash   string `json:"host_hash"`
+			StorageID  string `json:"storage_id"`
+			Class      string `json:"class"`
+			OwnerScope string `json:"owner_scope"`
+			OwnerNode  string `json:"owner_node"`
+			OwnerEpoch uint64 `json:"owner_epoch"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				telemetry.End(span, err)
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		var n int
+		var err error
+		if req.HostID != "" {
+			if req.OwnerScope != "" {
+				ownerScope, parseErr := cell.ParseScope(req.OwnerScope)
+				if parseErr != nil || req.OwnerNode == "" || req.OwnerEpoch == 0 {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid DO owner identity"})
+					return
+				}
+				ctx = sqlcapture.WithDOOwner(ctx, sqlcapture.DOOwnerIdentity{Scope: ownerScope, Node: req.OwnerNode, Epoch: req.OwnerEpoch})
+			}
+			if req.HostHash != "" {
+				s.Bind(req.HostID, req.HostHash, req.StorageID, req.Class)
+			}
+			n, err = s.SyncHost(ctx, req.HostID)
+		} else {
+			n, err = s.SyncAll(ctx)
+		}
 		telemetry.End(span, err)
 		if err != nil {
 			s.gateErrors.Add(1)
@@ -1049,13 +1252,26 @@ func (s *Supervisor) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /internal/do/restore-host", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			HostID string `json:"host_id"`
+			HostID     string `json:"host_id"`
+			OwnerScope string `json:"owner_scope"`
+			OwnerNode  string `json:"owner_node"`
+			OwnerEpoch uint64 `json:"owner_epoch"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil || req.HostID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host_id is required"})
 			return
 		}
-		n, err := s.RestoreHost(r.Context(), s.Dir, req.HostID)
+		var claim RecoveryClaim
+		var err error
+		if req.OwnerScope != "" {
+			claim.Scope, err = cell.ParseScope(req.OwnerScope)
+			if err != nil || req.OwnerNode == "" || req.OwnerEpoch == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid DO owner identity"})
+				return
+			}
+			claim.Node, claim.Epoch = req.OwnerNode, req.OwnerEpoch
+		}
+		n, err := s.RestoreHostClaimed(r.Context(), s.Dir, req.HostID, claim)
 		if errors.Is(err, bucket.ErrNotFound) || errors.Is(err, ErrHostNotCaptured) {
 			writeJSON(w, http.StatusOK, map[string]any{"restored": 0})
 			return

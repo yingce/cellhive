@@ -1,4 +1,4 @@
-// Package invocation persists Queue/Cron execution attempts and their console
+// Package invocation persists Queue/Cron/Workflow execution attempts and their console
 // output in a namespace cell. Logical IDs correlate retries; IDs identify one
 // immutable attempt, independent of sampled tracing or the ephemeral log ring.
 package invocation
@@ -31,8 +31,15 @@ type MessageRetry struct {
 	ID           string `json:"id"`
 	DelaySeconds int    `json:"delay_seconds"`
 }
+type ProducerLink struct {
+	MessageID   string `json:"message_id"`
+	RequestID   string `json:"request_id,omitempty"`
+	Traceparent string `json:"traceparent,omitempty"`
+}
 type Record struct {
 	ID              string           `json:"invocation_id"`
+	RequestID       string           `json:"request_id,omitempty"`
+	Traceparent     string           `json:"traceparent,omitempty"`
 	LogicalID       string           `json:"logical_id"`
 	Namespace       string           `json:"namespace"`
 	Worker          string           `json:"worker"`
@@ -49,6 +56,7 @@ type Record struct {
 	RetryRequested  bool             `json:"retry_requested,omitempty"`
 	NoRetry         bool             `json:"no_retry,omitempty"`
 	Messages        []MessageAttempt `json:"messages,omitempty"`
+	ProducerLinks   []ProducerLink   `json:"producer_links,omitempty"`
 	Parents         []string         `json:"parent_invocation_ids,omitempty"`
 	Result          json.RawMessage  `json:"result,omitempty"`
 	ResultEncoding  string           `json:"result_encoding,omitempty"`
@@ -101,7 +109,7 @@ func Validate(r Record) error {
 	if r.ID == "" || len(r.ID) > 160 || r.LogicalID == "" || len(r.LogicalID) > 512 || r.Worker == "" || len(r.Worker) > 256 || r.StartedMs <= 0 || r.Attempt < 1 {
 		return fmt.Errorf("invocation: invalid identity")
 	}
-	if r.Kind != "queue" && r.Kind != "cron" {
+	if r.Kind != "queue" && r.Kind != "cron" && r.Kind != "workflow" {
 		return fmt.Errorf("invocation: invalid trigger")
 	}
 	switch r.Status {
@@ -112,12 +120,20 @@ func Validate(r Record) error {
 	if len(r.Logs) > 256 || len(r.Error) > 16384 || len(r.ErrorStack) > 16384 {
 		return fmt.Errorf("invocation: record exceeds limits")
 	}
-	if len(r.Messages) > 100 || len(r.Parents) > 100 || len(r.Ack) > 100 || len(r.Retry) > 100 || len(r.Result) > 8192 {
+	if len(r.RequestID) > 160 || len(r.Traceparent) > 256 {
+		return fmt.Errorf("invocation: correlation fields exceed limits")
+	}
+	if len(r.Messages) > 100 || len(r.ProducerLinks) > 100 || len(r.Parents) > 100 || len(r.Ack) > 100 || len(r.Retry) > 100 || len(r.Result) > 8192 {
 		return fmt.Errorf("invocation: result/membership exceeds limits")
 	}
 	for _, m := range r.Messages {
 		if m.ID == "" || len(m.ID) > 128 || m.LogicalID == "" || len(m.LogicalID) > 160 || m.Attempt < 1 {
 			return fmt.Errorf("invocation: invalid message lineage")
+		}
+	}
+	for _, link := range r.ProducerLinks {
+		if len(link.MessageID) > 128 || len(link.RequestID) > 160 || len(link.Traceparent) > 256 || link.MessageID == "" {
+			return fmt.Errorf("invocation: invalid producer link")
 		}
 	}
 	b, err := json.Marshal(r)
@@ -150,6 +166,11 @@ func (s *Store) Put(ctx context.Context, r Record) error {
 			after, _ := json.Marshal(r.Messages)
 			if string(before) != string(after) {
 				return fmt.Errorf("invocation: membership is immutable")
+			}
+			before, _ = json.Marshal(previous.ProducerLinks)
+			after, _ = json.Marshal(r.ProducerLinks)
+			if string(before) != string(after) {
+				return fmt.Errorf("invocation: producer links are immutable")
 			}
 			if previous.Status != "running" {
 				return nil

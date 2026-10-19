@@ -78,7 +78,7 @@ function managedStub(env,ctx,entry) {
   return env.LOADER.get(entry.id,()=>Object.assign({},code,{
     env:entry.plan.directFetch?Object.assign({},entry.version.vars||{}):tenantEnv(env,ctx,entry.plan.spec,entry.version.vars),
     globalOutbound:env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE==='0'?{}:{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0}})]}),
+    ...(env.CH_LOG_CAPTURE==='0'||entry.version.log_policy?.console===false?{}:{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey}})]}),
   }));
 }
 async function sweepResidents(env,ctx) {
@@ -252,6 +252,7 @@ function prepareRequest(req, env) {
     if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
   }
   headers.set("traceparent", tp);
+  if (!headers.get("x-request-id")) headers.set("x-request-id", crypto.randomUUID());
   return { request: new Request(req, { headers }), sampled };
 }
 
@@ -353,11 +354,13 @@ async function preparedWorker(env, app, worker, version, classStorage, deletedCl
 // stubs, and tails must all be acquired in the current request.
 function workerPlan(env, version, source, spec) {
   const directFetch = Object.keys(spec).length === 0;
+  const tailKey = env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? "" : crypto.randomUUID();
   const compatibilityFlags = version.limits?.subrequests
     ? [...new Set([...(version.compat_flags || []), "nodejs_als"])]
     : (version.compat_flags || []);
   return {
     spec,
+    tailKey,
     directFetch,
     directWorkerCode: directFetch ? {
       compatibilityDate: version.compat_date || "2026-06-15",
@@ -372,7 +375,7 @@ function workerPlan(env, version, source, spec) {
       limits: workerLimits(version.limits),
       mainModule: "wrapper.js",
       modules: {
-        "wrapper.js": platformConsts(spec) + env.WRAPPER_SRC,
+        "wrapper.js": platformConsts(spec, tailKey) + env.WRAPPER_SRC,
         "tenant.js": source,
         "facades.js": env.FACADES_SRC,
         "rpc-codec.js": env.RPC_CODEC_SRC,
@@ -390,8 +393,8 @@ function fetchWorkerStub(env, ctx, app, worker, version, plan) {
   return env.LOADER.get(id, () => Object.assign({}, plan.directWorkerCode, {
     globalOutbound: env.OUTBOUND,
     env: Object.assign({}, version.vars || {}),
-    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
-      props: { namespace: app.namespace, worker, version: version.version || 0 },
+    ...(env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
     })] }),
   }));
 }
@@ -401,8 +404,8 @@ function workerStub(env, ctx, app, worker, version, plan) {
   return env.LOADER.get(id, () => Object.assign({}, plan.workerCode, {
     globalOutbound: env.OUTBOUND,
     env: tenantEnv(env, ctx, plan.spec, version.vars),
-    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
-      props: { namespace: app.namespace, worker, version: version.version || 0 },
+    ...(env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
     })] }),
   }));
 }
@@ -455,15 +458,15 @@ function tenantEnv(env, ctx, spec, vars) {
   return out;
 }
 
-// platformConsts renders only non-secret binding-name metadata into the trusted
-// wrapper module. Platform URLs/tokens stay in the host worker and never enter
-// the dynamic WorkerCode (ADR-186).
-function platformConsts(spec) {
+// platformConsts renders binding names and a Tail-only correlation key into
+// the trusted wrapper module. The key authorizes no platform API; platform
+// URLs and role credentials stay in the host worker (ADR-186/230).
+function platformConsts(spec, tailKey = "") {
   // PREPENDED to the wrapper source: the wrapper's top-level code runs before
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
 }
 
 // --- assets ---------------------------------------------------------------

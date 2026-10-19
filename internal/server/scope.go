@@ -2,12 +2,17 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 
 	"strings"
 	"time"
 
+	"cellhive/internal/control"
 	"cellhive/internal/replica"
 	"cellhive/internal/scopedtoken"
 	"cellhive/internal/telemetry"
@@ -20,6 +25,7 @@ type ctxKey int
 const (
 	ctxScopeNS ctxKey = iota
 	ctxScopeName
+	ctxScopePreInvalidated
 )
 
 // scopeSecret is the HMAC key for binding scoped tokens (ADR-074). Required.
@@ -116,6 +122,7 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			}
 			telemetry.SpanFromContext(r.Context()).SetAttributes(
 				telemetry.ScopeAttrs(claims.Namespace, kind, claims.Name, "")...)
+			preInvalidated := ""
 			if s.Store != nil {
 				// Before gating in-flight requests, drop a local cell this node
 				// does not own (a stale foreign lineage after a restart or
@@ -123,6 +130,7 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				// waits on this request's own eviction gate.
 				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
 					s.invalidateStaleLocal(r.Context(), sc)
+					preInvalidated = sc.String()
 				}
 				var end func()
 				if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
@@ -152,6 +160,9 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			}
 			ctx := context.WithValue(r.Context(), ctxScopeNS, claims.Namespace)
 			ctx = context.WithValue(ctx, ctxScopeName, claims.Name)
+			if preInvalidated != "" {
+				ctx = context.WithValue(ctx, ctxScopePreInvalidated, preInvalidated)
+			}
 			next(w, r.WithContext(ctx))
 		}
 	}
@@ -178,7 +189,7 @@ func (s *Server) admit(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, string, error) {
 	ttl := s.Cfg.BindingCacheTTL
 	if ttl <= 0 {
-		id, ok, err := s.Control.Binding(ctx, ns, kind, name)
+		id, ok, err := s.bindingFromOwner(ctx, ns, kind, name)
 		return ok, id, err
 	}
 	key := ns + "|" + kind + "|" + name
@@ -190,7 +201,7 @@ func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, 
 	}
 	s.bindMu.Unlock()
 
-	id, ok, err := s.Control.Binding(ctx, ns, kind, name)
+	id, ok, err := s.bindingFromOwner(ctx, ns, kind, name)
 	if err != nil {
 		return false, "", err
 	}
@@ -201,6 +212,38 @@ func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, 
 	s.bindCache[key] = bindingEntry{ok: ok, id: id, exp: now.Add(ttl)}
 	s.bindMu.Unlock()
 	return ok, id, nil
+}
+
+func (s *Server) bindingFromOwner(ctx context.Context, ns, kind, name string) (string, bool, error) {
+	if s.Owner != nil {
+		// Authorization must see the current control owner after a handoff;
+		// a stale owner hint can otherwise return an old negative declaration.
+		s.Owner.Invalidate(control.Scope())
+	}
+	q := url.Values{"ns": {ns}, "kind": {kind}, "name": {name}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://cellhive.internal/v1/control/binding?"+q.Encode(), http.NoBody)
+	if err != nil {
+		return "", false, err
+	}
+	resp, forwarded, err := s.forwardTo(req, control.Scope(), []byte{})
+	if err != nil {
+		return "", false, err
+	}
+	if forwarded {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", false, fmt.Errorf("control binding owner returned %d", resp.StatusCode)
+		}
+		var answer struct {
+			ID string `json:"id"`
+			OK bool   `json:"ok"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&answer); err != nil {
+			return "", false, err
+		}
+		return answer.ID, answer.OK, nil
+	}
+	return s.Control.Binding(ctx, ns, kind, name)
 }
 
 // bindingAllowed reports whether the binding is declared (cached).

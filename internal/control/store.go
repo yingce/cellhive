@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +39,8 @@ var (
 	ErrNoPrevious = errors.New("control: no previous version")
 	// ErrNoEnvelope means no secret root key is configured.
 	ErrNoEnvelope = errors.New("control: secret root key not configured")
+	// ErrIdempotencyConflict means a key was reused for a different deploy.
+	ErrIdempotencyConflict = errors.New("control: idempotency key reused with different deploy parameters")
 )
 
 // Store is the control-plane metadata store. All control metadata lives in one
@@ -53,11 +56,20 @@ type Store struct {
 	mu         sync.Mutex
 	migrated   map[*cellstore.Cell]bool
 	resourceMu sync.Mutex
+	// Set only by fault tests to stop after all deploy rows are
+	// written but before Cell.Tx commits them.
+	onDeployBeforeCommit func()
 	// Lifecycle hooks run after the metadata transaction but before its caller
 	// acknowledges it. Coordination failures must be returned to the caller.
 	OnResourceActivated func(context.Context, string, string, string) error
 	OnResourceRevoked   func(context.Context, string, string, string) error
 	ResourceGeneration  func(context.Context, cell.Scope) (string, error)
+}
+
+// SetDeployBeforeCommitForTest installs the process-death barrier used by fault
+// tests. Production callers leave it unset.
+func (s *Store) SetDeployBeforeCommitForTest(hook func()) {
+	s.onDeployBeforeCommit = hook
 }
 
 // New builds a control store. env may be nil when secrets are unused.
@@ -293,6 +305,12 @@ CREATE TABLE IF NOT EXISTS service_acls (
 );
 CREATE INDEX IF NOT EXISTS service_acls_caller ON service_acls(caller_ns, ns, worker);
 
+CREATE TABLE IF NOT EXISTS rollback_idempotency (
+  ns TEXT NOT NULL, worker TEXT NOT NULL, key TEXT NOT NULL,
+  active INTEGER NOT NULL, previous INTEGER NOT NULL, created_ms INTEGER NOT NULL,
+  PRIMARY KEY(ns, worker, key)
+);
+
 -- Revoked resources (ADR-156): a tombstone that overrides version-derived
 -- binding declarations, so a revoke takes effect even though immutable version
 -- metadata still mentions the binding. Re-registering clears it.
@@ -319,8 +337,8 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 	cols := map[string][]string{
 		"apps":               {"deleted_ms INTEGER NOT NULL DEFAULT 0"},
 		"workers":            {"host_label TEXT NOT NULL DEFAULT ''", "created_ms INTEGER NOT NULL DEFAULT 0", "deleted_ms INTEGER NOT NULL DEFAULT 0"},
-		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'", "secret_snapshot INTEGER NOT NULL DEFAULT 0"},
-		"deploy_idempotency": {"created_ms INTEGER NOT NULL DEFAULT 0"},
+		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'", "log_policy TEXT NOT NULL DEFAULT '{}'", "secret_snapshot INTEGER NOT NULL DEFAULT 0"},
+		"deploy_idempotency": {"created_ms INTEGER NOT NULL DEFAULT 0", "fingerprint TEXT NOT NULL DEFAULT ''"},
 		"audit":              {"actor_kind TEXT NOT NULL DEFAULT ''", "on_behalf_of TEXT NOT NULL DEFAULT ''", "request_id TEXT NOT NULL DEFAULT ''"},
 	}
 	for table, defs := range cols {
@@ -625,6 +643,7 @@ func (s *Store) PurgeAppRows(ctx context.Context, ns string) error {
 			`DELETE FROM do_classes WHERE ns=?`,
 			`DELETE FROM delete_locks WHERE ns=?`,
 			`DELETE FROM deploy_idempotency WHERE ns=?`,
+			`DELETE FROM rollback_idempotency WHERE ns=?`,
 		} {
 			if _, err := t.ExecContext(ctx, stmt, ns); err != nil {
 				return err
@@ -877,10 +896,10 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	var v Version
 	var bindings, vars, consumers, crons string
 	var assets sql.NullString
-	var flags, limits string
+	var flags, limits, logPolicy string
 	var number int
 	if err := scan(&number, &v.BundleSHA, &v.AssetsSHA, &v.StorageID, &v.SessionPolicy,
-		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &v.CreatedMs, &v.Actor); err != nil {
+		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &logPolicy, &v.CreatedMs, &v.Actor); err != nil {
 		return Version{}, err
 	}
 	if flags != "" {
@@ -892,6 +911,13 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 			return Version{}, err
 		}
 		v.Limits = &l
+	}
+	if logPolicy != "" && logPolicy != "{}" {
+		var p LogPolicy
+		if err := unmarshal([]byte(logPolicy), &p); err != nil {
+			return Version{}, err
+		}
+		v.LogPolicy = &p
 	}
 	v.Number = number
 	if err := unmarshal([]byte(bindings), &v.Bindings); err != nil {
@@ -916,11 +942,11 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	return v, nil
 }
 
-const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor`
+const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, log_policy, created_ms, actor`
 
 // versionColsAliased is versionCols qualified with the versions-table alias "v"
 // for queries that join workers (both tables have storage_id).
-const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.limits, v.created_ms, v.actor`
+const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.limits, v.log_policy, v.created_ms, v.actor`
 
 func (s *Store) getVersion(ctx context.Context, c *cellstore.Cell, ns, worker string, number int) (Version, bool, error) {
 	row := c.DB.QueryRowContext(ctx,
@@ -986,6 +1012,17 @@ func newStorageID() string {
 // Deploy allocates the next immutable version and makes it active in one
 // transaction.
 func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, actor string) (Version, error) {
+	fingerprint := ""
+	if spec.IdempotencyKey != "" {
+		copy := spec
+		copy.IdempotencyKey = ""
+		encoded, err := json.Marshal(copy)
+		if err != nil {
+			return Version{}, err
+		}
+		sum := sha256.Sum256(encoded)
+		fingerprint = hex.EncodeToString(sum[:])
+	}
 	if err := validateNS(ns); err != nil {
 		return Version{}, err
 	}
@@ -994,6 +1031,14 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 	}
 	if spec.Limits != nil && spec.Limits.SubRequests != nil && *spec.Limits.SubRequests <= 0 {
 		return Version{}, fmt.Errorf("control: limits.subrequests must be positive")
+	}
+	if spec.Limits != nil && spec.Limits.CpuMs != nil && *spec.Limits.CpuMs <= 0 {
+		return Version{}, fmt.Errorf("control: limits.cpuMs must be positive")
+	}
+	for _, consumer := range spec.Consumers {
+		if consumer.MaxRetries < 0 || consumer.RetryDelaySeconds < 0 || consumer.MaxBatchTimeoutSeconds < 0 || consumer.MaxBatchTimeoutSeconds > 60 || consumer.MaxBatchSize < 0 || consumer.MaxBatchSize > 100 || consumer.MaxConcurrency < 0 {
+			return Version{}, fmt.Errorf("control: invalid queue consumer settings for %s", consumer.Queue)
+		}
 	}
 	c, err := s.cell(ctx)
 	if err != nil {
@@ -1004,10 +1049,14 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		// Idempotent deploy: return the version created by the first call.
 		if spec.IdempotencyKey != "" {
 			var prev int
+			var previousFingerprint string
 			err := t.QueryRowContext(ctx,
-				`SELECT version FROM deploy_idempotency WHERE ns=? AND worker=? AND key=?`,
-				ns, worker, spec.IdempotencyKey).Scan(&prev)
+				`SELECT version, fingerprint FROM deploy_idempotency WHERE ns=? AND worker=? AND key=?`,
+				ns, worker, spec.IdempotencyKey).Scan(&prev, &previousFingerprint)
 			if err == nil {
+				if previousFingerprint != "" && previousFingerprint != fingerprint {
+					return ErrIdempotencyConflict
+				}
 				v, ok, err := s.getVersion(ctx, c, ns, worker, prev)
 				if err != nil {
 					return err
@@ -1053,7 +1102,7 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			Number: next, BundleSHA: spec.BundleSHA, AssetsSHA: spec.AssetsSHA,
 			Bindings: bindings, Vars: spec.Vars, Consumers: spec.Consumers,
 			Crons: spec.Crons, Assets: spec.Assets, StorageID: storageID,
-			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags, Limits: spec.Limits,
+			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags, Limits: spec.Limits, LogPolicy: spec.LogPolicy,
 			CreatedMs: s.now().UnixMilli(), Actor: actor, SessionPolicy: spec.SessionPolicy,
 		}
 		var assets any
@@ -1062,13 +1111,14 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			assets = string(b)
 		}
 		limits := jsonOr(v.Limits, "{}")
+		logPolicy := jsonOr(v.LogPolicy, "{}")
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO versions(ns, worker, number, bundle_sha, assets_sha, storage_id, session_policy,
-				                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor, secret_snapshot)
-				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+				                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, log_policy, created_ms, actor, secret_snapshot)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
 			ns, worker, v.Number, v.BundleSHA, v.AssetsSHA, v.StorageID, v.SessionPolicy,
 			jsonOr(v.Bindings, "[]"), jsonOr(v.Vars, "{}"), jsonOr(v.Consumers, "[]"),
-			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, v.CreatedMs, v.Actor); err != nil {
+			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, logPolicy, v.CreatedMs, v.Actor); err != nil {
 			return err
 		}
 		if _, err := t.ExecContext(ctx,
@@ -1096,8 +1146,8 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		}
 		if spec.IdempotencyKey != "" {
 			if _, err := t.ExecContext(ctx,
-				`INSERT OR REPLACE INTO deploy_idempotency(ns, worker, key, version, created_ms) VALUES (?,?,?,?,?)`,
-				ns, worker, spec.IdempotencyKey, next, v.CreatedMs); err != nil {
+				`INSERT OR REPLACE INTO deploy_idempotency(ns, worker, key, version, created_ms, fingerprint) VALUES (?,?,?,?,?,?)`,
+				ns, worker, spec.IdempotencyKey, next, v.CreatedMs, fingerprint); err != nil {
 				return err
 			}
 		}
@@ -1122,7 +1172,13 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		}
 		out = v
 		_ = previous
-		return txAudit(ctx, t, ns, actor, "deploy", fmt.Sprintf("%s/%s@%d", ns, worker, next))
+		if err := txAudit(ctx, t, ns, actor, "deploy", fmt.Sprintf("%s/%s@%d", ns, worker, next)); err != nil {
+			return err
+		}
+		if s.onDeployBeforeCommit != nil {
+			s.onDeployBeforeCommit()
+		}
+		return nil
 	})
 	return out, err
 }
@@ -1260,9 +1316,11 @@ func (s *Store) Promote(ctx context.Context, ns, worker string, version int, act
 		if err != nil {
 			return err
 		}
-		if active != version {
-			previous, active = active, version
+		if active == version {
+			out = Worker{Name: worker, Active: active, Previous: previous}
+			return nil
 		}
+		previous, active = active, version
 		if _, err := t.ExecContext(ctx, `UPDATE workers SET active=?, previous=? WHERE ns=? AND name=?`,
 			active, previous, ns, worker); err != nil {
 			return err
@@ -1281,8 +1339,17 @@ func (s *Store) Promote(ctx context.Context, ns, worker string, version int, act
 
 // Rollback switches back to the previous version.
 func (s *Store) Rollback(ctx context.Context, ns, worker, actor string) (Worker, error) {
+	return s.RollbackWithKey(ctx, ns, worker, "", actor)
+}
+
+// RollbackWithKey makes an unknown-outcome retry safe. A repeated key returns
+// the first committed pointer result without toggling previous a second time.
+func (s *Store) RollbackWithKey(ctx context.Context, ns, worker, key, actor string) (Worker, error) {
 	if err := validateNS(ns); err != nil {
 		return Worker{}, err
+	}
+	if len(key) > 256 {
+		return Worker{}, fmt.Errorf("control: rollback idempotency key exceeds 256 bytes")
 	}
 	c, err := s.cell(ctx)
 	if err != nil {
@@ -1290,6 +1357,17 @@ func (s *Store) Rollback(ctx context.Context, ns, worker, actor string) (Worker,
 	}
 	var out Worker
 	err = tx(ctx, c, func(t *sql.Tx) error {
+		if key != "" {
+			var active, previous int
+			err := t.QueryRowContext(ctx, `SELECT active, previous FROM rollback_idempotency WHERE ns=? AND worker=? AND key=?`, ns, worker, key).Scan(&active, &previous)
+			if err == nil {
+				out = Worker{Name: worker, Active: active, Previous: previous}
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		var active, previous int
 		err := t.QueryRowContext(ctx, `SELECT active, previous FROM workers WHERE ns=? AND name=?`, ns, worker).Scan(&active, &previous)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1311,6 +1389,11 @@ func (s *Store) Rollback(ctx context.Context, ns, worker, actor string) (Worker,
 		}
 		if err := appendDeploymentEvent(ctx, t, ns, worker, active, actor, s.now().UnixMilli()); err != nil {
 			return err
+		}
+		if key != "" {
+			if _, err := t.ExecContext(ctx, `INSERT INTO rollback_idempotency(ns,worker,key,active,previous,created_ms) VALUES (?,?,?,?,?,?)`, ns, worker, key, active, previous, s.now().UnixMilli()); err != nil {
+				return err
+			}
 		}
 		out = Worker{Name: worker, Active: active, Previous: previous}
 		return txAudit(ctx, t, ns, actor, "rollback", fmt.Sprintf("%s/%s@%d", ns, worker, active))
@@ -1376,6 +1459,7 @@ func (s *Store) PurgeWorkerRows(ctx context.Context, ns, worker string) error {
 			`DELETE FROM do_classes WHERE ns=? AND worker=?`,
 			`DELETE FROM delete_locks WHERE ns=? AND worker=?`,
 			`DELETE FROM deploy_idempotency WHERE ns=? AND worker=?`,
+			`DELETE FROM rollback_idempotency WHERE ns=? AND worker=?`,
 			`DELETE FROM secrets WHERE ns=? AND worker=?`,
 			`DELETE FROM routes WHERE ns=? AND worker=?`,
 			`DELETE FROM hosts WHERE ns=? AND kind='builtin' AND worker=?`,
@@ -1895,7 +1979,7 @@ func (s *Store) VersionEnv(ctx context.Context, ns, worker string, number int) (
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }
@@ -1930,7 +2014,7 @@ func (s *Store) VersionEnvBySHA(ctx context.Context, ns, worker, sha string) (Wo
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"cellhive/internal/cellstore"
 )
@@ -26,6 +27,11 @@ CREATE TABLE IF NOT EXISTS timers (
   occurrence TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS timers_due ON timers(due_ms);
+CREATE TABLE IF NOT EXISTS timer_retry (
+  token          TEXT PRIMARY KEY,
+  attempt        INTEGER NOT NULL,
+  retry_after_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fired (
   token      TEXT PRIMARY KEY,
   expires_ms INTEGER NOT NULL
@@ -53,11 +59,20 @@ type Index interface {
 
 // NewStore opens (migrating if needed) the timer tables in a cell.
 func NewStore(ctx context.Context, c *cellstore.Cell) (*Store, error) {
-	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, schema)
-		return err
-	}); err != nil {
-		return nil, fmt.Errorf("timer: migrate: %w", err)
+	// Timer stores are opened on every due poll. Re-running the idempotent DDL
+	// inside Cell.Tx would still advance its capture txid on every read.
+	var objects int
+	err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name IN ('timers','timers_due','timer_retry','fired','fired_expires')`).Scan(&objects)
+	if err != nil {
+		return nil, fmt.Errorf("timer: check schema: %w", err)
+	}
+	if objects != 5 {
+		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, schema)
+			return err
+		}); err != nil {
+			return nil, fmt.Errorf("timer: migrate: %w", err)
+		}
 	}
 	return &Store{cell: c}, nil
 }
@@ -65,7 +80,8 @@ func NewStore(ctx context.Context, c *cellstore.Cell) (*Store, error) {
 // NextDue returns the earliest pending timer's due time, or 0 when none.
 func (s *Store) NextDue(ctx context.Context) (int64, error) {
 	var next sql.NullInt64
-	if err := s.cell.DB.QueryRowContext(ctx, `SELECT MIN(due_ms) FROM timers`).Scan(&next); err != nil {
+	if err := s.cell.DB.QueryRowContext(ctx, `SELECT MIN(CASE WHEN r.retry_after_ms > t.due_ms THEN r.retry_after_ms ELSE t.due_ms END)
+		FROM timers t LEFT JOIN timer_retry r ON r.token=t.token`).Scan(&next); err != nil {
 		return 0, err
 	}
 	if !next.Valid {
@@ -134,6 +150,9 @@ func (s *Store) Upsert(ctx context.Context, t Timer) error {
 // DO object's single alarm, ADR-079).
 func (s *Store) RemoveByOccurrence(ctx context.Context, occurrence string) error {
 	_, err := s.cell.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM timer_retry WHERE token IN (SELECT token FROM timers WHERE occurrence=?)`, occurrence); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE occurrence=?`, occurrence)
 		return err
 	})
@@ -146,11 +165,12 @@ func (s *Store) RemoveByOccurrence(ctx context.Context, occurrence string) error
 // Due returns timers due at or before nowMs, ascending by due time, excluding
 // tokens already fired within their TTL. limit <= 0 means no limit.
 func (s *Store) Due(ctx context.Context, nowMs int64, limit int) ([]Timer, error) {
-	q := `SELECT token, due_ms, kind, scope, occurrence FROM timers
-	      WHERE due_ms <= ?
-	        AND token NOT IN (SELECT token FROM fired WHERE expires_ms > ?)
-	      ORDER BY due_ms ASC, token ASC`
-	args := []any{nowMs, nowMs}
+	q := `SELECT t.token, t.due_ms, t.kind, t.scope, t.occurrence FROM timers t
+	      LEFT JOIN timer_retry r ON r.token=t.token
+	      WHERE t.due_ms <= ? AND COALESCE(r.retry_after_ms, 0) <= ?
+	        AND t.token NOT IN (SELECT token FROM fired WHERE expires_ms > ?)
+	      ORDER BY t.due_ms ASC, t.token ASC`
+	args := []any{nowMs, nowMs, nowMs}
 	if limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, limit)
@@ -184,6 +204,9 @@ func (s *Store) MarkFired(ctx context.Context, token string, expiresMs int64) er
 		if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE token = ?`, token); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM timer_retry WHERE token = ?`, token); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -191,6 +214,38 @@ func (s *Store) MarkFired(ctx context.Context, token string, expiresMs int64) er
 	}
 	_ = s.syncIndex(ctx)
 	return nil
+}
+
+// ScheduleRetry keeps the timer's original due time while deferring the next
+// attempt. The retry state is durable in the same cell as the timer itself.
+func (s *Store) ScheduleRetry(ctx context.Context, token string, nowMs int64) (retryAfterMs int64, attempt int, err error) {
+	_, err = s.cell.Tx(ctx, func(tx *sql.Tx) error {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM timers WHERE token=?`, token).Scan(&exists); err != nil {
+			return err
+		}
+		err := tx.QueryRowContext(ctx, `SELECT attempt FROM timer_retry WHERE token=?`, token).Scan(&attempt)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		attempt++
+		delay := 5 * time.Second
+		for n := 1; n < attempt && delay < 5*time.Minute; n++ {
+			delay *= 2
+		}
+		if delay > 5*time.Minute {
+			delay = 5 * time.Minute
+		}
+		retryAfterMs = nowMs + delay.Milliseconds()
+		_, err = tx.ExecContext(ctx, `INSERT INTO timer_retry(token,attempt,retry_after_ms) VALUES(?,?,?)
+			ON CONFLICT(token) DO UPDATE SET attempt=excluded.attempt,retry_after_ms=excluded.retry_after_ms`, token, attempt, retryAfterMs)
+		return err
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	_ = s.syncIndex(ctx)
+	return retryAfterMs, attempt, nil
 }
 
 // IsFired reports whether a token was fired and its TTL has not expired.
@@ -217,6 +272,17 @@ func (s *Store) Prune(ctx context.Context, nowMs int64) (int, error) {
 		return 0, err
 	}
 	return int(n), nil
+}
+
+// HasExpiredFired avoids opening a write transaction (and a durability proof)
+// on every timer poll when there is nothing to prune.
+func (s *Store) HasExpiredFired(ctx context.Context, nowMs int64) (bool, error) {
+	var found int
+	err := s.cell.DB.QueryRowContext(ctx, `SELECT 1 FROM fired WHERE expires_ms <= ? LIMIT 1`, nowMs).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Count returns the number of live (unfired) timer rows.

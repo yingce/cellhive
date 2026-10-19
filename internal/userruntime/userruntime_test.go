@@ -37,6 +37,9 @@ const tenantBundle = `
 export default {
   async fetch() { return new Response("tenant"); },
   async queue(batch, env, ctx) {
+    if (batch[0].body === "alpha" || batch[0].body === "beta") {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
     if (batch[0].contentType === "v8") {
       const v = batch[0].body;
       return "v8:" + typeof v.n + ":" + v.n + ":" + v.when.toISOString() + ":" + [...v.bytes].join(",");
@@ -170,7 +173,27 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 
 	// Stub cell-agent artifact endpoint serving the tenant bundle.
 	var gotToken string
+	var logMu sync.Mutex
+	var tailEvents []map[string]any
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/internal/worker/bindings" {
+			_, _ = w.Write([]byte(`{"bindings":{},"vars":{}}`))
+			return
+		}
+		if r.URL.Path == "/v1/internal/logs" {
+			var batch struct {
+				Events []map[string]any `json:"events"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			logMu.Lock()
+			tailEvents = append(tailEvents, batch.Events...)
+			logMu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
 		if r.URL.Path != "/v1/internal/bundle" {
 			http.NotFound(w, r)
 			return
@@ -186,6 +209,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 		CellURL:       stub.URL,
 		CellToken:     "test-token",
 		DispatchToken: "test-token",
+		LogToken:      "test-log",
 		InternalPort:  internalPort,
 		PublicPort:    publicPort,
 		PlatformJS:    "../../workerd/user-runtime",
@@ -297,6 +321,68 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	}
 	if v8Resp.StatusCode != http.StatusOK || !v8Out.OK || v8Out.Result != "v8:bigint:9:2026-10-15T00:00:00.000Z:0,128,255" {
 		t.Fatalf("v8 dispatch status=%d out=%+v", v8Resp.StatusCode, v8Out)
+	}
+
+	// Overlapping RPCs must each carry their own trusted Queue metadata in
+	// their native Tail trace, including when the handler emits no console line.
+	var dispatchErrs = make(chan error, 2)
+	for _, name := range []string{"alpha", "beta"} {
+		name := name
+		go func() {
+			copyPayload := map[string]any{
+				"namespace": "demo", "worker": "consumer", "bundle_sha": "sha1", "queue": name,
+				"messages": []map[string]any{{"id": name, "body": base64.StdEncoding.EncodeToString([]byte(name)), "content_type": "text/plain", "attempts": 1}},
+			}
+			encoded, _ := json.Marshal(copyPayload)
+			request, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(encoded))
+			request.Header.Set("content-type", "application/json")
+			request.Header.Set("x-cellhive-internal-token", "test-token")
+			response, err := client.Do(request)
+			if err != nil {
+				dispatchErrs <- err
+				return
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				dispatchErrs <- fmt.Errorf("%s dispatch status %d", name, response.StatusCode)
+				return
+			}
+			dispatchErrs <- nil
+		}()
+	}
+	for range 2 {
+		if err := <-dispatchErrs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	var badPayload any
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		logMu.Lock()
+		for _, event := range tailEvents {
+			if event["event_type"] != "queue" {
+				continue
+			}
+			info, _ := event["event"].(map[string]any)
+			name, _ := info["queue"].(string)
+			if name == "alpha" || name == "beta" {
+				if info["batchSize"] != float64(1) || info["rpcMethod"] != "handleQueue" {
+					badPayload = info
+				}
+				seen[name] = true
+			}
+		}
+		logMu.Unlock()
+		if badPayload != nil {
+			t.Fatalf("Queue Tail payload = %#v", badPayload)
+		}
+		if seen["alpha"] && seen["beta"] {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !seen["alpha"] || !seen["beta"] {
+		t.Fatalf("concurrent Queue Tail payloads missing: %#v", seen)
 	}
 
 	cancel()
@@ -1037,6 +1123,8 @@ func TestWorkflowStepsStubIsScoped(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var seen []string
+	var attempts []map[string]any
+	var stepTraces []string
 
 	const probe = `
 import { WorkflowEntrypoint } from "cloudflare:workers";
@@ -1050,9 +1138,22 @@ export class Probe extends WorkflowEntrypoint {
 		switch r.URL.Path {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(probe))
+		case "/v1/internal/worker/bindings":
+			_, _ = w.Write([]byte(`{"bindings":{},"vars":{}}`))
+		case "/v1/internal/invocations":
+			var record map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			attempts = append(attempts, record)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"invocation": record})
 		case "/v1/internal/workflow/state", "/v1/internal/workflow/step", "/v1/internal/workflow/attempt", "/v1/internal/workflow/finish":
 			mu.Lock()
 			seen = append(seen, r.URL.RawQuery)
+			stepTraces = append(stepTraces, r.Header.Get("traceparent"))
 			mu.Unlock()
 			switch r.URL.Path {
 			case "/v1/internal/workflow/state":
@@ -1081,7 +1182,8 @@ export class Probe extends WorkflowEntrypoint {
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
-		InternalPort: internalPort, PublicPort: publicPort,
+		InvocationLogging: true,
+		InternalPort:      internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -1132,6 +1234,20 @@ export class Probe extends WorkflowEntrypoint {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if len(attempts) != 2 || attempts[0]["status"] != "running" || attempts[1]["status"] != "success" || attempts[1]["kind"] != "workflow" || attempts[1]["resource"] != "MY_WF" {
+		t.Fatalf("workflow invocation records = %+v", attempts)
+	}
+	if attempts[0]["invocation_id"] != attempts[1]["invocation_id"] || attempts[1]["request_id"] != attempts[1]["invocation_id"] {
+		t.Fatalf("workflow invocation correlation = %+v", attempts)
+	}
+	if tp, ok := attempts[1]["traceparent"].(string); !ok || !regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`).MatchString(tp) {
+		t.Fatalf("workflow traceparent = %+v", attempts[1]["traceparent"])
+	}
+	for _, tp := range stepTraces {
+		if tp != attempts[1]["traceparent"] {
+			t.Fatalf("workflow step traceparent = %q, want %q", tp, attempts[1]["traceparent"])
+		}
+	}
 	if len(seen) == 0 {
 		t.Fatal("workflow state endpoint was never reached")
 	}
@@ -1168,6 +1284,9 @@ import { env as workerEnv } from "cloudflare:workers";
 export default {
   async fetch(req, env) {
     return Response.json({
+      keys: Object.keys(env).sort(),
+      importedKeys: Object.keys(workerEnv).sort(),
+      doType: typeof env.DO,
       handler: { chPlatform: env.CH_PLATFORM === "user-value" ? "user-value" : typeof env.CH_PLATFORM, cellToken: typeof env.CELL_TOKEN === "undefined" ? "absent" : "LEAKED", cellUrl: typeof env.CELL_URL === "undefined" ? "absent" : "LEAKED-URL", platform: typeof env.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT" },
       imported: { chPlatform: workerEnv.CH_PLATFORM === "user-value" ? "user-value" : typeof workerEnv.CH_PLATFORM, cellToken: typeof workerEnv.CELL_TOKEN === "undefined" ? "absent" : "LEAKED", cellUrl: typeof workerEnv.CELL_URL === "undefined" ? "absent" : "LEAKED-URL", platform: typeof workerEnv.PLATFORM === "undefined" ? "absent" : "LEAKED-TRANSPORT" },
       globalLeak: typeof globalThis.__cellhivePlatform === "undefined" ? "absent" : "LEAKED",
@@ -1183,7 +1302,7 @@ export default {
 		"workers": []any{map[string]any{
 			"worker":  "probe",
 			"active":  1,
-			"version": map[string]any{"number": 1, "bundle_sha": "shaProbe", "vars": map[string]string{"CH_PLATFORM": "user-value"}},
+			"version": map[string]any{"number": 1, "bundle_sha": "shaProbe", "vars": map[string]string{}},
 		}},
 	}}}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1239,17 +1358,24 @@ export default {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var out struct {
-		Handler    map[string]string `json:"handler"`
-		Imported   map[string]string `json:"imported"`
-		GlobalLeak string            `json:"globalLeak"`
-		LogToken   string            `json:"logToken"`
+		Keys         []string          `json:"keys"`
+		ImportedKeys []string          `json:"importedKeys"`
+		DoType       string            `json:"doType"`
+		Handler      map[string]string `json:"handler"`
+		Imported     map[string]string `json:"imported"`
+		GlobalLeak   string            `json:"globalLeak"`
+		LogToken     string            `json:"logToken"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("decode %q: %v", body, err)
 	}
+	t.Logf("empty tenant env response: %s", body)
+	if len(out.Keys) != 0 || len(out.ImportedKeys) != 0 || out.DoType != "undefined" {
+		t.Fatalf("undeclared tenant env: %s", body)
+	}
 	for name, got := range map[string]map[string]string{"handler": out.Handler, "imported": out.Imported} {
-		if got["chPlatform"] != "user-value" {
-			t.Fatalf("%s env CH_PLATFORM = %q, want user-value", name, got["chPlatform"])
+		if got["chPlatform"] != "undefined" {
+			t.Fatalf("%s env CH_PLATFORM = %q, want undefined", name, got["chPlatform"])
 		}
 		for key, want := range map[string]string{"cellToken": "absent", "cellUrl": "absent", "platform": "absent"} {
 			if got[key] != want {
@@ -2954,6 +3080,7 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 	r2 := map[string]string{}
 	var queueMu sync.Mutex
 	var queueSends []string
+	var queueContexts []string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -3014,6 +3141,7 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 			b, _ := io.ReadAll(r.Body)
 			queueMu.Lock()
 			queueSends = append(queueSends, r.Header.Get("x-cellhive-queue-content-type")+":"+string(b))
+			queueContexts = append(queueContexts, r.Header.Get("x-request-id")+"|"+r.Header.Get("traceparent"))
 			queueMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "m1"})
 		case "/v1/queue/send-batch":
@@ -3021,6 +3149,9 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 				Messages []any `json:"messages"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&in)
+			queueMu.Lock()
+			queueContexts = append(queueContexts, r.Header.Get("x-request-id")+"|"+r.Header.Get("traceparent"))
+			queueMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"ids": []string{"b1", "b2"}})
 		default:
 			http.NotFound(w, r)
@@ -3066,9 +3197,13 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 	}
 	queueMu.Lock()
 	gotQueueSends := append([]string(nil), queueSends...)
+	gotQueueContexts := append([]string(nil), queueContexts...)
 	queueMu.Unlock()
 	if len(gotQueueSends) != 2 || gotQueueSends[0] != `json:{"n":1}` || !strings.HasPrefix(gotQueueSends[1], "v8:{\"__cellhive_v8\":") {
 		t.Fatalf("queue sends = %q; expected json and v8 envelopes", gotQueueSends)
+	}
+	if len(gotQueueContexts) != 3 || gotQueueContexts[0] != gotQueueContexts[1] || gotQueueContexts[1] != gotQueueContexts[2] || !strings.Contains(gotQueueContexts[0], "|00-") || strings.HasPrefix(gotQueueContexts[0], "|") {
+		t.Fatalf("queue producer context was lost across isolate: %q", gotQueueContexts)
 	}
 	cancel()
 	select {
@@ -3833,15 +3968,21 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	}
 	proj := map[string]any{"apps": []any{map[string]any{
 		"namespace": "acme",
-		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
-		"workers":   []any{map[string]any{"worker": "web", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}}},
+		"routes": []any{
+			map[string]any{"host": "app.test", "path": "/on", "worker": "web"},
+			map[string]any{"host": "app.test", "path": "/off", "worker": "quiet"},
+		},
+		"workers": []any{
+			map[string]any{"worker": "web", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}},
+			map[string]any{"worker": "quiet", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog", "log_policy": map[string]any{"console": false}}},
+		},
 	}}}
 	var mu sync.Mutex
 	var logRequests []struct {
 		Namespace string
 		Worker    string
 		Token     string
-		Entries   []map[string]any
+		Events    []map[string]any
 	}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -3850,8 +3991,10 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(logTailBundle))
 		case "/v1/internal/logs":
-			var entries []map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+			var batch struct {
+				Events []map[string]any `json:"events"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -3860,8 +4003,8 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 				Namespace string
 				Worker    string
 				Token     string
-				Entries   []map[string]any
-			}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), r.Header.Get("x-cellhive-internal-token"), entries})
+				Events    []map[string]any
+			}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), r.Header.Get("x-cellhive-internal-token"), batch.Events})
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
@@ -3899,7 +4042,17 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	resp, body := fetchHost(t, client, public, "/")
+	request, _ := http.NewRequest(http.MethodGet, public+"/on", nil)
+	request.Host = "app.test"
+	request.Header.Set("x-request-id", "caller-request-7")
+	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	resp, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	body := string(bodyBytes)
 	if resp.StatusCode != 500 || !strings.Contains(body, "tail-boom") {
 		t.Fatalf("fetch = %d %q, want tenant exception response", resp.StatusCode, body)
 	}
@@ -3908,7 +4061,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		Namespace string
 		Worker    string
 		Token     string
-		Entries   []map[string]any
+		Events    []map[string]any
 	}
 	for {
 		mu.Lock()
@@ -3928,12 +4081,65 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if got[0].Token != "dev-log-token" {
 		t.Fatalf("tail token = %q, want log-role token", got[0].Token)
 	}
-	if len(got[0].Entries) != 3 || got[0].Entries[0]["level"] != "log" || got[0].Entries[0]["message"] != `native-tail-marker {"n":1}` || got[0].Entries[1]["level"] != "warn" || got[0].Entries[1]["message"] != "warned" || got[0].Entries[2]["level"] != "error" || !strings.Contains(got[0].Entries[2]["message"].(string), "tail-boom") {
-		t.Fatalf("tail entries = %#v", got[0].Entries)
+	if len(got[0].Events) != 1 {
+		t.Fatalf("tail events = %#v", got[0].Events)
 	}
-	args, ok := got[0].Entries[0]["message_args"].([]any)
+	event := got[0].Events[0]
+	if event["outcome"] != "exception" || event["event_type"] != "fetch" {
+		t.Fatalf("tail outcome/type = %#v", event)
+	}
+	if event["requestId"] != "caller-request-7" {
+		t.Fatalf("caller request ID was not preserved: %#v", event["requestId"])
+	}
+	if event["traceparent"] != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+		t.Fatalf("caller traceparent was not preserved in Tail: %#v", event["traceparent"])
+	}
+	logs, ok := event["logs"].([]any)
+	if !ok || len(logs) != 2 || logs[0].(map[string]any)["level"] != "log" || logs[1].(map[string]any)["level"] != "warn" {
+		t.Fatalf("tail logs = %#v", event["logs"])
+	}
+	args, ok := logs[0].(map[string]any)["message"].([]any)
 	if !ok || len(args) != 2 || args[0] != "native-tail-marker" {
-		t.Fatalf("tail raw message_args = %#v", got[0].Entries[0]["message_args"])
+		t.Fatalf("tail raw message args = %#v", logs[0])
+	}
+	exceptions, ok := event["exceptions"].([]any)
+	if !ok || len(exceptions) != 1 || !strings.Contains(exceptions[0].(map[string]any)["message"].(string), "tail-boom") {
+		t.Fatalf("tail exceptions = %#v", event["exceptions"])
+	}
+	if version, ok := event["scriptVersion"].(map[string]any); !ok || version["id"] == "" {
+		t.Fatalf("tail version = %#v", event["scriptVersion"])
+	}
+	resp, body = fetchHost(t, client, public, "/on")
+	if resp.StatusCode != 500 || !strings.Contains(body, "tail-boom") {
+		t.Fatalf("generated-ID fetch = %d %q", resp.StatusCode, body)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		mu.Lock()
+		count := len(logRequests)
+		if count >= 2 {
+			generated := logRequests[1].Events[0]["requestId"]
+			mu.Unlock()
+			if id, ok := generated.(string); !ok || id == "" || id == "caller-request-7" {
+				t.Fatalf("generated request ID = %#v", generated)
+			}
+			break
+		}
+		mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("generated-ID Tail event missing")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	resp, body = fetchHost(t, client, public, "/off")
+	if resp.StatusCode != 500 || !strings.Contains(body, "tail-boom") {
+		t.Fatalf("quiet fetch = %d %q, want tenant exception response", resp.StatusCode, body)
+	}
+	time.Sleep(250 * time.Millisecond)
+	mu.Lock()
+	quietLogCount := len(logRequests)
+	mu.Unlock()
+	if quietLogCount != 2 {
+		t.Fatalf("quiet worker emitted logs: requests=%d, want 2 from web only", quietLogCount)
 	}
 	cancel()
 	select {
@@ -6249,10 +6455,18 @@ func TestUserRuntimeTraceExport(t *testing.T) {
 	}
 	workerd, _ := FindWorkerd()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, workerd, capnpPath) }()
 	client := noProxyClient()
+	defer func() {
+		cancel()
+		client.CloseIdleConnections()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("workerd did not exit after cancel")
+		}
+	}()
 	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
 	deadline := time.Now().Add(25 * time.Second)
 	for {

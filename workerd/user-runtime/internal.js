@@ -93,7 +93,7 @@ async function dispatchQueues(req, env, ctx) {
   // The batch crosses an isolate boundary over RPC, and structured clone drops
   // non-index array properties and functions — so send a plain payload and let
   // the tenant-side wrapper build the CF MessageBatch (ADR-154).
-  const payload = { messages: batch, queue, traceparent: body.traceparent };
+  const payload = { messages: batch, queue, traceparent: body.traceparent, request_id: body.request_id };
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
     await finishInvocation(env, invocation, execution);
@@ -129,8 +129,7 @@ async function dispatchTimers(req, env, ctx) {
     await finishInvocation(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
-  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined };
-  if (body.traceparent) Object.defineProperty(event, "traceparent", { value: body.traceparent, enumerable: false });
+  const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, traceparent: body.traceparent, request_id: body.request_id };
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
     await finishInvocation(env, invocation, execution);
@@ -143,18 +142,24 @@ async function dispatchTimers(req, env, ctx) {
 }
 
 async function persistInvocation(env, record) {
-  if (env.CH_INVOCATION_LOGS !== "1") return record;
+  if (!record._logging_enabled) return record;
+  const { _logging_enabled, ...payload } = record;
   const url = new URL(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/invocations");
   url.searchParams.set("ns", record.namespace);
   const response = await env.PLATFORM.fetch(url, {
-    method:"POST",headers:{"content-type":"application/json","x-cellhive-internal-token":env.CELL_TOKEN},body:JSON.stringify(record),
+    method:"POST",headers:{"content-type":"application/json","x-cellhive-internal-token":env.CELL_TOKEN},body:JSON.stringify(payload),
   });
   if (!response.ok) throw new Error("invocation persistence failed: " + response.status);
-  return (await response.json()).invocation;
+  return { ...(await response.json()).invocation, _logging_enabled: true };
 }
 
 async function startInvocation(env,body,kind) {
-  const source = kind === "queue" ? [body.namespace,body.worker,body.queue,(body.messages||[]).map(m=>m.id).sort()] : [body.namespace,body.worker,body.token||"",body.scheduled_time_ms,body.cron];
+  // The versioned policy is authoritative. If its lookup fails, keep running
+  // the handler but do not persist a possibly opted-out Worker's invocation.
+  const spec = env.CH_INVOCATION_LOGS === "1" ? await specFor(env, body) : null;
+  const source = kind === "queue" ? [body.namespace,body.worker,body.queue,(body.messages||[]).map(m=>m.id).sort()]
+    : kind === "workflow" ? [body.namespace,body.worker,body.workflow,body.id]
+    : [body.namespace,body.worker,body.token||"",body.scheduled_time_ms,body.cron];
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(source))));
   const logical = [...digest].map(b=>b.toString(16).padStart(2,"0")).join("");
   const messages=[];
@@ -163,11 +168,25 @@ async function startInvocation(env,body,kind) {
     const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(identity))));
     messages.push({id:message.id,logical_id:"message:"+[...digest].map(b=>b.toString(16).padStart(2,"0")).join(""),attempt:Math.max(1,message.attempts||1)});
   }
+  const producerLinks = kind === "queue" ? (body.messages||[]).map(m => ({
+    message_id: m.id, request_id: m.producer_request_id || "", traceparent: m.producer_traceparent || "",
+  })).filter(link => link.request_id || link.traceparent) : [];
+  const invocationId = crypto.randomUUID();
+  const requestId = body.request_id || invocationId;
+  const traceparent = body.traceparent || freshTraceparent();
+  body.request_id = requestId;
+  body.traceparent = traceparent;
   return persistInvocation(env,{
-    invocation_id:crypto.randomUUID(),logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||"",
+    invocation_id:invocationId,request_id:requestId,traceparent,logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||body.workflow||"",
     attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):1,
-    started_ms:Date.now(),status:"running",logs:[],messages,
+    started_ms:Date.now(),status:"running",logs:[],messages,producer_links:producerLinks,
+    _logging_enabled: env.CH_INVOCATION_LOGS === "1" && spec?.ok !== false && spec?.log_policy?.invocation !== false,
   });
+}
+
+function freshTraceparent() {
+  const hex = (bytes) => [...crypto.getRandomValues(new Uint8Array(bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `00-${hex(16)}-${hex(8)}-01`;
 }
 
 async function finishInvocation(env, record, execution) {
@@ -260,10 +279,12 @@ async function dispatchWorkflows(req, env, ctx) {
   if (!namespace || !worker || !bundle_sha || !workflow || !class_name || !id) {
     return json({ error: "bad_request", message: "namespace, worker, bundle_sha, workflow, class_name, id are required" }, 400);
   }
+  const invocation = await startInvocation(env, body, "workflow");
   let stub;
   try {
     stub = await loadWorkflowWorker(env, ctx, body);
   } catch (e) {
+    await finishInvocation(env, invocation, { error: String(e) });
     return workerLoadFailure(e);
   }
   try {
@@ -273,13 +294,18 @@ async function dispatchWorkflows(req, env, ctx) {
       workflow: body.workflow,
       id: body.id,
       run: body.run_token || "",
+      traceparent: body.traceparent,
     });
     const out = await stub.getEntrypoint("CellHiveWorkflow").handleRun(class_name, {
       instanceId: id,
       event: { payload: decodeBody(body.params, "application/json"), instanceId: id, timestamp: new Date() },
+      traceparent: body.traceparent,
+      request_id: body.request_id,
     }, bridge);
+    await finishInvocation(env, invocation, { value: { result: out }, error: out?.status === "errored" ? out.error || "workflow errored" : "" });
     return json({ ok: true, workflow, id, ...(out || {}) });
   } catch (e) {
+    await finishInvocation(env, invocation, { error: String(e) });
     return json({ error: "workflow_failed", message: String(e) }, 500);
   }
 }
@@ -312,7 +338,7 @@ async function loadWorkflowWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
+    ...(env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
       props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
     })] }),
   };
@@ -326,11 +352,12 @@ async function loadWorkflowWorker(env, ctx, body) {
   );
 }
 
-// platformConsts renders only non-secret binding-name metadata. Platform
-// URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
-function platformConsts(spec) {
+// platformConsts renders binding names and a Tail-only correlation key into
+// the trusted wrapper. The key authorizes no platform API; platform role
+// credentials and URLs remain in the host (ADR-186/230).
+function platformConsts(spec, tailKey = "") {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
@@ -361,13 +388,14 @@ async function loadWorker(env, ctx, body) {
   // Same id format as loader.js workerStub (ADR-126/127): a worker's fetch and
   // queue/scheduled/service handlers share one isolate per (worker, version).
   const ver = body.version != null ? `${body.version}-` : "";
+  const tailKey = env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? "" : crypto.randomUUID();
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: [...new Set([...(body.compat_flags || spec.compat_flags || []).filter(f=>f!=="no_nodejs_als"), "nodejs_als"])],
     limits: workerLimits(body.limits || spec.limits),
     mainModule: "wrapper.js",
     modules: {
-      "wrapper.js": platformConsts(spec && spec.bindings) + env.WRAPPER_SRC,
+      "wrapper.js": platformConsts(spec && spec.bindings, tailKey) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,
@@ -377,8 +405,8 @@ async function loadWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE === "0" ? {} : { tails: [ctx.exports.TenantTail({
-      props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
+    ...(env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+      props: { namespace: body.namespace, worker: body.worker, version: body.version || 0, tailKey },
     })] }),
   };
   return checkedWorkerGet(
@@ -427,13 +455,6 @@ async function loadSource(env, sha) {
 // body.bindings wins (service dispatch carries the cell-agent-resolved spec);
 // otherwise the spec is fetched once per (worker, version) (ADR-128).
 async function specFor(env, body) {
-  if (body.bindings !== undefined) {
-    return {
-      bindings: body.bindings || {}, vars: body.vars || {},
-      limits: body.limits,
-      compat_date: body.compat_date, compat_flags: body.compat_flags,
-    };
-  }
   const key = `${body.namespace}/${body.worker}@${body.version !== undefined ? body.version : ""}`;
   let spec = specCache.get(key);
   if (spec === undefined) {
@@ -441,6 +462,14 @@ async function specFor(env, body) {
     // Only successful lookups are cached: a cell-agent blip must not pin an
     // empty spec for the worker's lifetime.
     if (spec.ok !== false) cachePut(specCache, key, spec, SPEC_CACHE_MAX);
+  }
+  if (body.bindings !== undefined) {
+    return {
+      ...spec, bindings: body.bindings || {}, vars: body.vars || {},
+      limits: body.limits || spec.limits,
+      compat_date: body.compat_date || spec.compat_date,
+      compat_flags: body.compat_flags || spec.compat_flags,
+    };
   }
   return spec;
 }
@@ -456,7 +485,7 @@ async function fetchSpec(env, ns, worker, version) {
     });
     if (!r.ok) return { ok: false, bindings: {}, vars: {} };
     const j = await r.json();
-    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits };
+    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits, log_policy:j.log_policy };
   } catch (e) {
     return { ok: false, bindings: {}, vars: {} };
   }

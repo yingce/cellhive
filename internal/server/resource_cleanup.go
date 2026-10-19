@@ -133,6 +133,7 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, control.Scope())
 		if err != nil || o.Expired(time.Now()) {
+			s.invalidateStaleLocal(ctx, control.Scope())
 			o, err = s.Owner.Claim(ctx, control.Scope(), time.Now())
 			if err != nil {
 				return err
@@ -236,6 +237,7 @@ func (s *Server) cleanupResourceData(ctx context.Context, j control.ResourceClea
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, sc)
 		if err != nil || o.Expired(time.Now()) {
+			s.invalidateStaleLocal(ctx, sc)
 			o, err = s.Owner.Claim(ctx, sc, time.Now())
 			if err != nil {
 				return false, err
@@ -411,6 +413,7 @@ func (s *Server) removeQueueSource(ctx context.Context, ns, queue, source, gener
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, sc)
 		if err != nil || o.Expired(time.Now()) {
+			s.invalidateStaleLocal(ctx, sc)
 			o, err = s.Owner.Claim(ctx, sc, time.Now())
 			if err != nil {
 				return err

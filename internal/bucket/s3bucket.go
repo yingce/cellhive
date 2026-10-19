@@ -61,6 +61,10 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 	}
 	if o.DisableOptionalChecksums {
 		cfg.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		// COS/OSS do not return the optional AWS checksum headers. The SDK's
+		// default "when supported" mode warns on every successful GET, which
+		// floods stdout under a busy cell-agent. Required checks remain enabled.
+		cfg.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	}
 	if o.Debug {
 		cfg.ClientLogMode = aws.LogRequestWithBody | aws.LogResponseWithBody

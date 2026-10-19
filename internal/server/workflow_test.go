@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"cellhive/internal/admission"
 	"cellhive/internal/scopedtoken"
@@ -125,6 +126,9 @@ func TestWorkflowResultDecodedBudget(t *testing.T) {
 	ctx := context.Background()
 	url := "/v1/internal/workflow/finish?ns=acme&workflow=MY_WF&id=large"
 	stepURL := "/v1/internal/workflow/step?ns=acme&workflow=MY_WF&id=large&name=large"
+	if _, err := srv.Owner.Claim(ctx, workflow.Scope("acme", "MY_WF"), time.Now()); err != nil {
+		t.Fatalf("claim workflow before fixture writes: %v", err)
+	}
 	if _, err := srv.Workflows.Create(ctx, "acme", "MY_WF", "large", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +264,9 @@ func TestWorkflowRunLeasePreventsDoubleDispatch(t *testing.T) {
 func TestWorkflowWaitReleasesRunLease(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx := context.Background()
+	if _, err := srv.Owner.Claim(ctx, workflow.Scope("acme", "wf"), time.Now()); err != nil {
+		t.Fatalf("claim workflow before fixture writes: %v", err)
+	}
 	if _, err := srv.Workflows.Create(ctx, "acme", "wf", "i", nil); err != nil {
 		t.Fatal(err)
 	}

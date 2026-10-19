@@ -62,6 +62,19 @@ func queueContentType(r *http.Request) string {
 	return "json"
 }
 
+// Correlation is best effort: an oversized caller header must not prevent an
+// otherwise valid business message from being enqueued.
+func queueProducerContext(r *http.Request) (requestID, traceparent string) {
+	requestID, traceparent = r.Header.Get("x-request-id"), r.Header.Get("traceparent")
+	if len(requestID) > 160 {
+		requestID = ""
+	}
+	if len(traceparent) > 256 {
+		traceparent = ""
+	}
+	return
+}
+
 func (s *Server) requireQueue(w http.ResponseWriter) bool {
 	if s.Queue == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no_queue", "queue store not configured")
@@ -110,9 +123,15 @@ func (s *Server) handleQueueSend(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	ns, queue := s.scopeNS(r), q.Get("queue")
+	producerID, producerTrace := queueProducerContext(r)
+	producer := queuepkg.SendMessage{Body: body, ContentType: contentType, DelaySeconds: delay, IdempotencyKey: q.Get("idempotency_key"), ProducerRequestID: producerID, ProducerTraceparent: producerTrace}
 	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, queue), func() error {
 		var e error
-		id, e = s.Queue.Send(r.Context(), ns, queue, body, contentType, delay, q.Get("idempotency_key"))
+		var ids []string
+		ids, e = s.Queue.SendBatch(r.Context(), ns, queue, []queuepkg.SendMessage{producer})
+		if e == nil {
+			id = ids[0]
+		}
 		return e
 	}); err != nil {
 		s.captureErr(w, err, "queue_send_failed")
@@ -147,13 +166,14 @@ func (s *Server) handleQueueSendBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msgs := make([]queuepkg.SendMessage, len(req.Messages))
+	producerID, producerTrace := queueProducerContext(r)
 	for i, m := range req.Messages {
 		body, err := base64.StdEncoding.DecodeString(m.Body)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "queue_invalid_body", "body must be base64")
 			return
 		}
-		msgs[i] = queuepkg.SendMessage{Body: body, ContentType: m.ContentType, DelaySeconds: m.DelaySeconds, IdempotencyKey: m.IdempotencyKey, Metadata: m.Metadata}
+		msgs[i] = queuepkg.SendMessage{Body: body, ContentType: m.ContentType, DelaySeconds: m.DelaySeconds, IdempotencyKey: m.IdempotencyKey, Metadata: m.Metadata, ProducerRequestID: producerID, ProducerTraceparent: producerTrace}
 	}
 	var ids []string
 	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error { var e error; ids, e = s.Queue.SendBatch(r.Context(), ns, name, msgs); return e }); err != nil {

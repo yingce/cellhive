@@ -930,7 +930,7 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 			var logRequests []struct {
 				Namespace string
 				Worker    string
-				Entries   []map[string]any
+				Events    []map[string]any
 			}
 			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -943,8 +943,10 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 				case "/v1/internal/do/alarm/upsert":
 					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 				case "/v1/internal/logs":
-					var entries []map[string]any
-					if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+					var batch struct {
+						Events []map[string]any `json:"events"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
@@ -952,8 +954,8 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 					logRequests = append(logRequests, struct {
 						Namespace string
 						Worker    string
-						Entries   []map[string]any
-					}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), entries})
+						Events    []map[string]any
+					}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), batch.Events})
 					mu.Unlock()
 					_, _ = w.Write([]byte(`{"ok":true}`))
 				default:
@@ -1001,23 +1003,49 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 			var got []struct {
 				Namespace string
 				Worker    string
-				Entries   []map[string]any
+				Events    []map[string]any
 			}
 			for {
 				mu.Lock()
 				got = append(got[:0], logRequests...)
 				mu.Unlock()
-				if len(got) > 0 || !tc.enabled || time.Now().After(deadline) {
+				foundLine := false
+				for _, request := range got {
+					for _, event := range request.Events {
+						logs, _ := event["logs"].([]any)
+						for _, raw := range logs {
+							line, _ := raw.(map[string]any)
+							args, _ := line["message"].([]any)
+							if len(args) == 1 && args[0] == "do-tail-line" {
+								foundLine = true
+							}
+						}
+					}
+				}
+				if foundLine || !tc.enabled || time.Now().After(deadline) {
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 			if tc.enabled {
-				if len(got) != 1 || got[0].Namespace != "demo" || got[0].Worker != "w" {
-					t.Fatalf("platform log requests = %#v, want one for demo/w", got)
+				foundLine := false
+				for _, request := range got {
+					if request.Namespace != "demo" || request.Worker != "w" {
+						t.Fatalf("tail identity = %#v", request)
+					}
+					for _, event := range request.Events {
+						logs, _ := event["logs"].([]any)
+						for _, raw := range logs {
+							line, _ := raw.(map[string]any)
+							args, _ := line["message"].([]any)
+							if line["level"] == "log" && len(args) == 1 && args[0] == "do-tail-line" {
+								foundLine = true
+							}
+						}
+					}
 				}
-				if len(got[0].Entries) != 1 || got[0].Entries[0]["level"] != "log" || got[0].Entries[0]["message"] != "do-tail-line" {
-					t.Fatalf("tail entries = %#v", got[0].Entries)
+				if !foundLine {
+					t.Fatalf("tail console line missing from events = %#v", got)
 				}
 			} else {
 				time.Sleep(200 * time.Millisecond)

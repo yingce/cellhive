@@ -122,7 +122,7 @@ func (m *Manager) Append(ctx context.Context, s cell.Scope, epoch uint64, segmen
 		return "", "", fmt.Errorf("replica: segment epoch %d != requested %d", h.Epoch, epoch)
 	}
 	key := Prefix(s, epoch) + ltx.SegmentName(h)
-	etag, err := m.putResourceObject(ctx, s, epoch, key, segment)
+	etag, err := m.putImmutableSegment(ctx, s, epoch, key, segment)
 	if err != nil {
 		return "", "", err
 	}
@@ -161,7 +161,7 @@ func (m *Manager) AppendBatch(ctx context.Context, s cell.Scope, epoch uint64, s
 		name = ltx.SegmentName(first)
 	}
 	key := Prefix(s, epoch) + name
-	etag, err := m.putResourceObject(ctx, s, epoch, key, buf)
+	etag, err := m.putImmutableSegment(ctx, s, epoch, key, buf)
 	if err != nil {
 		return "", "", err
 	}
@@ -210,7 +210,7 @@ func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segm
 		return "", "", fmt.Errorf("replica: L1 segment epoch %d != requested %d", h.Epoch, epoch)
 	}
 	key := L1Prefix(s, epoch) + ltx.SegmentName(h)
-	etag, err := m.putResourceObject(ctx, s, epoch, key, segment)
+	etag, err := m.putImmutableSegment(ctx, s, epoch, key, segment)
 	if err != nil {
 		return "", "", err
 	}

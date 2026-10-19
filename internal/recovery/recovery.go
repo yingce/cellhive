@@ -121,6 +121,55 @@ func (m *Manager) collectSealed(ctx context.Context, followers []string, session
 	return total, covered, nil
 }
 
+// RecoverLiveScope copies the acknowledged tail of one fenced DO capture scope
+// out of an active cell-agent session. Other cells keep using that session.
+// The DO owner must already have changed before this function is called.
+func (m *Manager) RecoverLiveScope(ctx context.Context, rec nodelog.Record, scope cell.Scope) (int, error) {
+	live, ok := m.Peer.(peer.LiveRecoveryTransport)
+	if !ok {
+		return 0, fmt.Errorf("recovery: peer transport lacks live tail support")
+	}
+	if rec.ProtoVersion != nodelog.ProtoVersionSession || rec.Status != nodelog.StatusOpen {
+		return 0, fmt.Errorf("recovery: active session has unsupported state %s/%s", rec.ProtoVersion, rec.Status)
+	}
+	if len(rec.Followers) == 0 {
+		return 0, fmt.Errorf("recovery: open session has no followers")
+	}
+	total := 0
+	for _, follower := range rec.Followers {
+		final, err := live.Head(ctx, follower, rec.Session)
+		if err != nil {
+			return total, fmt.Errorf("recovery: follower head %s: %w", follower, err)
+		}
+		var after uint64
+		var offset int64
+		for after < final {
+			fragments, next, nextOffset, err := live.TailOpen(ctx, follower, rec.Session, scope.String(), after, final, offset)
+			if err != nil {
+				return total, fmt.Errorf("recovery: follower tail %s: %w", follower, err)
+			}
+			if next <= after || next > final || nextOffset <= offset {
+				return total, fmt.Errorf("recovery: follower %s tail did not advance correctly at %d/%d", follower, after, final)
+			}
+			previous := after
+			for _, fragment := range fragments {
+				if fragment.Sequence <= previous || fragment.Sequence > next || fragment.Scope != scope.String() {
+					return total, fmt.Errorf("recovery: follower %s invalid scoped tail at %d", follower, fragment.Sequence)
+				}
+				for _, segment := range fragment.Segments {
+					if _, _, err := m.Replica.Append(ctx, scope, fragment.Epoch, segment); err != nil {
+						return total, fmt.Errorf("recovery: append %s: %w", scope.String(), err)
+					}
+					total++
+				}
+				previous = fragment.Sequence
+			}
+			after, offset = next, nextOffset
+		}
+	}
+	return total, nil
+}
+
 // RecoverNode runs recovery for every unsealed session of a dead node. Sealed
 // sessions take the fast path (graceful handoff already uploaded everything). It
 // returns the number of segments collected and the number of sessions recovered.

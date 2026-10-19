@@ -83,6 +83,7 @@ func main() {
 		}
 	}
 	committer := sqlcapture.NewHTTPCommitter(*owner, *token, followers, nil)
+	committer.RequireDOOwner = true // Claimed hosts recover follower tails before cold restore.
 	s := &dosupervisor.Supervisor{
 		Dir:         *dir,
 		Committer:   committer,

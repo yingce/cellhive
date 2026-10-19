@@ -82,6 +82,59 @@ func TestRunnerDispatchesDueExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsStaleReplicaAndCommitsFired(t *testing.T) {
+	ctx := context.Background()
+	d := &recordingDispatcher{}
+	r, reg, st := newRunner(t, d)
+	tm := New(1000, KindCron, "demo/__timers__/run", "slot")
+	if err := st.Upsert(ctx, tm); err != nil {
+		t.Fatal(err)
+	}
+	r.Now = func() time.Time { return time.UnixMilli(2000) }
+	owned := false
+	commits := 0
+	r.Own = func(context.Context, string) (bool, error) { return owned, nil }
+	r.Commit = func(_ context.Context, _ string, fn func() error) error { commits++; return fn() }
+	if n, err := r.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("stale pass = %d, %v", n, err)
+	}
+	if len(d.got) != 0 || commits != 0 {
+		t.Fatalf("stale copy dispatched or committed: calls=%d commits=%d", len(d.got), commits)
+	}
+	owned = true
+	reg.Add(tm.Scope)
+	if n, err := r.Pass(ctx); err != nil || n != 1 {
+		t.Fatalf("owner pass = %d, %v", n, err)
+	}
+	if len(d.got) != 1 || commits == 0 {
+		t.Fatalf("owner result: calls=%d commits=%d", len(d.got), commits)
+	}
+	if fired, _ := st.IsFired(ctx, tm.Token, 2000); !fired {
+		t.Fatal("fired token missing")
+	}
+}
+
+func TestRunnerIdlePassDoesNotWriteCell(t *testing.T) {
+	ctx := context.Background()
+	r, reg, st := newRunner(t, &recordingDispatcher{})
+	r.Now = func() time.Time { return time.UnixMilli(2000) }
+	reg.Add("demo/__timers__/run")
+	before, err := st.cell.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("idle pass = %d, %v", n, err)
+	}
+	after, err := st.cell.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("idle pass advanced txid from %d to %d", before, after)
+	}
+}
+
 func TestRunnerRetriesOnDispatchFailure(t *testing.T) {
 	ctx := context.Background()
 	d := &recordingDispatcher{err: errors.New("endpoint down")}
@@ -96,10 +149,32 @@ func TestRunnerRetriesOnDispatchFailure(t *testing.T) {
 	if ok, _ := st.IsFired(ctx, tm.Token, 2000); ok {
 		t.Fatalf("timer marked fired despite dispatch failure")
 	}
-	// Endpoint recovers: the next pass delivers it.
+	// Non-cron timers keep their existing immediate retry semantics.
 	d.err = nil
 	if n, _ := r.Pass(ctx); n != 1 {
 		t.Fatalf("retry pass did not deliver")
+	}
+}
+
+func TestRunnerCronFailureBacksOffAndPreservesSlot(t *testing.T) {
+	ctx := t.Context()
+	d := &recordingDispatcher{err: errors.New("handler failed")}
+	r, _, st := newRunner(t, d)
+	tm := New(1000, KindCron, "demo/__timers__/run", "slot")
+	if err := st.Upsert(ctx, tm); err != nil {
+		t.Fatal(err)
+	}
+	r.Now = func() time.Time { return time.UnixMilli(2000) }
+	if n, _ := r.Pass(ctx); n != 0 {
+		t.Fatalf("failed cron counted: %d", n)
+	}
+	d.err = nil
+	if n, _ := r.Pass(ctx); n != 0 {
+		t.Fatalf("cron retried before backoff: %d", n)
+	}
+	r.Now = func() time.Time { return time.UnixMilli(7000) }
+	if n, _ := r.Pass(ctx); n != 1 || len(d.got) != 1 || d.got[0].DueAtMs != tm.DueAtMs {
+		t.Fatalf("cron retry lost original slot: n=%d got=%+v", n, d.got)
 	}
 }
 

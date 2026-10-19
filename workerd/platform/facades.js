@@ -610,6 +610,19 @@ export function makeQueue(platform, ns, queue, scopeToken) {
   };
 }
 
+// Keep the public Queue API in the tenant isolate. The platform stub runs in
+// another isolate, so it receives the current invocation context explicitly.
+export function makeQueueFromStub(stub) {
+  const context = () => ({
+    traceparent: globalThis.__cellhiveTraceparent || "",
+    requestId: globalThis.__cellhiveRequestId || "",
+  });
+  return {
+    send(body, options = {}) { return stub.send(body, options, context()); },
+    sendBatch(messages = []) { return stub.sendBatch(messages, context()); },
+  };
+}
+
 function base64Queue(bytes) { let s = ""; for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b); return btoa(s); }
 function encodeQueueBody(body, requested) {
   const contentType = requested || (typeof body === "string" ? "text" : "json");

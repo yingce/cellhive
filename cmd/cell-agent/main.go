@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -98,7 +100,7 @@ func main() {
 		_ = tel.Shutdown(shutCtx)
 	}()
 	if tel.Enabled() {
-		log.Info("otel export enabled", "endpoint", cfg.OTLPEndpoint, "ratio", cfg.TraceSampleRatio)
+		log.Info("otel export enabled", "ratio", cfg.TraceSampleRatio)
 	}
 
 	// The bucket is the authority for owner election and epoch fencing. Serving
@@ -409,12 +411,13 @@ func main() {
 		}
 		return openTimer(tctx, sc)
 	}
+	var timerRunner *timer.Runner
 	if cfg.TimerInterval > 0 {
-		(&timer.Runner{
+		timerRunner = &timer.Runner{
 			Registry: timerReg, Open: openTimerScope, Dispatcher: dispatcher,
 			Interval: cfg.TimerInterval, Batch: cfg.TimerBatch, FiredTTL: cfg.TimerFiredTTL,
 			Log: log,
-		}).Start(ctx)
+		}
 	}
 	// Leader-only automatic recovery of dead nodes (ADR-066): the waker, on the
 	// same pass as timer dispatch, collects acked-but-unuploaded segments from
@@ -426,8 +429,9 @@ func main() {
 		SelfNode: cfg.NodeID,
 		Log:      log,
 	}
+	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
-		(&waker.Waker{
+		wakerRunner = &waker.Waker{
 			Election:   waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL),
 			Batch:      cfg.WakerBatch,
 			FiredTTL:   cfg.WakerFiredTTL,
@@ -456,7 +460,7 @@ func main() {
 			},
 			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval, Log: log,
 			RecoverNodes: recoveryRunner.Pass,
-		}).Start(ctx)
+		}
 	}
 
 	// Control plane (ADR-036): per-app control cells in the same SQLite store;
@@ -530,8 +534,9 @@ func main() {
 
 	// Cron scheduler: materialize due slots as KindCron timers (ADR-076). The
 	// timer runner then dispatches them (enriched with worker/bundle, ADR-070).
+	var cronScheduler *cron.Scheduler
 	if cfg.CronInterval > 0 {
-		(&cron.Scheduler{
+		cronScheduler = &cron.Scheduler{
 			Interval: cfg.CronInterval,
 			Log:      log,
 			Open:     openTimer,
@@ -573,7 +578,7 @@ func main() {
 				}
 				return out, nil
 			},
-		}).Start(ctx)
+		}
 	}
 
 	if cfg.AuditRetention > 0 {
@@ -592,6 +597,7 @@ func main() {
 		PeerMgr:          peerMgr,
 		PeerShipper:      shipper,
 		NodeLog:          nodeLog,
+		Recovery:         takeoverRecovery,
 		Uploader:         uploader,
 		PeerUploader:     peerUploader,
 		Store:            store,
@@ -706,10 +712,12 @@ func main() {
 							consumers[t.Namespace+"\x00"+t.Queue] = queue.Ref{
 								Namespace: t.Namespace, Name: t.Queue,
 								Worker: t.Worker, BundleSHA: t.BundleSHA, Version: t.Version,
-								MaxRetries:      t.Consumer.MaxRetries,
-								DeadLetterQueue: t.Consumer.DeadLetterQueue,
-								MaxBatchSize:    t.Consumer.MaxBatchSize,
-								MaxConcurrency:  t.Consumer.MaxConcurrency,
+								MaxRetries:             t.Consumer.MaxRetries,
+								RetryDelaySeconds:      t.Consumer.RetryDelaySeconds,
+								DeadLetterQueue:        t.Consumer.DeadLetterQueue,
+								MaxBatchSize:           t.Consumer.MaxBatchSize,
+								MaxBatchTimeoutSeconds: t.Consumer.MaxBatchTimeoutSeconds,
+								MaxConcurrency:         t.Consumer.MaxConcurrency,
 							}
 						}
 						out := make([]queue.Ref, 0, len(queues))
@@ -758,6 +766,94 @@ func main() {
 		store.Drop = captureMgr.Drop
 	}
 	store.Start(ctx)
+	// Background timer work uses the same owner and capture contract as API
+	// writes. Serialize claims per scope so a second local loop cannot open a
+	// stale SQLite copy while the first loop is restoring a newly claimed cell.
+	var timerOwnerLocks [64]sync.Mutex
+	timerOwn := func(tctx context.Context, sc cell.Scope) (bool, error) {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(sc.String()))
+		mu := &timerOwnerLocks[h.Sum32()%uint32(len(timerOwnerLocks))]
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		current, _, err := om.Resolve(tctx, sc)
+		if err == nil && !current.Expired(now) {
+			if current.Node != cfg.NodeID || current.Session != cfg.SessionID {
+				return false, nil
+			}
+		} else {
+			if err != nil && !errors.Is(err, owner.ErrUnowned) {
+				return false, err
+			}
+			if srv.Overloaded != nil && srv.Overloaded() {
+				return false, nil
+			}
+			claimed, cerr := om.Claim(tctx, sc, now)
+			if cerr != nil {
+				if errors.Is(cerr, owner.ErrOwnerLive) || errors.Is(cerr, bucket.ErrPrecondition) {
+					return false, nil
+				}
+				return false, cerr
+			}
+			// The previous owner may have advanced its own local copy. Recover
+			// only after Claim's predecessor recovery has made its tail durable.
+			if err != nil || current.Node != claimed.Node || current.Session != claimed.Session {
+				if ferr := store.Forget(tctx, sc); ferr != nil {
+					return false, ferr
+				}
+			}
+		}
+		if captureMgr != nil {
+			if _, err := captureMgr.Ensure(tctx, sc); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+	timerCommit := func(tctx context.Context, scope string, fn func() error) error {
+		sc, err := cell.ParseScope(scope)
+		if err != nil {
+			return err
+		}
+		o, _, err := om.Resolve(tctx, sc)
+		if err != nil {
+			return err
+		}
+		if o.Node != cfg.NodeID || o.Session != cfg.SessionID || o.Expired(time.Now()) {
+			return owner.ErrNotOwner
+		}
+		return srv.CaptureWrite(tctx, sc, fn)
+	}
+	if timerRunner != nil {
+		timerRunner.Own = func(tctx context.Context, scope string) (bool, error) {
+			sc, err := cell.ParseScope(scope)
+			if err != nil {
+				return false, err
+			}
+			return timerOwn(tctx, sc)
+		}
+		timerRunner.Commit = timerCommit
+		timerRunner.Start(ctx)
+	}
+	if wakerRunner != nil {
+		wakerRunner.Own = func(tctx context.Context, scope string) (bool, error) {
+			sc, err := cell.ParseScope(scope)
+			if err != nil {
+				return false, err
+			}
+			return timerOwn(tctx, sc)
+		}
+		wakerRunner.Commit = timerCommit
+		wakerRunner.Start(ctx)
+	}
+	if cronScheduler != nil {
+		cronScheduler.Own = timerOwn
+		cronScheduler.Commit = func(tctx context.Context, sc cell.Scope, fn func() error) error {
+			return timerCommit(tctx, sc.String(), fn)
+		}
+		cronScheduler.Start(ctx)
+	}
 	if cfg.WakeRepairInterval > 0 {
 		go runWakeRepairLoop(ctx, log, store, wakeIdx, om, srv, openTimer, cfg)
 	}

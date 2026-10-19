@@ -110,9 +110,17 @@ func TestSchedulerMaterializesAndDedups(t *testing.T) {
 		t.Fatalf("timer = %+v", due[0])
 	}
 
-	// Same minute again -> upsert is idempotent (token dedup), count stays 1.
-	if n, _ := s.Pass(ctx); n != 1 {
-		t.Fatalf("second pass = %d, want 1 upsert", n)
+	// Same minute again -> no duplicate SQLite write or capture segment.
+	before, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.Pass(ctx); n != 0 {
+		t.Fatalf("second pass = %d, want 0 upserts", n)
+	}
+	after, err := c.TxID(ctx)
+	if err != nil || after != before {
+		t.Fatalf("repeated slot advanced txid: %d -> %d, err=%v", before, after, err)
 	}
 	if cnt, _ := st.Count(ctx); cnt != 1 {
 		t.Fatalf("count = %d, want 1 (dedup by token)", cnt)
@@ -131,6 +139,48 @@ func TestSchedulerMaterializesAndDedups(t *testing.T) {
 	now = utc(2026, time.January, 5, 10, 1)
 	if n, _ := s.Pass(ctx); n != 0 {
 		t.Fatalf("non-matching pass = %d, want 0", n)
+	}
+}
+
+func TestSchedulerSkipsForeignLocalCopy(t *testing.T) {
+	ctx := context.Background()
+	sc := cell.Scope{Namespace: "acme", Class: CronClass, ID: "web"}
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Open(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := false
+	commits := 0
+	s := &Scheduler{
+		Now: func() time.Time { return utc(2026, time.January, 5, 10, 0) },
+		Targets: func(context.Context) ([]Target, error) {
+			return []Target{{Namespace: "acme", Worker: "web", Cron: "* * * * *"}}, nil
+		},
+		Own:    func(context.Context, cell.Scope) (bool, error) { return owned, nil },
+		Open:   func(context.Context, cell.Scope) (*timer.Store, error) { return st, nil },
+		Commit: func(_ context.Context, _ cell.Scope, fn func() error) error { commits++; return fn() },
+	}
+	if n, err := s.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("foreign pass = %d, %v", n, err)
+	}
+	if count, _ := st.Count(ctx); count != 0 || commits != 0 {
+		t.Fatalf("foreign local copy changed: count=%d commits=%d", count, commits)
+	}
+	owned = true
+	if n, err := s.Pass(ctx); err != nil || n != 1 {
+		t.Fatalf("owner pass = %d, %v", n, err)
+	}
+	if count, _ := st.Count(ctx); count != 1 || commits != 1 {
+		t.Fatalf("owner local copy: count=%d commits=%d", count, commits)
 	}
 }
 
@@ -231,5 +281,86 @@ func TestSchedulerFeedsTimerRunner(t *testing.T) {
 	}
 	if len(d.got) != 1 || d.got[0].Kind != timer.KindCron || d.got[0].Scope != "acme/__cron__/web" {
 		t.Fatalf("dispatched = %+v", d.got)
+	}
+}
+
+func TestCronMinuteFailoverPreservesSlotAndDocumentsAtLeastOnceBoundary(t *testing.T) {
+	ctx := t.Context()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Open(ctx, cell.Scope{Namespace: "acme", Class: CronClass, ID: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := utc(2026, time.January, 5, 10, 0)
+	now := slot
+	reg := timer.NewRegistry()
+	newScheduler := func() *Scheduler {
+		return &Scheduler{Now: func() time.Time { return now },
+			Open:     func(context.Context, cell.Scope) (*timer.Store, error) { return st, nil },
+			Register: func(scope string) { reg.Add(scope) },
+			Targets: func(context.Context) ([]Target, error) {
+				return []Target{{Namespace: "acme", Worker: "web", Cron: "* * * * *"}}, nil
+			}}
+	}
+	first, successor := newScheduler(), newScheduler()
+	if _, err := first.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The first scheduler stops after materializing the durable slot. A new
+	// scheduler sees the same UTC minute and cannot create a second token.
+	now = slot.Add(30 * time.Second)
+	if _, err := successor.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.Due(ctx, now.UnixMilli(), 10)
+	if err != nil || len(due) != 1 || due[0].Occurrence != Occurrence(slot, "* * * * *") {
+		t.Fatalf("failover slot = %+v, %v", due, err)
+	}
+	d := &countingDispatcher{}
+	runner := &timer.Runner{Registry: reg,
+		Open:       func(context.Context, string) (*timer.Store, error) { return st, nil },
+		Dispatcher: d, Now: func() time.Time { return now }}
+	if n, err := runner.Pass(ctx); err != nil || n != 1 || len(d.got) != 1 {
+		t.Fatalf("successor dispatch = %d, %v, events=%+v", n, err, d.got)
+	}
+	if _, err := first.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := runner.Pass(ctx); err != nil || n != 0 || len(d.got) != 1 {
+		t.Fatalf("old scheduler resurrected slot: %d, %v, events=%+v", n, err, d.got)
+	}
+
+	// If a handler completed but the process died before MarkFired, the
+	// external effect is unknowable. The persisted timer is intentionally
+	// redelivered with the same occurrence for application-level deduplication.
+	now = slot.Add(time.Minute)
+	if _, err := successor.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	due, err = st.Due(ctx, now.UnixMilli(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("next slot = %+v, %v", due, err)
+	}
+	completedWithoutAck := due[0]
+	if err := d.Dispatch(ctx, completedWithoutAck); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := runner.Pass(ctx); err != nil || n != 1 || len(d.got) != 3 || d.got[2].Token != completedWithoutAck.Token {
+		t.Fatalf("redelivery after lost fired ack = %d, %v, events=%+v", n, err, d.got)
+	}
+	// A later scheduler pass cannot replay the now-fired occurrence.
+	if _, err := first.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := runner.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("fired occurrence replayed: %d, %v", n, err)
 	}
 }

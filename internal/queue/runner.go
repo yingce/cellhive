@@ -28,6 +28,7 @@ type Ref struct {
 	Version int
 	// Consumer retry/dead-letter configuration (ADR-072).
 	MaxRetries             int
+	RetryDelaySeconds      int
 	DeadLetterQueue        string
 	MaxBatchSize           int
 	MaxBatchTimeoutSeconds int
@@ -88,6 +89,20 @@ func (r *Runner) retryDelay() int64 {
 		return r.RetryDelayMs
 	}
 	return 30_000
+}
+
+func (r *Runner) retryDelayFor(ref Ref) int64 {
+	if ref.RetryDelaySeconds > 0 {
+		return int64(ref.RetryDelaySeconds) * 1000
+	}
+	return r.retryDelay()
+}
+
+func retriesFor(ref Ref) int {
+	if ref.MaxRetries > 0 {
+		return ref.MaxRetries
+	}
+	return 3
 }
 
 // Start runs the consumer loop until ctx is cancelled.
@@ -152,8 +167,19 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 	if ref.MaxBatchSize > 0 {
 		batch = ref.MaxBatchSize
 	}
+	if batch <= 0 || batch > 100 {
+		batch = 10
+	}
 	batches := make([][]Message, 0, conc)
 	for i := 0; i < conc; i++ {
+		ready, rerr := r.Store.BatchReady(ctx, ref.Namespace, ref.Name, batch, ref.MaxBatchTimeoutSeconds)
+		if rerr != nil {
+			r.log().Warn("queue batch readiness failed", "ns", ref.Namespace, "queue", ref.Name, "err", rerr)
+			break
+		}
+		if !ready {
+			break
+		}
 		var msgs []Message
 		cerr := r.commit(ctx, ref.Namespace, ref.Name, func() error {
 			var e error
@@ -235,12 +261,12 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 	if derr != nil {
 		for _, m := range msgs {
 			// Attempts was incremented when the message was claimed above.
-			if ref.MaxRetries > 0 && m.Attempts >= ref.MaxRetries {
+			if m.Attempts > retriesFor(ref) {
 				r.deadLetter(ctx, ref, m, derr)
 				continue
 			}
 			if rerr := r.commit(ctx, ref.Namespace, ref.Name, func() error {
-				return r.Store.Retry(ctx, ref.Namespace, ref.Name, m.ID, r.retryDelay())
+				return r.Store.Retry(ctx, ref.Namespace, ref.Name, m.ID, r.retryDelayFor(ref))
 			}); rerr != nil {
 				r.log().Warn("queue retry failed", "ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "err", rerr)
 			}
@@ -258,7 +284,7 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 	acked := 0
 	for _, m := range msgs {
 		if delayMs, retry := retryDelay[m.ID]; retry {
-			if ref.MaxRetries > 0 && m.Attempts >= ref.MaxRetries {
+			if m.Attempts > retriesFor(ref) {
 				r.deadLetter(ctx, ref, m, fmt.Errorf("retry requested by consumer"))
 				continue
 			}
@@ -369,15 +395,17 @@ type DetailedDispatcher interface {
 }
 
 type dispatchMessage struct {
-	ID               string          `json:"id"`
-	Body             string          `json:"body"` // base64
-	ContentType      string          `json:"content_type"`
-	Attempts         int             `json:"attempts"`
-	Timestamp        int64           `json:"timestamp"`
-	Metadata         json.RawMessage `json:"metadata,omitempty"`
-	SourceQueue      string          `json:"source_queue"`
-	SourceGeneration string          `json:"source_generation"`
-	SourceID         string          `json:"source_id"`
+	ID                  string          `json:"id"`
+	Body                string          `json:"body"` // base64
+	ContentType         string          `json:"content_type"`
+	Attempts            int             `json:"attempts"`
+	Timestamp           int64           `json:"timestamp"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	SourceQueue         string          `json:"source_queue"`
+	SourceGeneration    string          `json:"source_generation"`
+	SourceID            string          `json:"source_id"`
+	ProducerRequestID   string          `json:"producer_request_id,omitempty"`
+	ProducerTraceparent string          `json:"producer_traceparent,omitempty"`
 }
 
 // Dispatch delivers a batch to the consumer endpoint (whole-batch semantics).
@@ -399,6 +427,7 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 			Timestamp:   m.TimestampMs,
 			Metadata:    m.Metadata,
 			SourceQueue: m.SourceQueue, SourceGeneration: m.SourceGeneration, SourceID: m.SourceID,
+			ProducerRequestID: m.ProducerRequestID, ProducerTraceparent: m.ProducerTraceparent,
 		})
 	}
 	body, err := json.Marshal(map[string]any{

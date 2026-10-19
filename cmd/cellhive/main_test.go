@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +15,31 @@ import (
 	"cellhive/internal/config"
 	"cellhive/internal/scopedtoken"
 )
+
+func TestRegisteredResourcesFailsClosedOnControlReadError(t *testing.T) {
+	for _, response := range []struct {
+		name, body string
+		status     int
+	}{
+		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"error":"recovering"}`},
+		{name: "malformed", status: http.StatusOK, body: `{"resources":`},
+	} {
+		t.Run(response.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/control/resources" || r.URL.Query().Get("namespace") != "acme" {
+					t.Errorf("unexpected resource request: %s", r.URL)
+				}
+				w.WriteHeader(response.status)
+				_, _ = w.Write([]byte(response.body))
+			}))
+			defer server.Close()
+			t.Setenv("CELLHIVE_ADMIN_URL", server.URL)
+			if registered, err := registeredResources("acme"); err == nil || registered != nil {
+				t.Fatalf("resource read had callback=%t err=%v, want explicit error", registered != nil, err)
+			}
+		})
+	}
+}
 
 func TestBuildBindings(t *testing.T) {
 	out := buildBindings(

@@ -1,10 +1,12 @@
 package dosupervisor
 
 import (
+	"bytes"
 	"cellhive/internal/cellstore"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -129,6 +131,129 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 		if got := queryRow(t, filepath.Join(dirB, name)); got != 7 {
 			t.Fatalf("%s restored row = %d, want 7", name, got)
 		}
+	}
+}
+
+// A new supervisor must continue the durable LTX numbering after a takeover.
+// Both successors have their own disk, while the original disk remains intact.
+func TestCaptureTakeoverRoundTripKeepsDurableHead(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(b)
+	newSupervisor := func(dir string) *Supervisor {
+		return &Supervisor{Dir: dir, Committer: &bucketCommitter{rep: rep, epoch: 1}, Epoch: 1,
+			ScopePrefix: "workerd/__do__", Bucket: b}
+	}
+	dirA := t.TempDir()
+	name := "host.sqlite"
+	mkSQLiteWithRow(t, filepath.Join(dirA, name), 1)
+	a := newSupervisor(dirA)
+	if _, err := a.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scope := a.scopeForRel(name)
+	oldKey := replica.Prefix(scope, 1) + "0.snapshot"
+	oldSnapshot, _, err := b.Get(ctx, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirB := t.TempDir()
+	if _, err := a.RestoreAll(ctx, dirB); err != nil {
+		t.Fatal(err)
+	}
+	updateRow(t, filepath.Join(dirB, name), 2)
+	bSup := newSupervisor(dirB)
+	if _, err := bSup.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := b.Get(ctx, oldKey); err != nil || !bytes.Equal(got, oldSnapshot) {
+		t.Fatalf("B overwrote A's acknowledged snapshot: err=%v", err)
+	}
+	dirReturn := t.TempDir()
+	if _, err := bSup.RestoreAll(ctx, dirReturn); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryRow(t, filepath.Join(dirReturn, name)); got != 2 {
+		t.Fatalf("durable restore after B acknowledged 2 = %d", got)
+	}
+	// A's old disk is still present. The host restore must take the durable head.
+	if _, err := bSup.RestoreAll(ctx, dirA); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryRow(t, filepath.Join(dirA, name)); got != 2 {
+		t.Fatalf("A after return = %d, want 2", got)
+	}
+	updateRow(t, filepath.Join(dirA, name), 3)
+	aReturn := newSupervisor(dirA)
+	if _, err := aReturn.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dirFinal := t.TempDir()
+	if _, err := aReturn.RestoreAll(ctx, dirFinal); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryRow(t, filepath.Join(dirFinal, name)); got != 3 {
+		t.Fatalf("durable restore after A acknowledged 3 = %d", got)
+	}
+}
+
+func TestHostGateDoesNotPublishStaleOtherShard(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(b)
+	newSupervisor := func(dir string) *Supervisor {
+		return &Supervisor{Dir: dir, Committer: &bucketCommitter{rep: rep, epoch: 1}, Epoch: 1,
+			ScopePrefix: "workerd/__do__", Bucket: b}
+	}
+	dirA := t.TempDir()
+	mkSQLiteWithRow(t, filepath.Join(dirA, "aaa.sqlite"), 1)
+	mkSQLiteWithRow(t, filepath.Join(dirA, "bbb.sqlite"), 10)
+	a := newSupervisor(dirA)
+	if _, err := a.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dirB := t.TempDir()
+	if _, err := a.RestoreAll(ctx, dirB); err != nil {
+		t.Fatal(err)
+	}
+	updateRow(t, filepath.Join(dirB, "aaa.sqlite"), 2)
+	bSup := newSupervisor(dirB)
+	if _, err := bSup.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A's PVC still holds aaa=1. Its new process serves only host bbb.
+	aRestart := newSupervisor(dirA)
+	rr := httptest.NewRecorder()
+	aRestart.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/internal/do/gate", strings.NewReader(`{"host_id":"host-bbb","host_hash":"bbb"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("host gate: %d %s", rr.Code, rr.Body.String())
+	}
+	dirCold := t.TempDir()
+	if err := bSup.restoreScope(ctx, bSup.scopeForRel("aaa.sqlite"), filepath.Join(dirCold, "aaa.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryRow(t, filepath.Join(dirCold, "aaa.sqlite")); got != 2 {
+		t.Fatalf("unowned stale shard displaced durable head: got %d, want 2", got)
+	}
+}
+
+func updateRow(t *testing.T, path string, value int) {
+	t.Helper()
+	db, err := cellstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE t SET a = ?", value); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -560,6 +685,37 @@ func (missingBlobStore) GetBlob(context.Context, string) ([]byte, error) {
 }
 
 func (missingBlobStore) PutBlob(context.Context, string, []byte) error { return nil }
+
+type flakyManifestStore struct{ attempts int }
+
+func (f *flakyManifestStore) GetBlob(context.Context, string) ([]byte, error) {
+	return nil, bucket.ErrNotFound
+}
+func (f *flakyManifestStore) PutBlob(context.Context, string, []byte) error {
+	f.attempts++
+	if f.attempts == 1 {
+		return errors.New("temporary COS failure")
+	}
+	return nil
+}
+
+func TestFailedManifestWriteIsRetriedAtNextGate(t *testing.T) {
+	store := &flakyManifestStore{}
+	s := &Supervisor{Blobs: store}
+	doc := manifestDoc{Files: []string{"host.sqlite"}}
+	if err := s.putManifest(context.Background(), "dosupervisor/test/host.json", doc); err == nil {
+		t.Fatal("first manifest write unexpectedly succeeded")
+	}
+	if err := s.putManifest(context.Background(), "dosupervisor/test/host.json", doc); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if err := s.putManifest(context.Background(), "dosupervisor/test/host.json", doc); err != nil {
+		t.Fatal(err)
+	}
+	if store.attempts != 2 {
+		t.Fatalf("manifest writes = %d, want retry then cache", store.attempts)
+	}
+}
 
 // slowCommitter records concurrent in-flight commits so a test can prove
 // SyncAll overlaps per-file proofs (ADR-170).

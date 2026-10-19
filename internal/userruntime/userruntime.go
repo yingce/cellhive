@@ -102,7 +102,7 @@ type Config struct {
 	// DisableTenantLogs omits native Tail Workers from loaded tenant code. The
 	// default keeps console and exception capture enabled.
 	DisableTenantLogs bool
-	// InvocationLogging persists Queue/Cron results and console output in the
+	// InvocationLogging persists Queue/Cron/Workflow results and console output in the
 	// cell-agent. Production cmd/user-runtime enables it; embedded test hosts
 	// without a cell-agent invocation store may leave it disabled.
 	InvocationLogging bool

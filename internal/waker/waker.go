@@ -17,6 +17,8 @@ type Waker struct {
 	// cold-path provider (leader only; may list owner records).
 	DeadScopes func(ctx context.Context) ([]string, error)
 	Open       func(ctx context.Context, scope string) (*timer.Store, error)
+	Own        func(ctx context.Context, scope string) (bool, error)
+	Commit     func(ctx context.Context, scope string, fn func() error) error
 	Dispatcher timer.Dispatcher
 	Interval   time.Duration
 	Batch      int
@@ -125,12 +127,26 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 	}
 	now := w.nowMs()
 	for _, scope := range scopes {
+		if w.Own != nil {
+			owned, oerr := w.Own(ctx, scope)
+			if oerr != nil {
+				w.log().Warn("waker ownership check failed", "scope", scope, "err", oerr)
+				continue
+			}
+			if !owned {
+				continue
+			}
+		}
 		st, err := w.Open(ctx, scope)
 		if err != nil {
 			w.log().Warn("waker open store failed", "scope", scope, "err", err)
 			continue
 		}
-		n, err := timer.DispatchDue(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.log())
+		var commit timer.Commit
+		if w.Commit != nil {
+			commit = func(cctx context.Context, fn func() error) error { return w.Commit(cctx, scope, fn) }
+		}
+		n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.log(), commit)
 		if err != nil {
 			w.log().Warn("waker dispatch pass failed", "scope", scope, "err", err)
 			continue

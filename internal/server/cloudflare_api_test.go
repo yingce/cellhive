@@ -9,11 +9,15 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/cellstore"
+	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/queue"
+	"cellhive/internal/scopedtoken"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,7 +26,7 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	part, _ := w.CreateFormField("metadata")
-	_, _ = part.Write([]byte(`{"main_module":"worker.js","compatibility_date":"2026-09-23"}`))
+	_, _ = part.Write([]byte(`{"main_module":"worker.js","compatibility_date":"2026-09-23","limits":{"cpu_ms":50}}`))
 	part, _ = w.CreateFormFile("worker.js", "worker.js")
 	_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
 	_ = w.Close()
@@ -41,6 +45,10 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	if err != nil || len(releases) != 1 {
 		t.Fatalf("worker was not deployed: releases=%d err=%v", len(releases), err)
 	}
+	view, ok, err := s.Control.VersionEnv(t.Context(), "acme", "web", releases[0].Version)
+	if err != nil || !ok || view.Limits == nil || view.Limits.CpuMs == nil || *view.Limits.CpuMs != 50 {
+		t.Fatalf("uploaded cpu_ms not persisted: limits=%+v ok=%v err=%v", view.Limits, ok, err)
+	}
 	if rr := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions", nil)
 		req.Header.Set("Authorization", "Bearer admin-tok")
@@ -49,6 +57,71 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 		return out
 	}(); rr.Code != 200 {
 		t.Fatalf("versions list %d %s", rr.Code, rr.Body.String())
+	}
+	get := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions/1", nil)
+	get.Header.Set("Authorization", "Bearer admin-tok")
+	getResult := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(getResult, get)
+	if getResult.Code != 200 || !bytes.Contains(getResult.Body.Bytes(), []byte(`"cpu_ms":50`)) {
+		t.Fatalf("version readback = %d %s", getResult.Code, getResult.Body.String())
+	}
+}
+
+func TestCloudflareRepeatUploadPreservesSeparateTriggers(t *testing.T) {
+	s := newControlServer(t)
+	ctx := t.Context()
+	if _, err := s.Control.CreateApp(ctx, "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.CreateResource(ctx, "acme", "queue", "JOBS", "acme/__queue__/JOBS", "test"); err != nil {
+		t.Fatal(err)
+	}
+	upload := func(meta string) {
+		t.Helper()
+		var body bytes.Buffer
+		w := multipart.NewWriter(&body)
+		part, _ := w.CreateFormField("metadata")
+		_, _ = part.Write([]byte(meta))
+		part, _ = w.CreateFormFile("worker.js", "worker.js")
+		_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions", &body)
+		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		rr := httptest.NewRecorder()
+		s.AdminHandler().ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("upload status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	read := func() control.Version {
+		t.Helper()
+		v, err := s.activeCloudflareVersionForWorker(ctx, "acme", "web")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	upload(`{"main_module":"worker.js","triggers":{"crons":["* * * * *"]},"bindings":[{"name":"JOBS","type":"queue","queue_name":"JOBS"}]}`)
+	consumer := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/queues/JOBS/consumers", strings.NewReader(`{"type":"worker","script_name":"web","settings":{"batch_size":1}}`))
+	consumer.Header.Set("Authorization", "Bearer admin-tok")
+	consumer.Header.Set("Content-Type", "application/json")
+	cr := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(cr, consumer)
+	if cr.Code != 200 {
+		t.Fatalf("consumer status=%d body=%s", cr.Code, cr.Body.String())
+	}
+	upload(`{"main_module":"worker.js","bindings":[{"name":"JOBS","type":"queue","queue_name":"JOBS"}]}`)
+	v := read()
+	if len(v.Crons) != 1 || v.Crons[0] != "* * * * *" || len(v.Consumers) != 1 || v.Consumers[0].Queue != "JOBS" {
+		t.Fatalf("repeat upload lost triggers: crons=%v consumers=%v", v.Crons, v.Consumers)
+	}
+	upload(`{"main_module":"worker.js","triggers":{"crons":[]},"bindings":[{"name":"JOBS","type":"queue","queue_name":"JOBS"}]}`)
+	v = read()
+	if len(v.Crons) != 0 || len(v.Consumers) != 1 {
+		t.Fatalf("explicit cron clear failed: crons=%v consumers=%v", v.Crons, v.Consumers)
 	}
 }
 
@@ -318,11 +391,20 @@ func TestCloudflareQueueConsumerLifecycle(t *testing.T) {
 	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues", `{"name":"jobs"}`); rr.Code != 200 {
 		t.Fatalf("queue %d %s", rr.Code, rr.Body.String())
 	}
-	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"batch_size":10,"max_retries":2}}`); rr.Code != 200 {
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"batch_size":10,"max_retries":2,"retry_delay":7,"max_wait_time_ms":5000}}`); rr.Code != 200 {
 		t.Fatalf("consumer create %d %s", rr.Code, rr.Body.String())
 	}
-	if rr := call(http.MethodGet, "/client/v4/accounts/acme/queues/jobs/consumers", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"consumer_id":"worker"`)) {
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/queues/jobs/consumers", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"consumer_id":"worker"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"retry_delay":7`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"max_wait_time_ms":5000`)) {
 		t.Fatalf("consumer list %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"max_retries":0}}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("explicit zero max_retries = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{}}`); rr.Code != 200 {
+		t.Fatalf("default consumer create %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := call(http.MethodGet, "/client/v4/accounts/acme/queues/jobs/consumers", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"max_retries":3`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"max_wait_time_ms":5000`)) {
+		t.Fatalf("default consumer settings %d %s", rr.Code, rr.Body.String())
 	}
 	if rr := call(http.MethodDelete, "/client/v4/accounts/acme/queues/jobs/consumers/worker", ""); rr.Code != 200 {
 		t.Fatalf("consumer delete %d %s", rr.Code, rr.Body.String())
@@ -359,8 +441,16 @@ func TestCloudflareTailSessionLifecycle(t *testing.T) {
 
 func TestCloudflareTailWebSocket(t *testing.T) {
 	s := newControlServer(t)
+	s.Cfg.TokenLog = "tok"
 	s.Logs = logbuf.New(16, 4)
-	s.Logs.Add(logbuf.Entry{Namespace: "acme", Worker: "web", Message: "hello"})
+	const event = `{"events":[{"scriptName":"untrusted","scriptVersion":{"id":"7","name":"web","tags":[]},"outcome":"exception","exceptions":[{"name":"Error","message":"boom","timestamp":42}],"logs":[{"message":["hello",{"a":1}],"level":"warn","timestamp":41}],"eventTimestamp":40,"event_type":"fetch","event":{"request":{"method":"GET","url":"https://example.com/"}},"requestId":"req-1"}]}`
+	ingest := httptest.NewRequest(http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", strings.NewReader(event))
+	ingest.Header.Set("x-cellhive-internal-token", "tok")
+	ingested := httptest.NewRecorder()
+	s.Handler().ServeHTTP(ingested, ingest)
+	if ingested.Code != http.StatusOK {
+		t.Fatalf("ingest = %d %s", ingested.Code, ingested.Body.String())
+	}
 	h := httptest.NewServer(s.AdminHandler())
 	defer h.Close()
 	base, _ := url.Parse(h.URL)
@@ -380,15 +470,264 @@ func TestCloudflareTailWebSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(env.Result.URL)
+	if strings.Contains(env.Result.URL, "admin-tok") || u.Query().Get("token") == "" {
+		t.Fatalf("tail URL contains admin credential or lacks stream token: %q", env.Result.URL)
+	}
 	u.Scheme = "ws"
 	u.Host = base.Host
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{"trace-v1"}
+	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if _, _, err := conn.ReadMessage(); err != nil {
+	if conn.Subprotocol() != "trace-v1" {
+		t.Fatalf("tail subprotocol = %q", conn.Subprotocol())
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var item struct {
+		ScriptName string `json:"scriptName"`
+		Outcome    string `json:"outcome"`
+		EventType  string `json:"event_type"`
+		Logs       []struct {
+			Message []any  `json:"message"`
+			Level   string `json:"level"`
+		} `json:"logs"`
+		Exceptions []struct {
+			Message string `json:"message"`
+		} `json:"exceptions"`
+	}
+	if err := conn.ReadJSON(&item); err != nil {
 		t.Fatal(err)
+	}
+	if item.ScriptName != "web" || item.Outcome != "exception" || item.EventType != "fetch" || len(item.Logs) != 1 || item.Logs[0].Level != "warn" || len(item.Logs[0].Message) != 2 || len(item.Exceptions) != 1 || item.Exceptions[0].Message != "boom" {
+		t.Fatalf("tail item = %+v", item)
+	}
+	pong := make(chan struct{}, 1)
+	conn.SetPongHandler(func(string) error { pong <- struct{}{}; return nil })
+	if err := conn.WriteControl(websocket.PingMessage, []byte("keepalive"), time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("tail ping: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	go func() { _, _, _ = conn.ReadMessage() }()
+	select {
+	case <-pong:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail did not answer WebSocket keepalive")
+	}
+	if lines := s.Logs.Since("acme", "web", 0, 10); len(lines) != 2 || lines[0].Message != `hello {"a":1}` || lines[0].EventType != "fetch" || lines[0].Outcome != "exception" || string(lines[0].ScriptVersion) != `{"id":"7","name":"web","tags":[]}` {
+		t.Fatalf("native line view = %+v", lines)
+	}
+	// Official Wrangler 4.133.0 sends its first debug data frame with
+	// mask:false. Its connection must remain alive and receive its fixed Pong.
+	wranglerHeaders := http.Header{"User-Agent": {"wrangler/4.133.0"}}
+	wranglerConn, _, err := dialer.Dial(u.String(), wranglerHeaders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wranglerConn.Close()
+	debug := []byte(`{"debug":false}`)
+	if _, err := wranglerConn.UnderlyingConn().Write(append([]byte{0x81, byte(len(debug))}, debug...)); err != nil {
+		t.Fatalf("wrangler debug frame: %v", err)
+	}
+	wranglerPong := make(chan struct{}, 1)
+	wranglerConn.SetPongHandler(func(data string) error {
+		if data == "wrangler tail ping" {
+			wranglerPong <- struct{}{}
+		}
+		return nil
+	})
+	_ = wranglerConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	go func() {
+		for {
+			if _, _, err := wranglerConn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-wranglerPong:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wrangler-compatible tail did not receive keepalive Pong")
+	}
+}
+
+func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
+	a, _ := newTestServer(t)
+	a.Logs = logbuf.New(16, 4)
+	b := New(Deps{
+		Cfg:  config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"},
+		Logs: logbuf.New(16, 4),
+	})
+	peerHTTP := httptest.NewServer(b.Handler())
+	defer peerHTTP.Close()
+	otherLease := lease.NewManager(a.Bucket, "node-2", "session-2", peerHTTP.URL, peerHTTP.URL, 30*time.Second)
+	if err := otherLease.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Lease.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	b.Logs.AddEvent(logbuf.TailEvent{Namespace: "acme", Worker: "web", ScriptName: "web", Outcome: "exception", EventType: "queue", EventTimestamp: 41, Exceptions: []logbuf.TailException{{Name: "Error", Message: "remote-boom", Timestamp: 41}}, Logs: []logbuf.TailLog{}})
+	b.Logs.AddEvent(logbuf.TailEvent{Namespace: "other", Worker: "web", ScriptName: "web", Outcome: "ok", EventType: "fetch", EventTimestamp: 42})
+	request := httptest.NewRequest(http.MethodGet, "/v1/internal/logs/events?ns=acme&worker=web&since=0", nil)
+	unauthorized := httptest.NewRecorder()
+	b.Handler().ServeHTTP(unauthorized, request)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("peer log endpoint without peer token = %d", unauthorized.Code)
+	}
+	adminHTTP := httptest.NewServer(a.AdminHandler())
+	defer adminHTTP.Close()
+	create, _ := http.NewRequest(http.MethodPost, adminHTTP.URL+"/client/v4/accounts/acme/workers/scripts/web/tails", strings.NewReader("{}"))
+	create.Header.Set("Authorization", "Bearer admin-tok")
+	resp, err := http.DefaultClient.Do(create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create tail = %d", resp.StatusCode)
+	}
+	var created struct {
+		Result struct {
+			URL string `json:"url"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	streamURL, err := url.Parse(created.Result.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminURL, _ := url.Parse(adminHTTP.URL)
+	streamURL.Host = adminURL.Host
+	streamURL.Scheme = "ws"
+	conn, _, err := websocket.DefaultDialer.Dial(streamURL.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	var event struct {
+		ScriptName string `json:"scriptName"`
+		Outcome    string `json:"outcome"`
+		EventType  string `json:"event_type"`
+		Exceptions []struct {
+			Message string `json:"message"`
+		} `json:"exceptions"`
+	}
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ScriptName != "web" || event.Outcome != "exception" || event.EventType != "queue" || len(event.Exceptions) != 1 || event.Exceptions[0].Message != "remote-boom" {
+		t.Fatalf("peer Tail event = %+v", event)
+	}
+	// Restart node-2 with a fresh lease session and a new ring whose first seq
+	// is 1. The stream must reset its peer cursor when discovery refreshes.
+	restarted := New(Deps{
+		Cfg:  config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"},
+		Logs: logbuf.New(16, 4),
+	})
+	restarted.Logs.AddEvent(logbuf.TailEvent{Namespace: "acme", Worker: "web", ScriptName: "web", Outcome: "ok", EventType: "scheduled", EventTimestamp: 43, Logs: []logbuf.TailLog{}})
+	restartedHTTP := httptest.NewServer(restarted.Handler())
+	defer restartedHTTP.Close()
+	newLease := lease.NewManager(a.Bucket, "node-2", "session-3", restartedHTTP.URL, restartedHTTP.URL, 30*time.Second)
+	if err := newLease.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("peer Tail after node restart: %v", err)
+	}
+	if event.Outcome != "ok" || event.EventType != "scheduled" {
+		t.Fatalf("peer Tail after node restart = %+v", event)
+	}
+}
+
+func TestCloudflareTailTokenIsScopedExpiresAndWorksAcrossNodes(t *testing.T) {
+	issuer := newControlServer(t)
+	listener := newControlServer(t)
+	listener.Logs = logbuf.New(16, 4)
+	second := httptest.NewServer(listener.AdminHandler())
+	defer second.Close()
+	create := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/tails", strings.NewReader(`{"search":"needle"}`))
+	create.Header.Set("Authorization", "Bearer admin-tok")
+	created := httptest.NewRecorder()
+	issuer.AdminHandler().ServeHTTP(created, create)
+	if created.Code != 200 {
+		t.Fatalf("create = %d %s", created.Code, created.Body.String())
+	}
+	var envelope struct {
+		Result struct {
+			URL string `json:"url"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := url.Parse(envelope.Result.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := url.Parse(second.URL)
+	stream.Host = base.Host
+	conn, _, err := websocket.DefaultDialer.Dial(stream.String(), nil)
+	if err != nil {
+		t.Fatalf("second node rejected stream: %v", err)
+	}
+	_ = conn.Close()
+	for _, path := range []string{
+		strings.Replace(stream.Path, "/scripts/web/", "/scripts/other/", 1),
+		strings.Replace(stream.Path, "/accounts/acme/", "/accounts/foreign/", 1),
+	} {
+		bad := *stream
+		bad.Scheme = "http"
+		bad.Path = path
+		resp, err := http.Get(bad.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("wrong scope %s = %d", path, resp.StatusCode)
+		}
+	}
+	bad := *stream
+	bad.Scheme = "http"
+	query := bad.Query()
+	query.Set("token", "admin-tok")
+	bad.RawQuery = query.Encode()
+	resp, err := http.Get(bad.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("admin token accepted as stream token: %d", resp.StatusCode)
+	}
+	key, err := scopedtoken.IssuerKey([]byte(listener.Cfg.ScopeSecret), tailTokenIssuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, err := scopedtoken.Mint(key, scopedtoken.Claims{Namespace: "acme", Kind: tailTokenIssuer, Name: "web#id#", Iss: tailTokenIssuer, ExpiresMs: time.Now().Add(-time.Second).UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad = *stream
+	bad.Scheme = "http"
+	bad.Path = "/client/v4/accounts/acme/workers/scripts/web/tails/id/stream"
+	query = bad.Query()
+	query.Set("token", expired)
+	bad.RawQuery = query.Encode()
+	resp, err = http.Get(bad.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired token = %d", resp.StatusCode)
 	}
 }
 

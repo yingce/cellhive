@@ -140,7 +140,11 @@ func TestRunnerRetryExhaustedGoesToDLQ(t *testing.T) {
 	if d, err := st.Depth(ctx, "demo", "q"); err != nil || d != 1 {
 		t.Fatalf("depth after retry = %d, %v; want the message queued", d, err)
 	}
-	// Second pass: attempts = 2 >= max_retries 2 -> dead-letter.
+	// Second pass: attempts = 2, the second configured retry remains available.
+	if _, err := r.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Third pass: initial delivery plus two retries are exhausted.
 	if _, err := r.Pass(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +174,9 @@ func TestRunnerDeadLetterUsesOwnerAwareSend(t *testing.T) {
 			sent = m
 			return nil
 		},
+	}
+	if _, err := r.Pass(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := r.Pass(ctx); err != nil {
 		t.Fatal(err)

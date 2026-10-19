@@ -50,6 +50,9 @@ func TestBindingsScopeAndTriggersE2E(t *testing.T) {
 		BucketDir: dir, Durability: "bucket", BucketWait: true,
 	}
 	om := &owner.Manager{B: b, NodeID: "node-1", Session: "s1", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
+	if _, err := om.Claim(ctx, control.Scope(), time.Now()); err != nil {
+		t.Fatalf("claim control before fixture writes: %v", err)
+	}
 	envKey, err := control.NewEnvelope(bytes.Repeat([]byte{0x5}, 32))
 	if err != nil {
 		t.Fatalf("envelope: %v", err)

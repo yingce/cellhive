@@ -1,11 +1,13 @@
 package peer
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -195,18 +197,11 @@ func (s *Spool) AppendSessionGroup(_ context.Context, session string, appends []
 	state := stateValue.(*sessionLog)
 	path := filepath.Join(dir, sessionLogName)
 	if !state.loaded {
-		fragments, size, err := loadSession(dir)
+		last, size, err := loadSessionState(dir)
 		if err != nil {
 			return nil, err
 		}
-		state.size = size
-		for i, fragment := range fragments {
-			want := uint64(i + 1)
-			if fragment.Sequence != want {
-				return nil, fmt.Errorf("spool: session sequence gap: got %d want %d", fragment.Sequence, want)
-			}
-			state.last = fragment.Sequence
-		}
+		state.last, state.size = last, size
 		state.loaded = true
 	}
 	seqs := make([]uint64, len(appends))
@@ -310,23 +305,63 @@ func parseSessionLog(path string) ([]SessionFragment, int64, error) {
 	return out, consumed, nil
 }
 
-func loadSession(dir string) ([]SessionFragment, int64, error) {
+// scanSessionState loads only the cursor of a potentially very large shared
+// follower log. Payloads remain on disk until a scoped recovery reads them.
+func scanSessionState(path string) (uint64, int64, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	var last uint64
+	var size int64
+	for {
+		var hdr [12]byte
+		if _, err := io.ReadFull(r, hdr[:]); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return last, size, nil
+		} else if err != nil {
+			return 0, 0, err
+		}
+		n := binary.BigEndian.Uint32(hdr[:4])
+		seq := binary.BigEndian.Uint64(hdr[4:])
+		if n < 18 || seq != last+1 {
+			return 0, 0, fmt.Errorf("spool: invalid session sequence at %d", last)
+		}
+		if _, err := io.CopyN(io.Discard, r, int64(n)-8); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return last, size, nil
+		} else if err != nil {
+			return 0, 0, err
+		}
+		last, size = seq, size+int64(4+n)
+	}
+}
+
+func loadSessionState(dir string) (uint64, int64, error) {
 	path := filepath.Join(dir, sessionLogName)
-	fragments, size, err := parseSessionLog(path)
+	last, size, err := scanSessionState(path)
 	if err != nil || size != 0 {
-		return fragments, size, err
+		return last, size, err
 	}
 	legacy, err := readLegacySession(filepath.Join(dir, "fragments"))
 	if err != nil || len(legacy) == 0 {
-		return legacy, 0, err
+		return 0, 0, err
 	}
 	tmp := path + ".migrate"
 	_ = os.Remove(tmp)
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, 0, err
+		return 0, 0, err
 	}
-	for _, fragment := range legacy {
+	for i, fragment := range legacy {
+		if fragment.Sequence != uint64(i+1) {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return 0, 0, fmt.Errorf("spool: legacy session sequence gap")
+		}
 		record := encodeSessionRecord(fragment.Sequence, fragment.Scope, fragment.Epoch, fragment.Segments)
 		if _, err = f.Write(record); err != nil {
 			break
@@ -347,9 +382,9 @@ func loadSession(dir string) ([]SessionFragment, int64, error) {
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return nil, 0, err
+		return 0, 0, err
 	}
-	return legacy, size, nil
+	return uint64(len(legacy)), size, nil
 }
 
 func readLegacySession(dir string) ([]SessionFragment, error) {
@@ -406,18 +441,11 @@ func (s *Spool) Seal(session string) (uint64, error) {
 	stateValue, _ := s.sessionLogs.LoadOrStore(dir, &sessionLog{})
 	state := stateValue.(*sessionLog)
 	if !state.loaded {
-		fragments, size, err := loadSession(dir)
+		last, size, err := loadSessionState(dir)
 		if err != nil {
 			return 0, err
 		}
-		state.size = size
-		for i, fragment := range fragments {
-			want := uint64(i + 1)
-			if fragment.Sequence != want {
-				return 0, fmt.Errorf("spool: session sequence gap: got %d want %d", fragment.Sequence, want)
-			}
-			state.last = fragment.Sequence
-		}
+		state.last, state.size = last, size
 		state.loaded = true
 	}
 	final := state.last
@@ -465,30 +493,186 @@ func (s *Spool) Tail(session string, after uint64) ([]SessionFragment, error) {
 // maxBytes counts raw segment bytes; the first matching fragment is always
 // returned so a single large but valid fragment can make progress.
 func (s *Spool) TailPage(session string, after uint64, maxFragments, maxBytes int) ([]SessionFragment, error) {
+	return s.tailPage(session, after, maxFragments, maxBytes, false)
+}
+
+// Head returns a fixed recovery cutoff without sealing the process session.
+// The caller must first fence writes for the particular scope it is restoring.
+func (s *Spool) Head(session string) (uint64, error) {
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	dir := s.sessionDir(session)
+	if cached, ok := s.sessionLogs.Load(dir); ok && cached.(*sessionLog).loaded {
+		return cached.(*sessionLog).last, nil
+	}
+	f, err := os.Open(filepath.Join(dir, sessionLogName))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("spool: active session log missing: %w", err)
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	var last uint64
+	for {
+		var hdr [12]byte
+		if _, err := io.ReadFull(r, hdr[:]); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return last, nil
+		} else if err != nil {
+			return 0, err
+		}
+		n := binary.BigEndian.Uint32(hdr[:4])
+		seq := binary.BigEndian.Uint64(hdr[4:])
+		if n < 8 || seq != last+1 {
+			return 0, fmt.Errorf("spool: invalid session head at %d", last)
+		}
+		if _, err := io.CopyN(io.Discard, r, int64(n)-8); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return last, nil
+		} else if err != nil {
+			return 0, err
+		}
+		last = seq
+	}
+}
+
+// TailScopePage streams an active session from a byte offset and returns only
+// one scope's fragments. It verifies every intervening sequence without
+// retaining unrelated cells' payloads in memory.
+func (s *Spool) TailScopePage(session, scope string, after, final uint64, offset int64, maxRecords, maxBytes int) ([]SessionFragment, uint64, int64, error) {
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	f, err := os.Open(filepath.Join(s.sessionDir(session), sessionLogName))
+	if err != nil {
+		return nil, after, offset, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, after, offset, err
+	}
+	r := bufio.NewReader(f)
+	out := make([]SessionFragment, 0)
+	next, nextOffset, used := after, offset, 0
+	for next < final && (maxRecords <= 0 || int(next-after) < maxRecords) {
+		var hdr [12]byte
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return nil, next, nextOffset, fmt.Errorf("spool: incomplete scope tail at %d: %w", next, err)
+		}
+		n := int(binary.BigEndian.Uint32(hdr[:4]))
+		seq := binary.BigEndian.Uint64(hdr[4:])
+		if n < 18 || seq != next+1 {
+			return nil, next, nextOffset, fmt.Errorf("spool: scope tail gap at %d got %d", next, seq)
+		}
+		var size [2]byte
+		if _, err := io.ReadFull(r, size[:]); err != nil {
+			return nil, next, nextOffset, err
+		}
+		scopeLen := int(binary.BigEndian.Uint16(size[:]))
+		if scopeLen > n-18 {
+			return nil, next, nextOffset, fmt.Errorf("spool: invalid scope length")
+		}
+		name := make([]byte, scopeLen)
+		if _, err := io.ReadFull(r, name); err != nil {
+			return nil, next, nextOffset, err
+		}
+		remaining := n - 8 - 2 - scopeLen
+		if string(name) == scope {
+			payload := make([]byte, 2+scopeLen+remaining)
+			copy(payload[:2], size[:])
+			copy(payload[2:], name)
+			if _, err := io.ReadFull(r, payload[2+scopeLen:]); err != nil {
+				return nil, next, nextOffset, err
+			}
+			fragment, err := decodeSessionFragment(seq, payload)
+			if err != nil {
+				return nil, next, nextOffset, err
+			}
+			out = append(out, fragment)
+			used += remaining
+		} else if _, err := io.CopyN(io.Discard, r, int64(remaining)); err != nil {
+			return nil, next, nextOffset, err
+		}
+		next, nextOffset = seq, nextOffset+int64(4+n)
+		if len(out) > 0 && maxBytes > 0 && used >= maxBytes {
+			break
+		}
+	}
+	return out, next, nextOffset, nil
+}
+
+// TailOpenPage reads up to an already observed head from an active session.
+// It leaves the session writable for unrelated cells.
+func (s *Spool) TailOpenPage(session string, after, final uint64, maxFragments, maxBytes int) ([]SessionFragment, error) {
+	fragments, err := s.tailPage(session, after, maxFragments, maxBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	out := fragments[:0]
+	for _, fragment := range fragments {
+		if fragment.Sequence > final {
+			break
+		}
+		out = append(out, fragment)
+	}
+	return out, nil
+}
+
+func (s *Spool) tailPage(session string, after uint64, maxFragments, maxBytes int, allowOpen bool) ([]SessionFragment, error) {
 	mu := s.sessionMu(session)
 	mu.Lock()
 	defer mu.Unlock()
 	dir := s.sessionDir(session)
 	sealed, err := os.ReadFile(filepath.Join(dir, sealName))
+	if err != nil && !(allowOpen && errors.Is(err, os.ErrNotExist)) {
+		return nil, err
+	}
+	var final uint64
+	if err == nil {
+		final, err = strconv.ParseUint(string(sealed), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+	}
+	f, err := os.Open(filepath.Join(dir, sessionLogName))
+	if errors.Is(err, os.ErrNotExist) && allowOpen {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	final, err := strconv.ParseUint(string(sealed), 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	fragments, _, err := parseSessionLog(filepath.Join(dir, sessionLogName))
-	if err != nil {
-		return nil, err
-	}
-	if uint64(len(fragments)) != final {
-		return nil, fmt.Errorf("spool: reclaimed or incomplete session tail: got %d want %d", len(fragments), final)
-	}
+	defer f.Close()
+	r := bufio.NewReader(f)
 	out := make([]SessionFragment, 0)
 	bytes := 0
-	for _, fragment := range fragments {
-		if fragment.Sequence <= after {
+	var sequence uint64
+	for sealed == nil || sequence < final {
+		var hdr [12]byte
+		if _, err := io.ReadFull(r, hdr[:]); errors.Is(err, io.EOF) && sealed == nil {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("spool: incomplete session tail at %d: %w", sequence, err)
+		}
+		n := binary.BigEndian.Uint32(hdr[:4])
+		seq := binary.BigEndian.Uint64(hdr[4:])
+		if n < 18 || seq != sequence+1 {
+			return nil, fmt.Errorf("spool: session tail gap at %d got %d", sequence, seq)
+		}
+		sequence = seq
+		if sequence <= after {
+			if _, err := io.CopyN(io.Discard, r, int64(n)-8); err != nil {
+				return nil, err
+			}
 			continue
+		}
+		payload := make([]byte, int(n)-8)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return nil, err
+		}
+		fragment, err := decodeSessionFragment(seq, payload)
+		if err != nil {
+			return nil, err
 		}
 		fragmentBytes := 0
 		for _, segment := range fragment.Segments {
@@ -499,6 +683,9 @@ func (s *Spool) TailPage(session string, after uint64, maxFragments, maxBytes in
 		}
 		out = append(out, fragment)
 		bytes += fragmentBytes
+	}
+	if sealed != nil && sequence < final && (maxFragments <= 0 || len(out) < maxFragments) && (maxBytes <= 0 || bytes < maxBytes) {
+		return nil, fmt.Errorf("spool: incomplete session tail: got %d want %d", sequence, final)
 	}
 	return out, nil
 }

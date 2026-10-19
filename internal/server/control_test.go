@@ -1170,6 +1170,45 @@ func TestDeployDryRun(t *testing.T) {
 	}
 }
 
+func TestDeployAndRollbackIdempotencyAPI(t *testing.T) {
+	s := newControlServer(t)
+	admin := s.AdminHandler()
+	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+	b := mustAdmin(t, admin, http.MethodPost, "/v1/control/bundle", "export default {}")
+	var bundle struct {
+		Sha string `json:"sha"`
+	}
+	if err := json.Unmarshal(b.Body.Bytes(), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	deploy := func(key, mode string) *httptest.ResponseRecorder {
+		return adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok",
+			`{"namespace":"acme","worker":"api","bundle_sha":"`+bundle.Sha+`","idempotency_key":"`+key+`","vars":{"MODE":"`+mode+`"}}`)
+	}
+	for _, rr := range []*httptest.ResponseRecorder{deploy("one", "v1"), deploy("one", "v1"), deploy("two", "v2")} {
+		if rr.Code != http.StatusOK {
+			t.Fatalf("deploy = %d %s", rr.Code, rr.Body.String())
+		}
+	}
+	if rr := deploy("one", "changed"); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "idempotency key reused") {
+		t.Fatalf("conflicting deploy = %d %s", rr.Code, rr.Body.String())
+	}
+	rollback := `{"namespace":"acme","worker":"api","idempotency_key":"rollback-one"}`
+	for i := 0; i < 2; i++ {
+		rr := adminDo(t, admin, http.MethodPost, "/v1/control/rollback", "admin-tok", rollback)
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"active":1`) {
+			t.Fatalf("rollback attempt %d = %d %s", i+1, rr.Code, rr.Body.String())
+		}
+	}
+	releases := mustAdmin(t, admin, http.MethodGet, "/v1/control/releases?namespace=acme&worker=api", "")
+	var out struct {
+		Releases []json.RawMessage `json:"releases"`
+	}
+	if err := json.Unmarshal(releases.Body.Bytes(), &out); err != nil || len(out.Releases) != 2 {
+		t.Fatalf("releases after retries = %s, err=%v", releases.Body.String(), err)
+	}
+}
+
 // TestResourceDeleteEndpoint: revoking a resource is refused while a worker
 // still binds it (409 + referenced_by) unless force=1, and after a revoke a
 // deploy declaring that binding fails the compatibility gate (ADR-156).

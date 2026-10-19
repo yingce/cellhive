@@ -92,13 +92,12 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 	if err != nil {
 		return 0, err
 	}
-	baseline, err := c.TxID(ctx)
-	if err != nil {
-		return 0, err
-	}
-
 	key := scope.String()
 	for {
+		baseline, err := c.TxID(ctx)
+		if err != nil {
+			return 0, err
+		}
 		m.mu.Lock()
 		if m.caps == nil {
 			m.caps = map[string]*state{}
@@ -112,10 +111,23 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				}
 				m.mu.Lock()
 				st2, ok2 := m.caps[key]
-				m.mu.Unlock()
 				if ok2 && st2.epoch == epoch {
-					return baseline, nil
+					select {
+					case <-st2.cap.Done():
+						// A failed capture cannot prove later writes. The next
+						// instance must establish a full durable baseline first.
+						if !m.AutoSnapshot {
+							m.mu.Unlock()
+							return 0, errors.New("cellcapture: stopped capture requires a snapshot to recover")
+						}
+						st2.cancel()
+						delete(m.caps, key)
+					default:
+						m.mu.Unlock()
+						return baseline, nil
+					}
 				}
+				m.mu.Unlock()
 				continue // initializer failed or the epoch moved: retry
 			}
 			// Owner epoch changed: stop the stale capture and restart below.
@@ -153,7 +165,16 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		// other cell's Ensure/Wait/Drop (ADR-134 follow-up).
 		if m.AutoSnapshot {
 			if err := cap.Snapshot(ctx); err != nil {
-				m.log().Warn("cellcapture snapshot failed", "scope", key, "err", err)
+				cancel()
+				cap.Start(cctx)
+				<-cap.Done()
+				m.mu.Lock()
+				if m.caps[key] != nil && m.caps[key].cap == cap {
+					delete(m.caps, key)
+				}
+				m.mu.Unlock()
+				close(ready)
+				return 0, err
 			}
 		}
 		cap.Start(cctx)

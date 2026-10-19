@@ -73,6 +73,8 @@ NetworkPolicy 将 user-runtime `:8088` 限为 cell-agent Pod；公开 `:8081` �
 
 生产用 `do-runtime-gated` 取代无门的 `do-runtime`：`do-runtime -render-only` 渲染 capnp，`do-supervisor` 托管 workerd 并把每个响应门控在 cell-agent 的持久性证明上（同时负责续租与 drain）。
 
+DO 接管恢复从 bucket 读取；ADR-208 起，DO 捕获会显式等待 bucket 提交，即使 cell-agent 可用 fleet follower 也不会仅以 follower fsync 确认放行。容量规划应按 bucket 写入延迟估算 DO 写入响应。
+
 ```bash
 # compose（先设置 CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 并运行 preflight）
 docker compose -f deploy/compose/docker-compose.yml --profile rpo0 up -d cell-agent user-runtime do-runtime-gated
@@ -81,7 +83,7 @@ kubectl apply -k deploy/k8s/overlays/rpo0
 ```
 
 - **已验证（真实容器）**：DO 调用经门返回持久计数，落桶 `cells/workerd/__do__/<host>.sqlite/ltx/e1/*.ltx` + owner；`scripts/runtime-baseline-e2e.sh` 验证同卷进程重启。
-- **真实 Kubernetes 验收（2026-09-25 PASS）**：`scripts/k3d-runtime-e2e.sh` 验证 gated 双 Pod、owner Pod 删除后从 per-host manifest 冷恢复（计数 `1→2`），以及 RollingUpdate 期间 120 个逻辑写后精确到 `123`（无丢写/重复提交）。滚动 ownership 切换窗口会短暂返回 5xx，验收客户端重试并以最终精确计数守住语义；这不是“每个物理 HTTP 尝试零错误”。per-host manifest 避免多个 supervisor 覆盖同一个全局索引；claim 恢复失败时先 release owner，再 fail closed。单节点 k3d 不替代跨主机、云桶与目标 CNI 验证。
+- **真实 Kubernetes 验收（2026-10-18 PASS）**：`scripts/k3d-runtime-e2e.sh` 在单节点 k3d 中用指定 Pod 验证 gated 双 Pod 的 A→B→A 接管，计数 `1→2→3`，A 的 PVC volumeName 保持不变；再做 RollingUpdate 期间 120 个逻辑写，最终 `124`。切换窗口会短暂返回 5xx，验收客户端重试并以最终精确计数守住语义；这不表示每个物理 HTTP 尝试零错误。per-host manifest 避免多个 supervisor 覆盖同一个 host 索引；claim 恢复失败时先 release owner，再 fail closed。单节点 FS bucket 验收不替代跨主机、COS 与目标 CNI 验证。
 - 手动：`do-supervisor -dir /data/state/do -owner http://cell-agent:7001 -listen :18901 -do-url http://127.0.0.1:8788 -workerd /usr/local/bin/workerd -config <capnp>`。
 
 ## systemd / 裸机
@@ -117,7 +119,7 @@ bin/cellhive-helm usw upgrade
 `helm upgrade --install --atomic --wait` 部署；后续升级继续复用同一入口。详见
 `/opt/cellhive-helm/README.md`。
 
-values 覆盖：镜像/副本/资源/存储、共享 `config.bucket`（默认 `s3://cellhive`，多 cell-agent 副本必须使用通过探针的共享 `s3://`/`oss://`/`cos://` 对象存储）、`doRuntime.gate`（true → gated `StatefulSet` + 每 Pod PVC，DO RPO=0；false → ungated OnDelete StatefulSet）、`existingSecret` 或内联 `rootKey`、PDB、NetworkPolicy（`adminIngressFrom` 追加 admin 入站来源）、ingress。Chart 与 `deploy/k8s/`（base + `overlays/rpo0`）等价；`make k8s-render` / `make helm-lint` 离线校验。
+values 覆盖：镜像/副本/资源/存储、共享 `config.bucket`（默认 `s3://cellhive`，多 cell-agent 副本必须使用通过探针的共享 `s3://`/`oss://`/`cos://` 对象存储）、`doRuntime.enabled`（默认 true；false 时不渲染 DO Service/StatefulSet/PDB/NetworkPolicy，并将 `CELLHIVE_DO_RUNTIMES` 置空）、`doRuntime.gate`（启用 DO 时 true → gated `StatefulSet` + 每 Pod PVC，DO RPO=0；false → ungated OnDelete StatefulSet）、`existingSecret` 或内联 `rootKey`、PDB、NetworkPolicy（`adminIngressFrom` 追加 admin 入站来源）、ingress。关闭 DO 后，DO 调用返回 `503 no_do_runtimes`；cell-agent、user-runtime 及非 DO 功能继续运行。对已经运行 DO 工作负载的 release，先确认不再使用 DO 再关闭；Helm 移除 StatefulSet 不会自动删除其 PVC。此开关仅用于 Helm Chart，`deploy/k8s/` 仍提供常规 DO 部署；`make k8s-render` / `make helm-lint` 离线校验。
 
 默认资源：cell-agent 2 副本（250m/256Mi request、2Gi memory limit）；user-runtime 2→10 副本（250m/256Mi request、1 CPU/2Gi limit，HPA CPU 70% + memory 70%）；gated do-runtime 2 副本（500m/512Mi request、2 CPU/4Gi limit、每 Pod 20Gi PVC）。
 

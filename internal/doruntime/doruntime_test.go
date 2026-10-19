@@ -1375,6 +1375,45 @@ func TestDoRuntimeReadyAndDrainProbe(t *testing.T) {
 	}
 }
 
+func TestDoRuntimeReadyRecoversAfterHungCellAgent(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	var healthy atomic.Bool
+	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/readyz" {
+			http.NotFound(w, r)
+			return
+		}
+		if !healthy.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cell.Close()
+	base, stop := startRuntimeAt(t, cell.URL, "", t.TempDir(), "", "ready-retry")
+	defer stop()
+	start := time.Now()
+	resp, err := noProxyClient().Get(base + "/ready")
+	if err != nil {
+		t.Fatalf("hung cell readiness: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || time.Since(start) > 3*time.Second {
+		t.Fatalf("hung cell readiness = %d after %s", resp.StatusCode, time.Since(start))
+	}
+	healthy.Store(true)
+	resp, err = noProxyClient().Get(base + "/ready")
+	if err != nil {
+		t.Fatalf("recovered cell readiness: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("recovered cell readiness = %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestDoRuntimeMetricsReportedToSupervisor covers ADR-166: after an alarm
 // invocation the host actor reports counter deltas to the supervisor's
 // /internal/do/stats so GET /metrics can expose cellhive_do_*.

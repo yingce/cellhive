@@ -250,6 +250,104 @@ func TestSessionTailPageAdvancesWithoutSplittingFragments(t *testing.T) {
 	}
 }
 
+func TestTailScopePageSkipsOtherScopesAndRejectsTruncation(t *testing.T) {
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cell.Scope{Namespace: "demo", Class: "__do__", ID: "target"}
+	other := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "other"}
+	var path string
+	for i := uint64(1); i <= 5; i++ {
+		sc := other
+		if i == 2 || i == 4 {
+			sc = target
+		}
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		path, _, err = sp.AppendBatchSession(t.Context(), "mixed", sc, 1, [][]byte{seg})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	final, err := sp.Head("mixed")
+	if err != nil || final != 5 {
+		t.Fatalf("head = %d, %v", final, err)
+	}
+	var after uint64
+	var offset int64
+	var seen []uint64
+	for after < final {
+		page, next, nextOffset, err := sp.TailScopePage("mixed", target.String(), after, final, offset, 2, 1<<20)
+		if err != nil || next <= after || nextOffset <= offset {
+			t.Fatalf("page %d = %v, %d, %d, %v", after, page, next, nextOffset, err)
+		}
+		for _, fragment := range page {
+			seen = append(seen, fragment.Sequence)
+		}
+		after, offset = next, nextOffset
+	}
+	if len(seen) != 2 || seen[0] != 2 || seen[1] != 4 {
+		t.Fatalf("scoped sequences = %v", seen)
+	}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 6, EndTxID: 6}, []byte("still-open"))
+	if _, _, err := sp.AppendBatchSession(t.Context(), "mixed", other, 1, [][]byte{seg}); err != nil {
+		t.Fatalf("other scope append: %v", err)
+	}
+	if _, err := sp.Head("mixed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, offset-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := sp.TailScopePage("mixed", target.String(), 4, 5, offset-2, 2, 1<<20); err == nil {
+		t.Fatal("truncated record accepted")
+	}
+}
+
+func TestTailScopePageRejectsSequenceGap(t *testing.T) {
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__do__", ID: "gap"}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("gap"))
+	path, _, err := sp.AppendBatchSession(t.Context(), "gap-session", sc, 1, [][]byte{seg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sp.AppendBatchSession(t.Context(), "gap-session", sc, 1, [][]byte{seg}); err != nil {
+		t.Fatal(err)
+	}
+	first, next, offset, err := sp.TailScopePage("gap-session", sc.String(), 0, 2, 0, 1, 1<<20)
+	if err != nil || len(first) != 1 || next != 1 {
+		t.Fatalf("first page: %v %d %v", first, next, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{0, 0, 0, 0, 0, 0, 0, 4}, offset+4)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := sp.TailScopePage("gap-session", sc.String(), 1, 2, offset, 1, 1<<20); err == nil {
+		t.Fatal("sequence gap accepted")
+	}
+}
+
+func TestActiveSessionHeadRejectsMissingLog(t *testing.T) {
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.Head("missing-session"); err == nil {
+		t.Fatal("missing follower session treated as empty")
+	}
+}
+
 func TestSessionDirectorySyncFailureIsRetried(t *testing.T) {
 	ctx := context.Background()
 	sp, err := NewSpool(t.TempDir())

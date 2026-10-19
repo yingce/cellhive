@@ -722,7 +722,11 @@ func cmdDeploy(args []string) error {
 		}
 		// Local preflight with the registered-resource set, then the server
 		// re-validates authoritatively.
-		if findings := m.ValidateWith(registeredResources(ns)); len(findings) > 0 {
+		registered, err := registeredResources(ns)
+		if err != nil {
+			return fmt.Errorf("read registered resources before deploy: %w", err)
+		}
+		if findings := m.ValidateWith(registered); len(findings) > 0 {
 			for _, f := range findings {
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", f.Code, f.FieldPath, f.Message)
 			}
@@ -766,6 +770,9 @@ func cmdDeploy(args []string) error {
 		"crons":     []string(crons),
 	}
 	if mapped != nil {
+		if mapped.Limits != nil {
+			payload["limits"] = mapped.Limits
+		}
 		if mapped.CompatibilityDate != "" {
 			payload["compatibility_date"] = mapped.CompatibilityDate
 		}
@@ -870,10 +877,15 @@ func cmdPromote(args []string) error {
 
 func cmdRollback(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cellhive rollback <namespace> <worker>")
+		return fmt.Errorf("usage: cellhive rollback <namespace> <worker> [--idempotency-key <key>]")
+	}
+	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	idempotencyKey := fs.String("idempotency-key", "", "return the first rollback result on repeated requests with this key")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
 	}
 	data, err := adminCall(http.MethodPost, "/v1/control/rollback", map[string]string{
-		"namespace": args[0], "worker": args[1],
+		"namespace": args[0], "worker": args[1], "idempotency_key": *idempotencyKey,
 	})
 	if err != nil {
 		return err
@@ -1032,22 +1044,25 @@ func cmdSecret(args []string) error {
 // uploadBundle hashes a local file, uploads it, and returns the content sha.
 // registeredResources fetches the namespace's registered resources so the local
 // preflight can reject unregistered bindings before deploy (no auto-provisioning).
-func registeredResources(ns string) func(kind, name string) bool {
+func registeredResources(ns string) (func(kind, name string) bool, error) {
 	set := map[string]bool{}
-	if data, err := adminCall(http.MethodGet, "/v1/control/resources?namespace="+url.QueryEscape(ns), nil); err == nil {
-		var out struct {
-			Resources []struct {
-				Kind string `json:"kind"`
-				Name string `json:"name"`
-			} `json:"resources"`
-		}
-		if json.Unmarshal(data, &out) == nil {
-			for _, r := range out.Resources {
-				set[r.Kind+"|"+r.Name] = true
-			}
-		}
+	data, err := adminCall(http.MethodGet, "/v1/control/resources?namespace="+url.QueryEscape(ns), nil)
+	if err != nil {
+		return nil, err
 	}
-	return func(kind, name string) bool { return set[kind+"|"+name] }
+	var out struct {
+		Resources []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode resource list: %w", err)
+	}
+	for _, r := range out.Resources {
+		set[r.Kind+"|"+r.Name] = true
+	}
+	return func(kind, name string) bool { return set[kind+"|"+name] }, nil
 }
 
 // bundleFromConfig builds and uploads the config's `main` (esbuild in-process,

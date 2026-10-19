@@ -1,5 +1,7 @@
 # Durable Objects
 
+> **2026-10-19 接管修订（ADR-208/212）**：DO shard owner epoch 与 supervisor 的 LTX capture epoch 相互独立。新 supervisor 首次捕获每个文件时，读取并校验该 scope 的持久链水位，从下一序号写 baseline snapshot，再连续提交 delta；请求输出门只捕获当前 host；同名 LTX 段只允许同字节重放。旧版 DO 每次等 bucket ack。新代码在 follower fsync 确认前持久记录该捕获 scope 的恢复指针；新 shard claim 后、首次派发前按 host manifest 对每个文件补传 follower 尾部，再从 bucket 恢复。活 cell-agent 的进程 session 不封存，其他 cell 继续写；失败时拒绝冷恢复。无 follower 时仍等 bucket。双 cell-agent k3d 的未落桶强杀 A→B→A 和 A→B→C 接管已通过，生产仍是旧镜像，真实 COS 故障窗口待验收。DO `/ready` 对 cell-agent 健康探测设 800ms 超时，避免滚动更新期间旧连接无限挂起使 Pod 持续未就绪。
+
 > **2026-10-15 alarm 修订（取代下方历史上报/消费描述）**：`setAlarm` 经对象绑定 capability 先确认统一 timer 持久化，再写对象时间/generation；交接失败不静默确认。派发验证 generation，active→pending 原子消费，失败保留重试、成功不误删 handler 新设 alarm。retryCount/isRetry 记录在 pending 中，重试节奏仍为统一 runner，非 CF 原生退避/次数上限。旧数字 alarm 惰性兼容。见 [计时器契约](timers-and-dispatch.md) 与 [验收](archive/timer-correctness-2026-10-15.md)。
 
 > **状态（2026-09-15）**：**host-actor 骨架 + 归属/栅栏/排空/驻留已实现并验证**（ADR-077/078：facets + `workerLoader.getDurableObjectClass` + localDisk；`/v1/do/invoke`；shard、owner record + **单调 generation**（`owner-gen`）、pre-dispatch guard/renew、`/v1/do/drain`、`DO_PREVENT_EVICTION` resident/evictable；真实 workerd e2e）。
@@ -10,7 +12,7 @@
 > **DO 客户端绑定（ADR-080）**：`env.DO.get(...).fetch()` → `scopeAuth("do")` 代理按 shard 放置到 `CELLHIVE_DO_RUNTIMES`；owner 冲突转发一次 + hint；`result_unknown` 语义。
 > **存储生命周期（ADR-081）**：代码变更用 **facet 级惰性重启**（版本戳 → `facets.abort()` 单个对象，storage 不变）；`migrations` 仅允许 `new_classes`/`new_sqlite_classes`，`renamed/deleted/transferred` 拒绝；**`doStorageId`** 作为稳定存储身份（重部署不变）。
 > **migrations v2（ADR-082）**：**对象注册表**（`GET /v1/do/objects` + cell-agent 聚合）；**rename**（`renamed_classes`，别名 `codeClass→storageClass`，不迁文件保数据）；**delete**（`deleted_classes` 标记 + `POST /v1/do/delete` 物理回收）；**主动重启**（`CELLHIVE_DO_EAGER_RESTART`，默认惰性）。
-> **持久性（ADR-083，部分）**：`do-supervisor` 以 **shard（host actor 目录）粒度**捕获全部 `*.sqlite`（LTX 快照+增量 → fleet/bucket proof），并**门控** do-runtime 响应（未证明不 ack；失败 `result_unknown`）。**发现**：`.facets` 是 workerd 内部二进制格式，故不解析、按 shard 处理。
+> **持久性（ADR-083/084/208）**：`do-supervisor` 在请求输出门中按当前 host 捕获其 actor/facet `*.sqlite`（LTX 快照+增量 → fleet/bucket proof），并门控响应（未证明不 ack；失败 `result_unknown`）。`.facets` 已解析为对象名索引，sidecar 按 host 保存；运维 `SyncAll` 仍可全目录捕获，但不用于租户请求输出门。
 > **跨节点冷激活（ADR-084，部分）**：`scopeID` 可逆（base64url）+ manifest + **`RestoreAll`**（LTX `replica.Restore`+`restore.ApplyFile`，sidecar 逐字回写）；**双 runtime e2e** 通过（A 运行→捕获到 bucket→B 恢复→状态延续）。host 文件名跨进程确定性是"恢复到原路径"成立的前提。
 > **DO 内 bindings ✅（ADR-090）**：平台导出 `WorkerEntrypoint` 能力类，`ctx.exports.X({props})` stub 放入 facet env；KV/D1/R2/Queue 走 stub、DO/Workflow 经 env-patch → **`this.env` 与构造函数形参 `env` 都可**。
 > **`deleteAll()` shim ✅**：stock workerd 对 SQLite facet 的 `deleteAll()` 抛内部错误；基类改为清 KV + drop 用户表 + 清 alarm（`cellhive-do.js`）。
@@ -106,7 +108,7 @@ export default {
 | alarm 兜底 | waker | owner 死后的遗留 alarm 由 cell-agent 侧 waker 接管 |
 
 **写路径**：`workerd 提交 → supervisor 捕获 WAL 段 → cell-agent.append/sync → cell-agent 写 e<epoch> 前缀 + 证明 → 输出门 → 返回`
-**读路径（冷激活/接管）**：`do-runtime → cell-agent.restore → cell-agent 读对象存储（epoch 链/快照）→ 下发 → 物化本地 SQLite`
+**读路径（冷激活/接管）**：`do-runtime claim → cell-agent 按 host 文件 scope 回收已确认的 follower 尾部 → cell-agent 读对象存储（epoch 链/快照）→ 下发 → 物化本地 SQLite`
 
 物理数据位于对象存储的 `cells/<scope>/ltx/e<epoch>/...`，**唯一访问者是 cell-agent**。
 

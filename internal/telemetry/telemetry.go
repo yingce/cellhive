@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -194,9 +195,10 @@ func newExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, error)
 	if u.Scheme != "https" {
 		opts = append(opts, otlptracehttp.WithInsecure())
 	}
-	// Accept both a base URL (path appended) and a full /v1/traces URL.
+	// Accept both a base URL (path appended) and a full OTLP traces URL.
+	// Alibaba ARMS uses /api/otlp/traces instead of /v1/traces.
 	if p := strings.TrimSuffix(u.Path, "/"); p != "" {
-		if !strings.HasSuffix(p, "/v1/traces") {
+		if !strings.HasSuffix(p, "/v1/traces") && !strings.HasSuffix(p, "/api/otlp/traces") {
 			p += "/v1/traces"
 		}
 		opts = append(opts, otlptracehttp.WithURLPath(p))
@@ -229,6 +231,59 @@ func SpanFromContext(ctx context.Context) trace.Span { return trace.SpanFromCont
 
 // Tracer returns the shared CellHive tracer (no-op when disabled).
 func Tracer() trace.Tracer { return otel.Tracer("cellhive") }
+
+// QueueLink associates one consumed message with its producing invocation.
+// Invalid traceparents remain visible in the invocation record but do not
+// become OpenTelemetry span links.
+type QueueLink struct {
+	MessageID   string
+	RequestID   string
+	Traceparent string
+}
+
+// ExportQueueConsumerSpan emits one independent span per consumption attempt.
+// A batch can have several producer traces, so none is made its parent.
+func ExportQueueConsumerSpan(traceparent, namespace, worker, queue, status string, startMs, finishMs int64, producers []QueueLink) {
+	if !Enabled() {
+		return
+	}
+	traceID, spanID := TraceIDs(traceparent)
+	ids, ok := spanContext(traceID, spanID)
+	if !ok {
+		return
+	}
+	links := make([]trace.Link, 0, len(producers))
+	for _, producer := range producers {
+		tp := strings.TrimSpace(producer.Traceparent)
+		tid, sid := TraceIDs(tp)
+		traceID, traceErr := trace.TraceIDFromHex(tid)
+		spanID, spanErr := trace.SpanIDFromHex(sid)
+		if traceErr != nil || spanErr != nil || !traceID.IsValid() || !spanID.IsValid() {
+			continue
+		}
+		flags, _ := strconv.ParseUint(tp[53:55], 16, 8)
+		sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.TraceFlags(flags), Remote: true})
+		links = append(links, trace.Link{SpanContext: sc, Attributes: []attribute.KeyValue{
+			attribute.String("messaging.message.id", producer.MessageID),
+			attribute.String("cellhive.producer_request_id", producer.RequestID),
+		}})
+	}
+	ctx := context.WithValue(context.Background(), reportedSpanIDKey{}, reportedSpanIDs{trace: ids.TraceID(), span: ids.SpanID()})
+	start := time.UnixMilli(startMs)
+	if startMs <= 0 {
+		start = time.Now()
+	}
+	end := time.UnixMilli(finishMs)
+	if finishMs <= 0 {
+		end = time.Now()
+	}
+	_, span := Tracer().Start(ctx, "queue.consume", trace.WithSpanKind(trace.SpanKindConsumer), trace.WithTimestamp(start), trace.WithLinks(links...), trace.WithAttributes(
+		attribute.String("cellhive.namespace", namespace), attribute.String("cellhive.worker", worker), attribute.String("messaging.destination.name", queue), attribute.String("cellhive.outcome", status)))
+	if status == "failed" {
+		span.SetStatus(codes.Error, status)
+	}
+	span.End(trace.WithTimestamp(end))
+}
 
 // Extract reads a W3C traceparent from HTTP headers into ctx.
 func Extract(ctx context.Context, h http.Header) context.Context {

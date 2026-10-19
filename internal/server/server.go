@@ -46,6 +46,7 @@ import (
 	"cellhive/internal/peer"
 	"cellhive/internal/queue"
 	"cellhive/internal/r2"
+	"cellhive/internal/recovery"
 	"cellhive/internal/replica"
 	"cellhive/internal/telemetry"
 	"cellhive/internal/timer"
@@ -80,6 +81,7 @@ type Deps struct {
 	// group commit); falls back to PeerMgr per-segment replication if nil.
 	PeerShipper *peer.ShipBatcher
 	NodeLog     *nodelog.Manager
+	Recovery    *recovery.Manager
 	Uploader    *upload.Batcher
 	// PeerUploader group-commits replicated segments into the follower spool so
 	// a whole batch pays one fsync (fleet ack path).
@@ -130,6 +132,7 @@ type Deps struct {
 // Server wires the HTTP surface for a cell-agent node.
 type Server struct {
 	Deps
+	doPointers        sync.Map // capture scope -> persisted doRecoveryPointer
 	resourceRep       *replica.Manager
 	resourceCleanupMu sync.Mutex
 	retirementAfter   string
@@ -148,8 +151,6 @@ type Server struct {
 	peerRecvBytes atomic.Int64
 	logFanMu      sync.Mutex
 	logFan        map[string]time.Time // ns/worker -> last peer fan-out
-	tailMu        sync.Mutex
-	tails         map[string]*cloudflareTailSession
 	importMu      sync.Mutex
 	d1Imports     map[string]*cloudflareD1Import
 	exportMu      sync.Mutex
@@ -158,7 +159,7 @@ type Server struct {
 	readyFlag     atomic.Bool
 
 	sessionMu        sync.Mutex
-	sessionEpoch     uint64
+	sessionOpen      bool
 	sessionFollowers []string
 	draining         atomic.Bool
 
@@ -201,7 +202,7 @@ func New(d Deps) *Server {
 	if d.Invocations == nil && d.Store != nil {
 		d.Invocations = invocation.New(d.Store)
 	}
-	s := &Server{Deps: d, ordered: newOrderedDispatcher(), tails: make(map[string]*cloudflareTailSession)}
+	s := &Server{Deps: d, ordered: newOrderedDispatcher()}
 	s.resourceRep = d.Replica
 	if s.resourceRep == nil && d.Bucket != nil {
 		s.resourceRep = replica.New(d.Bucket)
@@ -221,6 +222,10 @@ func (s *Server) SetReady(v bool) { s.readyFlag.Store(v) }
 // Handler returns the HTTP mux.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Owner forwarding uses the internal listener. Keep the Wrangler paths
+	// available there under their own admin-token check so multipart publishes
+	// can land on the control-cell owner without changing protocol shape.
+	s.registerCloudflareWorkerRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -251,6 +256,7 @@ func (s *Server) Handler() http.Handler {
 	// Hyperdrive origin connection string (sealed as a resource config, ADR-129).
 	mux.HandleFunc("GET /v1/internal/hyperdrive", s.auth(s.handleInternalHyperdrive))
 	mux.HandleFunc("POST /v1/internal/do/claim", s.auth(s.handleDOClaim))
+	mux.HandleFunc("POST /v1/internal/do/recover-scope", s.auth(s.handleDORecoverScope))
 	mux.HandleFunc("POST /v1/internal/do/alarm/upsert", s.auth(s.handleDOAlarmUpsert))
 	mux.HandleFunc("POST /v1/internal/do/renew", s.auth(s.handleDORenew))
 	mux.HandleFunc("POST /v1/internal/do/release", s.auth(s.handleDORelease))
@@ -264,13 +270,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/peer/append", s.roleAuth("peer")(s.handlePeerAppend))
 	mux.HandleFunc("POST /v1/peer/append_batch", s.roleAuth("peer")(s.handlePeerAppendBatch))
 	mux.HandleFunc("POST /v1/peer/seal", s.roleAuth("peer")(s.handlePeerSeal))
+	mux.HandleFunc("GET /v1/peer/head", s.roleAuth("peer")(s.handlePeerHead))
 	mux.HandleFunc("GET /v1/peer/tail", s.roleAuth("peer")(s.handlePeerTail))
+	mux.HandleFunc("GET /v1/peer/tail_open", s.roleAuth("peer")(s.handlePeerTailOpen))
 	mux.HandleFunc("DELETE /v1/peer/session", s.roleAuth("peer")(s.handlePeerSessionDelete))
 	mux.HandleFunc("POST /v1/peer/stream", s.roleAuth("peer")(s.handlePeerStream))
 	mux.HandleFunc("GET /v1/peer/held", s.roleAuth("peer")(s.handlePeerHeld))
 	mux.HandleFunc("POST /v1/kv/put", s.scopeAuth("kv")(s.admit(s.handleKVPut)))
 	mux.HandleFunc("POST /v1/kv/incr", s.scopeAuth("kv")(s.admit(s.handleKVIncr)))
 	mux.HandleFunc("POST /v1/internal/logs", s.roleAuth("log")(s.handleLogIngest))
+	mux.HandleFunc("GET /v1/internal/logs/events", s.roleAuth("peer")(s.handlePeerLogEvents))
 	mux.HandleFunc("POST /v1/internal/logs/subscribe", s.auth(s.handleLogSubscribeInternal))
 	mux.HandleFunc("POST /v1/internal/timer/upsert", s.auth(s.handleTimerUpsert))
 	mux.HandleFunc("POST /v1/internal/kv/expire", s.auth(s.handleKVExpire))
@@ -296,6 +305,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/control/gc/assets", s.auth(s.handleAssetGC))
 	mux.HandleFunc("GET /v1/control/host", s.auth(s.handleControlHost))
 	mux.HandleFunc("GET /v1/control/worker", s.auth(s.handleControlWorker))
+	mux.HandleFunc("GET /v1/control/binding", s.auth(s.handleControlBinding))
 	// Admin reads are mirrored here so a non-owner node can forward them to the
 	// control-cell owner (ADR-118 applies to reads too). The owner serves them
 	// under the internal token, which is the trusted plane.
@@ -926,7 +936,11 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 	switch {
 	case err == nil && !o.Expired(now):
 		if o.Node == s.Cfg.NodeID {
-			return false // already ours
+			if o.Session == s.Owner.Session {
+				return false
+			}
+			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
+			return true
 		}
 		return s.forwardIfNonOwner(w, r, sc, preRead)
 	case err == nil || errors.Is(err, owner.ErrUnowned):
@@ -935,6 +949,11 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 		if s.overloaded() {
 			writeErr(w, http.StatusServiceUnavailable, "overloaded", "node is above its disk high watermark")
 			return true
+		}
+		// The local file may be a replica left from another owner. Drop it
+		// before the claim makes this process visible as the new writer.
+		if r.Context().Value(ctxScopePreInvalidated) != sc.String() {
+			s.invalidateStaleLocal(r.Context(), sc)
 		}
 		claimed, cerr := s.Owner.Claim(r.Context(), sc, now)
 		switch {
@@ -945,27 +964,34 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 			if claimed.Node != s.Cfg.NodeID && claimed.Address != "" {
 				return s.forwardIfNonOwner(w, r, sc, preRead)
 			}
-			return false
+			if claimed.Node == s.Cfg.NodeID && claimed.Session == s.Owner.Session {
+				return false
+			}
+			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
+			return true
 		case errors.Is(cerr, bucket.ErrPrecondition):
 			// Lost the claim race: re-resolve and forward if a peer won.
 			if o2, _, rerr := s.Owner.ResolveCached(r.Context(), sc, 0); rerr == nil &&
 				o2.Node != s.Cfg.NodeID && !o2.Expired(time.Now()) && o2.Address != "" {
 				return s.forwardIfNonOwner(w, r, sc, preRead)
 			}
-			return false
+			writeErr(w, http.StatusServiceUnavailable, "claim_race", "scope owner changed during claim")
+			return true
 		default:
-			return false // let the caller surface its own error
+			writeErr(w, http.StatusServiceUnavailable, "claim_failed", cerr.Error())
+			return true
 		}
 	default:
-		return false
+		writeErr(w, http.StatusServiceUnavailable, "owner_resolve_failed", err.Error())
+		return true
 	}
 }
 
-// forwardRead forwards a read to the cell's live owner, so a non-owner never
-// serves a stale local copy (ADR-120). Unowned or expired cells are read
-// locally (the local file hydrates from the bucket on first open).
+// forwardRead also claims an unowned/expired scope before reading: claim first
+// recovers the former owner's acknowledged tail, then the cold local file is
+// restored from the authoritative chain (ADR-229).
 func (s *Server) forwardRead(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
-	return s.forwardIfNonOwner(w, r, sc, preRead)
+	return s.forwardOrClaim(w, r, sc, preRead)
 }
 
 // invalidateStaleLocal drops a locally cached cell whose scope this node does
@@ -1137,6 +1163,30 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 // or decorate it under its own authorization.
 func (s *Server) fetchViaOwner(r *http.Request, sc cell.Scope) (*http.Response, bool, error) {
 	return s.forwardTo(r, sc, nil)
+}
+
+// claimForRead establishes an authoritative local copy before a read path
+// that must filter the owner's response locally (for example app listing).
+func (s *Server) claimForRead(ctx context.Context, sc cell.Scope) error {
+	if s.Owner == nil {
+		return nil
+	}
+	o, _, err := s.Owner.Resolve(ctx, sc)
+	if err == nil && !o.Expired(time.Now()) {
+		if o.Node == s.Cfg.NodeID && o.Session != s.Owner.Session {
+			return owner.ErrNotOwner
+		}
+		return nil
+	}
+	if err != nil && !errors.Is(err, owner.ErrUnowned) {
+		return err
+	}
+	s.invalidateStaleLocal(ctx, sc)
+	_, err = s.Owner.Claim(ctx, sc, time.Now())
+	if errors.Is(err, owner.ErrOwnerLive) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
@@ -1597,6 +1647,32 @@ func (s *Server) handlePeerSeal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePeerTail(w http.ResponseWriter, r *http.Request) {
+	s.writePeerTail(w, r, false)
+}
+
+func (s *Server) handlePeerHead(w http.ResponseWriter, r *http.Request) {
+	if s.Spool == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no_spool", "follower spool not configured")
+		return
+	}
+	session := r.URL.Query().Get("session")
+	if session == "" {
+		writeErr(w, http.StatusBadRequest, "session_required", "owner session is required")
+		return
+	}
+	final, err := s.Spool.Head(session)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "head_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"final": final})
+}
+
+func (s *Server) handlePeerTailOpen(w http.ResponseWriter, r *http.Request) {
+	s.writePeerTail(w, r, true)
+}
+
+func (s *Server) writePeerTail(w http.ResponseWriter, r *http.Request, open bool) {
 	if s.Spool == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no_spool", "follower spool not configured")
 		return
@@ -1611,7 +1687,25 @@ func (s *Server) handlePeerTail(w http.ResponseWriter, r *http.Request) {
 		maxTailFragments = 256
 		maxTailRawBytes  = 48 << 20
 	)
-	fragments, err := s.Spool.TailPage(session, after, maxTailFragments, maxTailRawBytes)
+	var fragments []peer.SessionFragment
+	var next uint64
+	var offset int64
+	if open {
+		final, ferr := strconv.ParseUint(r.URL.Query().Get("final"), 10, 64)
+		if ferr != nil {
+			writeErr(w, http.StatusBadRequest, "bad_final", "numeric final is required")
+			return
+		}
+		scope := r.URL.Query().Get("scope")
+		offset, ferr = strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		if scope == "" || ferr != nil || offset < 0 || after > final || (after == 0 && offset != 0) || (after > 0 && offset == 0) {
+			writeErr(w, http.StatusBadRequest, "bad_tail_request", "scope, valid offset and ordered sequence are required")
+			return
+		}
+		fragments, next, offset, err = s.Spool.TailScopePage(session, scope, after, final, offset, maxTailFragments, maxTailRawBytes)
+	} else {
+		fragments, err = s.Spool.TailPage(session, after, maxTailFragments, maxTailRawBytes)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "tail_failed", err.Error())
 		return
@@ -1629,6 +1723,10 @@ func (s *Server) handlePeerTail(w http.ResponseWriter, r *http.Request) {
 			wire.Segments = append(wire.Segments, base64.StdEncoding.EncodeToString(segment))
 		}
 		out = append(out, wire)
+	}
+	if open {
+		writeJSON(w, http.StatusOK, map[string]any{"fragments": out, "next": next, "offset": offset})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"fragments": out})
 }
@@ -1793,13 +1891,18 @@ func kvScopeErr(w http.ResponseWriter, err error) {
 // duration of the request, so a cell eviction cannot close a cell in use.
 func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		if s.Store != nil {
 			if ns := r.URL.Query().Get("ns"); ns != "" {
-				end := s.Store.BeginRequest(s.gateKey(r.Context(), "workflow", ns, "", r.URL.Query()))
+				if sc, ok := s.gateScope(ctx, "workflow", ns, "", r.URL.Query()); ok {
+					s.invalidateStaleLocal(ctx, sc)
+					ctx = context.WithValue(ctx, ctxScopePreInvalidated, sc.String())
+				}
+				end := s.Store.BeginRequest(s.gateKey(ctx, "workflow", ns, "", r.URL.Query()))
 				defer end()
 			}
 		}
-		next(w, r)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -2436,6 +2539,17 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 // handleCommitBinary accepts a raw LTX body, avoiding JSON/base64 overhead on
 // the SQL capture hot path. Its proof semantics are identical to handleCommit.
 func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
+	if doID, present, derr := doIdentityFromRequest(r); present {
+		if derr != nil {
+			writeErr(w, http.StatusBadRequest, "bad_do_owner", derr.Error())
+			return
+		}
+		if derr = s.validateDOCommit(r.Context(), doID); derr != nil {
+			writeErr(w, http.StatusConflict, "do_owner_moved", derr.Error())
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), doCommitIdentityKey{}, doID))
+	}
 	sc, err := cell.ParseScope(r.URL.Query().Get("scope"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_scope", err.Error())
@@ -2467,7 +2581,7 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	followers := splitHeader(r.Header.Get("x-cellhive-followers"))
-	if r.URL.Query().Get("pipelined") == "1" && s.PeerShipper != nil && s.Cfg.Durability != "bucket" {
+	if r.URL.Query().Get("pipelined") == "1" && r.Header.Get("x-cellhive-bucket-proof") != "1" && s.PeerShipper != nil && s.Cfg.Durability != "bucket" {
 		if len(followers) == 0 {
 			followers = s.liveFollowers(r.Context(), 2)
 		}
@@ -2498,13 +2612,24 @@ func (s *Server) commitPipelined(w http.ResponseWriter, r *http.Request, sc cell
 		base = header.StartTxID
 	}
 	if !s.openFleetSession(r.Context(), epoch, followers) {
-		res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, true)
+		res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, true, false)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "bucket_failed", err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"mode": res.Mode, "key": res.Key, "etag": res.Etag})
 		return
+	}
+	if doID, ok := r.Context().Value(doCommitIdentityKey{}).(doCommitIdentity); ok {
+		if err := s.ensureDOCommitPointer(r.Context(), sc, doID); err != nil {
+			res, berr := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, true, true)
+			if berr != nil {
+				writeErr(w, http.StatusInternalServerError, "bucket_failed", berr.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"mode": res.Mode, "key": res.Key, "etag": res.Etag})
+			return
+		}
 	}
 	ctx := r.Context()
 	key := sc.String() + "@" + strconv.FormatUint(epoch, 10)
@@ -2549,7 +2674,7 @@ func splitHeader(value string) []string {
 type captureCommitter struct{ s *Server }
 
 func (c captureCommitter) Commit(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte) error {
-	res, err := c.s.commitSegmentCore(ctx, scope, epoch, segment, nil, false)
+	res, err := c.s.commitSegmentCore(ctx, scope, epoch, segment, nil, false, false)
 	if err != nil {
 		return err
 	}
@@ -2685,7 +2810,7 @@ type commitResult struct {
 // upload is asynchronous/batched. "fleet" degrades to a bucket wait when no
 // peer is eligible (never a silent ack). Shared by the HTTP commit handlers and
 // the cellstore capture committer.
-func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched bool) (commitResult, error) {
+func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (commitResult, error) {
 	// Epoch fence at the commit boundary: an in-flight write whose ownership
 	// moved while it was being captured must not be committed under the old
 	// epoch prefix (the new owner's restore would not contain it). The HTTP
@@ -2702,28 +2827,38 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 
 	// Durability posture: "bucket" skips peers entirely; "auto" and "fleet" try
 	// peers first.
-	tryFleet := s.Cfg.Durability != "bucket"
+	tryFleet := !requireBucket && s.Cfg.Durability != "bucket"
 	if tryFleet && len(followers) > 0 && s.PeerMgr != nil {
 		if !s.openFleetSession(ctx, epoch, followers) {
 			s.Log.Warn("fleet recovery ensemble unavailable; writes wait for the bucket", "epoch", epoch)
 		} else {
-			var ackedBy string
-			var rerr error
-			if prebatched && s.PeerShipper != nil {
-				ackedBy, rerr = s.PeerShipper.ShipNow(ctx, followers, sc, epoch, seg)
-			} else {
-				ackedBy, rerr = s.replicate(ctx, followers, sc, epoch, seg)
-			}
-			if rerr == nil {
-				if s.Uploader != nil {
-					s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
-				} else {
-					go func() {
-						_, _, _ = s.Replica.Append(context.Background(), sc, epoch, seg)
-					}()
+			if doID, ok := ctx.Value(doCommitIdentityKey{}).(doCommitIdentity); ok {
+				if err := s.ensureDOCommitPointer(ctx, sc, doID); err != nil {
+					s.Log.Warn("DO follower recovery coordinate unavailable; write waits for bucket", "scope", sc.String(), "err", err)
+					requireBucket = true
+				} else if err := s.validateDOCommit(ctx, doID); err != nil {
+					return commitResult{}, err
 				}
-				s.commits.Add(1)
-				return commitResult{Mode: "fleet", AckedBy: ackedBy}, nil
+			}
+			if !requireBucket {
+				var ackedBy string
+				var rerr error
+				if prebatched && s.PeerShipper != nil {
+					ackedBy, rerr = s.PeerShipper.ShipNow(ctx, followers, sc, epoch, seg)
+				} else {
+					ackedBy, rerr = s.replicate(ctx, followers, sc, epoch, seg)
+				}
+				if rerr == nil {
+					if s.Uploader != nil {
+						s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
+					} else {
+						go func() {
+							_, _, _ = s.Replica.Append(context.Background(), sc, epoch, seg)
+						}()
+					}
+					s.commits.Add(1)
+					return commitResult{Mode: "fleet", AckedBy: ackedBy}, nil
+				}
 			}
 		}
 	}
@@ -2732,7 +2867,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	if tryFleet && s.Cfg.Durability == "fleet" {
 		s.Log.Warn("fleet durability requested but no eligible peer; writes wait for the bucket")
 	}
-	wait := s.Cfg.BucketWait || s.Cfg.Durability == "fleet"
+	wait := requireBucket || s.Cfg.BucketWait || s.Cfg.Durability == "fleet"
 	switch {
 	case !wait:
 		if s.Uploader != nil {
@@ -2759,9 +2894,10 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 }
 
 // openFleetSession establishes the immutable recovery coordinates before any
-// follower acknowledgement. A process session uses one ensemble: changing it
-// without sealing and starting a new session would leave the node-log unable to
-// name every follower that may hold acknowledged data.
+// follower acknowledgement. A process session uses one follower ensemble;
+// individual cells can have different epochs, which are stored per fragment.
+// Changing followers without sealing and starting a new session would leave
+// the node-log unable to name every follower with acknowledged data.
 func (s *Server) openFleetSession(ctx context.Context, epoch uint64, followers []string) bool {
 	if s.NodeLog == nil {
 		return false
@@ -2770,14 +2906,14 @@ func (s *Server) openFleetSession(ctx context.Context, epoch uint64, followers [
 	sort.Strings(followers)
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	if s.sessionEpoch != 0 {
-		return s.sessionEpoch == epoch && slicesEqual(s.sessionFollowers, followers)
+	if s.sessionOpen {
+		return slicesEqual(s.sessionFollowers, followers)
 	}
 	if _, err := s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers); err != nil {
 		s.Log.Warn("node-log open failed", "err", err)
 		return false
 	}
-	s.sessionEpoch = epoch
+	s.sessionOpen = true
 	s.sessionFollowers = followers
 	return true
 }
@@ -2796,7 +2932,7 @@ func slicesEqual(a, b []string) bool {
 
 // commitSegment is the HTTP wrapper around commitSegmentCore.
 func (s *Server) commitSegment(w http.ResponseWriter, r *http.Request, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched bool) {
-	res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, prebatched)
+	res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, prebatched, r.Header.Get("x-cellhive-bucket-proof") == "1")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "bucket_failed", err.Error())
 		return

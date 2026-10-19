@@ -50,6 +50,7 @@ function ownerURL(address) {
 }
 
 const claims = new Map(); // scopeKey -> { epoch, expiryMs, spec, shard }
+const pendingClaims = new Map(); // scopeKey -> claim and cold restore promise
 const hints = new Map(); // scopeKey -> { address, expiry } (owner hint, ADR-080)
 const boundRouters = new Set(); // host_id reported to the supervisor (per isolate)
 const boundActors = new Set(); // host_hash reported to the supervisor (per isolate)
@@ -93,11 +94,17 @@ async function reportDoStats(env) {
 // while draining (POST /v1/do/drain) or while cell-agent is unreachable.
 async function ready(env) {
   if (draining) return json({ ready: false, reason: "draining" }, 503);
+  // An old pooled connection can outlive a cell-agent Pod during a rolling
+  // update. Bound the probe so readiness can retry against the new endpoint.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 800);
   try {
-    const r = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/readyz", { method: "GET" });
+    const r = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/readyz", { method: "GET", signal: controller.signal });
     if (!r.ok) return json({ ready: false, reason: "cell_unreachable" }, 503);
   } catch (e) {
     return json({ ready: false, reason: "cell_unreachable" }, 503);
+  } finally {
+    clearTimeout(timeout);
   }
   return json({ ready: true, projection_age_ms: 0, cell: "ok" });
 }
@@ -232,7 +239,8 @@ async function invoke(req, env, ticket) {
     const res = await host.fetch("http://host/invoke", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...spec, shard }),
+      body: JSON.stringify({ ...spec, shard, owner_node: env.NODE_ID,
+        owner_epoch: claims.get(key)?.epoch || 0 }),
     });
     // Dispatch finished; if we lost ownership during execution the outcome is
     // unknown to the caller (do not blindly replay) — ADR-080.
@@ -277,7 +285,7 @@ async function forward(env, address, spec) {
   }
 }
 
-async function restoreClaimedHost(env, spec, shard) {
+async function restoreClaimedHost(env, spec, shard, epoch) {
   const base = env.GATE_URL || "";
   if (!base) return null;
   const hostId = `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`;
@@ -285,7 +293,9 @@ async function restoreClaimedHost(env, spec, shard) {
     const r = await fetch(base.replace(/\/$/, "") + "/internal/do/restore-host", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ host_id: hostId }),
+      body: JSON.stringify({ host_id: hostId,
+        owner_scope: `${spec.namespace}/__do__/${spec.worker}~${spec.storage_class || spec.class}~shard${shard}`,
+        owner_node: env.NODE_ID, owner_epoch: epoch }),
     });
     if (!r.ok) return `restore_${r.status}`;
     return null;
@@ -299,9 +309,12 @@ async function restoreClaimedHost(env, spec, shard) {
 async function ensureClaim(env, spec, shard) {
   const storageClass = spec.storage_class || spec.class;
   const key = `${spec.namespace}/${spec.worker}/${storageClass}/shard${shard}`;
+  const pending = pendingClaims.get(key);
+  if (pending) return await pending;
   const c = claims.get(key);
   const now = Date.now();
   if (!c) {
+    const task = (async () => {
     const r = await post(env, "/v1/internal/do/claim", {
       namespace: spec.namespace, worker: spec.worker, class: storageClass, shard,
       node: env.NODE_ID, advertise: env.ADVERTISE, ttl_seconds: leaseTtlS(env),
@@ -318,16 +331,26 @@ async function ensureClaim(env, spec, shard) {
     }
     if (!r.ok) return { resp: json({ error: "owner_unavailable", reason: "claim_" + r.status }, 503) };
     const o = await r.json();
-    const restoreError = await restoreClaimedHost(env, spec, shard);
+    const claimed = { epoch: o.epoch, expiryMs: o.expiry_ms,
+      spec: { namespace: spec.namespace, worker: spec.worker, class: storageClass }, shard };
+    claims.set(key, claimed); // renewAll keeps this lease alive during a slow restore
+    const restoreError = await restoreClaimedHost(env, spec, shard, o.epoch);
     if (restoreError) {
+      if (claims.get(key) === claimed) claims.delete(key);
       await post(env, "/v1/internal/do/release", {
         namespace: spec.namespace, worker: spec.worker, class: storageClass, shard,
         node: env.NODE_ID, epoch: o.epoch,
       });
       return { resp: json({ error: "owner_unavailable", reason: restoreError }, 503) };
     }
-    claims.set(key, { epoch: o.epoch, expiryMs: o.expiry_ms, spec: { namespace: spec.namespace, worker: spec.worker, class: storageClass }, shard });
+    if (claims.get(key) !== claimed || claimed.expiryMs <= Date.now()) {
+      return { resp: json({ error: "owner_unavailable", reason: "ownership_lost_during_restore" }, 503) };
+    }
     return null;
+    })();
+    pendingClaims.set(key, task);
+    try { return await task; }
+    finally { if (pendingClaims.get(key) === task) pendingClaims.delete(key); }
   }
   if (c.expiryMs - now < GUARD_MS) {
     const r = await post(env, "/v1/internal/do/renew", {
@@ -824,7 +847,7 @@ export class Host extends DurableObject {
     await reportDoStats(this.env);
     // Output gate (ADR-083): do not ack until the supervisor has captured and
     // proven durability; unknown => result_unknown (do not silently ack).
-    const gate = await gateSync(this.env, span);
+    const gate = await gateSync(this.env, span, this.ctx.id.name, this.ctx.id.toString(), spec);
     if (gate) {
       endSpan(span, { code: 2, message: "gate_failed" });
       await flushSpans(this.env);
@@ -887,6 +910,7 @@ export class Host extends DurableObject {
       // (cellhive-do.js) builds the facades and merges them into this.env, since
       // workerd constructs the facet itself and its class cannot be subclassed.
       let bs = { bindings: {}, vars: {} };
+      let policyLoaded = false;
       try {
         const r = await fetch(
           this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/do/bindings?ns=" +
@@ -894,7 +918,7 @@ export class Host extends DurableObject {
             (spec.version === undefined || spec.version === null ? "" : "&version=" + encodeURIComponent(spec.version)),
           { headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN } },
         );
-        if (r.ok) bs = await r.json();
+        if (r.ok) { bs = await r.json(); policyLoaded = true; }
       } catch (e) {
         /* no bindings: DO runs with the host env only */
       }
@@ -930,7 +954,7 @@ export class Host extends DurableObject {
         ),
         env: buildFacetEnv(this.ctx, this.env, bs, spec),
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
-        ...(this.env.CH_LOG_CAPTURE === "0" ? {} : { tails: [this.ctx.exports.TenantTail({
+        ...(this.env.CH_LOG_CAPTURE === "0" || !policyLoaded || bs.log_policy?.console === false ? {} : { tails: [this.ctx.exports.TenantTail({
           props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0 },
         })] }),
       };
@@ -1027,17 +1051,24 @@ async function reportHostBinding(env, body) {
   }
 }
 
-// gateSync asks the do-supervisor to capture+prove all SQLite files (ADR-083).
+// gateSync asks the do-supervisor to capture+prove this host's SQLite files.
 // Returns a Response to fail with, or null when the gate is disabled/ok.
-async function gateSync(env, parentSpan) {
+async function gateSync(env, parentSpan, hostId, hostHash, spec) {
   const base = env.GATE_URL || "";
   if (!base) return null;
   const span = startSpan("do.gate", { kind: "internal" }, parentSpan);
   const gateHeaders = {};
   const tp = traceparentForSpan(span);
   if (tp) gateHeaders["traceparent"] = tp;
+  gateHeaders["content-type"] = "application/json";
   try {
-    const r = await fetch(base.replace(/\/$/, "") + "/sync-all", { method: "POST", headers: gateHeaders });
+    const r = await fetch(base.replace(/\/$/, "") + "/sync-all", {
+      method: "POST", headers: gateHeaders,
+      body: JSON.stringify({ host_id: hostId, host_hash: hostHash,
+        storage_id: spec.storage_id || "", class: spec.storage_class || spec.class,
+        owner_scope: `${spec.namespace}/__do__/${spec.worker}~${spec.storage_class || spec.class}~shard${spec.shard}`,
+        owner_node: spec.owner_node || "", owner_epoch: spec.owner_epoch || 0 }),
+    });
     if (!r.ok) {
       doStats.gateTimeouts++;
       endSpan(span, { code: 2, message: "gate_" + r.status });

@@ -41,6 +41,13 @@ type RecoveryTransport interface {
 	Reclaim(ctx context.Context, baseURL, session string) error
 }
 
+// LiveRecoveryTransport snapshots an active process session without sealing it.
+// The caller must fence the target cell before taking the snapshot.
+type LiveRecoveryTransport interface {
+	Head(ctx context.Context, baseURL, session string) (uint64, error)
+	TailOpen(ctx context.Context, baseURL, session, scope string, after, final uint64, offset int64) ([]SessionFragment, uint64, int64, error)
+}
+
 // HeldSegment is a segment a follower currently holds in its spool.
 type HeldSegment struct {
 	Scope   string
@@ -200,6 +207,77 @@ func (t *HTTPTransport) Seal(ctx context.Context, baseURL, session string) (uint
 // Tail reads sealed fragments after sequence.
 func (t *HTTPTransport) Tail(ctx context.Context, baseURL, session string, after uint64) ([]SessionFragment, error) {
 	u := fmt.Sprintf("%s/v1/peer/tail?session=%s&after=%d", trimSlash(baseURL), url.QueryEscape(session), after)
+	return t.readTail(ctx, u, baseURL)
+}
+
+func (t *HTTPTransport) Head(ctx context.Context, baseURL, session string) (uint64, error) {
+	u := fmt.Sprintf("%s/v1/peer/head?session=%s", trimSlash(baseURL), url.QueryEscape(session))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("x-cellhive-internal-token", t.Token)
+	resp, err := t.Client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("peer head %s: status %d", baseURL, resp.StatusCode)
+	}
+	var out struct {
+		Final uint64 `json:"final"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	return out.Final, nil
+}
+
+func (t *HTTPTransport) TailOpen(ctx context.Context, baseURL, session, scope string, after, final uint64, offset int64) ([]SessionFragment, uint64, int64, error) {
+	u := fmt.Sprintf("%s/v1/peer/tail_open?session=%s&scope=%s&after=%d&final=%d&offset=%d", trimSlash(baseURL), url.QueryEscape(session), url.QueryEscape(scope), after, final, offset)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, after, offset, err
+	}
+	req.Header.Set("x-cellhive-internal-token", t.Token)
+	resp, err := t.Client.Do(req)
+	if err != nil {
+		return nil, after, offset, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, after, offset, fmt.Errorf("peer live tail %s: status %d", baseURL, resp.StatusCode)
+	}
+	var wire struct {
+		Next      uint64 `json:"next"`
+		Offset    int64  `json:"offset"`
+		Fragments []struct {
+			Sequence uint64   `json:"sequence"`
+			Scope    string   `json:"scope"`
+			Epoch    uint64   `json:"epoch"`
+			Segments []string `json:"segments"`
+		} `json:"fragments"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 96<<20)).Decode(&wire); err != nil {
+		return nil, after, offset, err
+	}
+	out := make([]SessionFragment, 0, len(wire.Fragments))
+	for _, f := range wire.Fragments {
+		fragment := SessionFragment{Sequence: f.Sequence, Scope: f.Scope, Epoch: f.Epoch}
+		for _, raw := range f.Segments {
+			seg, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil {
+				return nil, after, offset, err
+			}
+			fragment.Segments = append(fragment.Segments, seg)
+		}
+		out = append(out, fragment)
+	}
+	return out, wire.Next, wire.Offset, nil
+}
+
+func (t *HTTPTransport) readTail(ctx context.Context, u, baseURL string) ([]SessionFragment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

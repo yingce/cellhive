@@ -31,6 +31,8 @@ def render(args):
         "helm", "template", "cellhive", args.path, "--namespace", args.namespace,
         "--set", "existingSecret=cellhive-secrets",
     ]
+    if args.target == "helm" and args.do_disabled:
+        cmd += ["--set", "doRuntime.enabled=false"]
     docs = [doc for doc in yaml.safe_load_all(subprocess.check_output(cmd, text=True)) if doc]
     config = next(doc["data"] for doc in docs if doc.get("kind") == "ConfigMap" and doc["metadata"]["name"].endswith("-config"))
     workloads = [doc for doc in docs if doc.get("kind") in ("Deployment", "StatefulSet")]
@@ -53,7 +55,7 @@ def validate(state):
     if not state["cell_url"] or not state["peer_url"]:
         errors.append("runtime cell URL or cell-agent peer URL missing")
     targets = [value.strip().removeprefix("http://").removeprefix("https://").split(":")[0] for value in state["targets"].split(",") if value.strip()]
-    if not targets:
+    if not targets and state["runtimes"]:
         errors.append("DO placement list empty")
     if state.get("profile") == "rpo0" and "do-runtime-gated" not in targets:
         errors.append("rpo0 profile requires CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788")
@@ -67,6 +69,7 @@ def main():
     parser.add_argument("--path", default="")
     parser.add_argument("--profile", default="")
     parser.add_argument("--namespace", default="cellhive")
+    parser.add_argument("--do-disabled", action="store_true", help="render Helm with doRuntime.enabled=false")
     args = parser.parse_args()
     args.path = args.path or ("deploy/helm/cellhive" if args.target == "helm" else "deploy/k8s/overlays/rpo0")
     try:

@@ -229,6 +229,23 @@ func TestCommitDoesNotFleetAckOutsideRecordedEnsemble(t *testing.T) {
 	}
 }
 
+func TestFleetSessionAcceptsDifferentCellEpochsWithSameFollowers(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.Cfg.SessionID = "multi-epoch-session"
+	srv.NodeLog = nodelog.New(srv.Replica.B, "multi-epoch-owner")
+	ctx := context.Background()
+	followers := []string{"http://follower.example"}
+	if !srv.openFleetSession(ctx, 15, followers) {
+		t.Fatal("first cell epoch rejected")
+	}
+	if !srv.openFleetSession(ctx, 23, followers) {
+		t.Fatal("second cell epoch rejected")
+	}
+	if srv.openFleetSession(ctx, 23, []string{"http://other.example"}) {
+		t.Fatal("changed follower set accepted")
+	}
+}
+
 func TestCommitBucketModes(t *testing.T) {
 	for _, wait := range []bool{true, false} {
 		mode := "async"
@@ -409,6 +426,33 @@ func TestCommitBinaryFleet(t *testing.T) {
 	segments, err := follower.Spool.Segments(scope, 1)
 	if err != nil || len(segments) != 1 || !bytes.Equal(segments[0], segment) {
 		t.Fatalf("follower segments = %d, %v", len(segments), err)
+	}
+}
+
+func TestCommitBinaryBucketProofForDO(t *testing.T) {
+	owner, _ := newTestServer(t)
+	follower, _ := newTestServer(t)
+	followerHTTP := httptest.NewServer(follower.Handler())
+	defer followerHTTP.Close()
+	scopeText := "demo/__do__/bucket-proof"
+	if rr := do(t, owner.Handler(), http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scopeText+`"}`)); rr.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
+	}
+	segment := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("do"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scopeText+"&epoch=1", bytes.NewReader(segment))
+	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("x-cellhive-followers", followerHTTP.URL)
+	req.Header.Set("x-cellhive-bucket-proof", "1")
+	rr := httptest.NewRecorder()
+	owner.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), `"fleet"`) {
+		t.Fatalf("DO commit must wait for bucket: %d %s", rr.Code, rr.Body.String())
+	}
+	scope, _ := cell.ParseScope(scopeText)
+	key := replica.Prefix(scope, 1) + "0.snapshot"
+	got, err := owner.Replica.ReadSegment(context.Background(), key)
+	if err != nil || !bytes.Equal(got, segment) {
+		t.Fatalf("bucket head after ack: %q, %v", got, err)
 	}
 }
 
@@ -828,14 +872,15 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	srvC, omC, hsC := newControlForwardServer(t, dir, "node-3")
 	_ = omB
 	omC.Advertise = hsC.URL
-	if _, err := srvC.Control.CreateApp(ctx, "app", "t"); err != nil {
-		t.Fatalf("app: %v", err)
+	rr = do(t, srvC.Handler(), http.MethodPost, "/v1/control/app", "tok", []byte(`{"namespace":"fresh"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("claim-on-write app = %d: %s", rr.Code, rr.Body.String())
 	}
-	if _, err := srvC.Control.PutCustomHost(ctx, "app", "app.test", "ops"); err != nil {
+	if _, err := srvC.Control.PutCustomHost(ctx, "fresh", "fresh.test", "ops"); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	rr = do(t, srvC.Handler(), http.MethodPost, "/v1/control/route", "tok",
-		[]byte(`{"namespace":"app","host":"app.test","worker":"web"}`))
+		[]byte(`{"namespace":"fresh","host":"fresh.test","worker":"web"}`))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("claim-on-write route = %d: %s", rr.Code, rr.Body.String())
 	}
@@ -849,7 +894,7 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	found := false
 	for _, app := range proj.Apps {
 		for _, rt := range app.Routes {
-			if rt.Host == "app.test" {
+			if rt.Host == "fresh.test" {
 				found = true
 			}
 		}
@@ -955,6 +1000,33 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	}
 	if _, err := srvB.Workflows.Get(ctx, "app", "wf", wf.ID); err == nil {
 		t.Fatal("non-owner executed the workflow create locally")
+	}
+}
+
+func TestControlReadAfterOwnerLossDropsStaleLocalCopy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, omA, _ := newControlForwardServer(t, dir, "node-a")
+	b, omB, _ := newControlForwardServer(t, dir, "node-b")
+	sc := control.Scope()
+	claimed, err := omA.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a local control copy that predates the current owner lineage.
+	if _, err := b.Control.CreateApp(ctx, "stale", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := omA.Release(ctx, sc, claimed.Epoch); err != nil {
+		t.Fatal(err)
+	}
+	rr := do(t, b.Handler(), http.MethodGet, "/v1/control/apps", "tok", nil)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), `"stale"`) {
+		t.Fatalf("read served stale local control: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	owner, _, err := omB.Resolve(ctx, sc)
+	if err != nil || owner.Node != "node-b" {
+		t.Fatalf("read did not claim control: owner=%+v err=%v", owner, err)
 	}
 }
 

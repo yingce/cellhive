@@ -7,6 +7,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"sync"
@@ -19,6 +20,19 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// LogMetadata carries invocation context without coupling telemetry to the
+// server's Tail DTO. JSON fields retain their original workerd values.
+type LogMetadata struct {
+	EventType     string
+	MessageArgs   []json.RawMessage
+	ScriptVersion json.RawMessage
+	RequestID     string
+	Outcome       string
+	Exceptions    json.RawMessage
+	Invocation    bool
+	ProducerLinks json.RawMessage
+}
 
 // Log export modes.
 const (
@@ -131,8 +145,13 @@ func TraceIDs(traceparent string) (traceID, spanID string) {
 	// Fixed W3C layout: 00-<32 hex trace>-<16 hex span>-<2 hex flags>. Parse by
 	// position (no split/allocation) and return the original hex substrings.
 	tp := strings.TrimSpace(traceparent)
-	if len(tp) < 55 || tp[2] != '-' || tp[35] != '-' || tp[52] != '-' {
+	if len(tp) != 55 || tp[:3] != "00-" || tp[35] != '-' || tp[52] != '-' {
 		return "", ""
+	}
+	for _, ch := range tp[53:55] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", ch) {
+			return "", ""
+		}
 	}
 	tid, err := trace.TraceIDFromHex(tp[3:35])
 	if err != nil || !tid.IsValid() {
@@ -149,6 +168,12 @@ func TraceIDs(traceparent string) (traceID, spanID string) {
 // it. It is best-effort and non-blocking: the SDK batches in the background.
 // traceID/spanID (hex, may be empty) correlate the record with its trace.
 func ExportLog(ns, worker, level, message string, atMs int64, traceID, spanID string) {
+	ExportLogWithMetadata(ns, worker, level, message, atMs, traceID, spanID, LogMetadata{})
+}
+
+// ExportLogWithMetadata exports a console line or an invocation record with
+// searchable attributes. The original message arguments remain JSON encoded.
+func ExportLogWithMetadata(ns, worker, level, message string, atMs int64, traceID, spanID string, meta LogMetadata) {
 	s := logs
 	s.mu.Lock()
 	mode, logger := s.mode, s.logger
@@ -171,7 +196,39 @@ func ExportLog(ns, worker, level, message string, atMs int64, traceID, spanID st
 	if sc, ok := spanContext(traceID, spanID); ok {
 		ctx = trace.ContextWithSpanContext(ctx, sc)
 	}
-	logger.Emit(ctx, buildLogRecord(ns, worker, level, message, atMs))
+	rec := buildLogRecord(ns, worker, level, message, atMs)
+	if _, valid := spanContext(traceID, spanID); valid {
+		// Some OTLP backends ingest the native LogRecord trace fields but do not
+		// index them as query columns. Keep the same IDs searchable as attributes.
+		rec.AddAttributes(attribute.String("cellhive.trace_id", traceID), attribute.String("cellhive.span_id", spanID))
+	}
+	if meta.EventType != "" {
+		rec.AddAttributes(attribute.String("cellhive.event_type", meta.EventType))
+	}
+	if len(meta.MessageArgs) > 0 {
+		if raw, err := json.Marshal(meta.MessageArgs); err == nil {
+			rec.AddAttributes(attribute.String("cellhive.message_args", string(raw)))
+		}
+	}
+	if len(meta.ScriptVersion) > 0 {
+		rec.AddAttributes(attribute.String("cellhive.script_version", string(meta.ScriptVersion)))
+	}
+	if meta.RequestID != "" {
+		rec.AddAttributes(attribute.String("cellhive.request_id", meta.RequestID))
+	}
+	if meta.Outcome != "" {
+		rec.AddAttributes(attribute.String("cellhive.outcome", meta.Outcome))
+	}
+	if len(meta.Exceptions) > 0 {
+		rec.AddAttributes(attribute.String("cellhive.exceptions", string(meta.Exceptions)))
+	}
+	if meta.Invocation {
+		rec.AddAttributes(attribute.Bool("cellhive.invocation", true))
+	}
+	if len(meta.ProducerLinks) > 0 {
+		rec.AddAttributes(attribute.String("cellhive.producer_links", string(meta.ProducerLinks)))
+	}
+	logger.Emit(ctx, rec)
 }
 
 // buildLogRecord assembles one OTLP log record: body = message, severity from

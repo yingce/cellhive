@@ -44,6 +44,19 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 	if authorityKey(key) {
 		return b.authority.ConditionalCreate(ctx, key, data)
 	}
+	if strings.HasPrefix(key, "cells/") && strings.Contains(key, "/ltx/e") {
+		// Provider PutObject conditionals are not portable. Native append at
+		// position zero atomically creates an immutable segment; an existing
+		// object cannot be overwritten, including a legacy normal object.
+		if err := b.authority.raw.Append(ctx, key, 0, data); err != nil {
+			if _, _, getErr := b.S3Bucket.Get(ctx, key); getErr == nil {
+				return "", ErrPrecondition
+			}
+			return "", err
+		}
+		_, etag, err := b.S3Bucket.Stat(ctx, key)
+		return etag, err
+	}
 	// Only content-addressed bundles use this path on provider buckets.
 	if !strings.HasPrefix(key, "bundles/sha256/") {
 		return "", ErrNotSupported

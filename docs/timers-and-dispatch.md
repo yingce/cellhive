@@ -51,10 +51,12 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 
 ## cron 派发
 
-> **状态（2026-09-15）**：**全链路已实现**——调度器（ADR-076：`internal/cron`，5 字段 UTC，物化 slot 为 `KindCron` 定时器，`CELLHIVE_CRON_INTERVAL` 默认 30s）→ 派发（ADR-070：`Projection.CronTargets()` → `cronEnricher` 补 worker/bundle → user-runtime `POST /v1/timers/dispatch` → `scheduled(event, env, ctx)`，真实 workerd e2e）。scope 约定 `<ns>/__cron__/<worker>`、occurrence=slot、token 去重、best-effort 不补跑、每节点可跑。
+> **状态（2026-10-19）**：调度器（ADR-076：`internal/cron`，5 字段 UTC，物化 slot 为 `KindCron` 定时器，`CELLHIVE_CRON_INTERVAL` 默认 30s）→ 派发（ADR-070：`Projection.CronTargets()` → `cronEnricher` 补 worker/bundle → user-runtime `POST /v1/timers/dispatch` → `scheduled(event, env, ctx)`）。scope 约定 `<ns>/__cron__/<worker>`；新 occurrence 包含 slot 和表达式。ADR-226 修复双节点各自派发同一 slot：只有当前 cell owner session 可物化、派发和写入 fired/retry，写入等待捕获证明。故障注入复验见兼容验收记录。
 
 - cron 配置存 `__cron__` cell；owner 的 cell-agent 计算下一次触发时间；
 - 新 occurrence 包含分钟 slot + 表达式，保证**每表达式每 slot 去重**；错过不补跑。派发成功但 fired 尚未持久化的崩溃仍可能重投。
+- Timer Runner 和 fleet waker 在打开本地 SQLite 前确认或认领 owner；接管后从权威链恢复。没有过期 fired 行时，轮询不执行清理写事务。
+- 同一 Scheduler 进程对已成功持久确认的 `(scope, cron, UTC slot)` 只物化一次；新进程或新 owner 可按同一 token 安全重试，避免每秒产生无意义的 LTX 段。
 
 ## DO alarm
 
@@ -74,12 +76,13 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 
 **Queue（消费者）**
 - 轮询 `CELLHIVE_QUEUE_INTERVAL`（默认 1s，0=关）；单批大小 `CELLHIVE_QUEUE_BATCH`（0=store 默认）；可见性租约 `CELLHIVE_QUEUE_LEASE`（0=store 默认）。
-- 失败重投延迟 `CELLHIVE_QUEUE_RETRY_DELAY`（默认 **30s**，batch 级 Retry）；重试上限与 DLQ（`dead_letter_queue`）由 **per-consumer 配置**（`max_retries`/`dead_letter_queue`/`max_batch_size`/`max_batch_timeout_seconds`/`max_concurrency`，ADR-072/112）决定，超限进 DLQ。
+- 失败重投优先使用 per-consumer `retry_delay`（秒），未配置时使用 `CELLHIVE_QUEUE_RETRY_DELAY`（默认 **30s**）；显式 `retry({delaySeconds})` 优先于两者。`max_batch_timeout_seconds` 从最早可见消息起算，满批立即派发。`max_retries` 省略或旧值 0 时按首次投递后 3 次重试，超限进 `dead_letter_queue`；无 DLQ 时确认并记录丢弃（ADR-216）。
 - 语义：at-least-once（claim→dispatch→ack/retry；整个 bat​ch 失败即整批重投），只有 owner 消费（`OwnerGate`），每次 store 变更走捕获证明（ADR-119）。
 
 **Timer（派发）**
 - 轮询 `CELLHIVE_TIMER_INTERVAL`（默认 1s，0=关）；单 pass 到期上限 `CELLHIVE_TIMER_BATCH`（默认 **256**）；fired 标记保留 `CELLHIVE_TIMER_FIRED_TTL`（默认 **24h**，防重复派发）。
 - 派发 at-least-once：成功后才标记 fired；崩溃/失败留待下轮。
+- 失败 cron token 的下一次尝试时间与次数写入 timer cell SQLite，按 5 秒起、最多 5 分钟的指数退避；原 slot/due_ms 不变，同 token 重复物化不清除退避，其他 timer 类型保持原重试语义（ADR-211）。
 
 **Waker（单 fleet wake + 死节点恢复）**
 - 轮询 `CELLHIVE_WAKER_INTERVAL`（默认 5s，0=关）；租约 TTL = **2×interval**；单 pass `CELLHIVE_WAKER_BATCH`（默认 256）；fired TTL `CELLHIVE_WAKER_FIRED_TTL`（默认 24h）。

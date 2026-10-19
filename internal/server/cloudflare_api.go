@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,6 +135,9 @@ func (s *Server) handleCloudflareWorkerService(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCloudflareWorkerDeployments(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
 	events, err := s.Control.DeploymentEvents(r.Context(), ns, worker, 10)
 	if err != nil {
@@ -147,6 +152,9 @@ func (s *Server) handleCloudflareWorkerDeployments(w http.ResponseWriter, r *htt
 }
 
 func (s *Server) handleCloudflareWorkerDeploymentCreate(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Strategy string `json:"strategy"`
 		Versions []struct {
@@ -206,6 +214,9 @@ func (s *Server) cloudflareAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
 	if ns == "" || worker == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "account_id and script_name are required")
@@ -262,7 +273,10 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusServiceUnavailable, "no_control", "control store not configured")
 		return
 	}
-	if _, err := s.Control.CreateApp(r.Context(), ns, "wrangler"); err != nil {
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		_, err := s.Control.CreateApp(r.Context(), ns, "wrangler")
+		return err
+	}); err != nil {
 		// CreateApp is idempotent in the control store. Preserve a real failure.
 		if !strings.Contains(err.Error(), "already exists") {
 			writeErr(w, http.StatusBadRequest, "namespace_create_failed", err.Error())
@@ -277,11 +291,26 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 			continue
 		}
 		if _, err := s.Control.GetResource(r.Context(), ns, "workflow", b.ID); err != nil {
-			if _, err := s.Control.CreateResource(r.Context(), ns, "workflow", b.ID, defaultResourceScope(ns, "workflow", b.ID), "wrangler"); err != nil {
+			if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+				_, err := s.Control.CreateResource(r.Context(), ns, "workflow", b.ID, defaultResourceScope(ns, "workflow", b.ID), "wrangler")
+				return err
+			}); err != nil {
 				writeErr(w, http.StatusBadRequest, "workflow_create_failed", err.Error())
 				return
 			}
 		}
+	}
+	// Wrangler manages schedules and queue consumers through separate API
+	// calls. Its code-upload metadata commonly omits both on a repeat deploy;
+	// omission must not disable existing triggers while those calls run.
+	if active, err := s.activeCloudflareVersionForWorker(r.Context(), ns, worker); err == nil {
+		if metadata.Crons == nil {
+			metadata.Crons = active.Crons
+		}
+		metadata.Consumers = active.Consumers
+	} else if !errors.Is(err, control.ErrNotFound) {
+		writeErr(w, http.StatusInternalServerError, "active_version_failed", err.Error())
+		return
 	}
 
 	req := deployReq{
@@ -291,12 +320,19 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		CompatibilityDate:  metadata.CompatibilityDate,
 		CompatibilityFlags: metadata.CompatibilityFlags,
 		Crons:              metadata.Crons, Consumers: metadata.Consumers,
+		Limits:     metadata.Limits,
+		LogPolicy:  metadata.LogPolicy,
 		Migrations: metadata.Migrations,
 	}
 	body, _ := json.Marshal(req)
 	inner := r.Clone(r.Context())
 	inner.Method = http.MethodPost
+	inner.URL.Path = "/v1/control/deploy"
+	inner.URL.RawPath = ""
+	inner.URL.RawQuery = ""
 	inner.Body = io.NopCloser(bytes.NewReader(body))
+	inner.ContentLength = int64(len(body))
+	inner.Header.Set("content-type", "application/json")
 	recorder := httptest.NewRecorder()
 	s.adminAuth(s.handleControlDeploy)(recorder, inner)
 	if recorder.Code < 200 || recorder.Code >= 300 {
@@ -312,6 +348,16 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	var version control.Version
 	if err := json.Unmarshal(recorder.Body.Bytes(), &version); err != nil {
 		writeErr(w, http.StatusInternalServerError, "deploy_response_invalid", err.Error())
+		return
+	}
+	active, ok, err := s.Control.WorkerEnv(r.Context(), ns, worker)
+	if err != nil || !ok || active.Version != version.Number || active.BundleSHA != version.BundleSHA {
+		writeErr(w, http.StatusInternalServerError, "deployment_readback_failed", "active worker version differs from committed deployment")
+		return
+	}
+	events, err := s.Control.DeploymentEvents(r.Context(), ns, worker, 1)
+	if err != nil || len(events) == 0 || events[0].Version != version.Number {
+		writeErr(w, http.StatusInternalServerError, "deployment_readback_failed", "committed deployment event is unavailable")
 		return
 	}
 	// Wrangler unwraps the Cloudflare API envelope and needs a stable version
@@ -337,6 +383,8 @@ type cloudflareWorkerMetadata struct {
 	Crons              []string
 	Consumers          []control.Consumer
 	Migrations         []map[string]any
+	Limits             *control.WorkerLimits
+	LogPolicy          *control.LogPolicy
 	MainModule         string
 	AssetsJWT          string
 	AssetsToken        string
@@ -396,7 +444,13 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		CompatibilityFlags []string         `json:"compatibility_flags"`
 		Bindings           []map[string]any `json:"bindings"`
 		Migrations         []map[string]any `json:"migrations"`
-		Assets             struct {
+		Limits             struct {
+			CpuMs       *int `json:"cpu_ms"`
+			CpuMsNative *int `json:"cpuMs"`
+			SubRequests *int `json:"subrequests"`
+		} `json:"limits"`
+		LogPolicy *control.LogPolicy `json:"log_policy"`
+		Assets    struct {
 			JWT    string `json:"jwt"`
 			Config struct {
 				Binding          string `json:"binding"`
@@ -413,6 +467,23 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		return err
 	}
 	out.MainModule, out.CompatibilityDate, out.CompatibilityFlags = raw.MainModule, raw.CompatibilityDate, raw.CompatibilityFlags
+	out.LogPolicy = raw.LogPolicy
+	if raw.Limits.CpuMs != nil && raw.Limits.CpuMsNative != nil && *raw.Limits.CpuMs != *raw.Limits.CpuMsNative {
+		return fmt.Errorf("limits.cpu_ms and limits.cpuMs disagree")
+	}
+	cpu := raw.Limits.CpuMs
+	if cpu == nil {
+		cpu = raw.Limits.CpuMsNative
+	}
+	if cpu != nil && *cpu <= 0 {
+		return fmt.Errorf("limits.cpu_ms must be positive")
+	}
+	if raw.Limits.SubRequests != nil && *raw.Limits.SubRequests <= 0 {
+		return fmt.Errorf("limits.subrequests must be positive")
+	}
+	if cpu != nil || raw.Limits.SubRequests != nil {
+		out.Limits = &control.WorkerLimits{CpuMs: cpu, SubRequests: raw.Limits.SubRequests}
+	}
 	out.Migrations, out.Crons = raw.Migrations, raw.Triggers.Crons
 	if raw.Assets.JWT != "" {
 		out.AssetsJWT = raw.Assets.JWT
@@ -718,7 +789,7 @@ func (s *Server) cloudflareQueueResult(r *http.Request, queue string) map[string
 			items = append(items, map[string]any{
 				"consumer_id": target.Worker,
 				"type":        "worker", "script": target.Worker,
-				"settings":          map[string]any{"batch_size": target.Consumer.MaxBatchSize, "max_retries": target.Consumer.MaxRetries, "max_concurrency": target.Consumer.MaxConcurrency, "max_wait_time_ms": target.Consumer.MaxBatchTimeoutSeconds * 1000},
+				"settings":          map[string]any{"batch_size": target.Consumer.MaxBatchSize, "max_retries": effectiveQueueRetries(target.Consumer.MaxRetries), "max_concurrency": target.Consumer.MaxConcurrency, "max_wait_time_ms": target.Consumer.MaxBatchTimeoutSeconds * 1000, "retry_delay": target.Consumer.RetryDelaySeconds},
 				"dead_letter_queue": target.Consumer.DeadLetterQueue,
 			})
 		}
@@ -732,12 +803,19 @@ type cloudflareQueueConsumerRequest struct {
 	ScriptName      string `json:"script_name"`
 	DeadLetterQueue string `json:"dead_letter_queue"`
 	Settings        struct {
-		BatchSize      int `json:"batch_size"`
-		MaxRetries     int `json:"max_retries"`
-		MaxConcurrency int `json:"max_concurrency"`
-		MaxWaitTimeMs  int `json:"max_wait_time_ms"`
-		RetryDelay     int `json:"retry_delay"`
+		BatchSize      int  `json:"batch_size"`
+		MaxRetries     *int `json:"max_retries"`
+		MaxConcurrency int  `json:"max_concurrency"`
+		MaxWaitTimeMs  *int `json:"max_wait_time_ms"`
+		RetryDelay     int  `json:"retry_delay"`
 	} `json:"settings"`
+}
+
+func effectiveQueueRetries(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return 3
 }
 
 func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Request, remove bool) {
@@ -759,11 +837,7 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 		in.ScriptName = r.PathValue("consumer_id")
 	}
 	if !remove {
-		if in.Settings.RetryDelay != 0 {
-			writeErr(w, http.StatusBadRequest, "unsupported_retry_delay", "queue consumer retry_delay is not supported")
-			return
-		}
-		if in.Settings.BatchSize < 0 || in.Settings.MaxRetries < 0 || in.Settings.MaxConcurrency < 0 || in.Settings.MaxWaitTimeMs < 0 || in.Settings.MaxWaitTimeMs%1000 != 0 {
+		if in.Settings.BatchSize < 0 || in.Settings.BatchSize > 100 || in.Settings.MaxConcurrency < 0 || in.Settings.RetryDelay < 0 || (in.Settings.MaxRetries != nil && *in.Settings.MaxRetries <= 0) || (in.Settings.MaxWaitTimeMs != nil && (*in.Settings.MaxWaitTimeMs < 0 || *in.Settings.MaxWaitTimeMs > 60_000 || *in.Settings.MaxWaitTimeMs%1000 != 0)) {
 			writeErr(w, http.StatusBadRequest, "invalid_consumer", "invalid queue consumer settings")
 			return
 		}
@@ -791,9 +865,17 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 			return control.ErrNotFound
 		}
 		if !remove {
-			consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: in.Settings.MaxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: in.Settings.MaxWaitTimeMs / 1000})
+			maxRetries := 3
+			if in.Settings.MaxRetries != nil {
+				maxRetries = *in.Settings.MaxRetries
+			}
+			batchTimeout := 5
+			if in.Settings.MaxWaitTimeMs != nil {
+				batchTimeout = *in.Settings.MaxWaitTimeMs / 1000
+			}
+			consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: maxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: batchTimeout, RetryDelaySeconds: in.Settings.RetryDelay})
 		}
-		nv, err = s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, SessionPolicy: v.SessionPolicy}, "wrangler-queue-consumer")
+		nv, err = s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy, SessionPolicy: v.SessionPolicy}, "wrangler-queue-consumer")
 		return err
 	})
 	if err != nil {

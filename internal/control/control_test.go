@@ -124,6 +124,62 @@ func TestDeployPromoteRollback(t *testing.T) {
 	}
 }
 
+func TestDeployEventFailureRollsBackActivationAndRetry(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, false)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha1"}, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.cell(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The trigger fails after the new version and active pointer have been
+	// written in the transaction, but before the deployment event and key.
+	if _, err := c.DB.ExecContext(ctx, `CREATE TRIGGER reject_second_deploy BEFORE INSERT ON deployment_events
+		WHEN NEW.ns='acme' AND NEW.worker='api' AND NEW.version=2
+		BEGIN SELECT RAISE(ABORT, 'injected deployment event failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	spec := DeploySpec{BundleSHA: "sha2", IdempotencyKey: "retry-v2"}
+	if _, err := s.Deploy(ctx, "acme", "api", spec, "ops"); err == nil {
+		t.Fatal("injected failure unexpectedly committed")
+	}
+	releases, err := s.Releases(ctx, "acme", "api")
+	if err != nil || len(releases) != 1 || releases[0].Version != 1 || !releases[0].Active {
+		t.Fatalf("failed deployment changed releases: %+v, %v", releases, err)
+	}
+	events, err := s.DeploymentEvents(ctx, "acme", "api", 10)
+	if err != nil || len(events) != 1 || events[0].Version != 1 {
+		t.Fatalf("failed deployment changed events: %+v, %v", events, err)
+	}
+	var keys int
+	if err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM deploy_idempotency WHERE ns='acme' AND worker='api' AND key='retry-v2'`).Scan(&keys); err != nil || keys != 0 {
+		t.Fatalf("failed deployment retained idempotency key: %d, %v", keys, err)
+	}
+	if _, err := c.DB.ExecContext(ctx, `DROP TRIGGER reject_second_deploy`); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := s.Deploy(ctx, "acme", "api", spec, "ops")
+	if err != nil || v2.Number != 2 {
+		t.Fatalf("retry = %+v, %v", v2, err)
+	}
+	if repeated, err := s.Deploy(ctx, "acme", "api", spec, "ops"); err != nil || repeated.Number != 2 {
+		t.Fatalf("idempotent retry = %+v, %v", repeated, err)
+	}
+	releases, err = s.Releases(ctx, "acme", "api")
+	if err != nil || len(releases) != 2 || releases[0].Version != 2 || !releases[0].Active {
+		t.Fatalf("recovered releases = %+v, %v", releases, err)
+	}
+	events, err = s.DeploymentEvents(ctx, "acme", "api", 10)
+	if err != nil || len(events) != 2 || events[0].Version != 2 {
+		t.Fatalf("recovered events = %+v, %v", events, err)
+	}
+}
+
 func TestDeployPersistsWorkerLimits(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t, true)
@@ -131,16 +187,52 @@ func TestDeployPersistsWorkerLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	sub := 7
-	v, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha", Limits: &WorkerLimits{SubRequests: &sub}}, "ops")
+	cpu := 50
+	v, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha", Limits: &WorkerLimits{SubRequests: &sub, CpuMs: &cpu}}, "ops")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Limits == nil || *v.Limits.SubRequests != sub {
+	if v.Limits == nil || *v.Limits.SubRequests != sub || *v.Limits.CpuMs != cpu {
 		t.Fatalf("version limits = %+v", v.Limits)
 	}
 	view, ok, err := s.VersionEnv(ctx, "acme", "api", v.Number)
-	if err != nil || !ok || view.Limits == nil || *view.Limits.SubRequests != sub {
+	if err != nil || !ok || view.Limits == nil || *view.Limits.SubRequests != sub || *view.Limits.CpuMs != cpu {
 		t.Fatalf("view limits = %+v ok=%v err=%v", view.Limits, ok, err)
+	}
+	zero := 0
+	if _, err := s.Deploy(ctx, "acme", "bad", DeploySpec{BundleSHA: "sha", Limits: &WorkerLimits{CpuMs: &zero}}, "ops"); err == nil {
+		t.Fatal("zero cpuMs must be rejected")
+	}
+}
+
+func TestLogPolicyIsVersionedAndPreservedBySecretChange(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, true)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	off, on := false, true
+	v1, err := s.Deploy(ctx, "acme", "quiet", DeploySpec{BundleSHA: "sha1", LogPolicy: &LogPolicy{Console: &off, Invocation: &on}}, "ops")
+	if err != nil || v1.LogPolicy == nil || *v1.LogPolicy.Console || !*v1.LogPolicy.Invocation {
+		t.Fatalf("deploy policy = %+v, %v", v1.LogPolicy, err)
+	}
+	if err := s.PutSecret(ctx, "acme", "quiet", "TOKEN", []byte("value"), "ops"); err != nil {
+		t.Fatal(err)
+	}
+	view, ok, err := s.WorkerEnv(ctx, "acme", "quiet")
+	if err != nil || !ok || view.Version != 2 || view.LogPolicy == nil || *view.LogPolicy.Console || !*view.LogPolicy.Invocation {
+		t.Fatalf("secret version policy = %+v, version=%d ok=%v err=%v", view.LogPolicy, view.Version, ok, err)
+	}
+	v2, err := s.Deploy(ctx, "acme", "quiet", DeploySpec{BundleSHA: "sha2", LogPolicy: &LogPolicy{Console: &on, Invocation: &off}}, "ops")
+	if err != nil || v2.Number != 3 {
+		t.Fatalf("next deploy = %+v, %v", v2, err)
+	}
+	if _, err := s.Promote(ctx, "acme", "quiet", 1, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	view, ok, err = s.WorkerEnv(ctx, "acme", "quiet")
+	if err != nil || !ok || view.LogPolicy == nil || *view.LogPolicy.Console || !*view.LogPolicy.Invocation {
+		t.Fatalf("rollback policy = %+v ok=%v err=%v", view.LogPolicy, ok, err)
 	}
 }
 
@@ -481,6 +573,12 @@ func TestDeployIdempotencyAndReleases(t *testing.T) {
 	if err != nil || again.Number != 1 {
 		t.Fatalf("idempotent deploy = %+v, %v (want v1)", again, err)
 	}
+	if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha2", IdempotencyKey: "k1"}, "ops"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("same key with different bundle = %v, want conflict", err)
+	}
+	if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha1", Vars: map[string]string{"MODE": "changed"}, IdempotencyKey: "k1"}, "ops"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("same key with different vars = %v, want conflict", err)
+	}
 	// A different key allocates a new version.
 	third, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: "sha2", IdempotencyKey: "k2"}, "ops")
 	if err != nil || third.Number != 2 {
@@ -492,6 +590,51 @@ func TestDeployIdempotencyAndReleases(t *testing.T) {
 	}
 	if rel[0].Version != 2 || !rel[0].Active || rel[1].Version != 1 || rel[1].Active {
 		t.Fatalf("release log = %+v", rel)
+	}
+}
+
+func TestPromoteAndRollbackRetryDoNotToggle(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, true)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range []string{"sha1", "sha2"} {
+		if _, err := s.Deploy(ctx, "acme", "api", DeploySpec{BundleSHA: sha}, "ops"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := s.Releases(ctx, "acme", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := s.Promote(ctx, "acme", "api", 2, "ops")
+	if err != nil || w.Active != 2 || w.Previous != 1 {
+		t.Fatalf("repeated promote = %+v, %v", w, err)
+	}
+	after, err := s.Releases(ctx, "acme", "api")
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("repeated promote added deployment event: before=%d after=%d err=%v", len(before), len(after), err)
+	}
+	first, err := s.RollbackWithKey(ctx, "acme", "api", "rollback-1", "ops")
+	if err != nil || first.Active != 1 || first.Previous != 2 {
+		t.Fatalf("first rollback = %+v, %v", first, err)
+	}
+	afterFirst, err := s.Releases(ctx, "acme", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.RollbackWithKey(ctx, "acme", "api", "rollback-1", "ops")
+	if err != nil || again.Active != first.Active || again.Previous != first.Previous {
+		t.Fatalf("retried rollback = %+v, %v", again, err)
+	}
+	afterRetry, err := s.Releases(ctx, "acme", "api")
+	if err != nil || len(afterRetry) != len(afterFirst) {
+		t.Fatalf("retried rollback added deployment event: before=%d after=%d err=%v", len(afterFirst), len(afterRetry), err)
+	}
+	w, err = s.RollbackWithKey(ctx, "acme", "api", "rollback-2", "ops")
+	if err != nil || w.Active != 2 || w.Previous != 1 {
+		t.Fatalf("new rollback key = %+v, %v", w, err)
 	}
 }
 

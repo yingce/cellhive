@@ -7,7 +7,7 @@
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError, WorkflowTimeoutError } from "cellhive-workflow.js";
-import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub } from "facades.js";
+import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
 
 // Rebuild synchronous tenant-isolate APIs over the props-bound capabilities.
@@ -32,6 +32,11 @@ try {
   for (const name of __cellhivePlatform.d1Bindings) {
     if (__env[name]) {
       Object.defineProperty(__env, name, { value: makeD1FromStub(__env[name]), writable: true, configurable: true, enumerable: true });
+    }
+  }
+  for (const name of __cellhivePlatform.queueBindings) {
+    if (__env[name]) {
+      Object.defineProperty(__env, name, { value: makeQueueFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
     }
   }
 } catch (e) {
@@ -62,6 +67,8 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
     const bindings = env;
     const step = makeStep(workflowBridge, eventJson.instanceId);
     const inst = new cls(this.ctx, bindings);
+    globalThis.__cellhiveTraceparent = eventJson.traceparent || "";
+    globalThis.__cellhiveRequestId = eventJson.request_id || "";
     try {
       const out = await runInvocation(() => inst.run(eventJson.event, step));
       await finish(workflowBridge, eventJson.instanceId, out);
@@ -71,6 +78,9 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
       if (e instanceof StopSignal) return { status: "stopped" };
       await finishError(workflowBridge, eventJson.instanceId, String(e && e.message ? e.message : e));
       return { status: "errored", error: String(e && e.message ? e.message : e) };
+    } finally {
+      delete globalThis.__cellhiveTraceparent;
+      delete globalThis.__cellhiveRequestId;
     }
   }
 }

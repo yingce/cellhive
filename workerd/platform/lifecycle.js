@@ -125,6 +125,9 @@ export function invocationSource() {
   return `
     import { AsyncLocalStorage } from 'node:async_hooks';
     const contexts = new AsyncLocalStorage();
+    // Capture the native sink before tenant module evaluation can replace
+    // console methods. Only the wrapper owns the per-loaded-worker Tail key.
+    export const dispatchDebug = console.debug.bind(console);
     export function trackBackground(p,delegate) {
       const state=contexts.getStore(), promise=Promise.resolve(p);
       if(state){if(state.background.length>=256)throw new Error('too many invocation background tasks');state.background.push(promise);}

@@ -14,6 +14,9 @@ import (
 )
 
 func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	apps, err := s.Control.Apps(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "accounts_failed", err.Error())
@@ -27,6 +30,9 @@ func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleCloudflareMemberships(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	apps, err := s.Control.Apps(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "memberships_failed", err.Error())
@@ -40,7 +46,12 @@ func (s *Server) handleCloudflareMemberships(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleCloudflareWorkerDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.Control.DeleteWorker(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), "wrangler"); err != nil {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		return s.Control.DeleteWorker(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), "wrangler")
+	}); err != nil {
 		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())
 		return
 	}
@@ -48,6 +59,9 @@ func (s *Server) handleCloudflareWorkerDelete(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleCloudflareWorkerVersionDeploy(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, worker, wanted := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("version_id")
 	releases, err := s.Control.Releases(r.Context(), ns, worker)
 	if err != nil {
@@ -118,6 +132,9 @@ func cloudflareVersionResult(v control.Version) map[string]any {
 }
 
 func (s *Server) handleCloudflareWorkerVersions(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	releases, err := s.Control.Releases(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "versions_failed", err.Error())
@@ -132,6 +149,9 @@ func (s *Server) handleCloudflareWorkerVersions(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, worker, wanted := r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("version_id")
 	releases, err := s.Control.Releases(r.Context(), ns, worker)
 	if err != nil {
@@ -169,12 +189,23 @@ func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http
 				}
 				bindings = append(bindings, item)
 			}
+			runtime := map[string]any{"compatibility_date": view.CompatDate, "compatibility_flags": view.CompatFlags}
+			if view.Limits != nil {
+				limits := map[string]any{}
+				if view.Limits.CpuMs != nil {
+					limits["cpu_ms"] = *view.Limits.CpuMs
+				}
+				if view.Limits.SubRequests != nil {
+					limits["subrequests"] = *view.Limits.SubRequests
+				}
+				runtime["limits"] = limits
+			}
 			cloudflareResult(w, map[string]any{
 				"id": strconv.Itoa(rel.Version), "number": rel.Version, "etag": rel.BundleSHA,
 				"metadata": map[string]any{"created_on": time.UnixMilli(rel.CreatedMs).UTC().Format(time.RFC3339Nano), "author_email": rel.Actors, "source": "api"},
 				"resources": map[string]any{
 					"script":         map[string]any{"etag": rel.BundleSHA, "handlers": []string{}},
-					"script_runtime": map[string]any{"compatibility_date": view.CompatDate, "compatibility_flags": view.CompatFlags},
+					"script_runtime": runtime,
 					"bindings":       bindings,
 				},
 				"active": rel.Active, "crons": rel.Crons,
@@ -186,6 +217,13 @@ func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http
 }
 
 func (s *Server) handleCloudflareWorkerSchedules(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		if s.forwardRead(w, r, control.Scope(), nil) {
+			return
+		}
+	} else if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	v, err := s.activeCloudflareVersion(r)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "worker_not_found", err.Error())
@@ -214,7 +252,12 @@ func (s *Server) handleCloudflareWorkerSchedules(w http.ResponseWriter, r *http.
 		}
 		crons = append(crons, item.Cron)
 	}
-	newV, err := s.Control.Deploy(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: v.Consumers, Crons: crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits}, "wrangler-schedules")
+	var newV control.Version
+	err = s.capturedWrite(r.Context(), control.Scope(), func() error {
+		var err error
+		newV, err = s.Control.Deploy(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: v.Consumers, Crons: crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy, SessionPolicy: v.SessionPolicy}, "wrangler-schedules")
+		return err
+	})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "schedule_update_failed", err.Error())
 		return

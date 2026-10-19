@@ -1,6 +1,7 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -228,6 +229,41 @@ func (m *Manager) putResourceObject(ctx context.Context, sc cell.Scope, epoch ui
 		cleanupErr := objects.ConditionalDelete(ctx, key, etag)
 		if cleanupErr != nil && !errors.Is(cleanupErr, bucket.ErrPrecondition) && !errors.Is(cleanupErr, bucket.ErrNotFound) {
 			return "", fmt.Errorf("%w: late publication cleanup: %v", ErrResourceDeleted, cleanupErr)
+		}
+		return "", ErrResourceDeleted
+	}
+	return etag, nil
+}
+
+// putImmutableSegment never changes an acknowledged LTX object. Replays from a
+// follower or retry are allowed only when the bytes are identical.
+func (m *Manager) putImmutableSegment(ctx context.Context, sc cell.Scope, epoch uint64, key string, data []byte) (string, error) {
+	objects := m.resourceObjects()
+	etag, err := objects.ConditionalCreate(ctx, key, data)
+	created := err == nil
+	if errors.Is(err, bucket.ErrPrecondition) {
+		old, oldETag, getErr := objects.GetVersion(ctx, key)
+		if getErr != nil {
+			return "", getErr
+		}
+		if !bytes.Equal(old, data) {
+			return "", fmt.Errorf("replica: conflicting segment at %s: %w", key, bucket.ErrPrecondition)
+		}
+		etag, err = oldETag, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	fence, _, err := m.readResourceFence(ctx, sc)
+	if err != nil {
+		return "", err
+	}
+	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
+		if created {
+			cleanupErr := objects.ConditionalDelete(ctx, key, etag)
+			if cleanupErr != nil && !errors.Is(cleanupErr, bucket.ErrPrecondition) && !errors.Is(cleanupErr, bucket.ErrNotFound) {
+				return "", fmt.Errorf("%w: late publication cleanup: %v", ErrResourceDeleted, cleanupErr)
+			}
 		}
 		return "", ErrResourceDeleted
 	}

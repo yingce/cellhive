@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS messages (
   idempotency_key TEXT,
   idempotency_fingerprint TEXT,
   metadata        TEXT,
+  producer_request_id TEXT NOT NULL DEFAULT '',
+  producer_traceparent TEXT NOT NULL DEFAULT '',
   source_queue    TEXT NOT NULL DEFAULT '',
   source_generation TEXT NOT NULL DEFAULT '',
   source_id       TEXT NOT NULL DEFAULT '',
@@ -80,6 +82,8 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 		for _, stmt := range []string{
 			`ALTER TABLE messages ADD COLUMN idempotency_fingerprint TEXT`,
 			`ALTER TABLE messages ADD COLUMN metadata TEXT`,
+			`ALTER TABLE messages ADD COLUMN producer_request_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN producer_traceparent TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE messages ADD COLUMN source_queue TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE messages ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE messages ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
@@ -103,14 +107,16 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 
 // Message is one queued message.
 type Message struct {
-	ID           string          `json:"id"`
-	Body         []byte          `json:"body"`
-	ContentType  string          `json:"content_type"`
-	VisibleAtMs  int64           `json:"visible_at_ms"`
-	Attempts     int             `json:"attempts"`
-	LeaseUntilMs int64           `json:"lease_until_ms"`
-	TimestampMs  int64           `json:"timestamp_ms"`
-	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	ID                  string          `json:"id"`
+	Body                []byte          `json:"body"`
+	ContentType         string          `json:"content_type"`
+	VisibleAtMs         int64           `json:"visible_at_ms"`
+	Attempts            int             `json:"attempts"`
+	LeaseUntilMs        int64           `json:"lease_until_ms"`
+	TimestampMs         int64           `json:"timestamp_ms"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	ProducerRequestID   string          `json:"producer_request_id,omitempty"`
+	ProducerTraceparent string          `json:"producer_traceparent,omitempty"`
 	// IdempotencyKey travels with the message so a dead-letter replay can
 	// preserve it. Transfers use separate durable receipts so an operator can
 	// replay a consumed message without bypassing producer deduplication.
@@ -134,7 +140,7 @@ func (s *Store) PeekPage(ctx context.Context, ns, name, after string, limit int)
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := c.DB.QueryContext(ctx, `SELECT id,body,content_type,visible_at_ms,attempts,lease_until_ms,COALESCE(idempotency_key,''),created_ms,COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms FROM messages WHERE id>? ORDER BY id LIMIT ?`, after, limit+1)
+	rows, err := c.DB.QueryContext(ctx, `SELECT id,body,content_type,visible_at_ms,attempts,lease_until_ms,COALESCE(idempotency_key,''),created_ms,COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms,producer_request_id,producer_traceparent FROM messages WHERE id>? ORDER BY id LIMIT ?`, after, limit+1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -144,7 +150,7 @@ func (s *Store) PeekPage(ctx context.Context, ns, name, after string, limit int)
 	for rows.Next() {
 		var m Message
 		var metadata string
-		if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs); err != nil {
+		if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs, &m.ProducerRequestID, &m.ProducerTraceparent); err != nil {
 			return nil, "", err
 		}
 		if metadata != "" {
@@ -183,16 +189,18 @@ func (s *Store) Send(ctx context.Context, ns, name string, body []byte, contentT
 
 // SendMessage is one Cloudflare Queue message in an atomic batch.
 type SendMessage struct {
-	Body             []byte
-	ContentType      string
-	DelaySeconds     int
-	IdempotencyKey   string
-	Metadata         json.RawMessage
-	sourceQueue      string
-	sourceGeneration string
-	sourceID         string
-	sourceAttempts   int
-	sourceCreatedMs  int64
+	Body                []byte
+	ContentType         string
+	DelaySeconds        int
+	IdempotencyKey      string
+	Metadata            json.RawMessage
+	ProducerRequestID   string
+	ProducerTraceparent string
+	sourceQueue         string
+	sourceGeneration    string
+	sourceID            string
+	sourceAttempts      int
+	sourceCreatedMs     int64
 }
 
 // SendBatch atomically enqueues all messages. Reusing an idempotency key with
@@ -229,7 +237,7 @@ func (s *Store) TransferValidated(ctx context.Context, ns, name string, m Messag
 			return nil
 		}
 	}
-	ids, err := s.sendBatch(ctx, ns, name, []SendMessage{{Body: m.Body, ContentType: m.ContentType, Metadata: m.Metadata, IdempotencyKey: m.IdempotencyKey, sourceQueue: m.SourceQueue, sourceGeneration: m.SourceGeneration, sourceID: m.SourceID, sourceAttempts: m.SourceAttempts, sourceCreatedMs: m.SourceCreatedMs}}, m.ID, validate)
+	ids, err := s.sendBatch(ctx, ns, name, []SendMessage{{Body: m.Body, ContentType: m.ContentType, Metadata: m.Metadata, IdempotencyKey: m.IdempotencyKey, ProducerRequestID: m.ProducerRequestID, ProducerTraceparent: m.ProducerTraceparent, sourceQueue: m.SourceQueue, sourceGeneration: m.SourceGeneration, sourceID: m.SourceID, sourceAttempts: m.SourceAttempts, sourceCreatedMs: m.SourceCreatedMs}}, m.ID, validate)
 	if err != nil {
 		return "", err
 	}
@@ -262,6 +270,9 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 		}
 		if len(m.Body) > 128*1024 {
 			return nil, fmt.Errorf("queue: message exceeds 128 KiB")
+		}
+		if len(m.ProducerRequestID) > 160 || len(m.ProducerTraceparent) > 256 {
+			return nil, fmt.Errorf("queue: producer context exceeds limits")
 		}
 		if _, err := messageFingerprint(m); err != nil {
 			return nil, err
@@ -322,8 +333,8 @@ func (s *Store) sendBatch(ctx context.Context, ns, name string, messages []SendM
 				metadata = string(m.Metadata)
 			}
 			if _, e := tx.ExecContext(ctx,
-				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms,source_queue,source_generation,source_id,source_attempts,source_created_ms)
-				 VALUES(?,?,?,?,0,0,?,?,?,?,?,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now, m.sourceQueue, m.sourceGeneration, m.sourceID, m.sourceAttempts, m.sourceCreatedMs); e != nil {
+				`INSERT INTO messages(id, body, content_type, visible_at_ms, attempts, lease_until_ms, idempotency_key, idempotency_fingerprint, metadata, created_ms,source_queue,source_generation,source_id,source_attempts,source_created_ms,producer_request_id,producer_traceparent)
+				 VALUES(?,?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,?)`, id, m.Body, m.ContentType, visible, idem, fingerprint, metadata, now, m.sourceQueue, m.sourceGeneration, m.sourceID, m.sourceAttempts, m.sourceCreatedMs, m.ProducerRequestID, m.ProducerTraceparent); e != nil {
 				return e
 			}
 			if ledgerKey != "" {
@@ -352,6 +363,49 @@ func normalizeContentType(v string) string {
 	}
 }
 
+// BatchReady reports whether the first available batch should be dispatched.
+// Retried messages are dispatched as soon as they become visible; new partial
+// batches wait until the oldest visible message reaches maxWaitSeconds.
+func (s *Store) BatchReady(ctx context.Context, ns, name string, batchSize, maxWaitSeconds int) (bool, error) {
+	if maxWaitSeconds <= 0 {
+		return true, nil
+	}
+	if batchSize <= 0 || batchSize > 100 {
+		batchSize = 10
+	}
+	c, err := s.cell(ctx, ns, name)
+	if err != nil {
+		return false, err
+	}
+	now := s.now().UnixMilli()
+	rows, err := c.DB.QueryContext(ctx, `SELECT visible_at_ms, attempts FROM messages
+		WHERE visible_at_ms<=? AND lease_until_ms<=? ORDER BY visible_at_ms,id LIMIT ?`, now, now, batchSize)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	count := 0
+	var oldest int64
+	for rows.Next() {
+		var visible int64
+		var attempts int
+		if err := rows.Scan(&visible, &attempts); err != nil {
+			return false, err
+		}
+		if count == 0 {
+			oldest = visible
+		}
+		count++
+		if attempts > 0 {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return count >= batchSize || (count > 0 && now-oldest >= int64(maxWaitSeconds)*1000), nil
+}
+
 // Claim returns up to limit visible messages and leases them until now+leaseMs.
 func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs int64) ([]Message, error) {
 	generation := ""
@@ -376,7 +430,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 	var out []Message
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,''), created_ms, COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms FROM messages
+			`SELECT id, body, content_type, visible_at_ms, attempts, lease_until_ms, COALESCE(idempotency_key,''), created_ms, COALESCE(metadata,''),source_queue,source_generation,source_id,source_attempts,source_created_ms,producer_request_id,producer_traceparent FROM messages
 			 WHERE visible_at_ms <= ? AND lease_until_ms <= ? ORDER BY visible_at_ms, id LIMIT ?`,
 			now, now, limit)
 		if err != nil {
@@ -385,7 +439,7 @@ func (s *Store) Claim(ctx context.Context, ns, name string, limit int, leaseMs i
 		for rows.Next() {
 			var m Message
 			var metadata string
-			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs); err != nil {
+			if err := rows.Scan(&m.ID, &m.Body, &m.ContentType, &m.VisibleAtMs, &m.Attempts, &m.LeaseUntilMs, &m.IdempotencyKey, &m.TimestampMs, &metadata, &m.SourceQueue, &m.SourceGeneration, &m.SourceID, &m.SourceAttempts, &m.SourceCreatedMs, &m.ProducerRequestID, &m.ProducerTraceparent); err != nil {
 				rows.Close()
 				return err
 			}

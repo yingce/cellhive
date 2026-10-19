@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cellhive/internal/control"
 	"cellhive/internal/scopedtoken"
 )
 
@@ -139,6 +140,9 @@ func (s *Server) currentRuntimeVars(ctx context.Context, ns, worker string, decl
 // /v1/internal/worker/bindings and, for the do-runtime, /v1/internal/do/bindings
 // (ADR-089/128).
 func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	q := r.URL.Query()
 	ns, worker := q.Get("ns"), q.Get("worker")
 	if ns == "" || worker == "" {
@@ -156,7 +160,7 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	}
 	view, ok, verr := s.Control.VersionEnv(r.Context(), ns, worker, version)
 	if verr != nil || !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
+		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}, "log_policy": map[string]bool{"console": false, "invocation": false}})
 		return
 	}
 	spec, vars := s.bindingSpecFor(r.Context(), ns, worker, version)
@@ -167,6 +171,7 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bindings": spec, "vars": vars,
 		"compat_date": view.CompatDate, "compat_flags": view.CompatFlags,
-		"limits": view.Limits,
+		"limits":     view.Limits,
+		"log_policy": view.LogPolicy,
 	})
 }

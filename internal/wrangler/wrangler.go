@@ -8,6 +8,7 @@
 package wrangler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -47,6 +48,7 @@ type Deploy struct {
 	// AssetsBinding is the assets binding name, if declared.
 	AssetsBinding string
 	Migrations    []map[string]any
+	Limits        *control.WorkerLimits
 
 	// Bundling inputs.
 	NoBundle   bool
@@ -123,6 +125,9 @@ func Load(path, envName string) (*Deploy, error) {
 	d.unknown(base)
 	d.rejected(base)
 	d.scalars(base)
+	if err := d.mapLimits(base); err != nil {
+		return nil, err
+	}
 	d.mapBindings(base)
 	d.mapBuild(base)
 	d.mapAssets(base, path)
@@ -145,6 +150,45 @@ func Load(path, envName string) (*Deploy, error) {
 		d.Main = filepath.Join(filepath.Dir(path), d.Main)
 	}
 	return d, nil
+}
+
+// mapLimits accepts Wrangler's cpu_ms spelling and the native cpuMs spelling.
+// CpuMs is metadata only until the production workerd supports an invocation
+// CPU watchdog; it must not be forwarded as an enforced runtime limit yet.
+func (d *Deploy) mapLimits(m map[string]any) error {
+	v, ok := m["limits"]
+	if !ok {
+		return nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("limits: %w", err)
+	}
+	var in struct {
+		CpuMs       *int `json:"cpu_ms"`
+		CpuMsNative *int `json:"cpuMs"`
+		SubRequests *int `json:"subrequests"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		return fmt.Errorf("limits: %w", err)
+	}
+	if in.CpuMs != nil && in.CpuMsNative != nil && *in.CpuMs != *in.CpuMsNative {
+		return fmt.Errorf("limits: cpu_ms and cpuMs disagree")
+	}
+	cpu := in.CpuMs
+	if cpu == nil {
+		cpu = in.CpuMsNative
+	}
+	if cpu != nil && *cpu <= 0 {
+		return fmt.Errorf("limits.cpu_ms must be positive")
+	}
+	if in.SubRequests != nil && *in.SubRequests <= 0 {
+		return fmt.Errorf("limits.subrequests must be positive")
+	}
+	d.Limits = &control.WorkerLimits{CpuMs: cpu, SubRequests: in.SubRequests}
+	return nil
 }
 
 // mergeEnv overlays env.<name> on the top level, dropping top-level bindings
@@ -263,13 +307,22 @@ func (d *Deploy) mapBindings(m map[string]any) {
 			d.Bindings = append(d.Bindings, control.Binding{Type: "queue", Name: str(p["binding"]), ID: str(p["queue"])})
 		}
 		for _, c := range list(q["consumers"]) {
+			maxRetries := 3
+			if raw, ok := c["max_retries"]; ok {
+				maxRetries = intOf(raw)
+			}
+			batchTimeout := 5
+			if raw, ok := c["max_batch_timeout"]; ok {
+				batchTimeout = intOf(raw)
+			}
 			d.Consumers = append(d.Consumers, control.Consumer{
 				Queue:                  str(c["queue"]),
-				MaxRetries:             intOf(c["max_retries"]),
+				MaxRetries:             maxRetries,
+				RetryDelaySeconds:      intOf(c["retry_delay"]),
 				DeadLetterQueue:        str(c["dead_letter_queue"]),
 				MaxBatchSize:           intOf(c["max_batch_size"]),
 				MaxConcurrency:         intOf(c["max_concurrency"]),
-				MaxBatchTimeoutSeconds: intOf(c["max_batch_timeout"]),
+				MaxBatchTimeoutSeconds: batchTimeout,
 			})
 		}
 	}

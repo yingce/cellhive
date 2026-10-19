@@ -23,6 +23,26 @@ type HTTPCommitter struct {
 	token     string
 	followers []string
 	client    *http.Client
+	// RequireBucket waits for the authoritative bucket before ack. DO cold
+	// restore reads bucket objects, so a fleet-only proof is insufficient.
+	RequireBucket bool
+	// RequireDOOwner keeps administrative whole-directory captures on bucket
+	// proof when no claimed shard identity is attached to the gate context.
+	RequireDOOwner bool
+}
+
+type doOwnerContextKey struct{}
+
+type DOOwnerIdentity struct {
+	Scope cell.Scope
+	Node  string
+	Epoch uint64
+}
+
+// WithDOOwner attaches the shard lease proven by the do-runtime router to one
+// supervisor output gate. The cell-agent checks it before fleet confirmation.
+func WithDOOwner(ctx context.Context, owner DOOwnerIdentity) context.Context {
+	return context.WithValue(ctx, doOwnerContextKey{}, owner)
 }
 
 func NewHTTPCommitter(owner, token string, followers []string, client *http.Client) *HTTPCommitter {
@@ -83,6 +103,15 @@ func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint
 	req.Header.Set("content-type", "application/octet-stream")
 	req.Header.Set("x-cellhive-internal-token", c.token)
 	req.Header.Set("x-cellhive-followers", strings.Join(c.followers, ","))
+	doOwner, hasDOOwner := ctx.Value(doOwnerContextKey{}).(DOOwnerIdentity)
+	if hasDOOwner && doOwner.Epoch != 0 {
+		req.Header.Set("x-cellhive-do-owner-scope", doOwner.Scope.String())
+		req.Header.Set("x-cellhive-do-owner-node", doOwner.Node)
+		req.Header.Set("x-cellhive-do-owner-epoch", strconv.FormatUint(doOwner.Epoch, 10))
+	}
+	if c.RequireBucket || (c.RequireDOOwner && (!hasDOOwner || doOwner.Epoch == 0)) {
+		req.Header.Set("x-cellhive-bucket-proof", "1")
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return err

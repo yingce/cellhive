@@ -2,8 +2,11 @@ package bucket
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestProviderCloudDiagnose(t *testing.T) {
@@ -41,7 +44,34 @@ func TestProviderCloudDiagnose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = Diagnose(context.Background(), NewProviderBucket(data, a)); err != nil {
+	provider := NewProviderBucket(data, a)
+	if err = Diagnose(context.Background(), provider); err != nil {
 		t.Fatal(err)
+	}
+	// LTX segments must use native position-zero append. A provider ordinary
+	// PutObject conditional cannot be assumed to work (COS rejects it).
+	key := fmt.Sprintf("cells/provider-probe/__test__/%d/ltx/e1/probe.ltx", time.Now().UnixNano())
+	defer provider.Delete(context.Background(), key)
+	if _, err := provider.ConditionalCreate(context.Background(), key, []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.ConditionalCreate(context.Background(), key, []byte("two")); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("LTX overwrite error = %v, want precondition", err)
+	}
+	got, _, err := provider.Get(context.Background(), key)
+	if err != nil || string(got) != "one" {
+		t.Fatalf("LTX content = %q, %v; want one", got, err)
+	}
+	legacyKey := key + ".legacy"
+	defer provider.Delete(context.Background(), legacyKey)
+	if _, err := provider.Put(context.Background(), legacyKey, []byte("legacy")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.ConditionalCreate(context.Background(), legacyKey, []byte("new")); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("legacy LTX overwrite error = %v, want precondition", err)
+	}
+	got, _, err = provider.Get(context.Background(), legacyKey)
+	if err != nil || string(got) != "legacy" {
+		t.Fatalf("legacy LTX content = %q, %v; want legacy", got, err)
 	}
 }

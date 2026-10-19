@@ -67,7 +67,7 @@ Timing/dispatch is unified in `cell-agent` (ADR-009): it is consistent with cell
 
 **Queue (Consumers)**
 - Polling `CELLHIVE_QUEUE_INTERVAL` (default 1s, 0=off); single batch size `CELLHIVE_QUEUE_BATCH` (0=store default); visibility lease `CELLHIVE_QUEUE_LEASE` (0=store default).
-- Failed redelivery delay `CELLHIVE_QUEUE_RETRY_DELAY` (default **30s**, batch-level Retry); retry limit and DLQ (`dead_letter_queue`) are determined by **per-consumer configuration** (`max_retries`/`dead_letter_queue`/`max_batch_size`/`max_batch_timeout_seconds`/`max_concurrency`, ADR-072/112), and over-limit messages go to the DLQ.
+- Failed redelivery uses per-consumer `retry_delay` (seconds), falling back to `CELLHIVE_QUEUE_RETRY_DELAY` (default **30s**); explicit `retry({delaySeconds})` takes precedence. `max_batch_timeout_seconds` starts when the oldest message becomes visible, and a full batch dispatches immediately. Omitted or legacy zero `max_retries` means three retries after the initial delivery; exhausted messages move to the DLQ, or are acknowledged and logged when no DLQ exists (ADR-216).
 - Semantics: at-least-once (claim→dispatch→ack/retry; if the whole batch fails, the whole batch is redelivered), only the owner consumes (`OwnerGate`), and every store mutation goes through capture proof (ADR-119).
 
 **Timer (Dispatch)**

@@ -17,6 +17,10 @@ data:
   CELLHIVE_DO_RUNTIME_JS: "/app/workerd/do-runtime"
   CELLHIVE_FACADES_JS: "/app/workerd/platform/facades.js"
   CELLHIVE_TENANT_LOG_CAPTURE: {{ .Values.config.tenantLogCapture | quote }}
+  {{- if .Values.telemetry.enabled }}
+  CELLHIVE_TRACES_SAMPLE_RATIO: {{ .Values.telemetry.tracesSampleRatio | quote }}
+  CELLHIVE_OTLP_LOGS: {{ .Values.telemetry.logs | quote }}
+  {{- end }}
   CELLHIVE_TENANT_OUTBOUND: {{ .Values.config.tenantOutbound | default "public" | quote }}
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"
@@ -37,7 +41,7 @@ data:
   CELLHIVE_USER_RUNTIME_PORT: "8081"
   CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
   CELLHIVE_DO_ADDR: "*:8788"
-  CELLHIVE_DO_RUNTIMES: {{ printf "%s:8788" (include "cellhive.doRuntimeService" .) | quote }}
+  CELLHIVE_DO_RUNTIMES: {{ ternary (printf "%s:8788" (include "cellhive.doRuntimeService" .)) "" .Values.doRuntime.enabled | quote }}
   CELLHIVE_DISPATCH_URL: {{ printf "http://%s-user-runtime:8088" .Release.Name | quote }}
   CELLHIVE_POOL_MODE: {{ .Values.userRuntime.pool.mode | quote }}
   CELLHIVE_POOL_MEMORY_UTILIZATION: {{ .Values.userRuntime.pool.memoryUtilization | quote }}

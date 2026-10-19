@@ -22,19 +22,23 @@ type Target struct {
 type WorkflowTarget struct{ Namespace, Workflow, Cron string }
 
 // Scheduler materializes due cron slots as KindCron timers (ADR-076). It is
-// idempotent (the timer token dedups repeated upserts of the same slot), so it
-// is safe to run on every node.
+// idempotent within one authoritative cell. Multi-node callers must set Own
+// and Commit so only the owner materializes and durably records each slot.
 type Scheduler struct {
 	Targets         func(ctx context.Context) ([]Target, error)
 	WorkflowTargets func(ctx context.Context) ([]WorkflowTarget, error)
 	Open            func(ctx context.Context, sc cell.Scope) (*timer.Store, error)
+	Own             func(ctx context.Context, sc cell.Scope) (bool, error)
+	Commit          func(ctx context.Context, sc cell.Scope, fn func() error) error
 	Register        func(scope string)
 	Interval        time.Duration
 	Now             func() time.Time
 	Log             *slog.Logger
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry
+	mu          sync.Mutex
+	cache       map[string]cacheEntry
+	writtenSlot int64
+	written     map[string]bool
 }
 
 type cacheEntry struct {
@@ -89,6 +93,12 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	slot := s.now().UTC().Truncate(time.Minute)
+	s.mu.Lock()
+	if s.writtenSlot != slot.UnixMilli() {
+		s.writtenSlot = slot.UnixMilli()
+		s.written = map[string]bool{}
+	}
+	s.mu.Unlock()
 	upserts := 0
 	for _, tg := range targets {
 		sch, ok := s.schedule(tg.Cron)
@@ -99,16 +109,37 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 			continue
 		}
 		sc := cell.Scope{Namespace: tg.Namespace, Class: CronClass, ID: tg.Worker}
+		key := sc.String() + "\x00" + tg.Cron
+		if s.wasWritten(slot.UnixMilli(), key) {
+			continue
+		}
+		if s.Own != nil {
+			owned, err := s.Own(ctx, sc)
+			if err != nil {
+				s.log().Warn("cron ownership check failed", "scope", sc.String(), "err", err)
+				continue
+			}
+			if !owned {
+				continue
+			}
+		}
 		st, err := s.Open(ctx, sc)
 		if err != nil {
 			s.log().Warn("cron open store failed", "scope", sc.String(), "err", err)
 			continue
 		}
 		t := timer.New(slot.UnixMilli(), timer.KindCron, sc.String(), Occurrence(slot, tg.Cron))
-		if err := st.Upsert(ctx, t); err != nil {
+		write := func() error { return st.Upsert(ctx, t) }
+		if s.Commit != nil {
+			err = s.Commit(ctx, sc, write)
+		} else {
+			err = write()
+		}
+		if err != nil {
 			s.log().Warn("cron upsert failed", "scope", sc.String(), "err", err)
 			continue
 		}
+		s.markWritten(slot.UnixMilli(), key)
 		if s.Register != nil {
 			s.Register(sc.String())
 		}
@@ -125,16 +156,37 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 				continue
 			}
 			sc := cell.Scope{Namespace: tg.Namespace, Class: "__workflow__", ID: tg.Workflow}
+			key := sc.String() + "\x00" + tg.Cron
+			if s.wasWritten(slot.UnixMilli(), key) {
+				continue
+			}
+			if s.Own != nil {
+				owned, err := s.Own(ctx, sc)
+				if err != nil {
+					s.log().Warn("workflow schedule ownership check failed", "scope", sc.String(), "err", err)
+					continue
+				}
+				if !owned {
+					continue
+				}
+			}
 			st, err := s.Open(ctx, sc)
 			if err != nil {
 				s.log().Warn("workflow schedule open failed", "scope", sc.String(), "err", err)
 				continue
 			}
 			t := timer.New(slot.UnixMilli(), timer.KindWorkflowSchedule, sc.String(), strconv.FormatInt(slot.Unix()/60, 10))
-			if err := st.Upsert(ctx, t); err != nil {
+			write := func() error { return st.Upsert(ctx, t) }
+			if s.Commit != nil {
+				err = s.Commit(ctx, sc, write)
+			} else {
+				err = write()
+			}
+			if err != nil {
 				s.log().Warn("workflow schedule upsert failed", "scope", sc.String(), "err", err)
 				continue
 			}
+			s.markWritten(slot.UnixMilli(), key)
 			if s.Register != nil {
 				s.Register(sc.String())
 			}
@@ -142,6 +194,20 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 		}
 	}
 	return upserts, nil
+}
+
+func (s *Scheduler) wasWritten(slot int64, key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writtenSlot == slot && s.written[key]
+}
+
+func (s *Scheduler) markWritten(slot int64, key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writtenSlot == slot {
+		s.written[key] = true
+	}
 }
 
 // Occurrence keeps coincident expressions distinct while repeated scheduler
