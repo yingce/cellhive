@@ -73,7 +73,7 @@ NetworkPolicy 将 user-runtime `:8088` 限为 cell-agent Pod；公开 `:8081` �
 
 生产用 `do-runtime-gated` 取代无门的 `do-runtime`：`do-runtime -render-only` 渲染 capnp，`do-supervisor` 托管 workerd 并把每个响应门控在 cell-agent 的持久性证明上（同时负责续租与 drain）。
 
-DO 接管恢复从 bucket 读取；ADR-208 起，DO 捕获会显式等待 bucket 提交，即使 cell-agent 可用 fleet follower 也不会仅以 follower fsync 确认放行。容量规划应按 bucket 写入延迟估算 DO 写入响应。
+DO 接管先按 host manifest 将已获 follower fsync 确认、但尚未落桶的捕获尾部补传到 bucket，再从持久链冷恢复；补传失败时拒绝激活（ADR-212）。带有效 DO owner 身份的写入可由 follower fsync 确认；没有可用 follower 时回退到等待 bucket 提交。容量规划须同时测量 follower 确认、bucket 兜底和大 spool 冷接管的时延。真实 COS 跨 AZ 故障窗口尚未验收，见 `cf-compatibility-acceptance.md`。
 
 ```bash
 # compose（先设置 CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 并运行 preflight）
