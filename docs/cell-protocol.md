@@ -144,6 +144,7 @@ nodes/<node>.json
 - 后端 A：`cell-agent` 直接捕获自己拥有的 SQLite（**ADR-092**：KV/D1/Queue/Workflow/Vectorize/timer/control 写路径经 `internal/cellcapture` 接 `sqlcapture` → LTX → fleet 证明，bucket 异步；冷恢复经 `cellstore.Hydrate` + `replica.LatestEpoch`；`/v1/internal/{append,commit}` 亦可供外部 committer）。
 - 后端 B：`do-runtime` 的 supervisor 捕获 WAL 段，**上报给 cell-agent**，由 cell-agent 执行复制与证明（见 [`durable-objects.md`](./durable-objects.md)）。
 - 快照：对大数据 cell，接管时先恢复一个整库快照（L9）以避免回放全部历史；否则物化 L0 链。
+- 冷恢复与分页索引选择**能接上完整、连续增量后缀的最新快照**。跨越快照水位的批量增量不能整段丢弃；若没有较早快照能提供连续链，则拒绝恢复，不能把重叠段当作已包含的事务。
 - **compaction**：后台把大量 L0 段折叠为 L1（`min_txids` / `min_mb` 触发），使接管只读少量对象而非成千上万。
 - **paging**：超过阈值的 cell 采用稀疏文件 + 按需分页，冷启动不必整库下载。
 - **checkpoint 对齐（I-03）**：后端 B 的 supervisor 轮询 `(salt, frame)`；salt 变化或 frame 归零 = 发生 checkpoint → 暂停 delta，用 **SQLite Online Backup API**（只读连接）取一致快照，上传为 **L9 快照**并记 txid，再从 frame 0 续 delta 并写 **snapshot→delta 衔接标记**。P0 必测"活跃写入期间 checkpoint"。

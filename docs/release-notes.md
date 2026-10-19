@@ -2,6 +2,9 @@
 
 ## 未发布（main）
 
+### 冷恢复重叠增量修复
+- 冷恢复、分页索引和压缩现在选择能接上完整增量链的最新快照；跨越快照水位的批量增量不会被整段忽略。没有可验证连续链时仍拒绝恢复。SG `vwork-40/__invocations__/main` 的真实 COS 段（24033/24034 快照、24034–24049 与 24050–24066 增量）在本地恢复到 txid 24066，SQLite `quick_check=ok`，与独立选择旧快照的参考镜像 SHA-256 一致。
+
 ### Secret 版本化发布（ADR-204）
 - 已有 Worker 的 secret put/delete/bulk 在 control cell 同一事务中创建并发布新版本，代码 bundle 不变；一次 bulk 只创建一个版本。deploy 捕获加密 Secret 快照，rollback/promote 恢复目标版本的值，运行时按版本解密。升级前的历史值无法追溯，迁移以升级时当前值初始化旧版本。
 - 运行时通过入口指针缓存发现新版本（默认 TTL 约 10 秒）；Service binding 的活跃目标查询也按该 TTL 重验。已加载的 isolate 不原地改值。

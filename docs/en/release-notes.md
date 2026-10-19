@@ -2,6 +2,9 @@
 
 ## Unreleased (main)
 
+### Cold restore of overlapping deltas
+- Cold restore, paging, and compaction now choose the newest snapshot with a complete delta suffix; a batched delta crossing a snapshot watermark is not discarded wholesale. Restore still fails closed when no contiguous chain can be proven. The real SG COS segments for `vwork-40/__invocations__/main` restore locally through txid 24066 with SQLite `quick_check=ok` and the same SHA-256 as the independently reconstructed reference image.
+
 ### Versioned Secret Deployment (ADR-204)
 - Secret put/delete/bulk on an existing Worker creates and deploys a new version in one control-cell transaction without changing the code bundle; one bulk operation creates one version. Deploy captures encrypted secret snapshots, rollback/promote restores the selected version's values, and runtimes decrypt by version. Pre-upgrade historical values cannot be reconstructed; migration initializes old versions from the values current at upgrade time.
 - Runtimes discover the new version through the host pointer cache (roughly 10 seconds by default); active Service binding target lookups revalidate on the same TTL. Loaded isolates are not mutated in place.

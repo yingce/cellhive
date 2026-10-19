@@ -129,7 +129,7 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 			if h.EndTxID > l0Max[k] {
 				l0Max[k] = h.EndTxID
 			}
-			if floor > 0 && h.StartTxID <= floor {
+			if floor > 0 && h.EndTxID <= floor {
 				continue // already folded into the L1 baseline
 			}
 			if seen[h.ID()] {

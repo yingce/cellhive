@@ -3,7 +3,6 @@ package restore
 import (
 	"fmt"
 	"os"
-	"sort"
 
 	"cellhive/internal/ltx"
 )
@@ -45,55 +44,23 @@ func IndexChain(segments [][]byte) (*PageIndex, error) {
 		}
 	}
 
-	var snapWatermark uint64
-	haveSnap := false
-	for _, p := range parts {
-		if p.h.Kind != ltx.KindSnapshot {
-			continue
-		}
-		if !haveSnap || p.h.StartTxID > snapWatermark {
-			snapWatermark = p.h.StartTxID
-		}
-		haveSnap = true
+	headers := make([]ltx.Header, len(parts))
+	for i, p := range parts {
+		headers[i] = p.h
 	}
-	if !haveSnap {
-		return nil, fmt.Errorf("restore: no snapshot in chain")
+	snapshots, deltas, watermark, err := selectChain(headers)
+	if err != nil {
+		return nil, err
+	}
+	order := make([]part, 0, len(snapshots)+len(deltas))
+	for _, i := range snapshots {
+		order = append(order, parts[i])
+	}
+	for _, i := range deltas {
+		order = append(order, parts[i])
 	}
 
-	var order []part
-	for _, p := range parts {
-		if p.h.Kind == ltx.KindSnapshot && p.h.StartTxID == snapWatermark {
-			order = append(order, p)
-		}
-	}
-	sort.SliceStable(order, func(i, j int) bool {
-		pi, _ := ltx.SnapshotPart(order[i].h)
-		pj, _ := ltx.SnapshotPart(order[j].h)
-		return pi < pj
-	})
-	var deltas []part
-	for _, p := range parts {
-		if p.h.Kind == ltx.KindDelta && p.h.StartTxID > snapWatermark {
-			deltas = append(deltas, p)
-		}
-	}
-	sort.SliceStable(deltas, func(i, j int) bool { return deltas[i].h.StartTxID < deltas[j].h.StartTxID })
-	expected := snapWatermark + 1
-	for _, d := range deltas {
-		if d.h.StartTxID != expected {
-			return nil, fmt.Errorf("restore: non-contiguous chain: expected txid %d, got %d", expected, d.h.StartTxID)
-		}
-		if d.h.EndTxID < d.h.StartTxID {
-			return nil, fmt.Errorf("restore: invalid delta txid range %d..%d", d.h.StartTxID, d.h.EndTxID)
-		}
-		expected = d.h.EndTxID + 1
-	}
-	order = append(order, deltas...)
-
-	ix := &PageIndex{refs: map[uint32]int{}, Watermark: snapWatermark}
-	if len(deltas) > 0 {
-		ix.Watermark = deltas[len(deltas)-1].h.EndTxID
-	}
+	ix := &PageIndex{refs: map[uint32]int{}, Watermark: watermark}
 	for idx, p := range order {
 		pageSize, commit, _, _, err := ltx.DecodeWALPageMap(p.payload)
 		if err != nil {

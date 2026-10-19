@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"cellhive/internal/ltx"
 )
@@ -73,8 +72,8 @@ func Compact(segments [][]byte, maxPartBytes int) ([][]byte, error) {
 	}, pageSize, commit, pages, maxPartBytes)
 }
 
-// mergeChain decodes an ordered chain, applies deltas on top of the snapshot with
-// the highest watermark, and returns the complete page set for pages 1..commit
+// mergeChain decodes an ordered chain, applies a contiguous delta suffix on top
+// of the newest usable snapshot, and returns the complete page set for pages 1..commit
 // together with the chain metadata. Every page must be defined, otherwise the
 // database would contain holes.
 func mergeChain(segments [][]byte) (pageSize, commit uint32, epoch, watermark uint64, out []ltx.WALPage, err error) {
@@ -83,42 +82,26 @@ func mergeChain(segments [][]byte) (pageSize, commit uint32, epoch, watermark ui
 		raw []byte
 	}
 	decoded := make([]seg, len(segments))
+	headers := make([]ltx.Header, len(segments))
 	for i, s := range segments {
 		h, _, derr := ltx.Decode(s)
 		if derr != nil {
 			return 0, 0, 0, 0, nil, fmt.Errorf("restore: decode segment %d: %w", i, derr)
 		}
 		decoded[i] = seg{h: h, raw: s}
+		headers[i] = h
 		if epoch == 0 {
 			epoch = h.Epoch
 		}
-		if h.EndTxID > watermark {
-			watermark = h.EndTxID
-		}
 	}
-
-	// The snapshot with the highest watermark supersedes any earlier one; all of
-	// its parts share that StartTxID.
-	var snapWatermark uint64
-	haveSnap := false
-	for _, d := range decoded {
-		if d.h.Kind != ltx.KindSnapshot {
-			continue
-		}
-		if !haveSnap || d.h.StartTxID > snapWatermark {
-			snapWatermark = d.h.StartTxID
-		}
-		haveSnap = true
-	}
-	if !haveSnap {
-		return 0, 0, 0, 0, nil, fmt.Errorf("restore: no snapshot in chain")
+	snapshots, deltas, watermark, err := selectChain(headers)
+	if err != nil {
+		return 0, 0, 0, 0, nil, err
 	}
 
 	pageMap := make(map[uint32][]byte)
-	for _, d := range decoded {
-		if d.h.Kind != ltx.KindSnapshot || d.h.StartTxID != snapWatermark {
-			continue
-		}
+	for _, i := range snapshots {
+		d := decoded[i]
 		_, payload, derr := ltx.Decode(d.raw)
 		if derr != nil {
 			return 0, 0, 0, 0, nil, derr
@@ -145,30 +128,8 @@ func mergeChain(segments [][]byte) (pageSize, commit uint32, epoch, watermark ui
 		}
 	}
 
-	// Deltas committed after the snapshot watermark, applied in txid order.
-	var deltas []seg
-	for _, d := range decoded {
-		if d.h.Kind == ltx.KindDelta && d.h.StartTxID > snapWatermark {
-			deltas = append(deltas, d)
-		}
-	}
-	sort.SliceStable(deltas, func(i, j int) bool {
-		return deltas[i].h.StartTxID < deltas[j].h.StartTxID
-	})
-	// Deltas must be contiguous from the snapshot watermark. A gap (e.g. an
-	// acknowledged delta whose object upload has not landed yet) would silently
-	// produce a stale database, so fail closed instead.
-	expected := snapWatermark + 1
-	for _, d := range deltas {
-		if d.h.StartTxID != expected {
-			return 0, 0, 0, 0, nil, fmt.Errorf("restore: non-contiguous chain: expected txid %d, got %d", expected, d.h.StartTxID)
-		}
-		if d.h.EndTxID < d.h.StartTxID {
-			return 0, 0, 0, 0, nil, fmt.Errorf("restore: invalid delta txid range %d..%d", d.h.StartTxID, d.h.EndTxID)
-		}
-		expected = d.h.EndTxID + 1
-	}
-	for _, d := range deltas {
+	for _, i := range deltas {
+		d := decoded[i]
 		_, payload, derr := ltx.Decode(d.raw)
 		if derr != nil {
 			return 0, 0, 0, 0, nil, derr
@@ -195,9 +156,6 @@ func mergeChain(segments [][]byte) (pageSize, commit uint32, epoch, watermark ui
 			return 0, 0, 0, 0, nil, fmt.Errorf("restore: missing page %d of %d", pgno, commit)
 		}
 		out = append(out, ltx.WALPage{PageNo: pgno, Data: data})
-	}
-	if watermark < snapWatermark {
-		watermark = snapWatermark
 	}
 	return pageSize, commit, epoch, watermark, out, nil
 }

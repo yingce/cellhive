@@ -220,6 +220,36 @@ func TestManifestAndL1RestorePreference(t *testing.T) {
 	}
 }
 
+func TestRestoreKeepsDeltaCrossingL1Watermark(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__invocations__", ID: "main"}
+	const epoch = uint64(3)
+	snapshot := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 10, EndTxID: 10}, []byte("snapshot"))
+	key, _, err := m.AppendL1(ctx, sc, epoch, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutManifest(ctx, sc, epoch, Manifest{MinTxID: 1, MaxTxID: 10, Objects: []string{key}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []ltx.Header{
+		{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 9, EndTxID: 12},
+		{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 13, EndTxID: 13},
+	} {
+		if _, _, err := m.Append(ctx, sc, epoch, ltx.Encode(h, []byte("delta"))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segs, err := m.Restore(ctx, sc, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 3 || segs[1].Header.StartTxID != 9 || segs[2].Header.StartTxID != 13 {
+		t.Fatalf("restore dropped the crossing delta: %+v", segs)
+	}
+}
+
 func TestRestoreDeduplicatesMixedGranularity(t *testing.T) {
 	ctx := context.Background()
 	b, err := bucket.NewFSBucket(t.TempDir())

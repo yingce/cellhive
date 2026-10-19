@@ -348,9 +348,10 @@ func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Se
 			} else {
 				seen[id] = true
 			}
-			// L0 segments at or below the compaction floor are already folded
-			// into the L1 snapshot.
-			if !l1Set[k] && floor > 0 && h.StartTxID <= floor {
+			// An L0 delta crossing the compaction floor still contains newer
+			// transactions. Keep it so restore can reject an ambiguous overlap
+			// instead of silently losing its tail.
+			if !l1Set[k] && floor > 0 && h.EndTxID <= floor {
 				continue
 			}
 			segs = append(segs, Segment{Key: fmt.Sprintf("%s#%d", k, i), Header: h, Raw: part})
