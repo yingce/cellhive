@@ -44,7 +44,8 @@ curl -s -H 'x-cellhive-internal-token: <token>' 'http://cell-agent:7001/v1/inter
 bin/cellhive d1 info demo app --tables
 bin/cellhive kv namespace stats demo KV --exact
 bin/cellhive queue stats demo jobs
-bin/cellhive r2 bucket stats demo media --limit 1000
+bin/cellhive r2 bucket stats demo media           # estimated usage since tracking began; no List
+bin/cellhive r2 bucket stats demo media --scan --limit 1000  # bounded List diagnostic
 
 # 向量索引 ANN（ADR-159）：默认 flat 精确扫描；重建为 IVFADC/OPQ 后查询快一个量级
 bin/cellhive vectorize rebuild demo docs --buckets 1024 --quantizer opq --codesize 32 --nprobe 0.05

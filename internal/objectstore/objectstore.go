@@ -34,6 +34,7 @@ const (
 	PrefixWake       = "wake/"         // due-timer wake index (waker)
 	PrefixR2         = "r2/"           // R2 binding objects
 	PrefixR2Meta     = "r2meta/"       // R2 binding object metadata sidecars
+	PrefixR2Usage    = "r2usage/"      // R2 approximate usage ledger
 )
 
 // Owners of the reserved prefixes.
@@ -56,6 +57,7 @@ var reserved = []struct{ Prefix, Owner string }{
 	{PrefixWake, OwnerWaker},
 	{PrefixR2, OwnerR2},
 	{PrefixR2Meta, OwnerR2},
+	{PrefixR2Usage, OwnerR2},
 }
 
 // normalizePrefix guarantees a single trailing slash so a prefix cannot match a

@@ -1,5 +1,11 @@
 # 决策记录（ADR）
 
+## ADR-234 R2 从启用后记录估算用量（2026-10-19）
+
+R2 每个虚拟 bucket 在 `r2usage/` 保留独立的估算总数与按对象键哈希定位的已跟踪大小。只在最终对象的 `put`、`delete`、multipart `complete` 成功后更新；part/staging 不计入正式对象。未发生后续变更的既有对象不回填、不计入；首次覆盖旧对象按新对象计入，删除未跟踪对象不扣数。对象标记与总数通过点查、条件创建和 CAS 写入，热路径禁止 List；前台对象操作成功后，用量记录失败不得将成功伪装为失败，记录错误供运维排查，因此估算值可因故障或并发产生偏差，不用于计费、配额或持久性判断。
+
+`GET /v1/r2/stats` 默认返回持久估算的 `objects`/`bytes`、`estimated:true`、`baseline:"from_first_tracked_write"`，不扫描桶。`?scan=1`（或指定 `prefix`/`limit`）保留原有有界 List 诊断语义及 `truncated`/`cursor`。用量账本使用保留前缀 `r2usage/`（R2 属主，`objectstore.NewOwned`）；不得把用户对象或 metadata sidecar 与账本混放。重新计量旧对象、定期全量校准及计费级原子记账不在本项范围。
+
 ## ADR-233 Queue 生产者上下文按消息持久化，消费批次用 OTel links 关联（2026-10-19）
 
 一个 Queue 批次可能包含来自不同请求、不同 trace 的消息，不能把整个消费调用指定为其中一个生产者的子 span。入队时从可信绑定调用的当前请求上下文读取 `x-request-id` 和 W3C `traceparent`，随每条消息持久化；批量入队、重试、DLQ 转移保留各自原始上下文，同一幂等键返回原消息及其原上下文。每次消费尝试继续生成独立 `invocation_id=request_id` 和 traceparent；调用记录保存按消息 ID 对应的生产者 links，OTLP 调用日志带可查询的 links 属性，消费 span 用标准 OTel links 指向有效的生产者 span context。未带合法 traceparent 的消息不产生 trace link；跨消息批次不臆造单一父调用。外部 Queue API 的请求头可提供自己的上下文，租户的 CF 形状 Queue binding 不暴露平台密钥或额外参数。

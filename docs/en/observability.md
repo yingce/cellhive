@@ -48,7 +48,7 @@ The host actor (`workerd/do-runtime/host.js`) reports increments after each invo
 
 ### Per-domain stats (ops, non-Prometheus; ADR-157)
 
-`GET /v1/<kind>/stats` (`kv`/`d1`/`queue`/`r2`/`workflow`/`hyperdrive`/`do`) returns **per-resource** read-only metadata (page/file bytes, expiry indexes, table lists, queue backlog and lag, bounded R2 approximations, instance estimates). Its division of responsibility with metrics: **metrics = node-level time series and alerts; stats = per-resource point-in-time inventory** (not sampled, not aggregated, on demand). Fields and costs are documented in `docs/bindings.md` (Vectorize's `/v1/vectorize/stats` also includes `ann` model information).
+`GET /v1/<kind>/stats` (`kv`/`d1`/`queue`/`r2`/`workflow`/`hyperdrive`/`do`) returns **per-resource** read-only metadata (page/file bytes, expiry indexes, table lists, queue backlog and lag, persistent R2 usage estimates from first tracked write, instance estimates). R2 performs a bounded List only with `?scan=1`, `prefix`, or `limit`. Its division of responsibility with metrics: **metrics = node-level time series and alerts; stats = per-resource point-in-time inventory** (not sampled, not aggregated, on demand). Fields and costs are documented in `docs/bindings.md` (Vectorize's `/v1/vectorize/stats` also includes `ann` model information).
 
 ### Planned (not yet implemented)
 

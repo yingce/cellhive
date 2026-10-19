@@ -1752,13 +1752,14 @@ func cmdKind(kind string, args []string) error {
 		return nil
 	case "stats", "info":
 		if len(rest) < 3 {
-			return fmt.Errorf("usage: cellhive %s stats <namespace> <name> [--prefix <p>] [--exact] [--tables] [--limit N]", kind)
+			return fmt.Errorf("usage: cellhive %s stats <namespace> <name> [--prefix <p>] [--exact] [--tables] [--limit N] [--scan]", kind)
 		}
 		fs := flag.NewFlagSet(kind+" stats", flag.ContinueOnError)
 		prefix := fs.String("prefix", "", "restrict count-style fields to a key prefix")
 		exact := fs.Bool("exact", false, "force exact counts (may scan)")
 		tables := fs.Bool("tables", false, "include per-table dbstat usage (D1)")
 		limit := fs.Int("limit", 0, "max objects to inspect (R2)")
+		scan := fs.Bool("scan", false, "scan R2 objects for diagnostic stats")
 		if err := fs.Parse(rest[3:]); err != nil {
 			return err
 		}
@@ -1777,6 +1778,9 @@ func cmdKind(kind string, args []string) error {
 		}
 		if kind == "r2" {
 			q.Set("bucket", rest[2])
+			if *scan {
+				q.Set("scan", "1")
+			}
 		}
 		data, err := adminCall(http.MethodGet, "/v1/"+kind+"/stats?"+q.Encode(), nil)
 		if err != nil {
@@ -2853,7 +2857,7 @@ Usage:
   cellhive d1 execute|query <namespace> <db> (--command <sql>|--file <path>)
   cellhive d1 migrations create <namespace> <db> <message> [--directory <dir>]
   cellhive d1 migrations list|apply <namespace> <db> [--directory <dir>] [--table <name>]  # list accepts --applied
-  cellhive r2 bucket create|list|delete|stats <namespace> <bucket> [--prefix] [--limit N]
+  cellhive r2 bucket create|list|delete|stats <namespace> <bucket> [--prefix] [--limit N] [--scan]
   cellhive r2 object put <namespace> <bucket> <key> --file <path> [--content-type <type>]
   cellhive r2 object get <namespace> <bucket> <key> [--file <path>]
   cellhive r2 object delete <namespace> <bucket> <key>

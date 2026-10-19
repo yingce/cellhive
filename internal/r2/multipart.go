@@ -223,6 +223,8 @@ func (s *Store) CompleteMultipart(ctx context.Context, ns, bucketName, key, uplo
 	if err != nil {
 		return "", 0, err
 	}
+	size := int64(total)
+	s.recordUsage(ctx, ns, bucketName, key, &size)
 	// Best-effort cleanup: a failed cleanup must not fail the completed upload.
 	_ = s.AbortMultipart(ctx, ns, bucketName, key, uploadID)
 	return etag, total, nil

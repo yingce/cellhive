@@ -423,7 +423,7 @@ Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、1
 | SQLite 现在是 CGo + 构建 tags（ADR-159） | ⚠️ **必须知道**：`make build/test`（或 `-tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"`）不可省——漏加会在 `internal/cellstore` 触发 `#error` 守卫；二进制含 AVX2 代码（`-march=x86-64-v3`），非 AVX2 CPU 用 `-tags cellhive_vec1_portable`（标量，较慢），arm64 走 NEON |
 | Vectorize 绑定面的鉴权层级（ADR-158） | ✅ **已对齐**：`/v1/vectorize/*` 绑定端点与 KV/D1/R2/Queue 一样**只需 scoped token**（不带 internal token）；写操作 `forwardOrClaim`、读 `forwardRead`。容器 smoke 曾发现误包 `s.auth` 导致 401，已修 + 回归测试 |
 | Vectorize 在 dev 不可用（ADR-158） | ⚠️ **边界**：Miniflare 只解析 `vectorize` 绑定（workerd 无该服务），`cellhive dev` 遇到它会明确报错退出；本地调试用 `cellhive vectorize` 打真实命名空间 |
-| R2 stats 是诊断性近似（ADR-157） | ⚠️ **有意**：R2 对象无本地索引，`/v1/r2/stats` 走**有界 List**（`limit` 默认 1000/上限 10000），大桶给 `truncated`+`cursor` 而非精确总数；它会计入 `cellhive_list_calls_total`（运维路径，允许但要有意识） |
+| R2 stats 是估算用量或诊断性近似（ADR-157/234） | ⚠️ **有意**：默认返回启用后持久跟踪的对象数/字节数，不回填旧对象，故障或并发可造成漂移，不用于计费；`?scan=1`/`prefix`/`limit` 才走有界 List（默认 1000/上限 10000），大桶给 `truncated`+`cursor`，并计入 `cellhive_list_calls_total` |
 | Wrangler D1/KV/R2 数据面（ADR-197） | ⚠️ **固定版本边界**：原版 Wrangler 4.133.0 的远端 D1 query/file import/migrations、KV key、R2 object 已真实验收；自定义 `migrations_table` 可由 Wrangler 配置或原生 CLI `--table` 指定。D1 文件导入限 8 MiB，上传 session 是单管理员实例内存态（需同实例路由）；R2 jurisdiction/storage class 显式拒绝。生产资源仍须先登记。 |
 | Wrangler 批量命令与 D1 export（ADR-198） | ⚠️ **已验收的边界**：D1 导出限 32 MiB，虚拟表拒绝，下载链接为单管理员实例内存态（一小时）；KV bulk 逐 key 提交，后续错误可能留下前面已写入的 key；Secret bulk 最多 100 项并在控制 cell 内原子提交。 |
 | 原生 `types`（ADR-199） | ⚠️ **生成范围**：只按 JSONC/JSON 配置生成 Env 接口，变量统一为 `string`；完整运行时类型和 TOML 类型生成仍由原版 Wrangler 提供。 |

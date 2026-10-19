@@ -112,7 +112,7 @@ export default {
 - **KV**: `expires_indexed`, `expired`, `next_expiry_ms` (`kv_expires` partial index), `rows_estimate` (dbstat leaf-page `ncell`; skip above 20000 pages and return `estimate_note`); `keys=count(*)` is returned only with `?exact=1`.
 - **D1**: `tables`/`table_names`/`indexes`/`auto_indexes`/`schema_version`/`user_version`/`sqlite_version`; `?tables=1` appends per-table `pages`/`payload_bytes`/`rows_estimate` (dbstat; skip above the threshold). cellstore internal tables (`kv`/`cell_meta`) and `sqlite_*` are not counted in `tables`.
 - **Queue**: `depth`/`visible`/`leased`, `oldest_visible_ms` (lag metric), `max_attempts`, `dead_letter_queue`/`dead_letter_depth`/`dead_letter_visible`/`dead_letter_oldest_visible_ms`, `disk`.
-- **R2**: `objects`/`bytes`/`truncated`/`cursor`/`listing_ms` + `multipart_uploads`/`multipart_parts`. **This is a diagnostic approximation from a bounded List** (`limit` defaults to 1000, maximum 10000), not an exact count; the `r2/.mpu/` staging area is not visible to user List operations.
+- **R2**: by default, persistent estimated `objects`/`bytes` tracked from first write (`estimated:true`, `baseline:"from_first_tracked_write"`); existing objects are not backfilled. `?scan=1`, `prefix`, or `limit` selects the earlier bounded List diagnostic (`truncated`/`cursor`/`listing_ms` and multipart counts; default limit 1000, maximum 10000). The `r2/.mpu/` staging area is not visible to user List operations.
 - **Workflow**: `disk` + `instances_estimate` (dbstat); `?exact=1` returns `instances`+`by_status`.
 - **Hyperdrive**: `registered`/`has_config` (never returns the origin URL).
 - **DO**: `indexed_objects`/`classes`/`workers`/`available` (`available:false` when the object index ADR-109 is disabled).

@@ -178,6 +178,8 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 	if err != nil {
 		return "", false, err
 	}
+	size := int64(len(data))
+	s.recordUsage(ctx, ns, bucketName, key, &size)
 	if md == nil || (len(md.HTTP) == 0 && len(md.Custom) == 0 && md.MD5 == "" && md.SHA256 == "") {
 		return etag, true, nil
 	}
@@ -274,7 +276,11 @@ func (s *Store) Delete(ctx context.Context, ns, bucketName, key string) error {
 	if mk, merr := metaKey(ns, bucketName, key); merr == nil {
 		_ = s.B.Delete(ctx, mk)
 	}
-	return s.B.Delete(ctx, k)
+	if err := s.B.Delete(ctx, k); err != nil {
+		return err
+	}
+	s.recordUsage(ctx, ns, bucketName, key, nil)
+	return nil
 }
 
 // Object is a listed R2 object.

@@ -114,7 +114,7 @@ export default {
 - **KV**：`expires_indexed`、`expired`、`next_expiry_ms`（`kv_expires` 部分索引）、`rows_estimate`（dbstat 叶页 `ncell`，超 20000 页跳过并给 `estimate_note`）；`?exact=1` 才给 `keys=count(*)`。
 - **D1**：`tables`/`table_names`/`indexes`/`auto_indexes`/`schema_version`/`user_version`/`sqlite_version`；`?tables=1` 追加每表 `pages`/`payload_bytes`/`rows_estimate`（dbstat，超阈值跳过）。cellstore 内部表（`kv`/`cell_meta`）与 `sqlite_*` 不计入 `tables`。
 - **Queue**：`depth`/`visible`/`leased`、`oldest_visible_ms`（滞后指标）、`max_attempts`、`dead_letter_queue`/`dead_letter_depth`/`dead_letter_visible`/`dead_letter_oldest_visible_ms`、`disk`。
-- **R2**：`objects`/`bytes`/`truncated`/`cursor`/`listing_ms` + `multipart_uploads`/`multipart_parts`。**这是有界 List 的诊断性近似**（`limit` 默认 1000、上限 10000），不是精确计数；`r2/.mpu/` 暂存区对用户 List 不可见。
+- **R2**：默认返回从启用后跟踪的持久估算 `objects`/`bytes`（`estimated:true`、`baseline:"from_first_tracked_write"`），点查账本，不回填已有对象。`?scan=1` 或指定 `prefix`/`limit` 返回原有 `truncated`/`cursor`/`listing_ms` + `multipart_uploads`/`multipart_parts`；此模式使用有界 List（默认 1000、上限 10000），不是精确总量；`r2/.mpu/` 暂存区对用户 List 不可见。
 - **Workflow**：`disk` + `instances_estimate`（dbstat）；`?exact=1` 给 `instances`+`by_status`。
 - **Hyperdrive**：`registered`/`has_config`（绝不返回 origin URL）。
 - **DO**：`indexed_objects`/`classes`/`workers`/`available`（对象索引 ADR-109 关闭时 `available:false`）。

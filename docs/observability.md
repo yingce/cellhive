@@ -48,7 +48,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 
 ### 每域 stats（运维，非 Prometheus；ADR-157）
 
-`GET /v1/<kind>/stats`（`kv`/`d1`/`queue`/`r2`/`workflow`/`hyperdrive`/`do`）给**按资源**的只读元数据（页/文件字节、过期索引、表清单、队列积压与滞后、有界 R2 近似、实例估计）。它与指标的分工：**指标=节点级时间序列与告警；stats=单资源即时盘点**（不采样、不聚合、按需）。字段与成本见 `docs/bindings.md`（Vectorize 的 `/v1/vectorize/stats` 还带 `ann` 模型信息）。
+`GET /v1/<kind>/stats`（`kv`/`d1`/`queue`/`r2`/`workflow`/`hyperdrive`/`do`）给**按资源**的只读元数据（页/文件字节、过期索引、表清单、队列积压与滞后、R2 启用后的持久估算用量、实例估计）。R2 只有 `?scan=1`/`prefix`/`limit` 才执行有界 List。它与指标的分工：**指标=节点级时间序列与告警；stats=单资源即时盘点**（不采样、不聚合、按需）。字段与成本见 `docs/bindings.md`（Vectorize 的 `/v1/vectorize/stats` 还带 `ann` 模型信息）。
 
 ### 计划中（尚未实现）
 

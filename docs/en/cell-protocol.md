@@ -265,7 +265,7 @@ Object storage must provide:
 
 ### Bucket namespaces (current implementation)
 
-There is currently one `CELLHIVE_BUCKET` and one endpoint/region/credential set. Reserved prefixes such as `cells/`, `nodes/`, `node-logs/`, `fleet/`, `bundles/`, `deploys/`, `assets/`, and `r2/` isolate subsystems inside that bucket.
+There is currently one `CELLHIVE_BUCKET` and one endpoint/region/credential set. Reserved prefixes such as `cells/`, `nodes/`, `node-logs/`, `fleet/`, `bundles/`, `deploys/`, `assets/`, `r2/`, `r2meta/`, and `r2usage/` isolate subsystems inside that bucket.
 
 Independent `state/code/assets/r2/backup` buckets, per-role credentials/lifecycle, and a backup archive write path are not implemented. Long-lived credentials are held only by `cell-agent` (ADR-023).
 

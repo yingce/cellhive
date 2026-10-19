@@ -19,7 +19,7 @@ import (
 //	GET /v1/kv/stats       ?namespace=&name=[&prefix=][&exact=1]
 //	GET /v1/d1/stats       ?namespace=&name=[&tables=1]
 //	GET /v1/queue/stats    ?namespace=&name=
-//	GET /v1/r2/stats       ?namespace=&bucket=[&prefix=][&limit=]
+//	GET /v1/r2/stats       ?namespace=&bucket=[&scan=1][&prefix=][&limit=]
 //	GET /v1/workflow/stats ?namespace=&name=[&exact=1]
 //	GET /v1/hyperdrive/stats ?namespace=&name=
 //	GET /v1/do/stats       ?namespace=[&worker=&class=]
@@ -178,6 +178,17 @@ func (s *Server) r2Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	if !truthy(q.Get("scan")) && !q.Has("prefix") && !q.Has("limit") {
+		usage, err := s.R2.Usage(r.Context(), ns, bucket)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "r2_usage_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"namespace": ns, "bucket": bucket, "kind": "r2", "stats": usage,
+		})
 		return
 	}
 	limit := 0

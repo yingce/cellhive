@@ -176,15 +176,20 @@ func TestPerKindStats(t *testing.T) {
 		t.Fatalf("legacy queue status must stay flat: %v", legacy)
 	}
 
-	// R2: bounded listing stats.
+	// R2: tracked usage by default; diagnostic listing remains opt-in.
 	mustAdmin(t, admin, http.MethodPost, "/v1/r2/resources", `{"namespace":"acme","name":"BUCKET"}`)
 	if _, err := s.R2.Put(ctx, "acme", "BUCKET", "k1", []byte("12345")); err != nil {
 		t.Fatal(err)
 	}
 	rr = mustAdmin(t, admin, http.MethodGet, "/v1/r2/stats?namespace=acme&bucket=BUCKET", "")
 	r2s := statsBody(t, rr)["stats"].(map[string]any)
-	if r2s["objects"] != float64(1) || r2s["bytes"] != float64(5) || r2s["truncated"] != false {
+	if r2s["objects"] != float64(1) || r2s["bytes"] != float64(5) || r2s["estimated"] != true || r2s["baseline"] != "from_first_tracked_write" {
 		t.Fatalf("r2 stats = %v", r2s)
+	}
+	rr = mustAdmin(t, admin, http.MethodGet, "/v1/r2/stats?namespace=acme&bucket=BUCKET&scan=1", "")
+	r2s = statsBody(t, rr)["stats"].(map[string]any)
+	if r2s["objects"] != float64(1) || r2s["bytes"] != float64(5) || r2s["truncated"] != false {
+		t.Fatalf("r2 scan stats = %v", r2s)
 	}
 
 	// Workflow: exact instance breakdown on request.

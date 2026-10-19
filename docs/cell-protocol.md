@@ -268,7 +268,7 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 
 ### 桶命名空间（当前实现）
 
-当前只有一个 `CELLHIVE_BUCKET` 与一组 endpoint/region/credentials。`cells/`、`nodes/`、`node-logs/`、`fleet/`、`bundles/`、`deploys/`、`assets/`、`r2/` 等保留前缀在同一桶内隔离。
+当前只有一个 `CELLHIVE_BUCKET` 与一组 endpoint/region/credentials。`cells/`、`nodes/`、`node-logs/`、`fleet/`、`bundles/`、`deploys/`、`assets/`、`r2/`、`r2meta/`、`r2usage/` 等保留前缀在同一桶内隔离。
 
 独立 `state/code/assets/r2/backup` 桶、per-role 凭据/生命周期和 backup 归档写入路径尚未实现。长期凭据只由 `cell-agent` 持有（ADR-023）。
 
