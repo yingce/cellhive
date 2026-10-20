@@ -13,7 +13,7 @@ BIN=./bin
 # Derive the same role credentials as cell-agent (ADR-137); the dev root is
 # enabled so no secret needs to be passed around.
 export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
-RUN=${RUN:-/tmp/rpozero}
+RUN=${RUN:-$(mktemp -d /tmp/cellhive-rpo-XXXXXX)}
 BUCKET=$RUN/bucket
 D1=$RUN/d1
 D2=$RUN/d2
@@ -30,6 +30,17 @@ B_ADMIN=http://127.0.0.1:8092
 INTERNAL=${INTERNAL:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds internal)}
 ADMIN_TOKEN=${ADMIN_TOKEN:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds admin)}
 
+# Never send the fault test to an unrelated service already using these ports.
+python3 - <<'PY' || exit 1
+import socket
+for port in (7001, 7011, 8082, 8092):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError as exc:
+            raise SystemExit(f"port {port} is unavailable: {exc}")
+PY
+
 A=""; B=""
 cleanup() { [[ -n "$A" ]] && kill "$A" 2>/dev/null; [[ -n "$B" ]] && kill "$B" 2>/dev/null; }
 trap cleanup EXIT
@@ -39,7 +50,6 @@ mkdir -p "$(dirname "$OUT")" "$BUCKET" "$D1" "$D2"
 echo "# RPO=0 fault injection: SIGKILL owner mid-write + delete local DB" | tee -a "$OUT"
 echo "# date=$(date -Is) host=$(hostname) N=$N KILL_AT=$KILL_AT LEASE_TTL=$LEASE_TTL" | tee -a "$OUT"
 
-pkill -x cell-agent 2>/dev/null || true
 sleep 1
 rm -rf "$RUN"; mkdir -p "$BUCKET" "$D1" "$D2"
 
@@ -94,7 +104,15 @@ while read -r k v; do
 done < "$ACKED"
 echo "verified acked keys on node B: missing=$missing wrong=$wrong (of $ACKN)" | tee -a "$OUT"
 
-"$BIN/restoreverify" -bucket "$BUCKET" -scope capA/__kv__/default -epoch 1 -out "$RUN/restored.db" 2>&1 | tee -a "$OUT"
+if ! restore_output=$("$BIN/restoreverify" -bucket "$BUCKET" -scope capA/__kv__/default -epoch 1 -out "$RUN/restored.db" 2>&1); then
+  echo "restoreverify failed: $restore_output" | tee -a "$OUT"
+  exit 1
+fi
+echo "$restore_output" | tee -a "$OUT"
+if ! python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["integrity"] == "ok" and d["keys"] == int(sys.argv[2])' "$restore_output" "$ACKN"; then
+  echo "restoreverify integrity/key count does not match acknowledgements" | tee -a "$OUT"
+  exit 1
+fi
 
 if [[ "$missing" == "0" && "$wrong" == "0" && "$ACKN" -gt 100 ]]; then
   echo "RPO-ZERO: PASS ($ACKN acked keys all present and exact)" | tee -a "$OUT"

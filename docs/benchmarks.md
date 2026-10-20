@@ -1,6 +1,8 @@
 # 基准回归（benchmarks）
 
-本页记录可复现的基准命令与结果，用于回归对照。**非生产硬件**；对象存储分 **FS（本地文件）** 与 **S3（本地 MinIO）** 两档；未含真实 workerd（DO 相关数字见 `docs/archive/p0-report.md`）。原始输出归档在 `docs/archive/bench/`。
+本页记录可复现的基准命令与结果，用于回归对照。**非生产硬件**；对象存储分 **FS（本地文件）** 与 **S3（本地 MinIO）** 两档。部分历史直连基准不含真实 workerd（DO 相关数字见 `docs/archive/p0-report.md`）；双 runtime 基准包含 pinned stock workerd。原始输出归档在 `docs/archive/bench/`。
+
+历史 MinIO 基准只证明当时的条件写与数据路径性能，不证明当前权威桶所需的条件删除契约；固定版 MinIO 的 stale `DeleteObject If-Match` 会被忽略，现行 `cellhive diagnose` 因此拒绝启动。`kvbench` 数字直连 cell-agent，不包含 user-runtime/workerd、资源删除栅栏或真实 COS 往返（见 `testing.md`、ADR-235）。
 
 ## 环境
 
@@ -391,5 +393,11 @@ run 1 的累计 `kv_requests=46,443`，精确等于 `/local`、`/get`、`/batch`
 | `BenchmarkLogIngestTraceparent`（2 行/请求，带 traceparent） | 6363 | 42 |
 
 含义：**默认（`CELLHIVE_OTLP_ENDPOINT` 空）零开销**——trace 中间件在 `!telemetry.Enabled()` 时直接放行（`internal/server/server.go:333`），`ExportLog` 先查 mode 再早退；打开后新增的每行成本约 **0.1 µs**，且只在**异步日志路径**（非请求热路径）。trace 导出默认头部采样 `0.01`。
+
+## 本机双 agent + 双 runtime 端到端标准（2026-10-20）
+
+运行 `CELLHIVE_WORKERD_BIN=<pinned-workerd> CELLHIVE_ESBUILD_BIN=<esbuild> scripts/bench-runtime-dual-local.sh`。脚本使用独立临时文件桶、2 个 cell-agent、2 个 user-runtime 和轮询入口；先由 agent1 写 KV A、agent2 写 KV B，再检查两个数据库分属不同节点。`/ping`（仅返回 pong）、`/fast`（分配 64 KiB）、KV `/read` 和 `/write` 默认各运行 30 秒，非 200 响应计失败；`CELLHIVE_BENCH_SPECS` 可选择路径和并发。结果与宿主负载、workerd 版本一起记录；本机共享主机上的两轮读吞吐为 752.7/933.9 RPS，不能视为容量上限或性能修复的 A/B 结论。原始结果见 `docs/archive/bench/resource-fence-2026-10-20.md`。
+
+纯 workerd 对照使用 `CELLHIVE_WORKERD_BIN=<pinned-workerd> scripts/bench-workerd-bare.sh`，以 `wrk` 直接访问 workerd HTTP socket，不启动任何 Go 服务。相同 `/ping` Worker 的单实例为 13993.77 RPS，双实例合计 26640.23 RPS；`/fast` 单实例 11392.98 RPS、双实例合计 17917.72 RPS。原始结果、连接数和尾延迟见 `docs/archive/bench/bare-workerd-2026-10-20.md`。这不是完整 CellHive 路径的同压测器 A/B，不能直接把吞吐比当作某个组件的开销。
 
 公共 fetch 移除入口侧第二层响应流包装后，同机双 agent/单 runtime 的 `/ping`（`wrk -t4 -c64 -d20s`，直连 workerd）在关闭 Tail 时从 1638.64 增至 2234.42 RPS，开启本地 Tail ring 时从 1483.97 增至 1807.71 RPS。均为共享宿主诊断，不是稳定容量结论；流式版本切换与公开 WebSocket 已用固定版 workerd 验证。原始输出及方法见 `docs/archive/bench/tail-batching-2026-10-20.md`。

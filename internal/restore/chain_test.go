@@ -2,6 +2,8 @@ package restore
 
 import (
 	"bytes"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +55,96 @@ func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
 	if err != nil || h.EndTxID != 66 {
 		t.Fatalf("compacted watermark = %d, err %v", h.EndTxID, err)
 	}
+}
+
+// Exercise the same bytes through full restore, paged restore, and compaction.
+// Snapshots are deliberately supplied out of order, as object listings need not
+// preserve the order in which an owner uploaded them.
+func TestRestoreAdversarialChains(t *testing.T) {
+	const pageSize = 64
+	snapshot := func(txid uint64, value byte) []byte {
+		return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 7, StartTxID: txid, EndTxID: txid},
+			encodePageMap(t, pageSize, 1, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)}))
+	}
+	delta := func(start, end uint64, value byte) []byte {
+		return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 7, StartTxID: start, EndTxID: end},
+			encodePageMap(t, pageSize, 1, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)}))
+	}
+	check := func(t *testing.T, chain [][]byte, want byte, wantTxID uint64) {
+		t.Helper()
+		dest := filepath.Join(t.TempDir(), "restored.db")
+		if _, err := ApplyFile(dest, chain); err != nil {
+			t.Fatalf("full restore: %v", err)
+		}
+		full, err := os.ReadFile(dest)
+		if err != nil || !bytes.Equal(full, bytes.Repeat([]byte{want}, pageSize)) {
+			t.Fatalf("full image = %q, err %v", full, err)
+		}
+		index, err := IndexChain(chain)
+		if err != nil {
+			t.Fatalf("paged restore: %v", err)
+		}
+		page, err := index.Page(1)
+		if err != nil || index.Watermark != wantTxID || !bytes.Equal(page, full) {
+			t.Fatalf("paged image = %q, watermark %d, err %v", page, index.Watermark, err)
+		}
+		compacted, err := Compact(chain, 0)
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		again := filepath.Join(t.TempDir(), "compacted.db")
+		if _, err := ApplyFile(again, compacted); err != nil {
+			t.Fatalf("restore compacted image: %v", err)
+		}
+		got, err := os.ReadFile(again)
+		if err != nil || !bytes.Equal(got, full) {
+			t.Fatalf("compaction changed image: %q, err %v", got, err)
+		}
+	}
+
+	// The later snapshot cuts through the first batch. The earlier one must
+	// replay both batches. Repeat with varying txid ranges and input order.
+	for i := 0; i < 100; i++ {
+		base := uint64(100 + i*7)
+		chain := [][]byte{
+			snapshot(base+1, 'b'),
+			delta(base+1, base+16, 'c'),
+			snapshot(base, 'a'),
+			delta(base+17, base+32, 'd'),
+		}
+		rand.New(rand.NewSource(int64(i))).Shuffle(len(chain), func(a, b int) { chain[a], chain[b] = chain[b], chain[a] })
+		t.Run(fmt.Sprintf("overlap_%d", i), func(t *testing.T) { check(t, chain, 'd', base+32) })
+	}
+
+	t.Run("newer_complete_snapshot", func(t *testing.T) {
+		check(t, [][]byte{delta(11, 20, 'b'), snapshot(20, 'c'), snapshot(10, 'a')}, 'c', 20)
+	})
+	t.Run("missing_middle_batch", func(t *testing.T) {
+		chain := [][]byte{snapshot(10, 'a'), delta(11, 15, 'b'), delta(17, 20, 'c')}
+		if _, err := ApplyFile(filepath.Join(t.TempDir(), "gap.db"), chain); err == nil {
+			t.Fatal("full restore accepted missing transaction 16")
+		}
+		if _, err := IndexChain(chain); err == nil {
+			t.Fatal("paged restore accepted missing transaction 16")
+		}
+		if _, err := Compact(chain, 0); err == nil {
+			t.Fatal("compaction accepted missing transaction 16")
+		}
+	})
+	t.Run("corrupt_latest_batch", func(t *testing.T) {
+		broken := delta(17, 20, 'c')
+		broken[len(broken)-1] ^= 0xff
+		chain := [][]byte{snapshot(10, 'a'), delta(11, 16, 'b'), broken}
+		if _, err := ApplyFile(filepath.Join(t.TempDir(), "corrupt.db"), chain); err == nil {
+			t.Fatal("full restore accepted corrupted batch")
+		}
+		if _, err := IndexChain(chain); err == nil {
+			t.Fatal("paged restore accepted corrupted batch")
+		}
+		if _, err := Compact(chain, 0); err == nil {
+			t.Fatal("compaction accepted corrupted batch")
+		}
+	})
 }
 
 func TestRestoreRejectsOverlapWithoutContiguousFallback(t *testing.T) {
