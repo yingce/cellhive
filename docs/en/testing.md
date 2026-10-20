@@ -80,7 +80,7 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 
 | Target | Local substitute | Evidence (command / test) |
 |---|---|---|
-| Object storage conditional write/conditional delete | Local MinIO (`make s3-test`, skip if docker is unavailable) | `TestS3BucketIntegration` (create/reject/CAS/reject-stale/ranged/**ListPage**), `TestDiagnoseDetectsConditionalDeleteIgnored`, `cellhive diagnose` |
+| Object storage conditional write/conditional delete | Pinned MinIO covers conditional writes/range/ListPage but **fails conditional delete** | `make s3-test` fails the stale `DeleteObject If-Match` assertion; `cellhive diagnose` rejects this backend. Full authority-store acceptance needs a backend that passes conditional delete, such as an isolated E2E COS bucket. |
 | Multi-process crash / takeover / RPO=0 | Two-process real crate (`make rpo-test`) | `RPO-ZERO: PASS (1200 acked keys all present and exact)`, restoreverify `integrity:ok` |
 | Cross-node RTT / peer pipeline | Synthetic latency injection | `internal/peer TestLatencyTransportInjectsRoundTripDelay` (`CELLHIVE_PEER_LATENCY` round trip 2×) |
 | Slow/rotating/faulty OIDC IdP | `httptest` mock IdP | `internal/auth TestJWTBearerRS256`, `TestJWTWithoutExpiryRejected`, `TestJWKSServesStaleDuringRefresh` |

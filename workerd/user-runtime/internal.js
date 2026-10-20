@@ -5,6 +5,7 @@ import { ByteLRU, textWeight, jsonWeight, quotaSource, invocationSource } from "
 import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
+import { tailQuery } from "log-tail.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -22,6 +23,7 @@ export { TenantTail } from "log-tail.js";
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
     if (url.pathname === "/healthz") return new Response("ok");
     if(env.CH_POOL_TARGET&&env.CH_POOL_TARGET!=="null"){
       if(!authorized(req,env))return json({error:"unauthorized"},401);

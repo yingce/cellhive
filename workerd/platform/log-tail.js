@@ -110,28 +110,88 @@ function eventRecords(events, props) {
   });
 }
 
+// Each host service has its own bounded ring. Tail writes only JS memory; the
+// authenticated runtime endpoint lets cell-agent pull when a client subscribes.
+const rings = new Map();
+let globalItems = [];
+let globalHead = 0;
+let globalBytes = 0;
+let ringSession;
+const maxWorkers = 200;
+const maxEvents = 1000;
+const maxBytes = 1 << 20;
+let sequence = 0;
+
+function storeRecords(namespace, worker, records, props) {
+  const key = JSON.stringify([namespace, worker]);
+  let ring = rings.get(key);
+  if (!ring) {
+    ring = { items: [], bytes: 0 };
+    rings.set(key, ring);
+    if (rings.size > maxWorkers) rings.delete(rings.keys().next().value);
+  }
+  for (const event of records) {
+    // Quiet invocation events are small. Avoid JSON serialization on the hot
+    // path; allow for long request URLs/headers in the byte estimate.
+    const request = event.event?.request;
+    let quietSize = 512 + (request?.url?.length || 0) * 2;
+    for (const [name, value] of Object.entries(request?.headers || {})) {
+      quietSize += (name.length + String(value).length) * 2 + 32;
+    }
+    const size = event.logs?.length || event.exceptions?.length
+      ? new TextEncoder().encode(JSON.stringify(event)).byteLength : quietSize;
+    if (size > 512 * 1024) continue; // one record must fit a bounded query page
+    const item = { seq: ++sequence, namespace, worker, raw: event, props, size };
+    ring.items.push(item);
+    ring.bytes += size;
+    globalItems.push(item);
+    globalBytes += size;
+    while (globalItems.length - globalHead > 10000 || globalBytes > 8 * maxBytes) {
+      globalBytes -= globalItems[globalHead++].size;
+    }
+    if (globalHead > 10000) { globalItems = globalItems.slice(globalHead); globalHead = 0; }
+    while (ring.items.length > maxEvents || ring.bytes > maxBytes) {
+      ring.bytes -= ring.items.shift().size;
+    }
+  }
+}
+
+export function readTailEvents(namespace, worker, since = 0, limit = 128) {
+  if (!ringSession) ringSession = crypto.randomUUID();
+  const ring = namespace && worker ? rings.get(JSON.stringify([namespace, worker])) : null;
+  const items = ring ? ring.items : globalItems;
+  const events = [];
+  let bytes = 0;
+  for (let i = ring ? 0 : globalHead; i < items.length; i++) {
+    const item = items[i];
+    if (item.seq <= since) continue;
+    if (events.length >= Math.min(limit, 128) || bytes + item.size > 512 * 1024) break;
+    bytes += item.size;
+    events.push({ seq: item.seq, namespace: item.namespace, worker: item.worker, event: eventRecords([item.raw], item.props)[0] });
+  }
+  return { session: ringSession, events };
+}
+
+export function tailQuery(req, env) {
+  const expected = env.LOG_TOKEN || "";
+  const token = req.headers.get("x-cellhive-internal-token") || "";
+  if (!expected || token.length !== expected.length) return new Response("unauthorized", { status: 401 });
+  let diff = 0;
+  for (let i = 0; i < token.length; i++) diff |= token.charCodeAt(i) ^ expected.charCodeAt(i);
+  if (diff) return new Response("unauthorized", { status: 401 });
+  const url = new URL(req.url);
+  const ns = url.searchParams.get("ns"), worker = url.searchParams.get("worker");
+  const since = Number(url.searchParams.get("since") || "0");
+  if (!!ns !== !!worker || !Number.isSafeInteger(since) || since < 0) return new Response("bad query", { status: 400 });
+  return new Response(JSON.stringify(readTailEvents(ns, worker, since)), { headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
 // TenantTail executes in the trusted host isolate. Its identity and transport
 // come from host-owned props/env; neither is visible to the loaded tenant.
 export class TenantTail extends WorkerEntrypoint {
-  async tail(events) {
+  tail(events) {
     const props = this.ctx.props || {};
-    if (!props.namespace || !props.worker || !this.env.CELL_URL || !this.env.LOG_TOKEN) return;
-    const records = eventRecords(events, props);
-    if (records.length === 0) return;
-    const url = new URL(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/logs");
-    url.searchParams.set("ns", props.namespace);
-    url.searchParams.set("worker", props.worker);
-    try {
-      await this.env.PLATFORM.fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-cellhive-internal-token": this.env.LOG_TOKEN,
-        },
-        body: JSON.stringify({ events: records }),
-      });
-    } catch (_err) {
-      // Logging is best-effort and must never affect the producer invocation.
-    }
+    if (!props.namespace || !props.worker) return;
+    if (events?.length) storeRecords(props.namespace, props.worker, events, props);
   }
 }

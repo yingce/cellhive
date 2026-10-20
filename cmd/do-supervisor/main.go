@@ -21,6 +21,7 @@ import (
 
 	"cellhive/internal/doruntime"
 	"cellhive/internal/dosupervisor"
+	"cellhive/internal/runtimelog"
 	"cellhive/internal/sqlcapture"
 	"cellhive/internal/telemetry"
 )
@@ -96,6 +97,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *config != "" {
+		advertise := os.Getenv("CELLHIVE_DO_ADVERTISE")
+		if advertise == "" {
+			advertise = strings.TrimPrefix(*doURL, "http://")
+		}
+		if !strings.HasPrefix(advertise, "http://") && !strings.HasPrefix(advertise, "https://") {
+			advertise = "http://" + advertise
+		}
+		registerURLs := os.Getenv("CELLHIVE_LOG_REGISTER_URLS")
+		if registerURLs == "" {
+			registerURLs = *owner
+		}
+		go runtimelog.RegisterLoop(ctx, registerURLs, *token, []string{advertise})
+	}
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 	var drain func() error

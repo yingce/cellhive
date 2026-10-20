@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"cellhive/internal/config"
+	"cellhive/internal/runtimelog"
 	"cellhive/internal/userruntime"
 	"cellhive/internal/userruntimepool"
 	"cellhive/internal/workerdpool"
@@ -100,6 +101,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	advertise := getenv("CELLHIVE_USER_RUNTIME_ADVERTISE", "")
+	if advertise == "" {
+		advertise = getenv("POD_IP", "127.0.0.1")
+	}
+	go runtimelog.RegisterLoop(ctx, getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL), cellToken, []string{
+		fmt.Sprintf("http://%s:%d", advertise, publicPort),
+		fmt.Sprintf("http://%s:%d", advertise, internalPort),
+	})
 	log.Info("user-runtime starting", "workerd", workerd, "config", capnpPath,
 		"public", fmt.Sprintf(":%d", publicPort), "internal", fmt.Sprintf(":%d", internalPort), "cell", cellURL)
 	// Graceful shutdown (ADR-156): on SIGTERM mark the loader not-ready so the

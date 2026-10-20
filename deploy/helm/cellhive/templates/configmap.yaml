@@ -2,6 +2,10 @@
 {{- if and (gt (int .Values.cellAgent.replicas) 1) (not (or (hasPrefix "s3://" $bucket) (hasPrefix "oss://" $bucket) (hasPrefix "cos://" $bucket))) -}}
 {{- fail "cellAgent.replicas > 1 requires config.bucket using s3://, oss://, or cos://" -}}
 {{- end -}}
+{{- $logAgents := list -}}
+{{- range $i, $_ := until (int .Values.cellAgent.replicas) -}}
+{{- $logAgents = append $logAgents (printf "http://%s-cell-agent-%d.%s-cell-agent:7001" $.Release.Name $i $.Release.Name) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,6 +14,7 @@ metadata:
     {{- include "cellhive.labels" . | nindent 4 }}
 data:
   CELLHIVE_CELL_URL: {{ printf "http://%s-cell-agent:7001" .Release.Name | quote }}
+  CELLHIVE_LOG_REGISTER_URLS: {{ join "," $logAgents | quote }}
   CELLHIVE_DATA_DIR: {{ .Values.config.dataDir | quote }}
   CELLHIVE_RUNTIME_DIR: {{ .Values.config.runtimeDir | quote }}
   CELLHIVE_WORKERD: "/usr/local/bin/workerd"

@@ -926,7 +926,6 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 		enabled bool
 	}{{"enabled", true}, {"disabled", false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			var mu sync.Mutex
 			var logRequests []struct {
 				Namespace string
 				Worker    string
@@ -943,21 +942,7 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 				case "/v1/internal/do/alarm/upsert":
 					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 				case "/v1/internal/logs":
-					var batch struct {
-						Events []map[string]any `json:"events"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-						http.Error(w, err.Error(), http.StatusBadRequest)
-						return
-					}
-					mu.Lock()
-					logRequests = append(logRequests, struct {
-						Namespace string
-						Worker    string
-						Events    []map[string]any
-					}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), batch.Events})
-					mu.Unlock()
-					_, _ = w.Write([]byte(`{"ok":true}`))
+					http.Error(w, "unexpected push", http.StatusInternalServerError)
 				default:
 					http.NotFound(w, r)
 				}
@@ -979,6 +964,34 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 			go func() { done <- Run(ctx, workerd, capnpPath) }()
 			base := fmt.Sprintf("http://127.0.0.1:%d", port)
 			client := noProxyClient()
+			readTail := func() {
+				req, _ := http.NewRequest(http.MethodGet, base+"/v1/internal/logs/events?ns=demo&worker=w", nil)
+				req.Header.Set("x-cellhive-internal-token", "log-tok")
+				res, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer res.Body.Close()
+				var page struct {
+					Events []struct {
+						Event map[string]any `json:"event"`
+					} `json:"events"`
+				}
+				if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+					t.Fatal(err)
+				}
+				logRequests = nil
+				if len(page.Events) > 0 {
+					events := make([]map[string]any, 0, len(page.Events))
+					for _, item := range page.Events {
+						events = append(events, item.Event)
+					}
+					logRequests = append(logRequests, struct {
+						Namespace, Worker string
+						Events            []map[string]any
+					}{"demo", "w", events})
+				}
+			}
 			deadline := time.Now().Add(25 * time.Second)
 			for {
 				resp, err := client.Get(base + "/healthz")
@@ -1006,9 +1019,8 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 				Events    []map[string]any
 			}
 			for {
-				mu.Lock()
+				readTail()
 				got = append(got[:0], logRequests...)
-				mu.Unlock()
 				foundLine := false
 				for _, request := range got {
 					for _, event := range request.Events {
@@ -1049,9 +1061,8 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 				}
 			} else {
 				time.Sleep(200 * time.Millisecond)
-				mu.Lock()
+				readTail()
 				count := len(logRequests)
-				mu.Unlock()
 				if count != 0 {
 					t.Fatalf("platform log requests = %d, want 0", count)
 				}

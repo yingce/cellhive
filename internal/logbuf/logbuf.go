@@ -51,6 +51,8 @@ type TailException struct {
 // It is separate from Entry so the native CLI can retain its line view.
 type TailEvent struct {
 	Seq                      uint64          `json:"-"`
+	RuntimeOrigin            string          `json:"-"` // direct runtime URL + process session
+	RuntimeSeq               uint64          `json:"-"`
 	Namespace                string          `json:"-"`
 	Worker                   string          `json:"-"`
 	ScriptName               string          `json:"scriptName"`

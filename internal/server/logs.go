@@ -60,68 +60,7 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 	// their own (older log-tail versions).
 	reqTP := r.Header.Get("traceparent")
 	for _, event := range batch.Events {
-		event.Namespace, event.Worker = ns, worker
-		event.ScriptName = worker
-		if event.EventTimestamp == 0 {
-			event.EventTimestamp = time.Now().UnixMilli()
-		}
-		if event.Logs == nil {
-			event.Logs = []logbuf.TailLog{}
-		}
-		if event.Exceptions == nil {
-			event.Exceptions = []logbuf.TailException{}
-		}
-		s.Logs.AddEvent(event)
-		tid, sid := telemetry.TraceIDs(event.Traceparent)
-		if tid == "" {
-			tid, sid = telemetry.TraceIDs(reqTP)
-		}
-		meta := telemetry.LogMetadata{
-			EventType: event.EventType, ScriptVersion: event.ScriptVersion,
-			RequestID: event.RequestID, Outcome: event.Outcome,
-		}
-		if len(event.Exceptions) > 0 {
-			if raw, marshalErr := json.Marshal(event.Exceptions); marshalErr == nil {
-				meta.Exceptions = raw
-			}
-		}
-		invocation := meta
-		invocation.Invocation = true
-		level := "info"
-		if event.Outcome != "ok" {
-			level = "error"
-		}
-		telemetry.ExportLogWithMetadata(ns, worker, level, "invocation", event.EventTimestamp, tid, sid, invocation)
-		for _, line := range event.Logs {
-			parts := make([]string, 0, len(line.Message))
-			for _, arg := range line.Message {
-				var value any
-				if json.Unmarshal(arg, &value) == nil {
-					if str, ok := value.(string); ok {
-						parts = append(parts, str)
-					} else {
-						parts = append(parts, string(arg))
-					}
-				}
-			}
-			at := line.Timestamp
-			if at == 0 {
-				at = event.EventTimestamp
-			}
-			added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: line.Level, Message: strings.Join(parts, " "), MessageArgs: line.Message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
-			lineMeta := meta
-			lineMeta.MessageArgs = line.Message
-			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, lineMeta)
-		}
-		for _, exception := range event.Exceptions {
-			at := exception.Timestamp
-			if at == 0 {
-				at = event.EventTimestamp
-			}
-			message := fmt.Sprintf("%s: %s", exception.Name, exception.Message)
-			added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
-			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, meta)
-		}
+		s.recordTailEvent(ns, worker, event, reqTP)
 	}
 	for _, e := range entries {
 		tid, sid := telemetry.TraceIDs(e.Traceparent)
@@ -138,6 +77,78 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 		telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, telemetry.LogMetadata{MessageArgs: e.MessageArgs, RequestID: e.RequestID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(entries) + len(batch.Events)})
+}
+
+func (s *Server) recordTailEvent(ns, worker string, event logbuf.TailEvent, reqTP string) {
+	s.recordTailEventWithExport(ns, worker, event, reqTP, true)
+}
+
+func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailEvent, reqTP string, export bool) {
+	event.Namespace, event.Worker = ns, worker
+	event.ScriptName = worker
+	if event.EventTimestamp == 0 {
+		event.EventTimestamp = time.Now().UnixMilli()
+	}
+	if event.Logs == nil {
+		event.Logs = []logbuf.TailLog{}
+	}
+	if event.Exceptions == nil {
+		event.Exceptions = []logbuf.TailException{}
+	}
+	s.Logs.AddEvent(event)
+	tid, sid := telemetry.TraceIDs(event.Traceparent)
+	if tid == "" {
+		tid, sid = telemetry.TraceIDs(reqTP)
+	}
+	meta := telemetry.LogMetadata{EventType: event.EventType, ScriptVersion: event.ScriptVersion, RequestID: event.RequestID, Outcome: event.Outcome}
+	if len(event.Exceptions) > 0 {
+		if raw, err := json.Marshal(event.Exceptions); err == nil {
+			meta.Exceptions = raw
+		}
+	}
+	invocation := meta
+	invocation.Invocation = true
+	level := "info"
+	if event.Outcome != "ok" {
+		level = "error"
+	}
+	if export {
+		telemetry.ExportLogWithMetadata(ns, worker, level, "invocation", event.EventTimestamp, tid, sid, invocation)
+	}
+	for _, line := range event.Logs {
+		parts := make([]string, 0, len(line.Message))
+		for _, arg := range line.Message {
+			var value any
+			if json.Unmarshal(arg, &value) == nil {
+				if str, ok := value.(string); ok {
+					parts = append(parts, str)
+				} else {
+					parts = append(parts, string(arg))
+				}
+			}
+		}
+		at := line.Timestamp
+		if at == 0 {
+			at = event.EventTimestamp
+		}
+		added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: line.Level, Message: strings.Join(parts, " "), MessageArgs: line.Message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
+		lineMeta := meta
+		lineMeta.MessageArgs = line.Message
+		if export {
+			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, lineMeta)
+		}
+	}
+	for _, exception := range event.Exceptions {
+		at := exception.Timestamp
+		if at == 0 {
+			at = event.EventTimestamp
+		}
+		message := fmt.Sprintf("%s: %s", exception.Name, exception.Message)
+		added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
+		if export {
+			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, meta)
+		}
+	}
 }
 
 // handleLogSubscribe enables OTLP log export for a worker for a TTL window
@@ -263,6 +274,7 @@ func (s *Server) handleLogQuery(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
+	s.PullRuntimeLogs(r.Context(), ns, worker)
 	var since uint64
 	if v := q.Get("since"); v != "" {
 		since, _ = strconv.ParseUint(v, 10, 64)

@@ -88,7 +88,7 @@ CELLHIVE_WRANGLER_BIN=/tmp/cellhive-wrangler-4.133/node_modules/wrangler/bin/wra
 
 | 目标 | 本地替代 | 证据（命令 / 测试） |
 |---|---|---|
-| 对象存储条件写/条件删除 | 本地 MinIO（`make s3-test`，docker 不可用则 skip） | `TestS3BucketIntegration`（create/reject/CAS/reject-stale/ranged/**ListPage**）、`TestDiagnoseDetectsConditionalDeleteIgnored`、`cellhive diagnose` |
+| 对象存储条件写/条件删除 | 固定版 MinIO 仅覆盖条件写/ranged/ListPage，**条件删除不兼容** | `make s3-test` 的 stale `DeleteObject If-Match` 断言失败；`cellhive diagnose` 拒绝该桶。完整权威桶验收需使用通过条件删除探针的后端（如独立 E2E COS 桶） |
 | 多进程崩溃 / 接管 / RPO=0 | 双进程真实 crate（`make rpo-test`） | `RPO-ZERO: PASS (1200 acked keys all present and exact)`，restoreverify `integrity:ok` |
 | 跨节点 RTT / peer 流水线 | 合成延迟注入 | `internal/peer TestLatencyTransportInjectsRoundTripDelay`（`CELLHIVE_PEER_LATENCY` 往返 2×） |
 | 慢/轮换/异常的 OIDC IdP | `httptest` mock IdP | `internal/auth TestJWTBearerRS256`、`TestJWTWithoutExpiryRejected`、`TestJWKSServesStaleDuringRefresh` |

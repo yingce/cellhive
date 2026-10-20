@@ -63,10 +63,10 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 
 ### 平台日志：内存 tail + 可选 OTLP 导出（ADR-172）
 
-- `workerd/platform/log-tail.js` 是可信宿主导出的 `TenantTail extends WorkerEntrypoint`。user-runtime、内部 dispatch/service target 与 do-runtime facet 在 `workerLoader` 的 `WorkerCode.tails` 中传入宿主 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 生成的真实 `Fetcher`。Tail 捕获 `console.*` 与未捕获异常，批量写入 `/v1/internal/logs`；租户身份取不可伪造的 host-bound props，不取动态事件中为 null 的 `scriptName`。log-role token、cell URL 与 private transport 仅在宿主 env，tenant env 仍为零平台键。投递失败吞掉，不影响生产者请求。
+- `workerd/platform/log-tail.js` 是可信宿主导出的 `TenantTail extends WorkerEntrypoint`。user-runtime、内部 dispatch/service target 与 do-runtime facet 在 `workerLoader` 的 `WorkerCode.tails` 中传入宿主 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 生成的真实 `Fetcher`。Tail 捕获每次调用事件（包括没有 `console.*` 的成功调用）、console 与未捕获异常，保存在所在 workerd service 的有界内存 ring；有人 Tail 订阅时，cell-agent 经受保护的 `/v1/internal/logs/events` 按游标拉取。`OTLP_LOGS=all` 时则后台持续拉取。租户身份取不可伪造的 host-bound props，不取动态事件中为 null 的 `scriptName`。log-role token 和查询能力仅在可信宿主，tenant env 仍为零平台键。runtime 重启、ring 溢出或短暂失联可能丢失实时日志。
 - **可选 OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
-  - `all`：每条都导出（集中采集；量大）。
-  - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续），tail 退出后 ≤60s 停止导出。
+  - `all`：首个配置的 cell-agent 后台按游标拉取并导出所有 runtime 日志（集中采集；量大）。该 agent 长时间失联或 runtime ring 溢出可能漏日志，属于 best-effort。
+  - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续）；Wrangler Tail 的 WebSocket 会续订。cell-agent 在订阅有效时后台拉取对应 runtime ring，tail 退出后 ≤60s 停止导出。
   - 导出是旁路、best-effort、后台批量（`sdk/log` BatchProcessor，2s），失败不影响请求也不阻塞。
   - **fleet 广播**：`cellhive tail` 仍只连一台 cell-agent；那台在收到订阅后**向其它活节点广播**（内部端点 `POST /v1/internal/logs/subscribe`，同 TTL；每 worker 最多每 25s 广播一次）。节点名单来自 lease（`Advertise`），广播 best-effort——某节点短暂失联会漏一次，下次续订（tail 每轮 ≤1s）在 ≤25s 内补上。
 

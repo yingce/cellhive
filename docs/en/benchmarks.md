@@ -2,6 +2,8 @@
 
 This page records reproducible benchmark commands and results for regression comparison. **Non-production hardware**; object storage is split into **FS (local files)** and **S3 (local MinIO)** tiers; does not include real workerd (for DO-related numbers, see `docs/archive/p0-report.md`). Raw outputs are archived under `docs/archive/bench/`.
 
+These historical MinIO numbers do not validate the current authority-store contract: the pinned image ignores stale `DeleteObject If-Match`, so current `cellhive diagnose` refuses it. Direct `kvbench` results also exclude user-runtime/workerd, the resource deletion fence added later, and real COS latency. See `testing.md` and ADR-235.
+
 ## Environment
 
 - Go: `/usr/local/go` (`go version` is shown in the run output).
@@ -390,3 +392,7 @@ Command: `go test <tags> -run '^$' -bench 'BenchmarkLogIngest|BenchmarkTraceIDs|
 | `BenchmarkLogIngestTraceparent` (2 lines/request, with traceparent) | 6363 | 42 |
 
 Meaning: **default (empty `CELLHIVE_OTLP_ENDPOINT`) is zero-cost** — the trace middleware short-circuits on `!telemetry.Enabled()` (`internal/server/server.go:333`) and `ExportLog` checks the mode first; when enabled the added cost is about **0.1 us per line**, and only on the **asynchronous log path** (not the request hot path). Trace export head-samples at `0.01` by default.
+
+### Public fetch response stream optimization (2026-10-20)
+
+Removing the redundant response stream wrapper in the public loader increased `/ping` from 1638.64 to 2234.42 RPS with Tail off, and from 1483.97 to 1807.71 RPS with the local Tail ring. The diagnostic used two local agents, one runtime, direct workerd access, and `wrk -t4 -c64 -d20s`. These shared-host measurements are not capacity guarantees. Fixed-version workerd tests covered an old response stream completing during a version switch and the public WebSocket path. Raw outputs and details are in `docs/archive/bench/tail-batching-2026-10-20.md`.

@@ -28,6 +28,7 @@ import { quotaSource } from "lifecycle.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
+import { tailQuery } from "log-tail.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned
@@ -112,6 +113,7 @@ async function ready(env) {
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
     if (url.pathname === "/healthz") return new Response("ok");
     if (url.pathname === "/ready") return ready(env);
     const auth = await authorize(req, env);

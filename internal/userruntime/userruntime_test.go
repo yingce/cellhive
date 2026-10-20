@@ -173,25 +173,15 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 
 	// Stub cell-agent artifact endpoint serving the tenant bundle.
 	var gotToken string
-	var logMu sync.Mutex
 	var tailEvents []map[string]any
+	var tailSince uint64
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/internal/worker/bindings" {
 			_, _ = w.Write([]byte(`{"bindings":{},"vars":{}}`))
 			return
 		}
 		if r.URL.Path == "/v1/internal/logs" {
-			var batch struct {
-				Events []map[string]any `json:"events"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			logMu.Lock()
-			tailEvents = append(tailEvents, batch.Events...)
-			logMu.Unlock()
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			http.Error(w, "unexpected Tail push", http.StatusInternalServerError)
 			return
 		}
 		if r.URL.Path != "/v1/internal/bundle" {
@@ -227,6 +217,32 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
 	client := noProxyClient()
+	collectTail := func() error {
+		req, _ := http.NewRequest(http.MethodGet, base+"/v1/internal/logs/events?ns=demo&worker=consumer&since="+strconv.FormatUint(tailSince, 10), nil)
+		req.Header.Set("x-cellhive-internal-token", "test-log")
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return fmt.Errorf("Tail query status %d", resp.StatusCode)
+		}
+		var page struct {
+			Events []struct {
+				Seq   uint64         `json:"seq"`
+				Event map[string]any `json:"event"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			return err
+		}
+		for _, item := range page.Events {
+			tailSince = item.Seq
+			tailEvents = append(tailEvents, item.Event)
+		}
+		return nil
+	}
 	deadline := time.Now().Add(25 * time.Second)
 	for {
 		resp, err := client.Get(base + "/healthz")
@@ -358,7 +374,9 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	seen := map[string]bool{}
 	var badPayload any
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-		logMu.Lock()
+		if err := collectTail(); err != nil {
+			t.Fatal(err)
+		}
 		for _, event := range tailEvents {
 			if event["event_type"] != "queue" {
 				continue
@@ -372,7 +390,6 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 				seen[name] = true
 			}
 		}
-		logMu.Unlock()
 		if badPayload != nil {
 			t.Fatalf("Queue Tail payload = %#v", badPayload)
 		}
@@ -732,6 +749,115 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 		t.Fatalf("unknown host status = %d, want 404", bresp.StatusCode)
 	}
 
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workerd did not exit after cancel")
+	}
+}
+
+// A retired version must keep an already returned response body alive even
+// after the public loader has released its fetch RPC reference.
+func TestUserRuntimeStreamSurvivesVersionRetirement(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	var active atomic.Int32
+	active.Store(1)
+	projection := func() map[string]any {
+		v := int(active.Load())
+		return map[string]any{"apps": []any{map[string]any{
+			"namespace": "acme",
+			"routes":    []any{map[string]any{"host": "stream.test", "worker": "web"}},
+			"workers": []any{map[string]any{"worker": "web", "active": v,
+				"version": map[string]any{"number": v, "bundle_sha": fmt.Sprintf("stream-v%d", v)}}},
+		}}}
+	}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
+			serveProjection(projection(), w, r)
+		case "/v1/internal/bundle":
+			if r.URL.Query().Get("sha") == "stream-v1" {
+				_, _ = w.Write([]byte(`export default {fetch() { return new Response(new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode("first|")); setTimeout(() => { c.enqueue(new TextEncoder().encode("last")); c.close(); }, 6000); }}), {headers: {"x-version": "v1"}}); }};`))
+			} else {
+				_, _ = w.Write([]byte(`export default {fetch() { return new Response("version-2", {headers: {"x-version": "v2"}}); }};`))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stub.Close()
+	internalPort, publicPort := freePort(t), freePort(t)
+	capnpPath, err := Render(t.TempDir(), Config{
+		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		HostCacheTTLMs: 50, RevPollMs: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerd, _ := FindWorkerd()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	client := noProxyClient()
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		resp, err := client.Get(public + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("public loader not healthy: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	request := func() (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodGet, public+"/", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Host = "stream.test"
+		return client.Do(req)
+	}
+	stream, err := request()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	reader := bufio.NewReader(stream.Body)
+	first, err := reader.ReadString('|')
+	if err != nil || first != "first|" {
+		t.Fatalf("first stream chunk = %q, %v", first, err)
+	}
+	active.Store(2)
+	var gotV2 bool
+	var lastVersion string
+	for until := time.Now().Add(3 * time.Second); time.Now().Before(until); {
+		resp, err := request()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastVersion = resp.Header.Get("x-version")
+		resp.Body.Close()
+		if lastVersion == "v2" {
+			gotV2 = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !gotV2 {
+		t.Fatalf("new version did not become active while old response streamed; last header=%q", lastVersion)
+	}
+	last, err := io.ReadAll(reader)
+	if err != nil || string(last) != "last" {
+		t.Fatalf("old stream after version retirement = %q, %v", last, err)
+	}
 	cancel()
 	select {
 	case <-done:
@@ -3991,22 +4117,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(logTailBundle))
 		case "/v1/internal/logs":
-			var batch struct {
-				Events []map[string]any `json:"events"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			mu.Lock()
-			logRequests = append(logRequests, struct {
-				Namespace string
-				Worker    string
-				Token     string
-				Events    []map[string]any
-			}{r.URL.Query().Get("ns"), r.URL.Query().Get("worker"), r.Header.Get("x-cellhive-internal-token"), batch.Events})
-			mu.Unlock()
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			http.Error(w, "runtime Tail must not push per invocation", http.StatusInternalServerError)
 		default:
 			http.NotFound(w, r)
 		}
@@ -4029,6 +4140,43 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	go func() { done <- Run(ctx, workerd, capnpPath) }()
 	client := noProxyClient()
 	public := fmt.Sprintf("http://127.0.0.1:%d", publicPort)
+	var tailSince uint64
+	collect := func() error {
+		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=web&since="+strconv.FormatUint(tailSince, 10), nil)
+		req.Header.Set("x-cellhive-internal-token", "dev-log-token")
+		res, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			return fmt.Errorf("Tail query status %d", res.StatusCode)
+		}
+		var page struct {
+			Events []struct {
+				Seq   uint64         `json:"seq"`
+				Event map[string]any `json:"event"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+			return err
+		}
+		if len(page.Events) == 0 {
+			return nil
+		}
+		events := make([]map[string]any, 0, len(page.Events))
+		for _, item := range page.Events {
+			tailSince = item.Seq
+			events = append(events, item.Event)
+		}
+		mu.Lock()
+		logRequests = append(logRequests, struct {
+			Namespace, Worker, Token string
+			Events                   []map[string]any
+		}{"acme", "web", "dev-log-token", events})
+		mu.Unlock()
+		return nil
+	}
 	deadline := time.Now().Add(25 * time.Second)
 	for {
 		resp, err := client.Get(public + "/healthz")
@@ -4064,6 +4212,9 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		Events    []map[string]any
 	}
 	for {
+		if err := collect(); err != nil {
+			t.Fatal(err)
+		}
 		mu.Lock()
 		got = append(got[:0], logRequests...)
 		mu.Unlock()
@@ -4114,6 +4265,9 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		t.Fatalf("generated-ID fetch = %d %q", resp.StatusCode, body)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; {
+		if err := collect(); err != nil {
+			t.Fatal(err)
+		}
 		mu.Lock()
 		count := len(logRequests)
 		if count >= 2 {
@@ -4135,11 +4289,85 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		t.Fatalf("quiet fetch = %d %q, want tenant exception response", resp.StatusCode, body)
 	}
 	time.Sleep(250 * time.Millisecond)
+	if err := collect(); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	quietLogCount := len(logRequests)
 	mu.Unlock()
 	if quietLogCount != 2 {
 		t.Fatalf("quiet worker emitted logs: requests=%d, want 2 from web only", quietLogCount)
+	}
+	// Concurrent native Tail invocations must retain every request identity while
+	// sharing the trusted ingest transport across more than one event.
+	const concurrent = 64
+	var concurrentWG sync.WaitGroup
+	requestErrors := make(chan error, concurrent)
+	for i := range concurrent {
+		concurrentWG.Add(1)
+		go func() {
+			defer concurrentWG.Done()
+			req, err := http.NewRequest(http.MethodGet, public+"/on", nil)
+			if err != nil {
+				requestErrors <- err
+				return
+			}
+			req.Host = "app.test"
+			req.Header.Set("x-request-id", fmt.Sprintf("batch-%d", i))
+			res, err := client.Do(req)
+			if err != nil {
+				requestErrors <- err
+				return
+			}
+			_, _ = io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			if res.StatusCode != http.StatusInternalServerError {
+				requestErrors <- fmt.Errorf("batch request %d: status %d", i, res.StatusCode)
+			}
+		}()
+	}
+	concurrentWG.Wait()
+	close(requestErrors)
+	for err := range requestErrors {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if err := collect(); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		seen := make(map[string]bool)
+		maxBatch := 0
+		for _, call := range logRequests {
+			if call.Worker != "web" {
+				continue
+			}
+			if len(call.Events) > maxBatch {
+				maxBatch = len(call.Events)
+			}
+			for _, event := range call.Events {
+				if id, ok := event["requestId"].(string); ok && strings.HasPrefix(id, "batch-") {
+					if seen[id] {
+						t.Errorf("duplicate Tail request ID %q", id)
+					}
+					seen[id] = true
+				}
+			}
+		}
+		mu.Unlock()
+		if len(seen) == concurrent {
+			if maxBatch <= 1 {
+				t.Error("native Tail events were not batched")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("native Tail retained %d/%d concurrent request IDs", len(seen), concurrent)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
 	select {
@@ -4605,8 +4833,6 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 		},
 	}}}
 
-	var mu sync.Mutex
-	var logWorkers []string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/routes", "/v1/control/host", "/v1/control/worker":
@@ -4618,10 +4844,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 				_, _ = w.Write([]byte(serviceNativeLogCallerBundle))
 			}
 		case "/v1/internal/logs":
-			mu.Lock()
-			logWorkers = append(logWorkers, r.URL.Query().Get("ns")+"/"+r.URL.Query().Get("worker"))
-			mu.Unlock()
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			http.Error(w, "unexpected push", http.StatusInternalServerError)
 		default:
 			http.NotFound(w, r)
 		}
@@ -4662,18 +4885,30 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 		t.Fatalf("native fetch = %d %q (want target)", resp.StatusCode, body)
 	}
 	deadline = time.Now().Add(5 * time.Second)
-	var got []string
 	for {
-		mu.Lock()
-		got = append(got[:0], logWorkers...)
-		mu.Unlock()
-		if len(got) > 0 || time.Now().After(deadline) {
+		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=api", nil)
+		req.Header.Set("x-cellhive-internal-token", "log-tok")
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Events []struct {
+				Event map[string]any `json:"event"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+			res.Body.Close()
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if len(page.Events) > 0 {
 			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatal("service target acme/api missing from local Tail ring")
+		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if !slices.Contains(got, "acme/api") {
-		t.Fatalf("platform log workers = %v, want service target acme/api", got)
 	}
 	cancel()
 	select {

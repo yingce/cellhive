@@ -18,6 +18,7 @@ import (
 
 	"cellhive/internal/config"
 	"cellhive/internal/doruntime"
+	"cellhive/internal/runtimelog"
 )
 
 func main() {
@@ -101,6 +102,11 @@ func main() {
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	registeredURL := advertise
+	if !strings.HasPrefix(registeredURL, "http://") && !strings.HasPrefix(registeredURL, "https://") {
+		registeredURL = "http://" + registeredURL
+	}
+	go runtimelog.RegisterLoop(signalCtx, getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL), cellToken, []string{registeredURL})
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 	log.Info("do-runtime starting", "workerd", workerd, "config", capnpPath, "addr", addr,

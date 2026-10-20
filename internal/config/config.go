@@ -141,6 +141,9 @@ type Config struct {
 	// OTLPLogs selects OTLP log export (ADR-172): off (default), tail (only
 	// workers with an active tail subscription) or all.
 	OTLPLogs string
+	// LogRegisterURLs lists the direct cell-agent origins used by runtime Tail
+	// registration. The first live node is the preferred OTLP exporter.
+	LogRegisterURLs []string
 
 	// Leases.
 	LeaseTTL time.Duration
@@ -507,6 +510,7 @@ func FromEnv() Config {
 		TraceSampleRatio:         envFloat("CELLHIVE_TRACES_SAMPLE_RATIO", 0.01),
 		ServiceName:              env("CELLHIVE_SERVICE_NAME", "cellhive-cell-agent"),
 		OTLPLogs:                 env("CELLHIVE_OTLP_LOGS", "off"),
+		LogRegisterURLs:          splitList(env("CELLHIVE_LOG_REGISTER_URLS", "")),
 		LeaseTTL:                 envDuration("CELLHIVE_LEASE_TTL", 10*time.Second),
 		TimerInterval:            envDuration("CELLHIVE_TIMER_INTERVAL", time.Second),
 		DispatchURL:              env("CELLHIVE_DISPATCH_URL", ""),

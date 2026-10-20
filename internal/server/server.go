@@ -151,6 +151,8 @@ type Server struct {
 	peerRecvBytes atomic.Int64
 	logFanMu      sync.Mutex
 	logFan        map[string]time.Time // ns/worker -> last peer fan-out
+	runtimeLogMu  sync.Mutex
+	runtimeLogs   map[string]*runtimeLogSource // registered workerd service URLs
 	importMu      sync.Mutex
 	d1Imports     map[string]*cloudflareD1Import
 	exportMu      sync.Mutex
@@ -279,6 +281,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/kv/put", s.scopeAuth("kv")(s.admit(s.handleKVPut)))
 	mux.HandleFunc("POST /v1/kv/incr", s.scopeAuth("kv")(s.admit(s.handleKVIncr)))
 	mux.HandleFunc("POST /v1/internal/logs", s.roleAuth("log")(s.handleLogIngest))
+	mux.HandleFunc("POST /v1/internal/logs/runtime", s.auth(s.handleRuntimeLogRegister))
 	mux.HandleFunc("GET /v1/internal/logs/events", s.roleAuth("peer")(s.handlePeerLogEvents))
 	mux.HandleFunc("POST /v1/internal/logs/subscribe", s.auth(s.handleLogSubscribeInternal))
 	mux.HandleFunc("POST /v1/internal/timer/upsert", s.auth(s.handleTimerUpsert))

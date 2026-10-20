@@ -21,14 +21,17 @@ import (
 
 	"cellhive/internal/logbuf"
 	"cellhive/internal/scopedtoken"
+	"cellhive/internal/telemetry"
 	"github.com/gorilla/websocket"
 )
 
 const tailTokenIssuer = "tail-stream"
 
 type peerTailEvent struct {
-	Seq   uint64           `json:"seq"`
-	Event logbuf.TailEvent `json:"event"`
+	Seq           uint64           `json:"seq"`
+	RuntimeOrigin string           `json:"runtime_origin,omitempty"`
+	RuntimeSeq    uint64           `json:"runtime_seq,omitempty"`
+	Event         logbuf.TailEvent `json:"event"`
 }
 
 type peerTailPage struct {
@@ -53,10 +56,11 @@ func (s *Server) handlePeerLogEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "since must be an unsigned integer")
 		return
 	}
+	s.PullRuntimeLogs(r.Context(), ns, worker)
 	page := peerTailPage{Events: []peerTailEvent{}}
 	if s.Logs != nil {
 		for _, event := range s.Logs.EventsSince(ns, worker, since, 32) {
-			page.Events = append(page.Events, peerTailEvent{Seq: event.Seq, Event: event})
+			page.Events = append(page.Events, peerTailEvent{Seq: event.Seq, RuntimeOrigin: event.RuntimeOrigin, RuntimeSeq: event.RuntimeSeq, Event: event})
 		}
 	}
 	w.Header().Set("cache-control", "no-store")
@@ -197,6 +201,24 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 	lastPong := time.Time{}
 	var cursor uint64
 	peerCursors := map[string]peerTailCursor{}
+	seenRuntime := map[string]struct{}{}
+	seenOrder := make([]string, 0, 2048)
+	markRuntime := func(origin string, seq uint64) bool {
+		if origin == "" {
+			return true
+		}
+		key := origin + ":" + strconv.FormatUint(seq, 10)
+		if _, ok := seenRuntime[key]; ok {
+			return false
+		}
+		seenRuntime[key] = struct{}{}
+		seenOrder = append(seenOrder, key)
+		if len(seenOrder) > 2048 {
+			delete(seenRuntime, seenOrder[0])
+			seenOrder = seenOrder[1:]
+		}
+		return true
+	}
 	worker := r.PathValue("script_name")
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
@@ -210,18 +232,24 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 			if time.Now().UnixMilli() >= claims.ExpiresMs {
 				return
 			}
+			telemetry.Subscribe(claims.Namespace, worker, 60*time.Second)
+			s.fanOutLogSubscribe(r.Context(), claims.Namespace, worker, 60*time.Second)
 			if wrangler && time.Since(lastPong) >= 2*time.Second {
 				if err := conn.WriteControl(websocket.PongMessage, []byte("wrangler tail ping"), time.Now().Add(time.Second)); err != nil {
 					return
 				}
 				lastPong = time.Now()
 			}
+			s.PullRuntimeLogs(r.Context(), claims.Namespace, worker)
 			var local []logbuf.TailEvent
 			if s.Logs != nil {
 				local = s.Logs.EventsSince(claims.Namespace, worker, cursor, 128)
 			}
 			for _, event := range local {
 				cursor = event.Seq
+				if !markRuntime(event.RuntimeOrigin, event.RuntimeSeq) {
+					continue
+				}
 				if len(search) != 0 {
 					encoded, _ := json.Marshal(event)
 					if !strings.Contains(string(encoded), string(search)) {
@@ -253,6 +281,9 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 						continue
 					}
 					pc.Seq = item.Seq
+					if !markRuntime(item.RuntimeOrigin, item.RuntimeSeq) {
+						continue
+					}
 					if len(search) != 0 {
 						encoded, _ := json.Marshal(item.Event)
 						if !strings.Contains(string(encoded), string(search)) {

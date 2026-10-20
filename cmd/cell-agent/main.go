@@ -618,6 +618,27 @@ func main() {
 		// query endpoints return 503 and `cellhive tail --worker` is unusable.
 		Logs: newLogBuffer(cfg),
 	})
+	if telemetry.LogsMode() == telemetry.LogsAll || telemetry.LogsMode() == telemetry.LogsTail {
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if telemetry.LogsMode() == telemetry.LogsAll {
+					srv.PullRuntimeLogs(ctx, "", "")
+				}
+				if telemetry.LogsMode() == telemetry.LogsTail {
+					for _, sub := range telemetry.ActiveLogSubscriptions() {
+						srv.PullRuntimeLogs(ctx, sub[0], sub[1])
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 
 	// Backend-A capture: wire cellstore-backed cells (KV/D1/Queue/Workflow/…)
 	// into the replication chain. Writes are acked only after a fleet (peer

@@ -16,6 +16,7 @@ import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits }
 import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
+import { tailQuery } from "log-tail.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
 
@@ -112,8 +113,14 @@ function scheduleSweep(env,ctx){
 }
 async function residentWorker(env,ctx,app,worker,version,plan){
   const key=workerVersionKey(app,worker,version),family=app.namespace+'/'+worker;
-  for(const e of residents.values())if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
-  await sweepResidents(env,ctx);
+  let retiring=false;
+  for(const e of residents.values()){
+    if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
+    if(e.retiring)retiring=true;
+  }
+  // Avoid an async suspension on the steady-state fetch path. Existing
+  // retirement candidates still get swept before a new resident is used.
+  if(retiring)await sweepResidents(env,ctx);
   let e=residents.get(key);
   if(e?.cleaning){await e.cleaning;e=residents.get(key);}
   if(!e){
@@ -140,6 +147,7 @@ async function residentWorker(env,ctx,app,worker,version,plan){
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
     if (url.pathname === "/healthz") return new Response("ok");
     if (env.CH_POOL_MODE === "1" && url.pathname === "/drain") return text("not found", 404);
     // Rolling-update probes (ADR-156): /ready reports projection freshness and
@@ -288,7 +296,11 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   if (!traced.sampled) {
     try {
       const res=await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
-      return lease.entry.life.response(res,finish);
+      // The child Lifetime owns the response body through EOF/cancel/error.
+      // Retirement also checks child status, so another host stream wrapper is
+      // unnecessary once the fetch RPC has completed.
+      finish();
+      return res;
     } catch (e) {
       finish();
       return text("worker error: " + e, 500);
@@ -304,7 +316,8 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     const res = await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(env);
-    return lease.entry.life.response(res,finish);
+    finish();
+    return res;
   } catch (e) {
     finish();
     endSpan(span, { code: 2, message: String(e) });

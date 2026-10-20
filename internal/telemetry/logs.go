@@ -101,6 +101,25 @@ func LogsMode() string {
 	return logs.mode
 }
 
+// ActiveLogSubscriptions returns the currently tailed workers for on-demand
+// runtime ring polling. Expired entries are removed under the same lock.
+func ActiveLogSubscriptions() [][2]string {
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	now := time.Now()
+	out := make([][2]string, 0, len(logs.subs))
+	for key, expiry := range logs.subs {
+		if now.After(expiry) {
+			delete(logs.subs, key)
+			continue
+		}
+		if ns, worker, ok := strings.Cut(key, "/"); ok {
+			out = append(out, [2]string{ns, worker})
+		}
+	}
+	return out
+}
+
 // Subscribe enables log export for one worker for ttl (renewed by each tail
 // poll). It records even when export is off, so a later mode change works.
 func Subscribe(ns, worker string, ttl time.Duration) time.Time {

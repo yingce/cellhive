@@ -391,3 +391,5 @@ run 1 的累计 `kv_requests=46,443`，精确等于 `/local`、`/get`、`/batch`
 | `BenchmarkLogIngestTraceparent`（2 行/请求，带 traceparent） | 6363 | 42 |
 
 含义：**默认（`CELLHIVE_OTLP_ENDPOINT` 空）零开销**——trace 中间件在 `!telemetry.Enabled()` 时直接放行（`internal/server/server.go:333`），`ExportLog` 先查 mode 再早退；打开后新增的每行成本约 **0.1 µs**，且只在**异步日志路径**（非请求热路径）。trace 导出默认头部采样 `0.01`。
+
+公共 fetch 移除入口侧第二层响应流包装后，同机双 agent/单 runtime 的 `/ping`（`wrk -t4 -c64 -d20s`，直连 workerd）在关闭 Tail 时从 1638.64 增至 2234.42 RPS，开启本地 Tail ring 时从 1483.97 增至 1807.71 RPS。均为共享宿主诊断，不是稳定容量结论；流式版本切换与公开 WebSocket 已用固定版 workerd 验证。原始输出及方法见 `docs/archive/bench/tail-batching-2026-10-20.md`。

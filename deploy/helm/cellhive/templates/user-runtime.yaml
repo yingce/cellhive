@@ -48,6 +48,8 @@ spec:
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
           env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
             {{- if .Values.telemetry.enabled }}
             - name: CELLHIVE_OTLP_ENDPOINT
               valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_OTLP_ENDPOINT}}

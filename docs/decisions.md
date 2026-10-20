@@ -1,5 +1,9 @@
 # 决策记录（ADR）
 
+## ADR-236 user-runtime Tail 事件有界合批（2026-10-20）
+
+stock workerd 的原生 Tail 每次调用都会产生事件，即使租户没有 console 输出。可信 Tail host 只把原生事件放入所在 workerd service 的本地内存 ring，不逐调用向 cell-agent 发 HTTP；完整 CF 事件在查询时转换。ring 按 `(namespace,worker)` 最多保留 1000 条及 1MiB，最多保留 200 个 worker；超大单条事件跳过。受 log-role token 保护的 `/v1/internal/logs/events` 按游标查询，每页最多 128 条及约 512KiB。user-runtime 的 public/internal service 和 do-runtime 各有独立 ring；supervisor 定期向所有 cell-agent 登记各实例的直接地址，cell-agent 在 CLI/Wrangler Tail 活跃时按来源和会话游标拉取；Wrangler 跨 agent 聚合按 runtime 会话与序号去重。`OTLP_LOGS=all` 时 agent 后台拉取全部来源，`tail` 模式按有效订阅拉取；同一日志只由首个配置的 cell-agent 导出，以免多节点重复。关闭或重启 runtime 时未被拉取的事件可能丢失；ring 溢出、来源短暂失联和故障切换也维持 best-effort 语义。轻量本地入队仍占用 workerd JS 线程；本方案只移除逐调用网络投递和完整事件转换，不声称消除 Tail 的全部 CPU 成本。
+
 ## ADR-234 R2 从启用后记录估算用量（2026-10-19）
 
 R2 每个虚拟 bucket 在 `r2usage/` 保留独立的估算总数与按对象键哈希定位的已跟踪大小。只在最终对象的 `put`、`delete`、multipart `complete` 成功后更新；part/staging 不计入正式对象。未发生后续变更的既有对象不回填、不计入；首次覆盖旧对象按新对象计入，删除未跟踪对象不扣数。对象标记与总数通过点查、条件创建和 CAS 写入，热路径禁止 List；前台对象操作成功后，用量记录失败不得将成功伪装为失败，记录错误供运维排查，因此估算值可因故障或并发产生偏差，不用于计费、配额或持久性判断。
@@ -2565,8 +2569,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 ## ADR-195 公共 function 动态版本退休与字节缓存预算（2026-10-13，实施中）
 
 - **依据**：512 MiB pinned stock workerd 实验确认 named loader 内部 Map 强引用；动态 isolate 自 `abortIsolate()` 可移除条目，匿名加载亦可释放。见 `docs/archive/bench/workerd-loader-lifecycle-2026-10-13.md`。
-- **决策**：公共 fetch 使用独立 managed loader id（不可变版本 + incarnation）；可信管理 entrypoint 不作为公网 URL，旧版本标记 retiring、新请求取新版本。宿主在调用前计活动引用，响应 body EOF/cancel/error 后释放；子 wrapper 追踪 handler、ctx/importable waitUntil，101/WS 保守 pin。无 binding 仍支持默认 WorkerEntrypoint，注入轻量生命周期模块取代 ADR-193 的完全直载；有 binding 继续原 facade wrapper。
-- **回收**：只对宿主无活动请求且子 wrapper 无活动/后台任务的版本调用自 abort；每次 lookup 使用 incarnation，避免晚到清理影响新实例。容量按条目 + 估算代码/env 字节限制；无法释放（busy/WS）时拒绝新冷加载（503），不强制中止执行。源码/plan/env/assets 缓存有总字节与单项上限；大静态资源走流式路径。
+- **决策**：公共 fetch 使用独立 managed loader id（不可变版本 + incarnation）；可信管理 entrypoint 不作为公网 URL，旧版本标记 retiring、新请求取新版本。宿主在 fetch RPC 完成后释放活动引用，响应 body EOF/cancel/error 由子 wrapper 的 `Lifetime.response` 追踪；宿主退休前必须向子 wrapper 查询 idle，不能只凭宿主引用计数自 abort。子 wrapper 还追踪 handler、ctx/importable waitUntil，101/WS 保守 pin。这样普通响应只经过一层 JS 流包装；无 binding 仍支持默认 WorkerEntrypoint，注入轻量生命周期模块取代 ADR-193 的完全直载；有 binding 继续原 facade wrapper。
+- **回收**：只对宿主无活动 fetch RPC 且子 wrapper 无活动响应/后台任务的版本调用自 abort；每次 lookup 使用 incarnation，避免晚到清理影响新实例。容量按条目 + 估算代码/env 字节限制；无法释放（busy/WS）时拒绝新冷加载（503），不强制中止执行。源码/plan/env/assets 缓存有总字节与单项上限；大静态资源走流式路径。
 - **边界**：native service RPC/内部 queue/scheduled/workflow/DO 的原 loader namespace 独立，暂不对它们强制回收；其跨请求 RPC capability、facet 和持久性必须分别验收。公共 WS 保守驻留，容量拒绝不能当作全进程 heap 硬限制。并发租户自身分配、内部运行时与 DO、FD 仍有独立压力，RSS 进程监控/drain 是后续兜底。版本历史 artifact 不删除。
 
 ## ADR-196 stock runtime 容器级资源配额（2026-10-14）
@@ -2897,4 +2901,4 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-10-19_
+_最后更新：2026-10-20_
