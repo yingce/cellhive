@@ -142,6 +142,13 @@ func (m *Manager) ResourceState(ctx context.Context, sc cell.Scope) (bool, uint6
 	return f.Deleted, f.Epoch, err
 }
 
+// ResourceSnapshot returns one authoritative view for request preparation.
+// Admission must recheck the generation after acquiring the local request gate.
+func (m *Manager) ResourceSnapshot(ctx context.Context, sc cell.Scope) (string, bool, uint64, error) {
+	f, _, err := m.readResourceFence(ctx, sc)
+	return f.JobID, f.Deleted, f.Epoch, err
+}
+
 func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string, error) {
 	f, _, err := m.readResourceFence(ctx, sc)
 	if err != nil {

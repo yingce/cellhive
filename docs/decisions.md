@@ -4,6 +4,12 @@
 
 stock workerd 的原生 Tail 每次调用都会产生事件，即使租户没有 console 输出。可信 Tail host 只把原生事件放入所在 workerd service 的本地内存 ring，不逐调用向 cell-agent 发 HTTP；完整 CF 事件在查询时转换。ring 按 `(namespace,worker)` 最多保留 1000 条及 1MiB，最多保留 200 个 worker；超大单条事件跳过。受 log-role token 保护的 `/v1/internal/logs/events` 按游标查询，每页最多 128 条及约 512KiB。user-runtime 的 public/internal service 和 do-runtime 各有独立 ring；supervisor 定期向所有 cell-agent 登记各实例的直接地址，cell-agent 在 CLI/Wrangler Tail 活跃时按来源和会话游标拉取；Wrangler 跨 agent 聚合按 runtime 会话与序号去重。`OTLP_LOGS=all` 时 agent 后台拉取全部来源，`tail` 模式按有效订阅拉取；同一日志只由首个配置的 cell-agent 导出，以免多节点重复。关闭或重启 runtime 时未被拉取的事件可能丢失；ring 溢出、来源短暂失联和故障切换也维持 best-effort 语义。轻量本地入队仍占用 workerd JS 线程；本方案只移除逐调用网络投递和完整事件转换，不声称消除 Tail 的全部 CPU 成本。
 
+## ADR-235 KV/Queue 资源栅栏请求准入去重（2026-10-20）
+
+资源删除的即时拒绝与本地 incarnation marker 仍按 ADR-205 执行；不得以短 TTL 缓存代替权威桶点查。常态数据请求先点查一次完整 fence 快照，在本地 marker 已匹配时只做本地比较；仅当 marker 需要改变时，在世代锁内重新点查权威 generation，防止旧快照回滚新一代文件。获得本地请求 gate 后再次点查 fence，若删除或世代变化则拒绝并释放 gate。这样常态请求是两次可并发的点查，不再在单 cell 的世代锁内等待对象存储；删除/重建仍须通过请求准入和捕获写入栅栏验证。跨节点转发在目标节点重新准入，不信任转发节点的快照。
+
+本项只减少同一请求的重复权威查询及锁内 I/O，不宣称 Worker HTTP 吞吐等同于直连 `kvbench`，也不弱化 MinIO 等对象存储的条件删除启动检查。
+
 ## ADR-234 R2 从启用后记录估算用量（2026-10-19）
 
 R2 每个虚拟 bucket 在 `r2usage/` 保留独立的估算总数与按对象键哈希定位的已跟踪大小。只在最终对象的 `put`、`delete`、multipart `complete` 成功后更新；part/staging 不计入正式对象。未发生后续变更的既有对象不回填、不计入；首次覆盖旧对象按新对象计入，删除未跟踪对象不扣数。对象标记与总数通过点查、条件创建和 CAS 写入，热路径禁止 List；前台对象操作成功后，用量记录失败不得将成功伪装为失败，记录错误供运维排查，因此估算值可因故障或并发产生偏差，不用于计费、配额或持久性判断。

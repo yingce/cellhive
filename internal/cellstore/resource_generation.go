@@ -41,6 +41,63 @@ func (s *Store) EnsureResourceGeneration(ctx context.Context, sc cell.Scope, gen
 	return s.ensureResourceGenerationLocked(ctx, sc, generation)
 }
 
+// EnsureResourceGenerationFromSnapshot skips a second bucket lookup when the
+// local marker already matches a just-read authoritative snapshot. A mismatch
+// may delete the old local SQLite file, so it must recheck authority under the
+// generation lock before changing anything. The caller must recheck once more
+// after acquiring BeginRequest; this snapshot alone is not admission.
+func (s *Store) EnsureResourceGenerationFromSnapshot(ctx context.Context, sc cell.Scope, generation string, authoritative func() (string, error)) error {
+	if sc.Class != "__kv__" && sc.Class != "__queue__" {
+		return nil
+	}
+	if len(generation) > 160 {
+		return fmt.Errorf("cellstore: invalid resource generation")
+	}
+	var hash uint64
+	for _, b := range []byte(sc.String()) {
+		hash = hash*131 + uint64(b)
+	}
+	lock := &s.resourceGenerationLocks[hash%uint64(len(s.resourceGenerationLocks))]
+	lock.Lock()
+	defer lock.Unlock()
+	p, err := s.Path(sc)
+	if err != nil {
+		return err
+	}
+	previous, err := os.ReadFile(p + ".resource-generation")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if string(previous) == generation {
+		return nil
+	}
+	current, err := authoritative()
+	if err != nil {
+		return err
+	}
+	if current != generation {
+		return cell.ErrResourceDeleted
+	}
+	return s.ensureResourceGenerationLocked(ctx, sc, generation)
+}
+
+// BeginPreparedResourceRequest admits a prepared generation only after a fresh
+// authoritative check under the local request gate. Bucket I/O runs outside
+// the generation lock so concurrent requests for one cell do not serialize on
+// object-store latency. A concurrent Forget waits for this gate to drain.
+func (s *Store) BeginPreparedResourceRequest(ctx context.Context, sc cell.Scope, generation string, authoritative func() (string, error)) (func(), error) {
+	end := s.BeginRequest(sc.String())
+	current, err := authoritative()
+	if err != nil || current != generation {
+		end()
+		if err != nil {
+			return nil, err
+		}
+		return nil, cell.ErrResourceDeleted
+	}
+	return end, nil
+}
+
 func (s *Store) ensureResourceGenerationLocked(ctx context.Context, sc cell.Scope, generation string) error {
 	p, err := s.Path(sc)
 	if err != nil {

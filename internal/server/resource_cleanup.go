@@ -20,6 +20,42 @@ import (
 
 func (s *Server) resourceReplica() *replica.Manager { return s.resourceRep }
 
+// prepareResourceAccessSnapshot takes one fence snapshot before the request
+// gate. Admission below rechecks it after acquiring the gate; a stale snapshot
+// can therefore neither serve a deleted resource nor roll back its marker.
+func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scope) (string, error) {
+	generation, blocked, floor, err := s.resourceReplica().ResourceSnapshot(ctx, sc)
+	if err != nil {
+		return "", err
+	}
+	if blocked {
+		return "", replica.ErrResourceDeleted
+	}
+	if s.Store != nil {
+		if err := s.Store.EnsureResourceGenerationFromSnapshot(ctx, sc, generation, func() (string, error) {
+			return s.resourceReplica().ResourceGeneration(ctx, sc)
+		}); err != nil {
+			return "", err
+		}
+	}
+	if floor > 0 && s.Owner != nil && s.Store != nil {
+		o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+		if err == nil && o.Epoch <= floor {
+			s.Owner.Invalidate(sc)
+			if err := s.Store.Forget(ctx, sc); err != nil {
+				return "", err
+			}
+		}
+	}
+	return generation, nil
+}
+
+func (s *Server) beginPreparedResourceRequest(ctx context.Context, sc cell.Scope, generation string) (func(), error) {
+	return s.Store.BeginPreparedResourceRequest(ctx, sc, generation, func() (string, error) {
+		return s.resourceReplica().ResourceGeneration(ctx, sc)
+	})
+}
+
 // PrepareResourceAccess runs outside a cell's BeginRequest gate. The epoch
 // floor also invalidates an old self-owner hint and local cache on a node that
 // was offline during deletion, so recreation cannot expose its old SQLite data.

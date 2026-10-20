@@ -46,6 +46,8 @@ SG 的 `cell-agent-0` PVC 曾被一个约 20GB 的旧 peer session `fragments.lo
 
 ## 2026-10-15 资源运维与调用审计（ADR-205）
 
+2026-10-20 性能复核：资源删除栅栏曾使每个 KV Worker 请求重复点查权威桶约 5 次，其中多次在同 cell 世代锁内等待 COS。ADR-235 去重后常态为 2 次可并发点查；同机访问 USW E2E COS 的 A/B 中 KV 读从 3.7 提升到 76.7 RPS，写从 3.2 到 5.6 RPS；双 agent 新版读/写 74.2/13.0 RPS（均为跨地域客户端，不能外推为区域内上限）。写入仍要完成 RPO=0 的持久证明；若无合格 fleet follower 会等待 COS。区域内双 agent 的新版本吞吐尚未重测，见 `archive/bench/resource-fence-2026-10-20.md`。
+
 2026-10-20 Worker `/ping` 单 runtime 热路径复核：原版 Tail 开启约 973 RPS；保留原生 Tail 挂载但不处理事件约 1,723 RPS，完全关闭约 1,721 RPS；64 条/5ms 有界合批约 1,441 RPS；256 条/3s 异步合批约 1,622 RPS（308 个 timeout）。改为 runtime 本地 ring 且查询时才转换事件后约 1,715 RPS（314 个 timeout），热路径只保留原生 Tail 投递和有界入队。静默调用仍可由 Tail 读取，ring 溢出/重启仍可丢实时事件。共享宿主测试含 socket timeout，只能用于定位，不能作容量承诺。早先双 runtime 的“合批从 1.73k 到 3.37k”因临时脚本误关 Tail 而无效，详见 `archive/bench/tail-batching-2026-10-20.md`。
 
 DLQ 已新增只读 keyset 预览及按 ID 批量幂等 ack（owner 路由/capture）；预览不 claim、不改 lease/attempts/visibility。KV/Queue 删除已有持久化 cleanup job、查询、自动退避和手动重试；物理 scope owner 清理本地 SQLite/WAL 和权威 LTX，保留小型 generation/fence 元数据，防止异步上传恢复旧数据。独立 DLQ 不删除，仅清理来源可证明属于主 Queue 的消息；旧来源缺失消息需人工 preview/ack 后 retry，否则作失败报告。共享物理 scope 当前拒绝破坏性删除。旧 sealed follower logs 仍按 session 回收，不逐资源立即清除历史副本。

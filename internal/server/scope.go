@@ -107,9 +107,11 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 					return
 				}
 			}
+			preparedGeneration := ""
 			if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
 				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
-					err := s.PrepareResourceAccess(r.Context(), sc)
+					var err error
+					preparedGeneration, err = s.prepareResourceAccessSnapshot(r.Context(), sc)
 					if err != nil {
 						if errors.Is(err, replica.ErrResourceDeleted) {
 							writeErr(w, 403, "resource_deleted", "resource has been deleted")
@@ -137,7 +139,7 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 					sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query())
 					if ok {
 						var err error
-						end, err = s.BeginResourceRequest(r.Context(), sc)
+						end, err = s.beginPreparedResourceRequest(r.Context(), sc, preparedGeneration)
 						if err != nil {
 							writeErr(w, 403, "resource_generation_changed", err.Error())
 							return

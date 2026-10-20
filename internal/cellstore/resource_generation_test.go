@@ -110,3 +110,63 @@ func TestStaleGenerationObservationCannotRollbackMarker(t *testing.T) {
 		t.Fatalf("successor discarded: %q %v", value, err)
 	}
 }
+
+func TestPreparedGenerationAvoidsLookupAndRejectsStaleMutation(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "cache"}
+	lookups := 0
+	current := ""
+	authoritative := func() (string, error) { lookups++; return current, nil }
+	if err := s.EnsureResourceGenerationFromSnapshot(t.Context(), sc, "", authoritative); err != nil || lookups != 0 {
+		t.Fatalf("matching empty marker did a lookup: %v, %d", err, lookups)
+	}
+	current = "job-2"
+	if err := s.EnsureResourceGenerationFromSnapshot(t.Context(), sc, current, authoritative); err != nil || lookups != 1 {
+		t.Fatalf("generation change did not recheck: %v, %d", err, lookups)
+	}
+	c, err := s.Cell(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(t.Context(), "k", []byte("successor"), nil); err != nil {
+		t.Fatal(err)
+	}
+	err = s.EnsureResourceGenerationFromSnapshot(t.Context(), sc, "job-1", authoritative)
+	if !errors.Is(err, cell.ErrResourceDeleted) || lookups != 2 {
+		t.Fatalf("stale snapshot accepted: %v, lookups=%d", err, lookups)
+	}
+	c, err = s.Cell(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _, err := c.Get(t.Context(), "k")
+	if err != nil || string(v) != "successor" {
+		t.Fatalf("stale snapshot discarded successor: %q %v", v, err)
+	}
+}
+
+func TestPreparedRequestRechecksAfterGate(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "cache"}
+	current := "job-1"
+	authoritative := func() (string, error) { return current, nil }
+	if err := s.EnsureResourceGenerationFromSnapshot(t.Context(), sc, current, authoritative); err != nil {
+		t.Fatal(err)
+	}
+	current = "job-2"
+	end, err := s.BeginPreparedResourceRequest(t.Context(), sc, "job-1", authoritative)
+	if end != nil || !errors.Is(err, cell.ErrResourceDeleted) {
+		t.Fatalf("admitted stale request: end=%v err=%v", end != nil, err)
+	}
+	if err := s.Forget(t.Context(), sc); err != nil {
+		t.Fatalf("rejected request leaked its gate: %v", err)
+	}
+}

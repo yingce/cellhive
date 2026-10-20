@@ -21,6 +21,50 @@ import (
 	"cellhive/internal/replica"
 )
 
+type fenceCountingBucket struct {
+	bucket.Bucket
+	gets atomic.Int64
+}
+
+func (b *fenceCountingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
+	if strings.HasSuffix(key, "/resource-fence.json") {
+		b.gets.Add(1)
+	}
+	return b.Bucket.Get(ctx, key)
+}
+
+func TestPreparedResourceAdmissionUsesTwoFenceReadsAndRejectsRevoke(t *testing.T) {
+	s := newDomainServer(t)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "cache"}
+	counting := &fenceCountingBucket{Bucket: s.resourceReplica().B}
+	s.resourceReplica().B = counting
+	for i := 0; i < 5; i++ {
+		generation, err := s.prepareResourceAccessSnapshot(t.Context(), sc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end, err := s.beginPreparedResourceRequest(t.Context(), sc, generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end()
+	}
+	if got := counting.gets.Load(); got != 10 {
+		t.Fatalf("steady admission used %d fence reads, want 2 per request", got)
+	}
+	generation, err := s.prepareResourceAccessSnapshot(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.resourceReplica().BlockResource(t.Context(), sc, "deleted-job"); err != nil {
+		t.Fatal(err)
+	}
+	end, err := s.beginPreparedResourceRequest(t.Context(), sc, generation)
+	if end != nil || !errors.Is(err, replica.ErrResourceDeleted) {
+		t.Fatalf("revoked resource admitted: end=%v err=%v", end != nil, err)
+	}
+}
+
 func seedCleanupReplica(t *testing.T, s *Server, sc cell.Scope) {
 	t.Helper()
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("payload"))
