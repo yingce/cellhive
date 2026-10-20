@@ -2,6 +2,9 @@
 
 ## 未发布（main）
 
+### 路由精确删除
+- `cellhive route rm <namespace> <host> --path <prefix>` 只删除指定 `(host,path)` 路由；`--path ''` 精确删除空路径挂载，省略 `--path` 保持原有整 host 删除语义。控制面 DELETE 接口同步支持可选 `path` 查询参数。
+
 ### 冷恢复重叠增量修复
 - 冷恢复、分页索引和压缩现在选择能接上完整增量链的最新快照；跨越快照水位的批量增量不会被整段忽略。没有可验证连续链时仍拒绝恢复。SG `vwork-40/__invocations__/main` 的真实 COS 段（24033/24034 快照、24034–24049 与 24050–24066 增量）在本地恢复到 txid 24066，SQLite `quick_check=ok`，与独立选择旧快照的参考镜像 SHA-256 一致。
 

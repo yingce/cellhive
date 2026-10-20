@@ -896,7 +896,7 @@ func cmdRollback(args []string) error {
 
 func cmdRoute(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cellhive route add <namespace> <host> <worker> | cellhive route rm <namespace> <host>")
+		return fmt.Errorf("usage: cellhive route add <namespace> <host> <worker> [--path <prefix>] | cellhive route rm <namespace> <host> [--path <prefix>]")
 	}
 	switch args[0] {
 	case "add":
@@ -917,9 +917,22 @@ func cmdRoute(args []string) error {
 		printJSON(data)
 	case "rm":
 		if len(args) < 3 {
-			return fmt.Errorf("usage: cellhive route rm <namespace> <host>")
+			return fmt.Errorf("usage: cellhive route rm <namespace> <host> [--path <prefix>]")
+		}
+		fs := flag.NewFlagSet("route rm", flag.ContinueOnError)
+		path := fs.String("path", "", "delete only this exact path (omit to delete all routes for the host)")
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: cellhive route rm <namespace> <host> [--path <prefix>]")
 		}
 		q := url.Values{"namespace": {args[1]}, "host": {args[2]}}
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "path" {
+				q.Set("path", *path)
+			}
+		})
 		data, err := adminCall(http.MethodDelete, "/v1/control/route?"+q.Encode(), nil)
 		if err != nil {
 			return err
@@ -2815,7 +2828,7 @@ Usage:
   cellhive route add <namespace> <host> <worker> [--path <prefix>]  # prefix is always stripped (mount semantics)
   cellhive bundle put <file>
   cellhive asset put <namespace> <worker> <path> <file>
-  cellhive route rm <namespace> <host>
+  cellhive route rm <namespace> <host> [--path <prefix>]  # omit --path to delete all routes for host
   cellhive service-acl add <namespace> <worker> <caller-namespace>  # cross-ns service binding grant
   cellhive service-acl ls <namespace>
   cellhive service-acl rm <namespace> <worker> <caller-namespace>

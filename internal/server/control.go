@@ -1122,11 +1122,15 @@ func (s *Server) handleControlRouteDelete(w http.ResponseWriter, r *http.Request
 	}
 	ns := r.URL.Query().Get("namespace")
 	host := r.URL.Query().Get("host")
+	var path *string
+	if values, ok := r.URL.Query()["path"]; ok {
+		path = &values[0]
+	}
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(ns), func() error {
-		return s.Control.DeleteRoute(r.Context(), ns, host, "admin")
+		return s.Control.DeleteRoute(r.Context(), ns, host, path, "admin")
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "route_delete_failed", err.Error())
 		return

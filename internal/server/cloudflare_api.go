@@ -627,7 +627,7 @@ func (s *Server) handleCloudflareRouteDelete(w http.ResponseWriter, r *http.Requ
 	if id == "" {
 		id = r.URL.Query().Get("id")
 	}
-	if err := s.Control.DeleteRoute(r.Context(), r.PathValue("account_id"), id, "wrangler"); err != nil {
+	if err := s.Control.DeleteRoute(r.Context(), r.PathValue("account_id"), id, nil, "wrangler"); err != nil {
 		writeErr(w, http.StatusNotFound, "route_delete_failed", err.Error())
 		return
 	}

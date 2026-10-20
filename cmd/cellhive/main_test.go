@@ -160,6 +160,40 @@ func TestCLISubcommandArity(t *testing.T) {
 	}
 }
 
+func TestRouteRmPathSendsSelectiveDelete(t *testing.T) {
+	var gotPath string
+	var hasPath bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/control/route" || r.URL.Query().Get("namespace") != "acme" || r.URL.Query().Get("host") != "app.test" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		gotPath = r.URL.Query().Get("path")
+		_, hasPath = r.URL.Query()["path"]
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	t.Setenv("CELLHIVE_ADMIN_URL", server.URL)
+	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	if err := cmdRoute([]string{"rm", "acme", "app.test", "--path", "/api"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api" {
+		t.Fatalf("deleted path = %q, want /api", gotPath)
+	}
+	if err := cmdRoute([]string{"rm", "acme", "app.test", "--path", ""}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasPath || gotPath != "" {
+		t.Fatalf("explicit empty path: present=%v value=%q", hasPath, gotPath)
+	}
+	if err := cmdRoute([]string{"rm", "acme", "app.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if hasPath {
+		t.Fatal("host-wide deletion unexpectedly included path")
+	}
+}
+
 // TestCmdCreds covers the root-derived credential printer (ADR-137).
 func TestCmdCreds(t *testing.T) {
 	t.Setenv("CELLHIVE_ROOT_KEY", "")

@@ -56,6 +56,7 @@ Client → Traefik(TLS, host) → user-runtime :8081
 - **内置域**：`deploy`/`promote` 时系统生成 `hosts(kind='builtin')` + `routes(host,'',ns,worker)`；`<base>` 通配符与证书由边缘/运维配置（ADR-131/132/133）；
 - **自定义域 = 登记即授权**（ADR-133）：`cellhive domain add <namespace> <host>` 后即可用 `route add` 绑定 worker，不做 DNS/CNAME/TXT 校验；host 已由其它 namespace 登记时返回 409，内置域空间拒绝认领；
 - **挂载前缀总是剥离**：route 含占位 `(host,path)` 时，worker 看到的路径 = 请求路径去掉挂载前缀；`path=''`/`'/'` 表示整 host；按**段边界**匹配（`/api` 不匹配 `/apix`，ADR-131）；
+- **按 path 删除路由**：`cellhive route rm <namespace> <host> --path /api` 只删除该 host 上 `path='/api'` 的路由，保留其他路径；`--path ''` 只删除 `path=''` 的整 host 路由；省略 `--path` 则删除该 host 的全部路由。HTTP `DELETE /v1/control/route?namespace=...&host=...&path=...` 同样区分缺失与空 path。
 - `workers_dev` → 命名空间路径（见 [`wrangler-compat.md`](./wrangler-compat.md)）；`preview_urls` 不支持。
 
 ## 保留命名空间

@@ -198,6 +198,7 @@ Rules:
 4. When deleting a worker, clean up the corresponding rows via `routes_ns_worker` / `hosts(ns)`.
 5. **Prefix matching follows path segment boundaries**: `/api` matches `/api` and `/api/x`, but not `/apix`; `path=''` or `'/'` means the entire host.
 6. **Route = mount point (always stripped)**: after the loader selects a route, it strips the route path prefix from the request path **once** (query/Host unchanged). Both assets and workers see the stripped path; an empty result after stripping is treated as `/`. For example, after `route add app.test /api api`, the worker receives `/users` for `/api/users`.
+7. **Deletion scope depends on whether the path parameter is present**: `DELETE /v1/control/route` without `path` removes every route for the namespace/host; with `path` (including an empty string), only the exact `(host,path)` route is removed. The CLI equivalent is `route rm <namespace> <host> [--path <prefix>]`.
 
 ### Resources / Secrets / DO Classes / Locks / GC / purge
 ```sql

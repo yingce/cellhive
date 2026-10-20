@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +136,40 @@ func TestControlAdminAuthAndDataPlaneIsolation(t *testing.T) {
 	if rr2.Code != http.StatusNotModified {
 		t.Fatalf("if-none-match = %d, want 304", rr2.Code)
 	}
+}
+
+func TestControlRouteDeletePathPreservesOtherRoutes(t *testing.T) {
+	s := newControlServer(t)
+	admin := s.AdminHandler()
+	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
+	mustHost(t, s, "acme", "api.example.com")
+	for _, path := range []string{"", "/api", "/api/v2"} {
+		mustAdmin(t, admin, http.MethodPost, "/v1/control/route", `{"namespace":"acme","host":"api.example.com","worker":"api","path":"`+path+`"}`)
+	}
+	assertPaths := func(want ...string) {
+		t.Helper()
+		p, err := s.Control.Projection(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, app := range p.Apps {
+			if app.Namespace == "acme" {
+				for _, route := range app.Routes {
+					got = append(got, route.Path)
+				}
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("routes after deletion = %q, want %q", got, want)
+		}
+	}
+	mustAdmin(t, admin, http.MethodDelete, "/v1/control/route?namespace=acme&host=api.example.com&path=%2Fapi", "")
+	assertPaths("", "/api/v2")
+	mustAdmin(t, admin, http.MethodDelete, "/v1/control/route?namespace=acme&host=api.example.com&path=", "")
+	assertPaths("/api/v2")
+	mustAdmin(t, admin, http.MethodDelete, "/v1/control/route?namespace=acme&host=api.example.com", "")
+	assertPaths()
 }
 
 func TestControlAdminDeployAndSecretRoundTrip(t *testing.T) {

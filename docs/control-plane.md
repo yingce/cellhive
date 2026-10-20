@@ -199,6 +199,7 @@ CREATE INDEX IF NOT EXISTS routes_ns_worker ON routes(ns, worker);
 4. 删 worker 按 `routes_ns_worker` / `hosts(ns)` 清理对应行。
 5. **前缀匹配按路径段边界**：`/api` 匹配 `/api` 与 `/api/x`，不匹配 `/apix`；`path=''` 或 `'/'` 表示整个 host。
 6. **路由 = 挂载点（总是剥离）**：loader 选路后**一次性**把路由的 path 前缀从请求路径去掉（query/Host 不变），资产与 worker 都看到剥离后的路径；剥离后为空视为 `/`。例如 `route add app.test /api api` 后，worker 收到的 `/api/users` 是 `/users`。
+7. **删除范围由 path 参数是否存在决定**：`DELETE /v1/control/route` 未传 `path` 时删除该 namespace/host 下所有路由；传 `path`（包括空字符串）时仅删除 `(host,path)` 精确匹配的路由。CLI 对应 `route rm <namespace> <host> [--path <prefix>]`。
 
 ### 资源 / 密钥 / DO 类 / 锁 / GC / purge
 ```sql

@@ -1515,8 +1515,9 @@ func (s *Store) PutRoute(ctx context.Context, ns string, rt Route, actor string)
 	})
 }
 
-// DeleteRoute removes every route for a host in an app.
-func (s *Store) DeleteRoute(ctx context.Context, ns, host, actor string) error {
+// DeleteRoute removes a specific host/path route when path is non-nil, or all
+// routes for the host when path is nil. An explicit empty path selects the root route.
+func (s *Store) DeleteRoute(ctx context.Context, ns, host string, path *string, actor string) error {
 	if err := validateNS(ns); err != nil {
 		return err
 	}
@@ -1525,10 +1526,18 @@ func (s *Store) DeleteRoute(ctx context.Context, ns, host, actor string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
-		if _, err := t.ExecContext(ctx, `DELETE FROM routes WHERE ns=? AND host=?`, ns, NormalizeHost(host)); err != nil {
-			return err
+		key := ns + "/" + host
+		if path == nil {
+			if _, err := t.ExecContext(ctx, `DELETE FROM routes WHERE ns=? AND host=?`, ns, NormalizeHost(host)); err != nil {
+				return err
+			}
+		} else {
+			if _, err := t.ExecContext(ctx, `DELETE FROM routes WHERE ns=? AND host=? AND path=?`, ns, NormalizeHost(host), *path); err != nil {
+				return err
+			}
+			key += *path
 		}
-		return txAudit(ctx, t, ns, actor, "route.delete", ns+"/"+host)
+		return txAudit(ctx, t, ns, actor, "route.delete", key)
 	})
 }
 

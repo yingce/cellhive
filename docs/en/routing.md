@@ -56,6 +56,7 @@ Client → Traefik(TLS, host) → user-runtime :8081
 - **Built-in domains**: During `deploy`/`promote`, the system creates `hosts(kind='builtin')` + `routes(host,'',ns,worker)`; the `<base>` wildcard and certificates are configured by the edge/ops side (ADR-131/132/133);
 - **Custom domain = registration is authorization** (ADR-133): `cellhive domain add <namespace> <host>` registers it, after which `route add` binds a worker; there is no DNS/CNAME/TXT validation. A host registered by another namespace returns 409, and the built-in domain space cannot be claimed;
 - **Mount prefixes are always stripped**: When a route includes a placeholder `(host,path)`, the path seen by the worker = the request path with the mount prefix removed; `path=''`/`'/'` means the entire host; matching is by **segment boundary** (`/api` does not match `/apix`, ADR-131);
+- **Delete by path**: `cellhive route rm <namespace> <host> --path /api` removes only the exact `path='/api'` route, preserving other paths. `--path ''` removes only the `path=''` whole-host route; omitting `--path` removes every route for that host. The HTTP `DELETE /v1/control/route?namespace=...&host=...&path=...` makes the same distinction between missing and empty path.
 - `workers_dev` → namespace path (see [`wrangler-compat.md`](wrangler-compat.md)); `preview_urls` are not supported.
 
 ## Reserved Namespaces
