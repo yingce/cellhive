@@ -137,3 +137,5 @@ cell-agent `/metrics` 现在额外暴露：
 | `cellhive_process_rss_bytes` | `/proc/self/statm` 的 RSS（Linux） |
 
 恢复路径现在用 `Truncate` + `WriteAt` 直接写目标 SQLite 文件，不再额外分配 `commit*pageSize` 的整库缓冲；仍然会持有从对象存储读入的 segment 数据，因此 bucket 下载/compaction 的峰值需要继续单独观察。
+
+恢复写入按最多 1MiB 的连续页 run 合并后一次 `WriteAt`，避免每页 4KiB 一次 syscall；run buffer 固定有界，不会回到整库缓冲。

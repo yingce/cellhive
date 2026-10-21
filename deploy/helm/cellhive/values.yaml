@@ -72,9 +72,12 @@ config:
 cellAgent:
   replicas: 2
   storage: 20Gi
-  # Bound cached SQLite cell handles. 0 keeps the old unlimited behavior;
-  # lower it when the container memory limit is tight.
-  maxOpenCells: 64
+  # Bound cached SQLite cell handles and close idle handles. 0 disables
+  # the respective cap/TTL; lower these when the container memory is tight.
+  maxOpenCells: 32
+  cellIdle: 5m
+  # Use paged cold restore for SQLite images at or above this size.
+  pagedMinBytes: 32MiB
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {memory: 2Gi}

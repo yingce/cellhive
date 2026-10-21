@@ -26,7 +26,7 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_CELLS_PER_NODE` | `100` | Per-node capacity target |
 | `CELLHIVE_CELL_DISK_MAX` | `0` unlimited | Cell file byte budget (LRU deletes non-owned files) |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor interval |
-| `CELLHIVE_CELL_IDLE` | `0` do not clean up | Close idle handles |
+| `CELLHIVE_CELL_IDLE` | `5m` | Close idle handles; `0` disables idle eviction |
 | `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 off) | L0→L1 compaction |
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Trigger bytes |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | Trigger segment count |
@@ -39,11 +39,11 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_DRAIN_TTL` | `30s` | Drain token validity period (shutdown wait = same value) |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | Log tail buffer `<entries>:<workers>` (`cellhive tail --worker`) |
 | `CELLHIVE_LTX_COMPRESSION` | bool, default `true` | Use LZ4 for the LTX page-map (`WAL3`); `false` falls back to `WAL2` fixed frames without compression (saves CPU, more bucket bytes; both decoding/GC paths are compatible, ADR-161) |
-| `CELLHIVE_MAX_OPEN_CELLS` | `64` | Cached handle upper bound; `0` disables the cap |
+| `CELLHIVE_MAX_OPEN_CELLS` | `32` | Cached handle upper bound; `0` disables the cap |
 | `CELLHIVE_NODE_ID` | `node-1` | Stable node identity (owner/handoff key), required |
 | `CELLHIVE_NS_RATE` | empty (off) | Per-ns write admission `rps[/burst]` (default burst=rps) |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | integer, default `16` | Background fill rate for paged cells (MiB/s, one at a time per node); `0` = keep sparse, read the bucket for every cold page |
-| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `256MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
+| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `32MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of child concurrent prefetch workers |
 | `CELLHIVE_PAGED_RESTORE` | bool, default `true` | cell-agent: during cold restore, use the fault-in VFS to load pages for cells that are "compacted and have chain ≥ MIN_BYTES" (ADR-160) |
 | `CELLHIVE_PAGED_WINDOW_PAGES` | integer, default `64` | Window prefetch: maximum number of adjacent pages to fetch in one ranged read (also subject to a 256KiB budget) |

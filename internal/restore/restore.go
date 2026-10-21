@@ -69,11 +69,38 @@ func ApplyFile(dest string, segments [][]byte) (uint32, error) {
 		_ = f.Close()
 		return 0, err
 	}
-	for _, p := range pages {
-		if _, err := f.WriteAt(p.Data, (int64(p.PageNo)-1)*int64(pageSize)); err != nil {
-			_ = f.Close()
-			return 0, err
+	// Coalesce contiguous pages into bounded write runs. A per-page WriteAt
+	// would issue one syscall per 4KiB page; a 1MiB run keeps memory bounded
+	// while reducing syscall pressure on large restores.
+	const writeRunBytes = 1 << 20
+	run := make([]byte, 0, writeRunBytes)
+	var runOff int64 = -1
+	flush := func() error {
+		if len(run) == 0 {
+			return nil
 		}
+		_, err := f.WriteAt(run, runOff)
+		run = run[:0]
+		runOff = -1
+		return err
+	}
+	for _, p := range pages {
+		off := (int64(p.PageNo) - 1) * int64(pageSize)
+		if runOff < 0 {
+			runOff = off
+		}
+		if off != runOff+int64(len(run)) || len(run)+len(p.Data) > cap(run) {
+			if err := flush(); err != nil {
+				_ = f.Close()
+				return 0, err
+			}
+			runOff = off
+		}
+		run = append(run, p.Data...)
+	}
+	if err := flush(); err != nil {
+		_ = f.Close()
+		return 0, err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()

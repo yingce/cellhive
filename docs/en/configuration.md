@@ -90,8 +90,8 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `64` | Cached handle limit; `0` disables the cap. The LRU sweeper closes the least-recently-used cells and releases SQLite handles/page cache |
-| `CELLHIVE_CELL_IDLE` | `0` no cleanup | Close idle handles |
+| `CELLHIVE_MAX_OPEN_CELLS` | `32` | Cached handle limit; `0` disables the cap. The LRU sweeper closes the least-recently-used cells and releases SQLite handles/page cache |
+| `CELLHIVE_CELL_IDLE` | `5m` | Close idle handles; `0` disables idle eviction |
 | `CELLHIVE_CELL_DISK_MAX` | `0` unlimited | Cell file byte budget (LRU deletes non-owned files) |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor interval |
 | `CELLHIVE_DISK_HIGH` | `0` off | High watermark→overloaded, reject claim |
@@ -127,7 +127,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_WAKE_REPAIR_BATCH` | `256` | Number of local cells checked per pass (rotating window, covers all after several passes) |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token validity period (shutdown wait = same value) |
 | `CELLHIVE_PAGED_RESTORE` | bool, default `true` | cell-agent: during cold restore, use fault-in VFS to page-load cells that are "compacted and whose chain ≥ MIN_BYTES" (ADR-160) |
-| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `256MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
+| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `32MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | integer, default `16` | Background hydration rate for paged cells (MiB/s, one at a time per node); `0` = keep sparse and read each cold page from the bucket |
 | `CELLHIVE_PAGED_WINDOW_PAGES` | integer, default `64` | Window prefetch: maximum number of adjacent pages to fetch in one ranged read (also has a 256KiB budget) |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of concurrent child prefetch workers |

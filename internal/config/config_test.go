@@ -318,8 +318,10 @@ func TestPeerHedgeMSEnv(t *testing.T) {
 
 func TestFromEnvCellCacheDefaults(t *testing.T) {
 	t.Setenv("CELLHIVE_MAX_OPEN_CELLS", "")
+	t.Setenv("CELLHIVE_CELL_IDLE", "")
+	t.Setenv("CELLHIVE_PAGED_MIN_BYTES", "")
 	c := FromEnv()
-	if c.MaxOpenCells != 64 {
-		t.Fatalf("cell cache default = %d, want 64", c.MaxOpenCells)
+	if c.MaxOpenCells != 32 || c.CellIdleTTL != 5*time.Minute || c.PagedMinBytes != 32<<20 {
+		t.Fatalf("cell defaults open=%d idle=%s paged_min=%d", c.MaxOpenCells, c.CellIdleTTL, c.PagedMinBytes)
 	}
 }

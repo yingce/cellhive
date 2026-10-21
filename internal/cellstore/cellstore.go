@@ -263,9 +263,14 @@ func (s *Store) Start(ctx context.Context) {
 	}
 	interval := 30 * time.Second
 	if s.IdleTTL > 0 {
-		if interval = s.IdleTTL / 2; interval < time.Second {
-			interval = time.Second
+		// Keep the cap sweep responsive even with a long idle TTL; use the
+		// shorter of 30s and half the TTL for idle expiry.
+		if d := s.IdleTTL / 2; d < interval {
+			interval = d
 		}
+	}
+	if interval < time.Second {
+		interval = time.Second
 	}
 	go func() {
 		t := time.NewTicker(interval)

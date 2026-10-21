@@ -120,8 +120,8 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `64` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |
-| `CELLHIVE_CELL_IDLE` | `0` 不清理 | 空闲句柄关闭 |
+| `CELLHIVE_MAX_OPEN_CELLS` | `32` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |
+| `CELLHIVE_CELL_IDLE` | `5m` | 空闲句柄关闭；`0` 关闭 TTL 驱逐 |
 | `CELLHIVE_CELL_DISK_MAX` | `0` 无限 | cell 文件字节预算（LRU 删非 owned） |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor 间隔 |
 | `CELLHIVE_DISK_HIGH` | `0` 关 | 高水位→overloaded 拒 claim |
@@ -157,7 +157,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_WAKE_REPAIR_BATCH` | `256` | 单 pass 检查的本地 cell 数（轮转窗口，几趟覆盖全部） |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
 | `CELLHIVE_PAGED_RESTORE` | bool，默认 `true` | cell-agent：冷恢复时对"已 compaction 且链 ≥ MIN_BYTES"的 cell 用 fault-in VFS 按页加载（ADR-160） |
-| `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `256MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且存在 L1 页索引才分页，否则整库克隆；`0` = 有页索引时一律分页 |
+| `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `32MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且存在 L1 页索引才分页，否则整库克隆；`0` = 有页索引时一律分页 |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | 整数，默认 `16` | paged cell 后台补齐速率（MiB/s，每节点同时一个）；`0` = 保持稀疏、每个冷页读桶 |
 | `CELLHIVE_PAGED_WINDOW_PAGES` | 整数，默认 `64` | 窗口预取：一次 ranged read 最多连取多少相邻页（另有 256KiB 预算） |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
