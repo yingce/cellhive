@@ -65,7 +65,7 @@ Queue/Cron 调用 UUID、逻辑重试关联、结果/异常/console 日志已独
 
 ## 2026-10-15 Wrangler 命令兼容边界
 
-Workflow 实例详情当前只持久化完成步骤的结果，不记录 Cloudflare 的逐次尝试、步骤开始结束时间及运行中步骤；Wrangler `instances describe` 只展示可证明的完成步骤。`restart --from`、跨 Worker Workflow 仍不支持。Queue consumer `retry_delay`、`max_batch_timeout` 与有限重试已接入（ADR-216）；固定版本 Docker E2E 已对领取中的消息强杀 cell-agent、重启并发布新版本，确认 lease 到期后按新 active 版本重新投递。跨节点故障与长时压力仍待验收；purge 为持久 owner 写入。Vectorize 原版管理只覆盖 V2 create/list/get/delete/info，点积 metric 不支持。Hyperdrive 原版管理命令尚未开放；当前原生能力只是加密的 origin URL，不承诺 Cloudflare 缓存、mTLS 或连接池语义。详见 `wrangler-compat.md`、ADR-202/203。
+Workflow 实例详情当前只持久化完成步骤的结果，不记录 Cloudflare 的逐次尝试、步骤开始结束时间及运行中步骤；Wrangler `instances describe` 只展示可证明的完成步骤。`restart --from`、跨 Worker Workflow 仍不支持。Queue consumer `retry_delay`、`max_batch_timeout` 与有限重试已接入（ADR-216）；固定版本 Docker E2E 已对领取中的消息强杀 cell-agent、重启并发布新版本，确认 lease 到期后按新 active 版本重新投递。跨节点故障与长时压力仍待验收；purge 为持久 owner 写入。Vectorize 原版管理只覆盖 V2 create/list/get/delete/info，点积 metric 不支持。Hyperdrive 原版管理命令现已支持 create/list/get/update/delete（id=资源名，origin 加密，managed `hd_*`），但 `caching`/`mtls` 明确拒绝；不承诺 Cloudflare 缓存、mTLS 或连接池语义。详见 `wrangler-compat.md`、ADR-202/203。
 
 ## 2026-10-15 调度正确性修复
 

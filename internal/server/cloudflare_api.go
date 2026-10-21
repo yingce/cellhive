@@ -28,12 +28,15 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 	compat := s.cloudflareAuth
 	for _, prefix := range []string{"", "/client/v4"} {
 		mux.HandleFunc("GET "+prefix+"/memberships", compat(s.handleCloudflareMemberships))
+		mux.HandleFunc("GET "+prefix+"/user/tokens/verify", compat(s.handleCloudflareTokenVerify))
+		mux.HandleFunc("GET "+prefix+"/user", compat(s.handleCloudflareUser))
 		mux.HandleFunc("GET "+prefix+"/accounts", compat(s.handleCloudflareAccounts))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}", compat(s.handleCloudflareWorkerDelete))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/subdomain", compat(s.handleCloudflareWorkerSubdomain))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/subdomain", compat(s.handleCloudflareWorkerScriptSubdomain))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/services/{script_name}", compat(s.handleCloudflareWorkerService))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/workers/{worker_id}", compat(s.handleCloudflareWorkerService))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/deployments", compat(s.handleCloudflareWorkerDeployments))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/deployments", compat(s.handleCloudflareWorkerDeploymentCreate))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/settings", compat(s.handleCloudflareWorkerSettings))
@@ -83,6 +86,12 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}/objects/{key...}", compat(s.handleCloudflareR2ObjectPut))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}/objects/{key...}", compat(s.handleCloudflareR2ObjectGet))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/r2/buckets/{resource_id}/objects/{key...}", compat(s.handleCloudflareR2ObjectDelete))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/hyperdrive/configs", compat(s.hyperdriveConfigs))
+		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/hyperdrive/configs", compat(s.hyperdriveConfigCreate))
+		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/hyperdrive/configs/{config_id}", compat(s.hyperdriveConfigGet))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/hyperdrive/configs/{config_id}", compat(s.hyperdriveConfigUpdate))
+		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/hyperdrive/configs/{config_id}", compat(s.hyperdriveConfigUpdate))
+		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/hyperdrive/configs/{config_id}", compat(s.hyperdriveConfigDelete))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueCreate))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/queues", compat(s.handleCloudflareQueueList))
 		mux.HandleFunc("DELETE "+prefix+"/accounts/{account_id}/queues/{resource_id}", compat(s.handleCloudflareResourceDelete("queue")))
@@ -128,8 +137,16 @@ func (s *Server) handleCloudflareWorkerScriptSubdomain(w http.ResponseWriter, r 
 }
 
 func (s *Server) handleCloudflareWorkerService(w http.ResponseWriter, r *http.Request) {
+	worker := r.PathValue("script_name")
+	if worker == "" {
+		worker = r.PathValue("worker_id")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": map[string]any{
-		"id":                  r.PathValue("script_name"),
+		"id":                  worker,
+		"name":                worker,
+		"observability":       map[string]any{"enabled": false},
+		"tail_consumers":      []any{},
+		"subdomain":           map[string]any{"enabled": false, "previews_enabled": false},
 		"default_environment": map[string]any{"environment": "production", "script": map[string]any{"tag": "cellhive"}},
 	}})
 }
@@ -189,6 +206,7 @@ func (s *Server) handleCloudflareWorkerDeploymentCreate(w http.ResponseWriter, r
 func (s *Server) handleCloudflareWorkerSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": map[string]any{
 		"bindings": []any{}, "compatibility_date": "2026-09-23", "compatibility_flags": []string{},
+		"observability": map[string]any{"enabled": false}, "tail_consumers": []any{},
 	}})
 }
 
