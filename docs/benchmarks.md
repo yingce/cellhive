@@ -728,3 +728,25 @@ WebSocket（32 sockets，单 in-flight，8s）：
 结论要保守：在这台单节点、1 vCPU 容器上，**多 shard 没有稳定带来线性 RPS 提升**。64/256 shard 每轮波动很大，不能据此宣称扩展曲线；更可能是 1 vCPU 下的对象建立/调度/CPU 限流混合影响。单对象约 500 RPS 也只能作为本地 smoke。
 
 因此下一步应该做的是：固定 DO 预热、记录 cgroup throttling、增加轮次和对象创建次数，再判断瓶颈；当前数字不是容量承诺。
+### gated do-supervisor 本地 smoke
+
+用同一个 1 vCPU / 1 GiB 限额启动 `rpo0` profile：
+
+```bash
+CELLHIVE_DO_RUNTIMES=do-runtime-gated:8788 \
+CELLHIVE_DO_RUNTIME_CPUS=1.0 CELLHIVE_DO_RUNTIME_MEMORY=1g \
+docker compose -f deploy/compose/docker-compose.yml \
+  -f deploy/compose/docker-compose.local.yml \
+  -f deploy/compose/docker-compose.hyperdrive.yml \
+  --profile rpo0 up -d cell-agent do-runtime-gated
+```
+
+同一个单 DO `/inc` 路径：
+
+```text
+Requests/sec: 507.34
+Requests/sec: 537.41
+Requests/sec: 518.79
+```
+
+与普通 `do-runtime` 的 ~500 RPS 在同一量级；本次 64 连接/单对象下没有观察到 output gate 的明显吞吐税。注意这并不代表 gate 没有成本：持久化证明会随对象/写入形态变化，仍需用更大对象数、真实写入和延迟分布复测。
