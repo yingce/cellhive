@@ -104,3 +104,16 @@ bin/cellhive vectorize drop-ann demo docs         # 回到 flat
 | 删除 worker 后重新部署又消失 | purge 作业竞态；ADR-135 后 purge 只对仍软删实体生效、deploy 取消作业（若仍复现按 bug 报） |
 
 _最后更新：2026-09-25_
+
+## Hyperdrive Proxy 健康状态
+
+ProxySQL 模式下，cell-agent 每 5s 探测 `CELLHIVE_HYPERDRIVE_PROXY` 中的每个 scheme endpoint；任何 endpoint 不可达都会让 `/readyz` 返回 503，并让该协议绑定 fail closed。
+
+查看当前快照（admin token）：
+
+```bash
+curl -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" \
+  http://127.0.0.1:8082/v1/control/hyperdrive/proxy
+```
+
+返回 `mode/checked/ready/reason/endpoints[]`，其中每个 endpoint 带 `scheme/endpoint/healthy`。日志在状态切换时分别记录 `hyperdrive proxy endpoint unreachable` / `recovered`，不会每个探测周期重复刷日志。

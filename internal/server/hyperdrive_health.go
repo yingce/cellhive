@@ -75,9 +75,18 @@ func (s *Server) RunHyperdriveProxyHealthLoop(ctx context.Context) {
 				reachable = true
 				_ = conn.Close()
 			}
+			key := proxyHealthKey(ep.scheme, ep.host)
 			s.proxyHealthMu.Lock()
-			s.proxyHealth[proxyHealthKey(ep.scheme, ep.host)] = reachable
+			previous, hadPrevious := s.proxyHealth[key]
+			s.proxyHealth[key] = reachable
 			s.proxyHealthMu.Unlock()
+			if s.Log != nil && hadPrevious && previous != reachable {
+				if reachable {
+					s.Log.Info("hyperdrive proxy endpoint recovered", "scheme", ep.scheme, "endpoint", ep.host)
+				} else {
+					s.Log.Warn("hyperdrive proxy endpoint unreachable", "scheme", ep.scheme, "endpoint", ep.host)
+				}
+			}
 		}
 	}
 	check()
@@ -122,6 +131,30 @@ func (s *Server) HyperdriveProxyReady() (bool, string) {
 		}
 	}
 	return true, ""
+}
+
+// HyperdriveProxyStatus returns a small operator-facing snapshot. endpoints is
+// ordered by configuration and safe to serialize.
+func (s *Server) HyperdriveProxyStatus() map[string]any {
+	s.proxyHealthMu.RLock()
+	checked := s.proxyHealthChecked
+	health := make(map[string]bool, len(s.proxyHealth))
+	for k, v := range s.proxyHealth {
+		health[k] = v
+	}
+	s.proxyHealthMu.RUnlock()
+	ready, reason := s.HyperdriveProxyReady()
+	endpoints := make([]map[string]any, 0)
+	for _, ep := range parseHyperdriveProxyEndpoints(s.Cfg.HyperdriveProxy) {
+		endpoints = append(endpoints, map[string]any{
+			"scheme": ep.scheme, "endpoint": ep.host,
+			"healthy": health[proxyHealthKey(ep.scheme, ep.host)],
+		})
+	}
+	return map[string]any{
+		"mode": s.Cfg.HyperdriveMode, "configured": len(endpoints) > 0,
+		"checked": checked, "ready": ready, "reason": reason, "endpoints": endpoints,
+	}
 }
 
 // hyperdriveProxyHostHealthy returns true when no health loop has been started

@@ -51,3 +51,17 @@ func TestHyperdriveBindingUsesHealthyProxy(t *testing.T) {
 		t.Fatal("binding should fail closed when proxy is unhealthy")
 	}
 }
+
+func TestHyperdriveProxyStatusSnapshot(t *testing.T) {
+	s := &Server{Cfg: config.Config{HyperdriveMode: "proxy", HyperdriveProxy: "postgres://db:5432,mysql://db:3306"}}
+	s.proxyHealth = map[string]bool{"postgres|db:5432": true, "mysql|db:3306": false}
+	s.proxyHealthChecked = true
+	got := s.HyperdriveProxyStatus()
+	if got["ready"] != false || got["checked"] != true {
+		t.Fatalf("status=%+v", got)
+	}
+	eps, _ := got["endpoints"].([]map[string]any)
+	if len(eps) != 2 || eps[0]["healthy"] != true || eps[1]["healthy"] != false {
+		t.Fatalf("endpoints=%+v", eps)
+	}
+}

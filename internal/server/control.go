@@ -127,6 +127,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("GET /v1/control/logs", s.adminAuth(s.handleLogQuery))
 	mux.HandleFunc("POST /v1/control/logs/subscribe", s.adminAuth(s.handleLogSubscribe))
 	mux.HandleFunc("GET /v1/control/status", s.adminAuth(s.handleControlStatus))
+	mux.HandleFunc("GET /v1/control/hyperdrive/proxy", s.adminAuth(s.handleHyperdriveProxyStatus))
 	mux.HandleFunc("POST /v1/control/app", s.adminAuth(s.handleControlApp))
 	mux.HandleFunc("POST /v1/control/resource", s.adminAuth(s.handleControlResource))
 	mux.HandleFunc("POST /v1/control/deploy", s.adminAuth(s.handleControlDeploy))
@@ -170,6 +171,10 @@ func (s *Server) AdminHandler() http.Handler {
 	// API stays on the internal listener with scoped tokens.
 	s.registerVectorizeRoutes(mux, false, s.adminAuth)
 	return mux
+}
+
+func (s *Server) handleHyperdriveProxyStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.HyperdriveProxyStatus())
 }
 
 func (s *Server) handleControlStatus(w http.ResponseWriter, r *http.Request) {
