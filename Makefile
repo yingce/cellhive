@@ -18,7 +18,8 @@ all: build
 
 # Build the single image (cell-agent + cellhive + both runtimes + pinned workerd).
 docker-build:
-	docker build -f deploy/Dockerfile -t cellhive:dev .
+	@test -f deploy/workerd-fork/workerd || bash deploy/build-workerd-fork.sh
+	docker build --build-context workerd-fork=deploy/workerd-fork -f deploy/Dockerfile -t cellhive:dev .
 
 # Validate the compose file (no containers started).
 compose-config:
@@ -26,6 +27,7 @@ compose-config:
 
 # Start the local stack (cell-agent + user-runtime + do-runtime).
 compose-up:
+	@test -f deploy/workerd-fork/workerd || bash deploy/build-workerd-fork.sh
 	docker compose -f deploy/compose/docker-compose.yml up --build
 
 # Render the k8s manifests without a cluster (client-side kustomize).
@@ -97,6 +99,30 @@ cli-test:
 
 s3-test:
 	bash scripts/s3-integration.sh
+
+# e2e-workflow / e2e-queue run the in-repo workflow and queue e2e scripts.
+# Requires make build, curl, jq, node, openssl, and the pinned workerd.
+e2e-bindings:
+	bash scripts/e2e/bindings.sh
+
+e2e-workflow:
+	bash scripts/e2e/workflow.sh
+
+e2e-queue:
+	bash scripts/e2e/queue.sh
+
+e2e-queue-multinode:
+	bash scripts/e2e/queue-multinode.sh
+
+e2e-queue-concurrency:
+	bash scripts/e2e/queue-concurrency.sh
+
+# Docker + npm required for MySQL/ProxySQL auto-config e2e.
+e2e-mysql:
+	bash scripts/e2e/mysql/build-bundle.sh
+	bash scripts/e2e/mysql-auto.sh
+
+e2e: build e2e-bindings e2e-workflow e2e-queue e2e-queue-multinode e2e-queue-concurrency
 
 vet:
 	$(GO) vet $(GOTAGS) ./...
