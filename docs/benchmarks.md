@@ -675,23 +675,24 @@ make e2e-do-rps
 - `GET /get`：读回；
 - WebSocket：`webSocketMessage` 原样 echo。
 
-本机单节点 Compose、单 DO 对象、`wrk -t4 -c64 -d10s` 结果：
+本机单节点 Compose、单 DO 对象、`wrk -t4 -c64 -d10s` 结果（2026-10-21 19:55 受控复测）：
 
 ```text
-Requests/sec: 471.60
-Requests/sec: 457.81
-Requests/sec: 428.29
+Requests/sec: 478.63
+Requests/sec: 449.06
+Requests/sec: 465.89
 ```
 
-一次 175.15 RPS 的离群值出现在宿主负载/compaction 窗口，不作为中位结果。
+三轮共完成 13,959 次请求，没有 socket error / non-2xx；`/get` 的计数器增量与请求数一致。此前一次 175.15 RPS 的离群值出现在宿主负载/compaction 窗口，不作为中位结果。
 
 WebSocket：32 个连接、每连接单 in-flight echo、8s：
 
 ```text
-messages/sec: 18,103
-messages/sec: 18,357
-messages/sec: 18,801
-messages/sec: 19,221
+messages/sec: 18,454
+messages/sec: 19,115
+messages/sec: 18,441
 ```
+
+三轮都是 32/32 连接建立、0 error。这里的数字是**客户端 echo 消息吞吐**，不是 HTTP RPS；也包含 Node 客户端事件循环成本。
 
 边界：测试只覆盖单个 DO 对象，fixture 的 SQL 写/读会被 DO 串行化；数字包含 user-runtime loader 和本机网络，不是容量承诺。多对象 shard、gated `do-supervisor`、跨节点放置未覆盖。
