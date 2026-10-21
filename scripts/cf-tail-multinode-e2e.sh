@@ -108,6 +108,7 @@ services:
       CELLHIVE_CELL_URL: http://$RUNTIME_CELL_AGENT:7001
       CELLHIVE_USER_RUNTIME_PORT: '8081'
       CELLHIVE_USER_RUNTIME_INTERNAL_PORT: '8088'
+      CELLHIVE_USER_RUNTIME_ADVERTISE: user-runtime
       CELLHIVE_USER_RUNTIME_JS: /app/workerd/user-runtime
       CELLHIVE_FACADES_JS: /app/workerd/platform/facades.js
     ports: ['127.0.0.1::8081']

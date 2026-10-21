@@ -91,6 +91,9 @@ services:
       CELLHIVE_USER_RUNTIME_INTERNAL_PORT: "8088"
       CELLHIVE_USER_RUNTIME_JS: /app/workerd/user-runtime
       CELLHIVE_FACADES_JS: /app/workerd/platform/facades.js
+      # Tail log registration URL must be reachable from cell-agent; 127.0.0.1
+      # is the runtime's own container, not the agent.
+      CELLHIVE_USER_RUNTIME_ADVERTISE: ${CELLHIVE_USER_RUNTIME_ADVERTISE:-user-runtime}
     expose: ["8081", "8088"]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/ready"]

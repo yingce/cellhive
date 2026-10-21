@@ -587,6 +587,12 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 			out.Bindings = append(out.Bindings, control.Binding{Type: "r2", Name: name, ID: stringValue(b["bucket_name"])})
 		case "queue":
 			out.Bindings = append(out.Bindings, control.Binding{Type: "queue", Name: name, ID: stringValue(b["queue_name"])})
+		case "durable_object_namespace", "do":
+			class := stringValue(b["class_name"])
+			if class == "" {
+				class = name
+			}
+			out.Bindings = append(out.Bindings, control.Binding{Type: "do", Name: name, ID: class})
 		case "service":
 			out.Bindings = append(out.Bindings, control.Binding{Type: "service", Name: name, ID: stringValue(b["service"]), Entrypoint: stringValue(b["entrypoint"])})
 		case "workflow":

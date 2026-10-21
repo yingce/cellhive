@@ -120,3 +120,13 @@ func TestDecodeRunWorkerFirstShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeDurableObjectBinding(t *testing.T) {
+	var out cloudflareWorkerMetadata
+	if err := decodeCloudflareMetadata([]byte(`{"bindings":[{"type":"durable_object_namespace","name":"COUNTER","class_name":"Counter"}]}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Bindings) != 1 || out.Bindings[0].Type != "do" || out.Bindings[0].Name != "COUNTER" || out.Bindings[0].ID != "Counter" {
+		t.Fatalf("bindings=%+v", out.Bindings)
+	}
+}
