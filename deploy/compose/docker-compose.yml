@@ -31,9 +31,8 @@ x-common-env: &common-env
   CELLHIVE_POOL_MAX_SLOTS: ${CELLHIVE_POOL_MAX_SLOTS:-16}
   # Hyperdrive default is direct origin; set CELLHIVE_HYPERDRIVE_MODE=proxy
   # and CELLHIVE_HYPERDRIVE_PROXY to route through an external pooler.
-  # Bound resident cell handles so a long-lived node cannot grow its SQLite
+  # Bound cached cell handles so a long-lived node cannot grow its SQLite
   # handle/page-cache working set without limit (0 disables the cap).
-  CELLHIVE_MAX_RESIDENT_CELLS: ${CELLHIVE_MAX_RESIDENT_CELLS:-64}
   CELLHIVE_MAX_OPEN_CELLS: ${CELLHIVE_MAX_OPEN_CELLS:-64}
   CELLHIVE_HYPERDRIVE_MODE: ${CELLHIVE_HYPERDRIVE_MODE:-direct}
   # Create a per-binding origin role so workers never receive the origin

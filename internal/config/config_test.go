@@ -317,10 +317,9 @@ func TestPeerHedgeMSEnv(t *testing.T) {
 }
 
 func TestFromEnvCellCacheDefaults(t *testing.T) {
-	t.Setenv("CELLHIVE_MAX_RESIDENT_CELLS", "")
 	t.Setenv("CELLHIVE_MAX_OPEN_CELLS", "")
 	c := FromEnv()
-	if c.MaxResidentCells != 64 || c.MaxOpenCells != 64 {
-		t.Fatalf("cell cache defaults = resident:%d open:%d, want 64/64", c.MaxResidentCells, c.MaxOpenCells)
+	if c.MaxOpenCells != 64 {
+		t.Fatalf("cell cache default = %d, want 64", c.MaxOpenCells)
 	}
 }

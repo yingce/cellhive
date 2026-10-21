@@ -89,7 +89,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 - **退避**：连续错误时循环延迟按 `interval·2^fails` 增长，封顶 `CELLHIVE_WAKER_BACKOFF_MAX`（默认 **1m**）；成功后立即复位。空闲（0 派发）不触发退避。
 
 **timer cell 的 resident/pinned 策略（决定）**
-- **不做 pinning**：timer cell 是**普通可驱逐 cell**，由统一的 `CELLHIVE_MAX_RESIDENT_CELLS`/`CELLHIVE_CELL_IDLE`/盘预算管理；正确性不依赖驻留——到期项存在 cell（权威）与桶 `wake/` 索引里，waker 用 `wake` 索引按 scope 定位（不 List 全量），需要时按需重开。
+- **不做 pinning**：timer cell 是**普通可驱逐 cell**，由统一的 `CELLHIVE_MAX_OPEN_CELLS`/`CELLHIVE_CELL_IDLE`/盘预算管理；正确性不依赖驻留——到期项存在 cell（权威）与桶 `wake/` 索引里，waker 用 `wake` 索引按 scope 定位（不 List 全量），需要时按需重开。
 - 容量：随 `CELLHIVE_CELLS_PER_NODE` 与磁盘预算；无单独的 timer 配额。
 
 _最后更新：2026-09-17_

@@ -72,9 +72,8 @@ config:
 cellAgent:
   replicas: 2
   storage: 20Gi
-  # Bound cached/resident SQLite cell handles. 0 keeps the old unlimited
-  # behavior; lower these when the container memory limit is tight.
-  maxResidentCells: 64
+  # Bound cached SQLite cell handles. 0 keeps the old unlimited behavior;
+  # lower it when the container memory limit is tight.
   maxOpenCells: 64
   resources:
     requests: {cpu: 250m, memory: 256Mi}

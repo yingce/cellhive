@@ -764,11 +764,7 @@ func main() {
 	// namespace is cleaned in bounded passes.
 	purger := &purge.Purger{Bucket: b, Cells: store}
 	go ctrl.RunPurgeLoop(ctx, log, 5*time.Second, purger.Run)
-	if cfg.MaxResidentCells > 0 {
-		store.MaxOpenCells = cfg.MaxResidentCells
-	} else {
-		store.MaxOpenCells = cfg.MaxOpenCells
-	}
+	store.MaxOpenCells = cfg.MaxOpenCells
 	store.IdleTTL = cfg.CellIdleTTL
 	if !cfg.ForgetOnLoss && cfg.CellDiskMax <= 0 {
 		log.Warn("local cell files are kept after ownership loss and no disk budget is set; " +

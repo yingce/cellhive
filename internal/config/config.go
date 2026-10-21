@@ -38,9 +38,6 @@ type Config struct {
 	// cold start can enumerate objects without asking every runtime (ADR-108).
 	DOObjectIndex bool
 
-	// MaxResidentCells caps resident (open) cell handles; 0 = unlimited. Exceeded
-	// handles are evicted by the LRU/idle sweeper.
-	MaxResidentCells int
 	// RebalanceInterval enables the ownership rebalance loop (0 = off).
 	RebalanceInterval time.Duration
 	// RebalanceMaxMove caps how many idle cells one rebalance pass releases.
@@ -53,6 +50,7 @@ type Config struct {
 	PlacementAZ string
 
 	// MaxOpenCells caps the number of cached cell handles (0 = unlimited).
+	// The default is 64; the LRU sweeper closes excess handles.
 	MaxOpenCells int
 	// CellDiskMax bounds the bytes of cell files on this node (0 = unlimited).
 	// When exceeded, the janitor deletes least-recently-used files for scopes
@@ -603,7 +601,6 @@ func FromEnv() Config {
 		BindingCacheTTL:          envDuration("CELLHIVE_BINDING_CACHE", time.Second),
 		DoTicketSecret:           creds.DoTicket,
 		DOObjectIndex:            envBool("CELLHIVE_DO_OBJECT_INDEX", false),
-		MaxResidentCells:         envInt("CELLHIVE_MAX_RESIDENT_CELLS", 64),
 		RebalanceInterval:        envDuration("CELLHIVE_REBALANCE_INTERVAL", 0),
 		RebalanceMaxMove:         envInt("CELLHIVE_REBALANCE_MAX_MOVE", 32),
 		PlacementWeight:          envInt("CELLHIVE_PLACEMENT_WEIGHT", 0),

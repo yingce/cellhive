@@ -16,7 +16,6 @@ data:
   CELLHIVE_CELL_URL: {{ printf "http://%s-cell-agent:7001" .Release.Name | quote }}
   CELLHIVE_LOG_REGISTER_URLS: {{ join "," $logAgents | quote }}
   CELLHIVE_DATA_DIR: {{ .Values.config.dataDir | quote }}
-  CELLHIVE_MAX_RESIDENT_CELLS: {{ .Values.cellAgent.maxResidentCells | default 64 | quote }}
   CELLHIVE_MAX_OPEN_CELLS: {{ .Values.cellAgent.maxOpenCells | default 64 | quote }}
   CELLHIVE_RUNTIME_DIR: {{ .Values.config.runtimeDir | quote }}
   CELLHIVE_WORKERD: "/usr/local/bin/workerd"

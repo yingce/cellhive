@@ -10,7 +10,7 @@ import (
 	"cellhive/internal/ltx"
 )
 
-func encodePageMap(t *testing.T, pageSize, commit uint32, pages map[uint32][]byte) []byte {
+func encodePageMap(t testing.TB, pageSize, commit uint32, pages map[uint32][]byte) []byte {
 	t.Helper()
 	sorted := make([]ltx.WALPage, 0, len(pages))
 	for pgno := uint32(1); pgno <= commit; pgno++ {
@@ -27,12 +27,12 @@ func encodePageMap(t *testing.T, pageSize, commit uint32, pages map[uint32][]byt
 	return payload
 }
 
-func snapshotSegment(t *testing.T, pageSize, commit uint32, pages map[uint32][]byte) []byte {
+func snapshotSegment(t testing.TB, pageSize, commit uint32, pages map[uint32][]byte) []byte {
 	t.Helper()
 	return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, encodePageMap(t, pageSize, commit, pages))
 }
 
-func deltaSegment(t *testing.T, pageSize, commit uint32, start uint64, pages map[uint32][]byte) []byte {
+func deltaSegment(t testing.TB, pageSize, commit uint32, start uint64, pages map[uint32][]byte) []byte {
 	t.Helper()
 	sorted := make([]ltx.WALPage, 0, len(pages))
 	for pgno := uint32(1); pgno <= commit; pgno++ {

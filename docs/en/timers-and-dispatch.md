@@ -79,7 +79,7 @@ Timing/dispatch is unified in `cell-agent` (ADR-009): it is consistent with cell
 - **Backoff**: on consecutive errors, the loop delay grows by `interval·2^fails`, capped by `CELLHIVE_WAKER_BACKOFF_MAX` (default **1m**); it resets immediately after success. Idleness (0 dispatches) does not trigger backoff.
 
 **resident/pinned Policy for timer cells (Decision)**
-- **No pinning**: a timer cell is a **normal evictable cell**, managed by the unified `CELLHIVE_MAX_RESIDENT_CELLS`/`CELLHIVE_CELL_IDLE`/disk budget; correctness does not depend on residency — due items exist in the cell (authoritative) and in the bucket `wake/` index, and waker uses the `wake` index to locate by scope (without listing everything), reopening on demand when necessary.
+- **No pinning**: a timer cell is a **normal evictable cell**, managed by the unified `CELLHIVE_MAX_OPEN_CELLS`/`CELLHIVE_CELL_IDLE`/disk budget; correctness does not depend on residency — due items exist in the cell (authoritative) and in the bucket `wake/` index, and waker uses the `wake` index to locate by scope (without listing everything), reopening on demand when necessary.
 - Capacity: follows `CELLHIVE_CELLS_PER_NODE` and the disk budget; there is no separate timer quota.
 
 _Last updated: 2026-09-17_

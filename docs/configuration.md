@@ -120,8 +120,7 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `64` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭空闲/超限 cell，释放 SQLite 句柄与 page cache |
-| `CELLHIVE_MAX_RESIDENT_CELLS` | `64` | 常驻句柄上限；`0` = 不限。非 0 时优先于 `MAX_OPEN_CELLS` |
+| `CELLHIVE_MAX_OPEN_CELLS` | `64` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |
 | `CELLHIVE_CELL_IDLE` | `0` 不清理 | 空闲句柄关闭 |
 | `CELLHIVE_CELL_DISK_MAX` | `0` 无限 | cell 文件字节预算（LRU 删非 owned） |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor 间隔 |

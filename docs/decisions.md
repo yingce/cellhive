@@ -1685,7 +1685,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 - **#4 RPO=0 故障注入**（`scripts/rpo-zero-fault.sh`，`make rpo-test`）：节点 A 顺序写唯一 key/value，每个 200 后记录 key；写到第 K 个 **SIGKILL A**；**删除 A 的本地数据目录**（本地库彻底丢失）；节点 B（同桶）claim 接管，对**每个 acked key** GET 校验值精确一致，并用 `restoreverify` 验 `integrity=ok`。实测：`N=1500, KILL_AT=900` → acked=900、`missing=0 wrong=0`、`{"mode":"l0","integrity":"ok","keys":900}` → **PASS**。证明"acked ⇒ durable"，恢复只能来自桶。
 - **#2 hibernation/placement 雏形**：
-  1. `CELLHIVE_MAX_RESIDENT_CELLS`（0=不限）→ `cellstore.Store.MaxOpenCells`：resident/句柄上限，超限由现有 LRU/空闲 sweep 驱逐（与 `CELLHIVE_CELL_IDLE_S` 配合）。"hibernation" 即**句柄关闭但保留所有权/epoch**，下次请求重开。
+  1. `CELLHIVE_MAX_OPEN_CELLS`（0=不限，原 `MAX_RESIDENT_CELLS` 已移除）→ `cellstore.Store.MaxOpenCells`：缓存句柄上限，超限由现有 LRU/空闲 sweep 驱逐（与 `CELLHIVE_CELL_IDLE_S` 配合）。"hibernation" 即**句柄关闭但保留所有权/epoch**，下次请求重开。
   2. `internal/rebalance.Plan`（**纯函数**）：按 `Weight` 比例算目标份额，只在本节点**超份额**且某 peer **低于其目标（留 2% 余量）**时，选出最多 `maxMove` 个**空闲**（句柄未打开）owned cell（按 scope 排序，确定性）。
   3. cell-agent 循环（`CELLHIVE_REBALANCE_INTERVAL`，默认 **0=关**；`CELLHIVE_REBALANCE_MAX_MOVE`=32）：采样 lease（`lease.Load` 新增 `placement_weight`）→ Plan → 对选中 scope `om.Release`（并 `timers.Remove`）；**对端按需 claim**（无主动 push）。`cellstore.Store.IsOpen` 用于判定空闲。
   4. **测试**：planner 单测（低于份额不动/按权重/尊重 maxMove 与 2% 余量/只动空闲/确定性顺序）；**live 双节点**：A 拥有 6 个空闲 cell、B 为 0 → A 发布 `placement_weight=NumCPU` 后按轮次共释放 **4** 个，B `claim` 已释放的 `capA/__kv__/c1` 返回 **200**。
@@ -2441,7 +2441,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   1. **Queue**：`CELLHIVE_QUEUE_BATCH`/`CELLHIVE_QUEUE_LEASE`（0=store 默认）、`CELLHIVE_QUEUE_RETRY_DELAY`（默认 30s）；重试上限与 DLQ 仍由 per-consumer 配置（ADR-072/112）决定；语义 at-least-once、owner 独占消费、每次变更走捕获证明（ADR-119，不变）。
   2. **Timer**：`CELLHIVE_TIMER_BATCH`（默认 256）、`CELLHIVE_TIMER_FIRED_TTL`（默认 24h）。
   3. **Waker**：`CELLHIVE_WAKER_BATCH`（256）、`CELLHIVE_WAKER_FIRED_TTL`（24h）、**`CELLHIVE_WAKER_BACKOFF_MAX`（默认 1m）**：连续错误时延时 `interval·2^fails` 封顶；成功复位；空闲不退避。
-  4. **timer cell 策略（决定）**：**不 pinning**，timer cell 与其它 cell 同为可驱逐（`MAX_RESIDENT_CELLS`/`CELL_IDLE`/盘预算统一管理）；正确性不依赖驻留（权威在 cell + 桶 `wake/` 索引，waker 按索引定位、按需重开）。
+  4. **timer cell 策略（决定）**：**不 pinning**，timer cell 与其它 cell 同为可驱逐（`MAX_OPEN_CELLS`/`CELL_IDLE`/盘预算统一管理）；正确性不依赖驻留（权威在 cell + 桶 `wake/` 索引，waker 按索引定位、按需重开）。
 - **验证**：`internal/waker TestBackoffDelay`（1→2×→4×→封顶、max≤base 关闭、base=0 回退 5s）；`internal/config TestDispatchDefaults`（timer/queue/waker 默认值 + 覆盖生效）；现有 queue/timer/waker/`internal/dispatch` 测试保持全绿。
 - **残余**：无 timer 专用配额/驻留（有意）；waker 退避为进程内状态（重启复位）。
 
