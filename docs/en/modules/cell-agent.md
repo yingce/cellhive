@@ -43,7 +43,7 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_NODE_ID` | `node-1` | Stable node identity (owner/handoff key), required |
 | `CELLHIVE_NS_RATE` | empty (off) | Per-ns write admission `rps[/burst]` (default burst=rps) |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | integer, default `16` | Background fill rate for paged cells (MiB/s, one at a time per node); `0` = keep sparse, read the bucket for every cold page |
-| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `256MiB` | Clone chains smaller than this whole; `0` = always paged |
+| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `256MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of child concurrent prefetch workers |
 | `CELLHIVE_PAGED_RESTORE` | bool, default `true` | cell-agent: during cold restore, use the fault-in VFS to load pages for cells that are "compacted and have chain ≥ MIN_BYTES" (ADR-160) |
 | `CELLHIVE_PAGED_WINDOW_PAGES` | integer, default `64` | Window prefetch: maximum number of adjacent pages to fetch in one ranged read (also subject to a 256KiB budget) |
