@@ -903,6 +903,7 @@ func main() {
 			registerTimerScope(ctx, openTimer, srv, sc)
 		}
 	}()
+	go srv.RunHyperdriveProxyHealthLoop(ctx)
 	srv.SetReady(true)
 	go srv.RunResourceCleanupLoop(ctx)
 	go srv.RunProxySQLReconcileLoop(ctx)

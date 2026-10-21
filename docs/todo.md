@@ -10,7 +10,7 @@ _最后更新：2026-10-21_
 
 1. ✅ ProxySQL create/delete 自动同步、30s reconcile、多 admin fanout（ADR-262）；生成式客户端凭据（ADR-263）；MySQL/PostgreSQL dynamic e2e 通过。
 2. ✅ 绑定级生成凭据（ADR-263）；origin 轮换由 reconcile 处理。
-3. **proxy 健康检查/fail-closed**：endpoint 不可达时快速失败，而不是只检查非空。
+3. ✅ **proxy 健康检查/fail-closed**：配置 endpoint 每 5s TCP 探测；不可达时 `/readyz` 503、绑定 fail closed；MySQL e2e 覆盖 stop/start 后 ready 503→200。
 4. **per-resource proxy/direct override**：目前是全局 `CELLHIVE_HYPERDRIVE_MODE`。
 5. **多副本配置分发**：ETag/long-poll/watch + 每 Pod 独立渲染，或 controller + ConfigMap。
 6. **`pg` CJS shim 内置到 bundler**：当前由租户按文档手工打包。

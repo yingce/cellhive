@@ -32,7 +32,7 @@ docker run -d --rm --name "$MYSQL_NAME" -p 13306:3306 \
   -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=app -e MYSQL_USER=app -e MYSQL_PASSWORD=secret \
   mysql:8.0 --default-authentication-plugin=mysql_native_password >/dev/null
 for i in $(seq 1 60); do docker exec "$MYSQL_NAME" mysql -uapp -psecret -h127.0.0.1 -N -e 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-docker run -d --rm --name "$PROXY_NAME" --network host proxysql/proxysql:3.0.11 >/dev/null
+docker run -d --name "$PROXY_NAME" --network host proxysql/proxysql:3.0.11 >/dev/null
 for i in $(seq 1 40); do (echo >/dev/tcp/127.0.0.1/6032) >/dev/null 2>&1 && break; sleep .5; done
 
 CELLHIVE_NODE_ID=mysql-auto CELLHIVE_ADVERTISE="127.0.0.1:$PORT" CELLHIVE_PEER_URL="http://127.0.0.1:$PORT" \
@@ -80,6 +80,29 @@ out=""
 for i in $(seq 1 40); do out=$(curl -s -m 20 -H 'Host: mysqlauto.test' "http://127.0.0.1:$RT_PORT/"); echo "$out" | grep -q '"ok"' && break; sleep .5; done
 echo "worker=$out"
 [[ "$out" == *'"ok":1'* ]] || { echo "worker query failed" >&2; exit 1; }
+
+# Health gate: while ProxySQL is down the cell-agent must stop advertising
+# readiness and report the unavailable proxy; it must recover after restart.
+docker stop "$PROXY_NAME" >/dev/null
+code=""
+for i in $(seq 1 30); do
+  code=$(curl -s -o "$BASE/ready-down.json" -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/readyz" || true)
+  [[ "$code" == 503 ]] && break
+  sleep .5
+done
+[[ "$code" == 503 ]] || { echo "readyz did not fail closed with ProxySQL down: $code" >&2; exit 1; }
+grep -q hyperdrive_proxy_unavailable "$BASE/ready-down.json" || { echo "missing proxy readiness reason: $(cat "$BASE/ready-down.json")" >&2; exit 1; }
+echo "health down=503 hyperdrive_proxy_unavailable"
+docker start "$PROXY_NAME" >/dev/null
+code=""
+for i in $(seq 1 40); do
+  code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/readyz" || true)
+  [[ "$code" == 200 ]] && break
+  sleep .5
+done
+[[ "$code" == 200 ]] || { echo "readyz did not recover after ProxySQL restart: $code" >&2; exit 1; }
+echo "health up=200"
+
 "$BIN/cellhive" resource delete mysqlauto hyperdrive hd1 --force >/dev/null 2>&1 || true
 sleep 1
 servers=$(docker exec "$PROXY_NAME" mysql -h127.0.0.1 -P6032 -uadmin -padmin -N -e 'SELECT hostgroup_id FROM runtime_mysql_servers' 2>/dev/null || true)

@@ -189,7 +189,8 @@ export CELLHIVE_HYPERDRIVE_PROXY='postgres://proxysql:6133,mysql://proxysql:6033
 - ProxySQL 的 MySQL/PostgreSQL 监听端口不同（6033/6133）；
 - `proxy` 模式未配置 endpoint 时 Helm 渲染失败；
 - 设置 `CELLHIVE_PROXYSQL_ADMIN` 后，CellHive 会在 Hyperdrive 资源 create/delete 时自动写 ProxySQL 的 backend/user 并 `LOAD ... TO RUNTIME`；`CELLHIVE_PROXYSQL_SAVE=1` 同时落盘。
-- ProxySQL 的 admin 凭据、backend 池参数、query rules 仍由运维负责；多副本和启动 reconcile 尚未实现。
+- ProxySQL 的 admin 凭据、backend 池参数、query rules 仍由运维负责；多副本 fanout 与 30s reconcile 已实现，跨副本 HA 仍由外部 LB/ProxySQL Cluster 承担。
+- cell-agent 每 5s TCP 探测配置的 proxy endpoint；不可达时 `/readyz` 返回 503，Hyperdrive 绑定 fail closed。
 
 
 ### 本机 Compose Hyperdrive profile

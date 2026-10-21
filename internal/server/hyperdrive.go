@@ -133,7 +133,7 @@ func (s *Server) hyperdriveBindingConnString(origin, namespace, resource string)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	proxyHost := s.hyperdriveProxyFor(scheme)
-	if proxyHost == "" {
+	if proxyHost == "" || !s.hyperdriveProxyHostHealthy(scheme, proxyHost) {
 		return "", false
 	}
 	u.Host = proxyHost

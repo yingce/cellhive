@@ -164,6 +164,10 @@ type Server struct {
 	// ProxySQL reconciles Hyperdrive origins when CELLHIVE_PROXYSQL_ADMIN is set.
 	ProxySQL *proxysql.Sync
 
+	proxyHealthMu      sync.RWMutex
+	proxyHealth        map[string]bool // scheme|host -> last TCP probe result
+	proxyHealthChecked bool
+
 	sessionMu        sync.Mutex
 	sessionOpen      bool
 	sessionFollowers []string
@@ -476,6 +480,10 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	}
 	if !s.readyFlag.Load() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "starting"})
+		return
+	}
+	if ok, reason := s.HyperdriveProxyReady(); !ok {
+		writeErr(w, http.StatusServiceUnavailable, "hyperdrive_proxy_unavailable", reason)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
