@@ -133,7 +133,10 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
   let retiring=false;
   for(const e of residents.values()){
     if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
-    if(e.family===family&&Number(e.version.version)===Number(version.version)&&e.tailOn!==tailOn)e.retiring=true;
+    // Tail-on/off variants use different worker ids (same bundle). Do not
+    // abort the old variant on this switch: abortIsolate makes workerd emit
+    // "script terminated for unknown reasons" while the new variant is being
+    // loaded. Keep both resident; the capacity sweep can reclaim them later.
     if(e.retiring)retiring=true;
   }
   // Avoid an async suspension on the steady-state fetch path. Existing
