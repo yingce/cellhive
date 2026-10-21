@@ -62,15 +62,22 @@ type RunSource interface {
 	ReadRun(pgno uint32, maxPages int) ([][]byte, error)
 }
 
-// WindowPages bounds one prefetch window.
-var WindowPages = 64
+// ReadAheadBytes bounds one prefetch window in decoded page bytes. Deriving
+// the page count from the database's actual page size keeps the IO budget
+// stable when a cell uses 4KiB, 8KiB, or 64KiB pages.
+var ReadAheadBytes int64 = 1 << 20
 
-// windowPages may be lowered by tests.
-func windowLimit() int {
-	if WindowPages < 1 {
+// windowPages returns the number of pages in one readahead window. It is at
+// least one page so a page larger than the budget still makes progress.
+func windowPages(pageSize int) int {
+	if pageSize <= 0 {
+		pageSize = 4096
+	}
+	n := int(ReadAheadBytes / int64(pageSize))
+	if n < 1 {
 		return 1
 	}
-	return WindowPages
+	return n
 }
 
 var (
@@ -301,7 +308,7 @@ func goPagedFetch(id C.int, pgno C.uint, buf unsafe.Pointer, bufLen C.int) C.int
 		if isChild {
 			maxPages = 1 // never pull a child's overflow neighbours
 		} else if r.windowEnd != 0 && pg == r.windowEnd+1 {
-			maxPages = windowLimit() // sequential access: read ahead
+			maxPages = windowPages(r.src.PageSize()) // sequential access: read ahead
 		}
 		pages, err := r.fetch(pg, maxPages)
 		if err != nil || len(pages) == 0 {
@@ -454,7 +461,7 @@ func (r *reg) prefetchChildren(after, prev uint32) {
 	var spans []span
 	for i := 0; i < len(next); {
 		last := i
-		for last+1 < len(next) && next[last+1] == next[last]+1 && last+1-i < windowLimit() {
+		for last+1 < len(next) && next[last+1] == next[last]+1 && last+1-i < windowPages(r.src.PageSize()) {
 			last++
 		}
 		spans = append(spans, span{start: next[i], n: last - i + 1})
@@ -671,7 +678,7 @@ func HydrateAll(ctx context.Context, path string) error {
 				pgno++
 				continue
 			}
-			runLen := windowLimit()
+			runLen := windowPages(ps)
 			if pgno+runLen-1 > commit {
 				runLen = commit - pgno + 1
 			}
@@ -764,7 +771,7 @@ func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) 
 				pgno++
 				continue
 			}
-			runLen := windowLimit()
+			runLen := windowPages(ps)
 			if pgno+runLen-1 > commit {
 				runLen = commit - pgno + 1
 			}

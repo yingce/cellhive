@@ -466,8 +466,8 @@ func TestFaultPolicyChildAloneAndWindow(t *testing.T) {
 	if _, ok := faultPage(paged, 12, ps); !ok {
 		t.Fatal("fault page 12 failed")
 	}
-	if got := src.maxSeen[12]; got != windowLimit() {
-		t.Fatalf("sequential non-child fault requested maxPages=%d, want %d", got, windowLimit())
+	if got := src.maxSeen[12]; got != windowPages(ps) {
+		t.Fatalf("sequential non-child fault requested maxPages=%d, want %d", got, windowPages(ps))
 	}
 }
 
@@ -630,5 +630,20 @@ func BenchmarkPagedScanSQLite(b *testing.B) {
 		if n != 20000 {
 			b.Fatalf("count = %d", n)
 		}
+	}
+}
+
+func TestWindowPagesUsesByteBudget(t *testing.T) {
+	old := ReadAheadBytes
+	defer func() { ReadAheadBytes = old }()
+	ReadAheadBytes = 1 << 20
+	if got := windowPages(4096); got != 256 {
+		t.Fatalf("4KiB pages: got %d, want 256", got)
+	}
+	if got := windowPages(65536); got != 16 {
+		t.Fatalf("64KiB pages: got %d, want 16", got)
+	}
+	if got := windowPages(4 << 20); got != 1 {
+		t.Fatalf("oversized page: got %d, want 1", got)
 	}
 }

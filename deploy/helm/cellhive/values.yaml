@@ -78,6 +78,8 @@ cellAgent:
   cellIdle: 5m
   # Use paged cold restore for SQLite images at or above this size.
   pagedMinBytes: 32MiB
+  # Byte budget for one paged readahead window; converted with pageSize.
+  pagedReadAheadBytes: 1MiB
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {memory: 2Gi}

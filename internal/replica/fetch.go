@@ -278,9 +278,9 @@ func (pf *PageFetcher) ReadRun(ctx context.Context, pgno uint32, maxPages int) (
 	return out, nil
 }
 
-// runByteBudget bounds one window read (decoded pages). A scan is amortized
-// without letting a single fault pull a large slice of the database.
-const runByteBudget = 256 << 10
+// runByteBudget bounds one window read (decoded pages). It matches the
+// paged VFS default readahead budget; the caller's maxPages still caps it.
+const runByteBudget = 1 << 20
 
 // Materialize writes a database image to dest, filling only the given page
 // ranges (all pages when ranges is nil) by fetching each page on demand. Unfilled

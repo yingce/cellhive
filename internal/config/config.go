@@ -262,8 +262,8 @@ type Config struct {
 	PagedRestore     bool
 	PagedMinBytes    int64
 	PagedHydrateMBPS int
-	// PagedWindowPages bounds one prefetch window (pages fetched together).
-	PagedWindowPages int
+	// PagedReadAheadBytes bounds one prefetch window in decoded page bytes.
+	PagedReadAheadBytes int64
 	// PagedPrefetchWorkers bounds concurrent child prefetches.
 	PagedPrefetchWorkers int
 
@@ -581,7 +581,7 @@ func FromEnv() Config {
 		PagedRestore:             envBool("CELLHIVE_PAGED_RESTORE", true),
 		PagedMinBytes:            envBytes("CELLHIVE_PAGED_MIN_BYTES", 32<<20),
 		PagedHydrateMBPS:         envInt("CELLHIVE_PAGED_HYDRATE_MBPS", 16),
-		PagedWindowPages:         envInt("CELLHIVE_PAGED_WINDOW_PAGES", 64),
+		PagedReadAheadBytes:      envBytes("CELLHIVE_PAGED_READAHEAD_BYTES", 1<<20),
 		PagedPrefetchWorkers:     envInt("CELLHIVE_PAGED_PREFETCH_WORKERS", 4),
 		LTXCompression:           envBool("CELLHIVE_LTX_COMPRESSION", true),
 		BundleGCInterval:         envDuration("CELLHIVE_BUNDLE_GC_INTERVAL", 0),

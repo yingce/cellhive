@@ -254,8 +254,8 @@ func main() {
 			return pagedSource{pf: pf}, true, nil
 		}
 		store.PagedHydrateMBPS = cfg.PagedHydrateMBPS
-		if cfg.PagedWindowPages > 0 {
-			pagedvfs.WindowPages = cfg.PagedWindowPages
+		if cfg.PagedReadAheadBytes > 0 {
+			pagedvfs.ReadAheadBytes = cfg.PagedReadAheadBytes
 		}
 		if cfg.PagedPrefetchWorkers > 0 {
 			pagedvfs.PrefetchWorkers = cfg.PagedPrefetchWorkers

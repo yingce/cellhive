@@ -36,6 +36,7 @@ x-common-env: &common-env
   CELLHIVE_MAX_OPEN_CELLS: ${CELLHIVE_MAX_OPEN_CELLS:-32}
   CELLHIVE_CELL_IDLE: ${CELLHIVE_CELL_IDLE:-5m}
   CELLHIVE_PAGED_MIN_BYTES: ${CELLHIVE_PAGED_MIN_BYTES:-32MiB}
+  CELLHIVE_PAGED_READAHEAD_BYTES: ${CELLHIVE_PAGED_READAHEAD_BYTES:-1MiB}
   CELLHIVE_HYPERDRIVE_MODE: ${CELLHIVE_HYPERDRIVE_MODE:-direct}
   # Create a per-binding origin role so workers never receive the origin
   # user/password. The sealed origin URL must have CREATE USER/GRANT rights.

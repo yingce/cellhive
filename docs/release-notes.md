@@ -159,7 +159,7 @@
 - 新增 fault-in SQLite VFS `internal/pagedvfs`（`?vfs=cellhive-paged`）：主库是**按 pinned cut 的稀疏文件**，`xRead` 缺页时**同步**从复制链取该页并写入本地；`xWrite`/`xTruncate` 维护 hydration 位图；fault 失败 fail-closed。
 - 页源 = `replica.PageFetcher`（L1 `index.bin` 按页 ranged 读 + 更新的 L0 尾巴）；链 < `CELLHIVE_PAGED_MIN_BYTES`（默认 256MiB）或未 compaction → 仍整克隆。
 - 实测（真链路测试）：冷点读 **8 次页 fault / 771 页、8 次 ranged 读、整对象读 3,158B（镜像 3,158,016B）≈ 1000× 少**；`SnapshotPages` 前强制 `HydrateAll`，保证 LTX 快照不含稀疏零页。
-- 开关：`CELLHIVE_PAGED_RESTORE`（默认开）、`CELLHIVE_PAGED_MIN_BYTES`、`CELLHIVE_PAGED_HYDRATE_MBPS`（默认 16，0=保持稀疏）、`CELLHIVE_PAGED_WINDOW_PAGES`（默认 64）。
+- 开关：`CELLHIVE_PAGED_RESTORE`（默认开）、`CELLHIVE_PAGED_MIN_BYTES`、`CELLHIVE_PAGED_HYDRATE_MBPS`（默认 16，0=保持稀疏）、`CELLHIVE_PAGED_READAHEAD_BYTES`（默认 1MiB）。
 - **窗口预取**：`replica.PageFetcher.ReadRun` 一次 ranged read 连取同 L1 对象内的相邻页（256KiB 预算），pagedvfs 缓存窗口 → 全扫 336 页只需 6 次桶读（此前每页一次）；`xTruncate` 回调丢弃陈旧窗口页。
 - **稀疏感知磁盘口径**：`DiskFile.AllocBytes`（`st_blocks*512`）进入 `DiskUsage`/`/metrics` 与磁盘驱逐预算，paged cell 不再因 apparent size 误触发反压。
 - **b-tree 感知 fault 策略**（内部页 child 单页取，避免 overflow 链被整段拉取；顺序 child 按 `SCAN_AHEAD`=64 预取到内存缓存，连续 child 合并成一次读）、`HydrateAll`/后台补齐批量取数、`/metrics` 六个 `cellhive_paged_*` 指标。

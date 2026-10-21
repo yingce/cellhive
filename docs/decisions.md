@@ -2557,8 +2557,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   3. **cellstore 集成**：`Store.Paged` hook 优先于 `Hydrate`；`Prepare` 建稀疏文件（并清掉陈旧 `-wal/-shm`）；任何路径（`Store.Cell`/`Store.Open`/`OpenAt`）打开已注册路径都会走 paged VFS（避免用默认 VFS 读到零页）；`Close` 停后台 hydrate 并 `Release` 注册（本地文件当缓存保留）。
   4. **捕获/快照协同（我们的额外约束）**：`Cell.SnapshotPages` 在 `ReadDBPages` 前强制 `pagedvfs.HydrateAll`，确保 LTX 快照不会把稀疏零页编码进去（paged cell 的本地文件只当缓存、不据此发快照）。
   5. **后台补齐**：`CELLHIVE_PAGED_HYDRATE_MBPS`（默认 16；0 = 保持稀疏、每个冷页都读桶），每节点同时只跑一个 cell 的补齐。
-  6. **窗口预取（run read）**：`replica.PageFetcher.ReadRun` 把**同一 L1 对象内连续存储的相邻页**用**一次 ranged read** 取回（受 `CELLHIVE_PAGED_WINDOW_PAGES`（默认 64）与 256KiB 解码字节预算约束）；pagedvfs 缓存该窗口，后续同窗 fault **零桶读**；`xTruncate` 回调 Go 丢弃超出新末尾的窗口页。稳定扫描因此是"每窗口一次 GET"而不是"每页一次"。
-  7. **开关**：`CELLHIVE_PAGED_RESTORE`（默认 true）、`CELLHIVE_PAGED_MIN_BYTES`（默认 256MiB）、`CELLHIVE_PAGED_HYDRATE_MBPS`（默认 16）、`CELLHIVE_PAGED_WINDOW_PAGES`（默认 64）。DO 侧不变（workerd VFS，后续 FUSE）。
+  6. **窗口预取（run read）**：`replica.PageFetcher.ReadRun` 把**同一 L1 对象内连续存储的相邻页**用**一次 ranged read** 取回（受 `CELLHIVE_PAGED_READAHEAD_BYTES`（默认 1MiB）解码字节预算约束）；pagedvfs 缓存该窗口，后续同窗 fault **零桶读**；`xTruncate` 回调 Go 丢弃超出新末尾的窗口页。稳定扫描因此是"每窗口一次 GET"而不是"每页一次"。
+  7. **开关**：`CELLHIVE_PAGED_RESTORE`（默认 true）、`CELLHIVE_PAGED_MIN_BYTES`（默认 32MiB）、`CELLHIVE_PAGED_HYDRATE_MBPS`（默认 16）、`CELLHIVE_PAGED_READAHEAD_BYTES`（默认 1MiB）。DO 侧不变（workerd VFS，后续 FUSE）。
   8. **稀疏感知磁盘口径**：`DiskFile.AllocBytes`（`st_blocks*512`）与 `DiskFile.DiskBytes()`；`DiskUsage`/`/metrics` 与磁盘驱逐预算改用**实占**，paged cell 不再因 apparent size 误触发反压。
 - **验证**：
   - `internal/pagedvfs`：`TestPagedOpenFaultsPagesOnDemand`（点读只 fault 少量页、fault 数 < 总页数；`HydrateAll` 后本地文件与源镜像**逐字节相同**）、`TestPagedWritesMarkHydrated`（写入/checkpoint 后不被旧 cut 覆盖）。

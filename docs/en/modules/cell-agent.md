@@ -46,7 +46,7 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `32MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of child concurrent prefetch workers |
 | `CELLHIVE_PAGED_RESTORE` | bool, default `true` | cell-agent: during cold restore, use the fault-in VFS to load pages for cells that are "compacted and have chain ≥ MIN_BYTES" (ADR-160) |
-| `CELLHIVE_PAGED_WINDOW_PAGES` | integer, default `64` | Window prefetch: maximum number of adjacent pages to fetch in one ranged read (also subject to a 256KiB budget) |
+| `CELLHIVE_PAGED_READAHEAD_BYTES` | bytes, default `1MiB` | Byte budget for one paged read, converted using the actual page size (at least one page) |
 | `CELLHIVE_PEER_URL` | `http://127.0.0.1:7001` | This node's REST callback address (peer replication target) |
 | `CELLHIVE_PLACEMENT_AZ` | empty | Failure domain for this node (rack/zone); when set, follower selection **prefers a different AZ** (ADR-151). empty=no preference |
 | `CELLHIVE_PLACEMENT_WEIGHT` | `0`→CPU | Ownership share |

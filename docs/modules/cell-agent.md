@@ -46,7 +46,7 @@
 | `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `32MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且存在 L1 页索引才分页，否则整库克隆；`0` = 有页索引时一律分页 |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
 | `CELLHIVE_PAGED_RESTORE` | bool，默认 `true` | cell-agent：冷恢复时对"已 compaction 且链 ≥ MIN_BYTES"的 cell 用 fault-in VFS 按页加载（ADR-160） |
-| `CELLHIVE_PAGED_WINDOW_PAGES` | 整数，默认 `64` | 窗口预取：一次 ranged read 最多连取多少相邻页（另有 256KiB 预算） |
+| `CELLHIVE_PAGED_READAHEAD_BYTES` | 字节，默认 `1MiB` | 一次 paged read 的字节预算；按实际 pageSize 换算页数（至少 1 页） |
 | `CELLHIVE_PEER_URL` | `http://127.0.0.1:7001` | 本节点 REST 回指地址（peer 复制目标） |
 | `CELLHIVE_PLACEMENT_AZ` | 空 | 本节点故障域（rack/zone）；设置后 follower 选择**优先不同 AZ**（ADR-151）。空=无偏好 |
 | `CELLHIVE_PLACEMENT_WEIGHT` | `0`→CPU | ownership 份额 |
