@@ -38,9 +38,6 @@ x-common-env: &common-env
   # Bare host:port = PostgreSQL; use postgres://... or mysql://... entries
   # (comma-separated) to carry both protocols through one variable.
   CELLHIVE_HYPERDRIVE_PROXY: ${CELLHIVE_HYPERDRIVE_PROXY:-}
-  # Optional comma-separated <ns>/<resource> allowlist that stays direct when
-  # the global mode is proxy; "*" keeps every resource direct.
-  CELLHIVE_HYPERDRIVE_DIRECT_RESOURCES: ${CELLHIVE_HYPERDRIVE_DIRECT_RESOURCES:-}
   # Optional ProxySQL admin DSN; when set, Hyperdrive resource create/delete
   # upserts/removes mysql_* or pgsql_* rows and LOADs them into RUNTIME.
   CELLHIVE_PROXYSQL_ADMIN: ${CELLHIVE_PROXYSQL_ADMIN:-}

@@ -128,7 +128,7 @@ func (s *Server) hyperdriveBindingConnString(origin, namespace, resource string)
 		}
 		u.User = url.UserPassword(c.User, c.Password)
 	}
-	if mode == "direct" || s.hyperdriveDirectResource(namespace, resource) {
+	if mode == "direct" {
 		return u.String(), true
 	}
 	scheme := strings.ToLower(u.Scheme)
@@ -142,19 +142,6 @@ func (s *Server) hyperdriveBindingConnString(origin, namespace, resource string)
 		u.RawPath = ""
 	}
 	return u.String(), true
-}
-
-// hyperdriveDirectResource allows an operator to keep specific resources on a
-// direct connection while the deployment-wide mode is proxy.
-func (s *Server) hyperdriveDirectResource(namespace, resource string) bool {
-	key := namespace + "/" + resource
-	for _, entry := range s.Cfg.HyperdriveDirectResources {
-		entry = strings.TrimSpace(entry)
-		if entry == "*" || entry == key {
-			return true
-		}
-	}
-	return false
 }
 
 // hyperdriveLogicalDB is the stable PostgreSQL pooler database key for a resource.

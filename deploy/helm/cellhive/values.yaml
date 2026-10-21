@@ -45,9 +45,6 @@ hyperdrive:
   # origin: keep origin database name; binding: hd_<resource> for PostgreSQL
   # poolers that map the database name.
   dbMode: origin
-  # Resources that stay on a direct origin connection while mode=proxy.
-  # Entries are "<namespace>/<resource>"; "*" keeps every resource direct.
-  directResources: []
 
 
 config:
