@@ -117,3 +117,23 @@ curl -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" \
 ```
 
 返回 `mode/checked/ready/reason/endpoints[]`，其中每个 endpoint 带 `scheme/endpoint/healthy`。日志在状态切换时分别记录 `hyperdrive proxy endpoint unreachable` / `recovered`，不会每个探测周期重复刷日志。
+
+## 内存与 cell 恢复 metrics
+
+cell-agent `/metrics` 现在额外暴露：
+
+| 指标 | 含义 |
+|---|---|
+| `cellhive_cellstore_max_open_cells` | 当前 resident cell 上限；0 表示不限 |
+| `cellhive_cellstore_idle_ttl_seconds` | 空闲 cell 的 TTL；0 表示只按上限驱逐 |
+| `cellhive_cellstore_open_cells` | 当前打开的 cell 数 |
+| `cellhive_cellstore_evicted_total` | 进程启动以来累计 eviction/forget 次数，不是当前数量 |
+| `cellhive_restore_files_total` | 冷恢复文件数 |
+| `cellhive_restore_image_bytes_total` | 累计恢复的 SQLite image 字节数 |
+| `cellhive_restore_pages_total` | 累计恢复的 SQLite 页数 |
+| `cellhive_restore_last_image_bytes` | 最近一次恢复的 image 大小 |
+| `cellhive_restore_max_image_bytes` | 进程启动以来最大恢复 image 大小，用于定位 OOM 峰值 |
+| `cellhive_go_heap_alloc_bytes` / `cellhive_go_heap_sys_bytes` | Go 堆分配/保留 |
+| `cellhive_process_rss_bytes` | `/proc/self/statm` 的 RSS（Linux） |
+
+恢复路径现在用 `Truncate` + `WriteAt` 直接写目标 SQLite 文件，不再额外分配 `commit*pageSize` 的整库缓冲；仍然会持有从对象存储读入的 segment 数据，因此 bucket 下载/compaction 的峰值需要继续单独观察。

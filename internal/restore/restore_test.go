@@ -384,3 +384,24 @@ func TestApplyFileRejectsTxIDGap(t *testing.T) {
 		t.Fatalf("want non-contiguous error")
 	}
 }
+
+func TestApplyFileStats(t *testing.T) {
+	const ps, commit = uint32(4096), uint32(3)
+	before := SnapshotStats()
+	dest := t.TempDir() + "/stats.db"
+	page := make([]byte, ps)
+	for i := range page {
+		page[i] = 7
+	}
+	pages := map[uint32][]byte{1: page, 2: page, 3: page}
+	if _, err := ApplyFile(dest, [][]byte{snapshotSegment(t, ps, commit, pages)}); err != nil {
+		t.Fatal(err)
+	}
+	after := SnapshotStats()
+	if after.Files != before.Files+1 || after.Pages != before.Pages+uint64(commit) {
+		t.Fatalf("restore stats files=%d->%d pages=%d->%d", before.Files, after.Files, before.Pages, after.Pages)
+	}
+	if after.LastSize != uint64(ps)*uint64(commit) || after.MaxSize < after.LastSize {
+		t.Fatalf("restore sizes last=%d max=%d", after.LastSize, after.MaxSize)
+	}
+}

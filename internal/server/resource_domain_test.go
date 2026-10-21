@@ -272,6 +272,12 @@ func TestMetricsBucketAndCellGauges(t *testing.T) {
 		"cellhive_list_calls_total",
 		"cellhive_bucket_ops_total{op=\"list\"}",
 		"cellhive_resident_cells",
+		"cellhive_cellstore_max_open_cells",
+		"cellhive_cellstore_idle_ttl_seconds",
+		"cellhive_restore_files_total",
+		"cellhive_restore_max_image_bytes",
+		"cellhive_go_heap_alloc_bytes",
+		"cellhive_process_rss_bytes",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics missing %q:\n%s", want, body)

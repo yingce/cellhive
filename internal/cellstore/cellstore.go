@@ -503,6 +503,13 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	return true
 }
 
+// Limits reports the configured resident-handle cap and idle TTL.
+func (s *Store) Limits() (maxOpenCells int, idleTTL time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.MaxOpenCells, s.IdleTTL
+}
+
 // Stats reports cache size and eviction counters for metrics/diagnostics.
 func (s *Store) Stats() (openCells int, evicted, sweeps uint64) {
 	s.mu.Lock()

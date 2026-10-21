@@ -16,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +51,7 @@ import (
 	"cellhive/internal/r2"
 	"cellhive/internal/recovery"
 	"cellhive/internal/replica"
+	"cellhive/internal/restore"
 	"cellhive/internal/telemetry"
 	"cellhive/internal/timer"
 	"cellhive/internal/upload"
@@ -468,6 +471,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "node": s.Cfg.NodeID})
 }
 
+// processRSSBytes reads the process RSS when /proc is available.
+func processRSSBytes() uint64 {
+	b, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	var size, resident uint64
+	if _, err := fmt.Sscanf(string(b), "%d %d", &size, &resident); err != nil {
+		return 0
+	}
+	return resident * uint64(os.Getpagesize())
+}
+
 // overloaded reports local capacity pressure (ADR-123).
 func (s *Server) overloaded() bool {
 	return s.Overloaded != nil && s.Overloaded()
@@ -625,6 +641,40 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		writeFmt(w, "cellhive_cellstore_disk_files %d\n", diskFiles)
 		writeFmt(w, "# TYPE cellhive_cellstore_disk_bytes gauge\n")
 		writeFmt(w, "cellhive_cellstore_disk_bytes %d\n", diskBytes)
+		maxOpen, idleTTL := s.Store.Limits()
+		writeFmt(w, "# TYPE cellhive_cellstore_max_open_cells gauge\n")
+		writeFmt(w, "cellhive_cellstore_max_open_cells %d\n", maxOpen)
+		writeFmt(w, "# TYPE cellhive_cellstore_idle_ttl_seconds gauge\n")
+		writeFmt(w, "cellhive_cellstore_idle_ttl_seconds %g\n", idleTTL.Seconds())
+	}
+	{
+		rs := restore.SnapshotStats()
+		writeFmt(w, "# TYPE cellhive_restore_files_total counter\n")
+		writeFmt(w, "cellhive_restore_files_total %d\n", rs.Files)
+		writeFmt(w, "# TYPE cellhive_restore_image_bytes_total counter\n")
+		writeFmt(w, "cellhive_restore_image_bytes_total %d\n", rs.Bytes)
+		writeFmt(w, "# TYPE cellhive_restore_pages_total counter\n")
+		writeFmt(w, "cellhive_restore_pages_total %d\n", rs.Pages)
+		writeFmt(w, "# TYPE cellhive_restore_last_image_bytes gauge\n")
+		writeFmt(w, "cellhive_restore_last_image_bytes %d\n", rs.LastSize)
+		writeFmt(w, "# TYPE cellhive_restore_max_image_bytes gauge\n")
+		writeFmt(w, "cellhive_restore_max_image_bytes %d\n", rs.MaxSize)
+	}
+	{
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		writeFmt(w, "# TYPE cellhive_go_heap_alloc_bytes gauge\n")
+		writeFmt(w, "cellhive_go_heap_alloc_bytes %d\n", ms.HeapAlloc)
+		writeFmt(w, "# TYPE cellhive_go_heap_inuse_bytes gauge\n")
+		writeFmt(w, "cellhive_go_heap_inuse_bytes %d\n", ms.HeapInuse)
+		writeFmt(w, "# TYPE cellhive_go_heap_sys_bytes gauge\n")
+		writeFmt(w, "cellhive_go_heap_sys_bytes %d\n", ms.HeapSys)
+		writeFmt(w, "# TYPE cellhive_go_total_alloc_bytes counter\n")
+		writeFmt(w, "cellhive_go_total_alloc_bytes %d\n", ms.TotalAlloc)
+		writeFmt(w, "# TYPE cellhive_go_gc_total counter\n")
+		writeFmt(w, "cellhive_go_gc_total %d\n", ms.NumGC)
+		writeFmt(w, "# TYPE cellhive_process_rss_bytes gauge\n")
+		writeFmt(w, "cellhive_process_rss_bytes %d\n", processRSSBytes())
 	}
 	if bs, ok := s.Bucket.(bucket.Statser); ok {
 		ops := bs.Stats()
