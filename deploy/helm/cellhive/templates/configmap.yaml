@@ -35,6 +35,7 @@ data:
   CELLHIVE_HYPERDRIVE_MANAGED_USERS: {{ ternary "1" "0" .Values.hyperdrive.managedUsers | quote }}
   CELLHIVE_HYPERDRIVE_PROXY: {{ $hdProxy | quote }}
   CELLHIVE_HYPERDRIVE_DB_MODE: {{ .Values.hyperdrive.dbMode | default "origin" | quote }}
+  CELLHIVE_HYPERDRIVE_DIRECT_RESOURCES: {{ join "," .Values.hyperdrive.directResources | quote }}
   CELLHIVE_PROXYSQL_SAVE: {{ ternary "1" "0" .Values.proxysql.save | quote }}
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"

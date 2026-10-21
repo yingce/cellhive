@@ -42,6 +42,7 @@ CELLHIVE_NODE_ID=mysql-auto CELLHIVE_ADVERTISE="127.0.0.1:$PORT" CELLHIVE_PEER_U
   CELLHIVE_HYPERDRIVE_PROXY='postgres://127.0.0.1:6133,mysql://127.0.0.1:6033' \
   CELLHIVE_PROXYSQL_ADMIN='admin:admin@tcp(127.0.0.1:6032)/' \
   CELLHIVE_HYPERDRIVE_MANAGED_USERS=1 \
+  CELLHIVE_HYPERDRIVE_DIRECT_RESOURCES=mysqlauto/hd1 \
   setsid nohup "$BIN/cell-agent" >"$BASE/agent.log" 2>&1 </dev/null &
 echo $! >"$BASE/agent.pid"
 for i in $(seq 1 80); do [[ "$(curl -s -o /dev/null -m1 -w '%{http_code}' "http://127.0.0.1:$PORT/readyz" || true)" == 200 ]] && break; sleep .3; done
@@ -93,6 +94,9 @@ done
 [[ "$code" == 503 ]] || { echo "readyz did not fail closed with ProxySQL down: $code" >&2; exit 1; }
 grep -q hyperdrive_proxy_unavailable "$BASE/ready-down.json" || { echo "missing proxy readiness reason: $(cat "$BASE/ready-down.json")" >&2; exit 1; }
 echo "health down=503 hyperdrive_proxy_unavailable"
+direct_out=$(curl -s -m 20 -H 'Host: mysqlauto.test' "http://127.0.0.1:$RT_PORT/")
+[[ "$direct_out" == *'"ok":1'* ]] || { echo "direct allowlist query failed while proxy down: $direct_out" >&2; exit 1; }
+echo "direct allowlist query=ok while proxy down"
 docker start "$PROXY_NAME" >/dev/null
 code=""
 for i in $(seq 1 40); do

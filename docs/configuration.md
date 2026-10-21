@@ -231,6 +231,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
 | `CELLHIVE_HYPERDRIVE_MODE` | `direct` | Hyperdrive binding 模式：`direct` 返回源库 connectionString；`proxy` 把 host/port 改写成协议池（需配 `CELLHIVE_HYPERDRIVE_PROXY`） |
+| `CELLHIVE_HYPERDRIVE_DIRECT_RESOURCES` | 空 | `proxy` 模式下仍走 origin 直连的资源白名单，逗号分隔 `<ns>/<resource>`（`*` 表示全部）。用于逐资源灰度，避免打开全局 proxy 后无法回退单个数据库 |
 | `CELLHIVE_HYPERDRIVE_PROXY` | 空 | `proxy` 模式的池化地址。裸 `host:port` 表示 PostgreSQL（兼容旧配置）；也可写 `postgres://proxysql:6133,mysql://proxysql:6033`，一个变量同时表达两种协议。未配置某协议的 entry 时，该协议绑定 fail closed；配置的 endpoint 每 5s TCP 探测，任一 endpoint 不可达时 `/readyz` 返回 503，该协议绑定也 fail closed |
 | `CELLHIVE_HYPERDRIVE_DB_MODE` | `origin` | `origin` 保留源库 database 名；`binding` 改成 `hd_<resource>`，用于多个资源同名数据库的 PostgreSQL 池映射 |
 | `CELLHIVE_HYPERDRIVE_MANAGED_USERS` | `0` | `1` 时为每个 binding 在源库创建/更新 `hd_<hash>` 角色，worker 只拿到生成凭据；origin URL 需有 `CREATE USER`/`GRANT` 权限 |

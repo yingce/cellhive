@@ -65,3 +65,20 @@ func TestHyperdriveProxyStatusSnapshot(t *testing.T) {
 		t.Fatalf("endpoints=%+v", eps)
 	}
 }
+
+func TestHyperdriveDirectResourceOverride(t *testing.T) {
+	s := &Server{Cfg: config.Config{
+		HyperdriveMode: "proxy", HyperdriveProxy: "postgres://db:5432",
+		HyperdriveDirectResources: []string{"acme/direct-hd"},
+	}}
+	s.proxyHealth = map[string]bool{"postgres|db:5432": true}
+	s.proxyHealthChecked = true
+	direct, ok := s.hyperdriveBindingConnString("postgres://u:p@origin:5432/app", "acme", "direct-hd")
+	if !ok || direct != "postgres://u:p@origin:5432/app" {
+		t.Fatalf("direct override=%q ok=%v", direct, ok)
+	}
+	proxied, ok := s.hyperdriveBindingConnString("postgres://u:p@origin:5432/app", "acme", "proxied-hd")
+	if !ok || proxied != "postgres://u:p@db:5432/app" {
+		t.Fatalf("proxied=%q ok=%v", proxied, ok)
+	}
+}
