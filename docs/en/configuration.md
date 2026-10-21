@@ -90,8 +90,8 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `0` unlimited | Cache handle limit |
-| `CELLHIVE_MAX_RESIDENT_CELLS` | `0` unlimited | Resident handle limit |
+| `CELLHIVE_MAX_OPEN_CELLS` | `64` | Cached handle limit; `0` disables the cap. The LRU sweeper closes idle/over-limit cells and releases SQLite handles/page cache |
+| `CELLHIVE_MAX_RESIDENT_CELLS` | `64` | Resident handle limit; `0` disables the cap. When non-zero it takes precedence over `MAX_OPEN_CELLS` |
 | `CELLHIVE_CELL_IDLE` | `0` no cleanup | Close idle handles |
 | `CELLHIVE_CELL_DISK_MAX` | `0` unlimited | Cell file byte budget (LRU deletes non-owned files) |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor interval |

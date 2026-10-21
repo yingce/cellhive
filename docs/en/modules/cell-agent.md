@@ -39,8 +39,8 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_DRAIN_TTL` | `30s` | Drain token validity period (shutdown wait = same value) |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | Log tail buffer `<entries>:<workers>` (`cellhive tail --worker`) |
 | `CELLHIVE_LTX_COMPRESSION` | bool, default `true` | Use LZ4 for the LTX page-map (`WAL3`); `false` falls back to `WAL2` fixed frames without compression (saves CPU, more bucket bytes; both decoding/GC paths are compatible, ADR-161) |
-| `CELLHIVE_MAX_OPEN_CELLS` | `0` unlimited | Cached handle upper bound |
-| `CELLHIVE_MAX_RESIDENT_CELLS` | `0` unlimited | Resident handle upper bound |
+| `CELLHIVE_MAX_OPEN_CELLS` | `64` | Cached handle upper bound; `0` disables the cap |
+| `CELLHIVE_MAX_RESIDENT_CELLS` | `64` | Resident handle upper bound; `0` disables the cap. Non-zero takes precedence over `MAX_OPEN_CELLS` |
 | `CELLHIVE_NODE_ID` | `node-1` | Stable node identity (owner/handoff key), required |
 | `CELLHIVE_NS_RATE` | empty (off) | Per-ns write admission `rps[/burst]` (default burst=rps) |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | integer, default `16` | Background fill rate for paged cells (MiB/s, one at a time per node); `0` = keep sparse, read the bucket for every cold page |

@@ -39,8 +39,8 @@
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
 | `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
-| `CELLHIVE_MAX_OPEN_CELLS` | `0` 无限 | 缓存句柄上限 |
-| `CELLHIVE_MAX_RESIDENT_CELLS` | `0` 无限 | 常驻句柄上限 |
+| `CELLHIVE_MAX_OPEN_CELLS` | `64` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭空闲/超限 cell，释放 SQLite 句柄与 page cache |
+| `CELLHIVE_MAX_RESIDENT_CELLS` | `64` | 常驻句柄上限；`0` = 不限。非 0 时优先于 `MAX_OPEN_CELLS` |
 | `CELLHIVE_NODE_ID` | `node-1` | 节点稳定身份（owner/handoff key），必填 |
 | `CELLHIVE_NS_RATE` | 空（关） | 每 ns 写准入 `rps[/burst]`（缺省 burst=rps） |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | 整数，默认 `16` | paged cell 后台补齐速率（MiB/s，每节点同时一个）；`0` = 保持稀疏、每个冷页读桶 |
