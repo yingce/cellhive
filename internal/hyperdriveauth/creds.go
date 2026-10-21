@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -72,16 +73,34 @@ func Provision(ctx context.Context, originURL string, c Credentials) error {
 			return err
 		}
 		defer conn.Close()
-		stmts := []string{
-			"CREATE USER IF NOT EXISTS " + quote(c.User) + "@'%' IDENTIFIED BY " + quote(c.Password),
-			"ALTER USER " + quote(c.User) + "@'%' IDENTIFIED BY " + quote(c.Password),
-			"GRANT ALL PRIVILEGES ON " + ident(db) + ".* TO " + quote(c.User) + "@'%'",
-			"FLUSH PRIVILEGES",
-		}
-		for _, q := range stmts {
+		// Avoid CREATE USER IF NOT EXISTS on an existing account: MySQL logs a
+		// warning every reconcile. Check first, then create or alter.
+		var exists int
+		err = conn.QueryRowContext(ctx,
+			"SELECT 1 FROM mysql.user WHERE User=? AND Host='%' LIMIT 1", c.User).Scan(&exists)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			q := "CREATE USER " + quote(c.User) + "@'%' IDENTIFIED BY " + quote(c.Password)
 			if _, err := conn.ExecContext(ctx, q); err != nil {
 				return fmt.Errorf("hyperdriveauth mysql: %s: %w", q, err)
 			}
+		case err != nil:
+			// The provisioning account may have CREATE USER/GRANT without
+			// SELECT on mysql.user. Fall back to the idempotent form; it emits
+			// a harmless duplicate-user warning but remains functional.
+			if _, err := conn.ExecContext(ctx, "CREATE USER IF NOT EXISTS "+quote(c.User)+"@'%' IDENTIFIED BY "+quote(c.Password)); err != nil {
+				return fmt.Errorf("hyperdriveauth mysql: create user: %w", err)
+			}
+			fallthrough
+		default:
+			q := "ALTER USER " + quote(c.User) + "@'%' IDENTIFIED BY " + quote(c.Password)
+			if _, err := conn.ExecContext(ctx, q); err != nil {
+				return fmt.Errorf("hyperdriveauth mysql: %s: %w", q, err)
+			}
+		}
+		q := "GRANT ALL PRIVILEGES ON " + ident(db) + ".* TO " + quote(c.User) + "@'%'"
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("hyperdriveauth mysql: %s: %w", q, err)
 		}
 		return nil
 	case "postgres", "postgresql":
