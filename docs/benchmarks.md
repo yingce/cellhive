@@ -659,3 +659,39 @@ static worker 单 key GET ~4.3k RPS；同一 worker 的 `getBatch(10 keys)` 为 
 - dynamic 查询：`{"rows":[{"ok":1,"db":"postgres"}]}`；
 - warm hot set 后 static table 指向 `127.0.0.1:19900`，static 查询同样返回 `{"rows":[{"ok":1,"db":"postgres"}]}`；
 - 说明 ProxySQL proxy 模式在 dynamic/static 两条 worker 路径都可用。
+
+## do-runtime 本地 RPS smoke（2026-10-21）
+
+新增可复现脚本：
+
+```bash
+make e2e-do-rps
+# 或：DO_RPS_CONNECTIONS=64 DO_RPS_DURATION=10 bash scripts/e2e/do-runtime-rps.sh
+```
+
+测试一个 SQLite Durable Object 的写入+读回，以及一个 WebSocket echo 对象：
+
+- `GET /inc`：DO SQLite 自增写 + 读回；
+- `GET /get`：读回；
+- WebSocket：`webSocketMessage` 原样 echo。
+
+本机单节点 Compose、单 DO 对象、`wrk -t4 -c64 -d10s` 结果：
+
+```text
+Requests/sec: 471.60
+Requests/sec: 457.81
+Requests/sec: 428.29
+```
+
+一次 175.15 RPS 的离群值出现在宿主负载/compaction 窗口，不作为中位结果。
+
+WebSocket：32 个连接、每连接单 in-flight echo、8s：
+
+```text
+messages/sec: 18,103
+messages/sec: 18,357
+messages/sec: 18,801
+messages/sec: 19,221
+```
+
+边界：测试只覆盖单个 DO 对象，fixture 的 SQL 写/读会被 DO 串行化；数字包含 user-runtime loader 和本机网络，不是容量承诺。多对象 shard、gated `do-supervisor`、跨节点放置未覆盖。

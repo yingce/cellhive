@@ -10,7 +10,7 @@ TAGS := sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata s
 GOTAGS := -tags "$(TAGS)"
 export CGO_ENABLED := 1
 
-.PHONY: all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
+.PHONY: e2e-do-rps all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
 
 all: build
 
@@ -118,6 +118,9 @@ e2e-queue-concurrency:
 	bash scripts/e2e/queue-concurrency.sh
 
 # Docker + npm required for MySQL/ProxySQL auto-config e2e.
+e2e-do-rps:
+	bash scripts/e2e/do-runtime-rps.sh
+
 e2e-mysql:
 	bash scripts/e2e/mysql/build-bundle.sh
 	bash scripts/e2e/mysql-auto.sh

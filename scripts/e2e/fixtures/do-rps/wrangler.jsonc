@@ -1,0 +1,8 @@
+{
+  "name": "do-rps-bench",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "BENCH", "class_name": "Bench" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bench"] }]
+}
