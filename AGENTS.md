@@ -4,7 +4,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 项目要点
 
-- 计算层：**stock workerd**，不修改 workerd；只用 `workerLoader`/bindings/capnp。
+- 计算层：**`cellhive-workerd` fork**（`yingce/cellhive-workerd`），fork 改动只在 fork 仓；本仓只用 `workerLoader`/bindings/capnp 集成。
 - 状态层：**一切皆 cell**（`<ns>/<class>/<id>`），SQLite + 对象存储为权威，bucket 条件写决定 owner，epoch fence，RPO=0。
 - `cell-agent`（Go，固定集群）：状态 + 控制面 + owner 解析 + 计时派发 + **唯一桶凭据**。
 - `do-runtime`（workerd + supervisor）：原生 DO，分布式弹性，**不持桶凭据**。
@@ -31,7 +31,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 必须遵守的决策
 
-见 `docs/decisions.md`（ADR-001 ~ 179）。改设计要先改文档。
+见 `docs/decisions.md`（ADR-001 ~ 264）。改设计要先改文档。
 
 ## 命令
 
@@ -50,7 +50,7 @@ make fmt     # gofmt -w .
 
 ## 不做
 
-- 不 fork / 修改 workerd；
+- 不在本仓内 patch / fork workerd；workerd 改动提交到 `yingce/cellhive-workerd`；
 - 不引入第二套 JS 引擎；
 - 不引入 NATS/kvrocks/etcd/APISIX 等（发现用 bucket + 内置 DNS）；
 - 不在热路径 List bucket。

@@ -1,0 +1,31 @@
+name: workerd-fork
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - deploy/Dockerfile.workerd-fork-build
+      - deploy/Dockerfile
+      - .github/workflows/workerd-fork.yml
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fork binary
+        run: |
+          mkdir -p deploy/workerd-fork
+          docker build --target artifact --output type=local,dest=deploy/workerd-fork \
+            -f deploy/Dockerfile.workerd-fork-build .
+          test -x deploy/workerd-fork/workerd
+          deploy/workerd-fork/workerd --version
+      - name: Build CellHive image with fork
+        run: |
+          docker build --build-context workerd-fork=deploy/workerd-fork \
+            -f deploy/Dockerfile -t cellhive:fork-ci .
+      - name: Smoke-test runtime image
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/workerd cellhive:fork-ci --version
+          docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:fork-ci --version

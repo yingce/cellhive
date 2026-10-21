@@ -49,3 +49,8 @@ coverage.txt
 
 # --- generated visualizations (archify skill) ---
 /.archify/
+
+# --- generated e2e bundles ---
+scripts/e2e/mysql/worker.bundle.js
+deploy/compose/cellhive.local.env
+deploy/workerd-fork/
