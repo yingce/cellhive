@@ -392,3 +392,20 @@ ranged_bytes=1059803
 ```
 
 即读取 1MiB blob 只产生 5 次 ranged read、约 1.01MiB 数据，符合 1MiB 字节预算。该测试不在默认 CI 中运行，耗时约 10 分钟。
+
+### 真实 COS 条件删除
+
+`TestCOSConditionalDelete`（opt-in，和上面的 `CELLHIVE_COS_TEST=1` 共用凭据）覆盖两条路径：
+
+- authority key（`cells/.../owner.json`）：走 COS native append authority；
+- 普通 key：走 S3 `DeleteObject If-Match`。
+
+2026-10-21 真实 COS 结果：
+
+```text
+authority conditional delete: stale rejected, current accepted
+s3 conditional delete: stale rejected, current accepted
+PASS
+```
+
+因此本地固定 MinIO 镜像的 stale conditional delete 失败是**该 MinIO 版本的行为**，真实 COS 的两条路径都满足 CellHive 的 fencing 预期。

@@ -354,3 +354,7 @@ go test ./internal/replica -run TestCOSLargePagedRestore -tags ...
 ```
 
 On 2026-10-21, a 1GiB image (1025 MiB file, 4KiB pages, 262489 pages) reading a 1MiB blob issued 5 ranged reads and transferred 1,059,803 bytes, consistent with the 1MiB readahead budget. The test is not part of default CI and takes about 10 minutes.
+
+### Real COS conditional delete
+
+`TestCOSConditionalDelete` (opt-in with the same `CELLHIVE_COS_TEST=1` credentials) covers both the authority-key native-append path and the ordinary S3 `DeleteObject If-Match` path. On 2026-10-21, real COS rejected a stale delete and accepted the current token on both paths; the local fixed MinIO image's stale-delete failure is therefore a MinIO-version behavior, not a COS limitation.
