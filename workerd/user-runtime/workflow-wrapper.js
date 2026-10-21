@@ -7,7 +7,7 @@
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError, WorkflowTimeoutError } from "cellhive-workflow.js";
-import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";
+import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub, wrapR2Metadata } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
 
 // Rebuild synchronous tenant-isolate APIs over the props-bound capabilities.
@@ -57,6 +57,29 @@ function b64decode(s) {
   }
 }
 
+// WorkflowEntrypoint receives env at construction time. Re-apply the R2
+// metadata facade so this.env.BUCKET.writeHttpMetadata stays tenant-local.
+const __r2EnvCache = new WeakMap();
+function withR2Metadata(env) {
+  if (!env || typeof env !== "object" || !__cellhivePlatform?.r2Bindings?.length) return env;
+  let cached = __r2EnvCache.get(env);
+  if (cached) return cached;
+  const wrapped = new Map();
+  const proxy = new Proxy(env, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof prop !== "string" || value === undefined || value === null) return value;
+      if (__cellhivePlatform.r2Bindings.includes(prop)) {
+        if (!wrapped.has(prop)) wrapped.set(prop, wrapR2Metadata(value));
+        return wrapped.get(prop);
+      }
+      return value;
+    },
+  });
+  __r2EnvCache.set(env, proxy);
+  return proxy;
+}
+
 export class CellHiveWorkflow extends WorkerEntrypoint {
   async handleRun(className, eventJson, workflowBridge) {
     const cls = tenant[className];
@@ -64,7 +87,7 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
       throw new Error("no WorkflowEntrypoint class " + className + " exported by the bundle");
     }
     const env = this.env;
-    const bindings = env;
+    const bindings = withR2Metadata(env);
     const step = makeStep(workflowBridge, eventJson.instanceId);
     const inst = new cls(this.ctx, bindings);
     globalThis.__cellhiveTraceparent = eventJson.traceparent || "";

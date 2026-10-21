@@ -12,7 +12,7 @@ import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFr
 try {
   for (const name of __cellhivePlatform.kvBindings) {
     if (env[name]) {
-      Object.defineProperty(env, name, { value: makeKVFromStub(env[name]), writable: true, configurable: true, enumerable: true });
+      try { Object.defineProperty(env, name, { value: makeKVFromStub(env[name]), writable: true, configurable: true, enumerable: true }); } catch (e) { /* keep raw stub */ }
     }
   }
   // DO namespaces are platform-side entrypoint stubs; rebuild the CF-shaped
@@ -31,7 +31,7 @@ try {
   // isolate and send only SQL/params through the props-bound entrypoint.
   for (const name of __cellhivePlatform.d1Bindings) {
     if (env[name]) {
-      Object.defineProperty(env, name, { value: makeD1FromStub(env[name]), writable: true, configurable: true, enumerable: true });
+      try { Object.defineProperty(env, name, { value: makeD1FromStub(env[name]), writable: true, configurable: true, enumerable: true }); } catch (e) { /* keep raw stub */ }
     }
   }
   // R2ObjectBody.writeHttpMetadata mutates the caller's Headers, so it must run
@@ -39,7 +39,7 @@ try {
   if (__cellhivePlatform.r2Bindings.length > 0) {
     for (const name of __cellhivePlatform.r2Bindings) {
       if (env[name]) {
-        Object.defineProperty(env, name, { value: wrapR2Metadata(env[name]), writable: true, configurable: true, enumerable: true });
+        try { Object.defineProperty(env, name, { value: wrapR2Metadata(env[name]), writable: true, configurable: true, enumerable: true }); } catch (e) { /* keep raw stub */ }
       }
     }
   }

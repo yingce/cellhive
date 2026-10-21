@@ -62,7 +62,21 @@ const preparedCache = new ByteLRU(2000, 64*1024*1024, jsonWeight); // conservati
 const preparedInflight = new Map();
 
 const residents = new Map(); // plain descriptors only, never WorkerStub/Fetcher
-const capacity = new RuntimeCapacity(128, 256*1024*1024);
+// Warm-isolate bounds are deployment-configurable (CH_ISOLATE_MAX/BYTES); the
+// Go supervisor derives defaults from the node/cgroup memory limit.
+const DEFAULT_ISOLATE_MAX = 128;
+const DEFAULT_ISOLATE_BYTES = 256*1024*1024;
+let isolateCapacityState = null;
+function isolateCapacity(env) {
+  if (isolateCapacityState) return isolateCapacityState;
+  const max = Math.floor(Number(env && env.CH_ISOLATE_MAX));
+  const bytes = Math.floor(Number(env && env.CH_ISOLATE_BYTES));
+  isolateCapacityState = new RuntimeCapacity(
+    Number.isFinite(max) && max > 0 ? max : DEFAULT_ISOLATE_MAX,
+    Number.isFinite(bytes) && bytes >= 1024*1024 ? bytes : DEFAULT_ISOLATE_BYTES,
+  );
+  return isolateCapacityState;
+}
 let coldLoads = 0;
 
 function managedCode(entry) {
@@ -79,7 +93,7 @@ function managedStub(env,ctx,entry) {
   return env.LOADER.get(entry.id,()=>Object.assign({},code,{
     env:entry.plan.directFetch?Object.assign({},entry.version.vars||{}):tenantEnv(env,ctx,entry.plan.spec,entry.version.vars),
     globalOutbound:env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE==='0'||entry.version.log_policy?.console===false?{}:{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey}})]}),
+    ...(entry.tailOn?{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey}})]}:{}),
   }));
 }
 async function sweepResidents(env,ctx) {
@@ -93,7 +107,8 @@ async function sweepResidents(env,ctx) {
         if(status.nonce!==e.nonce||!status.idle||!e.life.idle())return;
         try{if(await ctl.retire(e.nonce)===false)return;}
         catch(err){if(!/internal error; reference =|execution.*abort|disconnected/i.test(String(err)))throw err;}
-        residents.delete(key);capacity.release(key);preparedCache.delete(key);
+        residents.delete(key);isolateCapacity(env).release(key);
+        if(![...residents.values()].some(o=>o.versionKey===e.versionKey))preparedCache.delete(e.versionKey);
       }catch(err){console.error('worker retirement failed:',String(err));}
     })();
     await e.cleaning;
@@ -111,11 +126,14 @@ function scheduleSweep(env,ctx){
     }
   })());
 }
-async function residentWorker(env,ctx,app,worker,version,plan){
-  const key=workerVersionKey(app,worker,version),family=app.namespace+'/'+worker;
+async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
+  const capacity = isolateCapacity(env);
+  const versionKey=workerVersionKey(app,worker,version),family=app.namespace+'/'+worker;
+  const key=residentVariantKey(versionKey,tailOn);
   let retiring=false;
   for(const e of residents.values()){
     if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
+    if(e.family===family&&Number(e.version.version)===Number(version.version)&&e.tailOn!==tailOn)e.retiring=true;
     if(e.retiring)retiring=true;
   }
   // Avoid an async suspension on the steady-state fetch path. Existing
@@ -125,7 +143,7 @@ async function residentWorker(env,ctx,app,worker,version,plan){
   if(e?.cleaning){await e.cleaning;e=residents.get(key);}
   if(!e){
     // Reserve before any further await: concurrent misses cannot exceed admission.
-    e={key,family,app,worker,version,plan,nonce:crypto.randomUUID(),life:new Lifetime(),retiring:false,cleaning:null,pinned:false};
+    e={key,versionKey,tailOn,family,app,worker,version,plan,nonce:crypto.randomUUID(),life:new Lifetime(),retiring:false,cleaning:null,pinned:false};
     e.id='managed-fetch/'+key+'/'+e.nonce;
     e.code=managedCode(e);
     checkWorkerBudgets(e.code,version.vars,plan.spec,'user');
@@ -138,6 +156,7 @@ async function residentWorker(env,ctx,app,worker,version,plan){
     }
     residents.set(key,e);
   }
+  e.retiring=false;
   // Moving the descriptor refreshes the eviction order.
   residents.delete(key);residents.set(key,e);
   const release=e.life.hold();
@@ -172,6 +191,7 @@ export default {
       return fixedFetch(req,env,ctx,{namespace:ns},worker,version,url);
     }
     maybePollRoutes(env, ctx);
+    maybePollLogCapture(env, ctx);
     const host = normalizeHost(req.headers.get("host") || url.host);
 
     let view;
@@ -285,8 +305,9 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   } finally {
     if(cold)coldLoads--;
   }
+  const tailOn=tailEnabled(env,app.namespace,worker);
   let lease;
-  try { lease=await residentWorker(env,ctx,app,worker,version,plan); }
+  try { lease=await residentWorker(env,ctx,app,worker,version,plan,tailOn); }
   catch(e){return text(String(e).includes('runtime_capacity')?'runtime load capacity exhausted':'worker load failed',503);}
   const finish=()=>{
     lease.release();
@@ -367,7 +388,7 @@ async function preparedWorker(env, app, worker, version, classStorage, deletedCl
 // stubs, and tails must all be acquired in the current request.
 function workerPlan(env, version, source, spec) {
   const directFetch = Object.keys(spec).length === 0;
-  const tailKey = env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? "" : crypto.randomUUID();
+  const tailKey = env.CH_LOG_CAPTURE === "0" ? "" : crypto.randomUUID();
   const compatibilityFlags = version.limits?.subrequests
     ? [...new Set([...(version.compat_flags || []), "nodejs_als"])]
     : (version.compat_flags || []);
@@ -402,24 +423,26 @@ function workerPlan(env, version, source, spec) {
 
 function fetchWorkerStub(env, ctx, app, worker, version, plan) {
   if (!plan.directFetch) return workerStub(env, ctx, app, worker, version, plan);
-  const id = "fetch/" + workerVersionKey(app, worker, version);
+  const tailOn = tailEnabled(env, app.namespace, worker);
+  const id = "fetch/" + residentVariantKey(workerVersionKey(app, worker, version), tailOn);
   return env.LOADER.get(id, () => Object.assign({}, plan.directWorkerCode, {
     globalOutbound: env.OUTBOUND,
     env: Object.assign({}, version.vars || {}),
-    ...(env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+    ...(tailOn ? { tails: [ctx.exports.TenantTail({
       props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
-    })] }),
+    })] } : {}),
   }));
 }
 
 function workerStub(env, ctx, app, worker, version, plan) {
-  const id = workerVersionKey(app, worker, version);
+  const tailOn = tailEnabled(env, app.namespace, worker);
+  const id = residentVariantKey(workerVersionKey(app, worker, version), tailOn);
   return env.LOADER.get(id, () => Object.assign({}, plan.workerCode, {
     globalOutbound: env.OUTBOUND,
     env: tenantEnv(env, ctx, plan.spec, version.vars),
-    ...(env.CH_LOG_CAPTURE === "0" || version.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+    ...(tailOn ? { tails: [ctx.exports.TenantTail({
       props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
-    })] }),
+    })] } : {}),
   }));
 }
 
@@ -873,6 +896,54 @@ function maybePollRoutes(env, ctx) {
   if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p.catch(() => {}));
 }
 
+// Live log-capture demand (ADR-238): native Tail is attached only while the
+// worker has an unexpired tail subscription (or OTLP export covers every
+// worker). The loader polls the cell-agent, and the resident worker variant is
+// chosen per request, so enabling/disabling capture never needs a redeploy.
+const LOG_CAPTURE_POLL_MS = 1000;
+let captureMode = "tail";
+let captureWorkers = new Set();
+let capturePolledAt = 0;
+let captureInflight = null;
+let captureOK = false; // false until the first successful poll => legacy behavior
+
+async function pollLogCaptureOnce(env) {
+  try {
+    const r = await fetch(env.CELL_URL + "/v1/internal/log-capture", {
+      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+    });
+    if (!r.ok) return false;
+    const body = await r.json();
+    captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
+    captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
+    captureOK = true;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function maybePollLogCapture(env, ctx) {
+  if (captureInflight) return;
+  const now = Date.now();
+  if (now - capturePolledAt < LOG_CAPTURE_POLL_MS) return;
+  capturePolledAt = now;
+  const p = pollLogCaptureOnce(env).finally(() => { captureInflight = null; });
+  captureInflight = p;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p.catch(() => {}));
+}
+
+function tailEnabled(env, ns, worker) {
+  if (env.CH_LOG_CAPTURE === "0") return false;
+  if (captureMode === "all") return true;
+  if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
+  return captureWorkers.has(ns + "/" + worker);
+}
+
+function residentVariantKey(versionKey, tailOn) {
+  return versionKey + (tailOn ? ":t" : ":n");
+}
+
 function normalizeHost(host) {
   let h = String(host || "").trim().toLowerCase();
   const i = h.lastIndexOf(":");
@@ -1205,6 +1276,15 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
         // target's active version resolved at render (ADR-102). Empty -> HTTP.
         version: b.version || targetVersion,
         token: await scopedToken(env.SCOPE_SECRET, app.namespace, "service", b.name),
+      };
+      continue;
+    }
+    if (b.type === "queue") {
+      // The env key is arbitrary; the queue resource is the binding ID.
+      const qname = b.id || b.name;
+      spec[b.name] = {
+        kind: "queue", ns: app.namespace, name: qname,
+        token: await scopedToken(env.SCOPE_SECRET, app.namespace, "queue", qname),
       };
       continue;
     }

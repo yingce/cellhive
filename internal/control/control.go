@@ -34,14 +34,6 @@ type WorkerLimits struct {
 	CpuMs *int `json:"cpuMs,omitempty"`
 }
 
-// LogPolicy overrides the runtime's log defaults for one immutable version.
-// Nil fields inherit the runtime default; a runtime-wide disabled setting is
-// always a hard cap.
-type LogPolicy struct {
-	Console    *bool `json:"console,omitempty"`
-	Invocation *bool `json:"invocation,omitempty"`
-}
-
 // Version is an immutable worker version. Deploys always allocate a new number.
 type Version struct {
 	Number    int               `json:"number"`
@@ -69,7 +61,6 @@ type Version struct {
 	CompatDate  string        `json:"compat_date,omitempty"`
 	CompatFlags []string      `json:"compat_flags,omitempty"`
 	Limits      *WorkerLimits `json:"limits,omitempty"`
-	LogPolicy   *LogPolicy    `json:"log_policy,omitempty"`
 }
 
 // Consumer configures a queue consumer (Cloudflare queues.consumers subset).
@@ -118,7 +109,6 @@ type DeploySpec struct {
 	CompatDate  string
 	CompatFlags []string
 	Limits      *WorkerLimits
-	LogPolicy   *LogPolicy
 }
 
 // Release is one entry of a worker's release log.
@@ -200,7 +190,6 @@ type WorkerView struct {
 	CompatDate  string        `json:"compat_date,omitempty"`
 	CompatFlags []string      `json:"compat_flags,omitempty"`
 	Limits      *WorkerLimits `json:"limits,omitempty"`
-	LogPolicy   *LogPolicy    `json:"log_policy,omitempty"`
 	// HostLabel is the worker's built-in domain label (ADR-131); empty means the
 	// label is derived from the namespace + worker name.
 	HostLabel      string            `json:"host_label,omitempty"`

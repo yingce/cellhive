@@ -423,9 +423,12 @@ func TestPrefixScanHighByteKeys(t *testing.T) {
 	}
 }
 
-// TestForgetSerializesWithOpen is the regression for Cell/Forget racing: Forget
-// must hold openMu so a cell is never unlinked while Cell is mid-open.
-func TestForgetSerializesWithOpen(t *testing.T) {
+// TestForgetDoesNotHoldOpenWhileWaiting is the regression for the
+// Forget/openMu deadlock: Forget must not hold openMu while waiting for busy
+// requests, because a busy request may itself need openMu to open a cell.
+// Cell/Forget still serialize through the evicting gate and openMu around the
+// unlink/close window.
+func TestForgetDoesNotHoldOpenWhileWaiting(t *testing.T) {
 	ctx := context.Background()
 	s, err := New(t.TempDir())
 	if err != nil {
@@ -440,17 +443,20 @@ func TestForgetSerializesWithOpen(t *testing.T) {
 	if err := c.Put(ctx, "k", []byte("v"), nil); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	held := false
+	freeDuringVerify := false
 	if err := s.ForgetWithVerify(ctx, sc, func() error {
-		held = !s.openMu.TryLock()
-		if !held {
+		freeDuringVerify = s.openMu.TryLock()
+		if freeDuringVerify {
 			s.openMu.Unlock()
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("forget: %v", err)
 	}
-	if !held {
-		t.Fatalf("Forget did not hold openMu during eviction")
+	if !freeDuringVerify {
+		t.Fatalf("Forget held openMu while waiting for busy requests")
+	}
+	if _, err := s.Open(ctx, sc); err != nil {
+		t.Fatalf("reopen after forget: %v", err)
 	}
 }

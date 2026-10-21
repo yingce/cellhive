@@ -321,7 +321,6 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		CompatibilityFlags: metadata.CompatibilityFlags,
 		Crons:              metadata.Crons, Consumers: metadata.Consumers,
 		Limits:     metadata.Limits,
-		LogPolicy:  metadata.LogPolicy,
 		Migrations: metadata.Migrations,
 	}
 	body, _ := json.Marshal(req)
@@ -384,7 +383,6 @@ type cloudflareWorkerMetadata struct {
 	Consumers          []control.Consumer
 	Migrations         []map[string]any
 	Limits             *control.WorkerLimits
-	LogPolicy          *control.LogPolicy
 	MainModule         string
 	AssetsJWT          string
 	AssetsToken        string
@@ -449,8 +447,7 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 			CpuMsNative *int `json:"cpuMs"`
 			SubRequests *int `json:"subrequests"`
 		} `json:"limits"`
-		LogPolicy *control.LogPolicy `json:"log_policy"`
-		Assets    struct {
+		Assets struct {
 			JWT    string `json:"jwt"`
 			Config struct {
 				Binding          string `json:"binding"`
@@ -467,7 +464,6 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		return err
 	}
 	out.MainModule, out.CompatibilityDate, out.CompatibilityFlags = raw.MainModule, raw.CompatibilityDate, raw.CompatibilityFlags
-	out.LogPolicy = raw.LogPolicy
 	if raw.Limits.CpuMs != nil && raw.Limits.CpuMsNative != nil && *raw.Limits.CpuMs != *raw.Limits.CpuMsNative {
 		return fmt.Errorf("limits.cpu_ms and limits.cpuMs disagree")
 	}
@@ -875,7 +871,7 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 			}
 			consumers = append(consumers, control.Consumer{Queue: queue, DeadLetterQueue: in.DeadLetterQueue, MaxBatchSize: in.Settings.BatchSize, MaxRetries: maxRetries, MaxConcurrency: in.Settings.MaxConcurrency, MaxBatchTimeoutSeconds: batchTimeout, RetryDelaySeconds: in.Settings.RetryDelay})
 		}
-		nv, err = s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy, SessionPolicy: v.SessionPolicy}, "wrangler-queue-consumer")
+		nv, err = s.Control.Deploy(r.Context(), ns, in.ScriptName, control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: consumers, Crons: v.Crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, SessionPolicy: v.SessionPolicy}, "wrangler-queue-consumer")
 		return err
 	})
 	if err != nil {

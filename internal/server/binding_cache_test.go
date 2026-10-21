@@ -96,10 +96,8 @@ func TestRuntimeVersionBindingsReadControlOwner(t *testing.T) {
 	if _, err := primary.Control.CreateApp(ctx, "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
-	yes := true
 	if _, err := primary.Control.Deploy(ctx, "acme", "web", control.DeploySpec{
 		BundleSHA: "sha", Vars: map[string]string{"RELEASE": "new"},
-		LogPolicy: &control.LogPolicy{Console: &yes, Invocation: &yes},
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +105,7 @@ func TestRuntimeVersionBindingsReadControlOwner(t *testing.T) {
 		t.Fatalf("follower unexpectedly has version 1: ok=%v err=%v", ok, err)
 	}
 	rr := do(t, follower.Handler(), http.MethodGet, "/v1/internal/worker/bindings?ns=acme&worker=web&version=1", "tok", nil)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"RELEASE":"new"`) || !strings.Contains(rr.Body.String(), `"invocation":true`) {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"RELEASE":"new"`) {
 		t.Fatalf("runtime version lookup did not reach owner: status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }

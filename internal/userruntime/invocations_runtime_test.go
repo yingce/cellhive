@@ -37,11 +37,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		case "/v1/internal/bundle":
 			io.WriteString(w, bundle)
 		case "/v1/internal/worker/bindings":
-			if r.URL.Query().Get("worker") == "quiet" {
-				io.WriteString(w, `{"bindings":{},"vars":{},"log_policy":{"invocation":false}}`)
-			} else {
-				io.WriteString(w, `{"bindings":{},"vars":{}}`)
-			}
+			io.WriteString(w, `{"bindings":{},"vars":{}}`)
 		case "/v1/internal/invocations":
 			if r.Header.Get("x-cellhive-internal-token") != "tok" {
 				http.Error(w, "auth", 401)
@@ -224,8 +220,10 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 	if quietRes.StatusCode != http.StatusOK {
 		t.Fatalf("quiet queue result = %d %s", quietRes.StatusCode, quietResult)
 	}
+	// Invocation logging is node-wide (ADR-239): a second worker persists its
+	// attempt as well, with records isolated by worker.
 	quietRecords, err := records.List(t.Context(), invocation.Filter{Namespace: "acme", Worker: "quiet"})
-	if err != nil || len(quietRecords) != 0 {
-		t.Fatalf("quiet worker persisted invocation: %+v %v", quietRecords, err)
+	if err != nil || len(quietRecords) == 0 {
+		t.Fatalf("second worker did not persist its invocation: %+v %v", quietRecords, err)
 	}
 }

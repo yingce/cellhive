@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -236,6 +237,18 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 	}
 	b.lists.Add(1)
 	base := b.path(prefix)
+	if st, err := os.Stat(base); err != nil || !st.IsDir() {
+		// R2 prefixes are arbitrary strings, not directories: a prefix like
+		// "meta." must match "meta.txt". Walk the parent and filter by the raw
+		// prefix instead of treating it as a directory path.
+		dir := prefix
+		if i := strings.LastIndex(dir, "/"); i >= 0 {
+			dir = dir[:i+1]
+		} else {
+			dir = ""
+		}
+		base = b.path(dir)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var kept []string // ascending, len <= limit+1
@@ -251,6 +264,9 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 			return rerr
 		}
 		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
 		if key <= after {
 			return nil
 		}

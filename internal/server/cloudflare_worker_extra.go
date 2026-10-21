@@ -255,7 +255,7 @@ func (s *Server) handleCloudflareWorkerSchedules(w http.ResponseWriter, r *http.
 	var newV control.Version
 	err = s.capturedWrite(r.Context(), control.Scope(), func() error {
 		var err error
-		newV, err = s.Control.Deploy(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: v.Consumers, Crons: crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy, SessionPolicy: v.SessionPolicy}, "wrangler-schedules")
+		newV, err = s.Control.Deploy(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), control.DeploySpec{BundleSHA: v.BundleSHA, Bindings: v.Bindings, Vars: v.Vars, Consumers: v.Consumers, Crons: crons, AssetsSHA: v.AssetsSHA, Assets: v.Assets, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, SessionPolicy: v.SessionPolicy}, "wrangler-schedules")
 		return err
 	})
 	if err != nil {

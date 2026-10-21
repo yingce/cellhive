@@ -710,7 +710,10 @@ export class ServiceBinding extends WorkerEntrypoint {
       }),
       body,
     });
-    if (!r.ok && r.status !== 404 && r.status !== 500) throw new Error("service.fetch: " + r.status);
+    if (!r.ok && r.status !== 404 && r.status !== 500) {
+      const detail = await r.text();
+      throw new Error("service.fetch: " + r.status + (detail ? " " + detail.slice(0, 200) : ""));
+    }
     return new Response(await r.arrayBuffer(), {
       status: r.status,
       headers: { "content-type": r.headers.get("content-type") || "text/plain" },

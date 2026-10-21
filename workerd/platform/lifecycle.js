@@ -30,16 +30,56 @@ export class Lifetime {
     Object.defineProperty(ctx,'waitUntil',{value:p=>original(this.background(p)),configurable:true});
     return ctx;
   }
-  response(res,onDone=()=>{}){
+  // Bounded read-ahead for response bodies that are normally delivered whole
+  // (JSON/text payloads): a fully consumed small body is returned as a
+  // memory-backed Response, so the RPC boundary does not need a per-chunk JS
+  // stream. Everything else (SSE, octet streams, bodies over the cap) keeps the
+  // tracking wrapper, so the isolate is never retired while a response body is
+  // still in flight. Buffering is bounded by BODY_BUFFER_CAP per response.
+  static BODY_BUFFER_CAP = 128 * 1024;
+  static SMALL_BODY_TYPE = /^(application\/json|application\/[a-z0-9.+-]*\+json|text\/plain)/i;
+  static concatChunks(chunks){
+    let total=0;for(const c of chunks)total+=c.byteLength;
+    const out=new Uint8Array(total);let off=0;
+    for(const c of chunks){out.set(c,off);off+=c.byteLength;}
+    return out;
+  }
+  async response(res,onDone=()=>{}){
     if(res.webSocket||res.status===101){this.pinned=true;onDone();return res;}
     if(!res.body){onDone();return res;}
     const release=this.hold();const reader=res.body.getReader();let finished=false;
     const finish=()=>{if(!finished){finished=true;release();onDone();}};
-    const body=new ReadableStream({
-      async pull(c){try{const r=await reader.read();if(r.done){finish();c.close();}else c.enqueue(r.value);}catch(e){finish();c.error(e);}},
-      async cancel(reason){try{await reader.cancel(reason);}finally{finish();}},
-    },{highWaterMark:0});
-    return new Response(body,{status:res.status,statusText:res.statusText,headers:res.headers});
+    const replay=(initial)=>{
+      let pending=initial,pos=0;
+      return new ReadableStream({
+        async pull(c){try{
+          if(pending&&pos<pending.length){c.enqueue(pending[pos++]);if(pos===pending.length)pending=null;return;}
+          const r=await reader.read();if(r.done){finish();c.close();}else c.enqueue(r.value);
+        }catch(e){finish();c.error(e);}},
+        async cancel(reason){try{await reader.cancel(reason);}finally{finish();}},
+      },{highWaterMark:0});
+    };
+    const contentType=String(res.headers.get("content-type")||"").toLowerCase();
+    if(Lifetime.SMALL_BODY_TYPE.test(contentType)){
+      const chunks=[];let total=0,oversize=false;
+      try{
+        for(;;){
+          const r=await reader.read();
+          if(r.done)break;
+          if(!(r.value instanceof Uint8Array)){oversize=true;break;}
+          chunks.push(r.value);total+=r.value.byteLength;
+          if(total>Lifetime.BODY_BUFFER_CAP){oversize=true;break;}
+        }
+      }catch(e){finish();throw e;}
+      if(!oversize){
+        finish();
+        if(chunks.length===0)return new Response(null,{status:res.status,statusText:res.statusText,headers:res.headers});
+        const body=chunks.length===1?chunks[0]:Lifetime.concatChunks(chunks);
+        return new Response(body,{status:res.status,statusText:res.statusText,headers:res.headers});
+      }
+      return new Response(replay(chunks),{status:res.status,statusText:res.statusText,headers:res.headers});
+    }
+    return new Response(replay(null),{status:res.status,statusText:res.statusText,headers:res.headers});
   }
 }
 

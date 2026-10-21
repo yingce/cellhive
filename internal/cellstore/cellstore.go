@@ -163,11 +163,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
-	// Another goroutine may have opened it while we waited. The evicting re-check
-	// is belt-and-braces: it CANNOT fire, because evicting is only set while the
-	// setter holds openMu (see the field invariant), which this goroutine holds.
-	// If it ever did fire, cond.Wait() would deadlock -- so this loop is a guard
-	// on the invariant, not a path that should ever run.
+	// Another goroutine may have opened it while we waited. The evicting
+	// re-check handles a forget that marked the key while we were waiting for
+	// openMu; Cell and BeginRequest both wait out an eviction.
 	s.mu.Lock()
 	for s.evicting[key] {
 		s.cond.Wait()
@@ -334,24 +332,85 @@ func (s *Store) ForgetWithVerify(ctx context.Context, sc cell.Scope, verify func
 	return s.forget(ctx, sc, verify)
 }
 
+// TryForget evicts only when the cell is idle. Unlike forget it never waits
+// for in-flight requests, so a request-path caller cannot deadlock against a
+// busy request that still needs openMu/Cell. Returns false when the caller
+// should retry later.
+func (s *Store) TryForget(ctx context.Context, sc cell.Scope, verify func() error) (bool, error) {
+	p, err := s.Path(sc)
+	if err != nil {
+		return false, err
+	}
+	key := sc.String()
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.mu.Lock()
+	if s.evicting[key] || s.busy[key] > 0 {
+		s.mu.Unlock()
+		return false, nil
+	}
+	s.evicting[key] = true
+	c := s.cells[p]
+	if c != nil {
+		delete(s.cells, p)
+		if e := s.byPath[p]; e != nil {
+			s.lru.Remove(e)
+			delete(s.byPath, p)
+		}
+	}
+	s.mu.Unlock()
+	if verify != nil {
+		if err := verify(); err != nil {
+			s.mu.Lock()
+			delete(s.evicting, key)
+			s.cond.Broadcast()
+			s.mu.Unlock()
+			return false, err
+		}
+	}
+	if c != nil {
+		if s.Drop != nil {
+			_ = s.Drop(ctx, sc)
+		}
+		_ = c.Close()
+	}
+	for _, path := range []string{p, p + "-wal", p + "-shm", pagedMarkerPath(p)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.mu.Lock()
+			delete(s.evicting, key)
+			s.cond.Broadcast()
+			s.mu.Unlock()
+			return false, err
+		}
+	}
+	s.mu.Lock()
+	delete(s.evicting, key)
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	s.evicted.Add(1)
+	return true, nil
+}
+
 func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) error {
 	p, err := s.Path(sc)
 	if err != nil {
 		return err
 	}
 	key := sc.String()
-	// openMu serializes eviction against Cell opening: a cell is never unlinked
-	// while another goroutine is mid-open (which would orphan its writes).
-	s.openMu.Lock()
-	defer s.openMu.Unlock()
+	// Mark the key evicting under s.mu, but do not hold openMu while waiting
+	// for in-flight requests: a busy request may call Cell and need openMu,
+	// which would deadlock against this wait. New Cell/BeginRequest callers
+	// already wait on evicting, so no new request can enter the cell.
 	s.mu.Lock()
-	// Wait for in-flight requests and other evictions: after this loop the cell
-	// cannot be reached through BeginRequest/Cell until the gate is released.
-	for s.evicting[key] || s.busy[key] > 0 {
+	for s.evicting[key] {
 		s.cond.Wait()
 	}
 	s.evicting[key] = true
+	for s.busy[key] > 0 {
+		s.cond.Wait()
+	}
 	s.mu.Unlock()
+
 	if verify != nil {
 		if err := verify(); err != nil {
 			s.mu.Lock()
@@ -361,6 +420,11 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 			return err
 		}
 	}
+
+	// openMu serializes unlink/close against cold opens. All in-flight requests
+	// have drained, and evicting keeps new ones out, so no Cell can be opened
+	// for this path while we remove it.
+	s.openMu.Lock()
 	s.mu.Lock()
 	c := s.cells[p]
 	if c != nil {
@@ -378,19 +442,22 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 		}
 		_ = c.Close()
 	}
+	var removeErr error
 	for _, path := range []string{p, p + "-wal", p + "-shm", pagedMarkerPath(p)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			s.mu.Lock()
-			delete(s.evicting, key)
-			s.cond.Broadcast()
-			s.mu.Unlock()
-			return err
+			removeErr = err
+			break
 		}
 	}
+	s.openMu.Unlock()
+
 	s.mu.Lock()
 	delete(s.evicting, key)
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	if removeErr != nil {
+		return removeErr
+	}
 	s.evicted.Add(1)
 	return nil
 }

@@ -158,7 +158,6 @@ async function persistInvocation(env, record) {
 async function startInvocation(env,body,kind) {
   // The versioned policy is authoritative. If its lookup fails, keep running
   // the handler but do not persist a possibly opted-out Worker's invocation.
-  const spec = env.CH_INVOCATION_LOGS === "1" ? await specFor(env, body) : null;
   const source = kind === "queue" ? [body.namespace,body.worker,body.queue,(body.messages||[]).map(m=>m.id).sort()]
     : kind === "workflow" ? [body.namespace,body.worker,body.workflow,body.id]
     : [body.namespace,body.worker,body.token||"",body.scheduled_time_ms,body.cron];
@@ -182,7 +181,7 @@ async function startInvocation(env,body,kind) {
     invocation_id:invocationId,request_id:requestId,traceparent,logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||body.workflow||"",
     attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):1,
     started_ms:Date.now(),status:"running",logs:[],messages,producer_links:producerLinks,
-    _logging_enabled: env.CH_INVOCATION_LOGS === "1" && spec?.ok !== false && spec?.log_policy?.invocation !== false,
+    _logging_enabled: env.CH_INVOCATION_LOGS === "1",
   });
 }
 
@@ -312,9 +311,58 @@ async function dispatchWorkflows(req, env, ctx) {
   }
 }
 
+// Live log-capture demand (ADR-238): queue/scheduled/workflow dispatch loads
+// the tenant worker with native Tail only while a subscription exists. The
+// answer is refreshed (at most once per second) before each load because
+// dispatch is low-frequency and a stale answer could miss the first event.
+const LOG_CAPTURE_POLL_MS = 1000;
+let captureMode = "tail";
+let captureWorkers = new Set();
+let capturePolledAt = 0;
+let captureInflight = null;
+let captureOK = false;
+
+async function pollLogCaptureOnce(env) {
+  try {
+    const r = await fetch(env.CELL_URL + "/v1/internal/log-capture", {
+      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+    });
+    if (!r.ok) return false;
+    const body = await r.json();
+    captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
+    captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
+    captureOK = true;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function refreshLogCapture(env) {
+  if (captureInflight) { await captureInflight.catch(() => {}); return captureOK; }
+  const now = Date.now();
+  if (now - capturePolledAt < LOG_CAPTURE_POLL_MS) return captureOK;
+  capturePolledAt = now;
+  const p = pollLogCaptureOnce(env).finally(() => { captureInflight = null; });
+  captureInflight = p;
+  return p;
+}
+
+function tailEnabled(env, ns, worker) {
+  if (env.CH_LOG_CAPTURE === "0") return false;
+  if (captureMode === "all") return true;
+  if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
+  return captureWorkers.has(ns + "/" + worker);
+}
+
+function variantSuffix(tailOn) {
+  return tailOn ? "~t" : "~n";
+}
+
 // loadWorkflowWorker rewrites the tenant's `cloudflare:workers` import to the
 // platform WorkflowEntrypoint base and loads the workflow wrapper (P2 workflows).
 async function loadWorkflowWorker(env, ctx, body) {
+  await refreshLogCapture(env);
   let source = await loadSource(env, body.bundle_sha);
   source = source
     .replaceAll('"cloudflare:workers"', '"cellhive-workflow.js"')
@@ -325,6 +373,7 @@ async function loadWorkflowWorker(env, ctx, body) {
   // but must not reuse the old isolate/env (see loader.js workerStub).
   const wfVer = body.version != null ? `${body.version}-` : "";
   const spec = await specFor(env, body);
+  const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
@@ -340,13 +389,13 @@ async function loadWorkflowWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars),
     globalOutbound: env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+    ...(tailOn ? { tails: [ctx.exports.TenantTail({
       props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
-    })] }),
+    })] } : {}),
   };
   return checkedWorkerGet(
     env.LOADER,
-    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}~wf`,
+    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}~wf${variantSuffix(tailOn)}`,
     workerCode,
     spec.vars,
     spec.bindings,
@@ -383,14 +432,16 @@ function tenantEnv(env, ctx, spec, vars) {
 }
 
 async function loadWorker(env, ctx, body) {
+  await refreshLogCapture(env);
   const source = (await loadSource(env, body.bundle_sha))
     .replaceAll('"cloudflare:workers"','"__cellhive-invocation-workers.js"')
     .replaceAll("'cloudflare:workers'","'__cellhive-invocation-workers.js'");
   const spec = await specFor(env, body);
+  const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
   // Same id format as loader.js workerStub (ADR-126/127): a worker's fetch and
   // queue/scheduled/service handlers share one isolate per (worker, version).
   const ver = body.version != null ? `${body.version}-` : "";
-  const tailKey = env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? "" : crypto.randomUUID();
+  const tailKey = tailOn ? crypto.randomUUID() : "";
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: [...new Set([...(body.compat_flags || spec.compat_flags || []).filter(f=>f!=="no_nodejs_als"), "nodejs_als"])],
@@ -407,13 +458,13 @@ async function loadWorker(env, ctx, body) {
     },
     env: tenantEnv(env, ctx, spec.bindings, spec.vars, body.namespace, body.worker),
     globalOutbound: env.OUTBOUND,
-    ...(env.CH_LOG_CAPTURE === "0" || spec.ok === false || spec.log_policy?.console === false ? {} : { tails: [ctx.exports.TenantTail({
+    ...(tailOn ? { tails: [ctx.exports.TenantTail({
       props: { namespace: body.namespace, worker: body.worker, version: body.version || 0, tailKey },
-    })] }),
+    })] } : {}),
   };
   return checkedWorkerGet(
     env.LOADER,
-    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}`,
+    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}${variantSuffix(tailOn)}`,
     workerCode,
     spec.vars,
     spec.bindings,
@@ -487,7 +538,7 @@ async function fetchSpec(env, ns, worker, version) {
     });
     if (!r.ok) return { ok: false, bindings: {}, vars: {} };
     const j = await r.json();
-    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits, log_policy:j.log_policy };
+    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits };
   } catch (e) {
     return { ok: false, bindings: {}, vars: {} };
   }

@@ -896,10 +896,10 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	var v Version
 	var bindings, vars, consumers, crons string
 	var assets sql.NullString
-	var flags, limits, logPolicy string
+	var flags, limits string
 	var number int
 	if err := scan(&number, &v.BundleSHA, &v.AssetsSHA, &v.StorageID, &v.SessionPolicy,
-		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &logPolicy, &v.CreatedMs, &v.Actor); err != nil {
+		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &v.CreatedMs, &v.Actor); err != nil {
 		return Version{}, err
 	}
 	if flags != "" {
@@ -911,13 +911,6 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 			return Version{}, err
 		}
 		v.Limits = &l
-	}
-	if logPolicy != "" && logPolicy != "{}" {
-		var p LogPolicy
-		if err := unmarshal([]byte(logPolicy), &p); err != nil {
-			return Version{}, err
-		}
-		v.LogPolicy = &p
 	}
 	v.Number = number
 	if err := unmarshal([]byte(bindings), &v.Bindings); err != nil {
@@ -942,11 +935,11 @@ func scanVersion(scan func(dest ...any) error) (Version, error) {
 	return v, nil
 }
 
-const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, log_policy, created_ms, actor`
+const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor`
 
 // versionColsAliased is versionCols qualified with the versions-table alias "v"
 // for queries that join workers (both tables have storage_id).
-const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.limits, v.log_policy, v.created_ms, v.actor`
+const versionColsAliased = `v.number, v.bundle_sha, v.assets_sha, v.storage_id, v.session_policy, v.bindings, v.vars, v.consumers, v.crons, v.assets, v.compat_date, v.compat_flags, v.limits, v.created_ms, v.actor`
 
 func (s *Store) getVersion(ctx context.Context, c *cellstore.Cell, ns, worker string, number int) (Version, bool, error) {
 	row := c.DB.QueryRowContext(ctx,
@@ -1102,7 +1095,7 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			Number: next, BundleSHA: spec.BundleSHA, AssetsSHA: spec.AssetsSHA,
 			Bindings: bindings, Vars: spec.Vars, Consumers: spec.Consumers,
 			Crons: spec.Crons, Assets: spec.Assets, StorageID: storageID,
-			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags, Limits: spec.Limits, LogPolicy: spec.LogPolicy,
+			CompatDate: spec.CompatDate, CompatFlags: spec.CompatFlags, Limits: spec.Limits,
 			CreatedMs: s.now().UnixMilli(), Actor: actor, SessionPolicy: spec.SessionPolicy,
 		}
 		var assets any
@@ -1111,14 +1104,13 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			assets = string(b)
 		}
 		limits := jsonOr(v.Limits, "{}")
-		logPolicy := jsonOr(v.LogPolicy, "{}")
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO versions(ns, worker, number, bundle_sha, assets_sha, storage_id, session_policy,
-				                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, log_policy, created_ms, actor, secret_snapshot)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+				                      bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor, secret_snapshot)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
 			ns, worker, v.Number, v.BundleSHA, v.AssetsSHA, v.StorageID, v.SessionPolicy,
 			jsonOr(v.Bindings, "[]"), jsonOr(v.Vars, "{}"), jsonOr(v.Consumers, "[]"),
-			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, logPolicy, v.CreatedMs, v.Actor); err != nil {
+			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, v.CreatedMs, v.Actor); err != nil {
 			return err
 		}
 		if _, err := t.ExecContext(ctx,
@@ -1988,7 +1980,7 @@ func (s *Store) VersionEnv(ctx context.Context, ns, worker string, number int) (
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }
@@ -2023,7 +2015,7 @@ func (s *Store) VersionEnvBySHA(ctx context.Context, ns, worker, sha string) (Wo
 	return WorkerView{
 		Namespace: ns, Worker: worker, Version: v.Number, BundleSHA: v.BundleSHA,
 		AssetsSHA: v.AssetsSHA, Assets: v.Assets, Bindings: v.Bindings, Vars: v.Vars,
-		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits, LogPolicy: v.LogPolicy,
+		StorageID: v.StorageID, CompatDate: v.CompatDate, CompatFlags: v.CompatFlags, Limits: v.Limits,
 		HostLabel: hostLabel, ClassStorage: aliases, DeletedClasses: deleted,
 	}, true, nil
 }

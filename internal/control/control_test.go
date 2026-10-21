@@ -205,37 +205,6 @@ func TestDeployPersistsWorkerLimits(t *testing.T) {
 	}
 }
 
-func TestLogPolicyIsVersionedAndPreservedBySecretChange(t *testing.T) {
-	ctx := context.Background()
-	s := newStore(t, true)
-	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
-		t.Fatal(err)
-	}
-	off, on := false, true
-	v1, err := s.Deploy(ctx, "acme", "quiet", DeploySpec{BundleSHA: "sha1", LogPolicy: &LogPolicy{Console: &off, Invocation: &on}}, "ops")
-	if err != nil || v1.LogPolicy == nil || *v1.LogPolicy.Console || !*v1.LogPolicy.Invocation {
-		t.Fatalf("deploy policy = %+v, %v", v1.LogPolicy, err)
-	}
-	if err := s.PutSecret(ctx, "acme", "quiet", "TOKEN", []byte("value"), "ops"); err != nil {
-		t.Fatal(err)
-	}
-	view, ok, err := s.WorkerEnv(ctx, "acme", "quiet")
-	if err != nil || !ok || view.Version != 2 || view.LogPolicy == nil || *view.LogPolicy.Console || !*view.LogPolicy.Invocation {
-		t.Fatalf("secret version policy = %+v, version=%d ok=%v err=%v", view.LogPolicy, view.Version, ok, err)
-	}
-	v2, err := s.Deploy(ctx, "acme", "quiet", DeploySpec{BundleSHA: "sha2", LogPolicy: &LogPolicy{Console: &on, Invocation: &off}}, "ops")
-	if err != nil || v2.Number != 3 {
-		t.Fatalf("next deploy = %+v, %v", v2, err)
-	}
-	if _, err := s.Promote(ctx, "acme", "quiet", 1, "ops"); err != nil {
-		t.Fatal(err)
-	}
-	view, ok, err = s.WorkerEnv(ctx, "acme", "quiet")
-	if err != nil || !ok || view.LogPolicy == nil || *view.LogPolicy.Console || !*view.LogPolicy.Invocation {
-		t.Fatalf("rollback policy = %+v ok=%v err=%v", view.LogPolicy, ok, err)
-	}
-}
-
 func TestProjectionAndETag(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t, true)

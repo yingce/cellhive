@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,7 +22,10 @@ import (
 	"time"
 
 	"cellhive/internal/config"
+	"cellhive/internal/ingress"
+	"cellhive/internal/plangen"
 	"cellhive/internal/runtimelog"
+	"cellhive/internal/staticgen"
 	"cellhive/internal/userruntime"
 	"cellhive/internal/userruntimepool"
 	"cellhive/internal/workerdpool"
@@ -56,6 +61,11 @@ func main() {
 		log.Error("invalid CELLHIVE_TENANT_LOG_CAPTURE", "err", err)
 		os.Exit(1)
 	}
+	invocationLogging, err := invocationLogging()
+	if err != nil {
+		log.Error("invalid CELLHIVE_INVOCATION_LOGS", "err", err)
+		os.Exit(1)
+	}
 	runtimeCfg := userruntime.Config{
 		CellURL:           cellURL,
 		CellToken:         cellToken,
@@ -69,12 +79,28 @@ func main() {
 		DispatchToken:     dispatchToken,
 		LogToken:          logToken,
 		DisableTenantLogs: !tenantLogCapture,
-		InvocationLogging: true,
+		InvocationLogging: invocationLogging,
 		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
 		TraceSampleRatio:  traceRatio(),
 		DoDirect:          getenv("CELLHIVE_DO_DIRECT", ""),
 		OutboundAllow:     outboundAllow(),
 		EgressAllow:       egressAllow(),
+	}
+	if v := getenv("CELLHIVE_ISOLATE_MAX", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Error("invalid CELLHIVE_ISOLATE_MAX", "value", v)
+			os.Exit(1)
+		}
+		runtimeCfg.IsolateMax = n
+	}
+	if v := getenv("CELLHIVE_ISOLATE_BYTES", ""); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 1<<20 {
+			log.Error("invalid CELLHIVE_ISOLATE_BYTES", "value", v)
+			os.Exit(1)
+		}
+		runtimeCfg.IsolateBytes = n
 	}
 	capnpPath, err := userruntime.Render(dataDir, runtimeCfg)
 	if err != nil {
@@ -101,13 +127,95 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var frontServer *ingress.Server
+	if ingressPort := envInt("CELLHIVE_INGRESS_PORT", 0); ingressPort > 0 {
+		upstream := getenv("CELLHIVE_INGRESS_UPSTREAM", fmt.Sprintf("127.0.0.1:%d", publicPort))
+		var table *ingress.Table
+		if path := getenv("CELLHIVE_INGRESS_TABLE", ""); path != "" {
+			loaded, err := ingress.LoadTable(path)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Error("load ingress table", "path", path, "err", err)
+					os.Exit(1)
+				}
+				log.Info("ingress table not present yet; starting dynamic-only", "path", path)
+			} else {
+				table = loaded
+				if table.Default == "" {
+					table.Default = upstream
+				}
+			}
+		}
+		front, err := ingress.New(fmt.Sprintf(":%d", ingressPort), table, upstream, log)
+		if err != nil {
+			log.Error("start ingress", "err", err)
+			os.Exit(1)
+		}
+		frontServer = front
+		go func() {
+			if err := front.Serve(ctx); err != nil {
+				log.Error("ingress exited", "err", err)
+			}
+		}()
+		if path := getenv("CELLHIVE_INGRESS_TABLE", ""); path != "" {
+			go front.WatchTable(ctx, path, time.Second)
+		}
+		log.Info("ingress listening", "port", ingressPort, "upstream", upstream, "table", getenv("CELLHIVE_INGRESS_TABLE", ""))
+	}
+	planPath := getenv("CELLHIVE_STATIC_PLAN", "")
+	staticHosts := splitCSV(getenv("CELLHIVE_STATIC_HOSTS", ""))
+	hotMax := envInt("CELLHIVE_HOT_MAX", 0)
+	var staticMgr *staticgen.Manager
+	if planPath != "" || len(staticHosts) > 0 || hotMax > 0 {
+		staticMgr, err = staticgen.NewManager(staticgen.Config{
+			WorkerdBin: workerd,
+			Root:       filepath.Join(dataDir, "staticgen"),
+			PortBase:   envInt("CELLHIVE_STATIC_PORT_BASE", 19000),
+			DrainGrace: drainGrace,
+			TablePath:  getenv("CELLHIVE_INGRESS_TABLE", ""),
+			Logger: func(format string, args ...any) {
+				log.Info(fmt.Sprintf(format, args...))
+			},
+		})
+		if err != nil {
+			log.Error("start staticgen", "err", err)
+			os.Exit(1)
+		}
+		defer staticMgr.Close()
+		if adminPort := envInt("CELLHIVE_INGRESS_ADMIN_PORT", 0); adminPort > 0 && frontServer != nil {
+			startIngressAdmin(ctx, adminPort, frontServer, staticMgr, log)
+		}
+		switch {
+		case planPath != "":
+			go staticMgr.Watch(ctx, planPath, time.Second)
+			log.Info("static generation manager watching plan", "plan", planPath, "port_base", envInt("CELLHIVE_STATIC_PORT_BASE", 19000))
+		case hotMax > 0:
+			if frontServer == nil {
+				log.Error("CELLHIVE_HOT_MAX requires CELLHIVE_INGRESS_PORT")
+				os.Exit(1)
+			}
+			go runHotLoop(ctx, frontServer, staticMgr, cellURL, cellToken, logToken, log)
+			log.Info("hot-set static generation enabled", "max", hotMax, "port_base", envInt("CELLHIVE_STATIC_PORT_BASE", 19000))
+		default:
+			go runStaticHostsLoop(ctx, staticMgr, cellURL, cellToken, logToken, staticHosts, log)
+			log.Info("static generation manager building plans", "hosts", strings.Join(staticHosts, ","), "port_base", envInt("CELLHIVE_STATIC_PORT_BASE", 19000))
+		}
+	}
 	advertise := getenv("CELLHIVE_USER_RUNTIME_ADVERTISE", "")
 	if advertise == "" {
 		advertise = getenv("POD_IP", "127.0.0.1")
 	}
-	go runtimelog.RegisterLoop(ctx, getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL), cellToken, []string{
-		fmt.Sprintf("http://%s:%d", advertise, publicPort),
-		fmt.Sprintf("http://%s:%d", advertise, internalPort),
+	go runtimelog.RegisterLoopFunc(ctx, getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL), cellToken, func() []string {
+		urls := []string{
+			fmt.Sprintf("http://%s:%d", advertise, publicPort),
+			fmt.Sprintf("http://%s:%d", advertise, internalPort),
+		}
+		if staticMgr != nil {
+			if tailURL := staticMgr.TailURL(advertise); tailURL != "" {
+				urls = append(urls, tailURL)
+			}
+		}
+		return urls
 	})
 	log.Info("user-runtime starting", "workerd", workerd, "config", capnpPath,
 		"public", fmt.Sprintf(":%d", publicPort), "internal", fmt.Sprintf(":%d", internalPort), "cell", cellURL)
@@ -267,6 +375,19 @@ func traceRatio() float64 {
 	return 0.01
 }
 
+// invocationLogging is the node-wide switch for durable Queue/Cron/Workflow
+// invocation records (ADR-239); it is no longer a per-version policy.
+func invocationLogging() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(getenv("CELLHIVE_INVOCATION_LOGS", "on"))) {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be exactly on or off")
+	}
+}
+
 func tenantLogCapture() (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(getenv("CELLHIVE_TENANT_LOG_CAPTURE", "on"))) {
 	case "on":
@@ -331,4 +452,83 @@ func envList(name string) []string {
 
 func egressAllow() []string {
 	return envList("CELLHIVE_CAP_EGRESS")
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// newPlanBuilder wires the platform module paths and AI settings needed to
+// render workers that use platform bindings.
+func newPlanBuilder(cellURL, cellToken, logToken string) *plangen.Builder {
+	return plangen.New(plangen.Config{
+		CellURL: cellURL, CellToken: cellToken,
+		PlatformJS:   getenv("CELLHIVE_USER_RUNTIME_JS", "workerd/user-runtime"),
+		FacadesJS:    getenv("CELLHIVE_FACADES_JS", "workerd/platform/facades.js"),
+		AIURL:        getenv("CELLHIVE_AI_URL", ""),
+		AIKey:        getenv("CELLHIVE_AI_KEY", ""),
+		LogToken:     logToken,
+		MinimalMode:  staticMinimalMode(getenv("CELLHIVE_STATIC_MINIMAL", "")),
+		TenantEgress: outboundAllow(),
+	})
+}
+
+// runStaticHostsLoop periodically rebuilds the static plan for the configured
+// hosts from the cell-agent projection and applies it when it changes. Hosts
+// that need bindings/assets/path mounting are skipped and stay on the dynamic
+// loader (the ingress falls back per Host).
+func runStaticHostsLoop(ctx context.Context, mgr *staticgen.Manager, cellURL, cellToken, logToken string, hosts []string, log *slog.Logger) {
+	builder := newPlanBuilder(cellURL, cellToken, logToken)
+	var last []byte
+	apply := func() {
+		plan, skipped, err := builder.Build(ctx, hosts)
+		if err != nil {
+			log.Warn("static plan build failed", "err", err)
+			return
+		}
+		for _, s := range skipped {
+			log.Info("static plan skipped host", "host", s.Host, "reason", s.Reason)
+		}
+		data, err := json.Marshal(plan)
+		if err != nil {
+			log.Warn("static plan encode failed", "err", err)
+			return
+		}
+		if bytes.Equal(data, last) {
+			return
+		}
+		if err := mgr.Apply(ctx, plan); err != nil {
+			log.Warn("static plan apply failed", "err", err)
+			return
+		}
+		last = data
+	}
+	apply()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			apply()
+		}
+	}
+}
+
+func staticMinimalMode(v string) string {
+	switch v {
+	case "1", "on", "true":
+		return "on"
+	case "0", "off", "false":
+		return "off"
+	default:
+		return "auto"
+	}
 }

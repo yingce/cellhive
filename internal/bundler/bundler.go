@@ -121,6 +121,10 @@ func Build(ctx context.Context, opts Options) ([]byte, error) {
 	}
 	if opts.NodeJSCompat {
 		args = append(args, "--conditions=workerd,worker,webworker,node")
+		// CJS packages such as pg expose their entry point through `main`; the
+		// neutral platform ignored it, so NodeJSCompat bundles could not resolve
+		// them at all. Keep `module` first for ESM, then `main` for CJS interop.
+		args = append(args, "--main-fields=module,main")
 	}
 	for _, r := range opts.Rules {
 		loader := loaderFor(r.Type)

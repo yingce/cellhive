@@ -4087,7 +4087,9 @@ export default {
 // TestUserRuntimeCapturesConsoleWithNativeTail verifies that the trusted host
 // attaches a native Tail Fetcher to a dynamically loaded tenant. The tenant
 // request succeeds and its structured console arguments reach the platform
-// endpoint under the host-bound namespace and worker identity.
+// endpoint under the host-bound namespace and worker identity. Tail capture is
+// subscription-driven (ADR-238); this stub has no log-capture endpoint, so the
+// loader keeps the legacy all-on fallback and every worker is observed.
 func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
@@ -4100,7 +4102,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		},
 		"workers": []any{
 			map[string]any{"worker": "web", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}},
-			map[string]any{"worker": "quiet", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog", "log_policy": map[string]any{"console": false}}},
+			map[string]any{"worker": "quiet", "active": 1, "version": map[string]any{"number": 1, "bundle_sha": "shaLog"}},
 		},
 	}}}
 	var mu sync.Mutex
@@ -4288,15 +4290,46 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if resp.StatusCode != 500 || !strings.Contains(body, "tail-boom") {
 		t.Fatalf("quiet fetch = %d %q, want tenant exception response", resp.StatusCode, body)
 	}
-	time.Sleep(250 * time.Millisecond)
-	if err := collect(); err != nil {
-		t.Fatal(err)
-	}
+	// Tail capture is subscription-driven (ADR-238); this stub has no
+	// log-capture endpoint, so the loader keeps the legacy all-on fallback and
+	// the second worker is observed too. Its events land in its own ring.
 	mu.Lock()
-	quietLogCount := len(logRequests)
+	webLogs := len(logRequests)
 	mu.Unlock()
-	if quietLogCount != 2 {
-		t.Fatalf("quiet worker emitted logs: requests=%d, want 2 from web only", quietLogCount)
+	if webLogs != 2 {
+		t.Fatalf("web tail captures = %d, want 2", webLogs)
+	}
+	var quietSince uint64
+	quietEvents := 0
+	quietDeadline := time.Now().Add(5 * time.Second)
+	for {
+		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=quiet&since="+strconv.FormatUint(quietSince, 10), nil)
+		req.Header.Set("x-cellhive-internal-token", "dev-log-token")
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Events []struct {
+				Seq uint64 `json:"seq"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+			res.Body.Close()
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		for _, item := range page.Events {
+			quietSince = item.Seq
+			quietEvents++
+		}
+		if quietEvents > 0 || time.Now().After(quietDeadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if quietEvents == 0 {
+		t.Fatal("second worker was not captured despite no version-level deny")
 	}
 	// Concurrent native Tail invocations must retain every request identity while
 	// sharing the trusted ingest transport across more than one event.

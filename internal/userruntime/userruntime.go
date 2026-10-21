@@ -131,6 +131,11 @@ type Config struct {
 	// additionally enforces PoolTarget on both public and internal sockets.
 	PoolMode   bool
 	PoolTarget *ExecutionTarget
+	// IsolateMax/IsolateBytes bound the public loader's warm isolate set.
+	// Zero uses the fixed defaults (128 / 256MiB); deployments inject
+	// CELLHIVE_ISOLATE_MAX / CELLHIVE_ISOLATE_BYTES instead of probing the host.
+	IsolateMax   int
+	IsolateBytes int64
 }
 
 type ExecutionTarget struct {
@@ -220,6 +225,8 @@ const config :Workerd.Config = (
         (name = "HOST_TTL_MS", text = "{{.HostCacheTTLMs}}"),
         (name = "REV_POLL_MS", text = "{{.RevPollMs}}"),
         (name = "HOST_LOOKUP_MAX_PER_SEC", text = "{{.HostLookupMaxPerSec}}"),
+        (name = "CH_ISOLATE_MAX", text = "{{.IsolateMax}}"),
+        (name = "CH_ISOLATE_BYTES", text = "{{.IsolateBytes}}"),
       ],
       globalOutbound = "private-outbound",
     )),
@@ -238,6 +245,12 @@ const config :Workerd.Config = (
 // Render copies the platform JS into dir and writes the workerd config, returning
 // its path.
 func Render(dir string, cfg Config) (string, error) {
+	if cfg.IsolateMax <= 0 {
+		cfg.IsolateMax = DefaultIsolateMax
+	}
+	if cfg.IsolateBytes <= 0 {
+		cfg.IsolateBytes = IsolateBytesFor(cfg.IsolateMax)
+	}
 	if cfg.CellURL == "" || cfg.InternalPort == 0 || cfg.PublicPort == 0 {
 		return "", errors.New("userruntime: CellURL, InternalPort and PublicPort are required")
 	}

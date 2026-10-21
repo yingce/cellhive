@@ -110,8 +110,63 @@ async function ready(env) {
   return json({ ready: true, projection_age_ms: 0, cell: "ok" });
 }
 
+// Live log-capture demand (ADR-238): DO facets attach native Tail only while a
+// subscription exists. A facet's code class is fixed once its container is
+// created, so this gate applies to a facet's cold load; toggling affects later
+// facet instances, not ones already resident (no destructive facet abort).
+const LOG_CAPTURE_POLL_MS = 1000;
+let captureMode = "tail";
+let captureWorkers = new Set();
+let capturePolledAt = 0;
+let captureInflight = null;
+let captureOK = false;
+
+async function pollLogCaptureOnce(env) {
+  try {
+    const r = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/v1/internal/log-capture", {
+      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+    });
+    if (!r.ok) return false;
+    const body = await r.json();
+    captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
+    captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
+    captureOK = true;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function maybePollLogCapture(env, ctx) {
+  if (captureInflight) return;
+  const now = Date.now();
+  if (now - capturePolledAt < LOG_CAPTURE_POLL_MS) return;
+  capturePolledAt = now;
+  const p = pollLogCaptureOnce(env).finally(() => { captureInflight = null; });
+  captureInflight = p;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p.catch(() => {}));
+}
+
+async function refreshLogCapture(env) {
+  if (captureInflight) { await captureInflight.catch(() => {}); return captureOK; }
+  const now = Date.now();
+  if (now - capturePolledAt < LOG_CAPTURE_POLL_MS) return captureOK;
+  capturePolledAt = now;
+  const p = pollLogCaptureOnce(env).finally(() => { captureInflight = null; });
+  captureInflight = p;
+  return p;
+}
+
+function tailEnabled(env, ns, worker) {
+  if (env.CH_LOG_CAPTURE === "0") return false;
+  if (captureMode === "all") return true;
+  if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
+  return captureWorkers.has(ns + "/" + worker);
+}
+
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
+    maybePollLogCapture(env, ctx);
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
     if (url.pathname === "/healthz") return new Response("ok");
@@ -907,6 +962,7 @@ export class Host extends DurableObject {
       }
     }
     const facet = this.ctx.facets.get(facetId, async () => {
+      await refreshLogCapture(this.env);
       // CF parity: a Durable Object's env must expose the worker's bindings.
       // Fetch the worker's binding spec once (cold path); the tenant's base class
       // (cellhive-do.js) builds the facades and merges them into this.env, since
@@ -936,6 +992,7 @@ export class Host extends DurableObject {
         }
       }
       const facetSrc = renderFacetModule(doClasses);
+      const tailOn = policyLoaded && tailEnabled(this.env, spec.namespace, spec.worker);
       const workerCode = {
         compatibilityDate: spec.compat_date || "2026-06-15",
         compatibilityFlags: spec.limits?.subrequests ? [...new Set([...(spec.compat_flags || []), "nodejs_als"])] : (spec.compat_flags || []),
@@ -956,11 +1013,11 @@ export class Host extends DurableObject {
         ),
         env: buildFacetEnv(this.ctx, this.env, bs, spec),
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
-        ...(this.env.CH_LOG_CAPTURE === "0" || !policyLoaded || bs.log_policy?.console === false ? {} : { tails: [this.ctx.exports.TenantTail({
+        ...(tailOn ? { tails: [this.ctx.exports.TenantTail({
           props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0 },
-        })] }),
+        })] } : {}),
       };
-      const loaded = checkedWorkerGet(this.env.LOADER, loaderId, workerCode, bs.vars, bs.bindings, "do");
+      const loaded = checkedWorkerGet(this.env.LOADER, loaderId + (tailOn ? "~t" : "~n"), workerCode, bs.vars, bs.bindings, "do");
       const cls = loaded.getDurableObjectClass(spec.class, {
         props: {
           namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,

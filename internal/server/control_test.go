@@ -268,8 +268,8 @@ func TestDeployBudgetExactBoundaries(t *testing.T) {
 		admin := s.AdminHandler()
 		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
 		// Empty binding metadata renders to 111 bytes; the fixed runtime reserve is
-		// 80 KiB. This literal is independently derived from that public contract.
-		const bundleBytes = 67108864 - 81920 - 111
+		// 84 KiB. This literal is independently derived from that public contract.
+		const bundleBytes = 67108864 - 86016 - 111
 		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
 		if err != nil {
 			t.Fatal(err)
@@ -285,7 +285,7 @@ func TestDeployBudgetExactBoundaries(t *testing.T) {
 		s := newControlServer(t)
 		admin := s.AdminHandler()
 		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
-		const bundleBytes = 67108864 - 81920 - 111 + 1
+		const bundleBytes = 67108864 - 86016 - 111 + 1
 		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
 		if err != nil {
 			t.Fatal(err)

@@ -727,7 +727,6 @@ type deployReq struct {
 	CompatibilityDate  string                `json:"compatibility_date,omitempty"`
 	CompatibilityFlags []string              `json:"compatibility_flags,omitempty"`
 	Limits             *control.WorkerLimits `json:"limits,omitempty"`
-	LogPolicy          *control.LogPolicy    `json:"log_policy,omitempty"`
 	Consumers          []control.Consumer    `json:"consumers,omitempty"`
 	Crons              []string              `json:"crons,omitempty"`
 	Assets             *control.AssetsConfig `json:"assets,omitempty"`
@@ -803,7 +802,7 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercom
 // WorkerCode path can inject. Checked-in sources currently total about 67 KiB;
 // keep explicit headroom while generated binding metadata and facet classes are
 // charged separately below.
-const controlFixedRuntimeCodeBytes int64 = 80 * 1024
+const controlFixedRuntimeCodeBytes int64 = 84 * 1024
 
 func deployPlatformConsts(bindings []control.Binding) string {
 	kvNames := make([]string, 0)
@@ -994,7 +993,6 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			CompatDate:     req.CompatibilityDate,
 			CompatFlags:    req.CompatibilityFlags,
 			Limits:         req.Limits,
-			LogPolicy:      req.LogPolicy,
 		}, "admin")
 		return e
 	}); err != nil {

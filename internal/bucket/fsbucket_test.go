@@ -120,3 +120,30 @@ func TestFSListPage(t *testing.T) {
 		t.Fatalf("past end = %+v %q %v", objs, next, err)
 	}
 }
+
+func TestFSListPageArbitraryPrefix(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"r2/ns/b/xmeta.txt", "r2/ns/b/xmeta2.txt", "r2/ns/b/other.txt"} {
+		if _, err := b.Put(ctx, k, []byte(k)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	objs, _, err := b.ListPage(ctx, "r2/ns/b/xmeta", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 2 {
+		t.Fatalf("prefix objects = %v, want xmeta.txt/xmeta2.txt", objs)
+	}
+	objs, _, err = b.ListPage(ctx, "r2/ns/b/xmeta.", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || objs[0].Key != "r2/ns/b/xmeta.txt" {
+		t.Fatalf("dot-prefix objects = %v", objs)
+	}
+}

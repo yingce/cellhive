@@ -815,19 +815,28 @@ export function wrapR2Metadata(bucket) {
         return async (key, options) => {
           const obj = await target.get(key, options);
           if (!obj) return obj;
+          const write = (hdrs) => {
+            for (const [k, v] of Object.entries(obj.httpMetadata || {})) {
+              if (v === undefined || v === null || v === "") continue;
+              hdrs.set(map[k] || String(k).toLowerCase(), String(v));
+            }
+            return hdrs;
+          };
           try {
             Object.defineProperty(obj, "writeHttpMetadata", {
-              value: (hdrs) => {
-                for (const [k, v] of Object.entries(obj.httpMetadata || {})) {
-                  if (v === undefined || v === null || v === "") continue;
-                  hdrs.set(map[k] || String(k).toLowerCase(), String(v));
-                }
-                return hdrs;
-              },
-              enumerable: true, configurable: true, writable: true,
+              value: write, enumerable: true, configurable: true, writable: true,
             });
-          } catch (e) { /* frozen object: keep the RPC method */ }
-          return obj;
+            return obj;
+          } catch (e) {
+            // RPC objects can be frozen: inherit the original and attach the
+            // local method to a shallow prototype instead of losing the
+            // tenant-side mutation semantics.
+            const local = Object.create(obj);
+            Object.defineProperty(local, "writeHttpMetadata", {
+              value: write, enumerable: true, configurable: true, writable: true,
+            });
+            return local;
+          }
         };
       }
       return Reflect.get(target, prop, receiver);

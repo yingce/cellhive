@@ -73,7 +73,23 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			spec[b.Name] = map[string]any{
 				"kind": "vectorize", "ns": ns, "name": b.Name, "index": index, "token": itok,
 			}
-		case "kv", "d1", "r2", "queue", "workflow":
+		case "queue":
+			// A queue binding's name is arbitrary; the actual queue is the
+			// resource ID. Scope the token to the resource so producer sends
+			// land in the same queue the consumer projection references.
+			qname := b.ID
+			if qname == "" {
+				qname = b.Name
+			}
+			qtok := token
+			if qname != b.Name {
+				qtok, err = scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: ns, Kind: "queue", Name: qname})
+				if err != nil {
+					continue
+				}
+			}
+			spec[b.Name] = map[string]any{"kind": "queue", "ns": ns, "name": qname, "token": qtok}
+		case "kv", "d1", "r2", "workflow":
 			spec[b.Name] = map[string]any{"kind": b.Type, "ns": ns, "name": b.Name, "token": token}
 		case "ai":
 			spec[b.Name] = map[string]any{"kind": "ai", "ns": ns, "name": b.Name}
@@ -160,7 +176,7 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	}
 	view, ok, verr := s.Control.VersionEnv(r.Context(), ns, worker, version)
 	if verr != nil || !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}, "log_policy": map[string]bool{"console": false, "invocation": false}})
+		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
 		return
 	}
 	spec, vars := s.bindingSpecFor(r.Context(), ns, worker, version)
@@ -171,7 +187,6 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bindings": spec, "vars": vars,
 		"compat_date": view.CompatDate, "compat_flags": view.CompatFlags,
-		"limits":     view.Limits,
-		"log_policy": view.LogPolicy,
+		"limits": view.Limits,
 	})
 }
