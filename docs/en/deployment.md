@@ -16,12 +16,13 @@
 A single image contains all services (`deploy/Dockerfile`):
 
 - Go binaries: `cell-agent`, `cellhive`, `user-runtime`, `do-runtime`, `do-supervisor`;
-- **pinned stock workerd `1.20260916.1`** and **esbuild `0.28.2`**: fetched from exact npm platform tarballs and verified against checked-in SHA-512 digests before extraction. They are installed at `/usr/local/bin/workerd` and `/usr/local/bin/esbuild`; the latter is exposed as `CELLHIVE_ESBUILD` for production bundling. Overriding a version also requires the matching `*_INTEGRITY_SHA512`; changing only the version must fail closed;
+- **cellhive-workerd fork** (pinned `cellhive-v1.20260916.1-3`) at `/usr/local/bin/workerd`, built/copied by `deploy/build-workerd-fork.sh`; the fork requires glibc ≥2.38, so the runtime is Ubuntu 24.04. **esbuild `0.28.2`** is still fetched from the exact npm tarball and verified; it is exposed as `CELLHIVE_ESBUILD` for production bundling;
 - Platform JS: `workerd/` → `/app/workerd/` (`CELLHIVE_*_JS` already points there).
 - Licenses and notices: `/usr/share/licenses/cellhive/{workerd,esbuild}/LICENSE` and `/usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md`.
 
 ```bash
-make docker-build                     # docker build -f deploy/Dockerfile -t cellhive:dev .
+bash deploy/build-workerd-fork.sh     # ./deploy/workerd-fork/workerd
+make docker-build                     # docker build --build-context workerd-fork=deploy/workerd-fork ...
 docker run --rm cellhive:dev workerd --version
 docker run --rm --entrypoint /usr/local/bin/esbuild cellhive:dev --version
 ```
@@ -35,6 +36,7 @@ Health checks: `GET http://127.0.0.1:7001/readyz` (no auth; returns 503 when ove
 ## Docker Compose
 
 ```bash
+bash deploy/build-workerd-fork.sh
 export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)
 python3 scripts/deploy-preflight.py compose
 docker compose -f deploy/compose/docker-compose.yml up --build -d

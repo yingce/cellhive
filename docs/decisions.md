@@ -1,5 +1,314 @@
 # 决策记录（ADR）
 
+## ADR-264 计算层切换到 cellhive-workerd fork ✅
+
+- **背景**：上游 stock workerd 无法执行 CellHive 需要的逐调用 CPU/subrequest/deadline 限额；用户决定改为维护 fork。
+- **决策**：运行时 workerd 统一使用 `https://github.com/yingce/cellhive-workerd`，固定 `cellhive-v1.20260916.1-3`。CellHive 主仓不内联 patch workerd；fork 负责上游跟踪和 CellHive 扩展。
+- **镜像**：fork 二进制依赖 glibc ≥2.38，runtime 阶段改用 Ubuntu 24.04；Go 二进制仍在 bookworm 构建，向前兼容。`deploy/Dockerfile` 通过命名构建上下文 `workerd-fork` 复制 `deploy/workerd-fork/workerd`；`make docker-build` / Compose 会先调用 `deploy/build-workerd-fork.sh`。
+- **兼容性**：`internal/workerdcompat` 的 manifest 仍绑定上游 revision `1.20260916.1`；fork 必须保持上游协议/兼容行为，新增限额只通过 CellHive 明确配置启用。
+- **验证**：fork 二进制 `workerd 2026-09-16`；workflow e2e、local Compose demo、managed MySQL Hyperdrive 均通过；默认镜像已切换。
+- **边界**：CI 的 Docker 构建需要先产出 fork 二进制；未验证 fork 的 release/LTO 构建；fork 的逐调用限额目前只在 fork 支持范围内启用。
+
+## ADR-263 Hyperdrive 生成式客户端凭据（managed users）✅
+
+- **背景**：直接下发 origin user/password 会让 worker 看到源库凭据，也无法解决多资源同名用户冲突。
+- **决策**：`CELLHIVE_HYPERDRIVE_MANAGED_USERS=1` 时，对每个 `ns/resource` 派生稳定身份：
+  - user `hd_<20 hex>`；
+  - password `HMAC-SHA256(scopeSecret, "hyperdrive-client\0ns/resource")`；
+  - 在 origin 创建/更新该角色并授予 database/schema 权限；
+  - worker connectionString 只含生成凭据；
+  - ProxySQL 的 `mysql_users`/`pgsql_users` 也使用生成凭据；
+  - delete 时删除 ProxySQL 条目并 DROP 该角色。
+- **验证**：MySQL 8 + ProxySQL 3、PostgreSQL 17 + ProxySQL 3：
+  - worker 查询成功；
+  - ProxySQL user 与 origin role 均为 `hd_...`，不含 origin user；
+  - resource delete 清理 ProxySQL；MySQL 角色删除。
+- **边界**：origin URL 必须是可 `CREATE USER`/`GRANT` 的管理连接；角色/密码由 scope secret 确定性派生，暂不支持单独轮换版本；PostgreSQL 默认授予 public schema 的 DML，生产需按最小权限调整。
+- **安全**：scope secret 泄露等同生成凭据可重算；origin 管理凭据仍只存在加密 control 配置。
+
+## ADR-262 ProxySQL 自动配置同步（create/delete）✅
+
+- **触发**：`CELLHIVE_PROXYSQL_ADMIN` 非空时，Hyperdrive 资源 create/delete 调 ProxySQL admin SQL：
+  - MySQL：`mysql_servers` + `mysql_users`；
+  - PostgreSQL：`pgsql_servers` + `pgsql_users`；
+  - hostgroup 用 `ns/name` 的稳定 hash；
+  - 执行 `LOAD ... TO RUNTIME`；可选 `SAVE ... TO DISK`；
+  - `CELLHIVE_PROXYSQL_ADMIN` 支持逗号分隔多个 admin endpoint，逐个 fanout；
+  - 启动时及每 30s 由 control owner reconcile 所有已注册 Hyperdrive 资源，覆盖重启/漏掉的 hook。
+- **验证**：MySQL 8.0 + ProxySQL 3.0.11，只通过 `cellhive resource create` 触发：
+  - ProxySQL runtime 出现 backend `127.0.0.1:13306` 与 user `app`；
+  - worker 查询返回 `{"ok":1,"db":"app"}`；
+  - PostgreSQL 17 + ProxySQL 3.0.11：resource create 自动生成 `pgsql_servers`，worker 查询返回 `{"rows":[{"ok":1,"db":"postgres"}]}`；
+  - `resource delete` 后 runtime servers/users 清空；
+  - PostgreSQL static generation：warm hot set 后 static 查询同样返回 `{"rows":[{"ok":1,"db":"postgres"}]}`。
+- **边界**：已覆盖多 admin fanout 和 30s reconcile；任一 admin 不可达不会阻止其他 endpoint 收敛，但 admin 集合本身需要外部配置管理。没有 ProxySQL Cluster 自动成员同步、用户名冲突合并、同步失败回滚；失败的 endpoint 会在下一轮 reconcile 重试。真实数据面 HA 仍需要外部 LB/Service 指向多副本 ProxySQL。仓库 e2e：`make e2e-mysql`（Docker + npm）。
+- **安全**：admin DSN 含 admin 凭据，应走 Secret/环境变量，不能进 ConfigMap/仓库。
+
+## ADR-261 Hyperdrive MySQL 支持（direct + ProxySQL proxy）✅
+
+- **direct**：`mysql://` origin 原样下发；tenant 用 `mysql2`，需要 `nodejs_compat`、`disableEval: true`（workerd 禁止 `new Function`）和 Node builtin require shim。
+- **proxy**：只使用一个 `CELLHIVE_HYPERDRIVE_PROXY`；裸 `host:port` 表示 PostgreSQL（兼容旧配置），带 scheme 的逗号列表可同时表达两种协议（`postgres://proxysql:6133,mysql://proxysql:6033`）。MySQL 改写 host/port 到 ProxySQL/MaxScale；`HyperdriveDBMode=binding` 只用于 PostgreSQL，MySQL 保留原 schema。
+- **验证**：MySQL 8.0 + ProxySQL 3.0.11：
+  - direct：`CREATE TABLE`/`SELECT` 经 Hyperdrive binding 返回 `{"ok":1,"db":"app"}`；
+  - proxy：origin 故意写成不可达端口 `13307`，binding 改写至 ProxySQL `6033`，仍返回 `{"ok":1,"db":"app"}`；ProxySQL `stats_mysql_connection_pool` 显示 backend `127.0.0.1:13306`、`Queries` 增长。
+- **边界**：单节点本地；ProxySQL 的 PG 路径未验证；MySQL 缓存/池语义不等于 CF Hyperdrive；部署侧只加了配置项，未内置 ProxySQL 模板。
+
+## ADR-260 Queue 并发消费 smoke（e2e）✅
+
+- **场景**：100 条消息，`max_batch_size=10`、`max_concurrency=4`；worker 用 D1 主键去重并记录每条消息 handler 的起止时间。
+- **结果**：`count=100`，`missing_end=0`，最大重叠 handler 数 `40`（4 个 batch × 10 条），与配置一致；没有重复/丢失。
+- **生产者并发修复**：`Promise.all(20 × QUEUE.send)` 现在 32ms 完成；e2e 先并发发 20 条、再顺序发 80 条，最终 100 条全部消费。
+- **根因/修复**：
+  1. `cellstore` 的请求路径 `invalidateStaleLocal` 调用阻塞 `Forget`，后者等待 busy 请求，而 busy 请求又需要 `openMu`/`Cell`，形成死锁；新增非阻塞 `TryForget`，请求路径只清理 idle cell，busy 时下次再试；同时 `Forget` 不再持 `openMu` 等待 busy。
+  2. 并发首次发送同时 claim queue owner，输掉条件写的请求返回 503 `claim_race`；现在若解析到 owner 是本节点且同一 session，直接继续执行，不再 503。
+- **边界**：单节点、本地 D1/FS bucket；未覆盖多节点并发消费、租约冲突、真实网络。
+
+## ADR-259 Queue 多节点 retry/DLQ 与 R2 metadata 路径（e2e）✅
+
+- **Queue 多节点**：两个 cell-agent 共享 FS bucket，queue q1 + DLQ q1-dlq；5 条正常消息被消费（`consumed=5`），1 条 `retry` 消息进入 DLQ（`dlq=1`）；强杀 n1 后等待 lease，n2 接管继续消费 3 条（`consumed=8`）。
+- **R2 writeHttpMetadata**：queue handler 和 workflow `WorkflowEntrypoint` 的 env 都重新应用 per-call R2 facade；queue 返回 `text/x-queue`，workflow 返回 `text/x-workflow`。
+- **修复**：workflow-wrapper 之前用 `globalThis.__cellhivePlatform` 判断 R2 binding，而该常量是模块作用域，导致 R2 未包裹；改为模块常量后通过。
+- **边界**：多节点 e2e 使用本地 FS bucket/双进程，不覆盖真实对象存储跨 AZ；Queue 次数统计用单并发避免 KV 计数竞态，不是平台事务保证。
+
+## ADR-257 Workflow 长时间等待/超时/durable retry e2e（实验）🚧
+
+- **验证**：真实 cell-agent + user-runtime + workflow engine：
+  1. `step.sleep('nap','3 seconds')`：状态 `waiting` → timer 重新派发 → `complete`，output `{"slept":true}`；
+  2. `step.waitForEvent('never',{timeout:'2 seconds'})`：`waiting` → 超时后 `errored`，error 为 `workflow waitForEvent timed out`；
+  3. `step.do('flaky',{retries:{limit:5,delay:'1 second'}}, ...)`：前两次抛错（KV 计次），第 3 次成功，状态 `complete`，output `{"attempts":3}`。
+- **结论**：长时间 sleep、事件超时、durable retry/backoff 的 timer 派发链路可用；retry 必须用 `step.do` 的 `retries` 配置，直接在 `run()` 里抛错不会被 step 重试。
+- **边界**：① e2e 用单节点本地 harness；② 未覆盖崩溃中途恢复、pause/resume/terminate、事件超时后的补偿；③ 重试次数/KV 计数是测试 worker 逻辑，不是平台状态。
+- **脚本**：`/tmp/ch-bench/wtest.sh`；日志 `/tmp/ch-bench/wtest2.log`。
+
+## ADR-256 Hyperdrive 代理模式（ProxySQL）🚧
+
+- **背景**：默认直连源库；需要共享池/统一入口时，由部署方提供协议感知 pooler。
+- **决策**：`CELLHIVE_HYPERDRIVE_MODE=direct|proxy`（默认 `direct`）和单变量 `CELLHIVE_HYPERDRIVE_PROXY`：
+  - 裸 `host:port` 按 PostgreSQL 兼容；
+  - 带 scheme 的逗号列表同时表达两种协议：`postgres://proxysql:6133,mysql://proxysql:6033`；
+  - `proxy` 仅改 URL host/port，保留 database/user/password/query；
+  - 未配置某协议 entry 时该协议 fail closed；
+  - `CELLHIVE_HYPERDRIVE_DB_MODE=binding` 只影响 PostgreSQL，MySQL 保留原 schema。
+- **部署**：ProxySQL/MaxScale 由运维部署；Chart/Compose 不内置池化器模板。ProxySQL 配置、凭据、backend 映射由运维负责。
+- **验证**：MySQL 8.0 + ProxySQL 3.0.11 的 direct/proxy、PostgreSQL + ProxySQL 3.0.11 的 auto create/worker query e2e 均通过（ADR-261/262）。
+- **边界**：CellHive 不自动写 ProxySQL 配置；PostgreSQL 的 ProxySQL 事务/prepared statement 语义需继续压测。
+
+## ADR-255 Hyperdrive 驱动兼容：nodejs_compat + postgres.js/pg（实验）🚧
+
+- **决策**：Hyperdrive 保持 CF 语义中的 `connectionString` 数据面，不做边缘代理/全球加速/全局连接池（按用户决定）。真实驱动兼容通过：
+  1. 版本带 `nodejs_compat`；
+  2. 推荐 `postgres`（`workerd` 条件导出 + `cloudflare:sockets`）；
+  3. `pg` 用 `pg-cloudflare` 的 `workerd` 导出，并加一个把 CJS `require` 映射到 `node:*`/`pg-cloudflare` 的 shim，esbuild 用 `--conditions=workerd --main-fields=main,module` 并 external 化 Node builtins。
+- **验证**：真实 Postgres 17，`select 1 as ok, current_database() as db` → `1|hyper`；postgres.js 与 pg(+shim) 均通过。
+- **边界**：池是 per-isolate，不是 CF 全局 Hyperdrive 池；没有全球加速/边缘代理；租户需自行管理 TLS/认证/最大连接数；CellHive 不自动注入 require shim（由租户 bundler/示例提供）。
+- **文档**：`docs/bindings.md`、`docs/en/bindings.md`。
+
+## ADR-254 双节点 DO/Vectorize e2e：在线与故障切换（实验）🚧
+
+- **拓扑**：两个 cell-agent（n1/n2）共享同一 bucket，各配一个 do-runtime（18788/18789）和一个 user-runtime（18281/18282）；两者前面放一个稳定 TCP 代理（17001），tenant 的 `CELL_URL` 指向代理而不是单节点。
+- **在线**：`/do` 在 n1 返回 `do-1`、n2 返回 `do-2`（同一 DO id，跨节点计数）；`/vec` 两个节点读到同一 Vectorize 结果。
+- **故障切换**：kill n1 + do1 后，n2 `/do` 返回 `do-3`（DO 存储/owner 恢复）；Vectorize 在等待 control owner lease 过期（默认 10s）后由 n2 正常返回。
+- **关键配置**：
+  1. tenant `CELL_URL` 必须是稳定入口（代理/Service），不能固定到某个 agent 的 Pod 地址；否则节点死亡后 tenant 仍调用死节点；
+  2. `CELLHIVE_DO_RUNTIMES` 同时列两个 do-runtime；
+  3. 控制面 owner 故障检测受 `CELLHIVE_LEASE_TTL`（默认 10s）约束，切换有该量级的延迟。
+- **边界**：① 本地 FS bucket 共享用于测试，生产必须用支持条件写的 S3；② 未覆盖多节点 ingress/static 表同步；③ 未覆盖 do-runtime 数据迁移/多节点 DO 同时写入冲突；④ 代理是测试用 TCP 转发，不是生产 LB。
+- **验证**：`/tmp/ch-bench/multinode.sh`；日志 `multinode4.log`；n1 do-1 → n2 do-2 → failover n2 do-3；Vectorize failover 成功。
+
+## ADR-253 静态代重建：不重启入口，但 workerd service 集合不能原地热替换（实验）🚧
+
+- **事实**：静态 worker 以 capnp `services` 声明，workerd 在进程启动时固定 service/module 集合；stock workerd 没有 HUP/热加载 service 的能力。因此“重建 static service”必然要启动新的 workerd 进程，不能在原进程内替换。
+- **可以做到的**：入口/user-runtime 不重启——新 generation 先预热 socket，发布新路由表原子切换，旧 generation 保持 `DrainGrace`（默认 3s）再退出；已经 pin 在旧连接上的 keep-alive 请求可在 grace 内完成。hybrid 在 Plan 完全相同时跳过 Apply，避免无意义重建。
+- **路由级更新可复用进程**：如果 Plan 的 services/networks/sockets 完全相同、只有 host routes 变化（典型是热集增删 host 但版本未变），staticgen 直接把新表发布到现有 socket，**不启动新 workerd**；只有 service/version 变化才重建 generation。
+- **不能做到的**：只换掉“变化的那一个 service”而不重启同代其他 service。当前 generation 是整代 workerd 配置；任一 host 版本变化会重建整代。
+- **要更细粒度只能换架构**：① 一个 service/分片一个 workerd 进程，只重启受影响进程（内存/端口成本上升）；② 对变化 host 临时走动态 loader（workerLoader 可运行期加载新版本），不重启进程但该 host 回到动态性能（~3k）。
+- **边界**：DrainGrace 只保证旧代进程在表切换后仍存活，不是 socket 级连接排空；客户端 keep-alive 连接在 grace 后仍可能被切断。若需要严格零丢请求，需要在 ingress 侧做连接 draining/迁移。
+- **验证**：staticgen 单测（含 route-only 复用同一 workerd PID）；功能 e2e 32/32（含 generation 切换、空 Plan、DropHosts）。
+
+## ADR-252 全 binding 静态/动态 e2e 与修复（实验）🚧
+
+- **范围**：真实 cell-agent + user-runtime + ingress + staticgen + do-runtime，测试 worker 覆盖 KV、D1（原生 prepare/bind 与 Drizzle ORM）、R2、Queue producer、Service binding、AI、DO、Workflow、Vectorize、Hyperdrive；动态阶段与热集提升后的静态阶段各跑一遍。
+- **结果**：32/32 检查通过（含 Queue consumer、Workflow 完成态、DO 存储跨 do-runtime 重启、Hyperdrive 真实 Postgres SQL、静态路径）。
+- **本轮修复**：
+  1. 静态/动态 R2 `writeHttpMetadata`：静态 env 的 binding 属性可能不可配置，模块加载期 patch 会静默失败；`queue-wrapper.js` 增加 `withR2Metadata(env)` 的 per-call env Proxy，保证 R2 metadata facade 在租户 isolate 执行；
+  2. binding patch 逐个 try/catch，避免一个不可配置属性中断后续 binding；
+  3. Hyperdrive 静态渲染改为 JSON binding（连接串是数据，不是 RPC entrypoint）；
+  4. `FSBucket.ListPage` 支持任意 prefix（此前只支持目录前缀，R2 `meta.` 列表为空）；
+  5. 静态平台服务 `globalOutbound = cap-egress` 且 `cap-egress` 允许 `local`（AI_URL 指向 127.0.0.1 的本地 e2e）；
+  6. service binding 静态 HTTP 路径要求 cell-agent 配置 `CELLHIVE_DISPATCH_URL`（否则 503 no_dispatch）；
+  7. 静态 tenant 出网列表接 `CELLHIVE_TENANT_OUTBOUND`（Hyperdrive/私有 DB 场景需要 `private`）；
+  8. plangen 渲染 binding 前按名字排序，避免 Go map 随机顺序导致每次 refresh 生成不同 Plan、静态代被反复重建；
+  9. queue binding 的生产者使用 **binding ID（实际队列名）** 而非 env 名（`loader.js`/`bindingSpecFor`），消费者按队列资源名投递；
+  10. e2e 的 Hyperdrive 用最小 PostgreSQL v3 协议客户端（`cloudflare:sockets`）完成真实 `select 1/current_database()`。
+- **边界**：① DO 已验证单节点存储跨 do-runtime 重启，未覆盖跨节点放置；② Workflow 已验证 create→complete，未覆盖长时间等待/事件；③ Vectorize 本地单节点；④ Queue consumer、并发批量、retry→DLQ 已通过；⑤ Hyperdrive 用最小协议客户端验证真实查询/并发连接，未覆盖租户驱动/连接池；⑤ Service binding 静态仍走 cell-agent HTTP（非动态 native serviceLoader）；⑥ R2 metadata 的 per-call Proxy 仅在 fetch 路径应用，queue/scheduled 路径仍依赖模块加载期 patch。
+- **验证**：`internal/plangen`、`internal/bucket` 单测；完整 `make test`；binding e2e 28/28（脚本 `/tmp/ch-bench/bindings-e2e.sh`）。
+
+## ADR-251 静态 wrapper 的 plain-fetch 入口（去掉每请求 CellHiveHost 构造）🚧
+
+- **背景**：ADR-249 的 minimal 入口证明 wrapper 是静态性能瓶颈：完整 wrapper ~146µs/请求、~7.1k RPS，而直接 bundle ~72µs、~14k。但 minimal 会丢 D1 prepare/bind、R2 writeHttpMetadata、DO facade 与 subrequest 配额，不能作为默认。
+- **决策**：
+  1. `queue-wrapper.js` 新增 `export async function handleFetch(req, env, ctx)`：复用模块加载时已完成的 facade patches，执行与 `CellHiveHost.fetch` 相同的 tenant fetch 路径（trace context、request id、quota runInvocation），但**不构造 WorkerEntrypoint 实例**；
+  2. staticgen 的静态入口 `main.js` 改为 `import { handleFetch }`，由 default fetch 直接调用；动态 loader 仍使用 `CellHiveHost`（service binding 的 handleQueue/handleScheduled 路径不变）；
+  3. 因此完整 wrapper（含 D1/R2/DO facade 与配额）也回到接近 minimal 的性能，`CELLHIVE_STATIC_MINIMAL` 保留为 KV-only 等场景的额外优化。
+- **边界**：① `handleFetch` 不处理 `x-cellhive-entrypoint`（该寻址只走动态 service binding）；② queue/scheduled/DO 行为仍由动态 wrapper 承担；③ facade patches 仍按 binding kind 在模块加载时执行。
+- **验证**：直接启动 wrapper 静态代实测 c=16/64/128：RPS 9,742 / 9,602 / 12,388，CPU 0.90–1.03 cores，83–102µs/请求（此前 ~146µs / ~7.1k）；功能 e2e（`CELLHIVE_STATIC_MINIMAL=0`）21/21；完整 `make test` 通过。
+
+## ADR-250 Tail 不挂静态快路径：有订阅时回落动态（取代 ADR-247 的静态 Tail）🚧
+
+- **背景**：ADR-247 给静态代挂 Tail designator。实测这让每个静态请求都支付原生 Tail 事件成本（静态 ~14k → tail-on ~9k，订阅常开时更低），而 Tail 是调试态功能，不应给生产快路径持续加税。
+- **决策**：
+  1. plangen 不再给静态 service 挂 `tails`，也不再渲染 `cellhive-tail` service；静态代始终是 Tail-free；
+  2. 构建 Plan 时读取 `/v1/internal/log-capture`：若某 worker 有活跃 tail 订阅（或 `OTLP_LOGS=all`），该 host **不进入静态集合**，由 ingress 回落动态 loader（动态路径已有 ring/Tail 实现）；订阅过期后下一轮 refresh 自动回到静态；
+  3. 静态快速路径的 Tail 语义 = “想 tail 时走动态，tail 结束回静态”，而不是“静态代内联 tail”。
+- **边界**：① tail 期间该 host 的 RPS 回到动态水平（~3k），只影响正在调试的 worker；② `OTLP_LOGS=all` 会让所有 host 保持动态（静态被禁用）；③ staticgen 的 Tail 能力保留为通用能力，但当前 plangen 不使用；④ Tail 订阅刷新窗口由 `CELLHIVE_PLAN_REFRESH_SEC`/路由轮询决定（默认 3–30s）。
+- **验证**：`internal/plangen` 单测（capture active 时跳过、inactive 时正常渲染）；功能 e2e 21/21：订阅后 host 移回动态且动态 Tail 有新事件，过期后静态恢复；性能：无 Tail 时 ingress 静态 **12,565** / 静态直连 13,581 / 动态 2,841 RPS。
+
+## ADR-249 静态 worker 的最小入口（auto minimal entry，实验）🚧
+
+- **背景**：静态代统一使用 trusted wrapper（CellHiveHost + invocation + quota + facades）时，实测 `/ping` 路径约 146µs CPU/请求，单 isolate 上限 ~7k；直接把 tenant bundle 作为入口模块可到 ~72µs/请求、14k+（接近裸 workerd）。wrapper 的价值是 D1 `prepare/bind`、R2 `writeHttpMetadata`、DO namespace facade、子请求配额和队列/定时调度；fetch-only 且 binding 集合不需要这些语义时可直接运行 bundle。
+- **决策**：
+  1. plangen 增加 `CELLHIVE_STATIC_MINIMAL=auto|1|0`（默认 `auto`）：
+     - `auto`：当 worker 的 binding kind 不含 `d1`/`r2`/`do`，且版本无 `limits.subrequests` 时，静态 service 直接使用 tenant bundle 作为入口模块（env 仍是平台 service binding stub）；
+     - `1`：强制最小入口（跳过 wrapper/quota/facade，风险自负）；
+     - `0`：始终使用完整 wrapper（原行为）；
+  2. 其余路径（queue/scheduled/async 派发、DO facets）仍走动态 loader 的 wrapper，不受影响；
+  3. 最小入口的静态 worker 仍可挂 Tail designator（原生 Tail 事件不依赖 wrapper）。
+- **边界**：① 最小入口不提供 wrapper 的本地 facade（D1 prepared statement、R2 metadata 写回、DO namespace facade、KV micro-batching）；② 不执行 `limits.subrequests`（auto 因此排除有该限制的版本）；③ 强制 `1` 用于诊断/特殊场景；④ fetch 与动态派发可能在不同 isolate（无共享内存契约）。
+- **验证**：`internal/plangen` 单测覆盖 auto/on/off 与 kind/limit 判定；真实 workerd 静态 bound worker e2e；diag 实测 minimal 14,162–14,295 RPS / 72µs CPU（wrapper 7,133–7,161 RPS / 146µs）；功能 e2e 18/18（含 Tail 订阅、静态回落）。
+
+## ADR-248 静态 service binding 与子请求配额（实验）🚧
+
+- **背景**：ADR-245 把 worker 间 service binding 排除在静态代之外；但 `bindings.js` 的 `ServiceBinding` 在未注册 `serviceLoader`（静态平台服务即如此）时会走 cell-agent 的 `/v1/service/fetch` 与 `/v1/service/run` HTTP 传输，语义可用（较慢，适合非热路径）。
+- **决策**：
+  1. plangen 将 `kind=service` 映射为平台 `ServiceBinding` entrypoint；静态 worker 的跨 worker 调用通过 cell-agent HTTP 传输执行，不再强制该 host 走动态；
+  2. 静态 wrapper 的 `__cellhive-quota.js` 完整移植 `quotaSource`：读取版本 `limits.subrequests`，在租户 isolate 内代理 fetch/D1/DO/Workflow/R2 方法并计数，超限抛 `subrequest_limit_exceeded`；
+  3. 跨 worker 调用**不走**同实例 native `serviceLoader` 路径（静态代没有该 callback），因此没有 pinned-version 的同进程直达优化；版本/租约由 cell-agent 现有 service 路由保证。
+- **边界**：① service binding 的静态调用是 HTTP 路径（延迟更高）；② 不支持 `setServiceLoader` 的 RpcTarget/流式直连语义；③ quota 只覆盖 wrapper 能包装的调用；④ 配额为 isolate 级计数，与动态路径一致。
+- **验证**：`internal/plangen` 单测覆盖 `service` kind 渲染为 `ServiceBinding`（不再跳过 host）、quota 模块包含 limit 与 kind 映射；真实 workerd bound worker e2e 仍通过；`go build`/`vet`/相关测试通过。
+
+## ADR-247 静态代 Tail 采集与注册（实验，已被 ADR-250 取代）🚧
+
+- **背景**：动态 loader 的 Tail ring 在 loader isolate；静态 generation 是独立 workerd 进程，无法复用该 ring。静态 worker 需要自己的 tail service，并让 cell-agent 能拉到事件（Tail 查询与 OTLP）。
+- **决策**：
+  1. staticgen `Service` 支持 `tails = [(service, entrypoint, props(json))]`，并提供 `ServiceAddr`/`TailURL` 查询当前代的 tail socket；
+  2. plangen 为每个静态 Plan 追加 `cellhive-tail` service（`log-tail.js` + 一个 HTTP 入口模块，暴露 `/v1/internal/logs/events`，binding `LOG_TOKEN`），并给每个静态 worker 挂 `TenantTail` designator（props 含 namespace/worker/version）；
+  3. user-runtime 的 runtimelog 注册改为**动态 URL 列表**（新增 `RegisterLoopFunc`）：在原有 runtime public/internal URL 之外追加当前代的 `TailURL(advertise)`；generation 切换后 tail socket 变化，下一次 5s 注册周期自动更新；
+  4. cell-agent 按既有 runtime log pull 协议读取该 socket 并导出 OTLP / 提供 Tail 查询。
+- **边界**：① 静态代 tail 总是挂载（未按订阅门控；静态代 Tail 成本固定）；② ring 在 generation isolate，代切换后旧代 ring 随进程消失；③ 需要 `CELLHIVE_LOG_REGISTER_URLS`/cellURL 可达；④ 事件不带动态 dispatch 的 tailKey 语义（fetch 场景无 queue/cron 派发）。
+- **验证**：`internal/staticgen` 渲染 tails designator；`internal/plangen` 真实 workerd e2e：请求静态 bound worker 后，从 `ServiceAddr("cellhive-tail")` 查询 `/v1/internal/logs/events?ns=acme&worker=bound` 得到事件；`internal/runtimelog` 覆盖动态 URL 注册；`go build`/`vet`/相关测试通过。
+
+## ADR-246 发布摘表与 ingress 运维端点（实验）🚧
+
+- **背景**：静态代在版本变化时需要先停止服务旧版本；如果等新代渲染完成再切表，整个渲染窗口内 host 会继续命中旧静态服务。另需给边缘/运维提供 ingress 健康与指标。
+- **决策**：
+  1. staticgen 新增 `DropHosts(hosts)`：只从当前已发布的 routing table 删除这些 host，**不停止当前代**；随后 Apply 新 Plan 再切到新代/新表；被摘除 host 在新表生效前由 ingress 回落动态 loader（新 active version 立即可用）；
+  2. hybrid coordinator 在重建 Plan 时比较 host→service（service 名含版本），发现版本变化先 `DropHosts(changed)` 再 `Apply`；
+  3. user-runtime 新增可选 `CELLHIVE_INGRESS_ADMIN_PORT`：`/ready`（drain 时 503）与 `/metrics`（requests/dynamic/errors/static_routes），供 Traefik/监控使用；
+  4. 仍以 refresh tick（默认 30s）发现版本变化；更细粒度的 deploy 事件后续接入。
+- **边界**：① DropHosts 不终止旧代，旧代在后续 Apply drain 时退出；② 没有 socket 级 drain，旧代退出可能切断尚未完成的请求；③ 管理端口只读，无鉴权（部署在私网/仅运维可达）。
+- **验证**：staticgen `TestDropHostsFallsBackBeforeRewrite`（摘表后旧 socket 仍存活、表为空、重新 Apply 后切新代）；hybrid 单测验证版本变化先 `DropHosts(changed)` 再 `Apply`；`go build`/`vet`/相关测试通过。
+
+## ADR-245 静态平台 binding 渲染（实验）🚧
+
+- **背景**：ADR-243 只支持 binding-free worker；真实 worker 常用 KV/D1/R2/Queue/AI/DO 等绑定。动态路径通过 `ctx.exports` 把平台 entrypoint stub 注入租户 env；静态 generation 没有共享 `ctx.exports`，需要 capnp service binding 等价物。
+- **决策**：
+  1. staticgen `Binding` 支持 `service = (name, entrypoint, props(json))`，并新增 `Networks` 与 service 的 `globalOutbound`；
+  2. plangen 对有平台 binding 的 worker 生成：
+     - `cellhive-platform` service（bindings.js/facades.js/rpc-codec.js），bindings=`CELL_URL`/`CELL_TOKEN`/`PLATFORM`(network `cap-egress`)/AI 配置；
+     - 租户 service 的 binding：`service=(cellhive-platform, entrypoint=<kind 映射>, props=<cell-agent spec JSON>)`，token 已由 cell-agent 签好；
+     - 入口模块 `main.js` 委托 `CellHiveHost`（wrapper），wrapper 前缀包含 kind 列表；模块含 tenant bundle、facades、rpc-codec、quota（当前为 no-op）、invocation（与 lifecycle.js 一致）；
+     - networks `public-network`/`cap-egress`，tenant/plat 的 `globalOutbound = public-network`；
+  3. kind→entrypoint：kv→KV、d1→D1Database、r2→R2Bucket、queue→QueueProducer、ai→AI、do→DurableObjectNamespace、workflow→WorkflowBinding、vectorize→Vectorize、hyperdrive→Hyperdrive、assets→Assets；`service` binding 暂不支持（需要动态 service loader），对应 host 保持动态。
+- **边界**：① service binding 仍走动态；② `__cellhive-quota.js` 为 no-op（子请求配额未在静态代执行）；③ Tail/OTLP 未挂到静态代；④ 每代一个 workerd 承载所有静态 worker；⑤ assets/path 路由不处理。
+- **验证**：`internal/staticgen` 服务 binding/network 渲染单测；`internal/plangen` 单测覆盖 bound worker 的 plat service、wrapper 模块、props/entrypoint、globalOutbound；真实 workerd 集成：带 KV binding 的静态 worker 启动后 `env.KV` 存在并返回正确响应（`TestBoundWorkerRunsAsStaticGeneration`）。
+
+## ADR-244 每 pod 热集自动接线（实验）🚧
+
+- **背景**：ADR-241 定义了热集策略，ADR-242/243 提供了渲染与 Plan builder；需要把“ingress 计数 → 热集 → Plan → 静态代”串起来，且不依赖跨 pod 协调。
+- **决策**：
+  1. ingress 记录 normalized host 累计计数；`internal/hybrid` 负责“本次快照 - 上次快照”的增量入桶、按窗口聚合并调用 `hotset.Select`；
+  2. 每个热集评估周期（默认 60s）只在 `Render=true` 时重新构建该 pod 的静态集合；
+  3. 额外每 `CELLHIVE_PLAN_REFRESH_SEC`（默认 30s）用当前静态集合重建 Plan，**Plan 变化才切代**，以此覆盖 deploy/升级；不做“先摘表”事件路径（版本切换窗口内静态入口失败由 ingress 回落动态兜底）；
+  4. 静态集合清空时发布空表并 drain 静态代（ingress 全部回落动态）；
+  5. 全流程本地：计数、策略、Plan、代际都在本 pod，无跨节点表同步。
+- **边界**：① 部署到静态生效最坏约 30s（refresh tick），期间可能短暂继续旧版本静态服务；② Tail/OTLP 未挂到静态代；③ 有 binding/assets/path 的 host 被 plangen 跳过，保持动态；④ 计数为进程内累计，重启后窗口重新累积。
+- **验证**：`internal/hybrid` 单测（窗口聚合/容忍不渲染/dominant 替换/refresh 去重/窗口过期发布空表）、`internal/hotset`、`internal/ingress`（HostSnapshot）、`internal/staticgen`（空 Plan drain）均通过。
+
+## ADR-243 静态 Plan builder（binding-free 子集，实验）🚧
+
+- **背景**：ADR-242 的 staticgen 只接受渲染好的 Plan；从 cell-agent 投影/bundle/env 生成 Plan 是静态化的最后一块。完整渲染需要平台 binding facade 与 secret/props 映射；先落地无平台 binding 的 worker（direct-fetch 形态：bundle 直接作为 static worker 模块，env 只有 vars/secrets）。
+- **决策**：
+  1. 新增 `internal/plangen`：对每个 host 拉 `/v1/control/host`，要求单一非 path 路由、无 assets；再拉 `/v1/internal/worker/bindings`，仅当 `bindings` 为空时生成 static service；
+  2. service 模块 = 该版本 bundle 源码；bindings = vars+secrets 的 text 排序注入；compat date/flags 沿用版本；
+  3. 同一 `ns/worker/version` 去重为一个 service，多 host 共用；不支持 path 前缀/多路由/assets 的 host，保持动态；
+  4. user-runtime 通过 `CELLHIVE_STATIC_HOSTS`（逗号分隔）每 30s 重建 Plan，变化才 apply（新代 + 切表 + drain）；`CELLHIVE_INGRESS_TABLE` 为发布目标。
+- **边界**：① 有 bindings（KV/D1/R2/Queue/DO/AI/service/hyperdrive 等）的 worker 暂不静态化，走动态；② assets、path-mounted route 不处理；③ Tail/OTLP 采集在静态代里尚未挂载；④ 30s 轮询而非部署事件，版本切换窗口内靠 ingress 静态失败回落动态兜底；⑤ 相对路径 strip/mount 语义未实现。
+- **验证**：`internal/plangen` 单测（可选 host/跳过 bindings/assets/path/多路由/unknown、同一版本去重、vars 排序、bundle/compat 透传）；`internal/staticgen` 真实 workerd gen1→gen2 切代表/热重载已覆盖。
+
+## ADR-242 静态 generation 渲染与切换（实验）🚧
+
+- **背景**：ADR-240 的 ingress 需要一张 host→静态 socket 的路由表；静态 service 必须由平台渲染，并随热集/版本变化按代切换。Go 侧只做“渲染 + 进程代际 + 发布表”，不把渲染细节塞进入口。
+- **决策**：
+  1. 新增 `internal/staticgen`：输入 JSON `Plan`（services/modules/bindings/sockets/routes），输出一个 workerd 静态 config 目录；模块支持内联 `source` 或文件；
+  2. 每代分配独立 loopback 端口段（`CELLHIVE_STATIC_PORT_BASE`，默认 19000），避免新旧代抢同一端口；
+  3. 启动新代 workerd → 等待所有 socket ready → **原子写** ingress 路由表（tmp+rename，带 `version`）→ 再 drain 旧代（SIGINT + grace + kill）；
+  4. 失败回滚：新代未 ready/表写失败则杀掉新代，旧代与旧表继续服务；
+  5. user-runtime 通过 `CELLHIVE_STATIC_PLAN`（JSON 路径）启用；文件变化自动重新 Apply；`CELLHIVE_INGRESS_TABLE` 是发布目标。
+- **边界**：① 本层只接受已渲染好的 Plan；从 cell-agent 的 bundle/env/bindings 生成 Plan（含 tenant wrapper/facades、secret、platform binding）是下一步；② 热集策略（ADR-241）尚未接到这里（目前由外部写入 Plan）；③ 旧代 drain 依赖 workerd 对 SIGINT/SIGTERM 的响应，在途请求的 socket 级 drain 仍待补；④ 一个进程承载整代静态 worker，重启影响该代全部 worker。
+- **验证**：`internal/staticgen` 单测含真实 workerd 集成：gen1 Apply → 表指向新端口并返回预期响应 → gen2 Apply → 表切到另一端口、旧代在 grace 内退出；Plan 文件变化自动重载；渲染快照/非法 Plan/端口分配检查。
+
+## ADR-241 每 pod 本地热集：滞回选择与发布渲染（设计）🚧
+
+- **背景**：静态 workerd service 要按 worker 渲染、按 host 路由；多副本下若共享一张全局表会引入跨节点同步。每个 user-runtime 副本都有动态 loader 兜底，因此静态化可以退化为**每 pod 本地优化**：A/B 副本各自按自己观察到的流量选择静态集合，互不协调。
+- **决策**：
+  1. 入口 = 每 pod 的 Go ingress（ADR-240），静态集合只是该 pod 的本地路由表；未命中的 host 走本 pod 动态 loader；
+  2. 热集由 `internal/hotset` 选择：5 分钟窗口、按请求率排序、最低 QPS 门槛、deploy 后稳定期（默认 5m）内不静态化；
+  3. **滞回**：集合大小一致且成员重叠 ≥ `K - max(1,10%K)` 时视为噪声不切换；替换必须 challenger ≥ `ReplaceFactor`(默认 2)×incumbent，且每轮最多替换 `max(1,10%K)` 个；
+  4. **节奏**：每 60s 只评估；实际渲染最小间隔 5m；部署/回滚事件优先但 debounce 5–10s 合并；
+  5. **发布路径**：active version 变化的 host 先从路由表摘除 → 请求走动态 loader（新版本立即可用）→ 批量渲染新代 workerd config → ready 后原子切表 → 旧代 drain；渲染失败保留旧表/旧代，不阻塞 deploy；
+  6. 不跨 pod 同步表，不要求全局 hotness 一致。
+- **边界**：① 静态命中率取决于流量分布与本地收敛，需指标；② 版本 skew 与现有动态 route cache 语义一致（最终一致）；③ 渲染器/代际管理仍未实现（本 ADR 只定策略）；④ 每 pod 内存 × 副本数是静态化的固有成本。
+- **验证（已完成部分）**：`internal/ingress` 单测（路由/回落/热加载/splice/升级）与 `internal/hotset` 单测（top-K、容忍、dominant swap、swap ratio、deploy 稳定期、关闭）。
+
+## ADR-240 可选 Go ingress：Host 路由 + 字节 splice + 动静态混合（实验）🚧
+
+- **背景**：动态 loader 每请求跨 isolate（JSRPC）约 +200µs，单实例 ~3k RPS；静态 workerd service 原型 10–13k。但 Traefik 是运维静态配置（ADR-132 平台不下发边缘配置），无法跟随每 worker 一个 loopback socket 的动态端口。实测纯 Go 反向代理（`httputil.ReverseProxy`）会掉 20%+，调优/手写后接近直连，而“只读请求头再字节 splice”的 L1 代理额外成本最低（~0.8 core/9k RPS，RPS 接近直连）。
+- **决策**：
+  1. 新增 `internal/ingress`：Traefik 仍静态转发到**一个** ingress 端口；ingress 按 Host 查路由表，命中静态后端则把连接 splice 到该 worker 的 loopback workerd socket，否则回落动态 loader；
+  2. 路由表是 JSON 契约（`{"routes":{"host":"127.0.0.1:19001"},"default":"127.0.0.1:8081","version":"..."}`），由后续静态渲染器生成，支持文件热加载（tmp+rename 原子替换）；
+  3. HTTP/1.1 只解析请求头，之后双向字节 splice（keep-alive/SSE/流式/WebSocket 101 原样通过）；**连接按首个请求的 Host 固定**；
+  4. user-runtime 通过 `CELLHIVE_INGRESS_PORT`（0=关闭）、`CELLHIVE_INGRESS_TABLE`、`CELLHIVE_INGRESS_UPSTREAM` 可选启用；Traefik 只需把公网 host 指到 ingress 端口。
+- **边界**：① 仅 HTTP/1.1（Traefik→ingress 默认即 HTTP/1.1；TLS 仍在 Traefik）；② 同一连接上 Host 变化不会重路由（新连接才能换后端）；③ 原始客户端 IP 暂未透传；④ 静态渲染器（把热 worker 写入 workerd config + 路由表 + 代际切换）仍是后续工作，本 ADR 只落地入口与路由契约；⑤ 实验特性，默认关闭。
+- **验证**：`internal/ingress` 单测覆盖静态路由/动态回退/请求体与 Host 透传/keep-alive/101 升级/连接固定/表热加载/非法表/超大请求头；原型 splice 对比直连 RPS 在噪声范围内（见 `docs/archive/bench/static-hosting-prototype-2026-10-20.md` 与后续记录）。
+
+## ADR-239 调用记录改为节点级全局开关，移除版本级 log_policy（2026-10-20）
+
+- **背景**：ADR-238 删除了版本级 `log_policy.console`，但 `log_policy.invocation` 仍把“是否写 Queue/Cron/Workflow 调用记录”绑定在 worker 版本上。调用记录是平台级可观测能力（本地 SQLite + `GET /v1/control/invocations` + OTLP），不应由单个 worker 的部署元数据控制，且目前节点侧的 `CH_INVOCATION_LOGS` 在 `cmd/user-runtime` 里硬编码为 true，没有真正可用的全局开关。
+- **决策**：
+  1. 删除 `log_policy` 版本元数据（`LogPolicy` 类型、`Version.LogPolicy`、`DeploySpec.LogPolicy`、部署 API/Cloudflare 元数据字段）；旧版本 JSON 里的 `log_policy` 被忽略，versions 表保留 `log_policy` 列以兼容旧库但不再读写。
+  2. 调用记录改为**节点级**开关：`CELLHIVE_INVOCATION_LOGS=on|off`（默认 `on`），渲染为 `CH_INVOCATION_LOGS`；关闭时只影响 Queue/Cron/Workflow 的持久记录与 OTLP invocation 导出，handler 执行与 Queue ack/retry 不变。
+  3. Native Tail 采集仍由 ADR-238 的订阅驱动（`CH_LOG_CAPTURE` + 实时订阅），不引入新的版本级开关。
+- **边界**：① 不再支持按 worker 关闭调用记录（只保留节点级与未来的全局配置）；② 旧版本记录不迁移；③ 停用记录后本地历史不删除，只是不再写入新记录；④ OTLP invocation 日志仍受 `OTLP_LOGS` 模式与 endpoint 配置控制。
+- **验证**：删除字段后 `make build`、`make js-test`（真实 workerd userruntime/doruntime 集成）、`internal/control`/`internal/server`/`internal/telemetry` 测试与 `go vet` 通过；Queue/Cron/Workflow 记录的现有验收断言保持（除按 worker 关闭场景外）。
+
+## ADR-238 user-runtime 按订阅动态挂载原生 Tail（2026-10-20）
+
+- **背景**：ADR-236 的本地 ring 只去掉了逐调用 HTTP 投递和查询时转换；worker 加载时是否挂 `tails` 仍只看节点 `CH_LOG_CAPTURE`，与“现在是否有人在看”无关。实测无订阅时每次调用仍支付原生 Tail 事件投递约 30µs + ring 记账约 20µs：动态 loader 路径 2.7–2.8k（关掉后 3.4–3.5k），静态托管 7.9–8.3k（关掉后 13k）。
+- **决策**：
+  1. cell-agent 新增内部端点 `GET /v1/internal/log-capture`，返回 `{mode: telemetry.LogsMode(), workers: 活跃订阅 (ns/worker)}`；订阅态复用 ADR-172/173 的 `telemetry.Subscribe` + peer fan-out。
+  2. user-runtime 的 `loader.js` / `internal.js` 与 do-runtime 的 `host.js` 每约 1s 轮询该端点；低频 dispatch 在加载前强制刷新。原生 Tail 的挂载条件改为：`CH_LOG_CAPTURE !== "0"` &&（`mode === "all"` 或该 worker 在活跃订阅集合中）。端点不可用/404 时保持旧行为（全挂），保证兼容与故障安全。
+  3. 由于 workerd 的 `tails` 只在 worker 加载时固定：fetch 路径维护 **tail / no-tail 两个 resident 变体**并复用现有 retirement 切换；internal dispatch 的 loader id 增加变体后缀；DO facet 只在冷启动时按当前状态选择，**不强行 abort 已驻留 facet**。
+- **版本级 console 策略移除（2026-10-20 产品决策）**：`log_policy.console` 已删除；旧版本 JSON 里的 `console` 字段被忽略。采集不再有“某版本永久拒绝被观测”的语义，只由节点硬上限 + 实时订阅决定；`log_policy` 整体移除；Queue/Cron/Workflow 调用记录由节点级 `CELLHIVE_INVOCATION_LOGS` 控制（ADR-239）。
+- **边界**：① 停止延迟由订阅 TTL 决定——Wrangler tail 每 500ms 续期 60s，关闭后最多约 60s 停止采集（后续可用短 TTL capture 订阅收紧）；② 跨节点依赖现有 fan-out（25s 节流），跨节点启动延迟相应放宽；③ `OTLP_LOGS=all` 仍要求全量采集；④ 静态托管需在渲染期使用同一判定（或混合路由），不在本 ADR 内实现。
+- **验证**：`TestLogCaptureEndpoint`、`TestUserRuntimeDynamicTailGate`（真实 workerd：无订阅→0 Tail 事件；订阅→捕获；过期→停止并切回 no-tail 变体）；`make js-test` 与 `internal/server`、`internal/telemetry` 包测试通过。本机 e2e（单 cell-agent + 单动态 user-runtime，`wrk -t4 -c64 -d15s`，load≈2.5–3.8）：无订阅 **3,060/3,215 RPS**，订阅后 **2,586 RPS（p99 1.76s）**，订阅过期后 **3,038 RPS**；端点实时反映 workers 变化，切换期间无 5xx。
+
+## ADR-237 user-runtime 小响应缓冲降低响应流生命周期开销（2026-10-20）
+
+- **背景**：公共 fetch 的租户响应必须由子 wrapper 追踪 body 的 EOF/cancel/error，否则版本退休可能中断仍在流的响应（ADR-195）。`Lifetime.response` 把每个响应包成 JS `ReadableStream`；真实 workerd 同会话 A/B 显示该包装约占单核 CPU 的 25%–30%（`/ping`、c=64，2,250→3,100 RPS）。小响应（JSON/text）在 API 场景占多数，却为生命周期保护支付同样的每 chunk JS 流成本。
+- **决策**：`Lifetime.response` 对 `application/json`、`*+json`、`text/plain` 做有界预读：最多 128KiB 或读到 EOF；读完的响应以内存 body 返回（不再经过 JS 流），可立即释放生命周期引用；超过上限、chunk 不是字节或其它 content-type（SSE、octet-stream 等）仍走原有逐 chunk 包装，语义不变。预读在子 isolate 内完成，loader 不做第二层包装。
+- **边界**：这是延迟/吞吐权衡。`text/plain` 流式响应的首字节会推迟到 128KiB 或 EOF；需要逐块可见的流应使用 `text/event-stream`（不受影响）或其它 content-type。缓冲上限按响应计，64 并发最坏约 8MiB。
+- **验证**：本机 e2e（`wrk -t4 -c64 -d25s`、Host 路由、每轮重启预热、A/B 交替并含反向顺序）`/ping` 中位 1,944→2,341 RPS（+20%，5/5 轮更快），p50 4.7→3.4ms；`/json` +8%；`text/event-stream` 仍逐块返回，256KiB `text/plain` 超限后回退为受跟踪流，204/500/content-type 不变；`lifecycle.test.mjs` 9 项与 `make js-test`（含 real workerd userruntime/doruntime 集成测试）通过。p99 1s 级尖峰为改动前既有现象，未宣称消除。
+
 ## ADR-236 user-runtime Tail 事件有界合批（2026-10-20）
 
 stock workerd 的原生 Tail 每次调用都会产生事件，即使租户没有 console 输出。可信 Tail host 只把原生事件放入所在 workerd service 的本地内存 ring，不逐调用向 cell-agent 发 HTTP；完整 CF 事件在查询时转换。ring 按 `(namespace,worker)` 最多保留 1000 条及 1MiB，最多保留 200 个 worker；超大单条事件跳过。受 log-role token 保护的 `/v1/internal/logs/events` 按游标查询，每页最多 128 条及约 512KiB。user-runtime 的 public/internal service 和 do-runtime 各有独立 ring；supervisor 定期向所有 cell-agent 登记各实例的直接地址，cell-agent 在 CLI/Wrangler Tail 活跃时按来源和会话游标拉取；Wrangler 跨 agent 聚合按 runtime 会话与序号去重。`OTLP_LOGS=all` 时 agent 后台拉取全部来源，`tail` 模式按有效订阅拉取；同一日志只由首个配置的 cell-agent 导出，以免多节点重复。关闭或重启 runtime 时未被拉取的事件可能丢失；ring 溢出、来源短暂失联和故障切换也维持 best-effort 语义。轻量本地入队仍占用 workerd JS 线程；本方案只移除逐调用网络投递和完整事件转换，不声称消除 Tail 的全部 CPU 成本。
@@ -38,7 +347,7 @@ stock workerd 对动态 RPC entrypoint 只报告 `rpcMethod`。Queue/Cron 派发
 
 ## ADR-228 user-runtime 版本配置必须从 control owner 读取（2026-10-19）
 
-原版 Wrangler 从非 owner 节点发布新版本后，user-runtime 通过另一节点的 `/v1/internal/worker/bindings?version=N` 查询版本环境。该端点若直接读取接入节点的旧 control SQLite，查不到 N 时会回退为 `log_policy.console=false`、`invocation=false`：租户 handler 仍执行，但 Tail 和调用记录静默缺失。此端点按 control scope 先转发到当前 owner，再读取不可变版本及 Secret；owner 不可达时返回错误，不把本地旧版本当作授权或日志策略。双节点回归和真实 Wrangler 发布后异步 Tail/调用记录是验收门禁。
+原版 Wrangler 从非 owner 节点发布新版本后，user-runtime 通过另一节点的 `/v1/internal/worker/bindings?version=N` 查询版本环境。该端点若直接读取接入节点的旧 control SQLite，查不到 N 时不伪造版本环境；调用记录由节点级开关决定（ADR-239），Tail 采集由订阅态决定（ADR-238），均不再读版本策略。此端点按 control scope 先转发到当前 owner，再读取不可变版本及 Secret；owner 不可达时返回错误，不把本地旧版本当作授权或日志策略。双节点回归和真实 Wrangler 发布后异步 Tail/调用记录是验收门禁。
 
 ## ADR-227 Wrangler 重部署保留异步触发配置（2026-10-19）
 
@@ -59,7 +368,7 @@ stock workerd 对动态 RPC entrypoint 只报告 `rpcMethod`。Queue/Cron 派发
 
 ## ADR-224 Workflow 每次运行尝试的关联记录（2026-10-19）
 
-Workflow 实例 ID 是业务身份；每次领取运行 lease（首次、sleep/event 唤醒、故障恢复）产生新的 `invocation_id`、`request_id` 和 W3C traceparent，保存到与 Queue/Cron 共用的调用记录并在完成时导出 OTLP。WorkflowBridgeTarget 的 step 回调沿用该 traceparent。一次尝试的 `logical_id` 固定关联 namespace、worker、workflow 名和实例 ID，重跑保留业务身份但不复用 trace。版本化 `log_policy.invocation` 对 Workflow 同样生效。stock workerd 的 Workflow 原生 Tail 是 RPC 事件，没有 HTTP 请求头，TailItem 不伪造 requestId；关联查询以调用记录和 OTLP 为准。创建请求的 HTTP trace 不自动成为异步尝试的父级，除非后续给 Workflow cell 增加持久父链协议。
+Workflow 实例 ID 是业务身份；每次领取运行 lease（首次、sleep/event 唤醒、故障恢复）产生新的 `invocation_id`、`request_id` 和 W3C traceparent，保存到与 Queue/Cron 共用的调用记录并在完成时导出 OTLP。WorkflowBridgeTarget 的 step 回调沿用该 traceparent。一次尝试的 `logical_id` 固定关联 namespace、worker、workflow 名和实例 ID，重跑保留业务身份但不复用 trace。调用记录由节点级 `CELLHIVE_INVOCATION_LOGS` 全局控制（ADR-239）。stock workerd 的 Workflow 原生 Tail 是 RPC 事件，没有 HTTP 请求头，TailItem 不伪造 requestId；关联查询以调用记录和 OTLP 为准。创建请求的 HTTP trace 不自动成为异步尝试的父级，除非后续给 Workflow cell 增加持久父链协议。
 
 ## ADR-223 Queue/Cron 异步尝试关联（2026-10-19）
 
@@ -87,7 +396,7 @@ Wrangler 的单条 WebSocket 订阅由接入的 cell-agent 同时读取本机及
 
 ## ADR-217 按 Worker 版本控制日志采集（2026-10-19）
 
-部署版本保存可选 `log_policy.console` 与 `log_policy.invocation` 布尔值；省略时沿用运行时默认值。`CH_LOG_CAPTURE=0` 与 `CH_INVOCATION_LOGS=0` 是节点级硬上限，Worker 不能自行打开已关闭的采集。显式关闭 console 时不挂载租户 Tail，因此 Tail/console OTLP 均无该 Worker 事件；显式关闭 invocation 时不写 Queue/Cron 调用记录。版本环境读回、secret 引起的新版本、Queue/Cron 配置重发布均保留该策略；旧版本默认继承。内部 dispatch 查不到版本策略时按关闭采集处理，避免控制面故障导致已关闭 Worker 泄露日志。此设置不改变业务执行与 Queue ack，且运行中旧版本按旧策略继续运行。
+日志策略不再随版本保存（`log_policy` 于 2026-10-20 整体移除，ADR-238/239）：Queue/Cron/Workflow 的持久调用记录由节点 `CELLHIVE_INVOCATION_LOGS=on|off`（默认 on，渲染为 `CH_INVOCATION_LOGS`）全局控制；Tail/console 采集由节点 `CH_LOG_CAPTURE` 与实时 tail 订阅决定。关闭调用记录只影响持久记录与 OTLP invocation 导出，不改变业务执行与 Queue ack。
 
 ## ADR-216 Queue 消费等待与重试配置（2026-10-19）
 
@@ -141,7 +450,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 ---
 
-## ADR-001 计算层使用 stock workerd，不修改 workerd ✅
+## ADR-001 计算层使用 stock workerd，不修改 workerd（已被 ADR-264 取代）
 
 - **决策**：计算层使用 Cloudflare 官方未修改的 workerd，仅通过 `workerLoader`、bindings、capnp 配置、进程开关（`--experimental`）使用它。
 - **理由**：可跟上游修复；避免维护分叉。
@@ -1712,7 +2021,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 - **测试**：`internal/wrangler` 映射（含 hyperdrive）；`internal/wranglercompat` 的 vendor-matrix 契约测试更新；**真实 workerd** e2e（`TestUserRuntimePublicLoaderD1R2Queue`）加 hyperdrive 绑定并断言租户读到 `host:port/database/user`。
 - **边界（如实）**：
   - **平台不提供连接池**：worker 拿到的就是源库连接串。**isolate 内**的连接复用由驱动提供（`pg` 的模块级 `Pool` / `mysql2` pool，其空闲连接按 `idleTimeoutMillis`/`max` 自行淘汰）——这依赖 isolate 复用，跨 isolate/跨节点不共享。
-  - **共享池必须做协议终止**（pgbouncer 式），属独立项，未做（见下）。
+  - **共享池必须做协议终止**（协议终止代理式），属独立项，未做（见下）。
   - **网络可达性**：租户 `globalOutbound` 仍是 **public-only**，所以公有云上的源库可直接连；RFC1918/本机地址连不上 → 私有库需要运维侧代理/池化器（或未来按绑定的出网白名单，未做）。
   - 连接串含口令，落在版本绑定元数据里（控制面 cell，随复制进桶）；建议**低权限库用户**，或运维侧用受控代理不落口令。
 
@@ -1773,13 +2082,13 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   4. **两条读取路径都接线**：公开 loader（`loader.js bindingSpec`，冷路径缓存；解析失败**省略绑定**，不注入空凭据）与内部 spec（`bindingSpecFor` 新增 hyperdrive 分支，ADR-128 的 queue/scheduled/workflow/DO 路径同样生效）。
   5. **dev CLI**：`localConnectionString` 优先；否则 id 为 URL 时用它；资源名在离线 dev 无法解析 → 告警并跳过绑定（与生产的「解析失败即省略」一致）。
 - **测试**：`TestResourceConfigSealed`（密文不含明文、无 key 拒绝）、`TestHyperdriveResourceAndBinding`（注册→兼容门通过、未注册仍被拒、内联兼容、internal 端点、spec 注入）、`TestUserRuntimeHyperdriveResolvesFromPlatform`（真实 workerd：env 取到解析后的 URL 而非 id；解析失败则无绑定；已用「回退修复」验证会失败）、CLI e2e 增补资源注册 + `--hyperdrive NAME=NAME`。
-- **边界/后续（如实）**：① 平台仍**不做连接池**（ADR-125 边界不变：isolate 内由驱动池化，共享池需 pgbouncer 式协议终止代理）；② `resources` 新增列不被 `CREATE TABLE IF NOT EXISTS` 迁移——pre-production 按 ADR-117 直接重建 control cell；③ origin URL 的轮换在**加载时**生效（需重新部署/驱逐 isolate 才会重取）；④ 资源名约定与其它 kind 一致（资源名 == 绑定名）；⑤ dev 离线解析不了资源名，需要 `localConnectionString`。
+- **边界/后续（如实）**：① 平台仍**不做连接池**（ADR-125 边界不变：isolate 内由驱动池化，共享池需协议终止代理）；② `resources` 新增列不被 `CREATE TABLE IF NOT EXISTS` 迁移——pre-production 按 ADR-117 直接重建 control cell；③ origin URL 的轮换在**加载时**生效（需重新部署/驱逐 isolate 才会重取）；④ 资源名约定与其它 kind 一致（资源名 == 绑定名）；⑤ dev 离线解析不了资源名，需要 `localConnectionString`。
 
 ---
 
 ## ADR-130 本地连接复用 = 在 Durable Object 内持有连接（实证 + 接线）✅
 
-- **背景**：用户决定「不做外部组件，本地复用连接即可」（不引入 pgbouncer/池化代理）。ADR-125 曾写「isolate 内由驱动池化」，但这是**未经验证的假设**。该行为已在现行 pinned workerd `1.20260916.1` 的真实套件重验：
+- **背景**：用户决定「不做外部组件，本地复用连接即可」（不引入外部池化代理）。ADR-125 曾写「isolate 内由驱动池化」，但这是**未经验证的假设**。该行为已在现行 pinned workerd `1.20260916.1` 的真实套件重验：
   1. **普通 worker 做不到**：模块作用域的 socket 对象跨请求存活，但其 streams 锁在创建它的请求上（第二次请求报 `This WritableStream is currently locked to a writer.`）→ 请求级 I/O 隔离，普通 handler 无法跨请求持有连接，「模块级连接池」不成立。
   2. **Durable Object 可以**：DO 的 fetch 里把 `connect()` 的 socket + writer/reader 存到实例字段，后续请求复用同一连接（实测 3 次请求 → 服务端只 accept 1 次、每次都正确收发）。这正是 CF「用 DO 持有长连接」的语义。
 - **决策**：
@@ -1787,7 +2096,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   2. **接线/可配**：`userruntime.Config`/`doruntime.Config` 增加 `OutboundAllow`（默认 `["public"]`，即 I-09 不变），env `CELLHIVE_TENANT_OUTBOUND=public[,private[,local]]`（`cmd/user-runtime`/`cmd/do-runtime`）。允许 `private`/`local` 才能连私有网段/本机源库——**默认关闭，开启即放松 I-09 的 public-only 底线**，由运维决定。未知类别在 Render 期直接报错。
   3. **README 里给出形态**：DO 内 `connect()` + 实例字段持有（见下方测试用的最小例子）；驱动需基于 `cloudflare:sockets`（如 `postgres`），平台不自带驱动。
 - **测试（真实 workerd，已用「改成每请求重连」验证会失败）**：`internal/doruntime TestDoRuntimeHoldsConnectionAcrossRequests`——租户 DO 持有到 loopback echo 服务的 TCP 连接，两次 invoke 复用（服务端 accepts==1，返回 `n=1;echo:ping-1` / `n=2;echo:ping-2`）。
-- **边界/后续（如实）**：① 跨节点/跨 isolate 的共享池**不可能**（除非协议终止代理，即之前说的 pgbouncer/自研池化器——本 ADR 明确不做）；② 连接随 DO 生命周期（驱逐/重部署/`/v1/do/abort` 断）；③ `local`/`private` 出网默认关闭；④ 普通 worker（fetch/queue/scheduled）仍无法跨请求持有连接——**不要在普通 handler 里做模块级池**，把它放进 DO。
+- **边界/后续（如实）**：① 跨节点/跨 isolate 的共享池**不可能**（除非协议终止代理，即之前说的协议终止代理/自研池化器——本 ADR 明确不做）；② 连接随 DO 生命周期（驱逐/重部署/`/v1/do/abort` 断）；③ `local`/`private` 出网默认关闭；④ 普通 worker（fetch/queue/scheduled）仍无法跨请求持有连接——**不要在普通 handler 里做模块级池**，把它放进 DO。
 
 ---
 

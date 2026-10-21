@@ -441,3 +441,15 @@ Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、1
 | 入口 `/ready` 的覆盖范围（ADR-156） | ⚠️ **边界**：描述的是**入口/DO 宿主**的就绪（投影新鲜度、排空状态），不是租户 worker 内部健康；props-bound facades（KV/D1/R2/Queue 在 loader isolate）没有独立探针 |
 
 **含义（2026-09-15 更新）**：P3.7/P3.8 的交付（facet 发现、对象键、按对象恢复、门、跨节点冷激活/接管、compat 套件）**均已实现并验证**。P3 各项均已实现/定稿（WS 跨节点转发、`transferred_classes` 同 worker、运行期 VFS 懒读见 ADR-160、`refreshFacets` 增量缓存）；仅剩 **C 类环境验证**（真实跨主机 RTT、云端对象存储、多主机混沌/接管）与跨 worker `transferred_classes`（有意拒绝）。
+
+## 静态/动态混合托管（ADR-240 ~ ADR-248）
+
+- 静态代只覆盖无 assets、非 path 挂载的 host；path 路由、assets 与 pattern host 继续走动态 loader。
+- 静态代一个 workerd 进程承载该代全部静态 worker；部署/热集变化会重建整代，warm isolate 会丢失一次。
+- 静态快路径不挂 Tail：有活跃 tail 订阅的 host 会回落动态（Tail 仍可用，但该 host 回到 ~3k）；订阅过期后自动回静态。跨 worker service binding 走 cell-agent HTTP，延迟高于动态同实例路径。
+- 静态 service binding 需要 cell-agent 配置 `CELLHIVE_DISPATCH_URL`，否则返回 503 no_dispatch。
+- 多节点 tenant 的 `CELL_URL` 必须指向稳定入口；控制面 owner 故障切换受 `CELLHIVE_LEASE_TTL`（默认 10s）限制。
+- Hyperdrive 已用最小 PostgreSQL v3 协议客户端做真实查询；租户侧驱动/连接池仍需自行验证。
+- Queue producer + consumer、并发批量、retry→DLQ 已 e2e；更长时间/大批量压测尚未覆盖。
+- 热集/Plan 刷新默认 30s；部署后的短暂窗口内可能继续服务旧静态版本（ingress 静态失败会回落动态）。
+- ingress 运维端点（`CELLHIVE_INGRESS_ADMIN_PORT`）无鉴权，应只暴露在私网。

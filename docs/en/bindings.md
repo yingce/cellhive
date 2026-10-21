@@ -136,3 +136,62 @@ Tenant bindings are no longer HTTP facades: the platform worker exports `WorkerE
 - **R2 presign**: `env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet` (self-hosted backend returns a short-lived read URL).
 - **Log tail**: trusted hosts attach `workerd/platform/log-tail.js` as a real `Fetcher` in each dynamic Worker's `WorkerCode.tails`. It captures `console.*`/exceptions into the platform ring and optional OTLP export; identity, log token, URL, and private transport never enter tenant env (ADR-185).
 - **AI (BYO)**: `env.AI.run(model, inputs)` → `<AI_URL>/chat/completions` (OpenAI-compatible, `AI_KEY` Bearer), returns `{response,model,usage}`; `inputs.messages` or `{prompt}`.
+
+## Hyperdrive: drivers and compatibility (2026-10-21)
+
+By default CellHive's Hyperdrive only exposes the **origin** `connectionString`; there is no edge connection pool, proxy or global acceleration.
+
+### Optional: ProxySQL proxy mode
+
+Default is `direct` (origin, no behavior change). Enable when a shared pooler is available:
+
+```bash
+CELLHIVE_HYPERDRIVE_MODE=proxy
+# one protocol
+CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133
+# or both protocols in one variable, selected by scheme
+CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133,mysql://proxysql:6033
+```
+
+- host/port are rewritten to the protocol pooler; **database/user/password/query are preserved**;
+- PostgreSQL and MySQL use separate ProxySQL listeners (6133/6033);
+- a scheme with no matching entry fails closed;
+- a bare `host:port` remains PostgreSQL back-compat; MySQL requires `mysql://`;
+- when multiple resources share a database name, `CELLHIVE_HYPERDRIVE_DB_MODE=binding` yields `hd_<resource>`; MySQL keeps the origin schema;
+- with workerd, `mysql2` needs `disableEval: true` (workerd forbids `new Function`) and generally a CJS require shim for Node builtins; verified with `mysql2` + ProxySQL;
+- With `CELLHIVE_PROXYSQL_ADMIN`, Hyperdrive resource create/delete automatically upserts/deletes ProxySQL `mysql_servers`/`mysql_users` or `pgsql_servers`/`pgsql_users` and runs `LOAD ... TO RUNTIME`; `CELLHIVE_PROXYSQL_SAVE=1` also persists.\n- ProxySQL admin credentials, backend pool settings and query rules remain operator-managed; sync failures are currently logged without rolling back the resource create.
+- restart cell-agent after changing the mode. To use a real Postgres driver on stock workerd:
+
+1. the version must set `compatibility_flags: ["nodejs_compat"]`;
+2. tenant egress must reach the database (`CELLHIVE_TENANT_OUTBOUND` needs `private`/`local` for a local/private DB);
+3. **postgres.js** is recommended (pure ESM with a `workerd` export):
+   ```js
+   import postgres from "postgres";
+   const sql = postgres(env.HYPERDRIVE.connectionString, { max: 4 });
+   const rows = await sql`select 1 as ok, current_database() as db`;
+   await sql.end({ timeout: 2 });
+   ```
+   esbuild: `--conditions=workerd --external:cloudflare:sockets --external:node:*`.
+
+4. **node-postgres (`pg`)** also works with `pg-cloudflare`'s `workerd` export plus a tiny require shim:
+   ```js
+   // pgshim.js — must run before importing "pg"
+   import * as events from "node:events";
+   import * as util from "node:util";
+   import * as crypto from "node:crypto";
+   import * as buffer from "node:buffer";
+   import * as stream from "node:stream";
+   import { CloudflareSocket } from "pg-cloudflare";
+   globalThis.require = (name) => ({ events, util, crypto, buffer, stream, net: {}, tls: {}, dns: {}, fs: {}, path: {}, os: {}, readline: {}, "pg-cloudflare": { CloudflareSocket } })[name] || {};
+   ```
+   ```js
+   import "./pgshim.js";
+   import { Client } from "pg";
+   const c = new Client(env.HYPERDRIVE.connectionString);
+   await c.connect();
+   const r = await c.query("select 1 as ok, current_database() as db");
+   await c.end();
+   ```
+   esbuild: `--platform=neutral --main-fields=main,module --conditions=workerd --external:cloudflare:sockets --external:node:* --external:events --external:util --external:crypto --external:buffer --external:stream --external:net --external:tls --external:dns --external:fs --external:path --external:os --external:readline`.
+
+Both were verified against a real Postgres 17 with `select 1, current_database()`. Pooling (`max`) is **per-isolate**, not Cloudflare's global Hyperdrive pool.

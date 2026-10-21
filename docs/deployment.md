@@ -165,3 +165,75 @@ make ci            # = bash scripts/ci.sh：gofmt/vet/test/build/js-test/cli-tes
 - Terraform 模板（orchestration 现由 Helm + kustomize 提供）。
 
 _最后更新：2026-09-17_
+
+### Hyperdrive ProxySQL（可选）
+
+默认 `CELLHIVE_HYPERDRIVE_MODE=direct`，binding 直接返回源库 connectionString。
+
+需要代理时，部署外部 ProxySQL（本 Chart 不内置 ProxySQL 模板）：
+
+```yaml
+hyperdrive:
+  mode: proxy
+  # 一个变量同时表达两种协议；只写一个则另一种 fail closed
+  proxy: "postgres://proxysql:6133,mysql://proxysql:6033"
+```
+
+Compose：
+
+```bash
+export CELLHIVE_HYPERDRIVE_MODE=proxy
+export CELLHIVE_HYPERDRIVE_PROXY='postgres://proxysql:6133,mysql://proxysql:6033'
+```
+
+- ProxySQL 的 MySQL/PostgreSQL 监听端口不同（6033/6133）；
+- `proxy` 模式未配置 endpoint 时 Helm 渲染失败；
+- 设置 `CELLHIVE_PROXYSQL_ADMIN` 后，CellHive 会在 Hyperdrive 资源 create/delete 时自动写 ProxySQL 的 backend/user 并 `LOAD ... TO RUNTIME`；`CELLHIVE_PROXYSQL_SAVE=1` 同时落盘。
+- ProxySQL 的 admin 凭据、backend 池参数、query rules 仍由运维负责；多副本和启动 reconcile 尚未实现。
+
+
+### 本机 Compose Hyperdrive profile
+
+```bash
+cd deploy/compose
+set -a; . ./cellhive.local.env; set +a
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+  -f docker-compose.hyperdrive.yml --profile hyperdrive up -d
+```
+
+该 profile 启动 MySQL 8 + ProxySQL 3，并给 cell-agent 配置：
+
+```text
+CELLHIVE_HYPERDRIVE_MODE=proxy
+CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133,mysql://proxysql:6033
+CELLHIVE_PROXYSQL_ADMIN=cellhive:cellhive@tcp(proxysql:6032)/
+CELLHIVE_HYPERDRIVE_MANAGED_USERS=1
+```
+
+并给 user-runtime 打开 `public,private,local` 出网。`proxysql-init` 一次性创建远端 admin 用户并重启 ProxySQL 使凭据生效。注册 MySQL 资源：
+
+```bash
+cellhive resource create <ns> hyperdrive hd1 \
+  --connection-string 'mysql://root:root@mysql:3306/app?ssl-mode=DISABLED'
+```
+
+CellHive 会创建 `hd_*` 源库角色、写 ProxySQL，并按 reconcile 收敛；初始创建失败时最多等待一个 30s reconcile 周期。
+
+### Runtime workerd fork
+
+运行时统一使用 `github.com/yingce/cellhive-workerd`（固定 `cellhive-v1.20260916.1-3`）。
+
+```bash
+# 本地已有 fork checkout 时直接复制；否则按脚本用 Bazel 编译
+bash deploy/build-workerd-fork.sh
+
+# 生成 deploy/workerd-fork/workerd 后构建镜像
+make docker-build
+# 或
+docker compose -f deploy/compose/docker-compose.yml up --build
+```
+
+- fork 二进制要求 glibc ≥ 2.38，runtime 镜像使用 Ubuntu 24.04；
+- Go 二进制仍在 Debian bookworm 构建，向前兼容；
+- 默认镜像不再下载 stock workerd；
+- CI/离线构建需要预先提供 `deploy/workerd-fork/workerd`，或让脚本完成 Bazel 构建；`.github/workflows/workerd-fork.yml` 用 `deploy/Dockerfile.workerd-fork-build` 从 pinned tag 构建并 smoke-test 镜像。

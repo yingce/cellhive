@@ -18,7 +18,7 @@
 
 清理状态为 `pending/running/failed/complete`，含 `job_id/data_scope/attempts/last_error/next_retry_ms`；后台每 2 秒检查、失败指数退避最多自动 10 次，手动 retry 重置失败预算。每 pass 最多删除 500 replica 对象；大资源继续 pending，不消耗失败预算。删除完成前不允许重建；完成后重新创建才激活新 incarnation。删除主 Queue 不删除独立 DLQ，purge 仍只清消息。旧无来源 DLQ、共享 scope 或 bucket 失败会明确报告，不能当作清理完成。
 
-调用记录 `invocation_id` 标识一次执行；`logical_id` 关联同 batch/slot，`attempt`、`status=success/failed/retry/running` 与 `retry_requested/no_retry` 区分结果。异常包含 error/stack，console 在 `logs` 中，截断看 `logs_truncated`。请求完成前先持久化结果；持久化失败不静默回成功。保留 7 天或每 namespace 最近 10,000 次（写入时有界回收），运行中异常退出保留 running 供定位；此 API 为完成记录查询，实时 tail 继续使用原日志接口。
+调用记录 `invocation_id` 标识一次执行；`logical_id` 关联同 batch/slot，`attempt`、`status=success/failed/retry/running` 与 `retry_requested/no_retry` 区分结果。异常包含 error/stack，console 在 `logs` 中，截断看 `logs_truncated`。请求完成前先持久化结果；持久化失败不静默回成功。保留 7 天或每 namespace 最近 10,000 次（写入时有界回收），运行中异常退出保留 running 供定位；此 API 为完成记录查询，实时 tail 继续使用原日志接口。调用记录由节点级 `CELLHIVE_INVOCATION_LOGS`（默认 on）全局控制（ADR-239），不再有 per-worker 策略。
 
 Queue 部分重试后批次可能重组：使用 `messages[].logical_id/attempt` 与 `parent_invocation_ids` 追踪消息，不应把当前成员哈希当作全链路重试身份。查询可附加 `message_id` 或 `message_logical_id`。返回值在 `result`（`result_encoding=cellhive-tagged-json`，最多 8 KiB；`result_truncated` 或 `unsupported` 显式提示），`ack/retry` 保留逐消息结果及 retry delay。
 

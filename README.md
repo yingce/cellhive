@@ -5,7 +5,7 @@
 <p align="center"><strong>A self-hosted, Cloudflare Workers-compatible runtime.</strong></p>
 
 <p align="center">
-  Unmodified <a href="https://github.com/cloudflare/workerd">workerd</a> for compute ·
+  <a href="https://github.com/yingce/cellhive-workerd">cellhive-workerd</a> fork for compute ·
   a Go "cell" state layer on SQLite + an S3-compatible object store ·
   RPO=0 with durable addressing and replaceable nodes.
 </p>
@@ -31,7 +31,7 @@
 **Platform & operations**
 - Cells are replicated and durable (RPO=0); a single object-store probe (`cellhive diagnose`) validates the bucket contract at startup.
 - `GET /metrics`, a bounded worker log tail, optional OTLP traces and logs.
-- One image with all services and the pinned workerd; Docker Compose, Kubernetes (kustomize), Helm; graceful drain and readiness probes.
+- One image with all services and the pinned cellhive-workerd fork; Docker Compose, Kubernetes (kustomize), Helm; graceful drain and readiness probes.
 
 **Multi-tenancy & isolation**
 - Per-binding scoped tokens (HMAC) with segment-level scopes (`<ns>:<kind>:<cell>`, `*`/`pre*`); tenant workers get binding facades, never platform secrets; tenant outbound is public-only by default; only `cell-agent` holds bucket credentials.
@@ -39,13 +39,13 @@
 
 ## Architecture
 
-![CellHive architecture](./docs/assets/architecture-minimal-detail.png)
+![CellHive architecture](./docs/assets/architecture-workerd-fork.svg)
 
 | Component | Runtime | Ports | Role |
 |---|---|---|---|
 | **Traefik / edge proxy** | external | 80/443 | TLS + host routing (statically configured by the operator) |
-| **`user-runtime`** | workerd | `:8081` public, `:8088` internal | Entry loader: host/version routing and tenant execution |
-| **`do-runtime`** | workerd + Go supervisor | `:8788` | Native Durable Objects (facets); elastic; holds a working copy, not the authority |
+| **`user-runtime`** | cellhive-workerd fork | `:8081` public, `:8088` internal | Entry loader: host/version routing and tenant execution |
+| **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | Native Durable Objects (facets); elastic; holds a working copy, not the authority |
 | **`do-supervisor`** (optional) | Go | `:18901` | Output gate for Durable Objects: gates responses on durability (RPO=0) |
 | **`cell-agent`** | Go | `:7001` internal REST, `:8082` admin | Cell storage + replication + owner/epoch leases + control plane + timer dispatch + the **only** object-store credentials |
 | **Object storage** | S3-compatible | — | Authority for cell state, worker bundles and assets |
@@ -54,11 +54,11 @@
 
 ## Design principles
 
-1. **Do not modify workerd.** CellHive uses only `workerLoader`, bindings and capnp; it never forks or patches the runtime.
+1. **Fork only in the workerd repo.** Compute uses `cellhive-workerd`, an upstream-tracking fork with CellHive-specific per-invocation limits. CellHive itself does not patch workerd inside this repo; it integrates through `workerLoader`, bindings and capnp.
 2. **Separate compute from state.** Runtimes execute; all persistence flows through `cell-agent`, which owns the cell's SQLite, replication and bucket credentials. Runtimes never touch the object store directly.
 3. **Everything is a cell.** One uniform unit (namespace, class, id) with one SQLite per cell means one mechanism for leases, fencing, replication, snapshots, recovery and cleanup.
 4. **The object store is the authority; no consensus service.** A conditional write decides ownership; LTX plus peer fsync gives RPO=0; nodes are replaceable because durable state lives in the bucket and in replicas, while local disk is only a working copy/cache.
-5. **Fail closed on compatibility.** Unknown `wrangler` fields, unknown compatibility flags and dates newer than the pinned workerd are rejected at deploy time rather than silently accepted.
+5. **Fail closed on compatibility.** Unknown `wrangler` fields, unknown compatibility flags and dates newer than the pinned cellhive-workerd are rejected at deploy time rather than silently accepted.
 6. **Least privilege.** Tenant code sees binding facades and scoped tokens, not platform secrets; object-store credentials exist only in `cell-agent`.
 7. **Evidence over claims.** Every behavior is covered by tests; `bash scripts/ci.sh` (lint, vet, unit, real-workerd integration, perf, RPO fault injection, S3, image/compose/k8s/helm) must print `GATE: PASS`.
 
@@ -79,13 +79,18 @@ make run       # starts cell-agent on :7001 with a local bucket
 CELLHIVE_CONTROL_URL=http://127.0.0.1:7001 make diagnose   # object-store probe
 ```
 
-Full local stack:
+Full local stack (builds the fork image first):
 
 ```bash
-export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32)   # the single required secret
+make docker-build                                  # compiles/copies cellhive-workerd into cellhive:dev
+export CELLHIVE_ROOT_KEY=$(openssl rand -base64 32) # the single required secret
 docker compose -f deploy/compose/docker-compose.yml up --build
 # or: make compose-up
 ```
+
+The workerd source fork is [`yingce/cellhive-workerd`](https://github.com/yingce/cellhive-workerd)
+(pinned `cellhive-v1.20260916.1-3`); `deploy/build-workerd-fork.sh` copies a local build or
+compiles it with Bazel.
 
 `CELLHIVE_ROOT_KEY` is the only required secret — every role credential is HKDF-derived from it.
 
@@ -125,7 +130,7 @@ scripts/    CI and ops scripts
 - Read [`docs/contributing.md`](./docs/contributing.md): a reading path and the test anchors for each change type.
 - Run `bash scripts/ci.sh` before opening a change; it must print `GATE: PASS`.
 - Keep design and code in sync: change the docs (and `docs/decisions.md`) with the code.
-- Never fork or patch workerd; extend through `workerLoader`, bindings and capnp only.
+- Change workerd in `yingce/cellhive-workerd`, not by patching it inside this repo; CellHive integrates through `workerLoader`, bindings and capnp.
 
 ## Acknowledgements
 

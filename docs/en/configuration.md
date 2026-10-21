@@ -175,10 +175,36 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade source |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | runtime directory (subdirectory `user-runtime/`) |
-| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` captures tenant `console.*`/uncaught exceptions; `off` omits native Tail for higher Worker throughput; it does not disable persistent Queue/Cron invocation records (ADR-205); accepts only `on`/`off` |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` allows subscription-driven native Tail (ADR-238: nothing is captured until a tail subscription or `OTLP_LOGS=all`); `off` is a node-wide hard cap; accepts only `on`/`off` |
+| `CELLHIVE_INVOCATION_LOGS` | `on` | Node-wide Queue/Cron/Workflow invocation-record switch (ADR-239); `off` stops durable records and OTLP invocation logs without changing execution or Queue ack; accepts only `on`/`off` |
+| `CELLHIVE_ISOLATE_MAX` | `128` | Upper bound on warm isolates kept by the public user-runtime loader (worker version × tail variant), injected by the deployment; positive integer |
+| `CELLHIVE_ISOLATE_BYTES` | `268435456` (128 × 2MiB) | Estimated byte budget for warm isolates (actual RSS is somewhat higher); when unset it follows `CELLHIVE_ISOLATE_MAX × 2MiB`; integer bytes (≥1MiB) |
+| `CELLHIVE_INGRESS_PORT` | `0` | Optional Go ingress listen port (ADR-240); 0 disables it. When enabled, Traefik statically forwards here and the ingress routes by Host to a static workerd socket or the dynamic loader |
+| `CELLHIVE_INGRESS_TABLE` | empty | Routing table JSON path: `{"routes":{"host":"127.0.0.1:19001"},"default":"127.0.0.1:8081"}`; hot-reloaded on file change (atomic replace) |
+| `CELLHIVE_INGRESS_UPSTREAM` | `127.0.0.1:<publicPort>` | Dynamic-loader fallback backend for the ingress |
+| `CELLHIVE_STATIC_PLAN` | empty | Plan JSON path for static generations (ADR-242); file changes trigger a new render/generation; used together with the ingress |
+| `CELLHIVE_STATIC_PORT_BASE` | `19000` | Loopback port base for static generations; each generation gets its own range |
+| `CELLHIVE_STATIC_HOSTS` | empty | Comma-separated hosts; when set, static plans are rebuilt from the cell-agent projection every 30s and applied only on change. Only workers without platform bindings are rendered statically, others stay dynamic (ADR-243) |
+| `CELLHIVE_HOT_MAX` | `0` | Per-pod static hot-set limit; >0 enables automatic hotness (requires `CELLHIVE_INGRESS_PORT`), 0 disables it (ADR-241/244) |
+| `CELLHIVE_HOT_INTERVAL_SEC` | `60` | Hot-set evaluation interval |
+| `CELLHIVE_HOT_WINDOW_SEC` | `300` | Hot-set scoring window |
+| `CELLHIVE_HOT_MIN_QPS` | `10` | Minimum request rate to enter the static set |
+| `CELLHIVE_HOT_SWAP_RATIO` | `0.1` | Maximum fraction replaced per cycle |
+| `CELLHIVE_HOT_REPLACE_FACTOR` | `2` | Challenger-to-incumbent replacement factor |
+| `CELLHIVE_HOT_DEPLOY_STABILITY_SEC` | `300` | Time a route stays dynamic after a deploy |
+| `CELLHIVE_PLAN_REFRESH_SEC` | `30` | Interval to rebuild the current static plan (version changes apply within this window) |
+| `CELLHIVE_ROUTE_POLL_SEC` | `5` | Route revision poll interval; a change triggers an immediate plan refresh (the periodic refresh remains the fallback) |
+| `CELLHIVE_STATIC_MINIMAL` | `auto` | Static worker entry selection (ADR-249): `auto` runs the tenant bundle directly when bindings are only kv/queue/ai/service/workflow/vectorize/hyperdrive/assets and no subrequest limit is set; `1` forces it, `0` always uses the full wrapper |
+| `CELLHIVE_INGRESS_ADMIN_PORT` | `0` | Ingress ops endpoints (0 disables): `/ready`, `/metrics`; keep private and use for edge health checks |
 | `CELLHIVE_SERVICE_NATIVE` | empty=enabled | `0` disables native service RPC |
 | `CELLHIVE_DO_DIRECT` | empty=enabled | `0` disables owner-hint direct access |
 | `CELLHIVE_TENANT_OUTBOUND` | empty→`public` | egress category `public`/`private`/`local` |
+| `CELLHIVE_HYPERDRIVE_MODE` | `direct` | Hyperdrive binding mode: `direct` returns the origin connectionString; `proxy` rewrites host/port to the protocol pooler (requires `CELLHIVE_HYPERDRIVE_PROXY`) |
+| `CELLHIVE_HYPERDRIVE_PROXY` | empty | Pooler address(es) for `proxy` mode. A bare `host:port` is PostgreSQL (back-compat); `postgres://proxysql:6133,mysql://proxysql:6033` carries both protocols in one variable. A scheme with no matching entry fails closed |
+| `CELLHIVE_HYPERDRIVE_DB_MODE` | `origin` | `origin` keeps the origin database name; `binding` rewrites it to `hd_<resource>`, for PostgreSQL pooler mappings when resources share a database name |
+| `CELLHIVE_HYPERDRIVE_MANAGED_USERS` | `0` | `1` creates/updates an `hd_<hash>` role on the origin per binding and gives workers only generated credentials; the origin URL needs `CREATE USER`/`GRANT` privileges |
+| `CELLHIVE_PROXYSQL_ADMIN` | empty | ProxySQL admin DSN, e.g. `admin:admin@tcp(proxysql:6032)/`; comma-separated for multiple admins (replica fanout); when set, Hyperdrive resource create/delete and the 30s reconcile upsert/delete backend+user and run `LOAD ... TO RUNTIME` |
+| `CELLHIVE_PROXYSQL_SAVE` | `0` | `1` also runs `SAVE ... TO DISK` so ProxySQL keeps changes after restart |
 | `CELLHIVE_CAP_EGRESS` | empty (recommended default) | extra network ranges (CIDR/categories, comma-separated, OR-combined) allowed for the capability data-plane egress (PLATFORM binding). **No configuration needed** when capability runs over the public domain + TLS (private denied by default = secure default); for intranet-direct runtime-services add its CIDR block (e.g. `10.20.0.0/16`) or single IP (`10.20.1.5/32`) |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | empty | BYO AI endpoint and key; empty=not injected |
 

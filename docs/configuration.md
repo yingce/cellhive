@@ -188,7 +188,7 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_WORKERD` | 自动查找 | workerd 路径（优先 pin `1.20260916.1`） |
+| `CELLHIVE_WORKERD` | 自动查找 | cellhive-workerd 路径（镜像内固定 fork `cellhive-v1.20260916.1-3`） |
 | `CELLHIVE_WORKERD_DIR` | 空 | 本地包存储目录（按 `@cloudflare+workerd-linux-64@*` 搜索，pin 优先） |
 | `CELLHIVE_ESBUILD` | 自动查找 | esbuild 路径 |
 | `CELLHIVE_ESBUILD_DIR` | 空 | 本地包存储目录（按 `esbuild@*` 搜索） |
@@ -206,10 +206,36 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade 源 |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `user-runtime/`） |
-| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 捕获租户 `console.*`/未捕获异常；`off` 不附加 native Tail，换取更高 Worker 吞吐；不关闭 Queue/Cron 的持久调用记录（ADR-205）；仅接受 `on`/`off` |
+| `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 允许按订阅挂载 native Tail（ADR-238：默认不采集，只有活跃 tail 订阅/`OTLP_LOGS=all` 时采集）；`off` 为节点硬上限，不附加 native Tail；仅接受 `on`/`off` |
+| `CELLHIVE_INVOCATION_LOGS` | `on` | 节点级 Queue/Cron/Workflow 持久调用记录开关（ADR-239）；`off` 不写记录、不导出 OTLP invocation 日志，不改变业务执行与 Queue ack；仅接受 `on`/`off` |
+| `CELLHIVE_ISOLATE_MAX` | `128` | user-runtime 公网 loader 驻留的 warm isolate 上限（worker 版本 × tail 变体），由部署环境变量注入；正整数 |
+| `CELLHIVE_ISOLATE_BYTES` | `268435456`（128 × 2MiB） | 驻留 isolate 的估算字节预算上限（实际 RSS 会略高）；省略时按 `CELLHIVE_ISOLATE_MAX × 2MiB` 推导；整数 bytes（≥1MiB） |
+| `CELLHIVE_INGRESS_PORT` | `0` | 可选 Go ingress 监听端口（ADR-240）；0 关闭。启用后 Traefik 静态转发到该端口，ingress 按 Host 路由到静态 workerd socket 或动态 loader |
+| `CELLHIVE_INGRESS_TABLE` | 空 | 路由表 JSON 路径：`{"routes":{"host":"127.0.0.1:19001"},"default":"127.0.0.1:8081"}`；文件变化自动热加载（原子替换） |
+| `CELLHIVE_INGRESS_UPSTREAM` | `127.0.0.1:<publicPort>` | ingress 的动态 loader 兜底后端 |
+| `CELLHIVE_STATIC_PLAN` | 空 | 静态 generation 的 Plan JSON 路径（ADR-242）；文件变化自动重渲染/切代；需配合 ingress 使用 |
+| `CELLHIVE_STATIC_PORT_BASE` | `19000` | 静态代际的 loopback 端口基址；每代使用独立端口段 |
+| `CELLHIVE_STATIC_HOSTS` | 空 | 逗号分隔的 host 列表；设置后从 cell-agent 投影自动构建静态 Plan，每 30s 重建、变化才切代。仅无平台 binding 的 worker 会被静态化，其余保持动态（ADR-243） |
+| `CELLHIVE_HOT_MAX` | `0` | 每 pod 静态热集上限；>0 启用自动热集（需 `CELLHIVE_INGRESS_PORT`），0 关闭（ADR-241/244） |
+| `CELLHIVE_HOT_INTERVAL_SEC` | `60` | 热集评估间隔 |
+| `CELLHIVE_HOT_WINDOW_SEC` | `300` | 热集评分窗口 |
+| `CELLHIVE_HOT_MIN_QPS` | `10` | 进入静态集的最低请求率 |
+| `CELLHIVE_HOT_SWAP_RATIO` | `0.1` | 每轮最多替换比例 |
+| `CELLHIVE_HOT_REPLACE_FACTOR` | `2` | challenger 超过 incumbent 的倍数门槛 |
+| `CELLHIVE_HOT_DEPLOY_STABILITY_SEC` | `300` | 部署后保持动态观察的时间 |
+| `CELLHIVE_PLAN_REFRESH_SEC` | `30` | 用当前静态集重建 Plan 的间隔（版本变化在此窗口内生效） |
+| `CELLHIVE_ROUTE_POLL_SEC` | `5` | 路由 revision 轮询间隔；变化时立即重建当前静态 Plan（部署更快生效，仍保留定时刷新兜底） |
+| `CELLHIVE_STATIC_MINIMAL` | `auto` | 静态 worker 入口选择（ADR-249）：`auto` 在 binding 仅含 kv/queue/ai/service/workflow/vectorize/hyperdrive/assets 且无 subrequest limit 时直接运行 tenant bundle；`1` 强制、`0` 始终用完整 wrapper |
+| `CELLHIVE_INGRESS_ADMIN_PORT` | `0` | ingress 运维端点（0 关闭）：`/ready`、`/metrics`；建议仅私网/Traefik 健康检查使用 |
 | `CELLHIVE_SERVICE_NATIVE` | 空=启用 | `0` 关闭原生 service RPC |
 | `CELLHIVE_DO_DIRECT` | 空=启用 | `0` 关闭 owner-hint 直达 |
 | `CELLHIVE_TENANT_OUTBOUND` | 空→`public` | 出网类别 `public`/`private`/`local` |
+| `CELLHIVE_HYPERDRIVE_MODE` | `direct` | Hyperdrive binding 模式：`direct` 返回源库 connectionString；`proxy` 把 host/port 改写成协议池（需配 `CELLHIVE_HYPERDRIVE_PROXY`） |
+| `CELLHIVE_HYPERDRIVE_PROXY` | 空 | `proxy` 模式的池化地址。裸 `host:port` 表示 PostgreSQL（兼容旧配置）；也可写 `postgres://proxysql:6133,mysql://proxysql:6033`，一个变量同时表达两种协议。未配置某协议的 entry 时，该协议绑定 fail closed |
+| `CELLHIVE_HYPERDRIVE_DB_MODE` | `origin` | `origin` 保留源库 database 名；`binding` 改成 `hd_<resource>`，用于多个资源同名数据库的 PostgreSQL 池映射 |
+| `CELLHIVE_HYPERDRIVE_MANAGED_USERS` | `0` | `1` 时为每个 binding 在源库创建/更新 `hd_<hash>` 角色，worker 只拿到生成凭据；origin URL 需有 `CREATE USER`/`GRANT` 权限 |
+| `CELLHIVE_PROXYSQL_ADMIN` | 空 | ProxySQL admin DSN，如 `admin:admin@tcp(proxysql:6032)/`；支持逗号分隔多个 admin（多副本 fanout）；设置后 Hyperdrive 资源 create/delete 与 30s reconcile 自动 upsert/delete backend+user 并 `LOAD ... TO RUNTIME` |
+| `CELLHIVE_PROXYSQL_SAVE` | `0` | 设为 `1` 时同时 `SAVE ... TO DISK`，ProxySQL 重启后保留 |
 | `CELLHIVE_CAP_EGRESS` | 空（推荐默认） | capability 数据面出口（PLATFORM binding）额外放行的网络段（CIDR/类别，逗号分隔，OR 关系）。capability 走公网域名+TLS 时**无需配置**（私网默认被拒=安全默认态）；runtime-services 要走内网直连时补其 CIDR 段（如 `10.20.0.0/16`）或单 IP（`10.20.1.5/32`） |
 | `CELLHIVE_AI_URL` / `CELLHIVE_AI_KEY` | 空 | BYO AI 端点与密钥；空=不注入 |
 
@@ -227,7 +253,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_DO_OBJECT_INDEX` | `false` | 对象注册表持久化到桶（`true`/`1`） |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite 盘 = `<DATA_DIR>/do` |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `do-runtime/`） |
-| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `CELLHIVE_TENANT_LOG_CAPTURE` / `TENANT_OUTBOUND` / `AI_*` | 同上 | 与 user-runtime 相同 |
+| `CELLHIVE_CELL_URL` / `CELLHIVE_ROOT_KEY` / `CELLHIVE_TENANT_LOG_CAPTURE` / `CELLHIVE_INVOCATION_LOGS` / `TENANT_OUTBOUND` / `AI_*` | 同上 | 与 user-runtime 相同 |
 
 ## CLI（`cellhive`）
 

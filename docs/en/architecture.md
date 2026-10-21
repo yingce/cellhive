@@ -6,16 +6,16 @@ CellHive is a self-hosted **Cloudflare Workers-compatible** runtime for teams th
 
 Design tenets:
 
-1. **Do not modify workerd.** The compute layer uses stock workerd and only uses it through its public capabilities (`workerLoader`, bindings, capnp configuration, process flags).
+1. **Workerd changes live only in the fork repo.** The compute layer uses `cellhive-workerd`, an upstream-tracking fork with CellHive per-invocation limits; this repo does not inline-patch workerd, it integrates through `workerLoader`, bindings, capnp and process flags.
 2. **All state is a cell.** Each state unit is a named SQLite database; S3-compatible object storage is the long-term authority; bucket conditional writes determine the unique owner; no consensus service is required.
-3. **Compute and state are layered.** stock workerd is responsible for execution; all persistent data goes through `cell-agent`.
+3. **Compute and state are layered.** `cellhive-workerd` is responsible for execution; all persistent data goes through `cell-agent`.
 4. **Fixed state layer + elastic execution layer.** `cell-agent` is a fixed cluster (nodes with identities); `do-runtime` is a distributed elastic execution layer, and its local disk may be temporary.
 5. **Portable.** The runtime does not depend on privileges or FUSE; by default it can run on managed/restricted Kubernetes.
 
 ## Non-goals
 
 - Global edge network, cross-region replication, Cloudflare account API compatibility;
-- Modifying workerd, or introducing a second JS engine;
+- Modifying workerd inside the CellHive repo, or introducing a second JS engine (workerd changes go to `yingce/cellhive-workerd`);
 - Depending on NATS / kvrocks / Valkey / etcd / APISIX;
 - A standalone gateway component (ingress responsibilities are handled by the operations edge proxy + user-runtime; see ADR-017; the platform does not distribute edge configuration, ADR-132);
 - Supporting CF capabilities that workerd itself does not provide (Python Workers, Cache API, Vectorize, Hyperdrive, Browser Rendering, Email Workers, etc.).
@@ -25,8 +25,8 @@ Design tenets:
 | Component | Implementation | Port | Role | Stateful | Requires custom PID1 supervisor |
 |---|---|---|---|---|---|
 | Edge proxy (Traefik/nginx/cloud LB) | Operations ingress (not an in-platform component) | 80/443 | TLS termination, host-based routing (tenant vs admin); **static configuration** (ADR-132) | No | No |
-| `user-runtime` | workerd (`cmd/user-runtime`) | :8081 public / :8088 internal privileged | Worker routing/version resolution/header sanitization + tenant Worker loading and execution. **Implemented**: `:8081` public loader (route projection fetch + version bundle loading + facade env + header sanitization, **ADR-068**) and `:8088` internal dispatch (queue/scheduled handler; ADR-067/070), with static assets on the public side (ADR-069) | No | No |
-| `do-runtime` | workerd (`cmd/do-runtime`) + Go supervisor (`cmd/do-supervisor`) | :8788 | Native Durable Object execution; **distributed and elastic**. **Implemented**: host-actor skeleton (facets + localDisk, ADR-077) + ownership/fencing/drain/residency (ADR-078) + supervisor capture/output gate (ADR-083) + alarm (ADR-079) + WS 1012/cross-node forwarding (ADR-080/084) + cross-node cold activation/per-object recovery (ADR-084) + bindings inside DO (ADR-090) + session policy (ADR-107) + owner epoch fencing/configurable lease/object index (ADR-108/109) | Local disk may be temporary (working copy) | **Yes** |
+| `user-runtime` | cellhive-workerd (`cmd/user-runtime`) | :8081 public / :8088 internal privileged | Worker routing/version resolution/header sanitization + tenant Worker loading and execution. **Implemented**: `:8081` public loader (route projection fetch + version bundle loading + facade env + header sanitization, **ADR-068**) and `:8088` internal dispatch (queue/scheduled handler; ADR-067/070), with static assets on the public side (ADR-069) | No | No |
+| `do-runtime` | cellhive-workerd (`cmd/do-runtime`) + Go supervisor (`cmd/do-supervisor`) | :8788 | Native Durable Object execution; **distributed and elastic**. **Implemented**: host-actor skeleton (facets + localDisk, ADR-077) + ownership/fencing/drain/residency (ADR-078) + supervisor capture/output gate (ADR-083) + alarm (ADR-079) + WS 1012/cross-node forwarding (ADR-080/084) + cross-node cold activation/per-object recovery (ADR-084) + bindings inside DO (ADR-090) + session policy (ADR-107) + owner epoch fencing/configurable lease/object index (ADR-108/109) | Local disk may be temporary (working copy) | **Yes** |
 | `cell-agent` | Go (fixed cluster) | :7001 internal REST (Go↔Go also uses this port, ADR-136) / :8082 admin | cell data + replication + leases + control plane + owner resolution + timer dispatch + **sole bucket credentials** | Yes (owns SQLite itself) | No (handles drain itself) |
 | Object storage | S3-compatible object storage | — | Authoritative state + code + assets | Yes (external) | — |
 | `cellhive` CLI | Go | — | Packaging/deployment/operations | No | — |
@@ -59,8 +59,8 @@ Fixed: cell-agent cluster (≥2)   Elastic: do-runtime nodes (can be added/remov
 ┌───────────────────────────────────────────────────────────────┐
 │ Access layer   Traefik (TLS + host routing)                   │
 ├───────────────────────────────────────────────────────────────┤
-│ Compute layer  user-runtime (workerd)  ingress/routing/version resolution/execution │
-│                do-runtime   (workerd native DO + supervisor)  │
+│ Compute layer  user-runtime (cellhive-workerd fork)  ingress/routing/version/execution │
+│                do-runtime   (cellhive-workerd native DO + supervisor)  │
 │                · host adapter: env.KV/DB/DO/Queue/... → private calls │
 ├───────────────────────────────────────────────────────────────┤
 │ State/control  cell-agent (Go, fixed cluster)                 │
@@ -163,7 +163,7 @@ CellHive's design references multiple open-source projects in the same domain. W
 
 | Project | Borrowed | Not borrowed |
 |---|---|---|
-| **celld** (`denoland/celld`) | cell=SQLite, bucket conditional-write owner, epoch fence, LTX, RPO=0, persistent addressing, node lease scaling signals, graceful handoff, "indexes are non-authoritative and repairable" | Its V8-based execution engine; we do not fork/modify its binary (we use stock workerd) |
+| **celld** (`denoland/celld`) | cell=SQLite, bucket conditional-write owner, epoch fence, LTX, RPO=0, persistent addressing, node lease scaling signals, graceful handoff, "indexes are non-authoritative and repairable" | Its V8-based execution engine; we do not fork/modify its binary (we use cellhive-workerd) |
 | **wdl** (`wdl-dev/wdl`) | `workerLoader` multi-tenant dynamic loading, binding host adapter, versioning/rollback, dual-socket privilege separation, DO host actor + facets, alarm shim, module-based documentation organization | Its Redis/Valkey state model, standalone gateway, standalone scheduler/workflows service |
 | **LiteFS / superfly/ltx** | Reference for Go-side SQLite replication and LTX format implementation | — |
 

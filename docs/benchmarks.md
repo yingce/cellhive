@@ -1,6 +1,6 @@
 # 基准回归（benchmarks）
 
-本页记录可复现的基准命令与结果，用于回归对照。**非生产硬件**；对象存储分 **FS（本地文件）** 与 **S3（本地 MinIO）** 两档。部分历史直连基准不含真实 workerd（DO 相关数字见 `docs/archive/p0-report.md`）；双 runtime 基准包含 pinned stock workerd。原始输出归档在 `docs/archive/bench/`。
+本页记录可复现的基准命令与结果，用于回归对照。**非生产硬件**；对象存储分 **FS（本地文件）** 与 **S3（本地 MinIO）** 两档。部分历史直连基准不含真实 workerd（DO 相关数字见 `docs/archive/p0-report.md`）；**标注 stock workerd 的结果是切换到 cellhive-workerd fork 前的历史基线**，当前默认镜像使用 fork，数字不可直接跨版本比较。原始输出归档在 `docs/archive/bench/`。
 
 历史 MinIO 基准只证明当时的条件写与数据路径性能，不证明当前权威桶所需的条件删除契约；固定版 MinIO 的 stale `DeleteObject If-Match` 会被忽略，现行 `cellhive diagnose` 因此拒绝启动。`kvbench` 数字直连 cell-agent，不包含 user-runtime/workerd、资源删除栅栏或真实 COS 往返（见 `testing.md`、ADR-235）。
 
@@ -401,3 +401,261 @@ run 1 的累计 `kv_requests=46,443`，精确等于 `/local`、`/get`、`/batch`
 纯 workerd 对照使用 `CELLHIVE_WORKERD_BIN=<pinned-workerd> scripts/bench-workerd-bare.sh`，以 `wrk` 直接访问 workerd HTTP socket，不启动任何 Go 服务。相同 `/ping` Worker 的单实例为 13993.77 RPS，双实例合计 26640.23 RPS；`/fast` 单实例 11392.98 RPS、双实例合计 17917.72 RPS。原始结果、连接数和尾延迟见 `docs/archive/bench/bare-workerd-2026-10-20.md`。这不是完整 CellHive 路径的同压测器 A/B，不能直接把吞吐比当作某个组件的开销。
 
 公共 fetch 移除入口侧第二层响应流包装后，同机双 agent/单 runtime 的 `/ping`（`wrk -t4 -c64 -d20s`，直连 workerd）在关闭 Tail 时从 1638.64 增至 2234.42 RPS，开启本地 Tail ring 时从 1483.97 增至 1807.71 RPS。均为共享宿主诊断，不是稳定容量结论；流式版本切换与公开 WebSocket 已用固定版 workerd 验证。原始输出及方法见 `docs/archive/bench/tail-batching-2026-10-20.md`。
+
+### user-runtime 小响应缓冲 A/B（ADR-237，2026-10-20）
+
+固定 stock workerd `1.20260916.1`，本机单 cell-agent + 单 user-runtime（public `:18281`），Worker 带一个 KV binding；`wrk -t4 -c64 -d25s -H 'Host: bench.cellhive.test'` 直连 workerd public socket，每轮重启 runtime 并预热 5s，base/优化版交替（另含反向顺序控制漂移）。共享宿主诊断，只能作同会话配对比较，不是容量承诺。
+
+| 路径 | 基线 RPS（中位） | 小响应缓冲后 RPS（中位） | 变化 | p50 | p99 |
+|---|---:|---:|---:|---|---|
+| `/ping`（`text/plain`，4B） | 1,944（5 轮 1787–2087） | **2,341**（1958–2577） | **+20%**（5/5 轮更快，+3.5%–26%） | 4.7ms → 3.4ms | 1.0–1.7s，两侧持平 |
+| `/json`（`application/json`，146B） | 1,815（2 轮） | **1,919** | +8% | 8.0ms → 8.0ms | 1.0–1.1s → 1.5–1.6s |
+
+原始输出、诊断变体（HWM/tee/bytestream/每请求定时器）与方法见 `docs/archive/bench/user-runtime-body-buffer-2026-10-20.md`。
+
+流式与边界行为：`/stream`（`text/event-stream`）首块约 1ms、100 块约 1.0s，仍逐块可见；256KiB `text/plain` 超过 128KiB 缓冲上限后回退为受生命周期跟踪的流，字节数一致；204/500 状态与 `content-type` 不变；`make js-test` 通过。p99 的 1s 级尖峰在改动前的基线、甚至裸 workerd `/ping`（p99 223–726ms）上就存在，本次未改变，也不把它归因于本改动。
+
+### user-runtime 动态 Tail 挂载 A/B（ADR-238，2026-10-20）
+
+单 cell-agent + 单**动态** user-runtime（公共 `:18281`），`CELLHIVE_TENANT_LOG_CAPTURE=on`、trace ratio 0.01；`wrk -t4 -c64 -d15s -H 'Host: bench.cellhive.test'`。通过内部订阅端点 `POST /v1/internal/logs/subscribe`（ttl 20s）模拟“有人正在 tail”：
+
+| 阶段 | RPS | p50 | p99 | wrk timeout |
+|---|---:|---:|---:|---:|
+| 无订阅（动态门控关闭 Tail） | 3,060 / 3,215 | 3.7–5.0ms | 1.1–1.2s | 2 / 0 |
+| 订阅中（切到 tail 变体） | 2,586 | 3.7ms | 1.76s | 51 |
+| 订阅过期（切回 no-tail） | 3,038 | 3.6ms | 1.32s | 4 |
+
+对照：同一动态路径在改动前（Tail 常开）为 2.7–2.8k；静态托管原型 Tail 关 13k、Tail 开 7.9–8.3k（见 `docs/archive/bench/static-hosting-prototype-2026-10-20.md`）。动态 loader 的单实例地板上限仍在 ~3.4k，本项收益是“无人看时不再付 Tail 成本”（约 +12%~+18%），静态托管则需在渲染期消费同一端点（后续工作）。共享宿主诊断，只作同会话比较。
+
+### Go ingress 静态/动态混合 e2e（ADR-240/245/246，2026-10-20）
+
+单 cell-agent + 单 user-runtime：ingress `:18300` → 动态 loader `:18281`；热集提升后静态 generation `:19500`。被测 worker 为 `loadbench`（带 KV binding，静态代包含平台服务与 service binding）。
+
+- 提升前 100 个预热请求全部走动态（`dynamic_total=100`）；
+- 热集自动提升后，路由表写入 `bench.cellhive.test → http://127.0.0.1:19500`；后续 164 个请求 `requests_total` 增加而 `dynamic_total` 保持 100，确认全部走静态 socket；
+- 静态路径 `wrk -t4 -c64 -d15s`：**11,099 / 10,154 RPS**（load 2.2 / 3.7），p50 6.3 / 6.8ms，p99 165 / 186ms，3 个 socket 错误；
+- 同机动态 loader 对照 ~3.0–3.2k（Tail 关），即 Go ingress + 静态代在本例中约 **3.3–3.6×** 于动态路径，接近静态直连口径。
+- `/kv` 返回 404 是租户路由本身未实现（响应来自静态 worker），不是平台 502；静态代内的 KV binding 已通过 `TestBoundWorkerRunsAsStaticGeneration` 验证 `env.KV` 存在。
+- 共享宿主诊断，load 2.2–3.7，只作同会话比较。
+
+### 静态最小入口 vs wrapper（ADR-249，2026-10-20）
+
+同一 `loadbench` 静态代（KV binding），同一宿主、`wrk -t4 -c64 -d10s`：
+
+| 入口 | RPS | workerd CPU | CPU/请求 |
+|---|---:|---:|---:|
+| 完整 wrapper | 7,133–7,161 | 1.05 cores | ~146µs |
+| **minimal（auto，本次默认）** | **14,162–14,295** | 1.02 cores | **~72µs** |
+| 之后混合 e2e（load 较高） | ingress 静态 **9,781** / 静态直连 9,157 / 动态 2,788 | — | — |
+
+Tail 订阅开启后 ingress 静态回落到 5,852（Tail 仍是主要成本）；无 Tail 时静态约为动态路径的 3.5×。
+
+### Tail 不挂静态快路径（ADR-250，2026-10-20）
+
+同一 `loadbench` 静态代（KV binding，auto minimal），`wrk -t4 -c64 -d10s`：
+
+| 状态 | RPS | 说明 |
+|---|---:|---|
+| ingress → 静态（无 Tail） | **12,565** | 静态快速路径 |
+| 静态直连（无 Tail） | 13,581 | 接近裸 workerd |
+| 动态 loader 直连 | 2,841 | 对照 |
+| 有 tail 订阅时 | 该 host 回落动态（~2.8k），Tail 事件正常；订阅过期后恢复静态 | 不拖累其他静态 worker |
+
+### wrapper plain-fetch 入口（ADR-251，2026-10-20）
+
+同一 `loadbench` 静态代，强制完整 wrapper（`CELLHIVE_STATIC_MINIMAL=0`），`wrk -t4 -c64 -d10s`：
+
+| 入口 | RPS | CPU/请求 |
+|---|---:|---:|
+| 旧 `new CellHiveHost()` 每请求 | ~7,133–7,161 | ~146µs |
+| **`handleFetch` plain 入口** | **9,602–12,388** | **83–102µs** |
+| minimal（auto，可选） | ~14,162–14,295 | ~72µs |
+
+混合 e2e（wrapper 入口）：ingress 静态 **11,376** / 静态直连 11,800 / 动态 3,010；功能 21/21。
+
+### 全部 platform binding e2e（2026-10-20）
+
+真实 cell-agent + user-runtime + ingress + staticgen + do-runtime，动态与静态各一遍：**32/32 通过**（含 Queue consumer、Workflow create→complete、DO 存储跨 do-runtime 重启、Hyperdrive 真实 Postgres SQL）。
+
+| binding | 动态 | 静态 |
+|---|---|---|
+| KV（put/get/getWithMetadata/list/delete） | ✅ | ✅ |
+| D1（prepare/bind/run/first/all） | ✅ | ✅ |
+| Drizzle ORM（drizzle-orm/d1 insert/select） | ✅ | ✅ |
+| R2（put/get/head/list/delete + writeHttpMetadata） | ✅ | ✅ |
+| Queue producer send + consumer | ✅ | ✅ |
+| Service binding fetch | ✅ | ✅ |
+| AI run（本地 OpenAI-compatible fake） | ✅ | ✅ |
+| DO fetch + storage 跨重启 | ✅ | ✅ |
+| Workflow create→complete | ✅ | ✅ |
+| Vectorize insert/query | ✅ | ✅ |
+| Hyperdrive connectionString + 真实 Postgres SQL | ✅ | ✅ |
+
+注：Hyperdrive 用最小 PostgreSQL v3 协议客户端验证真实查询；DO/Workflow/Vectorize 走本地 harness 资源。
+
+### 双节点 DO/Vectorize e2e（2026-10-21）
+
+两个 cell-agent 共享 bucket + 稳定 cell 代理 + 各自 do-runtime/user-runtime：
+
+| 场景 | 结果 |
+|---|---|
+| n1 `/do` | `do-1` |
+| n2 `/do`（同一 DO id） | `do-2` |
+| kill n1 + do1 后 n2 `/do` | `do-3`（DO owner/存储恢复） |
+| n1/n2 `/vec` | 同一 Vectorize 结果 |
+| kill n1 后 n2 `/vec` | 等 control lease TTL（~10s）后正常 |
+
+注：tenant `CELL_URL` 必须指向稳定入口；控制面 owner 切换受 lease TTL 约束。
+
+### Workflow 长等待/超时/retry e2e（2026-10-21）
+
+| 场景 | 结果 |
+|---|---|
+| `step.sleep('3 seconds')` | waiting → complete，`{"slept":true}` |
+| `step.waitForEvent(timeout='2 seconds')` | waiting → errored，`workflow waitForEvent timed out` |
+| `step.do(retries.limit=5)` 前两次失败 | 第 3 次成功，complete，`{"attempts":3}` |
+
+### Queue 多节点 retry/DLQ e2e（2026-10-21）
+
+| 场景 | 结果 |
+|---|---|
+| q1 正常消息 ×5 | consumed=5 |
+| 一条消息 `retry()` 超限 | DLQ q1-dlq depth=1 |
+| 强杀 n1，lease 后 n2 接管，再发 3 条 | consumed=8 |
+
+仓库脚本：`make e2e-workflow`、`make e2e-queue`、`make e2e-queue-multinode`、`make e2e-queue-concurrency`。
+
+### R2 metadata handler 覆盖（2026-10-21）
+
+| 路径 | `writeHttpMetadata` |
+|---|---|
+| queue handler | `text/x-queue` |
+| workflow handler | `text/x-workflow` |
+
+### Queue 并发消费 smoke（2026-10-21）
+
+| 参数 | 结果 |
+|---|---|
+| 100 条消息，batch=10，concurrency=4 | count=100，missing_end=0，max concurrent handlers=40 |
+| 并发生产 20 条 + 顺序 80 条 | parallel send_ms≈32ms；全部 100 条消费 |
+
+
+### KV / D1 cell-agent 接口基准（2026-10-21）
+
+直接打 cell-agent 内部 HTTP（`x-cellhive-scope-token`），单节点、本地 FS bucket、SQLite；不是 worker/user-runtime 端到端。
+
+```text
+wrk -t4 -c32 -d10s
+```
+
+| 接口 | RPS | p50 | p99 |
+|---|---:|---:|---:|
+| KV GET `/v1/kv/get` | ~36.8k | 0.75ms | 3.7ms |
+| KV PUT `/v1/kv/put` | ~9.3k | 3.2ms | 34.9ms |
+| D1 SELECT `/v1/d1/query` | ~46.6k | 0.59ms | 2.6ms |
+| D1 INSERT `/v1/d1/exec` | ~7.9k | 3.5ms | 66ms |
+
+说明：
+
+- KV PUT 固定写同一个 key，存在同一 cell 的写竞争；D1 INSERT 表持续增长且走 capture proof，p99 偏高。
+- 这是内部 API 上限参考，不含 workerLoader、binding facade、网络/TLS。
+- 未启用多副本；单 agent 写吞吐受 SQLite/FS bucket 限制。
+- 最终有效轮次无 non-2xx；此前 D1 的 non-2xx 是请求体未用 JSON 的测试脚本错误，不是接口问题。
+
+### Worker JS KV 端到端基准（2026-10-21）
+
+单节点、动态 loader（未启用 static generation），worker 只做 `env.KV.get` / `env.KV.put`，经 user-runtime 公开入口 + Host 路由。
+
+```text
+wrk -t2 -c8 -d10s
+```
+
+| worker 路径 | RPS | p50 | p99 |
+|---|---:|---:|---:|
+| `/ping`（无 binding） | ~3.3k | 1.55ms | 216ms |
+| `/get`（KV get） | ~1.9k | 3.74ms | 75ms |
+| `/put`（KV put） | ~1.2k | 6.38ms | 82ms |
+
+`-t4 -c32` 复测 RPS 接近（ping ~3.4k、get ~2.0k、put ~1.6k），但 p99 明显变差（ping ~871ms、get ~94ms、put ~109ms），说明该路径在高并发下排队/尾延迟明显。
+
+对比 cell-agent 内部 API：
+
+| 路径 | RPS 比例 |
+|---|---:|
+| KV GET | worker ~5% of direct (~36.8k) |
+| KV PUT | worker ~13% of direct (~9.3k) |
+
+结论：
+
+- 当前动态 loader 路径下，worker JS 的 KV 吞吐主要受 runtime/loader 和 binding RPC 限制，而不是 cell-agent 的 KV 存储；
+- 写路径更差（p50 6.4ms、1.2k RPS）；
+- 这是单节点动态路径基线，不代表启用 static generation 后的上限。
+
+### Worker JS KV：动态 vs static generation（2026-10-21）
+
+同一 worker，仅 `env.KV.get` / `env.KV.put`；先经 ingress warm hot set，等待 `staticgen: generation 1 published` 后打 ingress static 端口。
+
+`wrk -t2 -c8 -d10s`：
+
+| 路径 | 动态 RPS | static RPS | 动态 p50 | static p50 |
+|---|---:|---:|---:|---:|
+| `/ping` | ~3.3k | **~13.6k** | 1.55ms | 0.52ms |
+| KV GET | ~1.9k | **~3.8k** | 3.74ms | 1.93ms |
+| KV PUT | ~1.2k | **~1.65k** | 6.38ms | 4.61ms |
+
+`wrk -t2 -c32 -d10s`：
+
+| 路径 | 动态 RPS | static RPS |
+|---|---:|---:|
+| `/ping` | ~3.4k | **~16.3k** |
+| KV GET | ~2.0k | **~4.2k** |
+| KV PUT | ~1.6k | **~2.5k** |
+
+结论：
+
+- static generation 把空 handler 吞吐提高约 **4–5×**，KV GET 约 **2.2×**，KV PUT 约 **2×**；
+- KV 路径仍远低于 cell-agent 直连（GET ~36.8k、PUT ~9.3k），剩余瓶颈是 binding RPC/写路径，不是 loader；
+- static 下 p99 仍高（GET ~128–187ms、PUT ~114–128ms），写路径和 cell compaction 的尾延迟需继续观察；
+- 本测试是单节点、本地 FS bucket、无多副本。
+
+### KV 慢的原因定位：per-call binding RPC，不是 HTTP 协议（2026-10-21）
+
+static worker 单 key GET ~4.3k RPS；同一 worker 的 `getBatch(10 keys)` 为 ~3.38k requests/s，折算 **~33.8k keys/s**，接近 cell-agent 直连 `get` 的 ~36.8k。
+
+| 路径 | 结果 |
+|---|---:|
+| cell-agent 直连 KV GET（c32） | ~36.8k RPS |
+| static worker KV GET（c32） | ~4.3k RPS |
+| static worker KV `getBatch(10)`（c32） | ~3.38k req/s → **~33.8k keys/s** |
+| direct KV GET（单连接 c1） | ~6.6k RPS |
+| static worker `/ping`（c32） | ~16.2k RPS |
+
+结论：
+
+- 主要开销是 **每次 KV 调用都经过 worker → platform `KV` WorkerEntrypoint → `PLATFORM.fetch` → cell-agent** 的 RPC/服务跳转，以及每请求的鉴权/序列化；
+- 不是 cell-agent 存储慢：批量 10 key 时，每 key 成本被摊薄，接近直连；
+- 不是 HTTP 协议本身：直连同样走 HTTP/1.1 能达到 36.8k；换自定义协议不会自动消除 workerd 内的 binding/service hop 和 token 边界；
+- p99 仍高（单 key static GET ~163ms，getBatch ~87ms），写路径和 compaction/排队仍需继续看。
+
+建议：
+
+1. 应用层优先用 `getBatch`/批量读取；CellHive 的 `getBatch` 是扩展，纯 CF 兼容代码不能直接用。
+2. 若必须单 key 高频，优化方向是 **减少 binding RPC 跳数**（例如同 isolate 平台直连、连接复用/批量协议），而不是换掉 HTTP。
+3. 写路径没有批量 put；考虑应用侧合并/异步写，或评估专门的数据接口。
+
+### MySQL Hyperdrive e2e（2026-10-21）
+
+- MySQL 8.0 + ProxySQL 3.0.11；
+- direct：`mysql://` 原样下发，`mysql2` 查询返回 `{"ok":1,"db":"app"}`；
+- proxy：origin 故意不可达 `127.0.0.1:13307`，binding 改写至 ProxySQL `6033`，查询仍返回 `{"ok":1,"db":"app"}`；
+- ProxySQL `stats_mysql_connection_pool`：backend `127.0.0.1:13306`，`Queries` 增长。
+- PostgreSQL 17 + ProxySQL 3.0.11：自动生成 `pgsql_servers`，worker 查询返回 `{"rows":[{"ok":1,"db":"postgres"}]}`。
+- `mysql2` 必须传 `disableEval: true`，否则 workerd 拒绝 `new Function`。
+
+### PostgreSQL + ProxySQL static generation（2026-10-21）
+
+- PostgreSQL 17 + ProxySQL 3.0.11；
+- CellHive 自动创建 `pgsql_servers`；
+- dynamic 查询：`{"rows":[{"ok":1,"db":"postgres"}]}`；
+- warm hot set 后 static table 指向 `127.0.0.1:19900`，static 查询同样返回 `{"rows":[{"ok":1,"db":"postgres"}]}`；
+- 说明 ProxySQL proxy 模式在 dynamic/static 两条 worker 路径都可用。

@@ -5,7 +5,7 @@
 <p align="center"><strong>自托管、Cloudflare Workers 兼容的运行时。</strong></p>
 
 <p align="center">
-  计算层用原版（stock）<a href="https://github.com/cloudflare/workerd">workerd</a> ·
+  计算层用 <a href="https://github.com/yingce/cellhive-workerd">cellhive-workerd</a> fork ·
   状态层是 Go 实现的 "cell"（SQLite + S3 兼容对象存储）·
   RPO=0、持久寻址、节点可替换。
 </p>
@@ -31,7 +31,7 @@
 **平台与运维**
 - cell 复制且持久（RPO=0）；启动用一条命令探测对象存储契约（`cellhive diagnose`）。
 - `GET /metrics`、有界 worker 日志 tail、可选 OTLP traces 与 logs。
-- 单镜像包含全部服务与 pinned workerd；Docker Compose、Kubernetes（kustomize）、Helm；优雅 drain 与就绪探针。
+- 单镜像包含全部服务与 pinned cellhive-workerd fork；Docker Compose、Kubernetes（kustomize）、Helm；优雅 drain 与就绪探针。
 
 **多租户与隔离**
 - 每个 binding 一个 scoped token（HMAC）；租户 worker 只拿到 binding facade，拿不到平台 secret；租户出网默认仅公网；只有 `cell-agent` 持有桶凭据。
@@ -39,13 +39,13 @@
 
 ## 架构
 
-![CellHive 架构](./docs/assets/architecture-minimal-detail.png)
+![CellHive 架构](./docs/assets/architecture-workerd-fork.svg)
 
 | 组件 | 运行时 | 端口 | 职责 |
 |---|---|---|---|
 | **Traefik / 边缘代理** | 外部 | 80/443 | TLS + host 分流（由运维静态配置） |
-| **`user-runtime`** | workerd | `:8081` 公开 / `:8088` 内部 | 入口 loader：host/版本路由与租户执行 |
-| **`do-runtime`** | workerd + Go supervisor | `:8788` | 原生 Durable Objects（facet）；分布式弹性；只持工作副本，不是权威 |
+| **`user-runtime`** | cellhive-workerd fork | `:8081` 公开 / `:8088` 内部 | 入口 loader：host/版本路由与租户执行 |
+| **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | 原生 Durable Objects（facet）；分布式弹性；只持工作副本，不是权威 |
 | **`do-supervisor`**（可选） | Go | `:18901` | DO 输出门：确认响应的耐久性（RPO=0） |
 | **`cell-agent`** | Go | `:7001` 内部 REST / `:8082` admin | cell 存储 + 复制 + owner/epoch 租约 + 控制面 + 计时派发 + **唯一桶凭据** |
 | **对象存储** | S3 兼容 | — | cell 状态、worker bundle、assets 的权威 |
@@ -54,7 +54,7 @@
 
 ## 设计思路
 
-1. **不修改 workerd。** 只使用 `workerLoader`、bindings、capnp；绝不 fork 或打补丁。
+1. **workerd 改动只在 fork 仓库。** 计算层使用 `cellhive-workerd`（跟踪上游并加入 CellHive 逐调用限额）；本仓不内联 patch workerd，只通过 `workerLoader`、bindings、capnp 集成。
 2. **计算与状态分离。** runtime 只负责执行；所有持久化经 `cell-agent`，它拥有 cell 的 SQLite、复制与桶凭据；runtime 不直接访问对象存储。
 3. **一切皆 cell。** 统一的单元（namespace/class/id）+ 每 cell 一份 SQLite，意味着租约、fencing、复制、快照、恢复、清理只有一套机制。
 4. **对象存储是权威，不要共识服务。** 条件写决定 owner；LTX + peer fsync 给 RPO=0；持久状态在桶与副本里，本地盘只是工作副本/缓存，所以节点可替换。
@@ -123,7 +123,7 @@ scripts/    CI 与运维脚本
 - 先读 [`docs/contributing.md`](./docs/contributing.md)：按改动类型给出阅读路径与测试锚点。
 - 提交前跑 `bash scripts/ci.sh`，必须输出 `GATE: PASS`。
 - 设计与代码同步：改代码要同步改文档（含 `docs/decisions.md`）。
-- 不 fork / 不修改 workerd；只通过 `workerLoader`、bindings、capnp 扩展。
+- workerd 改动只在 `yingce/cellhive-workerd`；本仓通过 `workerLoader`、bindings、capnp 集成，不内联 patch。
 
 ## 致谢
 

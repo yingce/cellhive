@@ -71,7 +71,7 @@
 
 2026-10-19 更新：Queue consumer `retry_delay` 已接入，`max_batch_timeout` 生效，省略 `max_retries` 默认 3；上段是此前的 Wrangler 验收记录，新增行为仍待原版 Wrangler 与故障 E2E 重验（ADR-216）。
 
-按 Worker 的日志策略可通过原生 `POST /v1/control/deploy` 传入 `"log_policy":{"console":false,"invocation":false}`；两个字段均可省略，省略时继承运行时默认。策略随不可变版本保存，Secret 更新发布的新版本会继承它。运行时的 `CH_LOG_CAPTURE=0` 与 `CH_INVOCATION_LOGS=0` 仍是硬上限。原版 Wrangler 4.133.0 的标准配置不会自动生成这个 CellHive 扩展字段；需要按 Worker 控制时由平台调用原生部署 API（ADR-217）。
+日志策略不再随 Worker 版本保存（`log_policy` 已整体移除，ADR-238/239）：Queue/Cron/Workflow 调用记录由节点级 `CELLHIVE_INVOCATION_LOGS=on|off`（默认 on）全局控制；Tail/console 采集由节点 `CH_LOG_CAPTURE` + 实时 tail 订阅决定（默认不采集）。原版 Wrangler 4.133.0 的配置不会生成这些开关，按 worker 单独控制的能力已不提供。
 
 **D1 SQL migrations**：`cellhive d1 migrations create\|list\|apply <ns> <db> [message] [--directory migrations]` 与原版 Wrangler 4.133.0 的远端迁移共用迁移表；Wrangler `migrations_table` 与原生 CLI `--table` 可选择同一个自定义表。`list` 显示待执行文件，`list --applied` 显示已执行记录。每个文件的 SQL 与记录同事务提交，失败整文件回滚。两套命令提交的标准迁移均另存 SHA-256；原生 CLI 每次重查文件，可拒绝同名内容变更；摘要计算忽略 SQL 文件首尾空白，以匹配 Wrangler 提交行为。Wrangler CLI 会跳过已应用文件，改写本地同名文件后重跑不会向服务端提交，因而无法检测该变更。原版 Wrangler 的 `d1 execute --remote --command/--file`、`d1 migrations list/apply --remote` 已真实对拍；`--file` 上传限 8 MiB，按文件 SHA-256 幂等执行。上传 session 保存在单个管理员实例内，10 分钟过期；负载均衡需保持该三段请求落在同一实例，中途节点退出可重跑命令。Wrangler 本地 D1 仍由其 Miniflare 管理，不连接生产 CellHive。
 

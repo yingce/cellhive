@@ -396,3 +396,108 @@ Meaning: **default (empty `CELLHIVE_OTLP_ENDPOINT`) is zero-cost** — the trace
 ### Public fetch response stream optimization (2026-10-20)
 
 Removing the redundant response stream wrapper in the public loader increased `/ping` from 1638.64 to 2234.42 RPS with Tail off, and from 1483.97 to 1807.71 RPS with the local Tail ring. The diagnostic used two local agents, one runtime, direct workerd access, and `wrk -t4 -c64 -d20s`. These shared-host measurements are not capacity guarantees. Fixed-version workerd tests covered an old response stream completing during a version switch and the public WebSocket path. Raw outputs and details are in `docs/archive/bench/tail-batching-2026-10-20.md`.
+
+### user-runtime small-response buffering A/B (ADR-237, 2026-10-20)
+
+Pinned stock workerd `1.20260916.1`, one local cell-agent and one user-runtime (public `:18281`), a Worker with one KV binding; `wrk -t4 -c64 -d25s -H 'Host: bench.cellhive.test'` against the workerd public socket. The runtime is restarted and warmed for 5s before each round; base and optimized builds alternate (plus reversed order to control drift). Shared-host diagnostics only: use paired comparisons, not capacity claims.
+
+| Route | Baseline RPS (median) | Buffered small responses (median) | Change | p50 | p99 |
+|---|---:|---:|---:|---|---|
+| `/ping` (`text/plain`, 4B) | 1,944 (5 rounds, 1787–2087) | **2,341** (1958–2577) | **+20%** (faster in 5/5 rounds, +3.5%–26%) | 4.7ms → 3.4ms | 1.0–1.7s, unchanged |
+| `/json` (`application/json`, 146B) | 1,815 (2 rounds) | **1,919** | +8% | 8.0ms → 8.0ms | 1.0–1.1s → 1.5–1.6s |
+
+Raw rounds, diagnostic variants (HWM/tee/byte stream/per-request timer) and method: `docs/archive/bench/user-runtime-body-buffer-2026-10-20.md`.
+
+Streaming and edge behavior: `/stream` (`text/event-stream`) still delivers chunk by chunk (first chunk ~1ms, 100 chunks ~1.0s); a 256KiB `text/plain` body over the 128KiB cap falls back to the lifecycle-tracked stream with identical bytes; 204/500 status and `content-type` are preserved; `make js-test` passes. The ~1s p99 spikes already existed before this change (even bare workerd `/ping` p99 was 223–726ms) and are not attributed to it.
+
+### user-runtime dynamic Tail attachment A/B (ADR-238, 2026-10-20)
+
+One cell-agent and one **dynamic** user-runtime (`:18281`), `CELLHIVE_TENANT_LOG_CAPTURE=on`, trace ratio 0.01; `wrk -t4 -c64 -d15s -H 'Host: bench.cellhive.test'`. An internal subscription (`POST /v1/internal/logs/subscribe`, ttl 20s) simulates an operator tailing the worker:
+
+| Phase | RPS | p50 | p99 | wrk timeouts |
+|---|---:|---:|---:|---:|
+| No subscription (dynamic gate keeps Tail off) | 3,060 / 3,215 | 3.7–5.0ms | 1.1–1.2s | 2 / 0 |
+| Subscribed (tail variant) | 2,586 | 3.7ms | 1.76s | 51 |
+| After expiry (back to no-tail) | 3,038 | 3.6ms | 1.32s | 4 |
+
+Before this change the same dynamic path with Tail always on measured 2.7–2.8k. Static hosting remains 13k with Tail off and 7.9–8.3k with Tail on (see the archived prototype); the dynamic-loader floor stays ~3.4k, so this change removes the Tail cost only while nobody is watching (~+12%–18%). Shared-host diagnostic, paired comparison only.
+
+### Go ingress static/dynamic hybrid e2e (ADR-240/245/246, 2026-10-20)
+
+One cell-agent plus one user-runtime: ingress `:18300` forwards to the dynamic loader `:18281`; after hot promotion the static generation listens on `:19500`. The worker is `loadbench` (KV binding; the static generation embeds the platform service and a service binding).
+
+- The first 100 warm-up requests were dynamic (`dynamic_total=100`);
+- After promotion the routing table mapped `bench.cellhive.test → http://127.0.0.1:19500`; the next 164 requests increased `requests_total` while `dynamic_total` stayed 100, confirming the static socket path;
+- Static path `wrk -t4 -c64 -d15s`: **11,099 / 10,154 RPS** (load 2.2 / 3.7), p50 6.3 / 6.8ms, p99 165 / 186ms, 3 socket errors;
+- Same-host dynamic loader baseline ~3.0–3.2k (Tail off): the Go ingress + static generation path is **~3.3–3.6×** faster here and close to the direct-static ceiling.
+- `/kv` returned 404 because the tenant route is not implemented (the response came from the static worker, not a platform 502); the KV binding itself is covered by `TestBoundWorkerRunsAsStaticGeneration`.
+- Shared-host diagnostic at load 2.2–3.7; compare within this session only.
+
+### Static minimal entry vs wrapper (ADR-249, 2026-10-20)
+
+Same `loadbench` static generation (KV binding), same host, `wrk -t4 -c64 -d10s`:
+
+| Entry | RPS | workerd CPU | CPU/request |
+|---|---:|---:|---:|
+| Full wrapper | 7,133–7,161 | 1.05 cores | ~146µs |
+| **Minimal (auto, new default)** | **14,162–14,295** | 1.02 cores | **~72µs** |
+| Later hybrid e2e (higher load) | ingress static **9,781** / static direct 9,157 / dynamic 2,788 | — | — |
+
+With a Tail subscription the ingress static path drops to 5,852 (Tail remains the dominant cost); without Tail, static is ~3.5× the dynamic path.
+
+### Tail stays off the static fast path (ADR-250, 2026-10-20)
+
+Same `loadbench` static generation (KV binding, auto minimal), `wrk -t4 -c64 -d10s`:
+
+| State | RPS | Note |
+|---|---:|---|
+| ingress → static (no Tail) | **12,565** | static fast path |
+| static direct (no Tail) | 13,581 | near bare workerd |
+| dynamic loader direct | 2,841 | baseline |
+| with an active tail subscription | that host falls back to dynamic (~2.8k) and Tail events work; static returns after expiry | other static workers are unaffected |
+
+### Wrapper plain-fetch entry (ADR-251, 2026-10-20)
+
+Same `loadbench` static generation, full wrapper forced (`CELLHIVE_STATIC_MINIMAL=0`), `wrk -t4 -c64 -d10s`:
+
+| Entry | RPS | CPU/request |
+|---|---:|---:|
+| Old per-request `new CellHiveHost()` | ~7,133–7,161 | ~146µs |
+| **`handleFetch` plain entry** | **9,602–12,388** | **83–102µs** |
+| minimal (auto, optional) | ~14,162–14,295 | ~72µs |
+
+Hybrid e2e (wrapper entry): ingress static **11,376** / static direct 11,800 / dynamic 3,010; functional 21/21.
+
+### All platform bindings e2e (2026-10-20)
+
+Real cell-agent + user-runtime + ingress + staticgen + do-runtime, both dynamic and static: **32/32 pass** (including Queue consumer, Workflow create→complete, DO storage across a do-runtime restart, and a real Postgres SQL query through Hyperdrive).
+
+| binding | dynamic | static |
+|---|---|---|
+| KV (put/get/getWithMetadata/list/delete) | ✅ | ✅ |
+| D1 (prepare/bind/run/first/all) | ✅ | ✅ |
+| Drizzle ORM (drizzle-orm/d1 insert/select) | ✅ | ✅ |
+| R2 (put/get/head/list/delete + writeHttpMetadata) | ✅ | ✅ |
+| Queue producer send + consumer | ✅ | ✅ |
+| Service binding fetch | ✅ | ✅ |
+| AI run (local OpenAI-compatible fake) | ✅ | ✅ |
+| DO fetch + storage across restart | ✅ | ✅ |
+| Workflow create→complete | ✅ | ✅ |
+| Vectorize insert/query | ✅ | ✅ |
+| Hyperdrive connectionString + real Postgres SQL | ✅ | ✅ |
+
+Note: Hyperdrive is verified with a minimal PostgreSQL v3 protocol client; DO/Workflow/Vectorize use local harness resources.
+
+### Two-node DO/Vectorize e2e (2026-10-21)
+
+Two cell-agents sharing a bucket + a stable cell proxy + one do-runtime/user-runtime each:
+
+| Scenario | Result |
+|---|---|
+| n1 `/do` | `do-1` |
+| n2 `/do` (same DO id) | `do-2` |
+| n2 `/do` after killing n1 + do1 | `do-3` (DO owner/storage recovery) |
+| n1/n2 `/vec` | same Vectorize result |
+| n2 `/vec` after killing n1 | works after control lease TTL (~10s) |
+
+Note: the tenant `CELL_URL` must be a stable entry point; control-plane owner failover is bounded by the lease TTL.

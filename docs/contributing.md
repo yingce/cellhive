@@ -11,7 +11,7 @@
 
 **铁律**（任何改动都不能破）：
 
-- **不 fork / 不修改 workerd**；只通过 `workerLoader`、bindings、capnp 扩展。
+- **workerd 改动只在 `yingce/cellhive-workerd`**；本仓通过 `workerLoader`、bindings、capnp 集成，不内联 patch。
 - **热路径禁止 List**；对象存储只做点查与条件写，`List` 仅用于诊断/运维。
 - **授权先于转发**；租户只拿到 binding facade 与 scoped token，拿不到平台 secret。
 - **一切持久化经 `cell-agent`**；runtime 不直接访问对象存储。
@@ -64,7 +64,7 @@
 ### CLI / 打包 / wrangler 兼容 / dev
 
 - **先读**：[`wrangler-compat.md`](./wrangler-compat.md)、[`dev-mode.md`](./dev-mode.md)；
-- **要守住**：生产打包用 Go + esbuild（无 Node）；dev CLI（Bun + Miniflare）只是开发工具，不属生产产物，且必须与 pinned workerd 同期；
+- **要守住**：生产打包用 Go + esbuild（无 Node）；dev CLI（Bun + Miniflare）只是开发工具，不属生产产物，且必须与 pinned cellhive-workerd 同期；
 - **测试锚点**：`make cli-test`、`internal/bundler`、`internal/wrangler` 契约测试。
 
 ## 提交前检查

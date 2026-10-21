@@ -138,3 +138,64 @@ _最后更新：2026-09-24_
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
 - **日志 Tail**：`workerd/platform/log-tail.js` 由可信宿主作为真实 `Fetcher` 挂到动态 Worker 的 `WorkerCode.tails`；它捕获 `console.*`/异常并写入平台 ring/可选 OTLP。身份、log token、URL 与 private transport 不进入 tenant env（ADR-185）。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。
+
+## Hyperdrive：驱动与兼容（2026-10-21）
+
+CellHive 的 Hyperdrive 与 Cloudflare 的语义差异：**默认只下发源库 `connectionString`**，不做边缘连接池/代理/全球加速。
+
+### 可选：ProxySQL 代理模式
+
+默认 `direct`（源库地址，行为不变）。需要共享池/统一入口时开启：
+
+```bash
+CELLHIVE_HYPERDRIVE_MODE=proxy
+# 只服务一种协议
+CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133
+# 或同时服务两种协议（一个变量，按 scheme 选择）
+CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133,mysql://proxysql:6033
+```
+
+- binding 的 host/port 会改写为协议池，**database/user/password/query 保持不变**；
+- PostgreSQL 和 MySQL 使用 ProxySQL 的不同监听端口（6133/6033）；
+- 未配置某协议的 entry 时，该协议 binding fail closed；
+- 裸 `host:port` 仍按 PostgreSQL 兼容处理；MySQL 必须写 `mysql://`；
+- 多个 Hyperdrive 资源使用同一 database 名时，可用 `CELLHIVE_HYPERDRIVE_DB_MODE=binding` 生成 `hd_<resource>`；MySQL 保留原 schema；
+- `CELLHIVE_HYPERDRIVE_MANAGED_USERS=1` 时，CellHive 为每个 binding 在 origin 创建 `hd_<hash>` 角色并只把生成凭据下发给 worker；origin URL 只留在加密的 control 配置里，需要 `CREATE USER`/`GRANT` 权限。
+- MySQL 驱动在 workerd 下需要 `disableEval: true`（workerd 禁止 `new Function`），并通常需要 Node builtin 的 CJS require shim；已用 `mysql2` + ProxySQL 验证；
+- 设置 `CELLHIVE_PROXYSQL_ADMIN` 后，Hyperdrive 资源 create/delete 会自动 upsert/delete ProxySQL 的 `mysql_servers`/`mysql_users` 或 `pgsql_servers`/`pgsql_users`，并 `LOAD ... TO RUNTIME`；`CELLHIVE_PROXYSQL_SAVE=1` 时同时落盘。
+- ProxySQL 的 admin 凭据、backend 池参数、query rules 仍由运维管理；自动同步失败目前只记日志，不回滚资源创建。
+- 改 `CELLHIVE_HYPERDRIVE_MODE` 后需要重启 cell-agent。要在 stock workerd 上使用真实 Postgres 驱动：
+
+1. version 必须带 `compatibility_flags: ["nodejs_compat"]`；
+2. tenant 出网能到数据库（本地/私有库需要 `CELLHIVE_TENANT_OUTBOUND` 包含 `private`/`local`）；
+3. 推荐用 **postgres.js**（`workerd` 条件导出，纯 ESM）：
+   ```js
+   import postgres from "postgres";
+   const sql = postgres(env.HYPERDRIVE.connectionString, { max: 4 });
+   const rows = await sql`select 1 as ok, current_database() as db`;
+   await sql.end({ timeout: 2 });
+   ```
+   esbuild：`--conditions=workerd --external:cloudflare:sockets --external:node:*`。
+
+4. **node-postgres (`pg`)** 也能用，但它依赖 CJS `require`；需要用 `pg-cloudflare` 的 `workerd` 条件导出，并提供一个小 require shim：
+   ```js
+   // pgshim.js — 必须在 import "pg" 之前执行
+   import * as events from "node:events";
+   import * as util from "node:util";
+   import * as crypto from "node:crypto";
+   import * as buffer from "node:buffer";
+   import * as stream from "node:stream";
+   import { CloudflareSocket } from "pg-cloudflare";
+   globalThis.require = (name) => ({ events, util, crypto, buffer, stream, net: {}, tls: {}, dns: {}, fs: {}, path: {}, os: {}, readline: {}, "pg-cloudflare": { CloudflareSocket } })[name] || {};
+   ```
+   ```js
+   import "./pgshim.js";
+   import { Client } from "pg";
+   const c = new Client(env.HYPERDRIVE.connectionString);
+   await c.connect();
+   const r = await c.query("select 1 as ok, current_database() as db");
+   await c.end();
+   ```
+   esbuild：`--platform=neutral --main-fields=main,module --conditions=workerd --external:cloudflare:sockets --external:node:* --external:events --external:util --external:crypto --external:buffer --external:stream --external:net --external:tls --external:dns --external:fs --external:path --external:os --external:readline`。
+
+以上两条均已在真实 Postgres 17 上验证 `select 1, current_database()`；连接池（`max`）是 **per-isolate** 的，不是 CF 的全局 Hyperdrive 池。
