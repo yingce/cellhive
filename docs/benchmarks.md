@@ -696,3 +696,35 @@ messages/sec: 18,441
 三轮都是 32/32 连接建立、0 error。这里的数字是**客户端 echo 消息吞吐**，不是 HTTP RPS；也包含 Node 客户端事件循环成本。
 
 边界：测试只覆盖单个 DO 对象，fixture 的 SQL 写/读会被 DO 串行化；数字包含 user-runtime loader 和本机网络，不是容量承诺。多对象 shard、gated `do-supervisor`、跨节点放置未覆盖。
+
+### 多对象 shard 与容器资源限制
+
+把请求按 `?shard=` 真正分散到不同 DO（fixture 用 `bench-<shard>` 作为 DO 名），在 **1 vCPU / 1 GiB** 的 `do-runtime` 容器内测试：
+
+```bash
+DO_RPS_SHARDS=1,8,64,256 \
+DO_RPS_WS_SHARDS=1,8,64 \
+DO_RPS_DURATION=8 DO_RPS_WS_DURATION=8 \
+bash scripts/e2e/do-runtime-rps.sh
+```
+
+`wrk -t4 -c64`、每轮 8s 的观测范围：
+
+| DO shards | RPS 观测 |
+|---:|---:|
+| 1 | ~502–507 |
+| 8 | ~518 |
+| 64 | ~204–519 |
+| 256 | ~207–507 |
+
+WebSocket（32 sockets，单 in-flight，8s）：
+
+| DO shards | messages/sec |
+|---:|---:|
+| 1 | ~16.2k |
+| 8 | ~18.8k |
+| 64 | ~18.6k |
+
+结论要保守：在这台单节点、1 vCPU 容器上，**多 shard 没有稳定带来线性 RPS 提升**。64/256 shard 每轮波动很大，不能据此宣称扩展曲线；更可能是 1 vCPU 下的对象建立/调度/CPU 限流混合影响。单对象约 500 RPS 也只能作为本地 smoke。
+
+因此下一步应该做的是：固定 DO 预热、记录 cgroup throttling、增加轮次和对象创建次数，再判断瓶颈；当前数字不是容量承诺。

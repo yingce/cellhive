@@ -14,6 +14,8 @@ CONNECTIONS=${DO_RPS_CONNECTIONS:-64}
 DURATION=${DO_RPS_DURATION:-10}
 WS_SOCKETS=${DO_RPS_WS_SOCKETS:-32}
 WS_DURATION=${DO_RPS_WS_DURATION:-8}
+SHARDS=${DO_RPS_SHARDS:-1}
+WS_SHARDS=${DO_RPS_WS_SHARDS:-1}
 FIXTURES="$ROOT/scripts/e2e/fixtures/do-rps"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/cellhive-do-rps.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -50,10 +52,20 @@ for _ in $(seq 1 40); do
 done
 curl -fsS -H "Host: $HOST" "http://127.0.0.1:8081/inc" >/dev/null
 
-echo "== storage: wrk -t$THREADS -c$CONNECTIONS -d${DURATION}s /inc =="
-wrk -t"$THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
-  -H "Host: $HOST" "http://127.0.0.1:8081/inc" | tee "$TMP/storage.log"
-echo
-echo "== websocket: $WS_SOCKETS sockets for ${WS_DURATION}s =="
-NODE_PATH="$ROOT/cli/node_modules" node "$FIXTURES/ws-bench.cjs" \
-  "$WS_SOCKETS" "$WS_DURATION" "ws://127.0.0.1:8081/" "$HOST" | tee "$TMP/ws.log"
+for shards in ${SHARDS//,/ }; do
+  echo "== storage: shards=$shards wrk -t$THREADS -c$CONNECTIONS -d${DURATION}s /inc =="
+  if [ "$shards" -gt 1 ]; then
+    DO_RPS_SHARDS="$shards" wrk -t"$THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
+      -s "$FIXTURES/wrk-shards.lua" -H "Host: $HOST" "http://127.0.0.1:8081/inc" | tee "$TMP/storage-$shards.log"
+  else
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
+      -H "Host: $HOST" "http://127.0.0.1:8081/inc" | tee "$TMP/storage-$shards.log"
+  fi
+  echo
+done
+for shards in ${WS_SHARDS//,/ }; do
+  echo "== websocket: shards=$shards sockets=$WS_SOCKETS for ${WS_DURATION}s =="
+  NODE_PATH="$ROOT/cli/node_modules" node "$FIXTURES/ws-bench.cjs" \
+    "$WS_SOCKETS" "$WS_DURATION" "ws://127.0.0.1:8081/" "$HOST" "$shards" | tee "$TMP/ws-$shards.log"
+  echo
+done

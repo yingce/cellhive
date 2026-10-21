@@ -6,13 +6,16 @@ const n = Number(process.argv[2] || 32);
 const seconds = Number(process.argv[3] || 8);
 const url = process.argv[4] || "ws://127.0.0.1:8081/";
 const host = process.argv[5] || "do-bench.local";
+const shards = Number(process.argv[6] || 1);
 let connected = 0, closed = 0, errors = 0, messages = 0;
 const sockets = [];
 const started = Date.now();
 const deadline = started + seconds * 1000;
 
 for (let i = 0; i < n; i++) {
-  const ws = new WebSocket(url, { headers: { Host: host } });
+  const shard = Math.floor(Math.random() * shards);
+  const wsUrl = url + (url.includes("?") ? "&" : "?") + "shard=" + shard;
+  const ws = new WebSocket(wsUrl, { headers: { Host: host } });
   sockets.push(ws);
   ws.on("open", () => {
     connected++;

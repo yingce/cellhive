@@ -34,6 +34,7 @@ export class Bench extends DurableObject {
 
 export default {
   async fetch(request, env) {
-    return env.BENCH.get(env.BENCH.idFromName("bench")).fetch(request);
+    const shard = new URL(request.url).searchParams.get("shard") || "0";
+    return env.BENCH.get(env.BENCH.idFromName("bench-" + shard)).fetch(request);
   },
 };
