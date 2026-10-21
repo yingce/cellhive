@@ -530,7 +530,9 @@ func quotaSource(limits json.RawMessage, kinds map[string]string) string {
         return (...args)=>{
           const local=(kind==='d1'&&(key==='prepare'||key==='bind'))||(kind==='do'&&localMethods.has(key))||(kind==='workflow'&&key==='get')||(kind==='r2'&&key==='resumeMultipartUpload');
           if(!local)consume();
-          const result=v.apply(target,args);
+          // RPC stubs expose arbitrary method names; reading apply from a
+          // stub attempts a remote RPC call instead of invoking the function.
+          const result=Reflect.apply(v,target,args);
           if(local&&result&&typeof result.then==='function')return result.then(x=>wrap(x,kind));
           if(local)return wrap(result,kind);
           return result;

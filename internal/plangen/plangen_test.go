@@ -137,7 +137,8 @@ func TestBuildBindingFreeHosts(t *testing.T) {
 	}
 	quotaOK := false
 	for _, m := range bound.Modules {
-		if m.Name == "__cellhive-quota.js" && strings.Contains(m.Source, "limit=2") && strings.Contains(m.Source, `"KV":"kv"`) {
+		if m.Name == "__cellhive-quota.js" && strings.Contains(m.Source, "limit=2") && strings.Contains(m.Source, `"KV":"kv"`) &&
+			strings.Contains(m.Source, "Reflect.apply(v,target,args)") && !strings.Contains(m.Source, "v.apply(target,args)") {
 			quotaOK = true
 		}
 	}

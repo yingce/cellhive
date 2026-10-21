@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ByteLRU, Lifetime, RuntimeCapacity } from './lifecycle.js';
+import { ByteLRU, Lifetime, RuntimeCapacity, quotaSource } from './lifecycle.js';
+
+test('quota wrapper invokes binding methods without RPC apply lookup', () => {
+  const source = quotaSource(10, { CACHE: { kind: 'kv' } });
+  assert.match(source, /Reflect\.apply\(v,\s*target,\s*args\)/);
+  assert.doesNotMatch(source, /v\.apply\(target, args\)/);
+});
 
 test('byte cache evicts by weight, updates accounting and skips oversized values', () => {
   const c = new ByteLRU(10, 12, v => v.length, 8);
