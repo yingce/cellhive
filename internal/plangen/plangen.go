@@ -86,13 +86,16 @@ func (b *Builder) Build(ctx context.Context, hosts []string) (*staticgen.Plan, [
 		}
 		plan.Routes[host] = svc
 	}
-	routed := make(map[string]bool, len(plan.Routes))
-	for _, svc := range plan.Routes {
-		routed[svc] = true
-	}
-	names := make([]string, 0, len(routed))
-	for name := range routed {
-		names = append(names, name)
+	// Give every tenant service a socket, even when its host is currently
+	// tail-routed and therefore absent from Routes. Otherwise a Tail toggle
+	// changes Sockets and staticgen rebuilds the whole workerd generation,
+	// aborting the old isolate. The platform service is internal and needs no
+	// socket.
+	names := make([]string, 0, len(plan.Services))
+	for _, svc := range plan.Services {
+		if svc.Name != platformService {
+			names = append(names, svc.Name)
+		}
 	}
 	sort.Strings(names)
 	for i, name := range names {
@@ -212,13 +215,13 @@ func (b *Builder) buildHost(ctx context.Context, host string, seen map[string]st
 	if !ok || ptr.BundleSHA == "" {
 		return "", "no active version", nil
 	}
-	if state.capture.enabled(route.Namespace, route.Worker) {
-		// Keep the static fast path Tail-free: a worker with a live tail
-		// subscription (or OTLP_LOGS=all) is served by the dynamic loader, whose
-		// ring already implements Tail. This avoids paying the native Tail cost
-		// on every request to every statically served worker.
-		return "", "tail capture active; served dynamically", nil
-	}
+	tailActive := state.capture.enabled(route.Namespace, route.Worker)
+	// Keep the static fast path Tail-free: a worker with a live tail
+	// subscription (or OTLP_LOGS=all) is served by the dynamic loader, whose
+	// ring already implements Tail. We still render its service into the plan
+	// (without a route) so a tail subscription changes only the routing table;
+	// dropping the service would rebuild the workerd generation and abort the
+	// old isolate on every Tail toggle.
 	if ptr.AssetsSHA != "" {
 		return "", "worker has assets; asset routing stays dynamic", nil
 	}
@@ -261,6 +264,9 @@ func (b *Builder) buildHost(ctx context.Context, host string, seen map[string]st
 		svc.Modules = []staticgen.Module{{Name: "main.js", Source: source}}
 		*services = append(*services, svc)
 		seen[key] = name
+		if tailActive {
+			return name, "tail capture active; served dynamically", nil
+		}
 		return name, "", nil
 	}
 	// Bound workers need the trusted wrapper + platform entrypoints. Service
@@ -328,6 +334,9 @@ func (b *Builder) buildHost(ctx context.Context, host string, seen map[string]st
 	}
 	*services = append(*services, svc)
 	seen[key] = name
+	if tailActive {
+		return name, "tail capture active; served dynamically", nil
+	}
 	return name, "", nil
 }
 

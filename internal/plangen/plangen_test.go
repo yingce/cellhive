@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -309,45 +310,58 @@ func TestMinimalEntrySelection(t *testing.T) {
 }
 
 func TestCaptureActiveSkipsStatic(t *testing.T) {
-	cell := fakeCell(t)
-	defer cell.Close()
-	b := New(Config{
-		CellURL: cell.URL, CellToken: "tok",
-		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
-		LogToken: "logtok", MinimalMode: "auto",
-	})
-	// Fake a live tail subscription by pointing the builder at a capture endpoint
-	// variant that reports acme/bound as subscribed.
-	plan, skipped, err := b.Build(context.Background(), []string{"bindings.test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Routes) != 1 {
-		t.Fatalf("capture-off build routes = %v skipped = %+v", plan.Routes, skipped)
-	}
-	// The fake endpoint keys the "active" mode off the Host header (the real
-	// builder sends no such header, so drive the skip branch directly through a
-	// dedicated server).
-	active := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var active bool
+	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/control/host":
 			_ = json.NewEncoder(w).Encode(hostView{
 				Routes:  []hostRoute{{Namespace: "acme", Worker: "bound"}},
 				Workers: map[string]workerPtr{"acme/bound": {Version: 1, BundleSHA: "sha-bound"}},
 			})
+		case "/v1/internal/worker/bindings":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "token": "tok"}},
+				"vars":     map[string]string{"Z": "last", "A": "first"}, "compat_date": "2026-06-15", "compat_flags": []string{"nodejs_als"},
+				"limits": map[string]any{"subrequests": 2},
+			})
 		case "/v1/internal/log-capture":
-			_ = json.NewEncoder(w).Encode(map[string]any{"mode": "tail", "workers": []string{"acme/bound"}})
+			if active {
+				_ = json.NewEncoder(w).Encode(map[string]any{"mode": "tail", "workers": []string{"acme/bound"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"mode": "off", "workers": []string{}})
+		case "/v1/internal/bundle":
+			fmt.Fprint(w, `export default { fetch(req, env) { return new Response("bound"); } };`)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	defer active.Close()
-	b2 := New(Config{CellURL: active.URL, CellToken: "tok", MinimalMode: "auto"})
-	plan2, skipped2, err := b2.Build(context.Background(), []string{"bindings.test"})
+	defer cell.Close()
+	b := New(Config{
+		CellURL: cell.URL, CellToken: "tok",
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		MinimalMode: "auto",
+	})
+	plan, skipped, err := b.Build(context.Background(), []string{"bindings.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Routes) != 1 || len(skipped) != 0 {
+		t.Fatalf("capture-off build routes = %v skipped = %+v", plan.Routes, skipped)
+	}
+
+	active = true
+	plan2, skipped2, err := b.Build(context.Background(), []string{"bindings.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan2.Routes) != 0 || len(skipped2) != 1 || !strings.Contains(skipped2[0].Reason, "tail capture") {
 		t.Fatalf("capture-active build routes=%v skipped=%+v", plan2.Routes, skipped2)
+	}
+	if len(plan2.Services) == 0 {
+		t.Fatal("tail-active host should keep its service in the plan so the generation is reusable")
+	}
+	if !reflect.DeepEqual(plan.Services, plan2.Services) || !reflect.DeepEqual(plan.Sockets, plan2.Sockets) {
+		t.Fatalf("tail toggle changed the static runtime shape: services %d/%d sockets %d/%d", len(plan.Services), len(plan2.Services), len(plan.Sockets), len(plan2.Sockets))
 	}
 }
