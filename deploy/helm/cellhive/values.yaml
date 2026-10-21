@@ -24,6 +24,29 @@ telemetry:
   # ARMS traces endpoints do not accept OTLP logs; use a logs-capable backend.
   logs: "off"
 
+# Optional ProxySQL admin reconciliation. Prefer existingSecret with key
+# CELLHIVE_PROXYSQL_ADMIN; adminDsn is for local/dev only.
+proxysql:
+  # One DSN per ProxySQL replica, comma-separated for fanout.
+  adminDsn: ""
+  existingSecret: ""
+  save: false
+
+hyperdrive:
+  # direct: inject the origin connectionString (default, no pooler needed).
+  # proxy: rewrite host/port to the protocol pooler; database/user/password/query kept.
+  mode: direct
+  # Create a per-binding origin role; the origin URL must be able to
+  # CREATE USER/GRANT. Workers receive only the generated client credentials.
+  managedUsers: false
+  # Pooler endpoint(s). A bare host:port is PostgreSQL; use scheme URLs for
+  # both protocols, e.g. postgres://proxysql:6133,mysql://proxysql:6033.
+  proxy: ""
+  # origin: keep origin database name; binding: hd_<resource> for PostgreSQL
+  # poolers that map the database name.
+  dbMode: origin
+
+
 config:
   dataDir: /data/state
   runtimeDir: /data/runtime

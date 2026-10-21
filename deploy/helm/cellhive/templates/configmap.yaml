@@ -27,6 +27,15 @@ data:
   CELLHIVE_OTLP_LOGS: {{ .Values.telemetry.logs | quote }}
   {{- end }}
   CELLHIVE_TENANT_OUTBOUND: {{ .Values.config.tenantOutbound | default "public" | quote }}
+  {{- $hdProxy := .Values.hyperdrive.proxy | default "" -}}
+  {{- if and (eq .Values.hyperdrive.mode "proxy") (not $hdProxy) -}}
+  {{- fail "hyperdrive.mode=proxy requires hyperdrive.proxy" -}}
+  {{- end }}
+  CELLHIVE_HYPERDRIVE_MODE: {{ .Values.hyperdrive.mode | default "direct" | quote }}
+  CELLHIVE_HYPERDRIVE_MANAGED_USERS: {{ ternary "1" "0" .Values.hyperdrive.managedUsers | quote }}
+  CELLHIVE_HYPERDRIVE_PROXY: {{ $hdProxy | quote }}
+  CELLHIVE_HYPERDRIVE_DB_MODE: {{ .Values.hyperdrive.dbMode | default "origin" | quote }}
+  CELLHIVE_PROXYSQL_SAVE: {{ ternary "1" "0" .Values.proxysql.save | quote }}
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"
   CELLHIVE_BUCKET_DIR: {{ .Values.config.bucketDir | quote }}

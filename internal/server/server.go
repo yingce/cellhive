@@ -44,6 +44,7 @@ import (
 	"cellhive/internal/ownerclient"
 	"cellhive/internal/pagedvfs"
 	"cellhive/internal/peer"
+	"cellhive/internal/proxysql"
 	"cellhive/internal/queue"
 	"cellhive/internal/r2"
 	"cellhive/internal/recovery"
@@ -160,6 +161,9 @@ type Server struct {
 	commits       atomic.Uint64
 	readyFlag     atomic.Bool
 
+	// ProxySQL reconciles Hyperdrive origins when CELLHIVE_PROXYSQL_ADMIN is set.
+	ProxySQL *proxysql.Sync
+
 	sessionMu        sync.Mutex
 	sessionOpen      bool
 	sessionFollowers []string
@@ -205,6 +209,16 @@ func New(d Deps) *Server {
 		d.Invocations = invocation.New(d.Store)
 	}
 	s := &Server{Deps: d, ordered: newOrderedDispatcher()}
+	if d.Cfg.ProxySQLAdmin != "" {
+		ps, err := proxysql.New(d.Cfg.ProxySQLAdmin, d.Cfg.ProxySQLSave)
+		if err != nil {
+			if d.Log != nil {
+				d.Log.Warn("proxysql disabled: admin connection failed", "err", err)
+			}
+		} else {
+			s.ProxySQL = ps
+		}
+	}
 	s.resourceRep = d.Replica
 	if s.resourceRep == nil && d.Bucket != nil {
 		s.resourceRep = replica.New(d.Bucket)
@@ -284,6 +298,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/logs/runtime", s.auth(s.handleRuntimeLogRegister))
 	mux.HandleFunc("GET /v1/internal/logs/events", s.roleAuth("peer")(s.handlePeerLogEvents))
 	mux.HandleFunc("POST /v1/internal/logs/subscribe", s.auth(s.handleLogSubscribeInternal))
+	mux.HandleFunc("GET /v1/internal/log-capture", s.auth(s.handleLogCapture))
 	mux.HandleFunc("POST /v1/internal/timer/upsert", s.auth(s.handleTimerUpsert))
 	mux.HandleFunc("POST /v1/internal/kv/expire", s.auth(s.handleKVExpire))
 	mux.HandleFunc("GET /v1/control/routes", s.auth(s.handleControlRoutes))
@@ -973,10 +988,15 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
 			return true
 		case errors.Is(cerr, bucket.ErrPrecondition):
-			// Lost the claim race: re-resolve and forward if a peer won.
-			if o2, _, rerr := s.Owner.ResolveCached(r.Context(), sc, 0); rerr == nil &&
-				o2.Node != s.Cfg.NodeID && !o2.Expired(time.Now()) && o2.Address != "" {
-				return s.forwardIfNonOwner(w, r, sc, preRead)
+			// Lost the claim race: re-resolve. A concurrent request on this same
+			// node may have won, in which case this request can proceed locally.
+			if o2, _, rerr := s.Owner.ResolveCached(r.Context(), sc, 0); rerr == nil {
+				if o2.Node == s.Cfg.NodeID && o2.Session == s.Owner.Session && !o2.Expired(time.Now()) {
+					return false
+				}
+				if o2.Node != s.Cfg.NodeID && !o2.Expired(time.Now()) && o2.Address != "" {
+					return s.forwardIfNonOwner(w, r, sc, preRead)
+				}
 			}
 			writeErr(w, http.StatusServiceUnavailable, "claim_race", "scope owner changed during claim")
 			return true
@@ -1022,7 +1042,7 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) {
 			return // a live peer owns it: the request forwards, local is unused
 		}
 	}
-	_ = s.Store.Forget(ctx, sc)
+	_, _ = s.Store.TryForget(ctx, sc, nil)
 }
 
 // gateScope returns the cell scope a binding request touches, mirroring gateKey.

@@ -148,6 +148,31 @@ type Config struct {
 	// Leases.
 	LeaseTTL time.Duration
 
+	// HyperdriveMode selects how Hyperdrive bindings are rendered:
+	// "direct" (default, origin URL) or "proxy" (rewrite to HyperdriveProxy).
+	HyperdriveMode string
+	// HyperdriveProxy holds the pooler endpoint(s) used in "proxy" mode.
+	// A bare host:port is PostgreSQL (back-compat); explicit
+	// scheme://host:port entries allow one variable to carry both protocols,
+	// e.g. "postgres://proxysql:6133,mysql://proxysql:6033". Omit a protocol to
+	// fail that scheme closed.
+	HyperdriveProxy string
+	// HyperdriveDBMode selects the database name sent to a PostgreSQL pooler in
+	// proxy mode: "origin" preserves the origin database name (default);
+	// "binding" rewrites it to hd_<resource> so multiple origins that share a
+	// database name can be mapped independently.
+	HyperdriveDBMode string
+	// ProxySQLAdmin is one or more comma-separated ProxySQL admin DSNs. When set,
+	// Hyperdrive resource create/delete and the periodic reconcile update
+	// mysql_servers/mysql_users or pgsql_servers/pgsql_users on every endpoint
+	// and reload the corresponding runtime tables.
+	ProxySQLAdmin string
+	// ProxySQLSave persists admin changes with SAVE ... TO DISK.
+	ProxySQLSave bool
+	// HyperdriveManagedUsers creates a per-binding origin DB role and gives
+	// workers only the generated user/password. Requires the sealed origin URL
+	// to have CREATE USER/GRANT privileges.
+	HyperdriveManagedUsers bool
 	// TimerInterval enables the local due-dispatch loop (0 disables). DispatchURL
 	// is the logical endpoint due timers are POSTed to (empty = log only).
 	TimerInterval time.Duration
@@ -512,6 +537,12 @@ func FromEnv() Config {
 		OTLPLogs:                 env("CELLHIVE_OTLP_LOGS", "off"),
 		LogRegisterURLs:          splitList(env("CELLHIVE_LOG_REGISTER_URLS", "")),
 		LeaseTTL:                 envDuration("CELLHIVE_LEASE_TTL", 10*time.Second),
+		HyperdriveMode:           strings.ToLower(strings.TrimSpace(env("CELLHIVE_HYPERDRIVE_MODE", "direct"))),
+		HyperdriveProxy:          strings.TrimSpace(env("CELLHIVE_HYPERDRIVE_PROXY", "")),
+		HyperdriveDBMode:         strings.ToLower(strings.TrimSpace(env("CELLHIVE_HYPERDRIVE_DB_MODE", "origin"))),
+		ProxySQLAdmin:            strings.TrimSpace(env("CELLHIVE_PROXYSQL_ADMIN", "")),
+		ProxySQLSave:             envBool("CELLHIVE_PROXYSQL_SAVE", false),
+		HyperdriveManagedUsers:   envBool("CELLHIVE_HYPERDRIVE_MANAGED_USERS", false),
 		TimerInterval:            envDuration("CELLHIVE_TIMER_INTERVAL", time.Second),
 		DispatchURL:              env("CELLHIVE_DISPATCH_URL", ""),
 		QueueInterval:            envDuration("CELLHIVE_QUEUE_INTERVAL", time.Second),
@@ -767,6 +798,21 @@ func (c Config) Validate() error {
 	}
 	if c.LeaseTTL <= 0 {
 		return fmt.Errorf("lease ttl must be positive")
+	}
+	switch c.HyperdriveMode {
+	case "", "direct":
+	case "proxy":
+		if c.HyperdriveProxy == "" {
+			return fmt.Errorf("CELLHIVE_HYPERDRIVE_MODE=%s requires CELLHIVE_HYPERDRIVE_PROXY (host:port or scheme://host:port[,scheme://host:port])", c.HyperdriveMode)
+		}
+	default:
+		return fmt.Errorf("CELLHIVE_HYPERDRIVE_MODE must be direct or proxy (got %q)", c.HyperdriveMode)
+	}
+	switch c.HyperdriveDBMode {
+	case "", "origin":
+	case "binding":
+	default:
+		return fmt.Errorf("CELLHIVE_HYPERDRIVE_DB_MODE must be origin or binding (got %q)", c.HyperdriveDBMode)
 	}
 	switch c.Durability {
 	case "auto", "fleet", "bucket":

@@ -11,6 +11,8 @@ x-image: &image
   build:
     context: ../..
     dockerfile: deploy/Dockerfile
+    additional_contexts:
+      workerd-fork: ${CELLHIVE_WORKERD_FORK_CONTEXT:-../workerd-fork}
   image: cellhive:dev
   restart: unless-stopped
 
@@ -27,6 +29,20 @@ x-common-env: &common-env
   CELLHIVE_POOL_MODE: ${CELLHIVE_POOL_MODE:-}
   CELLHIVE_POOL_MEMORY_UTILIZATION: ${CELLHIVE_POOL_MEMORY_UTILIZATION:-0.70}
   CELLHIVE_POOL_MAX_SLOTS: ${CELLHIVE_POOL_MAX_SLOTS:-16}
+  # Hyperdrive default is direct origin; set CELLHIVE_HYPERDRIVE_MODE=proxy
+  # and CELLHIVE_HYPERDRIVE_PROXY to route through an external pooler.
+  CELLHIVE_HYPERDRIVE_MODE: ${CELLHIVE_HYPERDRIVE_MODE:-direct}
+  # Create a per-binding origin role so workers never receive the origin
+  # user/password. The sealed origin URL must have CREATE USER/GRANT rights.
+  CELLHIVE_HYPERDRIVE_MANAGED_USERS: ${CELLHIVE_HYPERDRIVE_MANAGED_USERS:-0}
+  # Bare host:port = PostgreSQL; use postgres://... or mysql://... entries
+  # (comma-separated) to carry both protocols through one variable.
+  CELLHIVE_HYPERDRIVE_PROXY: ${CELLHIVE_HYPERDRIVE_PROXY:-}
+  # Optional ProxySQL admin DSN; when set, Hyperdrive resource create/delete
+  # upserts/removes mysql_* or pgsql_* rows and LOADs them into RUNTIME.
+  CELLHIVE_PROXYSQL_ADMIN: ${CELLHIVE_PROXYSQL_ADMIN:-}
+  CELLHIVE_PROXYSQL_SAVE: ${CELLHIVE_PROXYSQL_SAVE:-0}
+  CELLHIVE_HYPERDRIVE_DB_MODE: ${CELLHIVE_HYPERDRIVE_DB_MODE:-origin}
 
 services:
   cell-agent:

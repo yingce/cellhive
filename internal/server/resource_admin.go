@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"cellhive/internal/control"
+	"cellhive/internal/hyperdriveauth"
+	"cellhive/internal/proxysql"
 	"cellhive/internal/vectorize"
 )
 
@@ -121,16 +123,35 @@ func (s *Server) doResourceCreate(w http.ResponseWriter, r *http.Request, kind s
 		}
 		cfg = []byte(req.ConnectionString)
 	}
+	var generated hyperdriveauth.Credentials
+	if req.Kind == "hyperdrive" && len(cfg) > 0 && s.Cfg.HyperdriveManagedUsers && s.Cfg.ScopeSecret != "" {
+		generated = hyperdriveauth.Derive(s.Cfg.ScopeSecret, req.Namespace, req.Name)
+		if err := hyperdriveauth.Provision(r.Context(), string(cfg), generated); err != nil {
+			writeErr(w, http.StatusBadGateway, "hyperdrive_credentials_failed", err.Error())
+			return
+		}
+	}
 	var res control.Resource
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
 		var e error
 		res, e = s.Control.CreateResourceWithConfig(r.Context(), req.Namespace, req.Kind, req.Name, req.Scope, cfg, "admin")
 		return e
 	}); err != nil {
+		if generated.User != "" && len(cfg) > 0 {
+			_ = hyperdriveauth.Deprovision(r.Context(), string(cfg), generated)
+		}
 		writeErr(w, http.StatusBadRequest, "resource_create_failed", err.Error())
 		return
 	}
 	s.invalidateBindings(req.Namespace)
+	if req.Kind == "hyperdrive" && s.ProxySQL != nil && len(cfg) > 0 {
+		if err := s.ProxySQL.SyncOrigin(r.Context(), proxysql.Origin{
+			Namespace: req.Namespace, Name: req.Name, URL: string(cfg),
+			ClientUser: generated.User, ClientPassword: generated.Password,
+		}); err != nil && s.Log != nil {
+			s.Log.Warn("proxysql hyperdrive sync failed", "ns", req.Namespace, "resource", req.Name, "err", err)
+		}
+	}
 	if req.Kind == "vectorize" {
 		s.invalidateVectorizeConfig(req.Namespace, req.Name)
 	}
@@ -223,6 +244,16 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 		writeErr(w, http.StatusNotFound, "resource_not_found", "no registered "+kind+" resource named "+name)
 		return
 	}
+	var hyperdriveOrigin string
+	var generated hyperdriveauth.Credentials
+	if kind == "hyperdrive" {
+		if b, err := s.Control.ResourceConfig(r.Context(), ns, kind, name); err == nil {
+			hyperdriveOrigin = string(b)
+		}
+		if s.Cfg.HyperdriveManagedUsers && s.Cfg.ScopeSecret != "" {
+			generated = hyperdriveauth.Derive(s.Cfg.ScopeSecret, ns, name)
+		}
+	}
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(ns), func() error {
 		return s.Control.DeleteResource(r.Context(), ns, kind, name, actorFor(r.Context()))
 	}); err != nil {
@@ -234,6 +265,16 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 		return
 	}
 	s.invalidateBindings(ns)
+	if kind == "hyperdrive" && s.ProxySQL != nil && hyperdriveOrigin != "" {
+		if err := s.ProxySQL.Remove(r.Context(), ns, name, hyperdriveOrigin, generated.User); err != nil && s.Log != nil {
+			s.Log.Warn("proxysql hyperdrive remove failed", "ns", ns, "resource", name, "err", err)
+		}
+	}
+	if kind == "hyperdrive" && hyperdriveOrigin != "" && generated.User != "" {
+		if err := hyperdriveauth.Deprovision(r.Context(), hyperdriveOrigin, generated); err != nil && s.Log != nil {
+			s.Log.Warn("hyperdrive credentials deprovision failed", "ns", ns, "resource", name, "err", err)
+		}
+	}
 	var cleanup *control.ResourceCleanup
 	if kind == "kv" || kind == "queue" {
 		job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name)

@@ -52,6 +52,13 @@ spec:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            {{- if .Values.proxysql.existingSecret }}
+            - name: CELLHIVE_PROXYSQL_ADMIN
+              valueFrom: {secretKeyRef: {name: {{ .Values.proxysql.existingSecret }}, key: CELLHIVE_PROXYSQL_ADMIN}}
+            {{- else if .Values.proxysql.adminDsn }}
+            - name: CELLHIVE_PROXYSQL_ADMIN
+              value: {{ .Values.proxysql.adminDsn | quote }}
+            {{- end }}
             {{- if .Values.telemetry.enabled }}
             - name: CELLHIVE_OTLP_ENDPOINT
               valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_OTLP_ENDPOINT}}

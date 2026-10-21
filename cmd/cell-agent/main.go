@@ -905,6 +905,7 @@ func main() {
 	}()
 	srv.SetReady(true)
 	go srv.RunResourceCleanupLoop(ctx)
+	go srv.RunProxySQLReconcileLoop(ctx)
 
 	// Graceful handoff (cell-protocol §7): mark draining as soon as shutdown
 	// begins so no new cell is claimed, then serialize the actual handoff with
