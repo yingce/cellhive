@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -64,5 +65,30 @@ func TestCloudflareHyperdriveCRUD(t *testing.T) {
 	var v any
 	if err := json.Unmarshal(create.Body.Bytes(), &v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCloudflareLegacyScriptUploadAndPreviewMetadata(t *testing.T) {
+	s := newControlServer(t)
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, _ := w.CreateFormField("metadata")
+	_, _ = part.Write([]byte(`{"main_module":"worker.js","compatibility_date":"2026-09-23","migrations":{"new_tag":"v1","steps":[{"new_classes":["LegacyDO"]}]}}`))
+	part, _ = w.CreateFormFile("worker.js", "worker.js")
+	_, _ = part.Write([]byte("export default { fetch() { return new Response('legacy-ok') } }"))
+	_ = w.Close()
+	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/legacy", &body)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("legacy put: %d %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"has_preview":false`)) {
+		t.Fatalf("legacy response missing has_preview: %s", rr.Body.String())
+	}
+	if _, ok, err := s.Control.WorkerEnv(t.Context(), "acme", "legacy"); err != nil || !ok {
+		t.Fatalf("legacy upload not deployed: ok=%v err=%v", ok, err)
 	}
 }

@@ -41,6 +41,7 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/deployments", compat(s.handleCloudflareWorkerDeploymentCreate))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/settings", compat(s.handleCloudflareWorkerSettings))
 		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/script-settings", compat(s.handleCloudflareWorkerSettings))
+		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/content", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerVersions))
@@ -387,6 +388,8 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 			"etag":            version.BundleSHA,
 			"number":          version.Number,
 			"startup_time_ms": 0,
+			"has_preview":     false,
+			"metadata":        map[string]any{"has_preview": false},
 			"resources":       map[string]any{"script": map[string]any{"etag": version.BundleSHA}},
 		},
 	})
@@ -405,6 +408,38 @@ type cloudflareWorkerMetadata struct {
 	AssetsJWT          string
 	AssetsToken        string
 	Assets             *control.AssetsConfig
+}
+
+// decodeCloudflareMigrations accepts both the legacy array shape and the
+// current Wrangler shape {new_tag, steps:[{new_classes,...}]}.
+func decodeCloudflareMigrations(raw json.RawMessage) ([]map[string]any, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, "[") {
+		var out []map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	var obj struct {
+		NewTag string           `json:"new_tag"`
+		Steps  []map[string]any `json:"steps"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(obj.Steps))
+	for _, step := range obj.Steps {
+		entry := map[string]any{"tag": obj.NewTag}
+		for k, v := range step {
+			entry[k] = v
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 func parseCloudflareWorkerMultipart(r *http.Request) (cloudflareWorkerMetadata, []byte, error) {
@@ -459,7 +494,7 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		CompatibilityDate  string           `json:"compatibility_date"`
 		CompatibilityFlags []string         `json:"compatibility_flags"`
 		Bindings           []map[string]any `json:"bindings"`
-		Migrations         []map[string]any `json:"migrations"`
+		Migrations         json.RawMessage  `json:"migrations"`
 		Limits             struct {
 			CpuMs       *int `json:"cpu_ms"`
 			CpuMsNative *int `json:"cpuMs"`
@@ -498,7 +533,11 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 	if cpu != nil || raw.Limits.SubRequests != nil {
 		out.Limits = &control.WorkerLimits{CpuMs: cpu, SubRequests: raw.Limits.SubRequests}
 	}
-	out.Migrations, out.Crons = raw.Migrations, raw.Triggers.Crons
+	migrations, err := decodeCloudflareMigrations(raw.Migrations)
+	if err != nil {
+		return err
+	}
+	out.Migrations, out.Crons = migrations, raw.Triggers.Crons
 	if raw.Assets.JWT != "" {
 		out.AssetsJWT = raw.Assets.JWT
 		out.Assets = &control.AssetsConfig{Binding: raw.Assets.Config.Binding, NotFoundHandling: raw.Assets.Config.NotFoundHandling, HTMLHandling: raw.Assets.Config.HTMLHandling, RunWorkerFirst: raw.Assets.Config.RunWorkerFirst}
