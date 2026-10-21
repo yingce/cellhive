@@ -383,8 +383,13 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"result": map[string]any{
-			"id":              strconv.Itoa(version.Number),
-			"version_id":      strconv.Itoa(version.Number),
+			"id":         strconv.Itoa(version.Number),
+			"version_id": strconv.Itoa(version.Number),
+			// Wrangler's legacy deploy path reads result.deployment_id and runs it
+			// through parseNonHyphenedUuid. CellHive version numbers are integers,
+			// so expose a deterministic UUID-shaped deployment id for the CLI
+			// output while version_id remains the numeric platform version.
+			"deployment_id":   fmt.Sprintf("00000000-0000-0000-0000-%012d", version.Number),
 			"etag":            version.BundleSHA,
 			"number":          version.Number,
 			"startup_time_ms": 0,

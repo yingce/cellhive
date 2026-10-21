@@ -88,6 +88,9 @@ func TestCloudflareLegacyScriptUploadAndPreviewMetadata(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"has_preview":false`)) {
 		t.Fatalf("legacy response missing has_preview: %s", rr.Body.String())
 	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"deployment_id":"00000000-0000-0000-0000-000000000001"`)) {
+		t.Fatalf("legacy response missing deployment_id: %s", rr.Body.String())
+	}
 	if _, ok, err := s.Control.WorkerEnv(t.Context(), "acme", "legacy"); err != nil || !ok {
 		t.Fatalf("legacy upload not deployed: ok=%v err=%v", ok, err)
 	}
