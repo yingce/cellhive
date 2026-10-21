@@ -25,7 +25,7 @@ Design tenets:
 | Component | Implementation | Port | Role | Stateful | Requires custom PID1 supervisor |
 |---|---|---|---|---|---|
 | Edge proxy (Traefik/nginx/cloud LB) | Operations ingress (not an in-platform component) | 80/443 | TLS termination, host-based routing (tenant vs admin); **static configuration** (ADR-132) | No | No |
-| `user-runtime` | cellhive-workerd (`cmd/user-runtime`) | :8081 public / :8088 internal privileged | Worker routing/version resolution/header sanitization + tenant Worker loading and execution. **Implemented**: `:8081` public loader (route projection fetch + version bundle loading + facade env + header sanitization, **ADR-068**) and `:8088` internal dispatch (queue/scheduled handler; ADR-067/070), with static assets on the public side (ADR-069) | No | No |
+| `user-runtime` | Go + cellhive-workerd (`cmd/user-runtime`) | :8081 public / :8088 internal privileged | Worker routing/version resolution/header sanitization + tenant Worker loading and execution. **Implemented**: `:8081` public loader (route projection fetch + version bundle loading + facade env + header sanitization, **ADR-068**) and `:8088` internal dispatch (queue/scheduled handler; ADR-067/070), with static assets on the public side (ADR-069) | No | No |
 | `do-runtime` | cellhive-workerd (`cmd/do-runtime`) + Go supervisor (`cmd/do-supervisor`) | :8788 | Native Durable Object execution; **distributed and elastic**. **Implemented**: host-actor skeleton (facets + localDisk, ADR-077) + ownership/fencing/drain/residency (ADR-078) + supervisor capture/output gate (ADR-083) + alarm (ADR-079) + WS 1012/cross-node forwarding (ADR-080/084) + cross-node cold activation/per-object recovery (ADR-084) + bindings inside DO (ADR-090) + session policy (ADR-107) + owner epoch fencing/configurable lease/object index (ADR-108/109) | Local disk may be temporary (working copy) | **Yes** |
 | `cell-agent` | Go (fixed cluster) | :7001 internal REST (Go↔Go also uses this port, ADR-136) / :8082 admin | cell data + replication + leases + control plane + owner resolution + timer dispatch + **sole bucket credentials** | Yes (owns SQLite itself) | No (handles drain itself) |
 | Object storage | S3-compatible object storage | — | Authoritative state + code + assets | Yes (external) | — |
@@ -173,7 +173,7 @@ For the complete borrowed/not-borrowed notes and acknowledgements, see [`acknowl
 
 | Service | Wraps workerd | Has state leases/replication | Requires custom PID1 |
 |---|---|---|---|
-| `user-runtime` | Yes (workerd is PID1) | No | No |
+| `user-runtime` | Yes (Go hosts workerd) | No | No |
 | `do-runtime` | Yes (Go starts workerd as a child process) | Yes (workerd owns the working copy) | **Yes** |
 | `cell-agent` | No (single Go process) | Yes (owns SQLite itself) | No |
 

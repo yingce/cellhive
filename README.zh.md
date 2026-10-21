@@ -39,14 +39,14 @@
 
 ## 架构
 
-![CellHive 架构](./docs/assets/architecture-workerd-fork.svg)
+![CellHive 架构](./docs/assets/architecture-workerd-fork.png)
 
 | 组件 | 运行时 | 端口 | 职责 |
 |---|---|---|---|
 | **Traefik / 边缘代理** | 外部 | 80/443 | TLS + host 分流（由运维静态配置） |
-| **`user-runtime`** | cellhive-workerd fork | `:8081` 公开 / `:8088` 内部 | 入口 loader：host/版本路由与租户执行 |
+| **`user-runtime`** | Go + cellhive-workerd fork | `:8081` 公开 / `:8088` 内部 | 入口 loader：host/版本路由与租户执行 |
 | **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | 原生 Durable Objects（facet）；分布式弹性；只持工作副本，不是权威 |
-| **`do-supervisor`**（可选） | Go | `:18901` | DO 输出门：确认响应的耐久性（RPO=0） |
+| **`do-supervisor`**（gated 模式） | Go | `:18901` | DO 专属输出门 + PID1；在 RPO=0 生产 profile 中替代默认 `do-runtime` supervisor |
 | **`cell-agent`** | Go | `:7001` 内部 REST / `:8082` admin | cell 存储 + 复制 + owner/epoch 租约 + 控制面 + 计时派发 + **唯一桶凭据** |
 | **对象存储** | S3 兼容 | — | cell 状态、worker bundle、assets 的权威 |
 

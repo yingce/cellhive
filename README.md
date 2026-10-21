@@ -4,6 +4,8 @@
 
 <p align="center"><strong>A self-hosted, Cloudflare Workers-compatible runtime.</strong></p>
 
+<p align="center"><a href="./README.zh.md">中文说明</a> · English</p>
+
 <p align="center">
   <a href="https://github.com/yingce/cellhive-workerd">cellhive-workerd</a> fork for compute ·
   a Go "cell" state layer on SQLite + an S3-compatible object store ·
@@ -39,14 +41,14 @@
 
 ## Architecture
 
-![CellHive architecture](./docs/assets/architecture-workerd-fork.svg)
+![CellHive architecture](./docs/assets/architecture-workerd-fork.png)
 
 | Component | Runtime | Ports | Role |
 |---|---|---|---|
 | **Traefik / edge proxy** | external | 80/443 | TLS + host routing (statically configured by the operator) |
-| **`user-runtime`** | cellhive-workerd fork | `:8081` public, `:8088` internal | Entry loader: host/version routing and tenant execution |
+| **`user-runtime`** | Go + cellhive-workerd fork | `:8081` public, `:8088` internal | Entry loader: host/version routing and tenant execution |
 | **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | Native Durable Objects (facets); elastic; holds a working copy, not the authority |
-| **`do-supervisor`** (optional) | Go | `:18901` | Output gate for Durable Objects: gates responses on durability (RPO=0) |
+| **`do-supervisor`** (gated mode) | Go | `:18901` | DO-only output gate and PID1; replaces the default `do-runtime` supervisor in the RPO=0 production profile |
 | **`cell-agent`** | Go | `:7001` internal REST, `:8082` admin | Cell storage + replication + owner/epoch leases + control plane + timer dispatch + the **only** object-store credentials |
 | **Object storage** | S3-compatible | — | Authority for cell state, worker bundles and assets |
 
@@ -139,5 +141,3 @@ CellHive's design is informed by several open-source projects in the same space 
 ## License
 
 CellHive reuses some Apache-2.0-licensed code and ideas; keep the corresponding `LICENSE`/`NOTICE` files and attribution when you use or redistribute such parts (see [`docs/decisions.md`](./docs/en/decisions.md) ADR-016).
-
-中文说明见 [`README.zh.md`](./README.zh.md)。
