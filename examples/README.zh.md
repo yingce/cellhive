@@ -44,32 +44,53 @@ cellhive domain add demo kv.example.test
 cellhive route add demo kv.example.test kv
 ```
 
-## 示例索引
+## 功能列表
 
-| 目录 | 演示 | 需要先创建的资源 | 触发 / 验证 |
-|---|---|---|---|
-| [`hello`](./hello) | 最小 `fetch` + 路由 | — | `GET /` |
-| [`webapi`](./webapi) | URL/Headers/TextEncoder/atob/crypto | — | `GET /?a=1` |
-| [`body`](./body) | 请求/响应体（json/text/arrayBuffer/流） | — | `POST /`（JSON 或二进制） |
-| [`kv`](./kv) | KV put/get/delete/list + TTL + metadata | `kv KV` | `PUT /k`、`GET /k` |
-| [`d1`](./d1) | SQL 建表/参数化插入/查询/`meta.last_row_id` | `d1 DB` | `POST /`、`GET /` |
-| [`r2`](./r2) | R2 put/get/head/list/delete + metadata | `r2 FILES` | `PUT /k`、`HEAD /k`、`GET /k`、`GET /` |
-| [`queues`](./queues) | 生产者 send + 消费者 batch + DLQ | `queue JOBS`、`queue DLQ` | `GET /?n=1` |
-| [`cron`](./cron) | `scheduled` + `triggers.crons` | — | 每分钟触发（看日志） |
-| [`do-counter`](./do-counter) | 经典 DO 类 + SQLite storage | — | `GET /?name=a` |
-| [`do-alarm`](./do-alarm) | DO alarm（shim + 统一 timer） | — | `GET /arm` 后等 2s 再 `GET /` |
-| [`do-rpc`](./do-rpc) | DO RPC（`extends DurableObject`） | — | `POST /`、`GET /` |
-| [`do-websocket`](./do-websocket) | 可休眠 WebSocket echo | — | WS 升级 `/`（非升级返回 426） |
-| [`router`](./router) | Worker → 多 DO 对象路由 | — | `GET /roomA` |
-| [`workflows`](./workflows) | Workflow `step.do`/`step.sleep` + 生命周期 | `workflow create report-builder` | `GET /create?seed=1` → `/status?id=ID` |
-| [`services`](./services) | service binding（fetch + 入口类 RPC） | — | 先部署 `services/api`，再部署 `services/caller` |
-| [`worker-rpc`](./worker-rpc) | worker↔worker 原生 JSRPC（结构化克隆） | — | 先部署 `worker-rpc/api`，再部署 `worker-rpc/caller` |
-| [`assets`](./assets) | 静态资产 + `_headers`/`_redirects`/SPA + Worker 回退 | — | `GET /`（资产）、`GET /api`（Worker） |
-| [`vars-secrets`](./vars-secrets) | `vars` 与 secret | — | `GET /`；secret：`cellhive secret put demo vars-secrets TOKEN` |
-| [`ai`](./ai) | BYO AI 端点（`env.AI.run`） | 平台设 `CELLHIVE_AI_URL/_KEY` | `GET /?prompt=hi` |
-| [`hyperdrive`](./hyperdrive) | Hyperdrive 连接串绑定 | `hyperdrive HYDR` | `GET /` |
-| [`vectorize`](./vectorize) | Vectorize `insert`/`query` | `vectorize VEC --dimensions 3 --metric cosine` | `GET /seed`、`GET /?v=1,0,0` |
-| [`async`](./async) | 异步 DO 存储 + `setTimeout` + `waitUntil` | — | `GET /` |
+| 功能 | 示例 | 典型场景 | 需要先创建 | 快速验证 |
+|---|---|---|---|---|
+| 最小 Worker / host + path 路由 | [`hello`](./hello) | 健康检查、host 路由、Hello World | — | `GET /` |
+| Web API / 请求响应体 | [`webapi`](./webapi)、[`body`](./body) | JSON API、query/header 解析、文本/二进制上传、流式响应 | — | `GET /?a=1`；`POST /`（JSON 或二进制） |
+| KV | [`kv`](./kv) | 配置、会话、小对象、TTL、metadata | `kv KV` | `PUT /k`、`GET /k`、`DELETE /k` |
+| D1 | [`d1`](./d1) | 关系型数据、SQL 查询、用户/业务表 | `d1 DB` | `POST /` 插入；`GET /` 查询 |
+| R2 | [`r2`](./r2) | 图片/文件上传、对象存储、下载、metadata | `r2 FILES` | `PUT /k`、`HEAD /k`、`GET /k`、`GET /` |
+| Queues | [`queues`](./queues) | 异步任务、削峰、后台处理、重试/DLQ | `queue JOBS`、`queue DLQ` | `GET /?n=1`，查看 consumer 日志 |
+| Cron | [`cron`](./cron) | 定时清理、报表、巡检 | — | 等待 `scheduled` 触发（示例为每分钟） |
+| Durable Object + SQLite | [`do-counter`](./do-counter) | 按房间/用户串行状态、计数器、会话 | — | `GET /?name=a` |
+| DO alarm | [`do-alarm`](./do-alarm) | 延迟任务、定时提醒、对象级 alarm | — | `GET /arm`，等 2s 再 `GET /` |
+| DO RPC | [`do-rpc`](./do-rpc) | 面向对象方法调用、强类型 DO API | — | `POST /`、`GET /` |
+| DO WebSocket | [`do-websocket`](./do-websocket) | 实时协作、聊天、游戏、可休眠连接 | — | WebSocket 升级 `/`（普通请求返回 426） |
+| DO 对象路由 | [`router`](./router) | 多房间/多租户对象路由 | — | `GET /roomA` |
+| Workflows | [`workflows`](./workflows) | 多步骤长任务、`step.do`/`step.sleep`、状态查询 | `workflow create report-builder` | `GET /create?seed=1` → `GET /status?id=ID` |
+| Service binding | [`services`](./services) | 内部 API 拆分、caller → api 调用 | 先部署 `services/api`，再部署 `services/caller` | 调用 caller 的 fetch |
+| Worker ↔ Worker RPC | [`worker-rpc`](./worker-rpc) | 原生 JSRPC、结构化克隆边界 | 先部署 `worker-rpc/api`，再部署 `worker-rpc/caller` | 调用 caller 的 RPC |
+| 静态资产 | [`assets`](./assets) | 静态站点、SPA 回退、`_headers`/`_redirects` | — | `GET /`（资产）；`GET /api`（Worker） |
+| Vars / Secrets | [`vars-secrets`](./vars-secrets) | 普通配置、API token、密钥注入 | secret 用 `cellhive secret put ...` | `GET /` |
+| AI（BYO 端点） | [`ai`](./ai) | 调用自有模型/网关、AI 功能 | 平台配置 `CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY` | `GET /?prompt=hi` |
+| Hyperdrive | [`hyperdrive`](./hyperdrive) | 连接现有 PostgreSQL/MySQL，不迁移数据库 | `hyperdrive HYDR` | `GET /` |
+| Vectorize | [`vectorize`](./vectorize) | 语义检索、RAG、相似度查询 | `vectorize VEC --dimensions 3 --metric cosine` | `GET /seed`、`GET /?v=1,0,0` |
+| 异步执行 | [`async`](./async) | `waitUntil`、后台写、非阻塞响应 | — | `GET /` |
+
+## 组合场景
+
+| 场景 | 推荐组合 | 说明 |
+|---|---|---|
+| SaaS API / 多租户后端 | `hello`/`webapi` + `d1` + `kv` + `vars-secrets` | D1 存业务数据，KV 存配置/会话，Worker 暴露 REST；按租户拆 namespace/资源 |
+| 文件上传与处理 | `r2` + `queues` + `workflows` | 上传进 R2，Queue 削峰，Workflow 做转码/审核等长任务 |
+| 实时协作 / 房间 | `do-websocket` + `do-counter` + `router` | 每个房间一个 DO，串行状态 + WebSocket；需要弹性时走 DO gated 生产模式 |
+| 接入已有数据库 | `hyperdrive` + `webapi` | Worker 通过 Hyperdrive 连接现有 PostgreSQL/MySQL，无需迁移到 D1 |
+| RAG / 语义搜索 | `ai` + `vectorize` + `r2` | R2 存文档，Vectorize 存向量，AI 做生成；适合知识库/客服 |
+| 定时 ETL / 报表 | `cron` + `workflows` + `d1`/`r2` | Cron 触发，Workflow 编排多步骤，结果落 D1/R2 |
+| 内部服务拆分 | `services` + `worker-rpc` | Service binding 做服务发现/调用，RPC 传递结构化对象 |
+| 静态控制台 + API | `assets` + API Worker | 静态页面与 API 同域部署，SPA 回退到 `index.html` |
+
+## 选择建议
+
+- **只是想验证平台**：从 `hello`、`kv`、`d1` 开始；
+- **做业务 API**：`webapi` + `d1` + `vars-secrets`，文件再加 `r2`；
+- **做异步/长任务**：`queues` + `workflows`，定时用 `cron`；
+- **做实时/有状态**：`do-counter`、`do-websocket`、`router`；
+- **接已有数据库**：`hyperdrive`，不要为了示例迁移数据库；
+- **做 AI 应用**：`ai` + `vectorize`，文档存 `r2`。
 
 ## 代码导航（功能 → 示例 → 源码 → 文档）
 
