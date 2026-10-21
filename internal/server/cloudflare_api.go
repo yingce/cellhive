@@ -488,6 +488,25 @@ func parseCloudflareWorkerMultipart(r *http.Request) (cloudflareWorkerMetadata, 
 	return out, module, nil
 }
 
+// decodeRunWorkerFirst accepts Wrangler's bool | string[] form.
+func decodeRunWorkerFirst(raw json.RawMessage) (bool, []string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false, nil, nil
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		return b, nil, nil
+	}
+	var paths []string
+	if err := json.Unmarshal(raw, &paths); err != nil {
+		return false, nil, fmt.Errorf("assets.config.run_worker_first must be a boolean or an array of paths")
+	}
+	if len(paths) > 100 {
+		return false, nil, fmt.Errorf("assets.config.run_worker_first: at most 100 patterns are supported")
+	}
+	return false, paths, nil
+}
+
 func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error {
 	var raw struct {
 		MainModule         string           `json:"main_module"`
@@ -503,10 +522,10 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		Assets struct {
 			JWT    string `json:"jwt"`
 			Config struct {
-				Binding          string `json:"binding"`
-				NotFoundHandling string `json:"not_found_handling"`
-				HTMLHandling     string `json:"html_handling"`
-				RunWorkerFirst   bool   `json:"run_worker_first"`
+				Binding          string          `json:"binding"`
+				NotFoundHandling string          `json:"not_found_handling"`
+				HTMLHandling     string          `json:"html_handling"`
+				RunWorkerFirst   json.RawMessage `json:"run_worker_first"`
 			} `json:"config"`
 		} `json:"assets"`
 		Triggers struct {
@@ -539,8 +558,16 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 	}
 	out.Migrations, out.Crons = migrations, raw.Triggers.Crons
 	if raw.Assets.JWT != "" {
+		runWorkerFirst, runWorkerFirstPaths, err := decodeRunWorkerFirst(raw.Assets.Config.RunWorkerFirst)
+		if err != nil {
+			return err
+		}
 		out.AssetsJWT = raw.Assets.JWT
-		out.Assets = &control.AssetsConfig{Binding: raw.Assets.Config.Binding, NotFoundHandling: raw.Assets.Config.NotFoundHandling, HTMLHandling: raw.Assets.Config.HTMLHandling, RunWorkerFirst: raw.Assets.Config.RunWorkerFirst}
+		out.Assets = &control.AssetsConfig{
+			Binding: raw.Assets.Config.Binding, NotFoundHandling: raw.Assets.Config.NotFoundHandling,
+			HTMLHandling: raw.Assets.Config.HTMLHandling, RunWorkerFirst: runWorkerFirst,
+			RunWorkerFirstPaths: runWorkerFirstPaths,
+		}
 	}
 	for _, b := range raw.Bindings {
 		name, typ := stringValue(b["name"]), stringValue(b["type"])

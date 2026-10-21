@@ -92,3 +92,28 @@ func TestCloudflareLegacyScriptUploadAndPreviewMetadata(t *testing.T) {
 		t.Fatalf("legacy upload not deployed: ok=%v err=%v", ok, err)
 	}
 }
+
+func TestDecodeRunWorkerFirstShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		flag bool
+		path string
+	}{
+		{"bool", `true`, true, ""},
+		{"array", `["/api/*","/health"]`, false, "/api/*"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out cloudflareWorkerMetadata
+			if err := decodeCloudflareMetadata([]byte(`{"assets":{"jwt":"x","config":{"run_worker_first":`+tc.raw+`}}}`), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.Assets == nil || out.Assets.RunWorkerFirst != tc.flag {
+				t.Fatalf("assets=%+v", out.Assets)
+			}
+			if tc.path != "" && (len(out.Assets.RunWorkerFirstPaths) != 2 || out.Assets.RunWorkerFirstPaths[0] != tc.path) {
+				t.Fatalf("paths=%v", out.Assets.RunWorkerFirstPaths)
+			}
+		})
+	}
+}
