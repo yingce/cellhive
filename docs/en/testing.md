@@ -338,3 +338,19 @@ ADR-159 (CGo + vec1): `internal/vectorize TestVec1CellReplicatesThroughLTX` (**L
 ADR-158 (Vectorize): `internal/vectorize` (store unit tests: `insert` does not overwrite existing id / `upsert` full replacement, three score types and ordering for cosine/euclidean/dot-product, namespace, 9 filter operations including nested dot paths and implicit AND, dimension/metadata/id limits, `topK` clamping, metadata index catalog and 10-entry limit, `describe`/`listVectors`/`stats`/`queryById`; `TestTopKWindowOrdering` (middle insertion into a partially filled window must shift and must not leave empty slots—a real bug caught by container smoke), `BenchmarkQueryExactScan` provides latency table); `internal/server TestVectorizeEndpoints` (missing config rejected → create → `/v1/vectorize/stats` → binding-side insert/query/filter/queryById/get/list/describe/dimension 400/delete → metadata index CRUD → after revocation 403 `binding_not_registered` → cross-ns scoped token 403); `internal/userruntime TestUserRuntimeVectorizeBinding` (**real workerd**: all facade methods, `ns=acme&index=docs` addressing, JS-minted token can be verified by Go, response shape matches CF); `internal/wranglercompat TestVendorMatrixContract` (vectorize in support matrix + lookup registration with `index_name`); CLI `cli/test/bindings-parity.test.ts` (dev reports explicit error for vectorize and is no longer a platform rejection item).
 
 _Last updated: 2026-09-23_
+
+### Real COS large-cell paged test
+
+Opt-in test: `internal/replica TestCOSLargePagedRestore`.
+
+```bash
+export CELLHIVE_COS_TEST=1
+export CELLHIVE_COS_TEST_MB=1024
+export COS_ENDPOINT=https://<bucket>.cos.<region>.myqcloud.com
+export COS_BUCKET=<bucket>
+export COS_SECRET_ID=...
+export COS_SECRET_KEY=...
+go test ./internal/replica -run TestCOSLargePagedRestore -tags ...
+```
+
+On 2026-10-21, a 1GiB image (1025 MiB file, 4KiB pages, 262489 pages) reading a 1MiB blob issued 5 ranged reads and transferred 1,059,803 bytes, consistent with the 1MiB readahead budget. The test is not part of default CI and takes about 10 minutes.

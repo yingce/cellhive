@@ -349,3 +349,46 @@ ADR-158（Vectorize）：`internal/vectorize`（store 单测：`insert` 不覆�
 ADR-194（gated DO 多 Pod）：`scripts/k3d-runtime-e2e.sh` 真实 k3d 验收于 2026-09-25 PASS：2 个 gated Pod；任意首跳能转发至 owner；删除 owner Pod 后 per-host manifest 冷恢复使计数 `1→2`；RollingUpdate 期间完成 120 个逻辑写，短暂 5xx 由客户端重试，最终计数精确 `123`，因此未观察到丢写或重复提交。该单节点 k3d 场景不覆盖真实跨主机 RTT、云对象存储或目标 NetworkPolicy/CNI。
 
 _最后更新：2026-09-25_
+
+### 真实 COS 大 cell paged 测试
+
+新增 opt-in 集成测试：
+
+```text
+internal/replica TestCOSLargePagedRestore
+```
+
+需要：
+
+```bash
+export CELLHIVE_COS_TEST=1
+export CELLHIVE_COS_TEST_MB=1024
+export COS_ENDPOINT=https://<bucket>.cos.<region>.myqcloud.com
+export COS_BUCKET=<bucket>
+export COS_SECRET_ID=...
+export COS_SECRET_KEY=...
+go test ./internal/replica -run TestCOSLargePagedRestore -tags ...
+```
+
+测试会：
+
+1. 构造大 SQLite 数据库；
+2. 上传 snapshot 到真实 COS；
+3. compaction 生成 L1 页索引；
+4. 通过 `pagedvfs` 打开稀疏文件；
+5. 查询 1MiB blob；
+6. 统计 `RangedGet` 次数和字节数；
+7. 清理本次测试对象。
+
+2026-10-21 的 1GiB 实测：
+
+```text
+db=1025 MiB
+pageSize=4096
+commit=262489
+query_blob=1048576
+ranged_calls=5
+ranged_bytes=1059803
+```
+
+即读取 1MiB blob 只产生 5 次 ranged read、约 1.01MiB 数据，符合 1MiB 字节预算。该测试不在默认 CI 中运行，耗时约 10 分钟。
