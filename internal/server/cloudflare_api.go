@@ -635,6 +635,9 @@ func (s *Server) handleCloudflareWorkerSecretPut(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleCloudflareWorkerSecrets(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	metas, err := s.Control.ListSecrets(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "secret_list_failed", err.Error())
@@ -665,6 +668,9 @@ func (s *Server) handleCloudflareWorkerSecretDelete(w http.ResponseWriter, r *ht
 type cloudflareRoute struct{ ID, Pattern, Script string }
 
 func (s *Server) handleCloudflareRoutes(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	p, err := s.Control.Projection(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "routes_failed", err.Error())
@@ -684,6 +690,9 @@ func (s *Server) handleCloudflareRoutes(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleCloudflareRoutePut(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns := r.PathValue("account_id")
 	var in struct{ Pattern, Script string }
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
@@ -702,11 +711,16 @@ func (s *Server) handleCloudflareRoutePut(w http.ResponseWriter, r *http.Request
 	// Cloudflare routes implicitly own the hostname. CellHive keeps host
 	// registration explicit internally, so the compatibility adapter performs
 	// the idempotent registration before writing the route.
-	if _, err := s.Control.PutCustomHost(r.Context(), ns, u.Host, "wrangler"); err != nil {
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		_, err := s.Control.PutCustomHost(r.Context(), ns, u.Host, "wrangler")
+		return err
+	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "route_host_failed", err.Error())
 		return
 	}
-	if err := s.Control.PutRoute(r.Context(), ns, control.Route{Host: u.Host, Path: u.EscapedPath(), Worker: in.Script}, "wrangler"); err != nil {
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		return s.Control.PutRoute(r.Context(), ns, control.Route{Host: u.Host, Path: u.EscapedPath(), Worker: in.Script}, "wrangler")
+	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "route_put_failed", err.Error())
 		return
 	}
@@ -714,11 +728,16 @@ func (s *Server) handleCloudflareRoutePut(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleCloudflareRouteDelete(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	id, _ := url.PathUnescape(r.PathValue("route_id"))
 	if id == "" {
 		id = r.URL.Query().Get("id")
 	}
-	if err := s.Control.DeleteRoute(r.Context(), r.PathValue("account_id"), id, nil, "wrangler"); err != nil {
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		return s.Control.DeleteRoute(r.Context(), r.PathValue("account_id"), id, nil, "wrangler")
+	}); err != nil {
 		writeErr(w, http.StatusNotFound, "route_delete_failed", err.Error())
 		return
 	}
@@ -732,21 +751,35 @@ func (s *Server) cloudflareResource(ctx context.Context, ns, kind, name string) 
 	return s.Control.CreateResource(ctx, ns, kind, name, defaultResourceScope(ns, kind, name), "wrangler")
 }
 
+// cloudflareResourceCreate registers a Cloudflare resource on the control-cell
+// owner. Body-bearing callers forward the whole request to that owner before
+// decoding (see the handleCloudflare*Create wrappers), so this write is
+// authoritative; a follower's local control replica must never be mutated.
 func (s *Server) cloudflareResourceCreate(w http.ResponseWriter, r *http.Request, kind string, name string) {
 	ns := r.PathValue("account_id")
 	if name == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "resource name is required")
 		return
 	}
-	if _, err := s.Control.CreateApp(r.Context(), ns, "wrangler"); err != nil && !strings.Contains(err.Error(), "already exists") {
+	// Wrangler's account model creates the namespace idempotently on first use.
+	// Both writes carry control-cell capture proof before the client sees 200.
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		_, err := s.Control.CreateApp(r.Context(), ns, "wrangler")
+		return err
+	}); err != nil && !strings.Contains(err.Error(), "already exists") {
 		writeErr(w, http.StatusBadRequest, "account_create_failed", err.Error())
 		return
 	}
-	res, err := s.cloudflareResource(r.Context(), ns, kind, name)
-	if err != nil {
+	var res control.Resource
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+		var err error
+		res, err = s.cloudflareResource(r.Context(), ns, kind, name)
+		return err
+	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "resource_create_failed", err.Error())
 		return
 	}
+	s.invalidateBindings(ns)
 	switch kind {
 	case "kv":
 		cloudflareResult(w, map[string]any{"id": res.Name, "title": res.Name})
@@ -762,6 +795,9 @@ func (s *Server) cloudflareResourceCreate(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleCloudflareKVCreate(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Title string `json:"title"`
 	}
@@ -769,6 +805,9 @@ func (s *Server) handleCloudflareKVCreate(w http.ResponseWriter, r *http.Request
 	s.cloudflareResourceCreate(w, r, "kv", in.Title)
 }
 func (s *Server) handleCloudflareD1Create(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Name string `json:"name"`
 	}
@@ -776,6 +815,9 @@ func (s *Server) handleCloudflareD1Create(w http.ResponseWriter, r *http.Request
 	s.cloudflareResourceCreate(w, r, "d1", in.Name)
 }
 func (s *Server) handleCloudflareR2Create(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Name string `json:"name"`
 	}
@@ -783,6 +825,9 @@ func (s *Server) handleCloudflareR2Create(w http.ResponseWriter, r *http.Request
 	s.cloudflareResourceCreate(w, r, "r2", in.Name)
 }
 func (s *Server) handleCloudflareQueueCreate(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Name      string `json:"name"`
 		QueueName string `json:"queue_name"`
@@ -796,6 +841,11 @@ func (s *Server) handleCloudflareQueueCreate(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) cloudflareResourceList(w http.ResponseWriter, r *http.Request, kind string, shape func(control.ResourceRef) any) {
+	// The registry is one control cell: list it on the current owner instead of
+	// the receiving replica's possibly stale local copy (ADR-209/228/229).
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), kind)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "resources_failed", err.Error())
@@ -816,6 +866,9 @@ func (s *Server) handleCloudflareD1List(w http.ResponseWriter, r *http.Request) 
 	})
 }
 func (s *Server) handleCloudflareR2List(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), "r2")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "resources_failed", err.Error())
@@ -843,30 +896,30 @@ func (s *Server) handleCloudflareResourceDelete(kind string) http.HandlerFunc {
 
 func (s *Server) handleCloudflareD1Get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("resource_id")
-	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "d1", name)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	if err := s.requireCloudflareResource(r.Context(), r.PathValue("account_id"), "d1", name); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "not_found")
 		return
 	}
-	cloudflareResult(w, map[string]any{"uuid": res.Name, "name": res.Name, "version": "production"})
+	cloudflareResult(w, map[string]any{"uuid": name, "name": name, "version": "production"})
 }
 func (s *Server) handleCloudflareR2Get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("resource_id")
-	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "r2", name)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	if err := s.requireCloudflareResource(r.Context(), r.PathValue("account_id"), "r2", name); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "not_found")
 		return
 	}
-	cloudflareResult(w, map[string]any{"name": res.Name, "creation_date": time.Now().UTC().Format(time.RFC3339)})
+	cloudflareResult(w, map[string]any{"name": name, "creation_date": time.Now().UTC().Format(time.RFC3339)})
 }
 func (s *Server) handleCloudflareQueueGet(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("resource_id")
-	res, err := s.Control.GetResource(r.Context(), r.PathValue("account_id"), "queue", name)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	if s.forwardRead(w, r, control.Scope(), nil) {
 		return
 	}
-	cloudflareResult(w, s.cloudflareQueueResult(r, res.Name))
+	name := r.PathValue("resource_id")
+	if err := s.requireCloudflareResource(r.Context(), r.PathValue("account_id"), "queue", name); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "not_found")
+		return
+	}
+	cloudflareResult(w, s.cloudflareQueueResult(r, name))
 }
 
 func (s *Server) cloudflareQueueResult(r *http.Request, queue string) map[string]any {
@@ -1004,10 +1057,16 @@ func (s *Server) handleCloudflareQueueConsumerDelete(w http.ResponseWriter, r *h
 	s.cloudflareQueueConsumerApply(w, r, true)
 }
 func (s *Server) handleCloudflareQueueConsumerList(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	q := s.cloudflareQueueResult(r, r.PathValue("resource_id"))
 	cloudflareResult(w, q["consumers"])
 }
 func (s *Server) handleCloudflareQueueConsumerGet(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	q := s.cloudflareQueueResult(r, r.PathValue("resource_id"))
 	for _, item := range q["consumers"].([]any) {
 		if item.(map[string]any)["consumer_id"] == r.PathValue("consumer_id") {
@@ -1024,8 +1083,8 @@ func (s *Server) handleCloudflareQueuePurge(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ns, name := r.PathValue("account_id"), r.PathValue("resource_id")
-	if _, err := s.Control.GetResource(r.Context(), ns, "queue", name); err != nil {
-		writeErr(w, http.StatusNotFound, "queue_not_found", err.Error())
+	if err := s.requireCloudflareResource(r.Context(), ns, "queue", name); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "queue_not_found")
 		return
 	}
 	if s.forwardOrClaim(w, r, queue.Scope(ns, name), nil) {

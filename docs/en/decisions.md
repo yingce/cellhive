@@ -8,6 +8,8 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 |---|---|---|
 | ADR-001 | Use Stock workerd for the Compute Layer; Do Not Modify workerd (superseded by ADR-264) | Historical: the compute layer originally relied on unmodified upstream workerd. Superseded by the cellhive-workerd fork. |
 | ADR-264 | Use the cellhive-workerd Fork for the Compute Layer | Runtime workerd is the pinned `yingce/cellhive-workerd` fork (CellHive per-invocation limits); the main repo does not inline-patch workerd. |
+| ADR-269 | Resource names and scopes must be addressable single cell components | Creation rejects names containing separators or traversal components and scopes that are neither a parseable full cell scope nor a bare cell id; Cloudflare-compatible and native create paths share the store-level validation. |
+| ADR-268 | Cloudflare-compatible resource registry reads/writes must go through the control owner | Registry reads resolve through the ownered binding path; registry writes pre-forward to the control owner with capture proof; lists/gets forward reads. Follower replicas no longer answer `control: not found` or fork namespace creation. |
 | ADR-002 | State Model: Everything Is a Cell; SQLite + Object Storage Are Authoritative | All state is modeled as cells, with SQLite and object storage serving as sources of truth. |
 | ADR-003 | Owner Resolution = Go Library + Local Endpoint, Not a Standalone Service | Ownership lookup is embedded as a Go library with a local endpoint instead of a separate service. |
 | ADR-004 | Build an In-House Cell Service; Do Not Reuse or Modify External Implementations | The cell service is developed internally rather than adapted from external systems. |

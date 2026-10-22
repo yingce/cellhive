@@ -40,6 +40,9 @@ func (s *Server) workflowResult(r *http.Request, name string) (map[string]any, e
 }
 
 func (s *Server) handleCloudflareWorkflowGet(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	result, err := s.workflowResult(r, r.PathValue("workflow_name"))
 	if err != nil {
 		// Wrangler probes this endpoint before creating a workflow and expects a
@@ -52,6 +55,9 @@ func (s *Server) handleCloudflareWorkflowGet(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleCloudflareWorkflowList(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), "workflow")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "workflows_failed", err.Error())
@@ -68,6 +74,9 @@ func (s *Server) handleCloudflareWorkflowList(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleCloudflareWorkflowPut(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		ScriptName       string          `json:"script_name"`
 		ClassName        string          `json:"class_name"`
@@ -185,6 +194,9 @@ func parseRetention(v any) (int64, error) {
 }
 
 func (s *Server) handleCloudflareWorkflowDelete(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, name := r.PathValue("account_id"), r.PathValue("workflow_name")
 	if err := s.Control.DeleteResource(r.Context(), ns, "workflow", name, "wrangler"); err != nil && !errors.Is(err, control.ErrNotFound) {
 		writeErr(w, http.StatusBadRequest, "workflow_delete_failed", err.Error())

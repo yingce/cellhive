@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"cellhive/internal/control"
 	"cellhive/internal/d1"
 	"cellhive/internal/scopedtoken"
 )
@@ -36,8 +39,8 @@ type cloudflareD1Export struct {
 
 func (s *Server) handleCloudflareD1Export(w http.ResponseWriter, r *http.Request) {
 	ns, db := r.PathValue("account_id"), r.PathValue("resource_id")
-	if _, err := s.Control.GetResource(r.Context(), ns, "d1", db); err != nil {
-		writeErr(w, 404, "not_found", err.Error())
+	if err := s.requireCloudflareResource(r.Context(), ns, "d1", db); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "not_found")
 		return
 	}
 	var in struct {
@@ -122,8 +125,8 @@ func (s *Server) handleCloudflareD1ExportDownload(w http.ResponseWriter, r *http
 
 func (s *Server) handleCloudflareD1Import(w http.ResponseWriter, r *http.Request) {
 	name, ns := r.PathValue("resource_id"), r.PathValue("account_id")
-	if _, err := s.Control.GetResource(r.Context(), ns, "d1", name); err != nil {
-		writeErr(w, 404, "not_found", err.Error())
+	if err := s.requireCloudflareResource(r.Context(), ns, "d1", name); err != nil {
+		writeCloudflareRegistryError(w, err, http.StatusNotFound, "not_found")
 		return
 	}
 	var in struct {
@@ -228,13 +231,53 @@ func (s *Server) handleCloudflareD1ImportUpload(w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusOK)
 }
 
+// cloudflareControlLookupError marks a resource-registry lookup that could not
+// reach the control owner. It must surface as a control-plane failure (5xx),
+// never as "the resource is not registered" (ADR-209/228/229).
+type cloudflareControlLookupError struct{ err error }
+
+func (e *cloudflareControlLookupError) Error() string { return e.err.Error() }
+func (e *cloudflareControlLookupError) Unwrap() error { return e.err }
+
+// requireCloudflareResource resolves a Cloudflare resource registration the same
+// way the binding endpoints authorize data calls: through the control owner
+// (ADR-209), not through the receiving node's local control SQLite. The
+// Cloudflare compatibility surface used to call Control.GetResource directly, so
+// a replica that does not own the control cell answered "control: not found" for
+// a namespace that is registered on the owner.
+func (s *Server) requireCloudflareResource(ctx context.Context, ns, kind, name string) error {
+	if s.Control == nil {
+		return &cloudflareControlLookupError{errors.New("control store not configured")}
+	}
+	ok, _, err := s.bindingInfo(ctx, ns, kind, name)
+	if err != nil {
+		return &cloudflareControlLookupError{err}
+	}
+	if !ok {
+		return fmt.Errorf("%s resource %q not found: %w", kind, name, control.ErrNotFound)
+	}
+	return nil
+}
+
+// writeCloudflareRegistryError writes a Cloudflare-shaped error for a failed
+// registry resolution: 5xx when the control owner could not be reached,
+// otherwise the caller's not-found shape.
+func writeCloudflareRegistryError(w http.ResponseWriter, err error, status int, code string) {
+	var lookup *cloudflareControlLookupError
+	if errors.As(err, &lookup) {
+		writeErr(w, http.StatusServiceUnavailable, "resource_lookup_failed", err.Error())
+		return
+	}
+	writeErr(w, status, code, err.Error())
+}
+
 // cloudflareBindingCall reuses the binding data path, including the owner
 // redirect, capture gate and resource ACL. The public admin bearer never
 // becomes a tenant binding credential.
 func (s *Server) cloudflareBindingCall(r *http.Request, kind, name, method, path string, q url.Values, body []byte) (*httptest.ResponseRecorder, error) {
 	ns := r.PathValue("account_id")
-	if _, err := s.Control.GetResource(r.Context(), ns, kind, name); err != nil {
-		return nil, fmt.Errorf("%s resource %q not found: %w", kind, name, err)
+	if err := s.requireCloudflareResource(r.Context(), ns, kind, name); err != nil {
+		return nil, err
 	}
 	token, err := scopedtoken.Mint(s.scopeSecret(), scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name, ExpiresMs: time.Now().Add(time.Minute).UnixMilli()})
 	if err != nil {
@@ -259,6 +302,11 @@ func (s *Server) cloudflareBindingCall(r *http.Request, kind, name, method, path
 
 func cloudflareBridgeError(w http.ResponseWriter, rec *httptest.ResponseRecorder, err error) bool {
 	if err != nil {
+		var lookup *cloudflareControlLookupError
+		if errors.As(err, &lookup) {
+			writeErr(w, http.StatusServiceUnavailable, "resource_lookup_failed", err.Error())
+			return true
+		}
 		writeErr(w, http.StatusBadRequest, "resource_unavailable", err.Error())
 		return true
 	}

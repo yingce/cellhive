@@ -1,5 +1,28 @@
 # 决策记录（ADR）
 
+## ADR-269 资源名与 scope 必须是可寻址的 cell 组件（2026-10-22）✅实现
+
+- **背景**：`control.CreateResourceWithConfig` 只校验 `kind`/`name` 非空，`name`/`scope` 直接入库。资源名默认成为 cell id（`<ns>/__<kind>__/<name>`），同时是 registry 主键、binding/token 名和 Cloudflare 兼容 URL 的路径段。`name: vwork-74/CHTEST` 这类带 `/` 的名字会被接受并返回 200，但存下的默认 scope 是 4 段 `acme/__kv__/vwork-74/CHTEST`，不是合法 cell scope：KV 数据调用 5xx（`invalid cell scope`）、`/v1/kv/stats` 500 `resource_scope_invalid`、Cloudflare 兼容 `keys` 在 `%2F` 编码下 503、未编码时 404，而且 `DELETE` 因 `ResourceDataScope` 解析失败返回 500——登记既不可用也不可删。反斜杠、`.`/`..`、含 `..` 的组件同理（`cell.Scope.Validate` 的目录/协议约束）。
+- **决策**：
+  1. `control.CreateResourceWithConfig` 在写事务前校验 `name`：必须是单个合法 cell 组件（非空、非 `.`/`..`、不含 `..`、不含 `/` 或 `\`）。名字是默认 cell id / registry key / binding token 名，必须可寻址。
+  2. 校验 `scope`：允许空（配置型资源、无 id 声明）；非空时允许两种历史形态——完整 cell scope（`<ns>/__<kind>__/<id>`，必须能被 `cell.ParseScope` 解析）或裸 cell id（如 `sessions`，必须是单个合法组件）。不在此处强制 scope 的 namespace/class 与资源一致：跨 ns scope 仍由数据面读取时拒绝（ADR-097），保持既有语义。
+  3. 校验放在 store 单一入口，因此原生 `/v1/<kind>/resources`、`/v1/control/resource`、CLI、Cloudflare 兼容创建、Workflow/Vectorize 创建全部一致返回 400（`resource_create_failed` / `workflow_put_failed` 等）。
+  4. 需要"名字与物理 cell 不同"时用显式 `--scope`（如 name `CHTEST`、scope `acme/__kv__/chtest-v2`），不要用带 `/` 的 name。
+  5. **存量修复**：本修复前已创建的非法登记不再让吊销失败——`DeleteResource` 遇到无法解析的物理 scope 时只删 registry 行 + 写墓碑、跳过数据清理作业（本来就没有可寻址的物理 cell）；`revokeResource` hook 与 `doResourceDelete` 把"没有 cleanup job"当作正常结果（`cleanup:null`），因此这类登记现在可以正常 `resource delete`。
+- **验证**：`internal/control` 新增 `TestCreateResourceRejectsUnscopableNameAndScope`（5 种非法 name、6 种非法 scope 均拒绝且不落行；裸 id、完整 scope、跨 ns scope、空 scope、含点合法名继续可用）与 `TestDeleteResourceRevokesMalformedLegacyRegistration`（模拟存量非法行可吊销、无 cleanup job、墓碑生效）；`internal/server` 新增 `TestCloudflareResourceNamesMustAddressACell`（Cloudflare namespace/D1 创建 400、无残留登记、原生别名同样 400、单段合法名仍 200 且列表可见）与 `TestResourceDeleteRevokesMalformedLegacyRegistration`（存量非法行经 API 吊销返回 200 `cleanup:null`）。`go test ./internal/control ./internal/server ./cmd/cellhive ./internal/wranglercompat` 通过。
+- **边界/代价**：存量非法登记可吊销但不会自动修复为合法 cell；资源名字符集保持与 cell 组件一致（只拒绝分隔符/穿越 token），Cloudflare 兼容 URL 的路径段仍建议使用 `[A-Za-z0-9._-]`（`%`/空格等需客户端正确转义）。
+
+## ADR-268 Cloudflare 兼容资源注册表读写必须走 control owner（2026-10-22）✅实现
+
+- **背景**：生产 `GET /client/v4/accounts/vwork-74/storage/kv/namespaces/CHTEST/keys` 返回 `kv resource "CHTEST" not found: control: not found`，同一 namespace 在发布时又报 `no registered kv resource named CHTEST`。根因是 Cloudflare 兼容层的资源注册表操作直接读写**接入节点本地**的 control cell SQLite：`handleCloudflareKVKeys -> cloudflareBindingCall -> Control.GetResource` 只查本地副本，`cloudflareResourceCreate/List` 还把注册行写到本地副本。admin 流量被负载均衡到任意 cell-agent 副本，非 control owner 的本地副本可能为空或过期，于是已注册 namespace 被读成不存在；更严重的是 `wrangler kv namespace create` 落在非 owner 时会把注册行写进非权威副本并返回 200，control owner 永远看不到该 namespace，之后 owner 侧的发布校验（wranglercompat）与 `/v1/kv/stats` 都报“未注册”。这与 ADR-209/228/229 是同一类错误，当时只修了绑定授权、版本配置与 stats 读取。
+- **决策**：
+  1. **注册表读**：`cloudflareBindingCall` 与 D1 import/export 的存在性检查改为 `requireCloudflareResource`——经 `bindingInfo`/`bindingFromOwner` 在 control owner 解析（与绑定授权同源），不再读本地副本；owner 不可达时返回 5xx `resource_lookup_failed` 失败关闭，绝不伪装成“资源未注册”。
+  2. **注册表写**：KV/D1/R2/Queue namespace 与 Workflow/Vectorize 的 create/put/delete 在读取请求 body 之前先 `forwardOrClaim(control.Scope())` 转发到 control owner；`cloudflareResourceCreate` 的 app/resource 写入带 `capturedWrite` 持久证明并 `invalidateBindings`。非 owner 副本不再被写入。
+  3. **管理读**：namespace/资源列表、D1/R2/Queue get、Queue consumer list/get、Workflow/Vectorize list/get、worker routes 与 secret 列表/读取先 `forwardRead` 到 control owner；worker route 的写也先 `forwardOrClaim` 并带 `capturedWrite` 证明。大 body 数据面（KV values/bulk、R2 object、D1 query/import/export body）不整包转发，只把注册表解析改为 owner 路由，避免 25MiB value 受转发上限影响。
+  4. **边界**：`bindingInfo` 的绑定缓存默认 1s，follower 上刚创建的 namespace 最多 1s 后可见（与既有绑定授权语义一致）；owner 不可达期间这些端点失败关闭。
+- **验证**：新增 `internal/server/cloudflare_owner_test.go` 双节点回归（共享桶：owner 持有 control cell，follower 本地 control cell 为空）：follower 的 KV keys/list 与 D1/R2/Queue get 必须读到 owner 注册；follower create 后 owner 必须可见、follower 本地不得留下注册行，且 `/v1/kv/stats` 不再报未注册；`follower create + owner 转发发布` 不再出现 `no registered kv resource named ...`；follower 的 route put/list 落到 owner 投影；owner 不可达时 keys 返回 5xx。`go test ./internal/server -run 'TestCloudflare|TestStats|TestControl'` 通过。
+- **代价**：CF 兼容管理请求在非 owner 副本上多一次内部转发；大 body 数据面仍按原路径处理。
+
 ## ADR-265 `cellhive` CLI 迁移到 cobra；原生命令是唯一实现，wrangler 只是兼容层（2026-10-22，P1/P2 命令面完成；P3 收尾中）
 
 - **背景**：`cmd/cellhive` 现有 45 个 `cmdXxx` 命令函数、30 处 `flag.NewFlagSet`，主体堆在 2961 行的 `main.go` 里；入口是手写 `dispatch` switch（38 个 case）+ 108 行手写 `usage()`。ADR-038 早已把 CLI 框架定为 **cobra（后续）**，但代码一直用 stdlib `flag`，文档与实现不一致。同时命令面出现两套名字：原生 `queue`/`workflow`/`kv`/`d1`/`r2` 与 wrangler 兼容的 `queues`/`workflows`/`versions`/...，容易被误读为"功能被重复实现"。

@@ -266,6 +266,9 @@ func (s *Server) handleCloudflareWorkerSchedules(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleCloudflareWorkerSecretGet(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	val, err := s.Control.GetSecret(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"), r.PathValue("secret_name"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "secret_not_found", err.Error())

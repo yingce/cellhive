@@ -99,6 +99,52 @@ func validateNS(ns string) error {
 	return nil
 }
 
+// validateScopeComponent applies the cell.Scope component rules (ADR-002: a
+// cell is <ns>/<class>/<id>, so each component is one path element).
+func validateScopeComponent(what, v string) error {
+	if v == "" {
+		return fmt.Errorf("control: %s is required", what)
+	}
+	// A component becomes a directory/file name (cells/<ns>/<class>/<id>.db) and
+	// part of the "<ns>/<class>/<id>" protocol string.
+	if v == "." || v == ".." || strings.Contains(v, "..") {
+		return fmt.Errorf("control: invalid %s %q: must not contain a path traversal component", what, v)
+	}
+	if strings.ContainsAny(v, "/\\") {
+		return fmt.Errorf("control: invalid %s %q: must be a single path component", what, v)
+	}
+	return nil
+}
+
+// validateResourceName rejects resource names that cannot address a cell: the
+// name is the default cell id, the registry key and the binding/token name, so a
+// separator would register a resource that every data path, stats and even
+// delete reject afterwards (ADR-269). Use --scope to decouple the name from the
+// physical cell id when a different id is needed.
+func validateResourceName(name string) error {
+	return validateScopeComponent("resource name", name)
+}
+
+// validateResourceScope accepts both registry scope shapes: a full cell scope
+// ("<ns>/__<kind>__/<id>") or a bare cell id ("sessions", the pre-scope form).
+// Either shape must address a cell; a malformed scope otherwise leaves the
+// resource unreadable and undeletable. An empty scope is allowed for resources
+// that only carry config (e.g. Hyperdrive) or are declared without an id; the
+// data path rejects those when an id is required (ADR-097). Namespace/class
+// boundaries remain enforced by the data path, not here.
+func validateResourceScope(scope string) error {
+	if scope == "" {
+		return nil
+	}
+	if strings.Contains(scope, "/") {
+		if _, err := cell.ParseScope(scope); err != nil {
+			return fmt.Errorf("control: invalid resource scope %q: %w", scope, err)
+		}
+		return nil
+	}
+	return validateScopeComponent("resource scope", scope)
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS apps (
   ns         TEXT PRIMARY KEY,
@@ -671,6 +717,12 @@ func (s *Store) CreateResourceWithConfig(ctx context.Context, ns, kind, name, sc
 	}
 	if kind == "" || name == "" {
 		return Resource{}, fmt.Errorf("control: resource kind and name are required")
+	}
+	if err := validateResourceName(name); err != nil {
+		return Resource{}, err
+	}
+	if err := validateResourceScope(scope); err != nil {
+		return Resource{}, err
 	}
 	var dek, ct []byte
 	if len(config) > 0 {
@@ -2275,6 +2327,7 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 	}
 	err = tx(ctx, c, func(t *sql.Tx) error {
 		dataScope, generation := "", ""
+		cleanupScope := false
 		deadLetters := []string{}
 		if kind == "kv" || kind == "queue" {
 			var ref string
@@ -2297,36 +2350,40 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 					return lookup
 				}
 			}
-			physical, err := ResourceDataScope(ns, kind, name, ref)
-			if err != nil {
-				return err
-			}
-			dataScope = physical.String()
-			rows, err := t.QueryContext(ctx, `SELECT name,scope FROM resources WHERE ns=? AND kind=? AND name<>?`, ns, kind, name)
-			if err != nil {
-				return err
-			}
-			for rows.Next() {
-				var otherName, otherRef string
-				if err := rows.Scan(&otherName, &otherRef); err != nil {
-					rows.Close()
-					return err
-				}
-				other, err := ResourceDataScope(ns, kind, otherName, otherRef)
-				if err == nil && other.String() == dataScope {
-					rows.Close()
-					return ErrResourceScopeShared
-				}
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			rows.Close()
-			if s.ResourceGeneration != nil {
-				generation, err = s.ResourceGeneration(ctx, physical)
+			physical, perr := ResourceDataScope(ns, kind, name, ref)
+			// A malformed registration predating the name/scope validation
+			// (ADR-269) never addressed a physical cell: revoke the registry
+			// entry and tombstone without a data-cleanup job instead of making
+			// the resource permanently undeletable.
+			if perr == nil {
+				dataScope = physical.String()
+				cleanupScope = true
+				rows, err := t.QueryContext(ctx, `SELECT name,scope FROM resources WHERE ns=? AND kind=? AND name<>?`, ns, kind, name)
 				if err != nil {
 					return err
+				}
+				for rows.Next() {
+					var otherName, otherRef string
+					if err := rows.Scan(&otherName, &otherRef); err != nil {
+						rows.Close()
+						return err
+					}
+					other, err := ResourceDataScope(ns, kind, otherName, otherRef)
+					if err == nil && other.String() == dataScope {
+						rows.Close()
+						return ErrResourceScopeShared
+					}
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					return err
+				}
+				rows.Close()
+				if s.ResourceGeneration != nil {
+					generation, err = s.ResourceGeneration(ctx, physical)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -2398,7 +2455,7 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 			`DELETE FROM bindings WHERE ns=? AND type=? AND name=?`, ns, kind, name); err != nil {
 			return err
 		}
-		if kind == "kv" || kind == "queue" {
+		if (kind == "kv" || kind == "queue") && cleanupScope {
 			dlqs, _ := json.Marshal(deadLetters)
 			if _, err := t.ExecContext(ctx, `INSERT INTO resource_cleanups(ns,kind,name,job_id,data_scope,source_generation,dead_letters,state,requested_ms,updated_ms) VALUES(?,?,?,?,?,?,?,'pending',?,?) ON CONFLICT(ns,kind,name) DO UPDATE SET job_id=excluded.job_id,data_scope=excluded.data_scope,source_generation=excluded.source_generation,dead_letters=excluded.dead_letters,state='pending',requested_ms=excluded.requested_ms,updated_ms=excluded.updated_ms,attempts=0,last_error='',next_retry_ms=0,lease_token='',lease_until_ms=0`, ns, kind, name, newStorageID(), dataScope, generation, string(dlqs), s.now().UnixMilli(), s.now().UnixMilli()); err != nil {
 				return err

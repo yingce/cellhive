@@ -132,6 +132,13 @@ func (s *Server) revokeResource(ctx context.Context, ns, kind, name string) erro
 		return nil
 	}
 	j, err := s.Control.ResourceCleanup(ctx, ns, kind, name)
+	if errors.Is(err, control.ErrNotFound) {
+		// A malformed legacy registration is revoked without a data-cleanup job
+		// (ADR-269): there is no physical scope to block. Bindings still need to
+		// drop, because the registry row and any derived rows are gone.
+		s.invalidateBindings(ns)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

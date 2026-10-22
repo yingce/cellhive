@@ -57,6 +57,7 @@ Wrangler 的"无 id 自动创建资源"被**拒绝**（wrangler-compat.md）：�
 
 - deploy 引用不存在的资源 → **明确报错并提示对应 create 命令**；
 - 资源创建 = 在控制面登记 scope（cell 首次访问时惰性激活）。
+- **name / scope 必须可寻址（ADR-269）**：`name` 是默认 cell id、registry 主键和 binding/token 名，必须是单个 cell 组件（不能含 `/` 或 `\`，不能是 `.`/`..` 或含 `..`）；`scope` 只能省略（配置型资源/无 id 声明）、给完整 `<ns>/__<kind>__/<id>`，或给裸 cell id（如 `sessions`）。需要"名字与物理 cell 不同"时用显式 `--scope`，不要把 `/` 写进 name（如 `name: vwork-74/CHTEST` 会在创建时 400，不会留下不可用/不可删的登记）。
 
 ## 凭据与 token 签发 CLI（ADR-074/137/181）
 

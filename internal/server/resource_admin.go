@@ -278,11 +278,15 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 	var cleanup *control.ResourceCleanup
 	if kind == "kv" || kind == "queue" {
 		job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name)
-		if err != nil {
+		if err != nil && !errors.Is(err, control.ErrNotFound) {
 			writeErr(w, 500, "cleanup_lookup_failed", err.Error())
 			return
 		}
-		cleanup = &job
+		// A malformed legacy registration is revoked without a data-cleanup job
+		// (ADR-269): there is no addressable physical scope to clean.
+		if err == nil {
+			cleanup = &job
+		}
 	}
 	if kind == "vectorize" {
 		s.invalidateVectorizeConfig(ns, name)

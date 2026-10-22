@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 
+	"cellhive/internal/control"
 	"cellhive/internal/vectorize"
 )
 
@@ -54,6 +55,9 @@ func (s *Server) cloudflareVectorizeConfig(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleCloudflareVectorizeCreate(w http.ResponseWriter, r *http.Request) {
+	if s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	var in struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -88,6 +92,9 @@ func (s *Server) handleCloudflareVectorizeCreate(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleCloudflareVectorizeList(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	ns := r.PathValue("account_id")
 	refs, err := s.Control.Resources(r.Context(), ns, "vectorize")
 	if err != nil {
@@ -106,6 +113,9 @@ func (s *Server) handleCloudflareVectorizeList(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCloudflareVectorizeGet(w http.ResponseWriter, r *http.Request) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
 	name := r.PathValue("index_name")
 	cfg, ok := s.cloudflareVectorizeConfig(w, r, name)
 	if ok {

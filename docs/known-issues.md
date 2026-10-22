@@ -4,7 +4,15 @@
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-19_
+_最后更新：2026-10-22_
+
+## 2026-10-22 资源名 / scope 的可寻址性校验（ADR-269）
+
+创建资源曾只校验 `kind`/`name` 非空，`name: vwork-74/CHTEST` 这类带 `/` 的名字会 200 入库，但默认 scope `<ns>/__<kind>__/vwork-74/CHTEST` 不是合法 cell scope：KV 数据调用返回 `invalid cell scope`（5xx）、`/v1/kv/stats` 500 `resource_scope_invalid`、Cloudflare 兼容 `keys` 在 `%2F` 编码下 503、未编码时 404，且 `DELETE` 因 `ResourceDataScope` 解析失败 500——登记既不可用也不可删。现已在 `control.CreateResourceWithConfig` 单一入口校验：`name` 必须是单个合法 cell 组件（拒绝 `/`、`\`、`.`/`..` 与含 `..` 的组件）；`scope` 只能省略、给可解析的完整 `<ns>/__<kind>__/<id>`，或给裸 cell id；跨 ns scope 仍由数据面拒绝（ADR-097）。新增 control/server 回归覆盖非法 name/scope 拒绝且不落行、合法历史形态继续可用，以及 Cloudflare/原生创建路径同样 400。存量非法登记现在也可吊销（跳过不存在的数据清理作业，返回 `cleanup:null`），但不会被自动修复；Cloudflare 兼容 URL 的路径段建议使用 `[A-Za-z0-9._-]`。
+
+## 2026-10-22 Cloudflare 兼容资源注册表的跨节点读写（ADR-268）
+
+生产 `GET /client/v4/accounts/vwork-74/storage/kv/namespaces/CHTEST/keys` 返回 `kv resource "CHTEST" not found: control: not found`，同一 namespace 发布时又报 `no registered kv resource named CHTEST`。复现与定位：Cloudflare 兼容层的注册表操作直接读写接入节点本地的 control cell SQLite——`cloudflareBindingCall` 的 `Control.GetResource` 只查本地副本，`cloudflareResourceCreate/List` 还把注册行写到本地副本。admin 流量被负载均衡到任意 cell-agent 副本后，非 control owner 的本地副本为空/过期时，已注册 namespace 被读成不存在；`wrangler kv namespace create` 落在非 owner 时注册行只写进非权威副本并返回 200，owner 永远看不到它，于是 owner 侧的发布校验（wranglercompat）与 `/v1/kv/stats` 都报未注册。现已把注册表读改为经 control owner 的 `bindingInfo` 解析（owner 不可达 5xx 失败关闭）、把 KV/D1/R2/Queue 与 Workflow/Vectorize 的注册写改为先 `forwardOrClaim(control.Scope())` 再做 `capturedWrite`，并把列表/get 管理读（含 worker routes、secret 列表/读取）`forwardRead` 到 control owner、worker route 写带 `capturedWrite`；大 body 数据面不整包转发。双节点共享桶回归覆盖 keys/list/get、follower create 的权威性与 stats 可见性、发布不再误报未注册、route 写读落到 owner，`go test ./internal/server -run 'TestCloudflare|TestStats|TestControl'` 通过。剩余：真实多副本 + COS 的生产故障演练尚未执行，`bindingInfo` 1s 绑定缓存意味着 follower 上刚创建的 namespace 最多 1s 后可见。
 
 ## 2026-10-19 捕获失败后重新建立持久证明（ADR-232）
 
@@ -28,7 +36,7 @@ _最后更新：2026-10-19_
 
 ## 2026-10-19 Wrangler 多节点发布与 Tail（ADR-221）
 
-原版 Wrangler 上传落在非 control owner 的 cell-agent 时，旧桥接把 Cloudflare URL 留给原生部署转发，owner 的内部路由返回 404。现已让上传先按 control owner 转发，再由 owner 做 app/Workflow 预留和持久化发布；版本及部署读回也按 owner 转发。隔离 Compose 的双 cell-agent、共享 FS bucket、真实 user-runtime 验证了从非 owner B 发布，B 上的原版 Wrangler Tail 读取 A 执行的 fetch、Queue、Cron、Workflow 事件；100 秒会话无重连，主动重启 B 后 Wrangler 也完成重连。异步原生 Trace 只有 RPC 方法；现由带实例密钥的可信派发包装层补齐 Queue/Cron 的 CF 载荷，并在隔离双节点的原版 Wrangler 与原始 WebSocket 中验证（ADR-230）。更多 Cloudflare 资源管理端点的跨节点写入和真实 COS 跨 AZ 故障仍需验收，见 `cf-compatibility-acceptance.md`。
+原版 Wrangler 上传落在非 control owner 的 cell-agent 时，旧桥接把 Cloudflare URL 留给原生部署转发，owner 的内部路由返回 404。现已让上传先按 control owner 转发，再由 owner 做 app/Workflow 预留和持久化发布；版本及部署读回也按 owner 转发。隔离 Compose 的双 cell-agent、共享 FS bucket、真实 user-runtime 验证了从非 owner B 发布，B 上的原版 Wrangler Tail 读取 A 执行的 fetch、Queue、Cron、Workflow 事件；100 秒会话无重连，主动重启 B 后 Wrangler 也完成重连。异步原生 Trace 只有 RPC 方法；现由带实例密钥的可信派发包装层补齐 Queue/Cron 的 CF 载荷，并在隔离双节点的原版 Wrangler 与原始 WebSocket 中验证（ADR-230）。资源注册表读写已按 ADR-268 纳入 control owner 路由；真实 COS 跨 AZ 故障和真实多副本演练仍需验收，见 `cf-compatibility-acceptance.md`。
 
 ## 2026-10-19 DO follower 确认接管（ADR-212）
 
