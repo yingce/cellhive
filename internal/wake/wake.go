@@ -89,9 +89,10 @@ func minuteStart(prefix string) (int64, bool) {
 	return t.UnixMilli(), true
 }
 
-// Put records (or refreshes) a scope's earliest due timer. The due-minute
-// entry is written first, then the pointer; an old due entry is removed after
-// the new pointer is durable.
+// Put records (or refreshes) a scope's earliest due timer. The pointer is
+// written first, then the due-minute entry; an old due entry is removed after
+// the new pointer is durable. This ordering lets Cleanup remove no-pointer
+// orphans without racing an in-flight Put.
 func (i *Index) Put(ctx context.Context, scope string, dueMs int64, kind, token string) error {
 	data, err := json.Marshal(Entry{Scope: scope, DueMs: dueMs, Kind: kind, Token: token})
 	if err != nil {
