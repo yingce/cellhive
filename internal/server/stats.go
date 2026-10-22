@@ -7,6 +7,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/control"
 	"cellhive/internal/d1"
 	"cellhive/internal/r2"
 	"cellhive/internal/workflow"
@@ -61,7 +62,17 @@ func (s *Server) resourceScope(w http.ResponseWriter, r *http.Request, kind stri
 		writeErr(w, http.StatusBadRequest, "bad_request", "namespace and name are required")
 		return cell.Scope{}, false
 	}
-	scopeStr, ok, err := s.Control.Binding(r.Context(), ns, kind, name)
+	// The registry row lives in the single control cell. Make sure this node can
+	// read it authoritatively: claim/restore an unowned or expired control scope
+	// first, then resolve the declaration from the current control owner
+	// (ADR-209/228/229) instead of the node's possibly stale local SQLite.
+	// Skipping this made a stats request that landed on a non-owner answer 404
+	// for a resource that is registered; retrying on the owner succeeded.
+	if err := s.claimForRead(r.Context(), control.Scope()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "resource_lookup_failed", err.Error())
+		return cell.Scope{}, false
+	}
+	scopeStr, ok, err := s.bindingFromOwner(r.Context(), ns, kind, name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "resource_lookup_failed", err.Error())
 		return cell.Scope{}, false
