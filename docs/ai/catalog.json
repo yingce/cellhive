@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.15.01",
+  "version": "2026.10.22.01",
   "product": "cellhive",
   "docs_base": "/docs",
   "skill_base": "/skills",
@@ -24,6 +24,7 @@
     {"id":"cli.auth-project","kind":"cli","status":"supported","keywords":["login","profile","namespace","project.json","multi Worker"],"reference":"/docs/cli.md","verification":"CLI profile deploy E2E"},
     {"id":"cli.wrangler","kind":"cli","status":"partial","keywords":["Wrangler","wrangler.jsonc","Cloudflare API","CLOUDFLARE_API_TOKEN"],"reference":"/docs/wrangler-compat.md","verification":"compatibility tests and Wrangler E2E when configured"},
     {"id":"ops.storage-gc","kind":"operations","status":"supported","keywords":["GC","assets cleanup","bundle cleanup","garbage collection"],"reference":"/docs/operations.md","verification":"gc endpoint tests"},
-    {"id":"ops.routing","kind":"operations","status":"supported","keywords":["domain","route","custom domain","path prefix"],"reference":"/docs/routing.md","verification":"route projection E2E"}
+    {"id":"ops.routing","kind":"operations","status":"supported","keywords":["domain","route","custom domain","path prefix"],"reference":"/docs/routing.md","verification":"route projection E2E"},
+    {"id":"examples.scenarios","kind":"examples","status":"supported","keywords":["example","sample","demo","template","starter","scenario","use case","组合场景"],"reference":"/examples/README.md","verification":"examples dev/deploy smoke"}
   ]
 }

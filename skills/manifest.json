@@ -1,6 +1,6 @@
 {
   "name": "cellhive-skills",
-  "version": "2026.10.15.01",
+  "version": "2026.10.22.01",
   "skills": [
     {"name":"cellhive","manifest":"cellhive/manifest.json"}
   ]
