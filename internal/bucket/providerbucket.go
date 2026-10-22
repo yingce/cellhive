@@ -43,7 +43,12 @@ func (b *ProviderBucket) diagnosePreflight(ctx context.Context) error {
 
 func authorityKey(key string) bool {
 	if strings.HasPrefix(key, "cells/") {
-		return strings.HasSuffix(key, "/owner.json") || strings.HasSuffix(key, "/owner-gen")
+		// Resource-deletion fences are small conditional records; route them
+		// through the append authority so COS/OSS get a real atomic create/CAS
+		// instead of relying on PutObject If-Match, which they ignore or reject.
+		return strings.HasSuffix(key, "/owner.json") ||
+			strings.HasSuffix(key, "/owner-gen") ||
+			strings.HasSuffix(key, "/resource-fence.json")
 	}
 	return strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
 		key == "fleet/drain-token.json" || key == "fleet/waker.json"

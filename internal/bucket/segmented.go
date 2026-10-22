@@ -347,6 +347,15 @@ func (s *SegmentedAuthority) readLegacy(ctx context.Context, logical string) (*a
 	}
 	value, deleted, instance, _, err := decodeAnyFrames(raw)
 	if err != nil {
+		// Resource-deletion fences predate the append authority: they are
+		// plain JSON point objects. Treat the raw bytes as one legacy value;
+		// the first CAS migrates them into a bounded window segment.
+		if strings.HasSuffix(logical, "/resource-fence.json") {
+			return &authoritySegment{
+				logical: logical, window: -1, length: int64(len(raw)),
+				value: raw, legacy: true,
+			}, nil
+		}
 		return nil, err
 	}
 	return &authoritySegment{

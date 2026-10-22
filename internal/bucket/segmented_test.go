@@ -401,3 +401,42 @@ func TestSegmentedAuthorityClockSkewWithinBoundaryGuard(t *testing.T) {
 type fixedClock struct{ t time.Time }
 
 func (c *fixedClock) Now() time.Time { return c.t }
+
+func TestSegmentedAuthorityLegacyResourceFence(t *testing.T) {
+	ctx := context.Background()
+	mem := newSegmentMem()
+	key := "cells/acme/__kv__/CACHE/resource-fence.json"
+	legacy := []byte(`{"job_id":"old","deleted":true}`)
+	mem.objects[key] = append([]byte(nil), legacy...)
+	auth := NewSegmentedAuthority(mem, mem, AuthorityOptions{})
+	got, token, err := auth.Get(ctx, key)
+	if err != nil || string(got) != string(legacy) || token == "" {
+		t.Fatalf("legacy get = %q token=%q err=%v", got, token, err)
+	}
+	if _, err := auth.ConditionalCreate(ctx, key, []byte(`{"job_id":"new"}`)); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("legacy create = %v, want precondition", err)
+	}
+	next := []byte(`{"job_id":"old","deleted":false}`)
+	if _, err := auth.CAS(ctx, key, next, token); err != nil {
+		t.Fatalf("legacy CAS: %v", err)
+	}
+	got, _, err = auth.Get(ctx, key)
+	if err != nil || string(got) != string(next) {
+		t.Fatalf("after CAS = %q err=%v", got, err)
+	}
+	if _, err := mem.Read(ctx, key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy plain object still present: %v", err)
+	}
+}
+
+func TestAuthorityKeyRoutesResourceFence(t *testing.T) {
+	if !authorityKey("cells/acme/__kv__/CACHE/resource-fence.json") {
+		t.Fatal("KV resource fence must use append authority on providers")
+	}
+	if !authorityKey("cells/acme/__queue__/jobs/resource-fence.json") {
+		t.Fatal("queue resource fence must use append authority on providers")
+	}
+	if authorityKey("cells/acme/__kv__/CACHE/ltx/e1/1.ltx") {
+		t.Fatal("LTX segment must not be treated as authority")
+	}
+}

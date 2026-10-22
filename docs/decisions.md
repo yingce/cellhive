@@ -1,5 +1,16 @@
 # 决策记录（ADR）
 
+## ADR-270 provider 资源删除栅栏走 append authority（2026-10-22）✅实现
+
+- **背景**：namespace 卡在 `control: resource data cleanup is pending`，cleanup job `attempts=10`、`last_error="bucket: not supported"`。`ResourceCleanupPass -> BlockResource -> updateResourceFence -> ConditionalCreate` 写 `cells/<ns>/__kv__/<id>/resource-fence.json`，但 `ProviderBucket.ConditionalCreate` 只放行 authority、LTX 和 bundle，栅栏 key 直接返回 `ErrNotSupported`。只把该 key 转给 `S3Bucket.ConditionalCreate` 也不行：COS 会忽略 `If-None-Match`（第二次仍覆盖），OSS 返回 `NotImplemented`，都不是原子栅栏。
+- **决策**：
+  1. `authorityKey` 识别 `cells/<ns>/__<kind>__/<id>/resource-fence.json`，栅栏的 create/CAS/delete、读、列表和 stat 全部走 `SegmentedAuthority`，线性化点仍是 COS/OSS 的 `AppendObject(position)`。
+  2. 热补丁产生的 plain JSON 栅栏作为 legacy raw value 读取；第一次 CAS 时迁移到当前窗口并删除 plain 对象，保证已存在的 deletion fence 不会在升级后丢失。
+  3. S3/R2 的 `s3://` 路径保持原生条件 PUT/DELETE，不强制 append。
+  4. `attempts<10` 的自动重试预算不扩大；历史 10 次失败 job 仍通过 `POST /v1/control/resource/cleanup/retry` 显式重置，避免无限重试。
+- **验证**：`internal/bucket` 新增 `TestProviderResourceFence`（真实 COS/OSS：首次 create、第二次 `ErrPrecondition`、CAS 更新、legacy plain JSON 读取/迁移）与 `TestSegmentedAuthorityLegacyResourceFence`、`TestAuthorityKeyRoutesResourceFence`；`TestProviderCloudDiagnose` 继续覆盖 provider 启动探针。
+- **边界/代价**：栅栏从普通点对象变为 append 权威记录（窗口分段、token 带 window/instance/length），旧/新二进制不能混跑；USW 热补丁的 plain 栅栏在第一次 CAS 前仍可读，升级需停机替换。
+
 ## ADR-269 资源名与 scope 必须是可寻址的 cell 组件（2026-10-22）✅实现
 
 - **背景**：`control.CreateResourceWithConfig` 只校验 `kind`/`name` 非空，`name`/`scope` 直接入库。资源名默认成为 cell id（`<ns>/__<kind>__/<name>`），同时是 registry 主键、binding/token 名和 Cloudflare 兼容 URL 的路径段。`name: vwork-74/CHTEST` 这类带 `/` 的名字会被接受并返回 200，但存下的默认 scope 是 4 段 `acme/__kv__/vwork-74/CHTEST`，不是合法 cell scope：KV 数据调用 5xx（`invalid cell scope`）、`/v1/kv/stats` 500 `resource_scope_invalid`、Cloudflare 兼容 `keys` 在 `%2F` 编码下 503、未编码时 404，而且 `DELETE` 因 `ResourceDataScope` 解析失败返回 500——登记既不可用也不可删。反斜杠、`.`/`..`、含 `..` 的组件同理（`cell.Scope.Validate` 的目录/协议约束）。
@@ -43,7 +54,7 @@
 - **背景**：ADR-099/ADR-177 的索引是 `wake/<scope>.json`，waker 每个 pass 都要 `List("wake/")` 并把每个 scope 的 entry `Get` 出来按 due 过滤；timer scope 数量大时，扫描成本随**全部有 timer 的 scope** 增长，且无法只打开到期分钟。celld 的 alarm discovery 用 `wake/entries/<minute>/<cell>/<id>`，waker 只枚举分钟前缀、打开到期分钟。
 - **决策**：
   1. 每个 scope 写两个对象：`wake/due/<UTC minute>/<scope>.json`（到期条目，内容仍是 `{scope,due_ms,kind,token}`）和 `wake/ptr/<scope>.json`（该 scope 的当前指针，用于 O(1) 删除/过期检测）。两者都是**覆盖写**，不是 append。
-  2. `Put` 先写 due entry，再写 pointer；pointer 成功后删除旧 minute 的 due entry。`Delete` 按 pointer 删除 due entry + pointer。`wake/<scope>.json` 旧对象作为 legacy 保留，`Put`/`Delete` 会清理；启动时 `Migrate` 一次性把 legacy entry 搬到新布局，`List`/`Count` 在迁移期仍兼容读取（`Due` 只扫新布局，避免旧 keyspace 破坏分钟前缀扫描）。
+  2. `Put` 先写 pointer，再写 due entry；due entry 成功后删除旧 minute 的 due entry。这个顺序保证 Cleanup 可以安全删除没有 pointer 的 due 孤儿，而不会误删一次 in-flight Put。`Delete` 按 pointer 删除 due entry + pointer。`wake/<scope>.json` 旧对象作为 legacy 保留，`Put`/`Delete` 会清理；启动时 `Migrate` 一次性把 legacy entry 搬到新布局，`List`/`Count` 在迁移期仍兼容读取（`Due` 只扫新布局，避免旧 keyspace 破坏分钟前缀扫描）。
   3. waker 的 `Due` 先通过新的 `bucket.PrefixLister.CommonPrefixes("wake/due/", "/")` 枚举分钟前缀，只打开 `minute <= now` 的桶；同一 scope 多桶时取最早 due。`objectstore.CommonPrefixes` 在 backend 不支持 delimiter 时回退到全量 `List` 后聚合（正确但较慢）。
   4. waker leader 每 10 分钟跑一次有界 `Cleanup`（每轮最多 128 条）：删除 minute 早于 1 小时且已不被 pointer 指向的孤儿 entry；pointer 仍指向的过期 timer 保留，不能误删。
   5. `wake/ptr/`、`wake/due/` 是保留前缀；scope 的 namespace 恰为 `ptr`/`due` 时用**路径深度**区分 pointer/due entry 与 legacy `wake/<scope>.json`，不作为普通 entry 误删。
