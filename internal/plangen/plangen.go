@@ -101,15 +101,23 @@ func (b *Builder) Build(ctx context.Context, hosts []string) (*staticgen.Plan, [
 	for i, name := range names {
 		plan.Sockets = append(plan.Sockets, staticgen.Socket{Name: "s" + fmt.Sprint(i), Service: name})
 	}
-	if state.platformAdded {
+	// A binding-free/minimal worker also sets globalOutbound to public-network.
+	// The network service must exist whenever any rendered service references
+	// it; adding it only with the platform service made plain hot workers fail
+	// workerd startup ("globalOutbound refers to ... no such service").
+	if len(plan.Services) > 0 {
 		egress := b.cfg.TenantEgress
 		if len(egress) == 0 {
 			egress = []string{"public"}
 		}
 		plan.Networks = append(plan.Networks,
 			staticgen.Network{Name: "public-network", Allow: egress, TLS: true},
-			staticgen.Network{Name: "cap-egress", Allow: []string{"public", "private", "local"}, TLS: true},
 		)
+		if state.platformAdded {
+			plan.Networks = append(plan.Networks,
+				staticgen.Network{Name: "cap-egress", Allow: []string{"public", "private", "local"}, TLS: true},
+			)
+		}
 	}
 	return plan, skipped, nil
 }

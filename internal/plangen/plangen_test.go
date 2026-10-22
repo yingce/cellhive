@@ -365,3 +365,26 @@ func TestCaptureActiveSkipsStatic(t *testing.T) {
 		t.Fatalf("tail toggle changed the static runtime shape: services %d/%d sockets %d/%d", len(plan.Services), len(plan2.Services), len(plan.Sockets), len(plan2.Sockets))
 	}
 }
+
+func TestBindingFreeStaticPlanDefinesPublicNetwork(t *testing.T) {
+	cell := fakeCell(t)
+	defer cell.Close()
+	b := New(Config{
+		CellURL: cell.URL, CellToken: "tok",
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		LogToken: "logtok", MinimalMode: "off",
+	})
+	plan, skipped, err := b.Build(context.Background(), []string{"plain.test"})
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("build err=%v skipped=%+v", err, skipped)
+	}
+	want := false
+	for _, n := range plan.Networks {
+		if n.Name == "public-network" {
+			want = true
+		}
+	}
+	if !want {
+		t.Fatalf("binding-free plan is missing public-network: %+v", plan.Networks)
+	}
+}
