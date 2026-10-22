@@ -4,23 +4,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
 // ProviderBucket uses native append-position checks for control records and
 // ordinary S3-compatible object operations for immutable bulk data.
+//
+// Authority records are segmented per time window (see SegmentedAuthority), so
+// a long-running renewal loop no longer grows one object forever: the newest
+// value lives in a fresh bounded segment and old segments are physically
+// deleted after readers no longer need them.
 type ProviderBucket struct {
 	*S3Bucket
-	authority *AppendAuthority
+	authority *SegmentedAuthority
+	appender  PositionAppender
 }
 
-func NewProviderBucket(data *S3Bucket, appendLog PositionAppender) *ProviderBucket {
-	return &ProviderBucket{S3Bucket: data, authority: NewAppendAuthority(appendLog)}
+func NewProviderBucket(data *S3Bucket, appendLog PositionAppender, opts ...AuthorityOptions) *ProviderBucket {
+	var authorityOpts AuthorityOptions
+	if len(opts) > 0 {
+		authorityOpts = opts[0]
+	}
+	return &ProviderBucket{
+		S3Bucket:  data,
+		authority: NewSegmentedAuthority(appendLog, data, authorityOpts),
+		appender:  appendLog,
+	}
 }
 
 func (b *ProviderBucket) diagnosePreflight(ctx context.Context) error {
-	if cosAppender, ok := b.authority.raw.(*COSAppender); ok {
+	if cosAppender, ok := b.appender.(*COSAppender); ok {
 		return cosAppender.checkAZ(ctx)
 	}
 	return nil
@@ -48,7 +63,7 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 		// Provider PutObject conditionals are not portable. Native append at
 		// position zero atomically creates an immutable segment; an existing
 		// object cannot be overwritten, including a legacy normal object.
-		if err := b.authority.raw.Append(ctx, key, 0, data); err != nil {
+		if err := b.appender.Append(ctx, key, 0, data); err != nil {
 			if _, _, getErr := b.S3Bucket.Get(ctx, key); getErr == nil {
 				return "", ErrPrecondition
 			}
@@ -81,132 +96,137 @@ func (b *ProviderBucket) ConditionalDelete(ctx context.Context, key, token strin
 	return b.S3Bucket.ConditionalDelete(ctx, key, token)
 }
 func (b *ProviderBucket) Put(ctx context.Context, key string, data []byte) (string, error) {
-	if !authorityKey(key) {
-		return b.S3Bucket.Put(ctx, key, data)
+	if authorityKey(key) {
+		return b.authority.Put(ctx, key, data)
 	}
-	for {
-		_, token, err := b.authority.Get(ctx, key)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			token, err = b.authority.ConditionalCreate(ctx, key, data)
-		case err == nil:
-			token, err = b.authority.CAS(ctx, key, data, token)
-		default:
-			return "", err
-		}
-		if errors.Is(err, ErrPrecondition) {
-			continue
-		}
-		return token, err
-	}
+	return b.S3Bucket.Put(ctx, key, data)
 }
 func (b *ProviderBucket) Delete(ctx context.Context, key string) error {
-	if !authorityKey(key) {
-		return b.S3Bucket.Delete(ctx, key)
+	if authorityKey(key) {
+		return b.authority.Delete(ctx, key)
 	}
-	for {
-		_, token, err := b.authority.Get(ctx, key)
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		err = b.authority.ConditionalDelete(ctx, key, token)
-		if errors.Is(err, ErrPrecondition) {
-			continue
-		}
-		return err
-	}
+	return b.S3Bucket.Delete(ctx, key)
 }
 func (b *ProviderBucket) Stat(ctx context.Context, key string) (int64, string, error) {
-	if !authorityKey(key) {
-		return b.S3Bucket.Stat(ctx, key)
+	if authorityKey(key) {
+		return b.authority.Stat(ctx, key)
 	}
-	data, token, err := b.Get(ctx, key)
-	return int64(len(data)), token, err
+	return b.S3Bucket.Stat(ctx, key)
 }
 func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
-	if !authorityKey(key) {
-		return b.S3Bucket.RangedGet(ctx, key, off, length)
+	if authorityKey(key) {
+		return b.authority.RangedGet(ctx, key, off, length)
 	}
-	data, token, err := b.Get(ctx, key)
-	if err != nil {
-		return nil, "", err
-	}
-	if off < 0 || length < 0 || off > int64(len(data)) || length > int64(len(data))-off {
-		return nil, "", fmt.Errorf("authority range out of bounds")
-	}
-	return data[off : off+length], token, nil
+	return b.S3Bucket.RangedGet(ctx, key, off, length)
 }
+
+// List returns logical keys. Physical window objects are collapsed into their
+// logical key and tombstoned records are hidden, matching the Bucket contract.
 func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, error) {
 	keys, err := b.S3Bucket.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	out := keys[:0]
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		if authorityKey(key) {
-			_, _, err := b.authority.Get(ctx, key)
-			if errors.Is(err, ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, fmt.Errorf("list authority %s: %w", key, err)
-			}
+		logical := key
+		if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
+			logical = base
+		} else if !authorityKey(key) {
+			out = append(out, key)
+			continue
 		}
-		out = append(out, key)
+		if _, ok := seen[logical]; ok {
+			continue
+		}
+		seen[logical] = struct{}{}
+		if _, _, err := b.authority.Get(ctx, logical); errors.Is(err, ErrNotFound) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("list authority %s: %w", logical, err)
+		}
+		out = append(out, logical)
 	}
+	sort.Strings(out)
 	return out, nil
 }
+
 func (b *ProviderBucket) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	if authorityKey(key) {
 		return "", ErrNotSupported
 	}
 	return b.S3Bucket.PresignGet(ctx, key, ttl)
 }
+
 func (b *ProviderBucket) ListSizes(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	items, err := b.S3Bucket.ListSizes(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	out := items[:0]
+	out := make([]ObjectInfo, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if authorityKey(item.Key) {
-			data, token, err := b.authority.Get(ctx, item.Key)
-			if errors.Is(err, ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			item.Size, item.ETag = int64(len(data)), token
+		logical := item.Key
+		if base, _, ok := ParsePhysicalAuthorityKey(item.Key); ok {
+			logical = base
+		} else if !authorityKey(item.Key) {
+			out = append(out, item)
+			continue
 		}
-		out = append(out, item)
+		if _, ok := seen[logical]; ok {
+			continue
+		}
+		seen[logical] = struct{}{}
+		size, token, serr := b.authority.Stat(ctx, logical)
+		if errors.Is(serr, ErrNotFound) {
+			continue
+		}
+		if serr != nil {
+			return nil, serr
+		}
+		out = append(out, ObjectInfo{Key: logical, Size: size, ETag: token})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }
+
 func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, string, error) {
-	// Keep the underlying page bound; tombstones may make pages shorter.
+	// Keep the underlying page bound. A logical authority key can own up to two
+	// physical window objects, so a page may yield fewer logical items; the
+	// physical cursor is still monotonic. Cross-page duplicates are possible if
+	// a page boundary splits one logical key's windows; callers treat listing as
+	// diagnostic/idempotent (delete/purge tolerate repeats).
 	items, next, err := b.S3Bucket.ListPage(ctx, prefix, after, limit)
 	if err != nil {
 		return nil, "", err
 	}
-	out := items[:0]
+	out := make([]ObjectInfo, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if authorityKey(item.Key) {
-			data, token, err := b.authority.Get(ctx, item.Key)
-			if errors.Is(err, ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, "", err
-			}
-			item.Size, item.ETag = int64(len(data)), token
+		logical := item.Key
+		if base, _, ok := ParsePhysicalAuthorityKey(item.Key); ok {
+			logical = base
+		} else if !authorityKey(item.Key) {
+			out = append(out, item)
+			continue
 		}
-		out = append(out, item)
+		if _, ok := seen[logical]; ok {
+			continue
+		}
+		seen[logical] = struct{}{}
+		size, token, serr := b.authority.Stat(ctx, logical)
+		if errors.Is(serr, ErrNotFound) {
+			continue
+		}
+		if serr != nil {
+			return nil, "", serr
+		}
+		out = append(out, ObjectInfo{Key: logical, Size: size, ETag: token})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, next, nil
 }
 
 var _ Bucket = (*ProviderBucket)(nil)
+var _ segmentData = (*S3Bucket)(nil)

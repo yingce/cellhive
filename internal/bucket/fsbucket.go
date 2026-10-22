@@ -350,6 +350,31 @@ func (b *FSBucket) List(_ context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// CommonPrefixes implements PrefixLister by reading the immediate directory.
+func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	b.lists.Add(1)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entries, err := os.ReadDir(b.path(prefix))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		out = append(out, prefix+entry.Name()+delimiter)
+	}
+	return out, nil
+}
+
 // PresignGet implements Bucket (local dev returns a file:// style handle).
 func (b *FSBucket) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	if _, err := os.Stat(b.path(key)); err != nil {

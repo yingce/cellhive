@@ -460,6 +460,9 @@ func main() {
 			},
 			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval, Log: log,
 			RecoverNodes: recoveryRunner.Pass,
+			Cleanup: func(cctx context.Context) (int, error) {
+				return wakeIdx.Cleanup(cctx, time.Now().Add(-time.Hour).UnixMilli(), 128)
+			},
 		}
 	}
 
@@ -882,6 +885,11 @@ func main() {
 	// in-memory registry is empty, but the bucket index still lists the scopes
 	// with pending timers.
 	go func() {
+		if n, err := wakeIdx.Migrate(ctx, 0); err != nil {
+			log.Warn("wake legacy migration failed", "migrated", n, "err", err)
+		} else if n > 0 {
+			log.Info("migrated legacy wake entries", "count", n)
+		}
 		entries, err := wakeIdx.List(ctx)
 		if err != nil {
 			return

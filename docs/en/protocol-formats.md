@@ -12,6 +12,7 @@ This document defines data formats and interfaces across processes/nodes. All in
 
 - `expiry` (unix ms) is **always ≤ the node lease expiry**;
 - Acquire: `If-None-Match:*` (cold) or `If-Match:<etag>` (takeover/renewal).
+- **Provider physical encoding (ADR-266)**: on `cos://` / `oss://` this is not a plain JSON object. The logical key maps to `cells/<scope>/owner.json.w<window>`; each segment appends `CHL2` frames (`magic(4)|op(1)|instance(8)|payload_len(4)|payload|frame_len(4)|crc32(4)`) and the token is `s<window>:<instance>:<length>`. Readers tail-probe only the last frame; the current and previous windows are retained and older ones are physically deleted at rollover. Legacy CHL1 objects migrate and are deleted on first write.
 
 ## 2. Node lease (bucket `nodes/<node>.json`)
 

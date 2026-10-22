@@ -32,7 +32,15 @@ type Waker struct {
 	// invoked only by the elected leader, on the same pass as timer dispatch, so
 	// no second election is needed.
 	RecoverNodes func(ctx context.Context) (nodes, segments, sessions int, err error)
+	// Cleanup retires stale wake minute entries (ADR-267). Optional and
+	// leader-only; it runs at most once per wakeCleanupInterval so discovery
+	// scans stay cheap without listing the whole wake prefix every pass.
+	Cleanup func(ctx context.Context) (removed int, err error)
+
+	lastCleanup time.Time
 }
+
+const wakeCleanupInterval = 10 * time.Minute
 
 func (w *Waker) nowMs() int64 {
 	if w.Now != nil {
@@ -116,6 +124,14 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 			w.log().Warn("waker node recovery failed", "err", rerr)
 		} else if sess > 0 {
 			w.log().Info("waker recovered dead nodes", "nodes", n, "segments", seg, "sessions", sess)
+		}
+	}
+	if w.Cleanup != nil && time.Since(w.lastCleanup) >= wakeCleanupInterval {
+		w.lastCleanup = time.Now()
+		if n, cerr := w.Cleanup(ctx); cerr != nil {
+			w.log().Warn("waker wake cleanup failed", "err", cerr)
+		} else if n > 0 {
+			w.log().Debug("waker retired stale wake entries", "removed", n)
 		}
 	}
 	if w.DeadScopes == nil || w.Open == nil || w.Dispatcher == nil {

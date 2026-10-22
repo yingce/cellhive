@@ -32,8 +32,8 @@ func TestOSSOwnerTakeover(t *testing.T) {
 	}
 	b := bucket.NewProviderBucket(data, appender)
 	sc := cell.Scope{Namespace: "itest", Class: "__kv__", ID: time.Now().UTC().Format("20060102T150405.000000000")}
-	first := &Manager{B: b, NodeID: "itest-a", Session: "a", Advertise: "127.0.0.1:7000", Role: cell.RoleCellAgent, OwnerTTL: time.Second}
-	second := &Manager{B: b, NodeID: "itest-b", Session: "b", Advertise: "127.0.0.1:7001", Role: cell.RoleCellAgent, OwnerTTL: time.Second}
+	first := &Manager{B: b, NodeID: "itest-a", Session: "a", Advertise: "127.0.0.1:7000", Role: cell.RoleCellAgent, OwnerTTL: 30 * time.Second}
+	second := &Manager{B: b, NodeID: "itest-b", Session: "b", Advertise: "127.0.0.1:7001", Role: cell.RoleCellAgent, OwnerTTL: 30 * time.Second}
 	ctx := context.Background()
 	old, err := first.Claim(ctx, sc, time.Now())
 	if err != nil {

@@ -120,12 +120,16 @@ func (e *Election) Acquire(ctx context.Context) (bool, error) {
 
 // StepDown releases the lease if this node/session holds it.
 func (e *Election) StepDown(ctx context.Context) error {
-	cur, _, ok, err := e.holder(ctx)
+	cur, token, ok, err := e.holder(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok || cur.Node != e.NodeID || cur.Session != e.Session {
 		return nil
 	}
-	return e.B.Delete(ctx, Key)
+	// Conditional delete: never remove a lease a peer acquired after our read.
+	if err := e.B.ConditionalDelete(ctx, Key, token); err != nil && !errors.Is(err, bucket.ErrPrecondition) {
+		return err
+	}
+	return nil
 }

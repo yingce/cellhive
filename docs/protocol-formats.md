@@ -12,6 +12,7 @@
 
 - `expiry`（unix ms）**总是 ≤ 节点 lease expiry**；
 - 获取：`If-None-Match:*`（冷）或 `If-Match:<etag>`（接管/续约）。
+- **provider 物理编码（ADR-266）**：`cos://` / `oss://` 上不是普通 JSON 对象。逻辑 key 映射为按时间窗分段的 `cells/<scope>/owner.json.w<window>`；每段追加 `CHL2` 帧（`magic(4)|op(1)|instance(8)|payload_len(4)|payload|frame_len(4)|crc32(4)`），token 为 `s<window>:<instance>:<length>`。读侧 tail-probe 最后一帧；旧窗口只保留当前+上一段，rollover 时 deep GC 物理删除更老段。legacy `CHL1` 单对象在第一次写时迁移并删除。
 
 ## 2. 节点 lease（bucket `nodes/<node>.json`）
 

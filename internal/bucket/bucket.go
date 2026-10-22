@@ -49,6 +49,13 @@ type PagedLister interface {
 	ListPage(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, string, error)
 }
 
+// PrefixLister is an optional Bucket extension for delimiter listings: it
+// returns the immediate child prefixes under prefix. Wake discovery uses it to
+// enumerate due minute buckets without listing every entry (ADR-267).
+type PrefixLister interface {
+	CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error)
+}
+
 // ObjectInfo is one key with its size and etag.
 type ObjectInfo struct {
 	Key  string

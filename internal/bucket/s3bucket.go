@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -141,6 +142,72 @@ func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64)
 	return data, unquote(aws.ToString(out.ETag)), nil
 }
 
+// TailGet returns at most the last n bytes of an object plus its total size.
+// Authority segments use it to read only the newest frame instead of the whole
+// append history. Providers that ignore suffix ranges still return the full
+// object; the caller trims it and stays correct.
+func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int64, string, error) {
+	if n <= 0 {
+		n = segProbeBytes
+	}
+	b.gets.Add(1)
+	rng := fmt.Sprintf("bytes=-%d", n)
+	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, 0, "", ErrNotFound
+		}
+		// Some S3-compatible providers reject suffix ranges. Fall back to a
+		// HEAD plus an explicit tail range; if that also fails, surface the
+		// original error.
+		size, etag, serr := b.Stat(ctx, key)
+		if serr != nil {
+			return nil, 0, "", err
+		}
+		if size == 0 {
+			return []byte{}, 0, etag, nil
+		}
+		off := size - int64(n)
+		if off < 0 {
+			off = 0
+		}
+		data, etag, rerr := b.RangedGet(ctx, key, off, size-off)
+		if rerr != nil {
+			return nil, 0, "", err
+		}
+		return data, size, etag, nil
+	}
+	defer out.Body.Close()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	total := int64(len(data))
+	if out.ContentRange != nil {
+		if slash := strings.LastIndex(*out.ContentRange, "/"); slash >= 0 && slash+1 < len(*out.ContentRange) {
+			if parsed, perr := strconv.ParseInt((*out.ContentRange)[slash+1:], 10, 64); perr == nil {
+				total = parsed
+			}
+		}
+	} else {
+		// A 206 without Content-Range is non-compliant; HEAD gives the true
+		// total so fencing tokens stay correct. A 200 that ignored Range has a
+		// full ContentLength and this HEAD is unnecessary but harmless.
+		if size, _, serr := b.Stat(ctx, key); serr == nil {
+			total = size
+		} else if out.ContentLength != nil {
+			total = *out.ContentLength
+		}
+	}
+	if int64(len(data)) > int64(n) {
+		data = data[len(data)-n:]
+	}
+	if total < int64(len(data)) {
+		total = int64(len(data))
+	}
+	return data, total, unquote(aws.ToString(out.ETag)), nil
+}
+
 // Put implements Bucket.
 func (b *S3Bucket) Put(ctx context.Context, key string, data []byte) (string, error) {
 	b.puts.Add(1)
@@ -205,6 +272,32 @@ func (b *S3Bucket) Stat(ctx context.Context, key string) (int64, string, error) 
 		return 0, "", err
 	}
 	return aws.ToInt64(out.ContentLength), unquote(aws.ToString(out.ETag)), nil
+}
+
+// CommonPrefixes implements PrefixLister with S3 delimiter listings.
+func (b *S3Bucket) CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	b.lists.Add(1)
+	var out []string
+	var token *string
+	for {
+		res, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: &b.bucket, Prefix: &prefix, Delimiter: &delimiter, ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range res.CommonPrefixes {
+			out = append(out, aws.ToString(p.Prefix))
+		}
+		if res.IsTruncated == nil || !*res.IsTruncated {
+			break
+		}
+		token = res.NextContinuationToken
+	}
+	return out, nil
 }
 
 // ListSizes implements SizeLister from the S3 list response (no per-object GET).

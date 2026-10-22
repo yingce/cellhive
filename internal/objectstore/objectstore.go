@@ -275,3 +275,40 @@ func (o *Objects) ListPrefix(ctx context.Context, prefix string) ([]string, erro
 	}
 	return o.B.List(ctx, prefix)
 }
+
+// CommonPrefixes returns immediate child prefixes under prefix when the
+// backend supports delimiter listings; otherwise it derives them from a full
+// listing (still correct, just less efficient on very large prefixes).
+func (o *Objects) CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	if o.err != nil {
+		return nil, o.err
+	}
+	if !strings.HasPrefix(prefix, o.Prefix) || strings.Contains(prefix, "..") {
+		return nil, ErrBadKey
+	}
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	if pl, ok := o.B.(bucket.PrefixLister); ok {
+		return pl.CommonPrefixes(ctx, prefix, delimiter)
+	}
+	keys, err := o.B.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		rest := strings.TrimPrefix(key, prefix)
+		i := strings.Index(rest, delimiter)
+		if i < 0 {
+			continue
+		}
+		seen[prefix+rest[:i]+delimiter] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, nil
+}

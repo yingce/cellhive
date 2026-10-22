@@ -23,6 +23,33 @@
 - **验证**：新增 `internal/server/cloudflare_owner_test.go` 双节点回归（共享桶：owner 持有 control cell，follower 本地 control cell 为空）：follower 的 KV keys/list 与 D1/R2/Queue get 必须读到 owner 注册；follower create 后 owner 必须可见、follower 本地不得留下注册行，且 `/v1/kv/stats` 不再报未注册；`follower create + owner 转发发布` 不再出现 `no registered kv resource named ...`；follower 的 route put/list 落到 owner 投影；owner 不可达时 keys 返回 5xx。`go test ./internal/server -run 'TestCloudflare|TestStats|TestControl'` 通过。
 - **代价**：CF 兼容管理请求在非 owner 副本上多一次内部转发；大 body 数据面仍按原路径处理。
 
+## ADR-266 provider 权威对象按时间分段，禁止无限追加（2026-10-22）✅实现
+
+- **背景**：ADR-189 用原生 `AppendObject(position)` 在 COS/OSS 上实现条件创建、CAS 和条件删除，但每个逻辑 key（`owner.json`、`owner-gen`、`nodes/<node>.json`、`node-logs/...`、`fleet/waker.json`）是一个永久 append-only 对象。默认 `CellHive LeaseTTL=10s`、每 `TTL/3` 续约一次，单个 owned cell 的 owner 日志每天约 4.4MB，节点 lease 约 9.7MB/天，waker 约 2MB/天；对象只增不减（tombstone 也只追加），`Get`/`CAS` 还要全量下载并解码历史。ADR-189 明确写了“日志轮换尚未实现；上线前需监控追加对象增长”，这不是可接受的长期形态。
+- **决策**：在 provider bucket 层引入 `SegmentedAuthority`，保持原有 `Bucket` 条件写语义不变，但把每个逻辑权威 key 映射为**按时间窗分段的物理对象** `key + ".w" + window`：
+  1. 每个窗口一个物理段；段内仍是 append-only 帧。新帧 `CHL2` 在尾部带 `frameLen + CRC32`，并带 8 字节 instance；读取只做有界 tail probe（4096B）取最后一帧，必要时只补读该帧，不再下载整段历史。
+  2. token 变为 `s<window>:<instance>:<length>`；`window` + `instance` + `length` 共同构成 fencing 版本。跨窗口的旧 token 不会误追加；同窗口的并发 CAS 仍由 `AppendObject(position)` 原子裁决。
+  3. 写入始终落到当前窗口；如果 token 来自旧窗口（idle/续约跨段），CAS 把新值原子创建到当前窗口（position=0），旧段保留给读侧后由 GC 清掉。`ConditionalCreate`/`ConditionalDelete` 同理。
+  4. 保留“当前 + 上一窗口”；rollover 时做一次单 key 前缀列出的 deep GC，删除更老的段。没有新写入的 key 只保留最新段，不会因为空闲丢失（读侧当前窗口点查 miss 时，做**单个逻辑 key** 的前缀查找，不 List 全 bucket）。
+  5. 硬上限固定为 8MiB（不再新增环境变量）：段超过上限时返回 `ErrAuthoritySegmentFull` 失败关闭，绝不继续增长。
+  6. **legacy 迁移**：已有 CHL1 单对象仍可读；第一次写（owner 续约/lease publish/claim）会创建当前窗口并物理删除旧对象，已膨胀的 `owner.json`/`waker.json` 在升级后第一次写入即缩小。
+- **固定参数**：窗口固定 `1h`，单对象硬上限固定 `8MiB`，不新增环境变量。窗口必须显著大于节点间时钟偏差（当前设计默认只在窗口边界附近额外看未来一窗；窗口的 1/10 是边界保护区）。
+- **安全边界**：分段不改变 owner/epoch 协议，只改变物理布局；条件创建/CAS/条件删除的线性化点仍是 `AppendObject(position)`。tombstone 仍追加、逻辑删除仍由读侧隐藏；`Delete`（无条件）会物理删除该 key 的所有分段和 legacy 对象。混合版本升级不安全（旧二进制只认 legacy key，新二进制迁移后会删 legacy），因此**必须停机或全量滚动替换**，不做混合版本兼容。
+- **验证**：`internal/bucket` 新增 `TestSegmentedAuthorityRotatesAndCollects`（同窗口 50 次续约仍 1 个 ≤4KiB 对象；跨窗口后物理段 ≤2；5 个窗口后旧段被清）、`TestSegmentedAuthorityMigratesLegacyLog`（CHL1 大日志首次 CAS 迁移后 legacy 删除、窗口对象 ≤1KiB）、`TestSegmentedAuthorityHardCapFailsClosed`、`TestSegmentedAuthorityTombstoneAndRecreate`、`TestSegmentedAuthorityConcurrentCreate`、`TestSegmentedAuthorityFindsSegmentAfterLongIdle`（10 个窗口空闲后 epoch 仍可读、CAS 不重置）与 `TestParsePhysicalAuthorityKey`；`go test ./internal/bucket ./internal/config ./internal/owner ./internal/lease ./internal/waker ./internal/server` 通过。真实 COS/OSS 桶的 suffix-range、旧对象迁移和混合版本边界仍需按 ADR-189 的实桶验收流程验证。
+- **代价/边界**：单个权威对象大小从“无界”变为 `窗口时长 × 写入速率`（默认 1h；owner 约百 KB，node lease 约几百 KB），每 key 常驻当前+上一段；rollover 多一次单 key List；空闲 key 读路径多一次前缀查找；混合版本不可用；真实 provider 的 tail range 需逐桶验证。
+
+## ADR-267 wake 索引改为按 due minute 分桶（celld 风格）✅实现（2026-10-22）
+
+- **背景**：ADR-099/ADR-177 的索引是 `wake/<scope>.json`，waker 每个 pass 都要 `List("wake/")` 并把每个 scope 的 entry `Get` 出来按 due 过滤；timer scope 数量大时，扫描成本随**全部有 timer 的 scope** 增长，且无法只打开到期分钟。celld 的 alarm discovery 用 `wake/entries/<minute>/<cell>/<id>`，waker 只枚举分钟前缀、打开到期分钟。
+- **决策**：
+  1. 每个 scope 写两个对象：`wake/due/<UTC minute>/<scope>.json`（到期条目，内容仍是 `{scope,due_ms,kind,token}`）和 `wake/ptr/<scope>.json`（该 scope 的当前指针，用于 O(1) 删除/过期检测）。两者都是**覆盖写**，不是 append。
+  2. `Put` 先写 due entry，再写 pointer；pointer 成功后删除旧 minute 的 due entry。`Delete` 按 pointer 删除 due entry + pointer。`wake/<scope>.json` 旧对象作为 legacy 保留，`Put`/`Delete` 会清理；启动时 `Migrate` 一次性把 legacy entry 搬到新布局，`List`/`Count` 在迁移期仍兼容读取（`Due` 只扫新布局，避免旧 keyspace 破坏分钟前缀扫描）。
+  3. waker 的 `Due` 先通过新的 `bucket.PrefixLister.CommonPrefixes("wake/due/", "/")` 枚举分钟前缀，只打开 `minute <= now` 的桶；同一 scope 多桶时取最早 due。`objectstore.CommonPrefixes` 在 backend 不支持 delimiter 时回退到全量 `List` 后聚合（正确但较慢）。
+  4. waker leader 每 10 分钟跑一次有界 `Cleanup`（每轮最多 128 条）：删除 minute 早于 1 小时且已不被 pointer 指向的孤儿 entry；pointer 仍指向的过期 timer 保留，不能误删。
+  5. `wake/ptr/`、`wake/due/` 是保留前缀；scope 的 namespace 恰为 `ptr`/`due` 时用**路径深度**区分 pointer/due entry 与 legacy `wake/<scope>.json`，不作为普通 entry 误删。
+- **验证**：`internal/wake` 新增 `TestWakeDueMinuteBucketsAndCleanup`（future minute 不扫、孤儿 entry 清理、pointer 保留）、`TestWakeDeleteRemovesDueEntry`；原 `TestWakeIndexPutDueDelete` 继续通过；`go test ./internal/wake ./internal/waker ./internal/timer ./internal/bucket ./internal/objectstore` 通过。`internal/waker` 现有 leader/派发测试未改语义。
+- **边界/代价**：每 scope 常态两个小对象（pointer + 当前 due entry）；分钟粒度意味着最多提前一个 pass 打开（`DispatchDue` 仍按 now 过滤）；`CommonPrefixes` 在 FS/S3 实现，未知 backend 回退全量 List；旧 `wake/<scope>.json` 由启动 `Migrate`（以及 Put/Delete）迁移，未迁移成功的条目在下次启动重试；`Cleanup` 只由 waker leader 执行，长时间无 leader 时孤儿 entry 会暂时保留但不影响正确性。
+
 ## ADR-265 `cellhive` CLI 迁移到 cobra；原生命令是唯一实现，wrangler 只是兼容层（2026-10-22，P1/P2 命令面完成；P3 收尾中）
 
 - **背景**：`cmd/cellhive` 现有 45 个 `cmdXxx` 命令函数、30 处 `flag.NewFlagSet`，主体堆在 2961 行的 `main.go` 里；入口是手写 `dispatch` switch（38 个 case）+ 108 行手写 `usage()`。ADR-038 早已把 CLI 框架定为 **cobra（后续）**，但代码一直用 stdlib `flag`，文档与实现不一致。同时命令面出现两套名字：原生 `queue`/`workflow`/`kv`/`d1`/`r2` 与 wrangler 兼容的 `queues`/`workflows`/`versions`/...，容易被误读为"功能被重复实现"。
@@ -1682,6 +1709,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 ---
 
+> 注：ADR-267 已把本 ADR 的 `wake/<scope>.json` 单索引替换为 `wake/due/<minute>/<scope>.json` + `wake/ptr/<scope>.json`；本 ADR 的“索引非权威、可修复”语义不变。
+
 ## ADR-098 KV TTL 与 metadata（过期清理复用 timer/waker 激活）✅
 
 - **背景**：KV 没有 TTL/metadata：`kv` 表无过期列，端点和绑定都不支持 `expiration`/`expirationTtl`/`metadata`（`put(key,value)` 静默忽略选项）。
@@ -2880,15 +2909,15 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 ## ADR-188 权威桶必须原子化且启动失败关闭（2026-09-22）✅实现
 
 - **背景**：`CELLHIVE_BUCKET=cos://...` / `oss://...` 以前被 `openBucket` 静默当本地目录；启动时的 `bucket.Diagnose` 即使发现条件删除等探针失败也仅告警，节点仍服务。owner/epoch 栅栏依赖条件创建、目标版本 CAS 和条件删除全部原子成立。
-- **决策（S3 路径；原生追加路径见 ADR-189）**：空配置用本地 FS，`s3://<bucket>` 必须通过全部权威条件写探针；未知 scheme 立即拒绝。`cell-agent` 启动运行 `bucket.Diagnose`，失败直接退出。COS/OSS 对普通目标对象不提供本协议要求的原子 CAS/条件删除，不做 `HEAD+PUT/DELETE` 适配；ADR-189 另以其原生追加 API 构造条件对象，并同样受启动探针约束。
-- **证据/边界**：2026-09-22 对可用 COS 桶通过 S3 API 测得重复 `If-None-Match:*` PUT 成功；对可用 OSS 桶首个相同 PUT 返回 `NotImplemented`。仓库固定的 MinIO `RELEASE.2025-02-18T16-25-55Z` 虽通过条件创建/CAS/range，却把 stale 条件删除当成功，**不能作为当前 owner/lease 权威桶**；`scripts/s3-integration.sh` 因新增真实条件删除断言失败。上述实测均不能推广到未测试云端实例；`Diagnose` 检查序列语义，不证明并发线性化或 presigned URL。测试键位于独立 `itest/` 前缀，未触碰真实状态。
+- **决策（S3 路径；原生追加路径见 ADR-189）**：空配置用本地 FS，`s3://<bucket>` 必须通过全部权威条件写探针；未知 scheme 立即拒绝。`cell-agent` 启动运行 `bucket.Diagnose`，失败直接退出。COS/OSS 的普通对象 API **不能拼出完整的“条件 PUT CAS + 条件 DELETE”组合**，不做 `HEAD+PUT/DELETE` 适配；ADR-189 另以其原生追加 API 构造条件对象，并同样受启动探针约束。
+- **证据/边界**：2026-09-22 对可用 COS 桶通过 S3 API 测得重复 `If-None-Match:*` PUT 成功；对可用 OSS 桶首个相同 PUT 返回 `NotImplemented`。**2026-10-22 复测（Go SDK v2，隔离键，已清理）**：COS（`vwork-hk-1376795072`，ap-hongkong）`PutObject` 的 `If-None-Match:*` 与 `If-Match`（含 stale）都返回 200 且实际覆盖，说明 header 被接受但未执行；同桶 `DeleteObject If-Match` stale 返回 412、current 返回 204，条件删除可用。OSS（`llmfs-bj`，cn-beijing）`PutObject` 的 `If-Match` / `If-None-Match` 均返回 400 `NotImplemented`；`DeleteObject If-Match` stale 也返回 204 且对象被删，条件删除被忽略。两家都支持 `GetObject`/`HeadObject` 的 `If-Match`/`If-None-Match`（读条件），也支持 `x-oss-forbid-overwrite` / `x-cos-forbid-overwrite` 的“仅创建”语义（版本控制下失效），但都不能替代目标对象的条件 PUT CAS。仓库固定的 MinIO `RELEASE.2025-02-18T16-25-55Z` 虽通过条件创建/CAS/range，却把 stale 条件删除当成功，**不能作为当前 owner/lease 权威桶**；`scripts/s3-integration.sh` 因新增真实条件删除断言失败。上述实测均不能推广到未测试云端实例；`Diagnose` 检查序列语义，不证明并发线性化或 presigned URL。测试键位于独立 `itest/` 前缀，未触碰真实状态。
 - **验证**：`cmd/cell-agent TestOpenBucketRejectsUnsupportedAuthorityProvider`、`internal/bucket TestDiagnoseDetectsConditionalDeleteIgnored` 和 S3 集成探针覆盖 S3 拒绝行为；原生追加式方案的实桶结论另见 ADR-189。
 
 ## ADR-189 OSS 追加式权威对象；COS 需逐桶验证（2026-09-22）🚧验证中
 
 - **背景**：ADR-188 正确拒绝了 COS/OSS 对目标对象 `PUT/DELETE If-Match` 的非原子模拟。原生 `AppendObject(position=N)` 在支持该操作的桶中可作为条件写原语，但不能从 SDK 存在推断任意实际桶可用。2026-09-22 隔离键实测：OSS 北京桶的并发 position=0 只有一个赢家；原 COS 香港桶 `vwork-hk-1376795072` 的 `POST ?append&position=0` 返回 `405 MethodNotAllowed`。2026-09-22 复测新 COS 香港桶 `cell-1376795072`：并发首次追加只有一个赢家，输家返回 COS 实际错误码 `409 AppendPositionErr`；修正该错误码到 `ErrPrecondition` 的映射后，共享并发 claim/CAS/条件删除契约及完整 `bucket.Diagnose` 均通过。失败桶仍须拒绝启动，不能退回非原子 `HEAD+PUT`。
 - **决策**：新增 `cos://<bucket>` 与 `oss://<bucket>` provider。不可变数据（LTX、快照、bundle、assets）仍使用普通对象 API；权威可变键（owner、owner-gen、node lease、node-log、fleet lease/token）存为带长度、操作类型和 CRC 的 append-only 帧。逻辑版本令牌是成功追加后的对象长度：首次条件创建要求位置 0，tombstone 后重建要求当前长度，CAS/条件删除要求调用方读到的位置，删除追加 tombstone 而不物理删除；无条件 Put/Delete 先读长度并在冲突后重试，因此仍有一个明确线性化点。现有 `bucket.Bucket` 调用方与 owner/epoch 协议不分叉。
-- **安全边界**：解析遇到坏 magic、长度越界或 CRC 错误必须失败关闭；AppendObject 的超时结果未知，调用方重读后判断，不盲目假定失败；热路径不 LIST。追加对象不能被普通 Put 覆盖。日志轮换尚未实现；上线前需监控追加对象增长与供应商容量限制。
+- **安全边界**：解析遇到坏 magic、长度越界或 CRC 错误必须失败关闭；AppendObject 的超时结果未知，调用方重读后判断，不盲目假定失败；热路径不 LIST。追加对象不能被普通 Put 覆盖。日志轮换最初未实现；**ADR-266 已把权威对象改为按时间窗口分段 + GC**，因此不再无限追加，上线前仍需监控单段大小与供应商容量限制。
 - **配置**：`oss://` 使用 `OSS_ENDPOINT`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`；`cos://` 使用 `COS_ENDPOINT`、`COS_SECRET_ID`、`COS_SECRET_KEY`。若未提供 provider 专用凭据变量，则兼容读取现有 AWS 变量；endpoint 必须是 HTTPS，OSS 可省略 scheme。供应商普通对象的 S3 适配器关闭 SDK 可选 trailer checksum（测试 OSS 桶不接受该编码）。
 - **验证状态**：共享条件对象契约覆盖创建竞争、陈旧 CAS、陈旧删除、tombstone 后重建、损坏尾部拒绝；OSS 北京实桶与 COS 香港 `cell-1376795072` 实桶的独立键并发 claim、CAS/删除及完整 `bucket.Diagnose` 通过。2026-09-22 又以两套独立 `cell-agent` 进程、共享各自云桶、`CELLHIVE_DURABILITY=bucket`、6s 租约执行真实进程级 `SIGKILL`/新本地目录接管：COS 192 并发 5000 次写全 ACK，最终冷恢复核对 6488 条已 ACK 键，missing=0/wrong=0，SQLite `integrity_check=ok`；OSS 192 并发 5000 次写全 ACK，最终冷恢复核对 6470 条已 ACK 键，missing=0/wrong=0，`integrity_check=ok`。两桶还在 24 并发流中取得 ≥30 个 ACK 后杀死 owner，接管后所有已 ACK 值精确匹配；断连请求为结果未知，不计入 ACK。原 COS 香港 `vwork-hk-1376795072` 桶追加探针失败（405）；供应商支持须逐桶验证。此结果是**同宿主多进程 + 真实云桶**，不是跨主机网络分区或长期混沌证明。
 

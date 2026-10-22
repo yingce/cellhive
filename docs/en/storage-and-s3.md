@@ -51,6 +51,8 @@ assets/<ns>/<worker>/<token>/<path>
 r2/<ns>/<bucket_name>/<object-key>
 ```
 
+**Provider authority physical layout (ADR-266)**: on `cos://` / `oss://`, logical authority keys (`owner.json`, `owner-gen`, `nodes/<node>.json`, `node-logs/...`, `fleet/waker.json`) map to time-segmented `.w<window>` objects, e.g. `cells/<scope>/owner.json.w<window>`. The API keeps the logical key; the provider console shows the segment keys. Each segment is a `CHL2` frame log read from its tail, and old segments are physically deleted at rollover; normally only the current and previous windows exist.
+
 ## Credentials
 
 - **Long-lived credentials are only in `cell-agent`**;
@@ -64,7 +66,7 @@ r2/<ns>/<bucket_name>/<object-key>
 - **LTX**: background **compaction → L1** for L0 segments (`min_txids`/`min_mb`); large cell **paging** (sparse files on demand);
 - **Snapshots**: L9 snapshots are used for takeover/large databases; generated when checkpoints are aligned;
 - **Cleanup**: worker/app deletion uses soft delete + `purges` jobs (ADR-131); **purge only takes effect for entities that are still soft-deleted**, and deploy/create cancels the job (ADR-135); each cell-agent performs idempotent deletion of local replicas and bucket objects in bounded, paginated passes (ADR-142/169);
-- **Enumeration**: operations commands only, with bounded pagination; **LIST is prohibited on hot paths**.
+- **Enumeration**: operations commands only, with bounded pagination; **LIST is prohibited on hot paths** (ADR-266 has one exception: when a single authority logical key misses in the current window, one bounded lookup of that key prefix recovers the previous/last long-idle segment; this is not a bucket-wide LIST).
 
 ## Performance
 

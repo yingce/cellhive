@@ -43,6 +43,8 @@ cells/<scope>/ltx/e<epoch>/<segment>
 cells/<scope>/snapshot/<txid>
 nodes/<node>.json
 node-logs/<node>/<session>.json
+wake/due/<UTC minute>/<scope>.json
+wake/ptr/<scope>.json
 fleet/capacity-v1.json
 fleet/drain-token.json
 bundles/sha256/<aa>/<hash>
@@ -50,6 +52,8 @@ deploys/<ns>/<worker>/<version>.json
 assets/<ns>/<worker>/<token>/<path>
 r2/<ns>/<bucket_name>/<object-key>
 ```
+
+**provider 权威对象的物理布局（ADR-266）**：`cos://` / `oss://` 上，逻辑权威 key（上表的 `owner.json`、`owner-gen`、`nodes/<node>.json`、`node-logs/...`、`fleet/waker.json`）实际映射为按时间窗分段的 `.w<window>` 对象，例如 `cells/<scope>/owner.json.w<window>`。API 仍使用逻辑 key；对象存储控制台看到的是分段 key。每个段是 `CHL2` 帧流，读取只取 tail frame；旧段在 rollover 的 deep GC 中物理删除，每个逻辑 key 常态只保留当前与上一窗口。详见 ADR-266。
 
 ## 凭据
 
@@ -64,7 +68,7 @@ r2/<ns>/<bucket_name>/<object-key>
 - **LTX**：L0 段后台 **compaction → L1**（`min_txids`/`min_mb`）；大 cell **paging**（稀疏文件按需）；
 - **快照**：接管/大库使用 L9 快照；checkpoint 对齐时产生；
 - **清理**：worker/app 删除走软删 + `purges` 作业（ADR-131）；**purge 只对仍处软删状态的实体生效**，deploy/create 会取消作业（ADR-135）；数据侧 hook 已闭环：各 cell-agent 幂等清理本地副本与桶对象，并以有界分页分轮续跑（ADR-142/169）；
-- **枚举**：仅运维命令，有界分页；**热路径禁止 LIST**。
+- **枚举**：仅运维命令，有界分页；**热路径禁止 LIST**（ADR-266 的唯一例外是：某个权威逻辑 key 当前窗口点查 miss 时，对**该单 key 前缀**做一次有界查找，用于找回上一窗口或长时间未写的最后一段；这不是 bucket 级 LIST）。
 
 ## 性能
 
