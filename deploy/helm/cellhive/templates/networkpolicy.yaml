@@ -20,7 +20,7 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/instance: {{ $inst }}}
       {{- with .Values.networkPolicy.adminIngressFrom }}
-      {{- toYaml . | nindent 6 }}
+      {{- toYaml . | nindent 8 }}
       {{- end }}
   egress:
     - to:
