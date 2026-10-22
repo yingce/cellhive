@@ -74,7 +74,7 @@ retry_capture() {
 }
 
 echo "== build pinned runtime image =="
-docker build -f deploy/Dockerfile -t "$IMAGE" .
+docker build --build-context workerd-fork=deploy/workerd-fork -f deploy/Dockerfile -t "$IMAGE" .
 WORKERD_VERSION=$(docker run --rm --entrypoint workerd "$IMAGE" --version)
 ESBUILD_VERSION=$(docker run --rm --entrypoint esbuild "$IMAGE" --version)
 assert_eq "workerd 2026-09-16" "$WORKERD_VERSION" "image workerd version"
