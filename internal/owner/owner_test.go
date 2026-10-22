@@ -307,3 +307,39 @@ func TestNextEpochRejectsCorruptGeneration(t *testing.T) {
 		t.Fatalf("ClaimAs = %v, want ErrGenCorrupt", err)
 	}
 }
+
+func TestOwnerRecordCarriesAdminAddress(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m, _ := newManager(t, dir, "node-1")
+	m.AdminAdvertise = "10.0.0.7:8082"
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "admin-address"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.AdminAddress != m.AdminAdvertise {
+		t.Fatalf("claim admin address = %q, want %q", o.AdminAddress, m.AdminAdvertise)
+	}
+	cur, etag, err := m.Resolve(ctx, sc)
+	if err != nil || cur.AdminAddress != m.AdminAdvertise {
+		t.Fatalf("resolved admin address = %q, err=%v", cur.AdminAddress, err)
+	}
+	// A lease written before this field existed must acquire it on renewal.
+	cur.AdminAddress = ""
+	data, err := cell.MarshalOwner(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.B.CAS(ctx, Key(sc), data, etag); err != nil {
+		t.Fatal(err)
+	}
+	m.Invalidate(sc)
+	if _, err := m.Renew(ctx, sc, cur.Epoch, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := m.Resolve(ctx, sc)
+	if err != nil || after.AdminAddress != m.AdminAdvertise {
+		t.Fatalf("renewed admin address = %q, err=%v", after.AdminAddress, err)
+	}
+}

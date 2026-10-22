@@ -33,12 +33,13 @@ type cachedOwner struct {
 
 // Manager performs owner operations for a node.
 type Manager struct {
-	B         bucket.Bucket
-	NodeID    string
-	Session   string
-	Advertise string
-	Role      cell.Role
-	OwnerTTL  time.Duration
+	B              bucket.Bucket
+	NodeID         string
+	Session        string
+	Advertise      string
+	AdminAdvertise string
+	Role           cell.Role
+	OwnerTTL       time.Duration
 
 	// BeforeTakeover must durably recover the expired predecessor session before
 	// its owner record is replaced. Nil is only safe for roles with no fleet
@@ -198,6 +199,9 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 		return cell.Owner{}, ErrEpochMismatch
 	}
 	cur.Expiry = now.Add(m.OwnerTTL).UnixMilli()
+	if m.AdminAdvertise != "" {
+		cur.AdminAddress = m.AdminAdvertise
+	}
 	data, _ := cell.MarshalOwner(cur)
 	if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
 		return cell.Owner{}, err
@@ -263,6 +267,7 @@ func (m *Manager) newOwner(epoch uint64, now time.Time) cell.Owner {
 		Epoch:        epoch,
 		Expiry:       now.Add(m.OwnerTTL).UnixMilli(),
 		Address:      m.Advertise,
+		AdminAddress: m.AdminAdvertise,
 		ProtoVersion: cell.ProtoVersion,
 	}
 }

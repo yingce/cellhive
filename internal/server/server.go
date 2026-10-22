@@ -314,10 +314,6 @@ func (s *Server) Handler() http.Handler {
 	// the admin listener, which delegates to the same handlers.
 	mux.HandleFunc("POST /v1/control/app", s.auth(s.handleControlApp))
 	mux.HandleFunc("POST /v1/control/resource", s.auth(s.handleControlResource))
-	// Admin write routes must also exist on the REST port: owner-forwarded
-	// admin requests land on the owner's Advertise address, not its admin
-	// listener. Missing methods here turn follower deletes into 405.
-	mux.HandleFunc("DELETE /v1/control/resource", s.auth(s.handleControlResourceDelete))
 	mux.HandleFunc("POST /v1/control/deploy", s.auth(s.handleControlDeploy))
 	mux.HandleFunc("POST /v1/control/promote", s.auth(s.handleControlPromote))
 	mux.HandleFunc("POST /v1/control/rollback", s.auth(s.handleControlRollback))
@@ -327,20 +323,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/domain", s.auth(s.handleControlDomainDelete))
 	mux.HandleFunc("DELETE /v1/control/route", s.auth(s.handleControlRouteDelete))
 	mux.HandleFunc("POST /v1/control/secret", s.auth(s.handleControlSecretPut))
-	mux.HandleFunc("DELETE /v1/control/secret", s.auth(s.handleControlSecretDelete))
-	mux.HandleFunc("GET /v1/control/secrets", s.auth(s.handleControlSecretList))
 	mux.HandleFunc("PATCH /v1/control/secrets/bulk", s.auth(s.handleControlSecretsBulk))
-	mux.HandleFunc("POST /v1/control/service-acl", s.auth(s.handleControlServiceACLPut))
-	mux.HandleFunc("DELETE /v1/control/service-acl", s.auth(s.handleControlServiceACLDelete))
-	mux.HandleFunc("GET /v1/control/service-acls", s.auth(s.handleControlServiceACLList))
-	mux.HandleFunc("GET /v1/control/queue/status", s.auth(s.handleControlQueueStatus))
-	mux.HandleFunc("POST /v1/control/queue/replay-dlq", s.auth(s.handleControlQueueReplayDLQ))
-	mux.HandleFunc("GET /v1/control/hyperdrive/proxy", s.auth(s.handleHyperdriveProxyStatus))
-	mux.HandleFunc("GET /v1/control/logs", s.auth(s.handleLogQuery))
-	mux.HandleFunc("POST /v1/control/logs/subscribe", s.auth(s.handleLogSubscribe))
-	mux.HandleFunc("POST /v1/control/bundle", s.auth(s.handleBundlePut))
-	mux.HandleFunc("POST /v1/control/asset", s.auth(s.handleAssetPut))
-	mux.HandleFunc("GET /v1/control/capacity", s.auth(s.handleControlCapacity))
 	mux.HandleFunc("DELETE /v1/control/app", s.auth(s.handleControlAppDelete))
 	mux.HandleFunc("DELETE /v1/control/worker", s.auth(s.handleControlWorkerDelete))
 	mux.HandleFunc("POST /v1/control/gc/bundles", s.auth(s.handleBundleGC))
@@ -1021,6 +1004,13 @@ const ownerCacheTTL = 1 * time.Second
 // Ownership remains an internal single-writer fence; callers never need to know
 // who owns a cell.
 func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
+	// Admin requests enter through AdminHandler and must stay on the owner's
+	// admin listener. Data-plane requests keep using the REST listener.
+	admin := isAdminForward(r.Context()) && sc == control.Scope()
+	return s.forwardOrClaimMode(w, r, sc, preRead, admin)
+}
+
+func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte, admin bool) bool {
 	if s.Owner == nil {
 		return false
 	}
@@ -1035,7 +1025,7 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
 			return true
 		}
-		return s.forwardIfNonOwner(w, r, sc, preRead)
+		return s.forwardNonOwner(w, r, sc, preRead, admin)
 	case err == nil || errors.Is(err, owner.ErrUnowned):
 		// Unowned or lease expired: claim it and proceed, unless this node is
 		// above its disk high watermark (then a peer should take it).
@@ -1055,7 +1045,7 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 			return false
 		case errors.Is(cerr, owner.ErrOwnerLive):
 			if claimed.Node != s.Cfg.NodeID && claimed.Address != "" {
-				return s.forwardIfNonOwner(w, r, sc, preRead)
+				return s.forwardNonOwner(w, r, sc, preRead, admin)
 			}
 			if claimed.Node == s.Cfg.NodeID && claimed.Session == s.Owner.Session {
 				return false
@@ -1070,7 +1060,7 @@ func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.
 					return false
 				}
 				if o2.Node != s.Cfg.NodeID && !o2.Expired(time.Now()) && o2.Address != "" {
-					return s.forwardIfNonOwner(w, r, sc, preRead)
+					return s.forwardNonOwner(w, r, sc, preRead, admin)
 				}
 			}
 			writeErr(w, http.StatusServiceUnavailable, "claim_race", "scope owner changed during claim")
@@ -1287,6 +1277,124 @@ func (s *Server) claimForRead(ctx context.Context, sc cell.Scope) error {
 	return err
 }
 
+type adminForwardKey struct{}
+
+func withAdminForward(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adminForwardKey{}, true)
+}
+
+func isAdminForward(ctx context.Context) bool {
+	v, _ := ctx.Value(adminForwardKey{}).(bool)
+	return v
+}
+
+// forwardNonOwner chooses the owner's admin listener for control-plane admin
+// requests. Data-plane requests keep the REST forwarding path.
+func (s *Server) forwardNonOwner(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte, admin bool) bool {
+	if admin {
+		return s.forwardAdmin(w, r, sc, preRead)
+	}
+	return s.forwardIfNonOwner(w, r, sc, preRead)
+}
+
+// forwardAdmin proxies an already-authenticated admin request to the owner's
+// admin listener. It deliberately keeps the admin headers (token/JWT) intact:
+// the owner must run its own adminAuth, rather than trusting the REST internal
+// token. The request is sent once; admin bodies are not retried.
+func (s *Server) forwardAdmin(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
+	if r.Header.Get(ownerclient.ForwardedHeader) != "" {
+		return false
+	}
+	if s.Owner == nil {
+		return false
+	}
+	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
+	if err != nil || o.Node == s.Cfg.NodeID || o.Expired(time.Now()) {
+		return false
+	}
+	addr := s.adminAddressFor(o)
+	if addr == "" {
+		writeErr(w, http.StatusServiceUnavailable, "admin_owner_unreachable", "owner has no admin address")
+		return true
+	}
+	var body io.Reader = r.Body
+	contentLength := r.ContentLength
+	if preRead != nil {
+		body = bytes.NewReader(preRead)
+		contentLength = int64(len(preRead))
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, adminBaseURL(addr)+r.URL.RequestURI(), body)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "admin_forward_failed", err.Error())
+		return true
+	}
+	req.ContentLength = contentLength
+	for k, vs := range r.Header {
+		if isHopHeader(k) || strings.EqualFold(k, "x-cellhive-internal-token") || strings.EqualFold(k, ownerclient.ForwardedHeader) {
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set(ownerclient.ForwardedHeader, "1")
+	client := s.ForwardClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "admin_forward_failed", err.Error())
+		return true
+	}
+	defer resp.Body.Close()
+	copyForwardResponse(w, resp)
+	return true
+}
+
+func (s *Server) adminAddressFor(o cell.Owner) string {
+	if addr := strings.TrimSpace(o.AdminAddress); addr != "" {
+		return addr
+	}
+	// Compatibility with owner records written before AdminAddress existed
+	// (and with test fixtures): derive host from the REST advertise address and
+	// use the configured local admin port. New claims/renewals write the field.
+	host := ""
+	if u, uerr := url.Parse(o.Address); uerr == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	} else if h, _, herr := net.SplitHostPort(o.Address); herr == nil {
+		host = h
+	}
+	if host == "" {
+		return ""
+	}
+	port := "8082"
+	if _, p, perr := net.SplitHostPort(s.Cfg.AdminAddr); perr == nil && p != "" {
+		port = p
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func adminBaseURL(addr string) string {
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/")
+	}
+	return "http://" + strings.TrimRight(addr, "/")
+}
+
+func copyForwardResponse(w http.ResponseWriter, resp *http.Response) {
+	for k, vs := range resp.Header {
+		if isHopHeader(k) {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
+}
+
 func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
 	resp, forwarded, err := s.forwardTo(r, sc, preRead)
 	if !forwarded {
@@ -1301,16 +1409,7 @@ func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc ce
 		return true
 	}
 	defer resp.Body.Close()
-	for k, vs := range resp.Header {
-		if isHopHeader(k) {
-			continue
-		}
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
+	copyForwardResponse(w, resp)
 	return true
 }
 

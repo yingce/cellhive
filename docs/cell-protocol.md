@@ -58,7 +58,8 @@ cell 协议只有一套（租约 / epoch / 复制 / RPO / 寻址 / 发现 / 诊�
 cells/<scope>/owner.json
 { "node": "<owner-node-id>", "role": "cell-agent|do-runtime",
   "session": "<session-id>", "epoch": 42,
-  "expiry": 1730000000000, "address": "10.0.0.12:8788" }
+  "expiry": 1730000000000, "address": "10.0.0.12:8788",
+  "admin_address": "10.0.0.12:8082" }
 ```
 
 **获取**：条件写。

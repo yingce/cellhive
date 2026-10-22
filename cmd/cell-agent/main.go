@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -113,13 +114,22 @@ func main() {
 
 	lm := lease.NewManager(b, cfg.NodeID, cfg.SessionID, cfg.Advertise, cfg.PeerURL, cfg.LeaseTTL)
 	lm.AZ = cfg.PlacementAZ
+	adminAdvertise := ""
+	if host, _, err := net.SplitHostPort(cfg.Advertise); err == nil {
+		port := "8082"
+		if _, p, perr := net.SplitHostPort(cfg.AdminAddr); perr == nil && p != "" {
+			port = p
+		}
+		adminAdvertise = net.JoinHostPort(host, port)
+	}
 	om := &owner.Manager{
-		B:         b,
-		NodeID:    cfg.NodeID,
-		Session:   cfg.SessionID,
-		Advertise: cfg.Advertise,
-		Role:      cell.RoleCellAgent,
-		OwnerTTL:  cfg.LeaseTTL,
+		B:              b,
+		NodeID:         cfg.NodeID,
+		Session:        cfg.SessionID,
+		Advertise:      cfg.Advertise,
+		AdminAdvertise: adminAdvertise,
+		Role:           cell.RoleCellAgent,
+		OwnerTTL:       cfg.LeaseTTL,
 	}
 
 	placementWeight := cfg.PlacementWeight

@@ -7,7 +7,7 @@
 ```json
 { "node": "n1", "role": "cell-agent|do-runtime", "session": "s1",
   "epoch": 1, "expiry": 1730000000000, "address": "10.0.0.1:7001",
-  "proto_version": "v1" }
+  "admin_address": "10.0.0.1:8082", "proto_version": "v1" }
 ```
 
 - `expiry`（unix ms）**总是 ≤ 节点 lease expiry**；

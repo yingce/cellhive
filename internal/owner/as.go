@@ -125,6 +125,9 @@ func (m *Manager) RenewAs(ctx context.Context, s cell.Scope, node string, epoch 
 		return cell.Owner{}, ErrEpochMismatch
 	}
 	cur.Expiry = now.Add(ttl).UnixMilli()
+	if m.AdminAdvertise != "" {
+		cur.AdminAddress = m.AdminAdvertise
+	}
 	data, _ := cell.MarshalOwner(cur)
 	if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
 		return cell.Owner{}, err
@@ -159,6 +162,7 @@ func (m *Manager) ownerFor(epoch uint64, now time.Time, node, advertise string, 
 		Epoch:        epoch,
 		Expiry:       now.Add(ttl).UnixMilli(),
 		Address:      advertise,
+		AdminAddress: m.AdminAdvertise,
 		ProtoVersion: cell.ProtoVersion,
 	}
 }

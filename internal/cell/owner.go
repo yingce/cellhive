@@ -36,12 +36,16 @@ func SupportedProtoVersion(v string) bool {
 // most one node can own a cell at a time. The record is normally refreshed only
 // on activation/takeover/migration, not on the hot path.
 type Owner struct {
-	Node         string `json:"node"`
-	Role         Role   `json:"role"`
-	Session      string `json:"session"`
-	Epoch        uint64 `json:"epoch"`
-	Expiry       int64  `json:"expiry"` // unix millis; always <= node lease expiry
-	Address      string `json:"address"`
+	Node    string `json:"node"`
+	Role    Role   `json:"role"`
+	Session string `json:"session"`
+	Epoch   uint64 `json:"epoch"`
+	Expiry  int64  `json:"expiry"` // unix millis; always <= node lease expiry
+	Address string `json:"address"`
+	// AdminAddress is where owner-forwarded admin requests should land. It is
+	// separate from Address (the cell REST/peer endpoint): the admin listener
+	// has its own authentication surface and must not be folded into :7001.
+	AdminAddress string `json:"admin_address,omitempty"`
 	ProtoVersion string `json:"proto_version"`
 }
 

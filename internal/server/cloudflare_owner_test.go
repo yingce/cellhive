@@ -36,6 +36,9 @@ func newControlOwnerAndFollower(t *testing.T) (owner, follower *Server, ownerHTT
 	owner, om, ownerHTTP := newControlForwardServer(t, dir, "owner")
 	follower, _, _ = newControlForwardServer(t, dir, "follower")
 	om.Advertise = ownerHTTP.URL
+	ownerAdmin := httptest.NewServer(owner.AdminHandler())
+	t.Cleanup(ownerAdmin.Close)
+	om.AdminAdvertise = ownerAdmin.URL
 	if _, err := om.Claim(ctx, control.Scope(), time.Now()); err != nil {
 		t.Fatalf("claim control: %v", err)
 	}
