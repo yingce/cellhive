@@ -281,3 +281,22 @@ func TestPinPairsWithCompatibilityDate(t *testing.T) {
 		t.Fatalf("compatibility ceiling changed to %q: re-verify against pinned workerd %s", MaxCompatibilityDate, PinnedWorkerdVersion)
 	}
 }
+
+func TestValidateD1UsesDatabaseID(t *testing.T) {
+	registered := map[string]bool{"store-inspection-248e4119": true}
+	in := Input{
+		BundleSHA: "x",
+		Bindings:  []Binding{{Type: "d1", Name: "DB", ID: "store-inspection-248e4119"}},
+		IsRegistered: func(kind, name string) bool {
+			return kind == "d1" && registered[name]
+		},
+	}
+	if res := Validate(in); !res.OK() {
+		t.Fatalf("d1 binding id rejected: %+v", res.Errors)
+	}
+	in.Bindings[0].ID = "missing-db"
+	res := Validate(in)
+	if len(res.Errors) == 0 || res.Errors[0].Code != "binding_unregistered" {
+		t.Fatalf("d1 binding name masked a missing database id: %+v", res.Errors)
+	}
+}

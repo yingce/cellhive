@@ -42,7 +42,9 @@ _最后更新：2026-10-22_
 
 本地代码改为带 DO shard owner 身份的写入先记录持久恢复指针，再以 follower fsync 证明打开输出门；接管先按 host manifest 逐文件补传 follower 尾部，活跃 cell-agent 的共享 session 不封存。缺少 follower 时写入回退到等 COS；恢复失败时拒绝 DO 激活。协议测试覆盖捕获 owner 记录释放后的恢复、其他 cell 不受阻断、缺失或损坏的 follower 日志和 A→B→A 单调指针。独立 k3d 的双 cell-agent 真实 workerd A→B→A 返回 `1→2→3`；确定性阻断 FS bucket 的 LTX 上传，确认 follower-only 写入 `4` 未落桶后强杀 A，B 接管返回 `5`，滚动请求最终返回 `126`，脚本退出 0。三副本 DO runtime 另做 A→B→C：B 的第三次写入由 follower 确认且未落桶，强杀 B 后首次接管的 C 返回 `4`；独立脚本模式退出 0。生产仍是旧镜像，真实 COS 的故障窗口尚未验收。活 session 按 scope、follower 重启和封存尾部改为流式读，避免一次载入约 20Gi 日志；冷接管仍需顺序扫描共享日志，生产发布前须测量 SG/USW 现有 spool 规模下的恢复时间。
 
-## 2026-10-22 资源删除栅栏修复后还发现：follower 的 admin `DELETE /v1/control/resource` 被 owner 转发到 owner 的 REST 端口，但该端口只注册了 `POST`，返回 405。现 admin 转发改走 owner 记录中的 `admin_address`，保留 admin 凭证并由 owner 重新 `adminAuth`；REST mux 不再补 admin 路由，旧记录缺字段时按地址 host + admin 端口兜底。`ProviderBucket.ConditionalCreate` 曾不认 `resource-fence.json` 返回 `bucket: not supported`，cleanup job 10 次失败后不再自动重试、同名资源被 `ErrCleanupPending` 永久挡住。现栅栏走 append authority（ADR-270）：COS/OSS 用 `AppendObject(position)` 原子 create/CAS，旧 plain JSON 栅栏首次 CAS 时迁移；历史 10 次失败 job 用 cleanup retry 端点显式重置后继续。
+## 2026-10-23 D1 binding 的 `binding` 名（例如 `DB`）曾被 loader 当成 database id，导致 `wrangler d1 create` 返回的资源名、`database_id` 都正确时，Worker 仍打开空的 `DB` cell 并报 `no such table`。现在 D1 deploy validation 优先用 `database_id`（API `id`）解析资源，loader 也用该 id 生成 scoped token 和 `/v1/d1/...?db=`；binding 名只保留为 env key。新增 `scripts/e2e/bindings-d1-id.sh`（binding=`DB`、database_id=`store-inspection-...`，预建表后 Worker 查询）回归。
+
+2026-10-22 资源删除栅栏修复后还发现：follower 的 admin `DELETE /v1/control/resource` 被 owner 转发到 owner 的 REST 端口，但该端口只注册了 `POST`，返回 405。现 admin 转发改走 owner 记录中的 `admin_address`，保留 admin 凭证并由 owner 重新 `adminAuth`；REST mux 不再补 admin 路由，旧记录缺字段时按地址 host + admin 端口兜底。`ProviderBucket.ConditionalCreate` 曾不认 `resource-fence.json` 返回 `bucket: not supported`，cleanup job 10 次失败后不再自动重试、同名资源被 `ErrCleanupPending` 永久挡住。现栅栏走 append authority（ADR-270）：COS/OSS 用 `AppendObject(position)` 原子 create/CAS，旧 plain JSON 栅栏首次 CAS 时迁移；历史 10 次失败 job 用 cleanup retry 端点显式重置后继续。
 
 2026-10-18 SG 高频日志与 fleet session（ADR-210）
 

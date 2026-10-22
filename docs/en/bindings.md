@@ -8,6 +8,7 @@ Workers see Cloudflare-shaped bindings through `env`; the platform uses a **host
 |---|---|---|---|---|
 | **KV** | KV cell | Async | SQLite (`__kv__` cell) | cell-agent node |
 | **D1** | D1 cell | Async (`prepare/bind/all/first/run/raw/batch/exec`) | SQLite (`__d1__` cell) | cell-agent node |
+| 　└ binding/id | `binding` is only the Worker env key (e.g. `DB`); `database_id` (the API `id`) is the D1 resource/data-cell id. Both deploy validation and runtime use it, never the binding name. | | | |
 | 　└ Contract fidelity | `prepare()`/`bind()` are synchronous local objects in the tenant isolate and can be passed directly to `batch()`; typed arrays round-trip as BLOBs; `meta` includes `changes/last_row_id/changed_db/duration`; errors expose `err.name=D1_ERROR` + `err.code` (ADR-163) | | | |
 | **R2** | S3-compatible object storage | Async | `r2/<ns>/<bucket>/...` + `r2meta/...` (metadata sidecar) | Object storage |
 | 　└ Contract fidelity | All fields of `R2Object/R2ObjectBody` (`key/version/size/etag/httpEtag/uploaded/httpMetadata/customMetadata/checksums` + `text/json/arrayBuffer/blob`); `put` supports `{httpMetadata,customMetadata,md5,sha256}` (validation); `head()`; list `truncated/cursor` + `include` (metadata on demand) + `delimiter`/`delimitedPrefixes` (ADR-163/168) | | | |

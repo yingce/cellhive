@@ -18,6 +18,7 @@ import (
 
 	"cellhive/internal/auth"
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/control"
 	"cellhive/internal/workerbudget"
 	"cellhive/internal/wranglercompat"
@@ -760,17 +761,26 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercom
 		CompatibilityDate:  req.CompatibilityDate,
 		CompatibilityFlags: req.CompatibilityFlags,
 		Vars:               req.Vars,
-		IsRegistered: func(kind, name string) bool {
-			ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, name)
-			if err == nil && ok {
+		IsRegistered: func(kind, ref string) bool {
+			registered := func(id string) bool {
+				if id == "" {
+					return false
+				}
+				ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, id)
+				return err == nil && ok
+			}
+			if registered(ref) {
+				return true
+			}
+			// Native deploys historically used a full cell scope as the D1 id
+			// (acme/__d1__/DB). Resolve its final cell id as well; the resource
+			// itself is still keyed by name.
+			if sc, err := cell.ParseScope(ref); err == nil && sc.Namespace == req.Namespace && registered(sc.ID) {
 				return true
 			}
 			for _, declared := range req.Bindings {
-				if declared.Type == kind && declared.Name == name && declared.ID != "" {
-					ok, err := s.Control.HasBinding(ctx, req.Namespace, kind, declared.ID)
-					if err == nil && ok {
-						return true
-					}
+				if declared.Type == kind && declared.Name == ref && declared.ID != "" && registered(declared.ID) {
+					return true
 				}
 			}
 			return false

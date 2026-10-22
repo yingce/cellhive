@@ -1302,11 +1302,19 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
       continue;
     }
     if (b.type !== "kv" && b.type !== "d1" && b.type !== "r2" && b.type !== "queue" && b.type !== "workflow") continue;
+    // D1's Cloudflare binding has an independent `name` (the env key) and
+    // `id` (the database resource). The runtime must open the database by id,
+    // not by the env key: wrangler commonly uses binding="DB" and
+    // database_id="store-inspection-...".
+    const raw = b.type === "d1" ? (b.id || b.name) : b.name;
+    // Native D1 deployments accepted a full cell scope as the id; the wire
+    // protocol wants the cell id, not "ns/__d1__/DB".
+    const resource = b.type === "d1" && raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
     spec[b.name] = {
       kind: b.type,
       ns: app.namespace,
-      name: b.name,
-      token: await scopedToken(env.SCOPE_SECRET, app.namespace, b.type, b.name),
+      name: resource,
+      token: await scopedToken(env.SCOPE_SECRET, app.namespace, b.type, resource),
     };
   }
   return spec;
