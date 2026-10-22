@@ -314,6 +314,10 @@ func (s *Server) Handler() http.Handler {
 	// the admin listener, which delegates to the same handlers.
 	mux.HandleFunc("POST /v1/control/app", s.auth(s.handleControlApp))
 	mux.HandleFunc("POST /v1/control/resource", s.auth(s.handleControlResource))
+	// Admin write routes must also exist on the REST port: owner-forwarded
+	// admin requests land on the owner's Advertise address, not its admin
+	// listener. Missing methods here turn follower deletes into 405.
+	mux.HandleFunc("DELETE /v1/control/resource", s.auth(s.handleControlResourceDelete))
 	mux.HandleFunc("POST /v1/control/deploy", s.auth(s.handleControlDeploy))
 	mux.HandleFunc("POST /v1/control/promote", s.auth(s.handleControlPromote))
 	mux.HandleFunc("POST /v1/control/rollback", s.auth(s.handleControlRollback))
@@ -323,7 +327,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/domain", s.auth(s.handleControlDomainDelete))
 	mux.HandleFunc("DELETE /v1/control/route", s.auth(s.handleControlRouteDelete))
 	mux.HandleFunc("POST /v1/control/secret", s.auth(s.handleControlSecretPut))
+	mux.HandleFunc("DELETE /v1/control/secret", s.auth(s.handleControlSecretDelete))
+	mux.HandleFunc("GET /v1/control/secrets", s.auth(s.handleControlSecretList))
 	mux.HandleFunc("PATCH /v1/control/secrets/bulk", s.auth(s.handleControlSecretsBulk))
+	mux.HandleFunc("POST /v1/control/service-acl", s.auth(s.handleControlServiceACLPut))
+	mux.HandleFunc("DELETE /v1/control/service-acl", s.auth(s.handleControlServiceACLDelete))
+	mux.HandleFunc("GET /v1/control/service-acls", s.auth(s.handleControlServiceACLList))
+	mux.HandleFunc("GET /v1/control/queue/status", s.auth(s.handleControlQueueStatus))
+	mux.HandleFunc("POST /v1/control/queue/replay-dlq", s.auth(s.handleControlQueueReplayDLQ))
+	mux.HandleFunc("GET /v1/control/hyperdrive/proxy", s.auth(s.handleHyperdriveProxyStatus))
+	mux.HandleFunc("GET /v1/control/logs", s.auth(s.handleLogQuery))
+	mux.HandleFunc("POST /v1/control/logs/subscribe", s.auth(s.handleLogSubscribe))
+	mux.HandleFunc("POST /v1/control/bundle", s.auth(s.handleBundlePut))
+	mux.HandleFunc("POST /v1/control/asset", s.auth(s.handleAssetPut))
+	mux.HandleFunc("GET /v1/control/capacity", s.auth(s.handleControlCapacity))
 	mux.HandleFunc("DELETE /v1/control/app", s.auth(s.handleControlAppDelete))
 	mux.HandleFunc("DELETE /v1/control/worker", s.auth(s.handleControlWorkerDelete))
 	mux.HandleFunc("POST /v1/control/gc/bundles", s.auth(s.handleBundleGC))

@@ -10,6 +10,7 @@
   4. `attempts<10` 的自动重试预算不扩大；历史 10 次失败 job 仍通过 `POST /v1/control/resource/cleanup/retry` 显式重置，避免无限重试。
 - **验证**：`internal/bucket` 新增 `TestProviderResourceFence`（真实 COS/OSS：首次 create、第二次 `ErrPrecondition`、CAS 更新、legacy plain JSON 读取/迁移）与 `TestSegmentedAuthorityLegacyResourceFence`、`TestAuthorityKeyRoutesResourceFence`；`TestProviderCloudDiagnose` 继续覆盖 provider 启动探针。
 - **边界/代价**：栅栏从普通点对象变为 append 权威记录（窗口分段、token 带 window/instance/length），旧/新二进制不能混跑；USW 热补丁的 plain 栅栏在第一次 CAS 前仍可读，升级需停机替换。
+- **补充（owner 转发路由）**：`forwardOrClaim` 把 admin 请求发到 owner 的 **Advertise REST 地址**（`:7001`），不是 admin 监听端口。因此 admin 写方法必须在 REST mux 也有路由；仅注册 `AdminHandler` 会让 follower 的 `DELETE /v1/control/resource` 在 owner 上得到 405。主 mux 现补齐 resource delete、secret delete/list、service-acl、queue status/replay、bundle/asset、logs、capacity 等转发方法，并新增 follower delete 回归测试。
 
 ## ADR-269 资源名与 scope 必须是可寻址的 cell 组件（2026-10-22）✅实现
 

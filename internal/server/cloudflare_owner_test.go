@@ -260,3 +260,23 @@ func TestCloudflareWorkerRoutesResolveFromControlOwner(t *testing.T) {
 		t.Fatalf("follower route list = %d: %s", followerRoutes.Code, followerRoutes.Body.String())
 	}
 }
+
+// A follower's admin DELETE is owner-forwarded over the owner's REST address.
+// The REST mux must expose the same admin write methods as AdminHandler; before
+// ADR-270 it only had POST /v1/control/resource, so a follower delete returned
+// 405 while the same request on the owner succeeded.
+func TestControlResourceDeleteForwardsToOwner(t *testing.T) {
+	ctx := context.Background()
+	owner, follower, _ := newControlOwnerAndFollower(t)
+	if _, err := owner.Control.CreateResource(ctx, "acme", "kv", "CHTEST", "acme/__kv__/CHTEST", "test"); err != nil {
+		t.Fatalf("create resource: %v", err)
+	}
+	rr := adminDo(t, follower.AdminHandler(), http.MethodDelete,
+		"/v1/control/resource?namespace=acme&kind=kv&name=CHTEST&force=1", "admin-tok", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("follower delete = %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"cleanup"`) {
+		t.Fatalf("follower delete body = %s", rr.Body.String())
+	}
+}
