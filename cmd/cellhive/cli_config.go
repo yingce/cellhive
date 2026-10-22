@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -107,99 +105,6 @@ func activeProfile() cliProfile {
 	}
 	return c.Profiles[activeProfileName()]
 }
-func cmdLogin(args []string) error {
-	f := flag.NewFlagSet("login", flag.ContinueOnError)
-	profile := f.String("profile", "default", "profile name")
-	admin := f.String("url", "", "CellHive admin URL")
-	token := f.String("token", "", "admin token")
-	jwt := f.String("jwt", "", "admin JWT")
-	if e := f.Parse(args); e != nil {
-		return e
-	}
-	if *admin == "" {
-		return fmt.Errorf("login requires --url")
-	}
-	if *token == "" && *jwt == "" {
-		fmt.Fprint(os.Stderr, "Admin token: ")
-		line, e := bufio.NewReader(os.Stdin).ReadString('\n')
-		if e != nil {
-			return e
-		}
-		*token = strings.TrimSpace(line)
-	}
-	p := cliConfigPath()
-	c, e := loadCLIConfig(p)
-	if e != nil {
-		return e
-	}
-	c.Profiles[*profile] = cliProfile{AdminURL: strings.TrimRight(*admin, "/"), AdminToken: *token, AdminJWT: *jwt}
-	if e = saveCLIConfig(p, c); e != nil {
-		return e
-	}
-	fmt.Printf("saved profile %q in %s\n", *profile, p)
-	return nil
-}
-func cmdAuth(args []string) error {
-	if len(args) == 0 || args[0] == "list" {
-		c, e := loadCLIConfig(cliConfigPath())
-		if e != nil {
-			return e
-		}
-		for n := range c.Profiles {
-			fmt.Println(n)
-		}
-		return nil
-	}
-	switch args[0] {
-	case "current":
-		fmt.Println(activeProfileName())
-		return nil
-	case "logout":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: cellhive auth logout <profile>")
-		}
-		p := cliConfigPath()
-		c, e := loadCLIConfig(p)
-		if e != nil {
-			return e
-		}
-		delete(c.Profiles, args[1])
-		return saveCLIConfig(p, c)
-	case "test":
-		p := activeProfile()
-		if p.AdminURL == "" {
-			return fmt.Errorf("profile %q is not configured", activeProfileName())
-		}
-		fmt.Printf("profile: %s\nadmin_url: %s\nconfigured: yes\n", activeProfileName(), p.AdminURL)
-		return nil
-	default:
-		return fmt.Errorf("usage: cellhive auth list|current|test|logout <profile>")
-	}
-}
-func cmdProject(args []string) error {
-	if len(args) == 0 || args[0] != "init" {
-		return fmt.Errorf("usage: cellhive project init --namespace <ns> [--profile <profile>]")
-	}
-	f := flag.NewFlagSet("project init", flag.ContinueOnError)
-	ns := f.String("namespace", "", "CellHive namespace")
-	profile := f.String("profile", activeProfileName(), "profile name")
-	if e := f.Parse(args[1:]); e != nil {
-		return e
-	}
-	if *ns == "" {
-		return fmt.Errorf("project init requires --namespace")
-	}
-	p := filepath.Join(".cellhive", "project.json")
-	if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
-		return e
-	}
-	b, _ := json.MarshalIndent(projectConfig{Profile: *profile, Namespace: *ns}, "", "  ")
-	if e := os.WriteFile(p, append(b, '\n'), 0600); e != nil {
-		return e
-	}
-	fmt.Printf("initialized %s\n", p)
-	return nil
-}
 func projectNamespace() string {
 	_, p, e := findProjectConfig(".")
 	if e == nil {
@@ -222,29 +127,6 @@ func projectWorkerConfig(name string) string {
 		return rel
 	}
 	return filepath.Join(root, rel)
-}
-
-func cmdEnv() error {
-	p := activeProfile()
-	if p.AdminURL == "" {
-		return fmt.Errorf("profile %q is not configured", activeProfileName())
-	}
-	ns := projectNamespace()
-	if ns == "" {
-		return fmt.Errorf("project namespace is not configured; run `cellhive project init --namespace <ns>`")
-	}
-	base := strings.TrimRight(p.AdminURL, "/")
-	if !strings.HasSuffix(base, "/client/v4") {
-		base += "/client/v4"
-	}
-	token := p.AdminToken
-	if token == "" {
-		token = p.AdminJWT
-	}
-	for _, kv := range []string{"CLOUDFLARE_API_BASE_URL=" + base, "CLOUDFLARE_API_TOKEN=" + token, "CLOUDFLARE_ACCOUNT_ID=" + ns, "WRANGLER_SEND_METRICS=false"} {
-		fmt.Printf("export %s\n", shellQuote(kv))
-	}
-	return nil
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }

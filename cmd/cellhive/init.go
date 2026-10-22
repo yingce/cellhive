@@ -2,30 +2,36 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+
 	"cellhive/internal/wranglercompat"
 )
 
-// cmdInit creates a small project that can be deployed by either CellHive or
-// official Wrangler. It never calls a remote API or installs dependencies.
-func cmdInit(args []string) error {
-	if len(args) == 0 || !workerProjectName(args[0]) {
-		return fmt.Errorf("usage: cellhive init <worker-name> [--yes] (lowercase letters, digits and hyphens only)")
+// newInitCommand creates a small project that can be deployed by either
+// CellHive or official Wrangler. It never calls a remote API or installs
+// dependencies.
+func newInitCommand() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "init <worker-name>",
+		Short: "create a minimal deployable Worker project",
+		Args:  legacyArgs("usage: cellhive init <worker-name> [--yes] (lowercase letters, digits and hyphens only)", 1, 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !workerProjectName(args[0]) {
+				return fmt.Errorf("usage: cellhive init <worker-name> [--yes] (lowercase letters, digits and hyphens only)")
+			}
+			return initCore(args[0], yes)
+		},
 	}
-	name := args[0]
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.Bool("yes", false, "create without prompting")
-	fs.Bool("y", false, "create without prompting")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if len(fs.Args()) != 0 {
-		return fmt.Errorf("usage: cellhive init <worker-name> [--yes]")
-	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "create without prompting")
+	return cmd
+}
+
+func initCore(name string, yes bool) error {
 	if err := os.Mkdir(name, 0755); err != nil {
 		return err
 	}
@@ -67,4 +73,9 @@ func workerProjectName(s string) bool {
 		return false
 	}
 	return true
+}
+
+// cmdInit keeps the pre-cobra entry point used by in-process tests.
+func cmdInit(args []string) error {
+	return dispatch(append([]string{"init"}, args...))
 }

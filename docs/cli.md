@@ -19,6 +19,23 @@ cellhive skills update
 
 在线 AI 路由目录是 [`docs/ai/index.md`](ai/index.md)，机器可读能力目录是 [`docs/ai/catalog.json`](ai/catalog.json)。
 
+## 命令面：原生命令 vs `wrangler` 兼容
+
+- **原生命令是唯一实现**：`cellhive app/resource/deploy/route/secret/kv/d1/r2/queue/workflow/...` 直接调用控制面/数据面；脚本、CI、e2e 都走这层。
+- **`cellhive wrangler ...` 只是兼容翻译层**：把 wrangler 子命令与 flags 映射到原生 argv 后重新执行，不重复实现业务逻辑（ADR-138/148/265）。
+- **CellHive 特有操作没有 wrangler 等价**：`resource --scope`、`deploy --bundle-sha`、`token`、`creds`、`status`/`capacity`/`gc`/`audit`/`routes` 等只保留原生命令。
+- **兼容别名**：顶层 `versions`/`deployments`/`triggers`/`queues`/`workflows` 是为迁移保留的隐藏别名；新脚本应优先用原生 `queue`/`workflow` 等。
+- **不要为了"兼容"把实现搬进 wrangler 前缀**：否则显式/自动化调用会被迫接受 wrangler 的 config 发现与 flag 形态。
+- **帮助/补全由 cobra 生成**：`cellhive <command> --help`、`cellhive help <command>`、`cellhive completion bash|zsh|fish|powershell`；`wrangler` 前缀保留翻译层语义。
+
+| 能力 | 原生命令（canonical） | wrangler 兼容入口 |
+|---|---|---|
+| Queue | `cellhive queue create/list/delete/stats/status/replay-dlq/consumer/purge ...` | `cellhive wrangler queues ...`（`queues` 隐藏别名同样转发） |
+| Worker 删除 | `cellhive worker delete <ns> <worker>` | `cellhive wrangler delete <ns> <worker>` |
+| KV | `cellhive kv namespace/key/bulk ...` | `cellhive wrangler kv ...` |
+| D1 | `cellhive d1 create/list/delete/info/execute/query/export/migrations ...` | `cellhive wrangler d1 ...` |
+| R2 | `cellhive r2 bucket/object ...` | `cellhive wrangler r2 ...` |
+
 ## 登录 profile
 
 ```bash

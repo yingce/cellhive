@@ -120,12 +120,3 @@ func cmdBundleBuild(args []string) error {
 	printJSON(res)
 	return nil
 }
-
-// listFlag collects repeatable string flags.
-type listFlag []string
-
-func (l *listFlag) String() string { return strings.Join(*l, ",") }
-func (l *listFlag) Set(v string) error {
-	*l = append(*l, v)
-	return nil
-}

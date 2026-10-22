@@ -1,5 +1,25 @@
 # 决策记录（ADR）
 
+## ADR-265 `cellhive` CLI 迁移到 cobra；原生命令是唯一实现，wrangler 只是兼容层（2026-10-22，P1/P2 命令面完成；P3 收尾中）
+
+- **背景**：`cmd/cellhive` 现有 45 个 `cmdXxx` 命令函数、30 处 `flag.NewFlagSet`，主体堆在 2961 行的 `main.go` 里；入口是手写 `dispatch` switch（38 个 case）+ 108 行手写 `usage()`。ADR-038 早已把 CLI 框架定为 **cobra（后续）**，但代码一直用 stdlib `flag`，文档与实现不一致。同时命令面出现两套名字：原生 `queue`/`workflow`/`kv`/`d1`/`r2` 与 wrangler 兼容的 `queues`/`workflows`/`versions`/...，容易被误读为"功能被重复实现"。
+- **决策**：
+  1. **框架**：`cmd/cellhive` 接入 `github.com/spf13/cobra`（连带 `pflag`）；其他 `cmd/*` 服务/工具入口继续用 stdlib `flag`（它们不是子命令树，迁移无收益）。cobra 只承担命令树、帮助、补全与 flag 解析；HTTP/业务仍在原 handler 与 `internal/`。
+  2. **命令面（唯一实现原则）**：
+     - **原生命令是 canonical surface**：`cellhive <domain> <verb>` 是唯一实现，也是脚本、CI、e2e 使用的表面。CellHive 特有操作（`app`/`resource`/`route`/`domain`/`token`/`creds`/`status`/`capacity`/`gc`/`audit`/`service-acl`/`bundle`/`asset`/`skills`/`login`/`auth`/`project`/`env`/`diagnose`）没有 wrangler 等价，必须保持原生。
+     - **`cellhive wrangler ...` 是兼容翻译层**：`translateWrangler` 把 wrangler 子命令与 flags 映射成原生 argv 后重新执行，**不持有业务逻辑**；禁止把功能"搬进" wrangler 前缀。顶层 `versions`/`deployments`/`triggers`/`queues`/`workflows` 是兼容别名，在帮助中隐藏（`Hidden`），但保持可用。
+     - **CF 有、平台无的语义**（`pages`/`containers`/`pubsub`/...）继续用表驱动结构化拒绝（ADR-138/148），不新增原生实现。
+  3. **原生组补齐而不是复制**：`queue` 吸收 `consumer`/`purge`（`queues` 保留为隐藏别名）；`workflow`/`workflows` 的定义/实例命名统一留到 P2（当前两者都可用，`workflows` 隐藏），避免在迁移中改变语义；`kv`/`d1`/`r2` 已是原生组，wrangler 前缀只做翻译；`worker` 保持 `delete`（wrangler `delete` 映射到它）。
+  4. **分阶段迁移**：
+     - **P1（本次）**：cobra 根命令 + 全部现有命令注册为兼容叶子（`DisableFlagParsing`，内部仍用原 handler/flag），保留退出码 2/1、`error:` 前缀、stdout JSON 与 `-c` shorthand；`wrangler` 重入使用新的 root 实例；新增 `executeRoot()` 测试助手。
+     - **P2（命令面完成）**：`app`/`resource`（`app.go`/`resource.go`）、`domain`/`route`/`secret`/`service-acl`、`deploy`/`promote`/`rollback`、`kv`/`d1`/`r2`/`hyperdrive`（注册/统计 typed flags；KV/R2/D1 数据面及 D1 migrations 已抽 `kv_core.go`/`r2_core.go`/`d1_core.go` typed core）、`queue`（registry/status/replay/consumer/purge，status/replay 已 core）、`bundle`/`asset`/`worker`/`workflow`/`releases`/`gc`/`audit`/`status`/`capacity`/`routes`、`auth`/`login`/`project`/`env`、`skills`/`types`/`init`、`diagnose`/`tail`（tail 已 core）、`vectorize` 子命令树与 typed core（`vectorize_core.go`）均已迁到 cobra；`cmdApp`/`cmdResource`/`cmdCreds` 等仅保留为进程内兼容 shim。所有面向用户的命令均已走 typed flags → typed core；只有 `cmdKind`/`cmdCompat`/`wrangler` 作为显式兼容层保留。
+     - **P3（收尾中）**：手写 `usage()` 已删除（no-arg/未知命令改用 cobra help）；`client.go`/`wrangler.go` 已从 `main.go` 拆出；`normalizeLegacyLongFlags` 已恢复 `-config`/`-force` 等单横线长 flag；剩余补全/man、IO 注入。
+  5. **兼容护栏**：pflag 会把 `-config` 解释成 `-c onfig`（stdlib 接受单横线长 flag），已在入口用 `normalizeLegacyLongFlags` 归一化（`-c`/`-v`/`-h` 与 `--` 语义不变）；`wrangler` 重入不得复用全局 flag 状态；数据命令的 stdout 只输出 JSON/数据，错误走 stderr。
+- **验证（P1/P2/P3）**：`make build`、`go vet ./cmd/cellhive`、`go test -count=1 ./cmd/cellhive` 全绿（70 个 Test）；新增 `root_test.go`、`app_resource_test.go`、`deploy_test.go`、`kind_test.go`、`access_test.go`、`dataplane_test.go`、`queue_test.go`、`auth_test.go`、`vectorize_test.go` 覆盖命令树、typed flags/HTTP、别名、arity、配置命令、`-config` 归一化与兼容 shim；真实 workerd 的 `TestCLIEndToEndWithWorkerCode` PASS；`scripts/e2e/bindings.sh`、`scripts/e2e/queue.sh`、`scripts/e2e/workflow.sh` 均 PASS。
+- **残余（P3）**：`cmdKind`/`cmdCompat`/`wrangler` 仍是兼容层（有意保留，非用户主命令面）；IO 尚未全部统一注入；`main.go` 约 816 行（主要是 `cmdKind`/`cmdCompat`/构建/传输 helper）；`cellhive commands`/man 未生成（shell completion 已有）。
+
+---
+
 ## ADR-264 计算层切换到 cellhive-workerd fork ✅
 
 - **背景**：上游 stock workerd 无法执行 CellHive 需要的逐调用 CPU/subrequest/deadline 限额；用户决定改为维护 fork。
@@ -690,7 +710,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   - **HTTP**：内部/管理面用 **stdlib `net/http`**；不用 fasthttp/fiber。
   - **热路径（Go↔Go）**：**gRPC**（`google.golang.org/grpc`）+ **buf** 生成 protobuf（替代 protoc）。
   - **SQLite**：~~默认 `modernc.org/sqlite`（纯 Go，无 CGO）；需要自定义 VFS/性能瓶颈时切 `mattn/go-sqlite3`（CGO）~~ **已由 ADR-159 切换为 `mattn/go-sqlite3`（CGO + vec1 ANN）**；`internal/cellstore` 仍然隔离驱动（换回/再换只改一个包）。
-  - **CLI**：**cobra**（后续）；**Metrics**：**`prometheus/client_golang`**；**日志**：stdlib **`log/slog`**；**测试**：stdlib **`testing`**。
+  - **CLI**：**cobra**（由 ADR-265 落地：P1 已接入，逐域迁移中）；**Metrics**：**`prometheus/client_golang`**；**日志**：stdlib **`log/slog`**；**测试**：stdlib **`testing`**。
 - **理由**：内部 HTTP 非瓶颈（瓶颈是持久化证明与复制 I/O）；热路径用 gRPC/二进制帧；纯 Go SQLite 便于单二进制与交叉编译；依赖尽量少。
 - **代价**：P0 的 peer 传输先为 HTTP（粗边），后续按 ADR-026 换 gRPC+buf；若需自定义 VFS 需引入 CGO。
 - **备注**：`modernc` 与 `mattn` 的 **WAL 均可用**，但**自定义 VFS 不等价**（modernc 是 C→Go 转译）；**读 WAL 文件与驱动无关**。
@@ -3216,4 +3236,4 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 - ADR-038~050：新增（Go 技术栈；持久性姿态；group commit；HTTP 101 peer 流；真实 SQL benchmark；capture 优化：WAL2 page-map、prepared statement、延迟注入、fleet/capture pipelining、snapshot/apply、连续写入安全 checkpoint 接管）。
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
-_最后更新：2026-10-20_
+_最后更新：2026-10-22_

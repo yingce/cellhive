@@ -3,13 +3,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 type cellhiveSkillBundle struct {
@@ -40,33 +41,60 @@ func cellhiveSkillRoot() string {
 	h, _ := os.UserHomeDir()
 	return filepath.Join(h, ".agents", "skills")
 }
-func cmdSkills(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: cellhive skills status|update [--force]")
+func newSkillsCommand() *cobra.Command {
+	skills := &cobra.Command{
+		Use:   "skills",
+		Short: "inspect or update the AI Skill bundle",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return fmt.Errorf("usage: cellhive skills status|update [--force]")
+		},
 	}
+	skills.AddCommand(
+		&cobra.Command{
+			Use:   "status",
+			Short: "show the installed skill bundle version",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return skillsStatus()
+			},
+		},
+		newSkillsUpdateCommand(),
+	)
+	return skills
+}
+
+func skillsStatus() error {
 	root := cellhiveSkillRoot()
-	switch args[0] {
-	case "status":
-		b, e := os.ReadFile(filepath.Join(root, ".cellhive-skills-version"))
-		if errors.Is(e, os.ErrNotExist) {
-			fmt.Println("not_installed")
-			return nil
-		}
-		if e != nil {
-			return e
-		}
-		fmt.Printf("version: %sroot: %s\n", string(b), root)
+	b, err := os.ReadFile(filepath.Join(root, ".cellhive-skills-version"))
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Println("not_installed")
 		return nil
-	case "update":
-		f := flag.NewFlagSet("skills update", flag.ContinueOnError)
-		force := f.Bool("force", false, "redownload the current version")
-		if e := f.Parse(args[1:]); e != nil {
-			return e
-		}
-		return updateCellhiveSkill(root, *force)
-	default:
-		return fmt.Errorf("usage: cellhive skills status|update [--force]")
 	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("version: %sroot: %s\n", string(b), root)
+	return nil
+}
+
+func newSkillsUpdateCommand() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "download/update the AI Skill bundle",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return updateCellhiveSkill(cellhiveSkillRoot(), force)
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "redownload the current version")
+	return cmd
+}
+
+// cmdSkills keeps the pre-cobra entry point for in-process callers.
+func cmdSkills(args []string) error {
+	return dispatch(append([]string{"skills"}, args...))
 }
 func updateCellhiveSkill(root string, force bool) error {
 	base := strings.TrimRight(os.Getenv("CELLHIVE_SKILL_BASE_URL"), "/")

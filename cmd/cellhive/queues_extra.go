@@ -9,14 +9,14 @@ import (
 
 func cmdQueueConsumer(args []string) error {
 	if len(args) < 3 {
-		return fmt.Errorf("usage: cellhive queues consumer list|add|remove <namespace> <queue> [worker]")
+		return fmt.Errorf("usage: cellhive queue consumer list|add|remove <namespace> <queue> [worker]")
 	}
 	verb, ns, queue := args[0], args[1], args[2]
 	base := "/client/v4/accounts/" + url.PathEscape(ns) + "/queues/" + url.PathEscape(queue) + "/consumers"
 	switch verb {
 	case "list":
 		if len(args) != 3 {
-			return fmt.Errorf("usage: cellhive queues consumer list <namespace> <queue>")
+			return fmt.Errorf("usage: cellhive queue consumer list <namespace> <queue>")
 		}
 		out, err := adminCall(http.MethodGet, base, nil)
 		if err != nil {
@@ -26,7 +26,7 @@ func cmdQueueConsumer(args []string) error {
 		return nil
 	case "remove":
 		if len(args) != 4 {
-			return fmt.Errorf("usage: cellhive queues consumer remove <namespace> <queue> <worker>")
+			return fmt.Errorf("usage: cellhive queue consumer remove <namespace> <queue> <worker>")
 		}
 		out, err := adminCall(http.MethodDelete, base+"/"+url.PathEscape(args[3]), nil)
 		if err != nil {
@@ -36,9 +36,9 @@ func cmdQueueConsumer(args []string) error {
 		return nil
 	case "add":
 		if len(args) < 4 {
-			return fmt.Errorf("usage: cellhive queues consumer add <namespace> <queue> <worker> [--batch-size N] [--max-retries N] [--max-concurrency N] [--dead-letter-queue name]")
+			return fmt.Errorf("usage: cellhive queue consumer add <namespace> <queue> <worker> [--batch-size N] [--max-retries N] [--max-concurrency N] [--dead-letter-queue name]")
 		}
-		fs := flag.NewFlagSet("queues consumer add", flag.ContinueOnError)
+		fs := flag.NewFlagSet("queue consumer add", flag.ContinueOnError)
 		batchSize := fs.Int("batch-size", 0, "max messages per batch")
 		maxRetries := fs.Int("max-retries", 0, "maximum retries")
 		maxConcurrency := fs.Int("max-concurrency", 0, "maximum concurrent invocations")
@@ -58,12 +58,12 @@ func cmdQueueConsumer(args []string) error {
 		printJSON(out)
 		return nil
 	}
-	return fmt.Errorf("usage: cellhive queues consumer list|add|remove <namespace> <queue> [worker]")
+	return fmt.Errorf("usage: cellhive queue consumer list|add|remove <namespace> <queue> [worker]")
 }
 
 func cmdQueuePurge(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: cellhive queues purge <namespace> <queue>")
+		return fmt.Errorf("usage: cellhive queue purge <namespace> <queue>")
 	}
 	path := "/client/v4/accounts/" + url.PathEscape(args[0]) + "/queues/" + url.PathEscape(args[1]) + "/purge"
 	out, err := adminCall(http.MethodPost, path, nil)
