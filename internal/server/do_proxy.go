@@ -87,7 +87,7 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		matched := false
 		for _, b := range tw.Version.Bindings {
-			if b.Type == "do" && b.Name == name && (b.ID == req.Class || b.ID == "") {
+			if b.Type == "do" && b.Name == name && (b.ID == req.Class || (b.ID == "" && b.Name == req.Class)) {
 				matched = true
 				break
 			}

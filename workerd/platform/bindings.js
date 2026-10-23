@@ -698,7 +698,7 @@ export class ServiceBinding extends WorkerEntrypoint {
     const reqHeaders = {};
     req.headers.forEach((v, k) => {
       const lk = k.toLowerCase();
-      if (lk === "host" || lk.startsWith("x-cellhive-")) return;
+      if (lk === "host" || lk === "content-length" || lk === "connection" || lk === "transfer-encoding" || lk.startsWith("x-cellhive-")) return;
       reqHeaders[k] = v;
     });
     let encodedReqHeaders = "";
