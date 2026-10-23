@@ -58,7 +58,11 @@ type Store struct {
 	// cell's ownership record is untouched, and the next request reopens it.
 	MaxOpenCells int
 	IdleTTL      time.Duration
-	Drop         func(ctx context.Context, sc cell.Scope) error
+	// HydrateParallel bounds concurrent cold hydrates across scopes. Per-scope
+	// opens are parallel, but a mass restart must not hydrate every cell at once
+	// (parallel RestoreChain fetches can exceed the container memory limit).
+	HydrateParallel int
+	Drop            func(ctx context.Context, sc cell.Scope) error
 	// Pin, when set, excludes a scope from LRU/idle eviction. The control cell
 	// is pinned: it is the hottest cell, and reopening it re-runs schema
 	// migration and forces capture to rebuild its baseline (ADR-272).
@@ -71,6 +75,7 @@ type Store struct {
 	OnForget func(sc cell.Scope)
 
 	openMu                  sync.Mutex // serializes cold opens so one file is opened once
+	hydrateSem              chan struct{}
 	resourceGenerationLocks [64]sync.Mutex
 
 	evicted atomic.Uint64
@@ -108,16 +113,21 @@ type lruEnt struct {
 
 // New creates a Store rooted at dataDir.
 func New(dataDir string) (*Store, error) {
+	return newStore(dataDir, 0)
+}
+
+func newStore(dataDir string, hydrateParallel int) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
 	s := &Store{
-		DataDir:  dataDir,
-		cells:    map[string]*Cell{},
-		lru:      list.New(),
-		byPath:   map[string]*list.Element{},
-		busy:     map[string]int{},
-		evicting: map[string]bool{},
+		DataDir:         dataDir,
+		HydrateParallel: hydrateParallel,
+		cells:           map[string]*Cell{},
+		lru:             list.New(),
+		byPath:          map[string]*list.Element{},
+		busy:            map[string]int{},
+		evicting:        map[string]bool{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s, nil
@@ -153,6 +163,21 @@ func (s *Store) touchLocked(p string) {
 		e.Value.(*lruEnt).last = time.Now()
 		s.lru.MoveToFront(e)
 	}
+}
+
+func (s *Store) hydrateSlot() func() {
+	n := s.HydrateParallel
+	if n <= 0 {
+		n = 2
+	}
+	s.openMu.Lock()
+	if s.hydrateSem == nil || cap(s.hydrateSem) != n {
+		s.hydrateSem = make(chan struct{}, n)
+	}
+	sem := s.hydrateSem
+	s.openMu.Unlock()
+	sem <- struct{}{}
+	return func() { <-sem }
 }
 
 // Cell returns a shared, cached Cell for the scope, opening and migrating it
@@ -205,7 +230,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	cold := missing || markerExists
 	paged := false
 	if cold && (missing || markerValid) && s.Paged != nil {
+		release := s.hydrateSlot()
 		src, ok, perr := s.Paged(ctx, sc, p)
+		release()
 		if perr != nil {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
@@ -265,7 +292,10 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		missing = true
 	}
 	if missing && s.Hydrate != nil {
-		if err := s.Hydrate(ctx, sc, p); err != nil {
+		release := s.hydrateSlot()
+		err := s.Hydrate(ctx, sc, p)
+		release()
+		if err != nil {
 			return nil, fmt.Errorf("cellstore: hydrate %s: %w", sc, err)
 		}
 	}

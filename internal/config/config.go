@@ -51,7 +51,8 @@ type Config struct {
 
 	// MaxOpenCells caps the number of cached cell handles (0 = unlimited).
 	// The default is 64; the LRU sweeper closes excess handles.
-	MaxOpenCells int
+	MaxOpenCells    int
+	HydrateParallel int
 	// CellDiskMax bounds the bytes of cell files on this node (0 = unlimited).
 	// When exceeded, the janitor deletes least-recently-used files for scopes
 	// this node does not own (ADR-122).
@@ -625,6 +626,7 @@ func FromEnv() Config {
 		PlacementWeight:              envInt("CELLHIVE_PLACEMENT_WEIGHT", 0),
 		PlacementAZ:                  env("CELLHIVE_PLACEMENT_AZ", ""),
 		MaxOpenCells:                 envInt("CELLHIVE_MAX_OPEN_CELLS", 32),
+		HydrateParallel:              envInt("CELLHIVE_HYDRATE_PARALLEL", 2),
 		CellIdleTTL:                  envDuration("CELLHIVE_CELL_IDLE", 5*time.Minute),
 		CellDiskMax:                  envBytes("CELLHIVE_CELL_DISK_MAX", 0),
 		CellDiskSweep:                envDuration("CELLHIVE_CELL_DISK_SWEEP", time.Minute),

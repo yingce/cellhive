@@ -2,7 +2,9 @@ package cellstore
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,4 +183,43 @@ func TestForgetCallsOnForget(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("OnForget was not called")
 	}
+}
+
+func TestHydrateConcurrencyLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.HydrateParallel = 2
+	var active, peak int32
+	release := make(chan struct{})
+	s.Hydrate = func(context.Context, cell.Scope, string) error {
+		n := atomic.AddInt32(&active, 1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+				break
+			}
+		}
+		<-release
+		atomic.AddInt32(&active, -1)
+		return nil
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: fmt.Sprintf("hydrate-%d", i)})
+		}(i)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := atomic.LoadInt32(&peak); got > 2 {
+		t.Fatalf("peak concurrent hydrates = %d, want <=2", got)
+	}
+	close(release)
+	wg.Wait()
 }
