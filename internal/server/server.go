@@ -645,6 +645,12 @@ func (s *Server) recordBindingCall(ns, kind string, status int) {
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("content-type", "text/plain; version=0.0.4")
+	writeFmt(w, "# TYPE cellhive_commit_total counter\n")
+	s.commitModes.Range(func(k, v any) bool {
+		writeFmt(w, "cellhive_commit_total{mode=%q} %d\n", k.(string), v.(*atomic.Uint64).Load())
+		return true
+	})
+	writeFmt(w, "# TYPE cellhive_live_followers gauge\ncellhive_live_followers %d\n", s.followerCount.Load())
 	writeFmt(w, "# TYPE cellhive_requests_total counter\n")
 	writeFmt(w, "cellhive_requests_total %d\n", s.requests.Load())
 	writeFmt(w, "# TYPE cellhive_claims_total counter\n")
