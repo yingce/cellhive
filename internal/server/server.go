@@ -131,11 +131,6 @@ type Deps struct {
 	// timer into its owning cell and register the scope for local dispatch.
 	Timers    *timer.Registry
 	OpenTimer func(ctx context.Context, sc cell.Scope) (*timer.Store, error)
-	// timerRegPending dedupes asynchronous pending-timer registration for a
-	// scope. A claim must not block the data plane on a cold timer-cell hydrate.
-	timerRegMu      sync.Mutex
-	timerRegPending map[string]bool
-	timerRegWG      sync.WaitGroup
 }
 
 // Server wires the HTTP surface for a cell-agent node.
@@ -145,6 +140,12 @@ type Server struct {
 	resourceRep       *replica.Manager
 	resourceCleanupMu sync.Mutex
 	retirementAfter   string
+
+	// timerRegPending dedupes asynchronous pending-timer registration for a
+	// scope. A claim must not block the data plane on a cold timer-cell hydrate.
+	timerRegMu      sync.Mutex
+	timerRegPending map[string]bool
+	timerRegWG      sync.WaitGroup
 
 	requests atomic.Uint64
 	claims   atomic.Uint64
