@@ -120,6 +120,14 @@ func main() {
 
 	lm := lease.NewManager(b, cfg.NodeID, cfg.SessionID, cfg.Advertise, cfg.PeerURL, cfg.LeaseTTL)
 	lm.Instance = inst.ID
+	if prev, lerr := lm.Get(ctx, cfg.NodeID); lerr == nil && prev.Live(time.Now()) && prev.Session != cfg.SessionID {
+		if prev.Instance == "" || prev.Instance != inst.ID {
+			log.Error("node id is live in another instance", "node", cfg.NodeID, "lease_session", prev.Session, "lease_instance", prev.Instance, "instance", inst.ID)
+			os.Exit(1)
+		}
+	} else if lerr != nil && !errors.Is(lerr, bucket.ErrNotFound) {
+		log.Warn("read previous node lease failed", "err", lerr)
+	}
 	lm.AZ = cfg.PlacementAZ
 	adminAdvertise := ""
 	if host, _, err := net.SplitHostPort(cfg.Advertise); err == nil {
