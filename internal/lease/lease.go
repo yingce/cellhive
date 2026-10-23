@@ -54,9 +54,11 @@ type Manager struct {
 	TTL      time.Duration
 	renewKey string
 
-	mu       sync.Mutex
-	cached   []NodeLease
-	cachedAt time.Time
+	mu         sync.Mutex
+	cached     []NodeLease
+	cachedAt   time.Time
+	refreshing bool
+	retryAt    time.Time
 }
 
 // NewManager builds a lease manager.
@@ -154,20 +156,53 @@ func (m *Manager) SampleCached(ctx context.Context, ttl time.Duration) []NodeLea
 		m.mu.Unlock()
 		return cached
 	}
-	m.mu.Unlock()
-
-	// Sample outside the lock: a bucket List/Get round trip must not serialize
-	// every caller behind one another on cache expiry.
-	sample, err := m.Sample(ctx)
-	if err != nil {
-		m.mu.Lock()
+	if m.cached != nil {
+		// Stale-while-revalidate: a hot write must never block on a bucket
+		// List. Return the previous snapshot and refresh in the background.
+		if !m.refreshing && time.Now().After(m.retryAt) {
+			m.refreshing = true
+			go m.refresh()
+		}
 		cached := m.cached
 		m.mu.Unlock()
-		return cached // fall back to a stale sample on error
+		return cached
 	}
+	if m.refreshing || time.Now().Before(m.retryAt) {
+		// A cold first sample is already in flight; do not pile more bucket
+		// Lists behind it. The caller falls back to the bucket posture.
+		m.mu.Unlock()
+		return nil
+	}
+	m.refreshing = true
+	m.mu.Unlock()
+
+	sample, err := m.Sample(ctx)
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshing = false
+	if err != nil {
+		m.retryAt = time.Now().Add(5 * time.Second)
+		return nil
+	}
 	m.cached = sample
 	m.cachedAt = time.Now()
-	m.mu.Unlock()
 	return sample
+}
+
+// refresh updates the lease snapshot without blocking a request path. The
+// object-store List can take seconds in SG; writes only need the previous
+// snapshot to choose a follower.
+func (m *Manager) refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	sample, err := m.Sample(ctx)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshing = false
+	if err != nil {
+		m.retryAt = time.Now().Add(5 * time.Second)
+		return
+	}
+	m.cached = sample
+	m.cachedAt = time.Now()
 }

@@ -3178,13 +3178,15 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 			return commitResult{}, err
 		}
 	}
-	if len(followers) == 0 {
-		followers = s.liveFollowers(ctx, 2)
-	}
-
 	// Durability posture: "bucket" skips peers entirely; "auto" and "fleet" try
 	// peers first.
 	tryFleet := !requireBucket && s.Cfg.Durability != "bucket"
+	if tryFleet && len(followers) == 0 {
+		// liveFollowers reads the in-memory lease snapshot; it must not block a
+		// capture commit on a bucket List (lease.SampleCached refreshes in the
+		// background).
+		followers = s.liveFollowers(ctx, 2)
+	}
 	if tryFleet && len(followers) > 0 && s.PeerMgr != nil {
 		if !s.openFleetSession(ctx, epoch, followers) {
 			s.Log.Warn("fleet recovery ensemble unavailable; writes wait for the bucket", "epoch", epoch)

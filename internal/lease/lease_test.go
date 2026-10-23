@@ -76,3 +76,35 @@ func TestSampleCachedDoesNotHoldLockDuringIO(t *testing.T) {
 		t.Fatalf("SampleCached held mu during bucket I/O")
 	}
 }
+
+func TestSampleCachedServesStaleWhileRefreshing(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Minute}
+	if got := m.SampleCached(context.Background(), time.Millisecond); got == nil {
+		t.Fatal("first sample should populate the cache")
+	}
+	block := make(chan struct{})
+	release := make(chan struct{})
+	m.B = &probeBucket{Bucket: base, probe: func() {
+		close(block)
+		<-release
+	}}
+	time.Sleep(5 * time.Millisecond) // expire the cache
+	start := time.Now()
+	got := m.SampleCached(context.Background(), time.Millisecond)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("SampleCached blocked on refresh for %s", time.Since(start))
+	}
+	if got == nil {
+		t.Fatal("stale snapshot was not returned")
+	}
+	select {
+	case <-block:
+	case <-time.After(time.Second):
+		t.Fatal("background refresh did not start")
+	}
+	close(release)
+}
