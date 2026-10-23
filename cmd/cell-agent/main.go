@@ -688,6 +688,9 @@ func main() {
 			Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
 				return rep.DurableWatermarkChain(cctx, sc, epoch)
 			},
+			DurableEpoch: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
+				return rep.DurableWatermark(cctx, sc, epoch)
+			},
 			HasEpoch: func(cctx context.Context, sc cell.Scope, epoch uint64) (bool, error) {
 				epochs, eerr := rep.Epochs(cctx, sc, epoch)
 				if eerr != nil {

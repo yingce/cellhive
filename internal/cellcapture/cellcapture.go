@@ -57,6 +57,10 @@ type Manager struct {
 	// existing chain instead of taking a new whole-database snapshot when the
 	// local cell is exactly at that position (ADR-272).
 	Durable func(ctx context.Context, scope cell.Scope, epoch uint64) (uint64, error)
+	// DurableEpoch, when set, reads only the current epoch's chain. Same-epoch
+	// resumes (a capture recreated after idle eviction) must not scan every old
+	// epoch: a 57KB KV cell paid ~9s in List for that.
+	DurableEpoch func(ctx context.Context, scope cell.Scope, epoch uint64) (uint64, error)
 	// HasEpoch reports whether the bucket already has LTX data for this epoch.
 	// A new owner epoch normally opens with a whole-database snapshot (celld
 	// format 1); only a large cell may continue its predecessor's chain.
@@ -295,51 +299,52 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	if m.Durable == nil {
 		return false, nil
 	}
-	durable, err := m.Durable(ctx, scope, epoch)
+	exists := true
+	if m.HasEpoch != nil {
+		ok, err := m.HasEpoch(ctx, scope, epoch)
+		if err != nil {
+			m.log().Warn("capture epoch lookup failed; taking a snapshot", "scope", scope.String(), "err", err)
+			return false, nil
+		}
+		exists = ok
+	}
+	var durable uint64
+	var err error
+	if exists && m.DurableEpoch != nil {
+		// Same epoch: only this epoch's chain matters. Reading the whole epoch
+		// chain made a capture recreated after LRU eviction scan every old delta.
+		durable, err = m.DurableEpoch(ctx, scope, epoch)
+	} else {
+		durable, err = m.Durable(ctx, scope, epoch)
+	}
 	if err != nil {
 		m.log().Warn("capture durable watermark unavailable; taking a snapshot", "scope", scope.String(), "err", err)
 		return false, nil
 	}
 	if durable == 0 {
-		// No durable baseline exists yet: a new cell must still snapshot.
 		return false, nil
 	}
 	local, err := c.TxID(ctx)
 	if err != nil {
 		return false, err
 	}
-	// A new snapshot at a position below the durable prefix would fork/lose
-	// acknowledged data, regardless of the epoch policy.
 	if durable > local {
 		return false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
 	}
-	// celld uses one whole-database snapshot per epoch by default. A small cell
-	// that merely restarted must not append deltas across epochs: restoring
-	// thousands of tiny objects costs far more than a few MB snapshot. Large
-	// cells keep the cross-epoch chain until paged continuation exists.
-	if m.HasEpoch != nil {
-		exists, eerr := m.HasEpoch(ctx, scope, epoch)
-		if eerr != nil {
-			m.log().Warn("capture epoch lookup failed; taking a snapshot", "scope", scope.String(), "err", eerr)
+	if !exists {
+		size := int64(0)
+		if st, serr := os.Stat(c.Path); serr == nil {
+			size = st.Size()
+		}
+		if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
+			m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
 			return false, nil
 		}
-		if !exists {
-			size := int64(0)
-			if st, serr := os.Stat(c.Path); serr == nil {
-				size = st.Size()
-			}
-			if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
-				m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
-				return false, nil
-			}
-			m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
-		}
+		m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
 	}
 	if durable == baseline && durable == local {
 		return true, nil
 	}
-	// Local ahead of the durable prefix (unacked tail) or a write landed between
-	// the baseline read and cursor creation: a new snapshot includes it.
 	m.log().Info("capture cannot resume; taking a snapshot", "scope", scope.String(), "baseline", baseline, "local", local, "durable", durable)
 	return false, nil
 }

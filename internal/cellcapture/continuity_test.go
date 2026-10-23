@@ -218,3 +218,34 @@ func TestSweepEvictsCapturedCellWithoutDeadlock(t *testing.T) {
 		t.Fatal("Sweep deadlocked in Drop")
 	}
 }
+
+func TestSameEpochResumeUsesEpochWatermarkOnly(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "epochonly"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		return 0, nil // the cross-epoch chain must not be consulted here
+	}, &commits)
+	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return true, nil }
+	m.DurableEpoch = func(context.Context, cell.Scope, uint64) (uint64, error) { return local, nil }
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 0 {
+		t.Fatalf("same-epoch resume committed %d snapshot segments, want 0", commits)
+	}
+}
