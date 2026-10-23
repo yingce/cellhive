@@ -10,6 +10,7 @@ package cellcapture
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -21,6 +22,11 @@ import (
 
 // ErrNotOwner means this node does not own the scope, so it must not capture.
 var ErrNotOwner = errors.New("cellcapture: not owner")
+
+// ErrLocalBehindDurable means the local cell is older than the bucket chain. A
+// new snapshot at the local position would fork the chain, so capture refuses
+// until the cell is restored/evicted (fail closed).
+var ErrLocalBehindDurable = errors.New("cellcapture: local cell is behind the durable chain")
 
 // Committer proves one LTX segment durable (fleet/bucket). It must return nil
 // only for an RPO=0 proof (fleet, bucket, or bucket-batch).
@@ -44,6 +50,15 @@ type Manager struct {
 	// the local cell so later reads re-hydrate from the bucket instead of
 	// serving a stale copy (ADR-115).
 	OnLostOwner func(scope cell.Scope)
+
+	// Durable, when set, returns the highest contiguous durable txid for a
+	// scope/epoch in the bucket (cold path). Ensure uses it to continue an
+	// existing chain instead of taking a new whole-database snapshot when the
+	// local cell is exactly at that position (ADR-272).
+	Durable func(ctx context.Context, scope cell.Scope, epoch uint64) (uint64, error)
+	// SnapshotDone, when set, records that a full-page snapshot at txid was
+	// completely committed. Resume treats only marked snapshots as baselines.
+	SnapshotDone func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
 
 	// GroupCommitWait is the WAL coalescing window (0 = package default).
 	GroupCommitWait time.Duration
@@ -159,12 +174,15 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		m.mu.Unlock()
 
 		// Establish a restore baseline (full-page snapshot) before writers, so a
-		// cold restore has a starting point even after the WAL rotates. This runs
-		// OUTSIDE the manager lock: a snapshot checkpoints SQLite and commits
-		// several bucket objects, and holding m.mu across it would stall every
-		// other cell's Ensure/Wait/Drop (ADR-134 follow-up).
+		// cold restore has a starting point even after the WAL rotates — unless
+		// the local cell is exactly at the bucket chain's durable watermark, in
+		// which case the capture simply continues the existing chain (ADR-272).
+		// This runs OUTSIDE the manager lock: a snapshot checkpoints SQLite and
+		// commits several bucket objects, and holding m.mu across it would stall
+		// every other cell's Ensure/Wait/Drop (ADR-134 follow-up).
 		if m.AutoSnapshot {
-			if err := cap.Snapshot(ctx); err != nil {
+			resume, rerr := m.canResume(ctx, c, scope, epoch, baseline)
+			if rerr != nil {
 				cancel()
 				cap.Start(cctx)
 				<-cap.Done()
@@ -174,13 +192,74 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				}
 				m.mu.Unlock()
 				close(ready)
-				return 0, err
+				return 0, rerr
+			}
+			if resume {
+				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
+			} else {
+				if err := cap.Snapshot(ctx); err != nil {
+					cancel()
+					cap.Start(cctx)
+					<-cap.Done()
+					m.mu.Lock()
+					if m.caps[key] != nil && m.caps[key].cap == cap {
+						delete(m.caps, key)
+					}
+					m.mu.Unlock()
+					close(ready)
+					return 0, err
+				}
+				if m.SnapshotDone != nil {
+					// The snapshot parts are durable now; the marker makes the
+					// snapshot a trusted resume baseline. A marker failure only
+					// costs a future snapshot, never correctness.
+					if txid, terr := c.TxID(ctx); terr == nil {
+						if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
+							m.log().Warn("snapshot done marker failed", "scope", key, "txid", txid, "err", merr)
+						}
+					}
+				}
 			}
 		}
 		cap.Start(cctx)
 		go m.watchOwner(cctx, key, scope)
 		close(ready)
 		return baseline, nil
+	}
+}
+
+// canResume reports whether this capture may continue the existing bucket
+// chain without emitting a new whole-database snapshot. It is safe only when the
+// local cell, the cursor baseline and the bucket's contiguous durable watermark
+// are the same txid: any local write beyond that watermark would otherwise fall
+// into the cursor's baseline and leave a hole in the chain. A local cell behind
+// the chain fails closed; everything else falls back to a snapshot.
+func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.Scope, epoch, baseline uint64) (bool, error) {
+	if m.Durable == nil {
+		return false, nil
+	}
+	durable, err := m.Durable(ctx, scope, epoch)
+	if err != nil {
+		m.log().Warn("capture durable watermark unavailable; taking a snapshot", "scope", scope.String(), "err", err)
+		return false, nil
+	}
+	if durable == 0 {
+		// No durable baseline exists yet: a new cell must still snapshot.
+		return false, nil
+	}
+	local, err := c.TxID(ctx)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case durable == baseline && durable == local:
+		return true, nil
+	case durable > local:
+		return false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
+	default:
+		// Local ahead of the durable prefix (unacked tail) or a write landed
+		// between the baseline read and the cursor creation: snapshot.
+		return false, nil
 	}
 }
 

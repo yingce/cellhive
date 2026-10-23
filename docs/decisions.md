@@ -1,5 +1,16 @@
 # 决策记录（ADR）
 
+## ADR-272 capture 冷启动沿用 celld/Litestream：durable position + 连续性续链（2026-10-23）✅P0 实现
+
+- **背景**：capture 重建时 `Ensure` 无条件做全页快照；控制 cell 约 90MiB 时冷路径 7s，而 warm 只有 84ms。`cellhive_durability_proof_seconds` 只包 `Wait`，看不到 `Ensure/Snapshot`，容易误判。celld 的 `Replica::sync` 是增量续写：只有 continuity break 才 snapshot；本地 eviction snapshot 可复用。CellHive 的存储/恢复理念本来就参照 celld，这里按同一模型收敛。
+- **决策**：
+  1. `replica.DurableWatermark` 计算 scope/epoch 的 durable 连续水位：L1 manifest 的 `MaxTxID`，或带完成标记的最新 snapshot，再向其上接连续 L0 delta；遇到 gap 停止。这是冷路径（List）。
+  2. 全页快照提交完成后写 `<txid>.snapshot-done` 标记；`DurableWatermark` 只把带 marker 的 snapshot 当作 baseline，避免崩溃中断的部分快照被误认为可续链。
+  3. `cellcapture.Ensure` 在创建新 capture 时比较 `local txid`、cursor baseline 与 durable 水位：三者相等且 durable>0 → **跳过 Snapshot**，直接 `sqlcapture.New(..., baseline=durable)` 续 delta；本地领先（未 ack 尾巴）→ 维持全量快照兜底；本地落后于 durable → `ErrLocalBehindDurable` fail closed，避免在链上分叉。
+  4. 只在创建 capture 时检查，warm `Ensure` 不读 bucket；热路径不新增 List。
+- **验证**：`internal/replica TestDurableWatermark`（manifest/snapshot marker/连续与 gap）、`internal/cellcapture TestEnsureContinuesDurableChain/TestEnsureFallsBackToSnapshotWhenBehind/TestEnsureFailsClosedWhenLocalBehindDurable`、`internal/server TestDeployResumesCaptureWithoutSnapshot`（模拟重启：第二次 deploy 只产生 1 条 delta，bucket 链可 restore 出 2 个版本）。
+- **边界**：本地领先仍走全量快照；流式/预算快照、控制 cell 常驻、`Ensure/Snapshot` 指标、`L>D` 的 gap 增量在后续阶段完成。
+
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
 
 - **背景**：`POST /v1/control/deploy` 依次执行 3 个 `capturedWrite`（DO migrations、自动 CreateApp、版本提交），每次各自 `Capture.Wait` 一次 RPO=0 证明。控制面自 ADR-117 起是单个 `__platform__` cell，所以这些 proof 的 `ns` 标签是 `__platform__`，不是租户 namespace（例如 `vwork-24`）；空 migrations 不写库，但那次 capturedWrite 仍做一次 Wait；`CreateApp` 即使 App 已存在也每次写 `apps` 行 + `app.create` 审计并推进 txid。因此真实部署会有 2–3 次串行证明等待，发布风暴时控制 cell 的 proof 可排到数秒。

@@ -48,6 +48,32 @@ func ManifestName(s cell.Scope, epoch uint64) string {
 	return L1Prefix(s, epoch) + "manifest.json"
 }
 
+// SnapshotDoneName marks that every part of a full-page snapshot at txid has
+// been committed. Without it a partial snapshot (crash between part uploads)
+// must not be treated as a resume baseline.
+func SnapshotDoneName(s cell.Scope, epoch, txid uint64) string {
+	return Prefix(s, epoch) + strconv.FormatUint(txid, 10) + ".snapshot-done"
+}
+
+// MarkSnapshotDone records that the snapshot at txid is complete. Idempotent:
+// an overwrite of the same marker is harmless.
+func (m *Manager) MarkSnapshotDone(ctx context.Context, s cell.Scope, epoch, txid uint64) error {
+	_, err := m.B.Put(ctx, SnapshotDoneName(s, epoch, txid), []byte("{}"))
+	return err
+}
+
+// SnapshotDone reports whether the snapshot at txid was fully committed.
+func (m *Manager) SnapshotDone(ctx context.Context, s cell.Scope, epoch, txid uint64) (bool, error) {
+	_, _, err := m.B.Get(ctx, SnapshotDoneName(s, epoch, txid))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, bucket.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
 // Manifest describes the current L1 compaction for a scope/epoch: the objects
 // that make up the compacted snapshot and the txid range they cover. Restore
 // reads only these objects plus L0 deltas newer than MaxTxID, so a takeover
@@ -71,6 +97,141 @@ func (m *Manager) Covers(ctx context.Context, s cell.Scope, epoch, txid uint64) 
 		return false, err
 	}
 	return man.MaxTxID >= txid, nil
+}
+
+// DurableWatermark returns the highest txid whose bucket chain is durably
+// contiguous for scope/epoch: the L1 manifest baseline plus the contiguous L0
+// spans above it (or the newest snapshot when it is above the manifest).
+//
+// It is the join point a restarted capture can resume from: when it equals the
+// local cell txid, deltas may continue from there and no new whole-database
+// snapshot is needed (ADR-272). This lists the bucket, so it is a cold-path
+// operation used only when a capture is created; 0 means there is no durable
+// baseline yet (a fresh cell still needs a snapshot).
+func (m *Manager) DurableWatermark(ctx context.Context, s cell.Scope, epoch uint64) (uint64, error) {
+	floor := uint64(0)
+	man, ok, err := m.ReadManifest(ctx, s, epoch)
+	if err != nil {
+		return 0, err
+	}
+	if ok {
+		floor = man.MaxTxID
+	}
+	keys, err := m.ListL0Segments(ctx, s, epoch)
+	if err != nil {
+		return 0, err
+	}
+	spans := make([]segmentSpan, 0, len(keys))
+	for _, key := range keys {
+		name := key
+		if i := strings.LastIndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		}
+		sp, ok := parseSegmentSpan(name)
+		if !ok {
+			continue
+		}
+		spans = append(spans, sp)
+	}
+	// A snapshot is a complete page image at its EndTxID: the newest *complete*
+	// one is a newer baseline than the manifest (it re-anchors the chain). A
+	// snapshot without its done marker may be missing parts and is ignored.
+	var snapEnds []uint64
+	for _, sp := range spans {
+		if sp.snapshot && sp.end > floor {
+			snapEnds = append(snapEnds, sp.end)
+		}
+	}
+	sort.Slice(snapEnds, func(i, j int) bool { return snapEnds[i] > snapEnds[j] })
+	for _, end := range snapEnds {
+		ok, err := m.SnapshotDone(ctx, s, epoch, end)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			floor = end
+			break
+		}
+	}
+	if floor == 0 {
+		return 0, nil
+	}
+	// Extend only through contiguous deltas; the first gap stops the watermark
+	// (a later span cannot be restored across it).
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start == spans[j].start {
+			return spans[i].end < spans[j].end
+		}
+		return spans[i].start < spans[j].start
+	})
+	for _, sp := range spans {
+		if sp.snapshot || sp.end <= floor || sp.start > floor+1 {
+			continue
+		}
+		floor = sp.end
+	}
+	return floor, nil
+}
+
+// segmentSpan is one L0 object's txid coverage.
+type segmentSpan struct {
+	start, end uint64
+	snapshot   bool
+}
+
+// parseSegmentSpan decodes an L0 object name into its txid range. Snapshot parts
+// share the watermark EndTxID; batches and deltas carry Start-End.
+func parseSegmentSpan(name string) (segmentSpan, bool) {
+	var out segmentSpan
+	switch {
+	case strings.HasSuffix(name, ".snapshot"):
+		base := strings.TrimSuffix(name, ".snapshot")
+		if i := strings.Index(base, ".p"); i > 0 {
+			base = base[:i]
+		}
+		n, err := strconv.ParseUint(base, 10, 64)
+		if err != nil {
+			return out, false
+		}
+		out.start, out.end, out.snapshot = n, n, true
+		return out, true
+	case strings.HasSuffix(name, ".batch"):
+		return parseSegmentRange(strings.TrimSuffix(name, ".batch"))
+	case strings.HasSuffix(name, ".ltx"):
+		return parseSegmentRange(strings.TrimSuffix(name, ".ltx"))
+	}
+	return out, false
+}
+
+// isSegmentKey reports whether an object under the epoch prefix is an LTX
+// segment (markers such as "<txid>.snapshot-done" are not).
+func isSegmentKey(key string) bool {
+	name := key
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.HasSuffix(name, ".snapshot") ||
+		strings.HasSuffix(name, ".ltx") ||
+		strings.HasSuffix(name, ".batch") ||
+		strings.HasSuffix(name, ".link")
+}
+
+func parseSegmentRange(base string) (segmentSpan, bool) {
+	var out segmentSpan
+	i := strings.IndexByte(base, '-')
+	if i <= 0 || i == len(base)-1 {
+		return out, false
+	}
+	start, err := strconv.ParseUint(base[:i], 10, 64)
+	if err != nil {
+		return out, false
+	}
+	end, err := strconv.ParseUint(base[i+1:], 10, 64)
+	if err != nil || end < start {
+		return out, false
+	}
+	out.start, out.end = start, end
+	return out, true
 }
 
 // LatestEpoch returns the highest epoch that has any replica object for the
@@ -188,7 +349,7 @@ func (m *Manager) ListL0Segments(ctx context.Context, s cell.Scope, epoch uint64
 	l1 := L1Prefix(s, epoch)
 	out := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if strings.HasPrefix(k, l1) {
+		if strings.HasPrefix(k, l1) || !isSegmentKey(k) {
 			continue
 		}
 		out = append(out, k)

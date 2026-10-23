@@ -667,9 +667,15 @@ func main() {
 		log.Warn("backend-A capture disabled: writes are local-only (no replication proof)")
 	} else {
 		captureMgr = &cellcapture.Manager{
-			Store:               store,
-			Committer:           srv.CaptureCommitter(),
-			AutoSnapshot:        true,
+			Store:        store,
+			Committer:    srv.CaptureCommitter(),
+			AutoSnapshot: true,
+			Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
+				return rep.DurableWatermark(cctx, sc, epoch)
+			},
+			SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
+				return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
+			},
 			AutoCheckpointBytes: cfg.CellWALCheckpointBytes,
 			GroupCommitWait:     cfg.CaptureGroupCommitWait,
 			PipelineThreshold:   cfg.CapturePipelineThreshold,
