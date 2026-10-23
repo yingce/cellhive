@@ -35,6 +35,10 @@
   3. 实测（SG，pod 内直连）：warm GET 多数 **0.5–3ms**，每 1s owner 缓存刷新一次 ~100ms；warm PUT ~36–78ms；40 路并发 GET 全部 200。首次 PUT 仍有一次新 epoch 快照/旧链扫描（~9s），epoch GC 后应下降。
   4. 回归测试：`TestForgetDrainsBusyRequestWithoutDeadlock`、`TestSweepEvictsCapturedCellWithoutDeadlock`、`TestPreparedResourceAdmissionCachesAbsentFenceAndRejectsRevoke`。
 
+- **补充（P6：FQDN 与 per-scope cold open）**：
+  1. `pod.service` 短名依赖 resolv.conf 的 search path；cell-agent 的 forwarder / worker 路径按字面查询会得到 NXDOMAIN（`forward_failed` 502）。chart 改为 `<pod>.<service>.<namespace>.svc.cluster.local`，worker 与 Go 两条解析路径都能用。
+  2. `Store.Cell` 之前在整个 cold open/hydrate 期间持有全局 `openMu`；一个慢的 bucket restore 会阻塞所有 cell open，滚动重启后表现为 KV 全挂。改为 `s.mu` 下的 per-scope `opening` 标记：不同 cell 可并行 hydrate；Forget 等待 opening 清零；TryForget/evictOne 跳过 opening；`openMu` 只用于 close/delete 的互斥。
+  3. 回归：`TestSlowHydrateDoesNotBlockOtherCells`；SG 重启后 vwork-77/vwork-40 KV 返回 200/404 而非 502，warm ~0.12s（含 port-forward），pod 内 ~0.5ms。
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
 
 - **背景**：`POST /v1/control/deploy` 依次执行 3 个 `capturedWrite`（DO migrations、自动 CreateApp、版本提交），每次各自 `Capture.Wait` 一次 RPO=0 证明。控制面自 ADR-117 起是单个 `__platform__` cell，所以这些 proof 的 `ns` 标签是 `__platform__`，不是租户 namespace（例如 `vwork-24`）；空 migrations 不写库，但那次 capturedWrite 仍做一次 Wait；`CreateApp` 即使 App 已存在也每次写 `apps` 行 + `app.create` 审计并推进 txid。因此真实部署会有 2–3 次串行证明等待，发布风暴时控制 cell 的 proof 可排到数秒。
