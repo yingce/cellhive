@@ -200,11 +200,9 @@ func (m *Manager) ResourceSnapshot(ctx context.Context, sc cell.Scope) (string, 
 }
 
 func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string, error) {
-	// Share the one-second fence cache with admission. Writes still take the
-	// authoritative path in resourceWriteGuard before a commit is acknowledged;
-	// reads may observe a cross-node delete up to the cache TTL late, which
-	// keeps the read path off the object store (KV GET was ~200ms per call).
-	f, _, err := m.readResourceFence(ctx, sc)
+	// Authoritative post-gate read: admission (ResourceSnapshot) may be cached,
+	// but revocation must be observed after the request gate is held.
+	f, _, err := m.readResourceFenceFresh(ctx, sc)
 	if err != nil {
 		return "", err
 	}
