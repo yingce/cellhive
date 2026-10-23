@@ -17,8 +17,8 @@ _最后更新：2026-10-23_
 - DO 租户 facet 前剥离 `x-cellhive-*` 平台凭据；`/v1/do/invoke` 校验 namespace + active worker 的 DO binding/class；WebSocket 与 service fallback 透传租户 headers。
 - R2 loader/compat 用 `bucket_name` 解析；Cloudflare R2 PUT 超 64 MiB 返回 413，不再静默截断。
 - Fleet follower 采样 TTL 现在不超过 `LeaseTTL/2`，避免 3s lease 下把 live peer 当过期、fleet 静默退化为 bucket。
-- Paged cache marker 记录 cut txid；source cut 早于本地 marker 时 fail closed，不 reuse/truncate；evict/close 时把本地 txid 写回 marker。仍建议补真实 paged 驱逐/重启故障注入。
-- Upload spool replay 改为 512 条有界窗口；损坏条目隔离；decodeLimit 拒绝尾部 JSON 并返回 413；nodelog 拒绝重开 sealed session；restore IndexChain 校验覆盖/重复页；补登记 `node-logs/`、`deploys/` 保留前缀。
+- Paged cache marker 记录 cut txid；source cut 早于本地 marker 时 fail closed，不 reuse/truncate；checkpoint/evict/close 时把本地 txid 写回 marker。仍建议补真实 paged 驱逐/重启故障注入。
+- Upload spool replay 改为 512 条有界窗口；损坏条目隔离；decodeLimit 拒绝尾部 JSON 并返回 413；nodelog 拒绝重开 sealed session；restore IndexChain 校验覆盖/重复页；Restore 在 manifest 变更时重试；补登记 `node-logs/`、`deploys/` 保留前缀。
 
 验证：`make test`、`go vet`、`go test -race`（server/cellstore/sqlcapture/wal/upload/timer/queue/userruntimepool/workerdpool/cell-agent）、`make js-test`、bindings/workflow/queue/queue-multinode/queue-concurrency e2e 均通过。高并发 32 writer + `SIGKILL` + 删除本地 DB + 接管：919 个 acked key missing=0/wrong=0；官方 RPO kill：900 个 acked key missing=0/wrong=0。剩余风险：paged 崩溃窗口的本地 txid 可能停留在上次 close，真实 COS/OSS 跨 AZ fleet 故障与 Docker/k3d 套件仍需发布前验收。
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,11 +291,36 @@ type Segment struct {
 }
 
 // Restore reads and orders the segments needed to rebuild a scope/epoch (cold
-// path). When an L1 manifest exists it reads only the compacted snapshot objects
-// plus L0 deltas newer than the manifest's MaxTxID; otherwise it reads the whole
-// L0 chain. Ordering: snapshot(s) by EndTxID, then link markers, then deltas by
-// StartTxID. This is the basis for takeover restore (docs/cell-protocol.md §6).
+// path). It retries if compaction replaces the manifest between the read and
+// the L0 listing, so a concurrent GC cannot leave the returned chain pointing at
+// a deleted L1 object.
 func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Segment, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		before, beforeOK, err := m.ReadManifest(ctx, s, epoch)
+		if err != nil {
+			return nil, err
+		}
+		segs, err := m.restoreOnce(ctx, s, epoch)
+		if err != nil {
+			return nil, err
+		}
+		after, afterOK, err := m.ReadManifest(ctx, s, epoch)
+		if err != nil {
+			return nil, err
+		}
+		if beforeOK == afterOK && (!afterOK || reflect.DeepEqual(before, after)) {
+			return segs, nil
+		}
+	}
+	return nil, fmt.Errorf("replica: manifest changed during restore")
+}
+
+// restoreOnce reads and orders the segments needed to rebuild a scope/epoch
+// (cold path). When an L1 manifest exists it reads only the compacted snapshot
+// objects plus L0 deltas newer than the manifest's MaxTxID; otherwise it reads
+// the whole L0 chain. Ordering: snapshot(s) by EndTxID, then link markers, then
+// deltas by StartTxID. Restore wraps it with a manifest-change retry.
+func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) ([]Segment, error) {
 	fence, _, ferr := m.readResourceFence(ctx, s)
 	if ferr != nil {
 		return nil, ferr
