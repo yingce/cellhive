@@ -254,3 +254,46 @@ func TestHydrateTimeoutReleasesSlot(t *testing.T) {
 		t.Fatal("second hydrate stayed blocked after timeout")
 	}
 }
+
+func TestInteractiveHydrateNotStarvedByBackground(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.HydrateParallel = 1
+	s.HydrateInteractiveParallel = 1
+	block := make(chan struct{})
+	release := make(chan struct{})
+	s.Hydrate = func(ctx context.Context, sc cell.Scope, _ string) error {
+		if sc.ID == "background" {
+			close(block)
+			<-release
+		}
+		return nil
+	}
+	go func() {
+		_, _ = s.Cell(context.Background(), cell.Scope{Namespace: "acme", Class: "__kv__", ID: "background"})
+	}()
+	select {
+	case <-block:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background hydrate did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "interactive"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("interactive hydrate: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("interactive hydrate was starved by background hydrate")
+	}
+	close(release)
+}

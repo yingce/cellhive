@@ -943,7 +943,13 @@ func (s *Server) ownerLive(ctx context.Context, o cell.Owner, now time.Time) boo
 // lease is fresh must not acknowledge writes, even if the owner record still
 // names it. Capture-loop commits take the same check.
 func (s *Server) ackAllowed(now time.Time) bool {
-	return s.Lease == nil || s.Lease.Healthy(now)
+	if s.Lease == nil {
+		return true
+	}
+	// A live peer on the pre-ADR-273 owner protocol may take over cells we are
+	// serving (it judges owners by Expiry, which is no longer renewed). Refuse to
+	// ack while one is visible rather than risk two writers.
+	return s.Lease.Healthy(now) && !s.Lease.LegacyPeerVisible(now)
 }
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
@@ -3136,6 +3142,11 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 	proofStart := time.Now()
 	werr := s.Capture.Wait(ctx, scope, txid)
 	s.recordProof(scope.Namespace, time.Since(proofStart))
+	if werr == nil && !s.ackAllowed(time.Now()) {
+		// The proof arrived, but this node lost its lease while waiting. A peer
+		// may already be taking the cell over, so the ack must not be released.
+		werr = owner.ErrNotOwner
+	}
 	telemetry.End(span, werr)
 	return werr
 }
@@ -3176,6 +3187,11 @@ func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uin
 	proofStart := time.Now()
 	werr := s.Capture.Wait(ctx, scope, txid)
 	s.recordProof(scope.Namespace, time.Since(proofStart))
+	if werr == nil && !s.ackAllowed(time.Now()) {
+		// The proof arrived, but this node lost its lease while waiting. A peer
+		// may already be taking the cell over, so the ack must not be released.
+		werr = owner.ErrNotOwner
+	}
 	telemetry.End(span, werr)
 	return werr
 }
@@ -3229,7 +3245,18 @@ func (s *Server) captureErr(w http.ResponseWriter, err error, code string) {
 		writeErr(w, http.StatusServiceUnavailable, "not_owner", "this node does not own the cell")
 		return
 	}
-	writeErr(w, http.StatusBadRequest, code, err.Error())
+	// A hydrate/commit timeout is not a malformed request. Returning 400 here
+	// made user-runtime log "invocation persistence failed: 400" for what is a
+	// transient storage problem.
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeErr(w, http.StatusGatewayTimeout, "storage_timeout", err.Error())
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		writeErr(w, http.StatusServiceUnavailable, "storage_canceled", err.Error())
+		return
+	}
+	writeErr(w, http.StatusServiceUnavailable, code, err.Error())
 }
 
 // commitResult reports how a segment was proven durable.

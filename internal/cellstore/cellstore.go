@@ -62,6 +62,11 @@ type Store struct {
 	// opens are parallel, but a mass restart must not hydrate every cell at once
 	// (parallel RestoreChain fetches can exceed the container memory limit).
 	HydrateParallel int
+	// HydrateInteractiveParallel bounds hydrates started by callers with a
+	// deadline (HTTP requests). Background cron/queue/waker hydration uses the
+	// separate HydrateParallel pool, so a stuck background restore cannot starve
+	// invocation/KV requests.
+	HydrateInteractiveParallel int
 	// HydrateTimeout bounds a single cold hydrate. Background callers (queue,
 	// cron, waker, timers) pass contexts with no deadline; without this one slow
 	// COS GET held the hydrate slot forever and every other cold cell stalled.
@@ -80,6 +85,7 @@ type Store struct {
 
 	openMu                  sync.Mutex // serializes cold opens so one file is opened once
 	hydrateSem              chan struct{}
+	hydrateInteractiveSem   chan struct{}
 	resourceGenerationLocks [64]sync.Mutex
 
 	evicted atomic.Uint64
@@ -174,11 +180,25 @@ func (s *Store) hydrateSlot(ctx context.Context) (func(), error) {
 	if n <= 0 {
 		n = 2
 	}
+	_, interactive := ctx.Deadline()
+	if interactive {
+		n = s.HydrateInteractiveParallel
+		if n <= 0 {
+			n = 2
+		}
+	}
 	s.openMu.Lock()
-	if s.hydrateSem == nil || cap(s.hydrateSem) != n {
+	if interactive {
+		if s.hydrateInteractiveSem == nil || cap(s.hydrateInteractiveSem) != n {
+			s.hydrateInteractiveSem = make(chan struct{}, n)
+		}
+	} else if s.hydrateSem == nil || cap(s.hydrateSem) != n {
 		s.hydrateSem = make(chan struct{}, n)
 	}
 	sem := s.hydrateSem
+	if interactive {
+		sem = s.hydrateInteractiveSem
+	}
 	s.openMu.Unlock()
 	select {
 	case sem <- struct{}{}:
@@ -1009,6 +1029,11 @@ type Cell struct {
 // Paged reports whether this cell is backed by the paged VFS. A paged cell must
 // finish its background hydrate before a full-page baseline is safe.
 func (c *Cell) Paged() bool { return c.paged }
+
+// PagedComplete reports whether the cell's local file is a full image. It is
+// true for a non-paged cell and for a paged cell whose background hydrate has
+// finished; only then is a full-page snapshot cheap and safe to take.
+func (c *Cell) PagedComplete() bool { return !c.paged || pagedvfs.Complete(c.Path) }
 
 // Closed reports whether the cell's SQLite handle has been closed (e.g. by an
 // eviction racing a caller). Callers that lazily initialize per-cell state can
