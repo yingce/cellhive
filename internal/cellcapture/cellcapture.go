@@ -108,8 +108,17 @@ type Manager struct {
 	// several LTX chunks in flight (0 = package default).
 	PipelineThreshold time.Duration
 
+	hints map[string]resumeHint
+
 	mu   sync.Mutex
 	caps map[string]*state
+}
+
+// resumeHint is the durable watermark captured at Drop time. Reopening the same
+// epoch can continue without a List/Get when the local txid still equals it.
+type resumeHint struct {
+	epoch   uint64
+	durable uint64
 }
 
 type state struct {
@@ -230,7 +239,11 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		// commits several bucket objects, and holding m.mu across it would stall
 		// every other cell's Ensure/Wait/Drop (ADR-134 follow-up).
 		if m.AutoSnapshot {
-			resume, rerr := m.canResume(ctx, c, scope, epoch, baseline)
+			hintOK := m.takeHint(key, epoch, baseline)
+			resume, rerr := hintOK, error(nil)
+			if !hintOK {
+				resume, rerr = m.canResume(ctx, c, scope, epoch, baseline)
+			}
 			if rerr != nil {
 				cancel()
 				cap.Start(cctx)
@@ -398,10 +411,38 @@ func (m *Manager) Drop(ctx context.Context, scope cell.Scope) error {
 	m.mu.Unlock()
 	select {
 	case <-st.cap.Done():
+		if d := st.cap.Stats().DurableTxID; d > 0 {
+			m.mu.Lock()
+			if m.hints == nil {
+				m.hints = map[string]resumeHint{}
+			}
+			m.hints[key] = resumeHint{epoch: st.epoch, durable: d}
+			m.mu.Unlock()
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// takeHint consumes a resume hint only when it exactly matches this epoch and
+// the local txid. Any mismatch discards it and falls back to the cold check.
+func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.hints[key]
+	if ok {
+		delete(m.hints, key)
+	}
+	return ok && h.epoch == epoch && h.durable == baseline
+}
+
+// ForgetHint drops a resume hint after a local file is deleted or ownership is
+// lost; the next Ensure must rebuild from the authoritative chain.
+func (m *Manager) ForgetHint(scope cell.Scope) {
+	m.mu.Lock()
+	delete(m.hints, scope.String())
+	m.mu.Unlock()
 }
 
 // Drain waits, bounded by ctx, until every live capture's barrier covers its

@@ -25,6 +25,10 @@ type Options struct {
 	// triggers a fold.
 	MinSegments int
 	MinBytes    int64
+	// MinObjects is an OR threshold on the number of L0 objects (not segments):
+	// cold-restore RTT is driven by object count, and a .batch may hold many
+	// segments. 0 disables this threshold.
+	MinObjects int
 	// MaxPartBytes bounds one compacted snapshot part (0 uses the ltx default).
 	MaxPartBytes int
 	// Verify, when non-nil, is called immediately before the L1 objects are
@@ -157,7 +161,8 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 	if newL0 == 0 && haveMan {
 		return Result{Skipped: "already compacted"}, nil
 	}
-	if len(segs) < opts.MinSegments && inputBytes < opts.MinBytes {
+	belowObjects := opts.MinObjects <= 0 || len(l0) < opts.MinObjects
+	if len(segs) < opts.MinSegments && inputBytes < opts.MinBytes && belowObjects {
 		return Result{Skipped: "below threshold", Inputs: len(segs), InputBytes: inputBytes}, nil
 	}
 	if opts.Verify != nil {

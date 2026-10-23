@@ -249,3 +249,49 @@ func TestSameEpochResumeUsesEpochWatermarkOnly(t *testing.T) {
 		t.Fatalf("same-epoch resume committed %d snapshot segments, want 0", commits)
 	}
 }
+
+func TestEnsureAfterDropUsesResumeHint(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "hint"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+	var commits int
+	var durableCalls int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		durableCalls++
+		return local, nil
+	}, &commits)
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	txid, _ := c.TxID(ctx)
+	if err := m.Wait(ctx, sc, txid); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Drop(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	before := durableCalls
+	// A hint hit must not consult the bucket at all.
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if durableCalls != before {
+		t.Fatalf("Ensure after Drop consulted Durable %d times, want 0", durableCalls-before)
+	}
+	m.Stop()
+}

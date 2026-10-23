@@ -527,6 +527,9 @@ func parseSegmentSpan(name string) (segmentSpan, bool) {
 		return out, true
 	case strings.HasSuffix(name, ".batch"):
 		base := strings.TrimSuffix(name, ".batch")
+		for _, suffix := range []string{".d", ".m", ".s"} {
+			base = strings.TrimSuffix(base, suffix)
+		}
 		if i := strings.Index(base, ".p"); i > 0 {
 			n, err := strconv.ParseUint(base[:i], 10, 64)
 			if err != nil {

@@ -189,7 +189,11 @@ func BatchName(first, last Header) string {
 	if first.Kind == KindSnapshot && last.Kind == KindSnapshot && first.EndTxID == last.EndTxID {
 		fp, _ := SnapshotPart(first)
 		lp, _ := SnapshotPart(last)
-		return fmt.Sprintf("%d.p%d-p%d.batch", first.EndTxID, fp, lp)
+		return fmt.Sprintf("%d.p%d-p%d.s.batch", first.EndTxID, fp, lp)
 	}
-	return fmt.Sprintf("%d-%d.batch", first.StartTxID, last.EndTxID)
+	suffix := "d"
+	if first.Kind == KindSnapshot || last.Kind == KindSnapshot {
+		suffix = "m"
+	}
+	return fmt.Sprintf("%d-%d.%s.batch", first.StartTxID, last.EndTxID, suffix)
 }

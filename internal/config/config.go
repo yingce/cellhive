@@ -271,6 +271,7 @@ type Config struct {
 	CompactionInterval    time.Duration
 	CompactionMinSegments int
 	CompactionMinBytes    int64
+	CompactionMinObjects  int
 
 	// Paged cold restore (ADR-160). PagedRestore enables the fault-in VFS for
 	// cell-agent cells whose restore chain is at least PagedMinBytes; smaller
@@ -595,6 +596,7 @@ func FromEnv() Config {
 		CompactionInterval:           envDuration("CELLHIVE_COMPACTION_INTERVAL", 30*time.Second),
 		CompactionMinSegments:        envInt("CELLHIVE_COMPACTION_MIN_SEGMENTS", 64),
 		CompactionMinBytes:           envBytes("CELLHIVE_COMPACTION_MIN_BYTES", 64<<20),
+		CompactionMinObjects:         envInt("CELLHIVE_COMPACTION_MIN_OBJECTS", 8),
 		PagedRestore:                 envBool("CELLHIVE_PAGED_RESTORE", true),
 		PagedMinBytes:                envBytes("CELLHIVE_PAGED_MIN_BYTES", 32<<20),
 		PagedHydrateMBPS:             envInt("CELLHIVE_PAGED_HYDRATE_MBPS", 16),

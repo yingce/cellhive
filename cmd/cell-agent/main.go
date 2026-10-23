@@ -731,6 +731,22 @@ func main() {
 				}
 			},
 		}
+		if captureMgr != nil {
+			prevForget := store.OnForget
+			store.OnForget = func(sc cell.Scope) {
+				if prevForget != nil {
+					prevForget(sc)
+				}
+				captureMgr.ForgetHint(sc)
+			}
+			prevEvict := store.OnEvicted
+			store.OnEvicted = func(sc cell.Scope) {
+				if prevEvict != nil {
+					prevEvict(sc)
+				}
+				captureMgr.ForgetHint(sc)
+			}
+		}
 		srv.Capture = captureMgr
 		go runEpochGCLoop(ctx, log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
 		// Queue consumer dispatch: poll registered queues and deliver claimed batches
@@ -1103,6 +1119,7 @@ func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager,
 				res, err := compaction.Compact(ctx, rep, sc, epoch, compaction.Options{
 					MinSegments: cfg.CompactionMinSegments,
 					MinBytes:    cfg.CompactionMinBytes,
+					MinObjects:  cfg.CompactionMinObjects,
 					Verify:      verify,
 					GC:          true,
 				})
