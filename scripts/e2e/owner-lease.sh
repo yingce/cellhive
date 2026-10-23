@@ -130,4 +130,13 @@ import sys
 sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)
 PY
 
+
+# A6: the local control SQLite must be structurally intact after the cold
+# hydrate and the encrypted/write path exercise.
+DB="$CELLHIVE_DATA_DIR/cells/__platform__/__control__/main.db"
+[[ -f $DB ]] || fail "control DB missing"
+INTEG=$(sqlite3 "$DB" 'PRAGMA integrity_check;' 2>&1) || fail "integrity_check failed: $INTEG"
+[[ $INTEG == ok ]] || fail "integrity_check = $INTEG"
+echo "control integrity_check: $INTEG"
+
 if [[ $FAILED -eq 0 ]]; then echo "OWNER-E2E: PASS"; else echo "OWNER-E2E: FAIL"; exit 1; fi
