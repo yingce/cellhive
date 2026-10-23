@@ -3041,6 +3041,9 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 	if s.Capture == nil {
 		return write()
 	}
+	if err := s.ensureControlSchema(ctx, scope); err != nil {
+		return err
+	}
 	if _, err := s.Capture.Ensure(ctx, scope); err != nil {
 		return err
 	}
@@ -3071,6 +3074,9 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write func() (uint64, error)) (uint64, error) {
 	if s.Capture == nil {
 		return write()
+	}
+	if err := s.ensureControlSchema(ctx, scope); err != nil {
+		return 0, err
 	}
 	if _, err := s.Capture.Ensure(ctx, scope); err != nil {
 		return 0, err
@@ -3104,8 +3110,21 @@ func (s *Server) CaptureEnsure(ctx context.Context, scope cell.Scope) error {
 	if s.Capture == nil {
 		return nil
 	}
+	if err := s.ensureControlSchema(ctx, scope); err != nil {
+		return err
+	}
 	_, err := s.Capture.Ensure(ctx, scope)
 	return err
+}
+
+// ensureControlSchema installs the control schema before capture snapshots a
+// cold control cell. The DDL commits are unnumbered (no txid bump), so they must
+// not run after capture has labelled its WAL transactions.
+func (s *Server) ensureControlSchema(ctx context.Context, scope cell.Scope) error {
+	if s.Control == nil || scope != control.Scope() {
+		return nil
+	}
+	return s.Control.EnsureSchema(ctx)
 }
 
 // CaptureWait blocks until the scope's current cell txid has a durable proof.

@@ -369,6 +369,9 @@ func (s *Store) shouldEvict() bool {
 // stale local copy. Calls made through BeginRequest(key) are respected: we wait
 // for in-flight requests to drain before closing.
 func (s *Store) Forget(ctx context.Context, sc cell.Scope) error {
+	if s.Pin != nil && s.Pin(sc) {
+		return nil
+	}
 	return s.forget(ctx, sc, nil)
 }
 
@@ -377,6 +380,9 @@ func (s *Store) Forget(ctx context.Context, sc cell.Scope) error {
 // re-check that the bucket manifest still covers the cell's current txid, so a
 // write acked after the eligibility check cannot be deleted.
 func (s *Store) ForgetWithVerify(ctx context.Context, sc cell.Scope, verify func() error) error {
+	if s.Pin != nil && s.Pin(sc) {
+		return nil
+	}
 	return s.forget(ctx, sc, verify)
 }
 
@@ -385,6 +391,9 @@ func (s *Store) ForgetWithVerify(ctx context.Context, sc cell.Scope, verify func
 // busy request that still needs openMu/Cell. Returns false when the caller
 // should retry later.
 func (s *Store) TryForget(ctx context.Context, sc cell.Scope, verify func() error) (bool, error) {
+	if s.Pin != nil && s.Pin(sc) {
+		return false, nil
+	}
 	p, err := s.Path(sc)
 	if err != nil {
 		return false, err

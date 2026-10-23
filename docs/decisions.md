@@ -18,6 +18,8 @@
   3. **完成标记**：snapshot 先写 `<txid>.snapshot-started`、全部 part 成功后写 `.snapshot-done`；restore 跳过“started 但未 done”的部分快照，legacy 无标记快照仍视为完整。
   4. **跨 epoch 续链**：`replica.Epochs/DurableWatermarkChain/RestoreChain`；新 owner 的新 epoch 的 delta 继续上一 epoch 的 txid 链，`Hydrate` 用 `RestoreChain` 组合多个 epoch，避免每次重启因 epoch 变化重拍全库。
   5. **优雅停机 drain**：SIGTERM 后先等 HTTP quiesce，再 `captureMgr.Drain`（5s）并 Stop；`Drop` 也先 drain 再停；control schema 迁移改为不推进 txid，避免重启后本地恰好领先一个 txid。
+  6. **capture 前安装控制 schema**：控制 schema 的 DDL 提交不推进 txid；若在第一个 captured write 里懒安装，capture 会把这些提交当作 txid，导致 watermark 错位（并发 + SIGKILL 测试会丢已 ack 的 deploy）。`capturedWrite` 在 `Capture.Ensure` 前调用 `Control.EnsureSchema`；`Pin` 同时覆盖 `Forget/TryForget/ForgetWithVerify/ForgetPrefix`，control cell 不再被 janitor 驱逐；`FailPurge` 改走 `tx` 以推进 txid。
+- **Crash/并发验证**：`scripts/crash-e2e.sh`（`make crash-e2e`）用 40 路并发 deploy，在第二轮请求飞行中 `SIGKILL`，随后删除本地 cell 目录强制从 bucket 恢复；断言所有 200 ack 的版本仍在、失败请求用同 idempotency key 重试后每个 worker 恰好 1 个版本。当前 `N=40, DELAY_MS=15` 通过。
 - **验证**：新增/扩展 `internal/sqlcapture`、`internal/cellstore`、`internal/ltx` 流式/预算/批量测试；`internal/replica` 跨 epoch watermark/restore 与部分快照跳过；`scripts/deploy-e2e.sh` 默认用 `CELLHIVE_CAPTURE_SNAPSHOT_PART=65536` 强制多 part 快照，并新增“重启后发布 v3”阶段：`DEPLOY-E2E: PASS`，deploy v3 proof_delta=1、`ensure_snapshot 0->0`、`ensure_resume 0->1`，真实 workerd 返回 v3。
 - **边界**：`L>D`（崩溃造成的未 ack 尾巴）仍回退全量快照；`L>D` 的 WAL gap 增量、paged 跨 epoch 续链留待后续。
 

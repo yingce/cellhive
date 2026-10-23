@@ -36,4 +36,21 @@ func TestPinSkipsEviction(t *testing.T) {
 	if !pinnedOpen || otherOpen {
 		t.Fatalf("pinned=%v other=%v, want pinned kept and other evicted", pinnedOpen, otherOpen)
 	}
+	// Explicit eviction paths must honor Pin too: the disk janitor and resource
+	// cleanup call Forget/TryForget/ForgetWithVerify directly.
+	if err := s.Forget(ctx, pinned); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.TryForget(ctx, pinned, nil); err != nil || got {
+		t.Fatalf("TryForget(pinned) = %v, %v; want false, nil", got, err)
+	}
+	if err := s.ForgetWithVerify(ctx, pinned, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	_, stillOpen := s.cells[pinnedPath]
+	s.mu.Unlock()
+	if !stillOpen {
+		t.Fatal("pinned cell was forgotten")
+	}
 }

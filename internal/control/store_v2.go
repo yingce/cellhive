@@ -298,10 +298,12 @@ func (s *Store) FailPurge(ctx context.Context, ns, worker, msg string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.DB.ExecContext(ctx,
-		`UPDATE purges SET state='failed', attempts=attempts+1, updated_ms=?, last_error=? WHERE ns=? AND worker=?`,
-		s.now().UnixMilli(), msg, ns, worker)
-	return err
+	return tx(ctx, c, func(t *sql.Tx) error {
+		_, err := t.ExecContext(ctx,
+			`UPDATE purges SET state='failed', attempts=attempts+1, updated_ms=?, last_error=? WHERE ns=? AND worker=?`,
+			s.now().UnixMilli(), msg, ns, worker)
+		return err
+	})
 }
 
 // PurgeHook cleans the data side of a purge job. done=false means work remains

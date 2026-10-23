@@ -498,6 +498,17 @@ func main() {
 		}
 	}
 	ctrl := control.New(store, env)
+	// Install the control schema before capture starts. Control DDL runs as
+	// unnumbered SQLite transactions (it does not advance cell_meta.txid); if it
+	// executed lazily inside the first captured deploy, capture would label those
+	// DDL commits with txids and shift every later write (a concurrent SIGKILL
+	// test lost acked deploys this way). Hydrate/store callbacks are already set.
+	if initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second); true {
+		if _, ierr := ctrl.Rev(initCtx); ierr != nil {
+			log.Warn("control schema init failed", "err", ierr)
+		}
+		initCancel()
+	}
 	ctrlRef = ctrl
 	enricher.ctrl = ctrl
 

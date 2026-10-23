@@ -421,6 +421,15 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// EnsureSchema opens and migrates the control cell. Call it before capture
+// takes a baseline snapshot: control schema DDL commits without advancing the
+// cell txid, so doing it inside the first captured write would shift capture's
+// txid labels (ADR-272 crash test).
+func (s *Store) EnsureSchema(ctx context.Context) error {
+	_, err := s.cell(ctx)
+	return err
+}
+
 // cell returns the single control cell, creating/migrating it on first use.
 func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 	// A cellstore eviction can close the cell between Cell() and our lazy
