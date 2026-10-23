@@ -223,3 +223,34 @@ func TestHydrateConcurrencyLimit(t *testing.T) {
 	close(release)
 	wg.Wait()
 }
+
+func TestHydrateTimeoutReleasesSlot(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.HydrateParallel = 1
+	s.HydrateTimeout = 100 * time.Millisecond
+	s.Hydrate = func(ctx context.Context, _ cell.Scope, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	start := time.Now()
+	_, err = s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "hang"})
+	if err == nil {
+		t.Fatal("hung hydrate should time out")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("hydrate timeout took %s, want bounded", d)
+	}
+	// A second cold scope must not stay queued behind the timed-out slot.
+	done := make(chan error, 1)
+	go func() { _, err := s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "next"}); done <- err }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second hydrate stayed blocked after timeout")
+	}
+}

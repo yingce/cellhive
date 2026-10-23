@@ -246,6 +246,7 @@ func main() {
 	// baseline, which is both a cold-path cost and a migration/close race.
 	store.Pin = func(sc cell.Scope) bool { return sc == control.Scope() }
 	store.HydrateParallel = cfg.HydrateParallel
+	store.HydrateTimeout = cfg.HydrateTimeout
 	// Paged cold restore (ADR-160): when the cell's compacted restore chain is
 	// large enough, open the main database over a sparse local file and fault
 	// pages from the replica on first use instead of downloading the whole

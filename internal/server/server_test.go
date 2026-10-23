@@ -80,7 +80,9 @@ func newTestServer(t *testing.T) (*Server, string) {
 		}
 		return timer.NewStore(ctx, c)
 	}
-	return New(Deps{Cfg: cfg, Bucket: b, Lease: lm, Owner: om, Replica: rm, Spool: spool, PeerMgr: pm, PeerShipper: shipper, NodeLog: nl, Uploader: up, PeerUploader: peerUp, Store: cs, Timers: reg, OpenTimer: open, Workflows: workflow.New(cs), R2: r2.New(b), Logs: logbuf.New(100, 10), Log: log}), dir
+	srv := New(Deps{Cfg: cfg, Bucket: b, Lease: lm, Owner: om, Replica: rm, Spool: spool, PeerMgr: pm, PeerShipper: shipper, NodeLog: nl, Uploader: up, PeerUploader: peerUp, Store: cs, Timers: reg, OpenTimer: open, Workflows: workflow.New(cs), R2: r2.New(b), Logs: logbuf.New(100, 10), Log: log})
+	t.Cleanup(func() { srv.WaitBackground(); _ = cs.Close() })
+	return srv, dir
 }
 
 func do(t *testing.T, h http.Handler, method, target, token string, body []byte) *httptest.ResponseRecorder {

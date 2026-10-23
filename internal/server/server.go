@@ -131,6 +131,11 @@ type Deps struct {
 	// timer into its owning cell and register the scope for local dispatch.
 	Timers    *timer.Registry
 	OpenTimer func(ctx context.Context, sc cell.Scope) (*timer.Store, error)
+	// timerRegPending dedupes asynchronous pending-timer registration for a
+	// scope. A claim must not block the data plane on a cold timer-cell hydrate.
+	timerRegMu      sync.Mutex
+	timerRegPending map[string]bool
+	timerRegWG      sync.WaitGroup
 }
 
 // Server wires the HTTP surface for a cell-agent node.
@@ -996,13 +1001,45 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	default:
 		// A (re)claimed cell may hold pending timers (takeover/restart); register
 		// them so the local runner schedules them (ADR-099).
-		s.registerPendingTimers(r.Context(), sc)
+		s.enqueuePendingTimers(sc)
 		writeJSON(w, http.StatusOK, map[string]any{"owner": o})
 	}
 }
 
+// enqueuePendingTimers registers a claimed cell's pending timers off the request
+// path. Opening a cold timer cell can hydrate a large chain; doing that inline
+// made invocation/KV requests pile up behind it and OOM the cell-agent.
+func (s *Server) enqueuePendingTimers(sc cell.Scope) {
+	key := sc.String()
+	s.timerRegMu.Lock()
+	if s.timerRegPending == nil {
+		s.timerRegPending = map[string]bool{}
+	}
+	if s.timerRegPending[key] {
+		s.timerRegMu.Unlock()
+		return
+	}
+	s.timerRegPending[key] = true
+	s.timerRegWG.Add(1)
+	s.timerRegMu.Unlock()
+	go func() {
+		defer s.timerRegWG.Done()
+		defer func() {
+			s.timerRegMu.Lock()
+			delete(s.timerRegPending, key)
+			s.timerRegMu.Unlock()
+		}()
+		s.registerPendingTimers(context.Background(), sc)
+	}()
+}
+
+// WaitBackground waits for asynchronous claim work. Tests use it before
+// removing a temporary data directory; production servers are long-lived.
+func (s *Server) WaitBackground() { s.timerRegWG.Wait() }
+
 // registerPendingTimers arms the local runner for a scope that already holds a
-// pending timer (e.g. a cell this node just claimed).
+// pending timer (e.g. a cell this node just claimed). It is only called from the
+// asynchronous enqueue path.
 func (s *Server) registerPendingTimers(ctx context.Context, sc cell.Scope) {
 	if s.Timers == nil || s.OpenTimer == nil {
 		return
@@ -1105,7 +1142,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 		claimed, cerr := s.Owner.Claim(r.Context(), sc, now)
 		switch {
 		case cerr == nil:
-			s.registerPendingTimers(context.Background(), sc)
+			s.enqueuePendingTimers(sc)
 			return false
 		case errors.Is(cerr, owner.ErrOwnerLive):
 			if claimed.Node != s.Cfg.NodeID && claimed.Address != "" {

@@ -62,7 +62,11 @@ type Store struct {
 	// opens are parallel, but a mass restart must not hydrate every cell at once
 	// (parallel RestoreChain fetches can exceed the container memory limit).
 	HydrateParallel int
-	Drop            func(ctx context.Context, sc cell.Scope) error
+	// HydrateTimeout bounds a single cold hydrate. Background callers (queue,
+	// cron, waker, timers) pass contexts with no deadline; without this one slow
+	// COS GET held the hydrate slot forever and every other cold cell stalled.
+	HydrateTimeout time.Duration
+	Drop           func(ctx context.Context, sc cell.Scope) error
 	// Pin, when set, excludes a scope from LRU/idle eviction. The control cell
 	// is pinned: it is the hottest cell, and reopening it re-runs schema
 	// migration and forces capture to rebuild its baseline (ADR-272).
@@ -165,7 +169,7 @@ func (s *Store) touchLocked(p string) {
 	}
 }
 
-func (s *Store) hydrateSlot() func() {
+func (s *Store) hydrateSlot(ctx context.Context) (func(), error) {
 	n := s.HydrateParallel
 	if n <= 0 {
 		n = 2
@@ -176,8 +180,22 @@ func (s *Store) hydrateSlot() func() {
 	}
 	sem := s.hydrateSem
 	s.openMu.Unlock()
-	sem <- struct{}{}
-	return func() { <-sem }
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Store) hydrateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.HydrateTimeout <= 0 {
+		return ctx, func() {}
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.HydrateTimeout)
 }
 
 // Cell returns a shared, cached Cell for the scope, opening and migrating it
@@ -230,9 +248,15 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	cold := missing || markerExists
 	paged := false
 	if cold && (missing || markerValid) && s.Paged != nil {
-		release := s.hydrateSlot()
-		src, ok, perr := s.Paged(ctx, sc, p)
+		hctx, cancel := s.hydrateContext(ctx)
+		release, rerr := s.hydrateSlot(hctx)
+		if rerr != nil {
+			cancel()
+			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, rerr)
+		}
+		src, ok, perr := s.Paged(hctx, sc, p)
 		release()
+		cancel()
 		if perr != nil {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
@@ -292,9 +316,15 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		missing = true
 	}
 	if missing && s.Hydrate != nil {
-		release := s.hydrateSlot()
-		err := s.Hydrate(ctx, sc, p)
+		hctx, cancel := s.hydrateContext(ctx)
+		release, rerr := s.hydrateSlot(hctx)
+		if rerr != nil {
+			cancel()
+			return nil, fmt.Errorf("cellstore: hydrate %s: %w", sc, rerr)
+		}
+		err := s.Hydrate(hctx, sc, p)
 		release()
+		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("cellstore: hydrate %s: %w", sc, err)
 		}
