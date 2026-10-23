@@ -164,3 +164,25 @@ func TestDurableWatermarkChainAcrossEpochs(t *testing.T) {
 		t.Fatalf("restore chain epochs = %v, want 1 and 2", epochsSeen)
 	}
 }
+
+func TestDurableWatermarkChainParsesGroupedSnapshotBatch(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "batchchain"}
+	const epoch = uint64(1)
+	// Grouped snapshot parts share a watermark; the name (not a segment GET)
+	// must be enough to anchor the chain.
+	if _, err := b.Put(ctx, Prefix(sc, epoch)+"40.p0-p3.batch", []byte("not-decoded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSnapshotDone(ctx, sc, epoch, 40); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := m.DurableWatermarkChain(ctx, sc, epoch); err != nil || got != 40 {
+		t.Fatalf("grouped snapshot watermark = %d, %v; want 40", got, err)
+	}
+}

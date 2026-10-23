@@ -26,6 +26,9 @@ import (
 type Manager struct {
 	B             bucket.Bucket
 	resourceLocks [64]sync.RWMutex
+
+	fenceMu    sync.Mutex
+	fenceCache map[string]fenceCacheEntry
 }
 
 // New creates a Manager.
@@ -313,29 +316,85 @@ func (m *Manager) spansForEpoch(ctx context.Context, s cell.Scope, epoch uint64)
 // epoch chain up to maxEpoch. A restarted owner gets a new epoch; the previous
 // epoch's snapshot/deltas are its baseline, and the new epoch's deltas continue
 // the same txid sequence (ADR-272, celld epoch-chain restore).
+//
+// It lists the scope's LTX prefix once and groups keys by epoch. The previous
+// implementation listed once per epoch and decoded every batch object, which on
+// a long-lived scope (many owner epochs) made the first write after a restart
+// take tens of seconds.
 func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEpoch uint64) (uint64, error) {
-	epochs, err := m.Epochs(ctx, s, maxEpoch)
+	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
 	if err != nil {
 		return 0, err
 	}
+	base := s.Key() + "/ltx/"
+	type epochData struct {
+		spans    []segmentSpan
+		manifest string
+	}
+	groups := map[uint64]*epochData{}
+	for _, key := range keys {
+		rest, ok := strings.CutPrefix(key, base)
+		if !ok {
+			continue
+		}
+		// rest is "e<epoch>/<name>" (L1 objects live under ".../L1/").
+		if !strings.HasPrefix(rest, "e") {
+			continue
+		}
+		slash := strings.IndexByte(rest, '/')
+		if slash <= 1 {
+			continue
+		}
+		n, perr := strconv.ParseUint(rest[1:slash], 10, 64)
+		if perr != nil || (maxEpoch > 0 && n > maxEpoch) {
+			continue
+		}
+		name := rest[slash+1:]
+		g := groups[n]
+		if g == nil {
+			g = &epochData{}
+			groups[n] = g
+		}
+		if strings.HasSuffix(name, "L1/manifest.json") {
+			g.manifest = key
+			continue
+		}
+		if strings.Contains(name, "L1/") {
+			continue // compacted objects are not L0 spans
+		}
+		if sp, ok := parseSegmentSpan(name); ok {
+			g.spans = append(g.spans, sp)
+		}
+	}
+	epochs := make([]uint64, 0, len(groups))
+	for e := range groups {
+		epochs = append(epochs, e)
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
 	floor := uint64(0)
 	haveBase := false
 	for _, epoch := range epochs {
-		spans, err := m.spansForEpoch(ctx, s, epoch)
-		if err != nil {
-			return 0, err
+		g := groups[epoch]
+		if g.manifest != "" {
+			man, ok, merr := m.ReadManifest(ctx, s, epoch)
+			if merr != nil {
+				return 0, merr
+			}
+			if ok {
+				g.spans = append(g.spans, segmentSpan{start: 1, end: man.MaxTxID, snapshot: true})
+			}
 		}
 		var snapEnds []uint64
-		for _, sp := range spans {
+		for _, sp := range g.spans {
 			if sp.snapshot && sp.end > floor {
 				snapEnds = append(snapEnds, sp.end)
 			}
 		}
 		sort.Slice(snapEnds, func(i, j int) bool { return snapEnds[i] > snapEnds[j] })
 		for _, end := range snapEnds {
-			done, err := m.SnapshotDone(ctx, s, epoch, end)
-			if err != nil {
-				return 0, err
+			done, derr := m.SnapshotDone(ctx, s, epoch, end)
+			if derr != nil {
+				return 0, derr
 			}
 			if done {
 				floor = end
@@ -343,13 +402,13 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 				break
 			}
 		}
-		sort.Slice(spans, func(i, j int) bool {
-			if spans[i].start == spans[j].start {
-				return spans[i].end < spans[j].end
+		sort.Slice(g.spans, func(i, j int) bool {
+			if g.spans[i].start == g.spans[j].start {
+				return g.spans[i].end < g.spans[j].end
 			}
-			return spans[i].start < spans[j].start
+			return g.spans[i].start < g.spans[j].start
 		})
-		for _, sp := range spans {
+		for _, sp := range g.spans {
 			if sp.snapshot || sp.end <= floor || sp.start > floor+1 {
 				continue
 			}
@@ -412,7 +471,18 @@ func parseSegmentSpan(name string) (segmentSpan, bool) {
 		out.start, out.end, out.snapshot = n, n, true
 		return out, true
 	case strings.HasSuffix(name, ".batch"):
-		return parseSegmentRange(strings.TrimSuffix(name, ".batch"))
+		base := strings.TrimSuffix(name, ".batch")
+		// Grouped snapshot parts are named "<txid>.p<first>-p<last>.batch";
+		// they share one watermark and are not a delta range.
+		if i := strings.Index(base, ".p"); i > 0 {
+			n, err := strconv.ParseUint(base[:i], 10, 64)
+			if err != nil {
+				return out, false
+			}
+			out.start, out.end, out.snapshot = n, n, true
+			return out, true
+		}
+		return parseSegmentRange(base)
 	case strings.HasSuffix(name, ".ltx"):
 		return parseSegmentRange(strings.TrimSuffix(name, ".ltx"))
 	}
