@@ -751,12 +751,13 @@ func main() {
 				}
 				captureMgr.ForgetHint(sc)
 			}
+			// Eviction keeps the resume hint: the next Ensure uses it to avoid a
+			// cold List/Get. Only explicit Forget/ownership loss clears it.
 			prevEvict := store.OnEvicted
 			store.OnEvicted = func(sc cell.Scope) {
 				if prevEvict != nil {
 					prevEvict(sc)
 				}
-				captureMgr.ForgetHint(sc)
 			}
 		}
 		srv.Capture = captureMgr

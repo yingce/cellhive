@@ -946,6 +946,10 @@ type Cell struct {
 	hydrateStop func()
 }
 
+// Paged reports whether this cell is backed by the paged VFS. A paged cell must
+// finish its background hydrate before a full-page baseline is safe.
+func (c *Cell) Paged() bool { return c.paged }
+
 // Closed reports whether the cell's SQLite handle has been closed (e.g. by an
 // eviction racing a caller). Callers that lazily initialize per-cell state can
 // re-fetch the cell and retry instead of failing (ADR-272).

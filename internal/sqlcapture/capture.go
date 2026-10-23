@@ -72,6 +72,7 @@ type Capture struct {
 	committer        Committer
 	barrier          *barrier
 	notify           chan struct{}
+	baselineReq      chan chan error
 	done             chan struct{}
 
 	// GroupCommitWait and PipelineThreshold are tunable (0 = package defaults).
@@ -143,7 +144,7 @@ func New(db *cellstore.Cell, scope cell.Scope, epoch, baselineTxID uint64, commi
 		cell: db, scope: scope, epoch: epoch, cursor: cursor, baselineWALBytes: cursor.BytesRead(),
 		nextTxID: baselineTxID, committer: committer,
 		barrier: newBarrier(baselineTxID), notify: make(chan struct{}, 1),
-		done: make(chan struct{}),
+		baselineReq: make(chan chan error, 1), done: make(chan struct{}),
 	}, nil
 }
 
@@ -156,6 +157,24 @@ func (c *Capture) Notify() {
 	select {
 	case c.notify <- struct{}{}:
 	default:
+	}
+}
+
+// RequestBaseline asks the capture loop to emit a full-page baseline snapshot
+// at a safe point. It is used after a cross-epoch marker resume so the epoch
+// eventually owns an independent baseline and its predecessor can be GC'd.
+func (c *Capture) RequestBaseline(ctx context.Context) error {
+	req := make(chan error, 1)
+	select {
+	case c.baselineReq <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-req:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -203,6 +222,13 @@ func (c *Capture) loop(ctx context.Context) {
 				wg = captureGroupCommitWait
 			}
 			if err := waitGroupCommit(ctx, c.notify, wg); err != nil {
+				c.barrier.fail(err)
+				return
+			}
+		case req := <-c.baselineReq:
+			err := c.rebaseline(ctx)
+			req <- err
+			if err != nil {
 				c.barrier.fail(err)
 				return
 			}

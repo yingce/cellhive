@@ -242,11 +242,13 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		// This runs OUTSIDE the manager lock: a snapshot checkpoints SQLite and
 		// commits several bucket objects, and holding m.mu across it would stall
 		// every other cell's Ensure/Wait/Drop (ADR-134 follow-up).
+		crossEpoch := false
 		if m.AutoSnapshot {
 			hintOK := m.takeHint(key, epoch, baseline)
-			resume, rerr := hintOK, error(nil)
+			resume := hintOK
+			var rerr error
 			if !hintOK {
-				resume, rerr = m.canResume(ctx, c, scope, epoch, baseline)
+				resume, crossEpoch, rerr = m.canResume(ctx, c, scope, epoch, baseline)
 			}
 			if rerr != nil {
 				cancel()
@@ -302,6 +304,9 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		cap.Start(cctx)
 		go m.watchOwner(cctx, key, scope)
 		close(ready)
+		if crossEpoch {
+			go m.backgroundBaseline(cctx, c, cap, scope, epoch)
+		}
 		return baseline, nil
 	}
 }
@@ -312,42 +317,41 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 // are the same txid: any local write beyond that watermark would otherwise fall
 // into the cursor's baseline and leave a hole in the chain. A local cell behind
 // the chain fails closed; everything else falls back to a snapshot.
-func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.Scope, epoch, baseline uint64) (bool, error) {
+func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.Scope, epoch, baseline uint64) (bool, bool, error) {
 	if m.Durable == nil {
-		return false, nil
+		return false, false, nil
 	}
 	exists := true
 	if m.HasEpoch != nil {
 		ok, err := m.HasEpoch(ctx, scope, epoch)
 		if err != nil {
 			m.log().Warn("capture epoch lookup failed; taking a snapshot", "scope", scope.String(), "err", err)
-			return false, nil
+			return false, false, nil
 		}
 		exists = ok
 	}
 	var durable uint64
 	var err error
 	if exists && m.DurableEpoch != nil {
-		// Same epoch: only this epoch's chain matters. Reading the whole epoch
-		// chain made a capture recreated after LRU eviction scan every old delta.
 		durable, err = m.DurableEpoch(ctx, scope, epoch)
 	} else {
 		durable, err = m.Durable(ctx, scope, epoch)
 	}
 	if err != nil {
 		m.log().Warn("capture durable watermark unavailable; taking a snapshot", "scope", scope.String(), "err", err)
-		return false, nil
+		return false, false, nil
 	}
 	if durable == 0 {
-		return false, nil
+		return false, false, nil
 	}
 	local, err := c.TxID(ctx)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if durable > local {
-		return false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
+		return false, false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
 	}
+	crossEpoch := false
 	if !exists {
 		size := int64(0)
 		if st, serr := os.Stat(c.Path); serr == nil {
@@ -356,21 +360,22 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 		if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
 			if m.WriteMarker == nil {
 				m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
-				return false, nil
+				return false, false, nil
 			}
 			if err := m.WriteMarker(ctx, scope, epoch, local); err != nil {
-				return false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
+				return false, false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
 			}
 			m.log().Info("capture continues cross-epoch chain with marker", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
+			crossEpoch = true
 		} else {
 			m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
 		}
 	}
 	if durable == baseline && durable == local {
-		return true, nil
+		return true, crossEpoch, nil
 	}
 	m.log().Info("capture cannot resume; taking a snapshot", "scope", scope.String(), "baseline", baseline, "local", local, "durable", durable)
-	return false, nil
+	return false, false, nil
 }
 
 // RetireEpochs runs one epoch-GC pass for a scope. It is a no-op unless the
@@ -446,6 +451,35 @@ func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
 		delete(m.hints, key)
 	}
 	return ok && h.epoch == epoch && h.durable == baseline
+}
+
+// backgroundBaseline gives a marker-resumed epoch its own complete snapshot in
+// the capture loop's safe point, then records the done marker and retires the
+// predecessor. It never runs on the request path.
+func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap *sqlcapture.Capture, scope cell.Scope, epoch uint64) {
+	if c.Paged() {
+		// Snapshotting a sparse paged image would HydrateAll on the request/
+		// background path. Wait for a future explicit baseline after the paged
+		// hydrate completes.
+		m.log().Info("background baseline skipped for paged cell", "scope", scope.String(), "epoch", epoch)
+		return
+	}
+	if err := cap.RequestBaseline(ctx); err != nil {
+		m.log().Warn("background baseline failed", "scope", scope.String(), "epoch", epoch, "err", err)
+		return
+	}
+	if m.SnapshotDone != nil {
+		if txid, err := c.TxID(ctx); err == nil {
+			if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
+				m.log().Warn("background snapshot done marker failed", "scope", scope.String(), "txid", txid, "err", merr)
+				return
+			}
+		}
+	}
+	// Epoch GC is periodic: the background loop lists old epochs, and doing it
+	// here would add those Lists to the cold-open latency measured by E2E. The
+	// current epoch now has a complete snapshot, so the next GC pass can retire
+	// the predecessor.
 }
 
 // ForgetHint drops a resume hint after a local file is deleted or ownership is

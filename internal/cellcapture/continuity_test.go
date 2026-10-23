@@ -295,3 +295,52 @@ func TestEnsureAfterDropUsesResumeHint(t *testing.T) {
 	}
 	m.Stop()
 }
+
+func TestEvictionKeepsResumeHint(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	cs.MaxOpenCells = 1
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "evict-hint"}
+	other := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "other"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+	var commits, durableCalls int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		durableCalls++
+		return local, nil
+	}, &commits)
+	cs.Drop = m.Drop
+	// Eviction must NOT clear the hint; only explicit Forget/ownership loss does.
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	txid, _ := c.TxID(ctx)
+	if err := m.Wait(ctx, sc, txid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Cell(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	cs.Sweep(ctx)
+	before := durableCalls
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if durableCalls != before {
+		t.Fatalf("Ensure after eviction consulted Durable %d times, want 0", durableCalls-before)
+	}
+	m.Stop()
+}

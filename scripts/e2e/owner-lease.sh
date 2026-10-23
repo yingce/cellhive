@@ -80,14 +80,19 @@ echo "first deploy: $OUT"
 BASE=$(epochs)
 FAILS=0
 START=$(date +%s)
-for i in $(seq 1 40); do
-  OUT=$(deploy "k$i" "export default { async fetch() { return new Response(\"v$i\"); } };") || { FAILS=$((FAILS+1)); continue; }
+DURATION=${OWNER_E2E_SECONDS:-8}
+CALLS=0
+while :; do
+  NOW=$(date +%s)
+  [[ $((NOW - START)) -ge $DURATION ]] && break
+  CALLS=$((CALLS+1))
+  OUT=$(deploy "k$CALLS" "export default { async fetch() { return new Response(\"v$CALLS\"); } };") || { FAILS=$((FAILS+1)); continue; }
   [[ $OUT == *" 200" ]] || FAILS=$((FAILS+1))
   sleep 0.15
 done
 ELAPSED=$(( $(date +%s) - START ))
 AFTER=$(epochs)
-echo "continuous: ${ELAPSED}s calls=40 failures=$FAILS epochs_before=$BASE epochs_after=$AFTER"
+echo "continuous: ${ELAPSED}s calls=$CALLS failures=$FAILS epochs_before=$BASE epochs_after=$AFTER"
 [[ $FAILS -eq 0 ]] || fail "continuous writes failed=$FAILS"
 [[ $AFTER -eq $BASE ]] || fail "epoch changed during continuous writes: $BASE -> $AFTER"
 
