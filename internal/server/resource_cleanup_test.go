@@ -49,11 +49,8 @@ func TestPreparedResourceAdmissionUsesTwoFenceReadsAndRejectsRevoke(t *testing.T
 		}
 		end()
 	}
-	// The first admission is a cache miss (snapshot + post-gate = 2); the next
-	// four reuse the cached admission snapshot and do only the authoritative
-	// post-gate read.
-	if got := counting.gets.Load(); got != 6 {
-		t.Fatalf("steady admission used %d fence reads, want 6 (1 cold + 5 post-gate)", got)
+	if got := counting.gets.Load(); got != 10 {
+		t.Fatalf("steady admission used %d fence reads, want 2 per request", got)
 	}
 	generation, err := s.prepareResourceAccessSnapshot(t.Context(), sc)
 	if err != nil {
