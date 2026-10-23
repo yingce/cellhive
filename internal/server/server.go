@@ -3185,6 +3185,9 @@ func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write 
 
 func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uint64) error {
 	if !s.ackAllowed(time.Now()) {
+		if s.Lease != nil {
+			s.Log.Warn("capture ack fenced", "scope", scope.String(), "txid", txid, "lease_healthy", s.Lease.Healthy(time.Now()), "legacy_peer", s.Lease.LegacyPeerVisible(time.Now()))
+		}
 		return owner.ErrNotOwner
 	}
 	if s.Capture == nil {
@@ -3216,6 +3219,7 @@ func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uin
 func (s *Server) ensureOrForward(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
 	if err := s.CaptureEnsure(r.Context(), sc); err != nil {
 		if errors.Is(err, cellcapture.ErrNotOwner) {
+			s.Log.Warn("capture ensure not owner; forwarding", "scope", sc.String())
 			if s.Owner != nil {
 				s.Owner.Invalidate(sc)
 			}
@@ -3273,6 +3277,7 @@ func (s *Server) CaptureWait(ctx context.Context, scope cell.Scope) error {
 // captureErr writes the standard error for a capture-gated store call.
 func (s *Server) captureErr(w http.ResponseWriter, err error, code string) {
 	if errors.Is(err, cellcapture.ErrNotOwner) {
+		s.Log.Warn("capture write not owner", "code", code)
 		writeErr(w, http.StatusServiceUnavailable, "not_owner", "this node does not own the cell")
 		return
 	}
