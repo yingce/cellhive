@@ -22,6 +22,7 @@ type countingBucket struct {
 	rangedGets  int
 	getBytes    int64
 	rangedBytes int64
+	lists       int
 }
 
 func (c *countingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
@@ -31,6 +32,14 @@ func (c *countingBucket) Get(ctx context.Context, key string) ([]byte, string, e
 	c.getBytes += int64(len(data))
 	c.mu.Unlock()
 	return data, etag, err
+}
+
+func (c *countingBucket) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := c.Bucket.List(ctx, prefix)
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
+	return keys, err
 }
 
 func (c *countingBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
@@ -153,4 +162,34 @@ func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
 	}
 	t.Logf("hydrate: 1 whole-object read (%d bytes); paged primitive: %d pages materialized (ranged reads are exercised by TestPageFetcherOnDemandFromL1Index; this bucket recorded %d ranged bytes here)",
 		getBytes, filled, rangedBytes)
+}
+
+func TestRestoreChainListsScopeOnce(t *testing.T) {
+	ctx := context.Background()
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &countingBucket{Bucket: base}
+	m := New(cb)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "one-list"}
+	// Two epochs, each with a complete snapshot and a delta.
+	for e := uint64(1); e <= 3; e++ {
+		snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: e, StartTxID: e, EndTxID: e}, []byte("x"))
+		if _, _, err := m.Append(ctx, sc, e, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cb.mu.Lock()
+	cb.lists = 0
+	cb.mu.Unlock()
+	if _, err := m.RestoreChain(ctx, sc, 3); err != nil {
+		t.Fatal(err)
+	}
+	cb.mu.Lock()
+	lists := cb.lists
+	cb.mu.Unlock()
+	if lists != 1 {
+		t.Fatalf("RestoreChain listed %d times, want 1", lists)
+	}
 }

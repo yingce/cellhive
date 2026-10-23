@@ -229,3 +229,22 @@ func TestDurableWatermarkChainParsesGroupedSnapshotBatch(t *testing.T) {
 		t.Fatalf("grouped snapshot watermark = %d, %v; want 40", got, err)
 	}
 }
+
+func TestSpanBatchNames(t *testing.T) {
+	cases := []struct {
+		name       string
+		start, end uint64
+		snapshot   bool
+	}{
+		{"5-6.d.batch", 5, 6, false},
+		{"7.p0-p3.s.batch", 7, 7, true},
+		{"8-9.m.batch", 8, 9, false},
+		{"10-11.batch", 10, 11, false}, // legacy
+	}
+	for _, c := range cases {
+		sp, ok := parseSegmentSpan(c.name)
+		if !ok || sp.start != c.start || sp.end != c.end || sp.snapshot != c.snapshot {
+			t.Fatalf("%s -> %+v ok=%v, want %d..%d snapshot=%v", c.name, sp, ok, c.start, c.end, c.snapshot)
+		}
+	}
+}

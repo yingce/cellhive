@@ -481,16 +481,47 @@ func (m *Manager) RetireEpochs(ctx context.Context, s cell.Scope, current uint64
 // predecessor's snapshot. Cold path; the caller's restore planner selects the
 // newest complete snapshot and validates delta contiguity.
 func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]Segment, error) {
-	epochs, err := m.Epochs(ctx, s, maxEpoch)
+	// One listing for the whole chain: cold hydrate used to list once for
+	// Epochs and once per epoch for L0. restoreOnceKeys below never lists.
+	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
 	if err != nil {
 		return nil, err
 	}
+	base := s.Key() + "/ltx/e"
+	byEpoch := map[uint64][]string{}
+	var epochs []uint64
+	for _, key := range keys {
+		if !isSegmentKey(key) {
+			continue
+		}
+		rest, ok := strings.CutPrefix(key, base)
+		if !ok {
+			continue
+		}
+		slash := strings.IndexByte(rest, '/')
+		if slash <= 0 {
+			continue
+		}
+		e, perr := strconv.ParseUint(rest[:slash], 10, 64)
+		if perr != nil || (maxEpoch > 0 && e > maxEpoch) {
+			continue
+		}
+		if _, seen := byEpoch[e]; !seen {
+			epochs = append(epochs, e)
+			byEpoch[e] = nil
+		}
+		if strings.HasPrefix(rest[slash+1:], "L1/") {
+			continue
+		}
+		byEpoch[e] = append(byEpoch[e], key)
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
 	var out []Segment
 	seen := map[string]bool{}
 	for _, epoch := range epochs {
-		segs, err := m.restoreOnce(ctx, s, epoch)
-		if err != nil {
-			return nil, err
+		segs, rerr := m.restoreOnceKeys(ctx, s, epoch, byEpoch[epoch])
+		if rerr != nil {
+			return nil, rerr
 		}
 		for _, sg := range segs {
 			if seen[sg.Key] {
@@ -847,7 +878,17 @@ func (m *Manager) skipPartialSnapshot(ctx context.Context, s cell.Scope, epoch, 
 // objects plus L0 deltas newer than the manifest's MaxTxID; otherwise it reads
 // the whole L0 chain. Ordering: snapshot(s) by EndTxID, then link markers, then
 // deltas by StartTxID. Restore wraps it with a manifest-change retry.
+// restoreOnce is the per-epoch form used by diagnostics; RestoreChain passes a
+// pre-listed key set so a cold hydration lists the scope only once.
 func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) ([]Segment, error) {
+	l0, err := m.ListL0Segments(ctx, s, epoch)
+	if err != nil {
+		return nil, err
+	}
+	return m.restoreOnceKeys(ctx, s, epoch, l0)
+}
+
+func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint64, l0 []string) ([]Segment, error) {
 	fence, _, ferr := m.readResourceFence(ctx, s)
 	if ferr != nil {
 		return nil, ferr
@@ -872,20 +913,41 @@ func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) (
 		}
 		floor = man.MaxTxID
 	}
-	l0, err := m.ListL0Segments(ctx, s, epoch)
-	if err != nil {
-		return nil, err
-	}
 	keys = append(keys, l0...)
 
+	// Fetch objects concurrently; decoding and ordering stay deterministic.
+	raws := make([][]byte, len(keys))
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	var fetchErr error
+	var fetchMu sync.Mutex
+	for i, k := range keys {
+		wg.Add(1)
+		go func(i int, k string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			raw, err := m.ReadSegment(ctx, k)
+			if err != nil {
+				fetchMu.Lock()
+				if fetchErr == nil {
+					fetchErr = err
+				}
+				fetchMu.Unlock()
+				return
+			}
+			raws[i] = raw
+		}(i, k)
+	}
+	wg.Wait()
+	if fetchErr != nil {
+		return nil, fetchErr
+	}
 	segs := make([]Segment, 0, len(keys))
 	seen := map[string]bool{}
 	partialSnapshots := map[uint64]bool{}
-	for _, k := range keys {
-		raw, err := m.ReadSegment(ctx, k)
-		if err != nil {
-			return nil, err
-		}
+	for i, k := range keys {
+		raw := raws[i]
 		parts, err := ltx.Split(raw)
 		if err != nil {
 			return nil, fmt.Errorf("replica: corrupt object %s: %w", k, err)
