@@ -1,6 +1,6 @@
 # 决策记录（ADR）
 
-## ADR-273 cell owner 由节点租约判活，取消 per-cell 续约（2026-10-24，实施中）
+## ADR-273 cell owner 由节点租约判活，取消 per-cell 续约（2026-10-24，阶段1 已实现）
 
 - **背景**：owner 记录用 `Expiry=now+LeaseTTL`，后台每 `TTL/3` 串行续所有 `OwnedScopes`；owned 只增不减，单个 owner 续约要多次串行 COS 权威读/写。cell 一多，一轮续约就超过 TTL，正在读写的 cell 也会过期；随后 `Claim` 自我 bump epoch，capture 重建、整库快照，`watchOwner` 再 `Forget`，表现为偶发 10s 冷写。
 - **决策**：
@@ -13,10 +13,10 @@
 - **升级**：新旧版本不能在同一个桶上混跑；全量替换，旧 record 可读并按 Expiry 判活。
 - **验证**：owner/lease/server 单测覆盖同 session 不 bump、活性判定、self-fence、legacy、DO 不变；cellstore 覆盖 OnEvicted；e2e 模拟 owned 增长、续约停顿、同目录 SIGKILL 和跨节点接管。
 
-## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，待实现）
+## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，部分实现）
 
 - **决策**：capture 位置优先使用 `resume hint`（同 epoch 淘汰）、hydrate 得到的 `RestoreInfo`、fresh epoch；只有未知时才执行一次 `ChainView`（`CommonPrefixes` + 每个需要的 epoch 一次 `ListSizes`），后续 restore plan/durable watermark/has-epoch 都从该视图回答。`Fetch` 并发 16。`.batch` 名称带 `.d/.s/.m` span 标记，减少为解析 span 而下载对象。compaction 增加对象数阈值（默认 8），让小 cell 不长期挂 64 个 L0。该阶段目标是 A2/A5。
-- **状态**：设计已接受，尚未落地。
+- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地；完整 ChainView（CommonPrefixes/ListSizes/paged）仍待。
 
 ## ADR-275 跨 epoch 续链 marker（2026-10-24，待实现）
 
