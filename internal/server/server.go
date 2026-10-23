@@ -2401,6 +2401,9 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "value_too_large", "value exceeds 25 MiB")
 		return
 	}
+	if s.ensureOrForward(w, r, scope, val) {
+		return
+	}
 	// if_exists turns the put into an atomic existence-conditioned write
 	// (ADR-182, the "onlyIf" semantics): absent = create-if-absent, present =
 	// key must exist. The check and the write are one transaction; on a failed
@@ -2511,6 +2514,9 @@ func (s *Server) handleKVIncr(w http.ResponseWriter, r *http.Request) {
 	if s.forwardOrClaim(w, r, scope, nil) {
 		return
 	}
+	if s.ensureOrForward(w, r, scope, nil) {
+		return
+	}
 	c, err := s.Store.Cell(r.Context(), scope)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
@@ -2604,6 +2610,9 @@ func (s *Server) handleKVDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.forwardOrClaim(w, r, scope, nil) {
+		return
+	}
+	if s.ensureOrForward(w, r, scope, nil) {
 		return
 	}
 	c, err := s.Store.Cell(r.Context(), scope)
@@ -3200,6 +3209,28 @@ func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uin
 // write. For handlers that conditionally write (a CAS miss commits nothing,
 // so there is no txid to wait for) but must still arm capture before their
 // own transaction.
+// ensureOrForward preflights capture ownership before a KV write. If the
+// cached owner said this node but capture no longer agrees, the write has not
+// run yet, so it is safe to invalidate the owner hint and forward to the real
+// owner. After a write starts, an ErrNotOwner must stay a fail-closed 503.
+func (s *Server) ensureOrForward(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
+	if err := s.CaptureEnsure(r.Context(), sc); err != nil {
+		if errors.Is(err, cellcapture.ErrNotOwner) {
+			if s.Owner != nil {
+				s.Owner.Invalidate(sc)
+			}
+			if s.forwardIfNonOwner(w, r, sc, preRead) {
+				return true
+			}
+			writeErr(w, http.StatusServiceUnavailable, "not_owner", "this node does not own the cell")
+			return true
+		}
+		s.captureErr(w, err, "ensure_failed")
+		return true
+	}
+	return false
+}
+
 func (s *Server) CaptureEnsure(ctx context.Context, scope cell.Scope) error {
 	if s.Capture == nil {
 		return nil

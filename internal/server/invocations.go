@@ -37,6 +37,9 @@ func (s *Server) handleInvocationPut(w http.ResponseWriter, r *http.Request) {
 	if s.forwardOrClaim(w, r, scope, raw) {
 		return
 	}
+	if s.ensureOrForward(w, r, scope, raw) {
+		return
+	}
 	if err := s.capturedWrite(r.Context(), scope, func() error {
 		if record.Status == "running" {
 			var err error
