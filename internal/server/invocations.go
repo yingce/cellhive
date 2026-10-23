@@ -29,6 +29,7 @@ func (s *Server) handleInvocationPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := invocation.Validate(record); err != nil {
+		s.Log.Warn("invocation persistence rejected", "ns", record.Namespace, "worker", record.Worker, "id", record.ID, "kind", record.Kind, "status", record.Status, "err", err)
 		writeErr(w, 400, "invalid_invocation", err.Error())
 		return
 	}
@@ -44,6 +45,7 @@ func (s *Server) handleInvocationPut(w http.ResponseWriter, r *http.Request) {
 		}
 		return s.Invocations.Put(r.Context(), record)
 	}); err != nil {
+		s.Log.Warn("invocation write failed", "ns", record.Namespace, "worker", record.Worker, "id", record.ID, "kind", record.Kind, "status", record.Status, "err", err)
 		s.captureErr(w, err, "invocation_write_failed")
 		return
 	}
