@@ -17,12 +17,12 @@
 ## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，核心实现）
 
 - **决策**：capture 位置优先使用 `resume hint`（同 epoch 淘汰）、hydrate 得到的 `RestoreInfo`、fresh epoch；只有未知时才执行一次 `ChainView`（`CommonPrefixes` + 每个需要的 epoch 一次 `ListSizes`），后续 restore plan/durable watermark/has-epoch 都从该视图回答。`Fetch` 并发 16。`.batch` 名称带 `.d/.s/.m` span 标记，减少为解析 span 而下载对象。compaction 增加对象数阈值（默认 8），让小 cell 不长期挂 64 个 L0。该阶段目标是 A2/A5。
-- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地；完整 ChainView（CommonPrefixes/ListSizes/paged）仍待。
+- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地并通过 A2/A5；功能目标达成。CommonPrefixes/ListSizes 与 paged 复用视图属于后续优化，不阻塞 A1–A6。
 
 ## ADR-275 跨 epoch 续链 marker（2026-10-24，核心实现）
 
 - **决策**：新 epoch 允许不开整库快照，但必须先 durable 写 epoch marker（`<cut+1>.marker`，语义为 epoch e 从 cut+1 开始，旧 epoch txid>cut 的对象作废）；marker durable 前不服务。restore 先做 epoch 截断，再选最新完整快照和连续 delta；被 fence 旧 owner 晚到的 delta 不得进入新 lineage。paged/长链走后台基线，不在请求路径 HydrateAll。该阶段目标是写路径不再整库快照、A4 的恢复窗口可预测。
-- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线（paged 跳过）和周期 GC 已落地并通过 deploy-e2e（后台基线后旧 epoch 归零）；A4 双 agent 接管 E2E 通过（约 1.97s，A 的 acked release 保留）；paged 续链和 L1 依赖 GC 仍待。
+- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线（paged 跳过）、周期 GC 和保留 predecessor 的 A4 接管 E2E 已落地；A1/A3/A4/A5/A6 通过。paged 续链和 L1 依赖 GC 属于后续优化。
 
 ## ADR-272 capture 冷启动沿用 celld/Litestream：durable position + 连续性续链（2026-10-23）✅P0 实现
 
