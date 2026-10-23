@@ -287,7 +287,7 @@ func main() {
 		if herr != nil || !ok {
 			return herr
 		}
-		segs, herr := rep.Restore(hctx, sc, ep)
+		segs, herr := rep.RestoreChain(hctx, sc, ep)
 		if herr != nil {
 			return herr
 		}
@@ -675,15 +675,23 @@ func main() {
 			Committer:    srv.CaptureCommitter(),
 			AutoSnapshot: true,
 			Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
-				return rep.DurableWatermark(cctx, sc, epoch)
+				return rep.DurableWatermarkChain(cctx, sc, epoch)
+			},
+			SnapshotStarted: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
+				return rep.MarkSnapshotStarted(cctx, sc, epoch, txid)
 			},
 			SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
 				return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
+			},
+			ClearSnapshotStarted: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
+				return rep.ClearSnapshotStarted(cctx, sc, epoch, txid)
 			},
 			OnEnsure:            srv.RecordCaptureEnsure,
 			AutoCheckpointBytes: cfg.CellWALCheckpointBytes,
 			GroupCommitWait:     cfg.CaptureGroupCommitWait,
 			PipelineThreshold:   cfg.CapturePipelineThreshold,
+			SnapshotMaxBytes:    cfg.CaptureSnapshotMaxBytes,
+			SnapshotBatchParts:  8,
 			Log:                 log,
 			Owner: func(cctx context.Context, sc cell.Scope) (bool, uint64, error) {
 				o, _, err := om.Resolve(cctx, sc)
@@ -782,7 +790,8 @@ func main() {
 				}).Start(ctx)
 			}
 		}
-		go func() { <-ctx.Done(); captureMgr.Stop() }()
+		// Capture keeps running until HTTP has quiesced; the shutdown path below
+		// drains it so the local cell never ends ahead of the durable chain.
 	}
 
 	// Cell-handle eviction (ADR-096): bound open fds/memory by closing idle or
@@ -957,6 +966,15 @@ func main() {
 
 	if err := srv.Run(ctx); err != nil {
 		log.Error("server stopped", "err", err)
+		time.Sleep(100 * time.Millisecond)
+		if captureMgr != nil {
+			dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if derr := captureMgr.Drain(dctx); derr != nil {
+				log.Warn("capture drain", "err", derr)
+			}
+			dcancel()
+			captureMgr.Stop()
+		}
 		performHandoff(log, cfg, nodeLog, om, drainMgr, uploader)
 		upCancel()
 		shipper.Stop()
@@ -964,6 +982,18 @@ func main() {
 		uploader.Stop()
 		_ = store.Close()
 		os.Exit(1)
+	}
+	// Let in-flight background loops observe the cancelled context before the
+	// final capture drain; otherwise a late control write lands after the drain
+	// and leaves the local cell one txid ahead of the durable chain.
+	time.Sleep(100 * time.Millisecond)
+	if captureMgr != nil {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if derr := captureMgr.Drain(dctx); derr != nil {
+			log.Warn("capture drain", "err", derr)
+		}
+		dcancel()
+		captureMgr.Stop()
 	}
 	performHandoff(log, cfg, nodeLog, om, drainMgr, uploader)
 	upCancel()

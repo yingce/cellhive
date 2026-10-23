@@ -59,10 +59,24 @@ type Manager struct {
 	// SnapshotDone, when set, records that a full-page snapshot at txid was
 	// completely committed. Resume treats only marked snapshots as baselines.
 	SnapshotDone func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
+	// SnapshotStarted, when set, records that a snapshot at txid has begun, so
+	// restore can skip a crash-partial snapshot instead of selecting it.
+	SnapshotStarted func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
+	// ClearSnapshotStarted degrades a completed snapshot whose done marker
+	// failed into a legacy (complete) snapshot.
+	ClearSnapshotStarted func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
 	// OnEnsure, when set, observes each Ensure with its outcome
 	// (warm/resume/snapshot/plain/error) and duration. Warm Ensure is a map
 	// lookup; the other modes are cold paths.
 	OnEnsure func(scope cell.Scope, mode string, d time.Duration)
+
+	// SnapshotMaxBytes bounds one full-page snapshot (0 = unlimited). Streaming
+	// keeps memory at O(part); the budget is a fail-closed guard against
+	// accidentally snapshotting an unreasonable database.
+	SnapshotMaxBytes int64
+	// SnapshotBatchParts groups that many parts per CommitBatch call (0/1 =
+	// one Commit per part, correct but 12 RTTs for a 96MiB image).
+	SnapshotBatchParts int
 
 	// GroupCommitWait is the WAL coalescing window (0 = package default).
 	GroupCommitWait time.Duration
@@ -168,6 +182,8 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		}
 		cap.GroupCommitWait = m.GroupCommitWait
 		cap.PipelineThreshold = m.PipelineThreshold
+		cap.SnapshotMaxBytes = m.SnapshotMaxBytes
+		cap.SnapshotBatchParts = m.SnapshotBatchParts
 		cctx, cancel := context.WithCancel(context.Background())
 		if m.AutoCheckpointBytes > 0 {
 			cell := c
@@ -210,6 +226,11 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				mode = "resume"
 				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
 			} else {
+				if m.SnapshotStarted != nil {
+					if serr := m.SnapshotStarted(ctx, scope, epoch, baseline); serr != nil {
+						m.log().Warn("snapshot started marker failed", "scope", key, "txid", baseline, "err", serr)
+					}
+				}
 				if err := cap.Snapshot(ctx); err != nil {
 					cancel()
 					cap.Start(cctx)
@@ -229,10 +250,16 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 					if txid, terr := c.TxID(ctx); terr == nil {
 						if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
 							m.log().Warn("snapshot done marker failed", "scope", key, "txid", txid, "err", merr)
+							if m.ClearSnapshotStarted != nil {
+								_ = m.ClearSnapshotStarted(ctx, scope, epoch, txid)
+							}
 						}
 					}
 				}
+				mode = "snapshot"
 			}
+		} else {
+			mode = "plain"
 		}
 		cap.Start(cctx)
 		go m.watchOwner(cctx, key, scope)
@@ -272,6 +299,7 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	default:
 		// Local ahead of the durable prefix (unacked tail) or a write landed
 		// between the baseline read and the cursor creation: snapshot.
+		m.log().Info("capture cannot resume; taking a snapshot", "scope", scope.String(), "baseline", baseline, "local", local, "durable", durable)
 		return false, nil
 	}
 }
@@ -295,20 +323,75 @@ func (m *Manager) Drop(ctx context.Context, scope cell.Scope) error {
 	key := scope.String()
 	m.mu.Lock()
 	st := m.caps[key]
-	if st != nil {
-		st.cancel()
-		delete(m.caps, key)
-	}
 	m.mu.Unlock()
 	if st == nil {
 		return nil
 	}
+	// Drain before stopping: an eviction must not leave the local cell ahead of
+	// the durable chain, or the next wake would need a full snapshot. Bounded so
+	// a slow store cannot wedge eviction.
+	if c, err := m.Store.Cell(ctx, scope); err == nil {
+		if txid, terr := c.TxID(ctx); terr == nil {
+			dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = st.cap.Wait(dctx, txid)
+			cancel()
+		}
+	}
+	m.mu.Lock()
+	if m.caps[key] == st {
+		st.cancel()
+		delete(m.caps, key)
+	} else {
+		// A newer capture replaced this one while we drained; leave it alone.
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
 	select {
 	case <-st.cap.Done():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Drain waits, bounded by ctx, until every live capture's barrier covers its
+// cell's current txid. Graceful shutdown calls it before Stop so the local cell
+// does not end up ahead of the durable chain (which would force a full snapshot
+// on the next start). A timeout is reported but does not block shutdown.
+func (m *Manager) Drain(ctx context.Context) error {
+	type pending struct {
+		scope cell.Scope
+		cap   *sqlcapture.Capture
+	}
+	m.mu.Lock()
+	items := make([]pending, 0, len(m.caps))
+	for _, st := range m.caps {
+		items = append(items, pending{scope: st.scope, cap: st.cap})
+	}
+	m.mu.Unlock()
+	var firstErr error
+	for _, it := range items {
+		c, err := m.Store.Cell(ctx, it.scope)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		txid, err := c.TxID(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		werr := it.cap.Wait(ctx, txid)
+		if werr != nil && firstErr == nil {
+			firstErr = werr
+		}
+	}
+	return firstErr
 }
 
 // Stop cancels every capture (shutdown/drain).

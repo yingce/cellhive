@@ -24,9 +24,32 @@ type item struct {
 	scope   cell.Scope
 	epoch   uint64
 	seg     []byte
+	segs    [][]byte      // non-nil for a pre-grouped batch (EnqueueBatchWait)
 	done    chan error    // non-nil for EnqueueWait callers
 	spoolID uint64        // >0 when the segment is persisted in the spool
 	barrier chan struct{} // non-nil: flush prior items, then close
+}
+
+// itemSegs returns the LTX segments carried by one item.
+func itemSegs(it item) [][]byte {
+	if len(it.segs) > 0 {
+		return it.segs
+	}
+	if it.seg != nil {
+		return [][]byte{it.seg}
+	}
+	return nil
+}
+
+func itemBytes(it item) int {
+	if len(it.segs) > 0 {
+		n := 0
+		for _, seg := range it.segs {
+			n += len(seg)
+		}
+		return n
+	}
+	return len(it.seg)
 }
 
 // Batcher accumulates segments and flushes them in batches. Uploads are
@@ -244,7 +267,7 @@ func (b *Batcher) loop(ctx context.Context, sh *shard) {
 				continue
 			}
 			pending = append(pending, it)
-			pendingBytes += len(it.seg)
+			pendingBytes += itemBytes(it)
 			if len(pending) >= b.maxSegments || pendingBytes >= b.maxBytes {
 				flush()
 			}
@@ -274,7 +297,7 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 			index[key] = g
 			groups = append(groups, g)
 		}
-		g.segments = append(g.segments, it.seg)
+		g.segments = append(g.segments, itemSegs(it)...)
 		g.items = append(g.items, it)
 	}
 	for _, g := range groups {
@@ -369,6 +392,43 @@ func (b *Batcher) EnqueueWait(ctx context.Context, s cell.Scope, epoch uint64, s
 		return nil
 	}
 	// Ask the loop to flush now; coalesces under concurrency, immediate when idle.
+	select {
+	case sh.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// EnqueueBatchWait submits pre-grouped segments as one upload item and blocks
+// until that item's covering upload is durable. It lets a snapshot stream many
+// parts into a few objects instead of one commit per 8MiB part (ADR-272).
+func (b *Batcher) EnqueueBatchWait(ctx context.Context, s cell.Scope, epoch uint64, segs [][]byte) error {
+	if len(segs) == 0 {
+		return nil
+	}
+	if len(segs) == 1 {
+		return b.EnqueueWait(ctx, s, epoch, segs[0])
+	}
+	done := make(chan error, 1)
+	sh := b.shardFor(s)
+	select {
+	case sh.ch <- item{scope: s, epoch: epoch, segs: segs, done: done}:
+	default:
+		// Queue full: upload synchronously (backpressure).
+		_, _, err := b.sink.AppendBatch(ctx, s, epoch, segs)
+		if err != nil {
+			b.errors.Add(1)
+			return err
+		}
+		b.batches.Add(1)
+		b.segments.Add(uint64(len(segs)))
+		return nil
+	}
 	select {
 	case sh.wake <- struct{}{}:
 	default:

@@ -1024,6 +1024,13 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			CompatFlags:    req.CompatibilityFlags,
 			Limits:         req.Limits,
 		}, "admin")
+		if e == nil {
+			// The built-in worker domain is part of the deploy. Keep it in the
+			// capture section so the one proof covers it: a post-ack write would
+			// leave the local cell ahead of the durable watermark and force the
+			// next restart to snapshot.
+			s.ensureBuiltinHost(r.Context(), req.Namespace, req.Worker, "")
+		}
 		return e
 	})
 	if err != nil {
@@ -1039,8 +1046,8 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidateBindings(req.Namespace)
 	// Built-in worker domain (ADR-131): deploy gives the worker an immediate
-	// entry point without any DNS or certificate setup.
-	s.ensureBuiltinHost(r.Context(), req.Namespace, req.Worker, "")
+	// entry point without any DNS or certificate setup. It is written inside the
+	// capture section above so the deploy proof covers it (ADR-272).
 	// Durable Object restart policy (ADR-107): "restart" forces an eager
 	// abort/restart, "preserve" keeps resident objects until they idle out;
 	// empty honors CELLHIVE_DO_EAGER_RESTART (default false = lazy restart).
@@ -1074,13 +1081,15 @@ func (s *Server) handleControlPromote(w http.ResponseWriter, r *http.Request) {
 	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
 		var e error
 		wk, e = s.Control.Promote(r.Context(), req.Namespace, req.Worker, req.Version, actorFor(r.Context()))
+		if e == nil {
+			s.ensureBuiltinHost(r.Context(), req.Namespace, req.Worker, "")
+		}
 		return e
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "promote_failed", err.Error())
 		return
 	}
 	s.invalidateBindings(req.Namespace)
-	s.ensureBuiltinHost(r.Context(), req.Namespace, req.Worker, "")
 	writeJSON(w, http.StatusOK, wk)
 }
 

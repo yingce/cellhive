@@ -48,11 +48,43 @@ func ManifestName(s cell.Scope, epoch uint64) string {
 	return L1Prefix(s, epoch) + "manifest.json"
 }
 
+// SnapshotStartedName marks that a full-page snapshot at txid has begun.
+// Together with SnapshotDoneName it distinguishes a crash-partial snapshot from
+// a legacy snapshot that never had markers (ADR-272).
+func SnapshotStartedName(s cell.Scope, epoch, txid uint64) string {
+	return Prefix(s, epoch) + strconv.FormatUint(txid, 10) + ".snapshot-started"
+}
+
 // SnapshotDoneName marks that every part of a full-page snapshot at txid has
 // been committed. Without it a partial snapshot (crash between part uploads)
 // must not be treated as a resume baseline.
 func SnapshotDoneName(s cell.Scope, epoch, txid uint64) string {
 	return Prefix(s, epoch) + strconv.FormatUint(txid, 10) + ".snapshot-done"
+}
+
+// MarkSnapshotStarted records that a snapshot at txid has begun.
+func (m *Manager) MarkSnapshotStarted(ctx context.Context, s cell.Scope, epoch, txid uint64) error {
+	_, err := m.B.Put(ctx, SnapshotStartedName(s, epoch, txid), []byte("{}"))
+	return err
+}
+
+// SnapshotStarted reports whether a snapshot at txid began.
+func (m *Manager) SnapshotStarted(ctx context.Context, s cell.Scope, epoch, txid uint64) (bool, error) {
+	_, _, err := m.B.Get(ctx, SnapshotStartedName(s, epoch, txid))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, bucket.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// ClearSnapshotStarted drops the started marker after a completed snapshot
+// whose done marker could not be written, so restore treats it as a complete
+// legacy snapshot instead of skipping it forever.
+func (m *Manager) ClearSnapshotStarted(ctx context.Context, s cell.Scope, epoch, txid uint64) error {
+	return m.B.Delete(ctx, SnapshotStartedName(s, epoch, txid))
 }
 
 // MarkSnapshotDone records that the snapshot at txid is complete. Idempotent:
@@ -127,6 +159,28 @@ func (m *Manager) DurableWatermark(ctx context.Context, s cell.Scope, epoch uint
 		if i := strings.LastIndexByte(name, '/'); i >= 0 {
 			name = name[i+1:]
 		}
+		// A group-committed object can contain snapshot parts (and/or deltas);
+		// its name alone cannot tell, so decode the batch's headers.
+		if strings.HasSuffix(name, ".batch") {
+			raw, err := m.ReadSegment(ctx, key)
+			if err != nil {
+				return 0, err
+			}
+			parts, err := ltx.Split(raw)
+			if err != nil {
+				return 0, fmt.Errorf("replica: durable watermark split %s: %w", key, err)
+			}
+			for _, part := range parts {
+				h, _, derr := ltx.Decode(part)
+				if derr != nil {
+					return 0, fmt.Errorf("replica: durable watermark decode %s: %w", key, derr)
+				}
+				if h.Kind == ltx.KindSnapshot || h.Kind == ltx.KindDelta {
+					spans = append(spans, segmentSpan{start: h.StartTxID, end: h.EndTxID, snapshot: h.Kind == ltx.KindSnapshot})
+				}
+			}
+			continue
+		}
 		sp, ok := parseSegmentSpan(name)
 		if !ok {
 			continue
@@ -171,6 +225,168 @@ func (m *Manager) DurableWatermark(ctx context.Context, s cell.Scope, epoch uint
 		floor = sp.end
 	}
 	return floor, nil
+}
+
+// Epochs lists the epochs (<= maxEpoch, 0=unbounded) that have LTX objects for
+// the scope, ascending. Cold path.
+func (m *Manager) Epochs(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]uint64, error) {
+	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
+	if err != nil {
+		return nil, err
+	}
+	base := s.Key() + "/ltx/e"
+	set := map[uint64]bool{}
+	for _, k := range keys {
+		rest, ok := strings.CutPrefix(k, base)
+		if !ok {
+			continue
+		}
+		i := strings.IndexByte(rest, '/')
+		if i <= 0 {
+			continue
+		}
+		n, err := strconv.ParseUint(rest[:i], 10, 64)
+		if err != nil || (maxEpoch > 0 && n > maxEpoch) {
+			continue
+		}
+		set[n] = true
+	}
+	out := make([]uint64, 0, len(set))
+	for e := range set {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// spansForEpoch returns the base/delta spans of one epoch. A compacted L1
+// manifest is a complete baseline at its MaxTxID; L0 names are parsed, and a
+// group-committed batch is decoded because its name cannot tell snapshots from
+// deltas.
+func (m *Manager) spansForEpoch(ctx context.Context, s cell.Scope, epoch uint64) ([]segmentSpan, error) {
+	spans := make([]segmentSpan, 0, 16)
+	man, ok, err := m.ReadManifest(ctx, s, epoch)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		spans = append(spans, segmentSpan{start: 1, end: man.MaxTxID, snapshot: true})
+	}
+	keys, err := m.ListL0Segments(ctx, s, epoch)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range keys {
+		name := key
+		if i := strings.LastIndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		}
+		if strings.HasSuffix(name, ".batch") {
+			raw, err := m.ReadSegment(ctx, key)
+			if err != nil {
+				return nil, err
+			}
+			parts, err := ltx.Split(raw)
+			if err != nil {
+				return nil, fmt.Errorf("replica: durable watermark split %s: %w", key, err)
+			}
+			for _, part := range parts {
+				h, _, derr := ltx.Decode(part)
+				if derr != nil {
+					return nil, fmt.Errorf("replica: durable watermark decode %s: %w", key, derr)
+				}
+				if h.Kind == ltx.KindSnapshot || h.Kind == ltx.KindDelta {
+					spans = append(spans, segmentSpan{start: h.StartTxID, end: h.EndTxID, snapshot: h.Kind == ltx.KindSnapshot})
+				}
+			}
+			continue
+		}
+		sp, ok := parseSegmentSpan(name)
+		if ok {
+			spans = append(spans, sp)
+		}
+	}
+	return spans, nil
+}
+
+// DurableWatermarkChain returns the durable contiguous watermark across the
+// epoch chain up to maxEpoch. A restarted owner gets a new epoch; the previous
+// epoch's snapshot/deltas are its baseline, and the new epoch's deltas continue
+// the same txid sequence (ADR-272, celld epoch-chain restore).
+func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEpoch uint64) (uint64, error) {
+	epochs, err := m.Epochs(ctx, s, maxEpoch)
+	if err != nil {
+		return 0, err
+	}
+	floor := uint64(0)
+	haveBase := false
+	for _, epoch := range epochs {
+		spans, err := m.spansForEpoch(ctx, s, epoch)
+		if err != nil {
+			return 0, err
+		}
+		var snapEnds []uint64
+		for _, sp := range spans {
+			if sp.snapshot && sp.end > floor {
+				snapEnds = append(snapEnds, sp.end)
+			}
+		}
+		sort.Slice(snapEnds, func(i, j int) bool { return snapEnds[i] > snapEnds[j] })
+		for _, end := range snapEnds {
+			done, err := m.SnapshotDone(ctx, s, epoch, end)
+			if err != nil {
+				return 0, err
+			}
+			if done {
+				floor = end
+				haveBase = true
+				break
+			}
+		}
+		sort.Slice(spans, func(i, j int) bool {
+			if spans[i].start == spans[j].start {
+				return spans[i].end < spans[j].end
+			}
+			return spans[i].start < spans[j].start
+		})
+		for _, sp := range spans {
+			if sp.snapshot || sp.end <= floor || sp.start > floor+1 {
+				continue
+			}
+			floor = sp.end
+		}
+	}
+	if !haveBase {
+		return 0, nil
+	}
+	return floor, nil
+}
+
+// RestoreChain reads the segments of every epoch up to maxEpoch (oldest first),
+// so a new epoch that only contains deltas can be restored on top of its
+// predecessor's snapshot. Cold path; the caller's restore planner selects the
+// newest complete snapshot and validates delta contiguity.
+func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]Segment, error) {
+	epochs, err := m.Epochs(ctx, s, maxEpoch)
+	if err != nil {
+		return nil, err
+	}
+	var out []Segment
+	seen := map[string]bool{}
+	for _, epoch := range epochs {
+		segs, err := m.restoreOnce(ctx, s, epoch)
+		if err != nil {
+			return nil, err
+		}
+		for _, sg := range segs {
+			if seen[sg.Key] {
+				continue
+			}
+			seen[sg.Key] = true
+			out = append(out, sg)
+		}
+	}
+	return out, nil
 }
 
 // segmentSpan is one L0 object's txid coverage.
@@ -476,6 +692,30 @@ func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Se
 	return nil, fmt.Errorf("replica: manifest changed during restore")
 }
 
+// skipPartialSnapshot reports whether a crash-partial snapshot (started marker
+// without a done marker) must be ignored by restore. A legacy snapshot with no
+// markers is assumed complete, so pre-marker chains still restore.
+func (m *Manager) skipPartialSnapshot(ctx context.Context, s cell.Scope, epoch, txid uint64, cache map[uint64]bool) (bool, error) {
+	if skip, ok := cache[txid]; ok {
+		return skip, nil
+	}
+	started, err := m.SnapshotStarted(ctx, s, epoch, txid)
+	if err != nil {
+		return false, err
+	}
+	if !started {
+		cache[txid] = false
+		return false, nil
+	}
+	done, err := m.SnapshotDone(ctx, s, epoch, txid)
+	if err != nil {
+		return false, err
+	}
+	skip := !done
+	cache[txid] = skip
+	return skip, nil
+}
+
 // restoreOnce reads and orders the segments needed to rebuild a scope/epoch
 // (cold path). When an L1 manifest exists it reads only the compacted snapshot
 // objects plus L0 deltas newer than the manifest's MaxTxID; otherwise it reads
@@ -514,6 +754,7 @@ func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) (
 
 	segs := make([]Segment, 0, len(keys))
 	seen := map[string]bool{}
+	partialSnapshots := map[uint64]bool{}
 	for _, k := range keys {
 		raw, err := m.ReadSegment(ctx, k)
 		if err != nil {
@@ -527,6 +768,15 @@ func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) (
 			h, _, err := ltx.Decode(part)
 			if err != nil {
 				return nil, fmt.Errorf("replica: corrupt segment in %s: %w", k, err)
+			}
+			if h.Kind == ltx.KindSnapshot {
+				skip, serr := m.skipPartialSnapshot(ctx, s, epoch, h.EndTxID, partialSnapshots)
+				if serr != nil {
+					return nil, serr
+				}
+				if skip {
+					continue
+				}
 			}
 			// Recovery re-uploads a follower's single segments, which may also be
 			// present inside an owner-uploaded batch. Keep one logical copy.

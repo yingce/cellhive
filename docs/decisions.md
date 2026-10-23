@@ -12,7 +12,14 @@
 - **补充（P1，同日）**：
   1. 控制 cell 通过 `cellstore.Store.Pin` 排除出 LRU/idle 驱逐；`Cell.Closed()` + `control.Store.cell()` 在迁移遇到已关闭 cell 时重新取 cell 重试一次，消除 `control: migrate: sql: database is closed` 竞态。
   2. 新增 `cellhive_capture_ensure_seconds{ns}` 直方图与 `cellhive_capture_ensure_total{ns,mode}` 计数（mode=warm/resume/snapshot/plain/error），由 `capture.Manager.OnEnsure` 上报；proof 直方图继续只覆盖 `Wait`。
-- **边界**：本地领先仍走全量快照；流式/预算快照、快照 part 批量/并发、`L>D` 的 gap 增量在后续阶段完成。
+- **补充（P2/P3，同日）**：
+  1. **流式快照**：`cellstore.SnapshotStream/SnapshotStreamPages` + `ltx.EncodeSnapshotPart`，按 part 读取/编码/提交，内存 O(part)；`SnapshotMaxBytes`（`CELLHIVE_CAPTURE_SNAPSHOT_MAX`，默认 8GiB）超限返回 `ErrSnapshotTooLarge`，不开始读库。
+  2. **批量/并发提交**：`sqlcapture.BatchCommitter`；server 的 `CommitBatch` 在有 follower 时以 4 路并发 replicate，无 follower 时按 ≤32MiB 合并成少量对象走 `EnqueueBatchWait`；`SnapshotBatchParts=8`。
+  3. **完成标记**：snapshot 先写 `<txid>.snapshot-started`、全部 part 成功后写 `.snapshot-done`；restore 跳过“started 但未 done”的部分快照，legacy 无标记快照仍视为完整。
+  4. **跨 epoch 续链**：`replica.Epochs/DurableWatermarkChain/RestoreChain`；新 owner 的新 epoch 的 delta 继续上一 epoch 的 txid 链，`Hydrate` 用 `RestoreChain` 组合多个 epoch，避免每次重启因 epoch 变化重拍全库。
+  5. **优雅停机 drain**：SIGTERM 后先等 HTTP quiesce，再 `captureMgr.Drain`（5s）并 Stop；`Drop` 也先 drain 再停；control schema 迁移改为不推进 txid，避免重启后本地恰好领先一个 txid。
+- **验证**：新增/扩展 `internal/sqlcapture`、`internal/cellstore`、`internal/ltx` 流式/预算/批量测试；`internal/replica` 跨 epoch watermark/restore 与部分快照跳过；`scripts/deploy-e2e.sh` 新增“重启后发布 v3”阶段：`DEPLOY-E2E: PASS`，deploy v3 proof_delta=1、`ensure_snapshot 0->0`、`ensure_resume 0->1`，真实 workerd 返回 v3。
+- **边界**：`L>D`（崩溃造成的未 ack 尾巴）仍回退全量快照；`L>D` 的 WAL gap 增量、paged 跨 epoch 续链留待后续。
 
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
 

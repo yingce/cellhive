@@ -2930,6 +2930,100 @@ func (c captureCommitter) Commit(ctx context.Context, scope cell.Scope, epoch ui
 	}
 }
 
+// CommitBatch proves a group of snapshot parts durable. With fleet followers the
+// parts are replicated in parallel (bounded), which is the cold-snapshot win;
+// without followers they are grouped into a few bucket objects so a 12-part
+// snapshot is a few PUTs instead of twelve serial ones (ADR-272).
+func (c captureCommitter) CommitBatch(ctx context.Context, scope cell.Scope, epoch uint64, segments [][]byte) error {
+	return c.s.commitSegmentBatchCore(ctx, scope, epoch, segments)
+}
+
+// maxSnapshotParallel bounds concurrent follower replications for one batch.
+const maxSnapshotParallel = 4
+
+// maxSnapshotUploadBytes bounds one grouped bucket object. It stays under the
+// 64MiB maxSegmentBytes cap so the object can also be replicated/read as a
+// segment batch.
+const maxSnapshotUploadBytes = 32 << 20
+
+func (s *Server) commitSegmentBatchCore(ctx context.Context, sc cell.Scope, epoch uint64, segments [][]byte) error {
+	if len(segments) == 0 {
+		return nil
+	}
+	if s.Owner != nil {
+		if err := s.requireOwnerEpoch(ctx, sc, epoch); err != nil {
+			return err
+		}
+	}
+	followers := s.liveFollowers(ctx, 2)
+	if s.Cfg.Durability != "bucket" && s.PeerMgr != nil && len(followers) > 0 {
+		if !s.openFleetSession(ctx, epoch, followers) {
+			s.Log.Warn("fleet recovery ensemble unavailable; snapshot waits for the bucket", "epoch", epoch)
+		} else {
+			sem := make(chan struct{}, maxSnapshotParallel)
+			errCh := make(chan error, len(segments))
+			var wg sync.WaitGroup
+			for _, seg := range segments {
+				wg.Add(1)
+				go func(seg []byte) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					res, err := s.commitSegmentCore(ctx, sc, epoch, seg, followers, false, false)
+					if err != nil {
+						errCh <- err
+						return
+					}
+					switch res.Mode {
+					case "fleet", "bucket", "bucket-batch":
+					default:
+						errCh <- fmt.Errorf("cellcapture: batch commit was not durable (mode %q)", res.Mode)
+					}
+				}(seg)
+			}
+			wg.Wait()
+			close(errCh)
+			for err := range errCh {
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	// Bucket posture: group parts into bounded objects and wait for each.
+	var group [][]byte
+	groupBytes := 0
+	flush := func() error {
+		if len(group) == 0 {
+			return nil
+		}
+		segs := group
+		group, groupBytes = nil, 0
+		if s.Uploader != nil {
+			if err := s.Uploader.EnqueueBatchWait(ctx, sc, epoch, segs); err != nil {
+				return err
+			}
+		} else {
+			if _, _, err := s.Replica.AppendBatch(ctx, sc, epoch, segs); err != nil {
+				return err
+			}
+		}
+		s.commits.Add(uint64(len(segs)))
+		return nil
+	}
+	for _, seg := range segments {
+		if groupBytes > 0 && groupBytes+len(seg) > maxSnapshotUploadBytes {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		group = append(group, seg)
+		groupBytes += len(seg)
+	}
+	return flush()
+}
+
 // CaptureCommitter returns the committer the cellcapture manager uses.
 func (s *Server) CaptureCommitter() cellcapture.Committer { return captureCommitter{s} }
 

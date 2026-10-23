@@ -148,6 +148,12 @@ proofs() { # durability proofs attributed to the single control cell
   v=$(curl -sS -m 10 "http://$REST/metrics" | awk -F' ' '/^cellhive_durability_proof_seconds_count\{ns="__platform__"\}/{print $2}')
   echo "${v:-0}"
 }
+ensure_mode() { # MODE -> capture.Ensure counter for the control cell
+  local m=$1 v
+  v=$(curl -sS -m 10 "http://$REST/metrics" |
+    awk -v pat="cellhive_capture_ensure_total{ns=\"__platform__\",mode=\"$m\"}" 'index($0, pat)==1 {print $NF}')
+  echo "${v:-0}"
+}
 active_ver() {
   curl -sS -m 10 -H "x-cellhive-admin-token: $TOKEN" \
     "http://$ADMIN/v1/control/releases?namespace=e2e&worker=app" |
@@ -198,8 +204,32 @@ sleep 0.2
 after=$(proofs); d3=$((after-before))
 body1=$(wait_body v1) || fail "invoke after rollback: $body1"
 
-audits=$(adm GET '/v1/control/audit?namespace=e2e' |
-  python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(1 for a in d.get("audit") or [] if a.get("action")=="app.create"))')
+audit_json=$(adm GET '/v1/control/audit?namespace=e2e')
+audits=$(printf '%s' "$audit_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(1 for a in d.get("audit") or [] if a.get("action")=="app.create"))')
+
+# Restart the cell-agent (same data dir and bucket) and publish a third version.
+# ADR-272: the new capture must continue the durable chain (mode=resume) and
+# must not take another whole-database snapshot.
+kill "$AGENT" 2>/dev/null
+wait "$AGENT" 2>/dev/null
+( cd "$ROOT" && exec "$BINDIR/cell-agent" ) >"$TMP/agent-restart.log" 2>&1 &
+AGENT=$!
+for _ in $(seq 1 200); do
+  curl -sf "http://$REST/healthz" >/dev/null 2>&1 && break
+  kill -0 "$AGENT" 2>/dev/null || fail "cell-agent exited after restart"
+  sleep 0.1
+done
+curl -sf "http://$REST/healthz" >/dev/null 2>&1 || fail "cell-agent not healthy after restart"
+# Counters are per process: take the post-restart baseline here.
+snap_before=$(ensure_mode snapshot)
+resume_before=$(ensure_mode resume)
+sha3=$(upload 'export default { async fetch() { return new Response("v3"); } };')
+read -r t4 d4 <<<"$(deploy e2e app "$sha3" e2e-k3)" || fail "deploy v3 after restart"
+[[ $(active_ver) == 3 ]] || fail "active after v3 = $(active_ver)"
+body3=$(wait_body v3) || fail "invoke v3: $body3"
+sleep 0.2
+snap_after=$(ensure_mode snapshot)
+resume_after=$(ensure_mode resume)
 
 echo "RESULT[$LABEL]"
 echo "  deploy v1 (fresh ns):  ${t1}s  proof_delta=$d1"
@@ -208,6 +238,8 @@ echo "  rollback v2->v1:       ${t3}s  proof_delta=$d3"
 echo "  invoke v2:             ${body2}"
 echo "  invoke after rollback: ${body1}"
 echo "  app.create audits:     $audits"
+echo "  deploy v3 (restart):   ${t4}s  proof_delta=$d4  ensure_snapshot=${snap_before}->${snap_after} ensure_resume=${resume_before}->${resume_after}"
+echo "  invoke v3:             ${body3}"
 echo "  active version:        $(active_ver)"
 
 fail=0
@@ -217,5 +249,9 @@ fail=0
 [[ $audits == 1 ]] || { echo "ASSERT: app.create audits=$audits, want 1" >&2; fail=1; }
 [[ $body2 == *v2* ]] || { echo "ASSERT: invoke after v2 = '$body2'" >&2; fail=1; }
 [[ $body1 == *v1* ]] || { echo "ASSERT: invoke after rollback = '$body1'" >&2; fail=1; }
+[[ $d4 == 1 ]] || { echo "ASSERT: deploy v3 proofs=$d4, want 1" >&2; fail=1; }
+[[ $snap_after == "$snap_before" ]] || { echo "ASSERT: restart took a snapshot ($snap_before -> $snap_after)" >&2; fail=1; }
+[[ $resume_after -gt $resume_before ]] || { echo "ASSERT: restart did not resume (resume $resume_before -> $resume_after)" >&2; fail=1; }
+[[ $body3 == *v3* ]] || { echo "ASSERT: invoke after restart = '$body3'" >&2; fail=1; }
 [[ $fail == 0 ]] || exit 1
 echo "DEPLOY-E2E: PASS"

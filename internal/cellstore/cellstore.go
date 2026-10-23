@@ -1514,6 +1514,156 @@ func (c *Cell) SnapshotConsistent(ctx context.Context) (uint64, uint32, uint32, 
 	return c.txid, pageSize, commit, pages, err
 }
 
+// SnapshotPartFunc receives one part of a streamed full-page snapshot.
+//
+// pages holds consecutive pages of pageSize bytes each, covering page numbers
+// firstPage..firstPage+len(pages)-1. The slice and its page buffers are only
+// valid for the duration of the call; a callback that retains page data must
+// copy it. watermark is the cell's committed txid at the moment the image was
+// taken (after the checkpoint), so every part can carry the same snapshot
+// label.
+type SnapshotPartFunc func(partIndex, total int, watermark uint64, pageSize, commit, firstPage uint32, pages [][]byte) error
+
+// SnapshotStream checkpoints the cell and streams its full-page image to fn one
+// bounded part at a time while holding the write mutex, so memory stays
+// O(partBytes) even for a database far larger than RAM. fn runs under that lock
+// (the snapshot semantics of SnapshotConsistent: the cell takes no new write
+// through cellstore while the image is read), and the returned watermark is the
+// committed txid the image corresponds to.
+//
+// Like SnapshotConsistent it is safe for a quiesced cell. A caller whose writers
+// bypass the cell write mutex (for example sqlcapture.Writer, which serializes
+// on its own mutex) must pause them across the call: a TRUNCATE checkpoint that
+// cannot complete would leave the image older than the returned watermark.
+//
+// The image's page numbers are unchanged (no VACUUM): they match the WAL frames
+// that later deltas carry, and the parts are byte-compatible with
+// ltx.EncodeSnapshotParts. Any partBytes <= 0 uses 8MiB.
+func (c *Cell) SnapshotStream(ctx context.Context, partBytes int, fn SnapshotPartFunc) (watermark uint64, pageSize, commit uint32, err error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.CheckpointTruncate(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	return c.snapshotStream(ctx, partBytes, fn)
+}
+
+// SnapshotStreamPages streams a full-page image from a database file the caller
+// has already made consistent (CheckpointTruncate/SafeCheckpoint), exactly like
+// SnapshotPages. Unlike SnapshotStream it does not checkpoint again, which keeps
+// a capture checkpoint path from racing a live writer: a second TRUNCATE could
+// leave the image (and the watermark it is labelled with) stale.
+func (c *Cell) SnapshotStreamPages(ctx context.Context, partBytes int, fn SnapshotPartFunc) (watermark uint64, pageSize, commit uint32, err error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.snapshotStream(ctx, partBytes, fn)
+}
+
+// snapshotStream streams the database file at c.Path. The caller must either
+// have checkpointed (SnapshotStreamPages) or accept that snapshotStream's own
+// caller did (SnapshotStream).
+func (c *Cell) snapshotStream(ctx context.Context, partBytes int, fn SnapshotPartFunc) (uint64, uint32, uint32, error) {
+	const defaultPartBytes = 8 << 20
+	if fn == nil {
+		return 0, 0, 0, fmt.Errorf("cellstore: nil snapshot part callback")
+	}
+	if partBytes <= 0 {
+		partBytes = defaultPartBytes
+	}
+	if c.paged {
+		// Capture reads the file directly; every page must be materialized or
+		// the snapshot would encode sparse zeros.
+		if err := pagedvfs.HydrateAll(ctx, c.Path); err != nil {
+			return 0, 0, 0, err
+		}
+		removePagedMarker(c.Path)
+	}
+	if err := c.loadTxID(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	watermark := c.txid
+	f, err := os.Open(c.Path)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if info.Size() < 100 {
+		return 0, 0, 0, fmt.Errorf("cellstore: snapshot too small")
+	}
+	var header [100]byte
+	if _, err := f.ReadAt(header[:], 0); err != nil {
+		return 0, 0, 0, fmt.Errorf("cellstore: snapshot header: %w", err)
+	}
+	ps := uint32(binary.BigEndian.Uint16(header[16:18]))
+	if ps == 1 {
+		ps = 65536
+	}
+	if ps == 0 || info.Size()%int64(ps) != 0 {
+		return 0, 0, 0, fmt.Errorf("cellstore: invalid page size %d for %d bytes", ps, info.Size())
+	}
+	if pages := info.Size() / int64(ps); pages > int64(math.MaxUint32) {
+		return 0, 0, 0, fmt.Errorf("cellstore: snapshot has %d pages, want at most %d", pages, uint32(math.MaxUint32))
+	}
+	commit := uint32(info.Size() / int64(ps))
+	if commit == 0 {
+		return 0, 0, 0, fmt.Errorf("cellstore: snapshot has no pages")
+	}
+	perPart, err := snapshotPagesPerPart(ps, partBytes)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	total := (int(commit) + perPart - 1) / perPart
+	// One bounded read buffer is reused for every part; the callback sees
+	// sub-slices of it and must not retain them past the call.
+	buf := make([]byte, perPart*int(ps))
+	firstPage := uint32(1)
+	for part := 0; part < total; part++ {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, 0, err
+		}
+		count := perPart
+		if remaining := int(commit) - part*perPart; remaining < count {
+			count = remaining
+		}
+		run := buf[:count*int(ps)]
+		offset := int64(part*perPart) * int64(ps)
+		if _, err := f.ReadAt(run, offset); err != nil {
+			return 0, 0, 0, fmt.Errorf("cellstore: snapshot read pages %d..%d: %w", firstPage, firstPage+uint32(count)-1, err)
+		}
+		pages := make([][]byte, count)
+		for i := range pages {
+			pages[i] = run[i*int(ps) : (i+1)*int(ps)]
+		}
+		if err := fn(part, total, watermark, ps, commit, firstPage, pages); err != nil {
+			return 0, 0, 0, fmt.Errorf("cellstore: snapshot part %d/%d: %w", part+1, total, err)
+		}
+		firstPage += uint32(count)
+	}
+	return watermark, ps, commit, nil
+}
+
+// snapshotPagesPerPart bounds one streamed part by partBytes. The per-page cost
+// is the page itself plus a conservative index allowance that covers both the
+// legacy 4-byte page-number prefix and the v2 12-byte offset index, and the
+// fixed overhead covers the LTX header (44) and the larger v2 page-map header
+// (24), so a part encoded by ltx.EncodeSnapshotPart stays within partBytes.
+func snapshotPagesPerPart(pageSize uint32, partBytes int) (int, error) {
+	const (
+		headerBytes        = 44 // ltx.HeaderSize
+		pageMapHeaderBytes = 24 // ltx v2 (WAL3) payload header
+		perPageIndexBytes  = 12 // v2 index entry; also covers the v1 prefix
+	)
+	perPart := (partBytes - headerBytes - pageMapHeaderBytes) / (perPageIndexBytes + int(pageSize))
+	if perPart < 1 {
+		return 0, fmt.Errorf("cellstore: snapshot part budget %d too small for page size %d", partBytes, pageSize)
+	}
+	return perPart, nil
+}
+
 // SnapshotPages reads the database file as a full-page image
 // (pageSize, commit, pages). It is the source for a KindSnapshot segment.
 //

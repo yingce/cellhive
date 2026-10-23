@@ -1,6 +1,9 @@
 package ltx
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func snapshotPages(n, size int) []WALPage {
 	pages := make([]WALPage, n)
@@ -97,5 +100,87 @@ func TestEncodeSnapshotPartsRejectsNonContiguous(t *testing.T) {
 	pages := []WALPage{{PageNo: 2, Data: make([]byte, 512)}}
 	if _, err := EncodeSnapshotParts(Header{Kind: KindSnapshot}, 512, 1, pages, DefaultSnapshotPartBytes); err == nil {
 		t.Fatalf("want error for non-contiguous pages")
+	}
+}
+
+func TestEncodeSnapshotPartMatchesEncodeSnapshotParts(t *testing.T) {
+	pages := snapshotPages(10, 512)
+	maxBytes := HeaderSize + 20 + 2*(4+512) // exactly two pages per part
+	h := Header{Kind: KindSnapshot, Epoch: 3, StartTxID: 9, EndTxID: 9}
+	parts, err := EncodeSnapshotParts(h, 512, 10, pages, maxBytes)
+	if err != nil {
+		t.Fatalf("encode parts: %v", err)
+	}
+	if len(parts) != 5 {
+		t.Fatalf("want 5 parts, got %d", len(parts))
+	}
+	const perPart = 2
+	for i, want := range parts {
+		start, end := i*perPart, i*perPart+perPart
+		got, err := EncodeSnapshotPart(h, 512, 10, pages[start:end], i, len(parts))
+		if err != nil {
+			t.Fatalf("encode part %d: %v", i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("part %d differs from EncodeSnapshotParts output", i)
+		}
+	}
+}
+
+func TestEncodeSnapshotPartSingleIsUnpaged(t *testing.T) {
+	pages := snapshotPages(5, 512)
+	h := Header{Kind: KindSnapshot, Epoch: 1, StartTxID: 7, EndTxID: 7}
+	parts, err := EncodeSnapshotParts(h, 512, 5, pages, DefaultSnapshotPartBytes)
+	if err != nil {
+		t.Fatalf("encode parts: %v", err)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("want 1 part, got %d", len(parts))
+	}
+	got, err := EncodeSnapshotPart(h, 512, 5, pages, 0, 1)
+	if err != nil {
+		t.Fatalf("encode part: %v", err)
+	}
+	if !bytes.Equal(got, parts[0]) {
+		t.Fatalf("single part differs from unpaged EncodeSnapshotParts output")
+	}
+	header, _, err := Decode(got)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, paged := SnapshotPart(header); paged {
+		t.Fatalf("single streamed part must stay unpaged (Flags 0)")
+	}
+}
+
+func TestEncodeSnapshotPartRejectsInvalid(t *testing.T) {
+	page := func(pgno uint32, size int) WALPage {
+		return WALPage{PageNo: pgno, Data: make([]byte, size)}
+	}
+	good := []WALPage{page(1, 512), page(2, 512)}
+	cases := []struct {
+		name             string
+		header           Header
+		pageSize, commit uint32
+		pages            []WALPage
+		partIndex, total int
+	}{
+		{"wrong kind", Header{Kind: KindDelta}, 512, 2, good, 0, 1},
+		{"zero page size", Header{Kind: KindSnapshot}, 0, 2, good, 0, 1},
+		{"no pages", Header{Kind: KindSnapshot}, 512, 0, good, 0, 1},
+		{"empty part", Header{Kind: KindSnapshot}, 512, 2, nil, 0, 1},
+		{"part index out of range", Header{Kind: KindSnapshot}, 512, 2, good, 1, 1},
+		{"negative part index", Header{Kind: KindSnapshot}, 512, 2, good, -1, 1},
+		{"too many parts", Header{Kind: KindSnapshot}, 512, 1, []WALPage{page(1, 512)}, 0, MaxSnapshotParts + 1},
+		{"first part not at page 1", Header{Kind: KindSnapshot}, 512, 3, []WALPage{page(2, 512), page(3, 512)}, 0, 1},
+		{"non-contiguous", Header{Kind: KindSnapshot}, 512, 3, []WALPage{page(1, 512), page(3, 512)}, 0, 1},
+		{"last part does not end at commit", Header{Kind: KindSnapshot}, 512, 3, []WALPage{page(2, 512)}, 1, 2},
+		{"page beyond commit", Header{Kind: KindSnapshot}, 512, 1, good, 0, 1},
+		{"wrong page length", Header{Kind: KindSnapshot}, 512, 1, []WALPage{page(1, 256)}, 0, 1},
+	}
+	for _, c := range cases {
+		if _, err := EncodeSnapshotPart(c.header, c.pageSize, c.commit, c.pages, c.partIndex, c.total); err == nil {
+			t.Fatalf("%s: want error", c.name)
+		}
 	}
 }

@@ -463,10 +463,11 @@ func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 // migrateCell installs the control schema on a freshly opened cell. It is
 // idempotent and safe to retry on a new Cell instance.
 func (s *Store) migrateCell(ctx context.Context, c *cellstore.Cell) error {
-	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, schema)
-		return err
-	}); err != nil {
+	// Install the idempotent schema WITHOUT advancing the cell txid: a control
+	// cell reopen (restart/takeover) must not leave the local cell one txid
+	// ahead of the durable chain, which would force a full capture snapshot on
+	// the next write (ADR-272). Schema DDL is idempotent and reruns on crash.
+	if _, err := c.DB.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("control: migrate: %w", err)
 	}
 	// Columns added to legacy tables must exist before schemaV2's indexes.
