@@ -296,13 +296,22 @@ func main() {
 	// Cold restore (ADR-092): a fresh owner hydrates a cell from its bucket
 	// replica before serving, so acked backend-A writes survive crash/takeover.
 	store.Hydrate = func(hctx context.Context, sc cell.Scope, dest string) error {
+		hydrateStart := time.Now()
 		ep, ok, herr := rep.LatestEpoch(hctx, sc, 0)
-		if herr != nil || !ok {
+		if herr != nil {
+			log.Warn("hydrate latest epoch failed", "scope", sc.String(), "elapsed", time.Since(hydrateStart), "err", herr)
 			return herr
+		}
+		if !ok {
+			return nil
 		}
 		segs, herr := rep.RestoreChain(hctx, sc, ep)
 		if herr != nil {
+			log.Warn("hydrate restore chain failed", "scope", sc.String(), "epoch", ep, "elapsed", time.Since(hydrateStart), "err", herr)
 			return herr
+		}
+		if elapsed := time.Since(hydrateStart); elapsed > time.Second {
+			log.Info("hydrate slow", "scope", sc.String(), "epoch", ep, "segments", len(segs), "elapsed", elapsed)
 		}
 		if len(segs) == 0 {
 			return nil
