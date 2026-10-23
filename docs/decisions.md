@@ -21,7 +21,7 @@
 ## ADR-275 跨 epoch 续链 marker（2026-10-24，核心实现）
 
 - **决策**：新 epoch 允许不开整库快照，但必须先 durable 写 epoch marker（`<cut+1>.marker`，语义为 epoch e 从 cut+1 开始，旧 epoch txid>cut 的对象作废）；marker durable 前不服务。restore 先做 epoch 截断，再选最新完整快照和连续 delta；被 fence 旧 owner 晚到的 delta 不得进入新 lineage。paged/长链走后台基线，不在请求路径 HydrateAll。该阶段目标是写路径不再整库快照、A4 的恢复窗口可预测。
-- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线（paged 跳过）和周期 GC 已落地并通过 deploy-e2e（后台基线后旧 epoch 归零）；paged 续链和 L1 依赖 GC 仍待。
+- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线（paged 跳过）和周期 GC 已落地并通过 deploy-e2e（后台基线后旧 epoch 归零）；A4 双 agent 接管 E2E 通过（约 1.97s，A 的 acked release 保留）；paged 续链和 L1 依赖 GC 仍待。
 
 ## ADR-272 capture 冷启动沿用 celld/Litestream：durable position + 连续性续链（2026-10-23）✅P0 实现
 

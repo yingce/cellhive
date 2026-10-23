@@ -10,7 +10,7 @@ TAGS := sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata s
 GOTAGS := -tags "$(TAGS)"
 export CGO_ENABLED := 1
 
-.PHONY: e2e-do-rps e2e-service-headers deploy-e2e crash-e2e owner-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
+.PHONY: e2e-do-rps e2e-service-headers deploy-e2e crash-e2e owner-e2e takeover-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
 
 all: build
 
@@ -77,6 +77,11 @@ crash-e2e:
 # See scripts/e2e/owner-lease.sh.
 owner-e2e:
 	bash scripts/e2e/owner-lease.sh
+
+# Two real cell-agents sharing a bucket; kill A and verify B takes over after
+# the node-lease window while preserving A's acked control state (ADR-273).
+takeover-e2e:
+	bash scripts/e2e/owner-takeover.sh
 
 test:
 	# doruntime and userruntime spawn workerd on freePort() listeners; serialize
