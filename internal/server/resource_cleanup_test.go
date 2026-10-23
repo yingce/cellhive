@@ -49,8 +49,9 @@ func TestPreparedResourceAdmissionUsesTwoFenceReadsAndRejectsRevoke(t *testing.T
 		}
 		end()
 	}
-	if got := counting.gets.Load(); got != 10 {
-		t.Fatalf("steady admission used %d fence reads, want 2 per request", got)
+	// One cold admission read; the next four reuse the one-second fence cache.
+	if got := counting.gets.Load(); got != 1 {
+		t.Fatalf("steady admission used %d fence reads, want 1 (cold cache)", got)
 	}
 	generation, err := s.prepareResourceAccessSnapshot(t.Context(), sc)
 	if err != nil {

@@ -26,6 +26,9 @@ import (
 type Manager struct {
 	B             bucket.Bucket
 	resourceLocks [64]sync.RWMutex
+
+	fenceMu    sync.Mutex
+	fenceCache map[string]fenceCacheEntry
 }
 
 // New creates a Manager.

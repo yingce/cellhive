@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -34,12 +35,49 @@ func (m *Manager) resourceLock(sc cell.Scope) *sync.RWMutex {
 func (m *Manager) resourceObjects() *objectstore.Objects {
 	return objectstore.NewOwned(m.B, objectstore.PrefixCells, objectstore.OwnerReplica)
 }
+
+const resourceFenceCacheTTL = 1 * time.Second
+
+type fenceCacheEntry struct {
+	f    resourceFence
+	etag string
+	at   time.Time
+}
+
+// readResourceFence serves the deletion fence from a short local cache. Every
+// native KV/queue request used to do two object-store GETs for this fence
+// (admission + post-gate recheck), adding ~100ms per GET in SG. A one-second
+// cache bounds delete-fence staleness to the same order as the owner cache.
 func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourceFence, string, error) {
+	if sc.Class != "__kv__" && sc.Class != "__queue__" {
+		return resourceFence{}, "", nil
+	}
+	key := sc.String()
+	m.fenceMu.Lock()
+	if e, ok := m.fenceCache[key]; ok && time.Since(e.at) < resourceFenceCacheTTL {
+		m.fenceMu.Unlock()
+		return e.f, e.etag, nil
+	}
+	m.fenceMu.Unlock()
+	f, etag, err := m.readResourceFenceFresh(ctx, sc)
+	if err != nil {
+		return f, etag, err
+	}
+	m.fenceMu.Lock()
+	if m.fenceCache == nil {
+		m.fenceCache = make(map[string]fenceCacheEntry)
+	}
+	m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
+	m.fenceMu.Unlock()
+	return f, etag, nil
+}
+
+// readResourceFenceFresh bypasses the cache for write-side fence updates and
+// delete validation.
+func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (resourceFence, string, error) {
 	if err := sc.Validate(); err != nil {
 		return resourceFence{}, "", err
 	}
-	// Only native KV/Queue use resource deletion fences. Other cell subsystems
-	// retain their existing protocol and incur no extra object-store lookup.
 	if sc.Class != "__kv__" && sc.Class != "__queue__" {
 		return resourceFence{}, "", nil
 	}
@@ -56,10 +94,19 @@ func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourc
 	}
 	return f, etag, nil
 }
+
+func (m *Manager) cacheFence(sc cell.Scope, f resourceFence, etag string) {
+	m.fenceMu.Lock()
+	if m.fenceCache == nil {
+		m.fenceCache = make(map[string]fenceCacheEntry)
+	}
+	m.fenceCache[sc.String()] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
+	m.fenceMu.Unlock()
+}
 func (m *Manager) resourceWriteGuard(ctx context.Context, sc cell.Scope, epoch uint64) (func(), error) {
 	lock := m.resourceLock(sc)
 	lock.RLock()
-	f, _, err := m.readResourceFence(ctx, sc)
+	f, _, err := m.readResourceFenceFresh(ctx, sc)
 	if err == nil && (f.Deleted || (f.JobID != "" && epoch <= f.Epoch)) {
 		err = ErrResourceDeleted
 	}
@@ -74,7 +121,7 @@ func (m *Manager) updateResourceFence(ctx context.Context, sc cell.Scope, change
 	lock.Lock()
 	defer lock.Unlock()
 	for i := 0; i < 8; i++ {
-		f, etag, err := m.readResourceFence(ctx, sc)
+		f, etag, err := m.readResourceFenceFresh(ctx, sc)
 		if err != nil {
 			return err
 		}
@@ -89,6 +136,9 @@ func (m *Manager) updateResourceFence(ctx context.Context, sc cell.Scope, change
 		}
 		if errors.Is(err, bucket.ErrPrecondition) {
 			continue
+		}
+		if err == nil {
+			m.cacheFence(sc, f, "")
 		}
 		return err
 	}
@@ -150,6 +200,10 @@ func (m *Manager) ResourceSnapshot(ctx context.Context, sc cell.Scope) (string, 
 }
 
 func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string, error) {
+	// Share the one-second fence cache with admission. Writes still use
+	// readResourceFenceFresh in resourceWriteGuard before their commit is
+	// acknowledged, so a cross-node delete is observed before any write ack;
+	// reads may observe it up to the cache TTL late.
 	f, _, err := m.readResourceFence(ctx, sc)
 	if err != nil {
 		return "", err
@@ -161,7 +215,7 @@ func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string
 }
 
 func (m *Manager) ValidateResourceDelete(ctx context.Context, sc cell.Scope, jobID string) error {
-	f, _, err := m.readResourceFence(ctx, sc)
+	f, _, err := m.readResourceFenceFresh(ctx, sc)
 	if err != nil {
 		return err
 	}
@@ -178,7 +232,7 @@ func (m *Manager) PurgeResource(ctx context.Context, sc cell.Scope, jobID string
 	lock := m.resourceLock(sc)
 	lock.Lock()
 	defer lock.Unlock()
-	f, _, err := m.readResourceFence(ctx, sc)
+	f, _, err := m.readResourceFenceFresh(ctx, sc)
 	if err != nil {
 		return false, err
 	}
