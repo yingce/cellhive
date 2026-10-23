@@ -29,29 +29,43 @@ func pagedMarkerPath(p string) string { return p + pagedMarkerSuffix }
 // readPagedMarker reports marker existence separately from validity. A malformed
 // marker still identifies a sparse cache and must fail closed; treating it as
 // absent could open unmaterialized pages as zeros.
-func readPagedMarker(p string) (pageSize, commit int, txid uint64, exists, valid bool) {
+func readPagedMarker(p string) (pageSize, commit int, txid uint64, clean, exists, valid bool) {
 	data, err := os.ReadFile(pagedMarkerPath(p))
 	if err != nil {
-		return 0, 0, 0, false, false
+		return 0, 0, 0, false, false, false
 	}
 	parts := strings.Fields(string(data))
-	if len(parts) < 2 || len(parts) > 3 {
-		return 0, 0, 0, true, false
+	if len(parts) < 2 || len(parts) > 4 {
+		return 0, 0, 0, false, true, false
 	}
 	ps, err1 := strconv.Atoi(parts[0])
 	cm, err2 := strconv.Atoi(parts[1])
 	if err1 != nil || err2 != nil || ps <= 0 || cm <= 0 {
-		return 0, 0, 0, true, false
+		return 0, 0, 0, false, true, false
 	}
-	if len(parts) == 3 {
+	if len(parts) >= 3 {
 		txid, _ = strconv.ParseUint(parts[2], 10, 64)
 	}
-	return ps, cm, txid, true, true
+	if len(parts) == 4 {
+		switch parts[3] {
+		case "1":
+			clean = true
+		case "0":
+			clean = false
+		default:
+			return 0, 0, 0, false, true, false
+		}
+	}
+	return ps, cm, txid, clean, true, true
 }
 
-func writePagedMarker(p string, pageSize, commit int, txid uint64) error {
+func writePagedMarker(p string, pageSize, commit int, txid uint64, clean bool) error {
+	flag := 0
+	if clean {
+		flag = 1
+	}
 	return os.WriteFile(pagedMarkerPath(p),
-		[]byte(fmt.Sprintf("%d %d %d", pageSize, commit, txid)), 0o644)
+		[]byte(fmt.Sprintf("%d %d %d %d", pageSize, commit, txid, flag)), 0o644)
 }
 
 func removePagedMarker(p string) {
@@ -61,9 +75,9 @@ func removePagedMarker(p string) {
 // persistPagedTxID advances the local txid recorded in an existing marker. It
 // is called at checkpoints and close, shrinking the crash window in which the
 // bucket cut can be older than the local cache.
-func persistPagedTxID(path string, txid uint64) {
-	if ps, commit, _, exists, valid := readPagedMarker(path); exists && valid {
-		_ = writePagedMarker(path, ps, commit, txid)
+func persistPagedTxID(path string, txid uint64, clean bool) {
+	if ps, commit, _, _, exists, valid := readPagedMarker(path); exists && valid {
+		_ = writePagedMarker(path, ps, commit, txid, clean)
 	}
 }
 
