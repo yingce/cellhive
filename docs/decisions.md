@@ -18,7 +18,7 @@
   3. **完成标记**：snapshot 先写 `<txid>.snapshot-started`、全部 part 成功后写 `.snapshot-done`；restore 跳过“started 但未 done”的部分快照，legacy 无标记快照仍视为完整。
   4. **跨 epoch 续链**：`replica.Epochs/DurableWatermarkChain/RestoreChain`；新 owner 的新 epoch 的 delta 继续上一 epoch 的 txid 链，`Hydrate` 用 `RestoreChain` 组合多个 epoch，避免每次重启因 epoch 变化重拍全库。
   5. **优雅停机 drain**：SIGTERM 后先等 HTTP quiesce，再 `captureMgr.Drain`（5s）并 Stop；`Drop` 也先 drain 再停；control schema 迁移改为不推进 txid，避免重启后本地恰好领先一个 txid。
-- **验证**：新增/扩展 `internal/sqlcapture`、`internal/cellstore`、`internal/ltx` 流式/预算/批量测试；`internal/replica` 跨 epoch watermark/restore 与部分快照跳过；`scripts/deploy-e2e.sh` 新增“重启后发布 v3”阶段：`DEPLOY-E2E: PASS`，deploy v3 proof_delta=1、`ensure_snapshot 0->0`、`ensure_resume 0->1`，真实 workerd 返回 v3。
+- **验证**：新增/扩展 `internal/sqlcapture`、`internal/cellstore`、`internal/ltx` 流式/预算/批量测试；`internal/replica` 跨 epoch watermark/restore 与部分快照跳过；`scripts/deploy-e2e.sh` 默认用 `CELLHIVE_CAPTURE_SNAPSHOT_PART=65536` 强制多 part 快照，并新增“重启后发布 v3”阶段：`DEPLOY-E2E: PASS`，deploy v3 proof_delta=1、`ensure_snapshot 0->0`、`ensure_resume 0->1`，真实 workerd 返回 v3。
 - **边界**：`L>D`（崩溃造成的未 ack 尾巴）仍回退全量快照；`L>D` 的 WAL gap 增量、paged 跨 epoch 续链留待后续。
 
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现

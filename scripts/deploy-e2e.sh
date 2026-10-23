@@ -95,6 +95,9 @@ export CELLHIVE_WORKERD="$WORKERD"
 export CELLHIVE_USER_RUNTIME_PORT=$PUBLIC_PORT
 export CELLHIVE_USER_RUNTIME_INTERNAL_PORT=$INTERNAL_PORT
 export CELLHIVE_RUNTIME_DIR="$TMP/runtime"
+# Force a multi-part control snapshot so the harness exercises the batched
+# snapshot path and the batch-aware durable watermark.
+export CELLHIVE_CAPTURE_SNAPSHOT_PART=65536
 mkdir -p "$CELLHIVE_DATA_DIR" "$CELLHIVE_BUCKET_DIR" "$CELLHIVE_RUNTIME_DIR"
 
 cleanup() {

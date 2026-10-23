@@ -74,6 +74,9 @@ type Manager struct {
 	// keeps memory at O(part); the budget is a fail-closed guard against
 	// accidentally snapshotting an unreasonable database.
 	SnapshotMaxBytes int64
+	// SnapshotPartBytes overrides the 8MiB snapshot part budget (tests/small
+	// stores); 0 keeps the ltx default.
+	SnapshotPartBytes int
 	// SnapshotBatchParts groups that many parts per CommitBatch call (0/1 =
 	// one Commit per part, correct but 12 RTTs for a 96MiB image).
 	SnapshotBatchParts int
@@ -183,6 +186,7 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		cap.GroupCommitWait = m.GroupCommitWait
 		cap.PipelineThreshold = m.PipelineThreshold
 		cap.SnapshotMaxBytes = m.SnapshotMaxBytes
+		cap.SnapshotPartBytes = m.SnapshotPartBytes
 		cap.SnapshotBatchParts = m.SnapshotBatchParts
 		cctx, cancel := context.WithCancel(context.Background())
 		if m.AutoCheckpointBytes > 0 {

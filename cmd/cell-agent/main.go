@@ -691,6 +691,7 @@ func main() {
 			GroupCommitWait:     cfg.CaptureGroupCommitWait,
 			PipelineThreshold:   cfg.CapturePipelineThreshold,
 			SnapshotMaxBytes:    cfg.CaptureSnapshotMaxBytes,
+			SnapshotPartBytes:   cfg.CaptureSnapshotPartBytes,
 			SnapshotBatchParts:  8,
 			Log:                 log,
 			Owner: func(cctx context.Context, sc cell.Scope) (bool, uint64, error) {

@@ -77,6 +77,8 @@ type Config struct {
 	// CaptureSnapshotMaxBytes is the fail-closed budget for one full-page
 	// snapshot (0 = unlimited). Streaming bounds memory; this bounds mistakes.
 	CaptureSnapshotMaxBytes int64
+	// CaptureSnapshotPartBytes overrides the snapshot part budget (0 = 8MiB).
+	CaptureSnapshotPartBytes int
 	// CapturePipelineThreshold is the commit latency above which capture keeps
 	// several LTX chunks in flight (0 = default 8ms).
 	CapturePipelineThreshold time.Duration
@@ -617,6 +619,7 @@ func FromEnv() Config {
 		CaptureGroupCommitWait:   envDuration("CELLHIVE_CAPTURE_GROUPCOMMIT", 0),
 		CapturePipelineThreshold: envDuration("CELLHIVE_CAPTURE_PIPELINE", 0),
 		CaptureSnapshotMaxBytes:  int64(envBytes("CELLHIVE_CAPTURE_SNAPSHOT_MAX", 8<<30)),
+		CaptureSnapshotPartBytes: envInt("CELLHIVE_CAPTURE_SNAPSHOT_PART", 0),
 		OIDCJWKSURL:              env("CELLHIVE_OIDC_JWKS_URL", ""),
 		OIDCIssuer:               env("CELLHIVE_OIDC_ISSUER", ""),
 		OIDCAudience:             env("CELLHIVE_OIDC_AUDIENCE", ""),
