@@ -1,5 +1,15 @@
 # 决策记录（ADR）
 
+## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
+
+- **背景**：`POST /v1/control/deploy` 依次执行 3 个 `capturedWrite`（DO migrations、自动 CreateApp、版本提交），每次各自 `Capture.Wait` 一次 RPO=0 证明。控制面自 ADR-117 起是单个 `__platform__` cell，所以这些 proof 的 `ns` 标签是 `__platform__`，不是租户 namespace（例如 `vwork-24`）；空 migrations 不写库，但那次 capturedWrite 仍做一次 Wait；`CreateApp` 即使 App 已存在也每次写 `apps` 行 + `app.create` 审计并推进 txid。因此真实部署会有 2–3 次串行证明等待，发布风暴时控制 cell 的 proof 可排到数秒。
+- **决策**：
+  1. deploy 把 migrations + 自动 CreateApp + 版本提交收进**同一个 capturedWrite**：一次 Ensure、一次 Wait，响应前所有写都已被证明覆盖（RPO=0 不变）。
+  2. deploy 先用 `control.Store.AppActive` 只读判断 App 是否活跃；活跃则跳过 CreateApp（不写 apps/审计、不推进 txid）。显式 `/v1/control/app` 的 CreateApp 语义不变（仍写 `app.create` 审计），软删的 App 由 CreateApp/Deploy 复活。
+  3. 错误码保持分阶段：`migration_failed` / `app_create_failed` / `deploy_failed`（Ensure/Wait 失败归 `deploy_failed`）。
+- **验证**：`internal/server TestDeployUsesOneDurabilityProof`（新 namespace 与已存在 App 两种 deploy 均只记录 1 次 proof；`app.create` 审计只 1 条）、`internal/control TestAppActive`（只读、不推进 txid；软删后为 false）；40ms 慢 committer 下同一 deploy 从 ~90ms 降到 ~45ms；`go test ./internal/control ./internal/server` 通过。
+- **边界**：控制面仍是全局单 cell，proof 延迟取决于该 cell 的 capture backlog；本 ADR 只去掉冗余等待/写入（3→1），不改变 capture 吞吐。若部署仍慢，应看 `cell.durability_proof` span 的 scope（应为 `__platform__`）与 p99，而不是租户 ns 的 proof 指标（deploy 不写租户 cell）。把三段写合并成单个 SQL 事务（1 个 txid）是后续可选项。
+
 ## ADR-270 provider 资源删除栅栏走 append authority（2026-10-22）✅实现
 
 - **背景**：namespace 卡在 `control: resource data cleanup is pending`，cleanup job `attempts=10`、`last_error="bucket: not supported"`。`ResourceCleanupPass -> BlockResource -> updateResourceFence -> ConditionalCreate` 写 `cells/<ns>/__kv__/<id>/resource-fence.json`，但 `ProviderBucket.ConditionalCreate` 只放行 authority、LTX 和 bundle，栅栏 key 直接返回 `ErrNotSupported`。只把该 key 转给 `S3Bucket.ConditionalCreate` 也不行：COS 会忽略 `If-None-Match`（第二次仍覆盖），OSS 返回 `NotImplemented`，都不是原子栅栏。
@@ -2274,7 +2284,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
   4. **`cellstore.DeleteNamespace` 不停 capture/不等 busy**：改为对命名空间下每个缓存 scope 走 `forget`（drain busy + Drop 停 capture + Close + 删文件）后再 `RemoveAll`。测试 `TestDeleteNamespaceDrainsAndDrops`（持 BeginRequest 时删除必须等待；Drop 被调用两次；其他 ns 不受影响）。
   5. **`cellcapture.Ensure` 持 `m.mu` 跨 `Snapshot`**：捕获创建/注册在锁内、快照与 Start 在锁外（`state.ready` 让并发 Ensure 等待初始化；失败可重试）→ 一次冷 cell 快照不再阻塞所有 cell。测试 `TestEnsureDoesNotBlockOtherScopes`（回退为锁内快照会失败）。
 - **中**：
-  6. `applyDOMigrations` 与 deploy 的自动 `CreateApp` 改走 `capturedWrite`（与 deploy 同等的持久性证明）。
+  6. `applyDOMigrations` 与 deploy 的自动 `CreateApp` 改走 `capturedWrite`（与 deploy 同等的持久性证明）；ADR-271 起三者合并进同一个 `capturedWrite`，一次 proof 覆盖。
   7. 删除死代码 `ns_rev`（无人消费；投影 ETag 用全局 `meta.rev`）；`getDOOwner` 过期即删（防长跑节点 map 无界）。
   8. JWKS 刷新移出互斥锁 + 单飞 + **在途刷新时用缓存密钥服务**（慢 IdP 不再串行化所有校验）；JWT **缺 `exp` 直接拒绝**。测试 `TestJWKSServesStaleDuringRefresh`、`TestJWTWithoutExpiryRejected`。
   9. `internal.js` bundle 缓存 32→256 并加 single-flight（同 sha 并发只取一次）。

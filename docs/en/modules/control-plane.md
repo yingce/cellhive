@@ -31,7 +31,7 @@ Applications/versions/routes/domains/resources/secrets/audit and release pipelin
 - Automatic provisioning is **rejected**: bindings must reference registered resources.
 - Domain registration grants authorization (no DNS validation, ADR-133); host must be unique.
 - Versions are immutable; rollback/promote are atomic switches.
-- Control-plane writes also go through `capturedWrite` (RPO=0).
+- Control-plane writes also go through `capturedWrite` (RPO=0); deploy batches migrations + auto CreateApp + the version commit into one proof (ADR-271).
 
 ## Source Locations
 

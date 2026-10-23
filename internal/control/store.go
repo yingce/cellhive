@@ -585,6 +585,28 @@ func (s *Store) CreateApp(ctx context.Context, ns, actor string) (App, error) {
 	return app, err
 }
 
+// AppActive reports whether ns has an app row that is not soft-deleted. It is a
+// read-only check: a deploy uses it to skip the idempotent CreateApp write (and
+// its durability proof) when the app is already live (ADR-271).
+func (s *Store) AppActive(ctx context.Context, ns string) (bool, error) {
+	if err := validateNS(ns); err != nil {
+		return false, err
+	}
+	c, err := s.cell(ctx)
+	if err != nil {
+		return false, err
+	}
+	var deletedMs int64
+	err = c.DB.QueryRowContext(ctx, `SELECT deleted_ms FROM apps WHERE ns=?`, ns).Scan(&deletedMs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return deletedMs == 0, nil
+}
+
 // GetApp returns an app record.
 func (s *Store) GetApp(ctx context.Context, ns string) (App, error) {
 	c, err := s.cell(ctx)

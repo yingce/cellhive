@@ -358,3 +358,4 @@ On 2026-10-21, a 1GiB image (1025 MiB file, 4KiB pages, 262489 pages) reading a 
 ### Real COS conditional delete
 
 `TestCOSConditionalDelete` (opt-in with the same `CELLHIVE_COS_TEST=1` credentials) covers both the authority-key native-append path and the ordinary S3 `DeleteObject If-Match` path. On 2026-10-21, real COS rejected a stale delete and accepted the current token on both paths; the local fixed MinIO image's stale-delete failure is therefore a MinIO-version behavior, not a COS limitation.
+- ADR-271 (one proof per deploy): `internal/server TestDeployUsesOneDurabilityProof` (a deploy records exactly one proof for both a fresh and an existing app, with no repeated `app.create` audit) and `internal/control TestAppActive` (read-only, does not advance txid); with a 40ms slow committer a deploy drops from three proof waits (~90ms) to one (~45ms).

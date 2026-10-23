@@ -981,28 +981,35 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dry_run": true, "worker": req.Worker, "namespace": req.Namespace})
 		return
 	}
-	// Apply DO class migrations before activating the new version (ADR-082). Both
-	// this write and the optional app auto-create go through capturedWrite so
-	// they carry the same durability proof as the deploy itself (ADR-135).
-	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
-		return s.applyDOMigrations(r.Context(), req)
-	}); err != nil {
-		writeErr(w, http.StatusBadRequest, "migration_failed", err.Error())
-		return
-	}
-	if s.Cfg.AutoCreateApp {
-		// A deploy may bring its own namespace so a fresh install can deploy
-		// straight into it (e.g. "root"); CreateApp is idempotent (ADR-131).
-		if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
-			_, err := s.Control.CreateApp(r.Context(), req.Namespace, actorFor(r.Context()))
-			return err
-		}); err != nil {
-			writeErr(w, http.StatusBadRequest, "app_create_failed", err.Error())
-			return
-		}
-	}
+	// DO class migrations (ADR-082), the optional app auto-create (ADR-131) and
+	// the version commit run inside ONE capturedWrite: a single Ensure covers
+	// them and a single durability proof gates the response (ADR-271). Each step
+	// used to wait on its own proof, so a deploy paid the control cell's proof
+	// latency up to three times even when it committed only one new version.
 	var v control.Version
-	if err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
+	stage := "deploy"
+	err := s.capturedWrite(r.Context(), control.ScopeFor(req.Namespace), func() error {
+		stage = "migration"
+		if err := s.applyDOMigrations(r.Context(), req); err != nil {
+			return err
+		}
+		if s.Cfg.AutoCreateApp {
+			// A deploy may bring its own namespace so a fresh install can deploy
+			// straight into it (e.g. "root"). CreateApp is idempotent, but it
+			// always writes an audit row; skip that write (and its transaction)
+			// when the app is already live (ADR-131, ADR-271).
+			stage = "app_create"
+			active, err := s.Control.AppActive(r.Context(), req.Namespace)
+			if err != nil {
+				return err
+			}
+			if !active {
+				if _, err := s.Control.CreateApp(r.Context(), req.Namespace, actorFor(r.Context())); err != nil {
+					return err
+				}
+			}
+		}
+		stage = "deploy"
 		var e error
 		v, e = s.Control.Deploy(r.Context(), req.Namespace, req.Worker, control.DeploySpec{
 			BundleSHA: req.BundleSHA, AssetsSHA: req.AssetsSHA, Assets: req.Assets,
@@ -1014,8 +1021,16 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			Limits:         req.Limits,
 		}, "admin")
 		return e
-	}); err != nil {
-		writeErr(w, http.StatusBadRequest, "deploy_failed", err.Error())
+	})
+	if err != nil {
+		switch stage {
+		case "migration":
+			writeErr(w, http.StatusBadRequest, "migration_failed", err.Error())
+		case "app_create":
+			writeErr(w, http.StatusBadRequest, "app_create_failed", err.Error())
+		default:
+			writeErr(w, http.StatusBadRequest, "deploy_failed", err.Error())
+		}
 		return
 	}
 	s.invalidateBindings(req.Namespace)

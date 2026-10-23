@@ -31,7 +31,7 @@ admin `:8082` 上的 `/v1/control/*`（apps、deploy、promote、rollback、rout
 - 自动 provisioning **拒绝**：binding 必须引用已登记资源。
 - 域名登记即授权（无 DNS 校验，ADR-133）；host 唯一。
 - 版本不可变；rollback/promote 是原子切换。
-- 控制面写也走 `capturedWrite`（RPO=0）。
+- 控制面写也走 `capturedWrite`（RPO=0）；deploy 的 migrations + 自动 CreateApp + 版本提交合并为一次 proof（ADR-271）。
 
 ## 源码位置
 

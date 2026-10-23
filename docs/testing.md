@@ -409,3 +409,4 @@ PASS
 ```
 
 因此本地固定 MinIO 镜像的 stale conditional delete 失败是**该 MinIO 版本的行为**，真实 COS 的两条路径都满足 CellHive 的 fencing 预期。
+- ADR-271（deploy 单次 proof）：`internal/server TestDeployUsesOneDurabilityProof`（新 App 与已存在 App 两种 deploy 均只记录 1 次 proof，且不重复写 `app.create` 审计）、`internal/control TestAppActive`（只读判断、不推进 txid）；40ms 慢 committer 下 deploy 从 3 次 proof 等待（~90ms）降为 1 次（~45ms）。
