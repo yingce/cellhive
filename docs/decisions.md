@@ -12,6 +12,7 @@
 - **不变量**：I1 单写者、I2 epoch fence、I3 RPO=0、I4 写热路径不 List、I5 恢复只选连续 lineage。
 - **升级**：新旧版本不能在同一个桶上混跑；全量替换，旧 record 可读并按 Expiry 判活。
 - **验证**：owner/lease/server 单测覆盖同 session 不 bump、活性判定、self-fence、legacy、DO 不变；cellstore 覆盖 OnEvicted；e2e 模拟 owned 增长、续约停顿、同目录 SIGKILL 和跨节点接管。
+- **P7 全量发布（2026-10-24）**：SG/USW 先优雅停掉旧 cell-agent，等待 `LEASE_TTL` 后启动新协议，旧/新二进制没有同时服务。首次全量替换暴露 mass-hydrate OOM：`restoreOnceKeys` 曾为每个对象起 goroutine 再等信号量，COS SlowDown 时 300+ goroutine 卡在 chan send；改为固定 worker pool，并限制 `CELLHIVE_HYDRATE_PARALLEL=1`、`CELLHIVE_RESTORE_PARALLEL=4`，cell-agent 内存上限调到 4Gi。发布后 10 分钟两区 0 restart，endpoint 0.14–0.16s。
 
 ## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，核心实现）
 
