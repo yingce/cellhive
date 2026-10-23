@@ -390,3 +390,30 @@ func TestLiveFailsClosedWithoutLeaseView(t *testing.T) {
 		t.Fatalf("node-lease record without view = %v,%v; want false", live, err)
 	}
 }
+
+func TestSameNodeNewSessionTakesOverImmediately(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m1, _ := newManager(t, dir, "node-1")
+	m2, _ := newManager(t, dir, "node-1")
+	m2.Session = "node-1-s2"
+	lv := fakeLeaseView{}
+	m1.LeaseView, m2.LeaseView = lv, lv
+	sc := cell.Scope{Namespace: "demo", Class: "__do__", ID: "restart"}
+	now := time.Now()
+	o1, err := m1.Claim(ctx, sc, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old process's lease is still live, but it belongs to the predecessor
+	// session; the new process may take over without waiting for TTL.
+	// The restarted process publishes its new-session lease before claiming; the
+	// old owner record now has a session mismatch and is immediately dead.
+	lv["node-1"] = lease.NodeLease{Node: "node-1", Session: "node-1-s2", Expiry: now.Add(time.Hour).UnixMilli()}
+	recovered := false
+	m2.BeforeTakeover = func(context.Context, cell.Owner) error { recovered = true; return nil }
+	o2, err := m2.Claim(ctx, sc, now)
+	if err != nil || !recovered || o2.Epoch != o1.Epoch+1 || o2.Session != "node-1-s2" {
+		t.Fatalf("restart takeover = %+v recovered=%v err=%v", o2, recovered, err)
+	}
+}
