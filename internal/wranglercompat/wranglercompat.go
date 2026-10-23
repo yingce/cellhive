@@ -178,12 +178,12 @@ func Validate(in Input) Result {
 			})
 			continue
 		}
-		// The registered resource is normally the binding name. D1 and
+		// The registered resource is normally the binding name. D1, R2 and
 		// vectorize are different: the env key is arbitrary and Binding.ID is
-		// the actual database/index resource. D1 must not pass merely because a
-		// resource happens to share the binding name.
+		// the actual database/bucket/index resource. They must not pass merely
+		// because a resource happens to share the binding name.
 		ref := b.Name
-		if (b.Type == "d1" || b.Type == "vectorize") && b.ID != "" {
+		if (b.Type == "d1" || b.Type == "r2" || b.Type == "vectorize") && b.ID != "" {
 			ref = b.ID
 		}
 		if ResourceKinds[b.Type] && in.IsRegistered != nil && !in.IsRegistered(b.Type, ref) {

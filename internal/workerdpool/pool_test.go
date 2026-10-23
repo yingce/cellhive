@@ -60,3 +60,16 @@ func TestGenerationRejectsStaleExit(t *testing.T) {
 		t.Fatal("current generation did not finish")
 	}
 }
+
+func TestFunctionStateMapIsBounded(t *testing.T) {
+	p := &Pool{}
+	for i := 0; i < maxFunctionStates+100; i++ {
+		p.ObserveFunction(FunctionKey{Namespace: "n", Worker: "w", Version: i, BundleSHA: "sha"}, false)
+	}
+	p.mu.Lock()
+	n := len(p.states)
+	p.mu.Unlock()
+	if n > maxFunctionStates {
+		t.Fatalf("function states = %d, want <= %d", n, maxFunctionStates)
+	}
+}

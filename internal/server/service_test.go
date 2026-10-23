@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,7 @@ func TestServiceFetchProxy(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("x-cellhive-resp-headers", base64.StdEncoding.EncodeToString([]byte(`{"x-svc-resp":"yes"}`)))
 		_, _ = w.Write([]byte("from-B"))
 	}))
 	defer disp.Close()
@@ -55,6 +57,7 @@ func TestServiceFetchProxy(t *testing.T) {
 	req.Header.Set("x-cellhive-req-method", "POST")
 	req.Header.Set("x-cellhive-req-url", "http://svc/")
 	req.Header.Set("x-cellhive-req-content-type", "text/plain")
+	req.Header.Set("x-cellhive-req-headers", base64.StdEncoding.EncodeToString([]byte(`{"x-svc-req":"yes"}`)))
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || rr.Body.String() != "from-B" {
@@ -65,6 +68,12 @@ func TestServiceFetchProxy(t *testing.T) {
 	}
 	if got["body"] != "aGk=" { // base64("hi")
 		t.Fatalf("dispatch body = %v", got["body"])
+	}
+	if hdrs, _ := got["headers"].(map[string]any); hdrs["x-svc-req"] != "yes" {
+		t.Fatalf("dispatch headers = %#v", got["headers"])
+	}
+	if rr.Header().Get("x-svc-resp") != "yes" {
+		t.Fatalf("response headers not forwarded: %v", rr.Header())
 	}
 
 	// A token of the wrong kind is rejected.

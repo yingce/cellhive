@@ -60,7 +60,13 @@ func IndexChain(segments [][]byte) (*PageIndex, error) {
 		order = append(order, parts[i])
 	}
 
+	snapSet := make(map[int]bool, len(snapshots))
+	for _, i := range snapshots {
+		snapSet[i] = true
+	}
 	ix := &PageIndex{refs: map[uint32]int{}, Watermark: watermark}
+	snapCommit := uint32(0)
+	snapPages := map[uint32]bool{}
 	for idx, p := range order {
 		pageSize, commit, _, _, err := ltx.DecodeWALPageMap(p.payload)
 		if err != nil {
@@ -71,6 +77,13 @@ func IndexChain(segments [][]byte) (*PageIndex, error) {
 		} else if pageSize != ix.PageSize {
 			return nil, fmt.Errorf("restore: page size mismatch")
 		}
+		if snapSet[idx] {
+			if snapCommit == 0 {
+				snapCommit = commit
+			} else if commit != snapCommit {
+				return nil, fmt.Errorf("restore: snapshot parts disagree on commit %d/%d", snapCommit, commit)
+			}
+		}
 		if commit > ix.Commit {
 			ix.Commit = commit
 		}
@@ -79,12 +92,23 @@ func IndexChain(segments [][]byte) (*PageIndex, error) {
 			return nil, err
 		}
 		for _, no := range nums {
+			if snapSet[idx] {
+				if snapPages[no] {
+					return nil, fmt.Errorf("restore: duplicate snapshot page %d", no)
+				}
+				snapPages[no] = true
+			}
 			ix.refs[no] = idx
 		}
 		ix.payloads = append(ix.payloads, p.payload)
 	}
 	if ix.Commit == 0 || ix.PageSize == 0 {
 		return nil, fmt.Errorf("restore: snapshot has no pages")
+	}
+	for pgno := uint32(1); pgno <= ix.Commit; pgno++ {
+		if _, ok := ix.refs[pgno]; !ok {
+			return nil, fmt.Errorf("restore: chain does not define page %d of %d", pgno, ix.Commit)
+		}
 	}
 	return ix, nil
 }

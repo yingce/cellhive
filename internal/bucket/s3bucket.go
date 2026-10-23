@@ -162,6 +162,9 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		// original error.
 		size, etag, serr := b.Stat(ctx, key)
 		if serr != nil {
+			if errors.Is(serr, ErrNotFound) || isNotFound(serr) {
+				return nil, 0, "", ErrNotFound
+			}
 			return nil, 0, "", err
 		}
 		if size == 0 {
@@ -173,7 +176,7 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		}
 		data, etag, rerr := b.RangedGet(ctx, key, off, size-off)
 		if rerr != nil {
-			return nil, 0, "", err
+			return nil, 0, "", rerr
 		}
 		return data, size, etag, nil
 	}

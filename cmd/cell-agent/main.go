@@ -195,7 +195,11 @@ func main() {
 		_, err := takeoverRecovery.Recover(tctx, nodeLog, predecessor.Node, predecessor.Session)
 		return err
 	}
-	upCtx, upCancel := context.WithCancel(ctx)
+	// Keep the upload/ship loops alive through graceful handoff: the signal
+	// context is already cancelled when performHandoff runs, and a cancelled
+	// uploader would leave follower-acked segments in the local spool while the
+	// owner record is released.
+	upCtx, upCancel := context.WithCancel(context.Background())
 	shards := cfg.UploadShards
 	if shards <= 0 {
 		shards = runtime.NumCPU()
@@ -708,7 +712,9 @@ func main() {
 						if err := srv.PrepareResourceAccess(qctx, queue.Scope(ref.Namespace, ref.Name)); err != nil {
 							return false, err
 						}
-						return queue.OwnerGate(om)(qctx, ref)
+						return queue.OwnerGateWithReset(om, func(rctx context.Context, sc cell.Scope) error {
+							return store.Forget(rctx, sc)
+						})(qctx, ref)
 					},
 					Commit: func(cctx context.Context, ns, name string, fn func() error) error {
 						sc := queue.Scope(ns, name)
@@ -872,7 +878,14 @@ func main() {
 			if err != nil {
 				return false, err
 			}
-			return timerOwn(tctx, sc)
+			owned, err := timerOwn(tctx, sc)
+			if err == nil && owned && timerReg != nil {
+				// The waker may have just taken over a dead owner's timer cell.
+				// Register it with the local runner so future/retried timers in
+				// that cell are not left waiting for the 5-minute repair sweep.
+				timerReg.Add(scope)
+			}
+			return owned, err
 		}
 		wakerRunner.Commit = timerCommit
 		wakerRunner.Start(ctx)
@@ -933,7 +946,7 @@ func main() {
 
 	if err := srv.Run(ctx); err != nil {
 		log.Error("server stopped", "err", err)
-		performHandoff(log, cfg, nodeLog, om, drainMgr)
+		performHandoff(log, cfg, nodeLog, om, drainMgr, uploader)
 		upCancel()
 		shipper.Stop()
 		peerUploader.Stop()
@@ -941,7 +954,7 @@ func main() {
 		_ = store.Close()
 		os.Exit(1)
 	}
-	performHandoff(log, cfg, nodeLog, om, drainMgr)
+	performHandoff(log, cfg, nodeLog, om, drainMgr, uploader)
 	upCancel()
 	shipper.Stop()
 	peerUploader.Stop()
@@ -996,15 +1009,34 @@ func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager,
 }
 
 // performHandoff runs the shutdown-side of graceful handoff: acquire the bucket
-// drain token (serializing concurrent shutdowns), release every owned cell so a
-// peer can claim it, then release the token. The node-log intentionally remains
-// open: asynchronous bucket uploads are not proven drained here, so the next
-// owner must seal followers and recover their tail before takeover.
-func performHandoff(log *slog.Logger, cfg config.Config, _ *nodelog.Manager, om *owner.Manager, dm *drain.Manager) {
+// drain token (serializing concurrent shutdowns), prove every accepted async
+// upload reached the bucket, seal this session's node-log, then release every
+// owned cell and the token. If upload drain or seal fails, owner records are
+// deliberately left in place so the next owner runs predecessor recovery rather
+// than hydrating a bucket chain that is missing follower-acked writes.
+func performHandoff(log *slog.Logger, cfg config.Config, nl *nodelog.Manager, om *owner.Manager, dm *drain.Manager, up *upload.Batcher) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DrainWait)
 	defer cancel()
 	if err := dm.Wait(ctx); err != nil {
 		log.Warn("drain token not acquired; proceeding best-effort", "err", err)
+	}
+	// Prove every acknowledged async upload reached the bucket before deleting
+	// the owner records. If this fails, keep the records (and open node-log) so
+	// the next owner performs predecessor recovery instead of hydrating a
+	// bucket chain that is missing follower-acked writes.
+	if up != nil {
+		if err := up.Flush(ctx); err != nil {
+			log.Error("handoff: upload drain failed; leaving owner records for recovery", "err", err)
+			_ = dm.Release(ctx)
+			return
+		}
+	}
+	if nl != nil {
+		if _, err := nl.Seal(ctx, cfg.NodeID, cfg.SessionID); err != nil && !errors.Is(err, nodelog.ErrNotFound) {
+			log.Error("handoff: node-log seal failed; leaving owner records for recovery", "err", err)
+			_ = dm.Release(ctx)
+			return
+		}
 	}
 	released := 0
 	for _, owned := range om.OwnedScopes() {
@@ -1548,6 +1580,7 @@ type pagedSource struct {
 
 func (p pagedSource) PageSize() int { return int(p.pf.PageSize()) }
 func (p pagedSource) Commit() int   { return int(p.pf.Commit()) }
+func (p pagedSource) TxID() uint64  { return p.pf.TxID() }
 
 func (p pagedSource) ReadPage(pgno uint32) ([]byte, error) {
 	return p.pf.Page(context.Background(), pgno)

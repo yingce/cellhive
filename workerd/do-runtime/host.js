@@ -524,13 +524,20 @@ async function proxyConnect(env, address, req, url) {
   try {
     const target = new URL("/v1/do/connect", ownerURL(address));
     target.search = url.search;
-    upstream = await fetch(target.toString(), {
-      headers: {
-        "x-cellhive-internal-token": env.CELL_TOKEN,
-        Upgrade: req.headers.get("Upgrade") || "websocket",
-        Connection: "Upgrade",
-      },
-    });
+    // Forward the tenant's request headers (cookies, authorization, WebSocket
+    // subprotocols, ...) across nodes, but never copy platform credentials
+    // from the inbound proxy request. The internal token authenticates this
+    // hop; Host.fetch strips x-cellhive-* before the tenant facet sees it.
+    const headers = new Headers();
+    for (const [k, v] of req.headers) {
+      const lk = k.toLowerCase();
+      if (lk === "host" || lk.startsWith("x-cellhive-")) continue;
+      headers.set(k, v);
+    }
+    headers.set("x-cellhive-internal-token", env.CELL_TOKEN);
+    headers.set("Upgrade", req.headers.get("Upgrade") || "websocket");
+    headers.set("Connection", "Upgrade");
+    upstream = await fetch(target.toString(), { headers });
   } catch (e) {
     return json({ error: "owner_unavailable", reason: "forward_transport_failed" }, 502);
   }
@@ -791,6 +798,18 @@ function renderFacetModule(classes) {
   ].join("\n") + "\n";
 }
 
+// tenantRequest removes platform-only headers before a request is handed to a
+// tenant facet. The internal token and DO/scope tickets are host credentials;
+// docs/security.md promises they never enter tenant code, and request.headers
+// is tenant-visible.
+function tenantRequest(req) {
+  const headers = new Headers(req.headers);
+  for (const k of [...headers.keys()]) {
+    if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
+  }
+  return new Request(req, { headers });
+}
+
 export class Host extends DurableObject {
   async fetch(req) {
     await this.#bind();
@@ -814,7 +833,7 @@ export class Host extends DurableObject {
         if (body) return json(body, 500);
         throw e;
       }
-      return facet.fetch(req); // 101 + webSocket preserved
+      return facet.fetch(tenantRequest(req)); // 101 + webSocket preserved
     }
     if (url.pathname === "/v1/do/abort") {
       const spec = await req.json();

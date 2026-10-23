@@ -290,7 +290,20 @@ export function makeDO(platform, spec) {
 
   async function upgrade(id, req) {
     const info = await connectInfo(id);
-    const h = Object.assign({}, headers(platform, spec.token));
+    // Preserve the tenant's headers (cookies/auth/WebSocket subprotocol) on the
+    // direct-to-owner hop. Never forward a caller-supplied x-cellhive-* value:
+    // the platform adds its own scope token/ticket below.
+    const h = {};
+    req.headers.forEach((v, k) => {
+      const lk = k.toLowerCase();
+      // Hop-by-hop headers are set explicitly below. Copying them first can
+      // produce a duplicate ("websocket, websocket") after header
+      // normalization, which the owner no longer recognizes as an upgrade.
+      if (lk === "host" || lk === "upgrade" || lk === "connection" ||
+          lk === "content-length" || lk.startsWith("x-cellhive-")) return;
+      h[k] = v;
+    });
+    Object.assign(h, headers(platform, spec.token));
     h["Upgrade"] = req.headers.get("Upgrade") || "websocket";
     h["Connection"] = "Upgrade";
     if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
@@ -309,7 +322,9 @@ export function makeDO(platform, spec) {
       try { body = await req.text(); } catch { body = undefined; }
     }
     const hdrs = {};
-    req.headers.forEach((v, k) => { hdrs[k] = v; });
+    req.headers.forEach((v, k) => {
+      if (!k.toLowerCase().startsWith("x-cellhive-")) hdrs[k] = v;
+    });
     const payload = JSON.stringify({
       ...identity(id),
       request: { method, path: url.pathname + url.search, headers: hdrs, body },

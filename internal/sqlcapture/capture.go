@@ -211,6 +211,12 @@ func (c *Capture) poll(ctx context.Context) error {
 	if errors.Is(err, wal.ErrNoWAL) {
 		return nil
 	}
+	if errors.Is(err, wal.ErrChecksum) {
+		// A frame can be observed between SQLite's header and page writes. Do
+		// not turn a torn tail into committed data and do not kill the capture
+		// loop: the next Notify/poll retries once the write completes.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("sqlcapture: WAL poll: %w", err)
 	}
@@ -359,12 +365,15 @@ func (c *Capture) SetCheckpointer(f func(ctx context.Context) (uint64, error)) {
 func (c *Capture) SetAutoCheckpoint(n int64) { c.autoCheckpointBytes = n }
 
 // Snapshot checkpoints the database (backfilling WAL frames) and emits a full
-// snapshot. Call it while no writer is active to establish a restore baseline.
+// snapshot. The checkpoint, watermark read and page image are taken under the
+// cell write mutex, so a commit cannot land between them and release a ticket
+// whose pages are absent from the image.
 func (c *Capture) Snapshot(ctx context.Context) error {
-	if err := c.cell.CheckpointTruncate(ctx); err != nil {
+	watermark, pageSize, commit, pages, err := c.cell.SnapshotConsistent(ctx)
+	if err != nil {
 		return fmt.Errorf("sqlcapture: snapshot checkpoint: %w", err)
 	}
-	return c.emitSnapshot(ctx, c.maxWatermark())
+	return c.emitSnapshotPages(ctx, watermark, pageSize, commit, pages)
 }
 
 // Checkpoint forces a WAL truncate checkpoint. The capture loop then emits a
@@ -421,6 +430,13 @@ func (c *Capture) emitSnapshot(ctx context.Context, watermark uint64) error {
 	pageSize, commit, pages, err := c.cell.SnapshotPages(ctx)
 	if err != nil {
 		return fmt.Errorf("sqlcapture: snapshot pages: %w", err)
+	}
+	return c.emitSnapshotPages(ctx, watermark, pageSize, commit, pages)
+}
+
+func (c *Capture) emitSnapshotPages(ctx context.Context, watermark uint64, pageSize, commit uint32, pages map[uint32][]byte) error {
+	if err := c.drain(ctx, true); err != nil {
+		return err
 	}
 	sorted := make([]ltx.WALPage, 0, len(pages))
 	for pgno := uint32(1); pgno <= commit; pgno++ {

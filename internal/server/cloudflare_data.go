@@ -640,9 +640,16 @@ func (s *Server) cloudflareR2Object(w http.ResponseWriter, r *http.Request, meth
 			r.Header.Set(r2HTTPHeader, base64.StdEncoding.EncodeToString(raw))
 		}
 		var err error
-		body, err = io.ReadAll(io.LimitReader(r.Body, 25<<20+1))
+		// R2 objects use the same 64 MiB platform cap as the native path. The
+		// Cloudflare shim must reject an oversized body, never silently forward
+		// a truncated object to /v1/r2/object and answer 200.
+		body, err = io.ReadAll(io.LimitReader(r.Body, maxArtifactBytes+1))
 		if err != nil {
 			writeErr(w, 400, "invalid_object", err.Error())
+			return
+		}
+		if len(body) > maxArtifactBytes {
+			writeErr(w, 413, "object_too_large", "object exceeds the platform R2 cap")
 			return
 		}
 	}

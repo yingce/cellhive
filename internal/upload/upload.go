@@ -5,6 +5,7 @@ package upload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"sync"
@@ -23,8 +24,9 @@ type item struct {
 	scope   cell.Scope
 	epoch   uint64
 	seg     []byte
-	done    chan error // non-nil for EnqueueWait callers
-	spoolID uint64     // >0 when the segment is persisted in the spool
+	done    chan error    // non-nil for EnqueueWait callers
+	spoolID uint64        // >0 when the segment is persisted in the spool
+	barrier chan struct{} // non-nil: flush prior items, then close
 }
 
 // Batcher accumulates segments and flushes them in batches. Uploads are
@@ -155,17 +157,33 @@ func (b *Batcher) replayLoop(ctx context.Context) {
 	}
 }
 
-// replayOnce uploads every pending spooled entry, oldest first, and removes the
-// ones that succeeded. Segment keys are txid-range named, so replaying out of
-// band cannot corrupt the replica (idempotent PUTs).
+// replayOnce uploads pending spooled entries oldest first in bounded windows and
+// removes the ones that succeeded. Segment keys are txid-range named, so
+// replaying out of band cannot corrupt the replica (idempotent PUTs). A failed
+// window stops the pass; the next replay tick retries from the oldest entry.
 func (b *Batcher) replayOnce(ctx context.Context) {
-	entries, err := b.spool.Load()
-	if err != nil {
-		if b.log != nil {
-			b.log.Warn("upload spool load failed", "err", err)
+	for {
+		before := b.spool.Count()
+		entries, err := b.spool.LoadLimit(512)
+		if err != nil {
+			if b.log != nil {
+				b.log.Warn("upload spool load failed", "err", err)
+			}
+			return
 		}
-		return
+		if len(entries) == 0 {
+			return
+		}
+		b.replayEntries(ctx, entries)
+		// Stop when a pass makes no progress (the remaining entries are all
+		// failing); the next replay tick retries them from the oldest.
+		if b.spool.Count() >= before {
+			return
+		}
 	}
+}
+
+func (b *Batcher) replayEntries(ctx context.Context, entries []SpoolEntry) {
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			return
@@ -220,6 +238,11 @@ func (b *Batcher) loop(ctx context.Context, sh *shard) {
 				}
 			}
 		case it := <-sh.ch:
+			if it.barrier != nil {
+				flush()
+				close(it.barrier)
+				continue
+			}
 			pending = append(pending, it)
 			pendingBytes += len(it.seg)
 			if len(pending) >= b.maxSegments || pendingBytes >= b.maxBytes {
@@ -399,6 +422,33 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 	}
 }
 
+// Flush pushes a barrier through every shard, so all segments accepted before
+// the call are flushed (or spooled on failure), then performs a synchronous
+// replay of the durable spool. It is used by graceful shutdown: owners are
+// released only after every acknowledged async upload has reached the bucket.
+func (b *Batcher) Flush(ctx context.Context) error {
+	for _, sh := range b.shards {
+		done := make(chan struct{})
+		select {
+		case sh.ch <- item{barrier: done}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if b.spool != nil {
+		b.replayOnce(ctx)
+		if n := b.spool.Count(); n != 0 {
+			return fmt.Errorf("upload: %d spooled segment(s) still unproven", n)
+		}
+	}
+	return nil
+}
+
 // Stop flushes and waits for the loop to finish.
 func (b *Batcher) Stop() {
 	b.closeOnce.Do(func() {})
@@ -422,6 +472,7 @@ func (b *Batcher) Stats() map[string]uint64 {
 	if b.spool != nil {
 		st["spool"] = uint64(b.spool.Count())
 		st["spool_errors"] = b.spoolErrors.Load()
+		st["spool_corrupt"] = b.spool.Corrupt()
 		ss := b.spool.Stats()
 		st["spool_file_syncs"] = uint64(ss["file_syncs"])
 		st["spool_dir_syncs"] = uint64(ss["dir_syncs"])

@@ -83,21 +83,34 @@ func New(dueAtMs int64, kind Kind, scope string, occurrence string) Timer {
 // Registry tracks the scopes that currently hold timers, so a runner knows
 // which cells to poll. It is process-local and advisory; SQLite remains the
 // authority for the due set.
+type registryEntry struct {
+	due int64
+	gen uint64 // bumped by every producer update
+}
+
 type Registry struct {
 	mu     sync.Mutex
-	scopes map[string]int64 // scope -> earliest known due (0 = check every pass)
+	scopes map[string]registryEntry
 }
 
 // NewRegistry creates an empty registry.
-func NewRegistry() *Registry { return &Registry{scopes: map[string]int64{}} }
+func NewRegistry() *Registry { return &Registry{scopes: map[string]registryEntry{}} }
 
 // Add records a scope as holding timers with an unknown due (checked next pass).
 func (r *Registry) Add(scope string) { r.Arm(scope, 0) }
 
 // Arm records a scope's earliest due time, so the runner can skip it until then.
+// A producer's Add(0) or an already-earlier due is never pushed later by a
+// concurrent Arm: the earliest wakeup wins. The generation lets the runner
+// avoid clobbering a producer update that landed while it was polling.
 func (r *Registry) Arm(scope string, dueMs int64) {
 	r.mu.Lock()
-	r.scopes[scope] = dueMs
+	e := r.scopes[scope]
+	e.gen++
+	if e.due == 0 || dueMs == 0 || dueMs < e.due {
+		e.due = dueMs
+	}
+	r.scopes[scope] = e
 	r.mu.Unlock()
 }
 
@@ -105,6 +118,36 @@ func (r *Registry) Arm(scope string, dueMs int64) {
 func (r *Registry) Remove(scope string) {
 	r.mu.Lock()
 	delete(r.scopes, scope)
+	r.mu.Unlock()
+}
+
+// snapshot returns the current entry and its generation (ok=false if the scope
+// was removed/replaced while the runner was polling it).
+func (r *Registry) snapshot(scope string) (due int64, gen uint64, ok bool) {
+	r.mu.Lock()
+	e, ok := r.scopes[scope]
+	r.mu.Unlock()
+	return e.due, e.gen, ok
+}
+
+// setIfUnchanged replaces a scope's due only when no producer updated it since
+// snapshot. A concurrent Add(0) or an earlier due therefore survives the
+// runner's post-dispatch re-arm.
+func (r *Registry) setIfUnchanged(scope string, gen uint64, due int64) {
+	r.mu.Lock()
+	if e, ok := r.scopes[scope]; ok && e.gen == gen {
+		e.due = due
+		r.scopes[scope] = e
+	}
+	r.mu.Unlock()
+}
+
+// removeIf unregisters a scope only when no producer updated it since snapshot.
+func (r *Registry) removeIf(scope string, gen uint64) {
+	r.mu.Lock()
+	if e, ok := r.scopes[scope]; ok && e.gen == gen {
+		delete(r.scopes, scope)
+	}
 	r.mu.Unlock()
 }
 
@@ -125,8 +168,8 @@ func (r *Registry) Due(nowMs int64) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]string, 0, len(r.scopes))
-	for s, due := range r.scopes {
-		if due == 0 || due <= nowMs {
+	for s, e := range r.scopes {
+		if e.due == 0 || e.due <= nowMs {
 			out = append(out, s)
 		}
 	}

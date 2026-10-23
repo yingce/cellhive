@@ -50,3 +50,33 @@ func TestOwnerGate(t *testing.T) {
 		t.Fatalf("A gate after B claimed = %v, %v; want skip", ok, err)
 	}
 }
+
+func TestOwnerGateResetsForeignLocalState(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	omA := &owner.Manager{B: b, NodeID: "node-a", Session: "sa", OwnerTTL: time.Minute}
+	omB := &owner.Manager{B: b, NodeID: "node-b", Session: "sb", OwnerTTL: time.Minute}
+	ref := queue.Ref{Namespace: "app", Name: "jobs"}
+	sc := queue.Scope("app", "jobs")
+	// B held the cell but its lease expired.
+	if _, err := omB.Claim(ctx, sc, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatalf("claim B: %v", err)
+	}
+	var reset int
+	gate := queue.OwnerGateWithReset(omA, func(_ context.Context, got cell.Scope) error {
+		if got != sc {
+			t.Fatalf("reset scope = %v, want %v", got, sc)
+		}
+		reset++
+		return nil
+	})
+	if ok, err := gate(ctx, ref); err != nil || !ok {
+		t.Fatalf("gate A = %v, %v; want claim", ok, err)
+	}
+	if reset != 1 {
+		t.Fatalf("reset calls = %d, want 1", reset)
+	}
+}

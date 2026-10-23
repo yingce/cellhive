@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/config"
+	"cellhive/internal/control"
 	"cellhive/internal/doticket"
 	"time"
 )
@@ -212,7 +214,7 @@ func TestDOProxyRPCPassthrough(t *testing.T) {
 	huge := `{"method":"add","args":{"t":"a","v":["` + strings.Repeat("x", doRPCBodyLimit) + `"]}}`
 	oversize := post(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: "a",
 		RPC: json.RawMessage(huge)})
-	if oversize.Code != http.StatusBadRequest {
+	if oversize.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize = %d %s", oversize.Code, oversize.Body.String())
 	}
 }
@@ -310,5 +312,45 @@ func TestDOProxyDialFailureFailsOver(t *testing.T) {
 	}
 	if goodHits.Load() != 1 {
 		t.Fatalf("good runtime hits = %d, want 1", goodHits.Load())
+	}
+}
+
+func TestDOProxyRejectsBodyNamespaceOutsideToken(t *testing.T) {
+	srv := New(Deps{Cfg: config.Config{DoRuntimes: []string{"http://127.0.0.1:1"}}})
+	body, _ := json.Marshal(doInvokeReq{Namespace: "victim", Worker: "web", Class: "Room", ID: "x", BundleSHA: "sha"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), ctxScopeNS, "acme"))
+	rr := httptest.NewRecorder()
+	srv.handleDOProxy(rr, req)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "scope_namespace_mismatch") {
+		t.Fatalf("foreign namespace = %d %s, want 403 scope_namespace_mismatch", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDOProxyRejectsDifferentBindingInSameNamespace(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.Cfg.DoRuntimes = []string{"http://127.0.0.1:1"}
+	srv.Control = control.New(srv.Store, nil)
+	if _, err := srv.Control.CreateApp(context.Background(), "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Control.Deploy(context.Background(), "acme", "web", control.DeploySpec{
+		BundleSHA: "sha",
+		Bindings:  []control.Binding{{Type: "do", Name: "ROOM", ID: "Room"}},
+	}, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(class string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: class, ID: "x", BundleSHA: "sha"})
+		req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+		ctx := context.WithValue(req.Context(), ctxScopeNS, "acme")
+		ctx = context.WithValue(ctx, ctxScopeName, "ROOM")
+		req = req.WithContext(ctx)
+		rr := httptest.NewRecorder()
+		srv.handleDOProxy(rr, req)
+		return rr
+	}
+	if rr := invoke("Other"); rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "scope_binding_mismatch") {
+		t.Fatalf("class mismatch = %d %s, want 403 scope_binding_mismatch", rr.Code, rr.Body.String())
 	}
 }

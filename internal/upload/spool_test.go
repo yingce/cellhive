@@ -221,6 +221,12 @@ func TestSpoolRoundTrip(t *testing.T) {
 	if entries, err = sp.Load(); err != nil || len(entries) != 2 {
 		t.Fatalf("load with corrupt file = %d entries, %v", len(entries), err)
 	}
+	if sp.Corrupt() != 1 {
+		t.Fatalf("corrupt counter = %d, want 1", sp.Corrupt())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "00000000000000000099.spool.corrupt")); err != nil {
+		t.Fatalf("corrupt entry was not quarantined: %v", err)
+	}
 	if err := sp.Remove(id1); err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +296,29 @@ func TestBatcherStatsIncludeSpoolDurability(t *testing.T) {
 	}
 	if st["spool_file_syncs"] != 1 {
 		t.Fatalf("spool_file_syncs = %d, want 1", st["spool_file_syncs"])
+	}
+}
+
+func TestSpoolLoadLimitReturnsOldestBounded(t *testing.T) {
+	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
+	for i := 0; i < 3; i++ {
+		if _, err := sp.Append(sc, uint64(i+1), [][]byte{[]byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := sp.LoadLimit(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID > got[1].ID {
+		t.Fatalf("LoadLimit = %+v, want two oldest entries", got)
+	}
+	all, err := sp.Load()
+	if err != nil || len(all) != 3 {
+		t.Fatalf("Load = %d, %v, want 3", len(all), err)
 	}
 }

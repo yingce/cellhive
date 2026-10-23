@@ -225,7 +225,7 @@ func (s *Server) fanOutLogSubscribe(ctx context.Context, ns, worker string, ttl 
 	s.logFan[key] = now
 	s.logFanMu.Unlock()
 
-	leases := s.Lease.SampleCached(ctx, followerSampleTTL)
+	leases := s.Lease.SampleCached(ctx, s.followerSampleTTL())
 	body, err := json.Marshal(map[string]any{"namespace": ns, "worker": worker, "ttl_ms": ttl.Milliseconds()})
 	if err != nil {
 		return

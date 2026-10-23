@@ -101,6 +101,10 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 	now := r.nowMs()
 	dispatched := 0
 	for _, scope := range r.Registry.Due(now) {
+		_, gen, present := r.Registry.snapshot(scope)
+		if !present {
+			continue
+		}
 		if r.Own != nil {
 			owned, err := r.Own(ctx, scope)
 			if err != nil {
@@ -108,7 +112,7 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 				continue
 			}
 			if !owned {
-				r.Registry.Remove(scope)
+				r.Registry.removeIf(scope, gen)
 				continue
 			}
 		}
@@ -131,9 +135,9 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 		// the runner neither scans it every pass nor pins its cell resident.
 		if next, nerr := st.NextDue(ctx); nerr == nil {
 			if next == 0 {
-				r.Registry.Remove(scope)
+				r.Registry.removeIf(scope, gen)
 			} else {
-				r.Registry.Arm(scope, next)
+				r.Registry.setIfUnchanged(scope, gen, next)
 			}
 		}
 	}

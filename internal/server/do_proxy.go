@@ -59,6 +59,45 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "namespace, worker, class and id are required")
 		return
 	}
+	// The scoped token on /v1/do/invoke is bound to a namespace and binding
+	// name. The JSON body is supplied by the caller (and by the tenant facade),
+	// so it must never override the namespace the token was issued for; without
+	// this check a valid do token could execute a bundle with another
+	// namespace/worker's binding spec. The direct handler tests call this
+	// function without scopeAuth, so only enforce when a claim is present.
+	if want := s.scopeNS(r); want != "" && req.Namespace != want {
+		writeErr(w, http.StatusForbidden, "scope_namespace_mismatch",
+			"request namespace does not match the scoped token")
+		return
+	}
+	// The token names the DO binding, but the request body chooses the worker
+	// and class. Verify that the selected worker's active version actually
+	// declares this binding for this class; otherwise a token for one DO
+	// binding could load another worker's binding spec in the same namespace.
+	if name := s.scopeName(r); name != "" && s.Control != nil {
+		proj, err := s.Control.Projection(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "control_unavailable", err.Error())
+			return
+		}
+		tw, ok := proj.WorkerFor(req.Namespace, req.Worker)
+		if !ok {
+			writeErr(w, http.StatusForbidden, "scope_binding_mismatch", "worker has no such Durable Object binding")
+			return
+		}
+		matched := false
+		for _, b := range tw.Version.Bindings {
+			if b.Type == "do" && b.Name == name && (b.ID == req.Class || (b.ID == "" && b.Name == req.Class)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			writeErr(w, http.StatusForbidden, "scope_binding_mismatch",
+				"request worker/class does not match the scoped DO binding")
+			return
+		}
+	}
 	if len(req.RPC) > 0 {
 		if req.Request != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", "request and rpc are mutually exclusive")

@@ -21,6 +21,7 @@ make e2e-workflow   # sleep / waitForEvent timeout / durable retry / workflow R2
 make e2e-queue      # queue R2 metadata / retry / DLQ
 make e2e-queue-multinode  # two cell-agents: owner kill + lease failover
 make e2e-queue-concurrency # 100 messages, 4 batches in flight, D1 dedupe
+make e2e-service-headers  # service binding JSON fallback preserves request/response headers
 make e2e-mysql       # Docker MySQL + ProxySQL; auto-create via CellHive admin
 make e2e            # workflow/queue suite (not MySQL; needs Docker + npm)
 ```

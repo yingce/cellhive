@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/control"
 )
@@ -73,5 +75,37 @@ func TestInternalDispatchAuthenticatesAndPreservesBody(t *testing.T) {
 func TestMountPrefixMatchesSegments(t *testing.T) {
 	if matches("/api", "/apix") || !matches("/api", "/api/users") || !matches("/api", "/api") {
 		t.Fatal("incorrect mount match")
+	}
+}
+
+func TestHostCacheIsBoundedAndDoesNotCacheErrorsAs404(t *testing.T) {
+	r := NewRouter("http://unused", "internal", "dispatch")
+	for i := 0; i < maxCachedHosts+50; i++ {
+		r.mu.Lock()
+		r.storeLocked("h"+strconv.Itoa(i)+".test", hostEntry{expires: time.Now().Add(time.Minute)})
+		r.mu.Unlock()
+	}
+	r.mu.Lock()
+	n := len(r.hosts)
+	r.mu.Unlock()
+	if n > maxCachedHosts {
+		t.Fatalf("host cache grew to %d, want <= %d", n, maxCachedHosts)
+	}
+
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer agent.Close()
+	errRouter := NewRouter(agent.URL, "internal", "dispatch")
+	r1 := httptest.NewRequest("GET", "http://down.test/", nil)
+	r1.Host = "down.test"
+	if _, err := errRouter.Public(r1); err == nil {
+		t.Fatal("first lookup unexpectedly succeeded")
+	}
+	r2 := httptest.NewRequest("GET", "http://down.test/", nil)
+	r2.Host = "down.test"
+	_, err := errRouter.Public(r2)
+	if err == nil || strings.Contains(err.Error(), "host not registered") {
+		t.Fatalf("cached failure was turned into a 404: %v", err)
 	}
 }

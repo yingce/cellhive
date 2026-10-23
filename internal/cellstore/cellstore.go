@@ -179,7 +179,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
-	markerPS, markerCommit, markerExists, markerValid := readPagedMarker(p)
+	markerPS, markerCommit, markerTx, markerClean, markerExists, markerValid := readPagedMarker(p)
 	if missing && markerExists {
 		// A marker without its file is leftover state: drop it.
 		removePagedMarker(p)
@@ -196,19 +196,46 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
 		if ok {
+			if markerExists && markerValid && !markerClean {
+				// A previous process died with this paged cache open. Its last
+				// durable txid is unknown, so rebuilding from the bucket could
+				// silently drop locally acked pages. Fail closed; an operator can
+				// delete the cache after verifying the bucket.
+				return nil, fmt.Errorf("%w: dirty paged cache %s (crash before clean close)", ErrPagedCacheUnusable, p)
+			}
+			srcTx := uint64(0)
+			if ts, ok := src.(interface{ TxID() uint64 }); ok {
+				srcTx = ts.TxID()
+			}
+			if markerTx > 0 && srcTx > 0 && srcTx < markerTx {
+				// The bucket cut is older than the local cache marker. Reusing or
+				// truncating here would roll back locally acked pages; leave the
+				// file in place for an operator/retry rather than lose data.
+				return nil, fmt.Errorf("%w: bucket cut txid %d older than local marker %d",
+					ErrPagedCacheUnusable, srcTx, markerTx)
+			}
 			reuse := markerExists && !missing && markerPS == src.PageSize() && markerCommit == src.Commit()
+			if reuse && markerTx > 0 && srcTx > 0 && markerTx != srcTx {
+				// The cut advanced since the cache was created. Re-registering the
+				// old hydration set would fault old pages; rebuild from the newer
+				// cut instead.
+				reuse = false
+			}
 			// Write the marker before the file can become sparse, so a crash in
 			// between cannot leave a sparse file that looks complete.
-			if err := writePagedMarker(p, src.PageSize(), src.Commit()); err != nil {
+			if err := writePagedMarker(p, src.PageSize(), src.Commit(), srcTx, false); err != nil {
 				return nil, fmt.Errorf("cellstore: paged marker %s: %w", sc, err)
 			}
 			if reuse {
 				if err := pagedvfs.Register(p, src); err != nil {
-					removePagedMarker(p)
+					// Never leave a sparse file without its marker: a later open
+					// could mistake it for a complete database. Drop the whole
+					// file set and let the next open rebuild from the bucket.
+					_ = removeCellFileSet(p)
 					return nil, fmt.Errorf("cellstore: paged register %s: %w", sc, err)
 				}
 			} else if err := pagedvfs.Prepare(p, src); err != nil {
-				removePagedMarker(p)
+				_ = removeCellFileSet(p)
 				return nil, fmt.Errorf("cellstore: paged prepare %s: %w", sc, err)
 			}
 			paged = true
@@ -229,7 +256,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if !paged && missing && s.Hydrate == nil {
-		if _, _, exists, _ := readPagedMarker(p); exists {
+		if _, _, _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -654,7 +681,7 @@ func (s *Store) LocalScopes() ([]cell.Scope, error) {
 // when the table exists but holds no pending row. A sparse (paged) cell that is
 // not mounted through the paged VFS is skipped rather than read as zeros.
 func PendingTimerMin(ctx context.Context, path string) (min int64, has bool, err error) {
-	if _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
+	if _, _, _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
 		return 0, false, nil
 	}
 	dsn := OpenDSN(path)
@@ -716,7 +743,7 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 		paged = pagedvfs.IsPaged(p)
 	}
 	if !paged {
-		if _, _, exists, _ := readPagedMarker(p); exists {
+		if _, _, _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -889,6 +916,13 @@ func (c *Cell) Close() error {
 	if c.closed {
 		return nil
 	}
+	var pagedTxID uint64
+	pagedTxKnown := false
+	if c.paged {
+		if txid, err := c.TxID(context.Background()); err == nil {
+			pagedTxID, pagedTxKnown = txid, true
+		}
+	}
 	c.closed = true
 	_ = c.ReleaseReadLock(context.Background())
 	if c.kvUpsert != nil {
@@ -901,6 +935,12 @@ func (c *Cell) Close() error {
 		c.hydrateStop = nil
 	}
 	if c.paged {
+		// Only mark the cache clean after SQLite closed successfully; otherwise
+		// leave it dirty so the next open fails closed instead of rebuilding from
+		// a bucket cut that may lag the local file.
+		if pagedTxKnown && err == nil {
+			persistPagedTxID(c.Path, pagedTxID, true)
+		}
 		// The local file is a cache and must be re-registered on the next open;
 		// keep the bytes (eviction snapshot) but drop the VFS registration.
 		pagedvfs.Release(c.Path)
@@ -976,6 +1016,9 @@ func (c *Cell) SafeCheckpoint(ctx context.Context) (uint64, error) {
 	}
 	if err := c.loadTxID(ctx); err != nil {
 		return 0, err
+	}
+	if c.paged {
+		persistPagedTxID(c.Path, c.txid, false)
 	}
 	return c.txid, nil
 }
@@ -1431,6 +1474,24 @@ func (c *Cell) Snapshot(ctx context.Context, dest string) error {
 
 // WALPath returns the path of the write-ahead log file.
 func (c *Cell) WALPath() string { return c.Path + "-wal" }
+
+// SnapshotConsistent checkpoints and reads a full-page image while holding the
+// cell write mutex. Without the lock a transaction could commit between the
+// checkpoint and the txid read: its txid would be claimed by the snapshot
+// watermark while its pages are still only in the fresh WAL, releasing an ack
+// with no durable proof. SnapshotPages alone is only safe for a quiesced cell.
+func (c *Cell) SnapshotConsistent(ctx context.Context) (uint64, uint32, uint32, map[uint32][]byte, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.CheckpointTruncate(ctx); err != nil {
+		return 0, 0, 0, nil, err
+	}
+	if err := c.loadTxID(ctx); err != nil {
+		return 0, 0, 0, nil, err
+	}
+	pageSize, commit, pages, err := c.SnapshotPages(ctx)
+	return c.txid, pageSize, commit, pages, err
+}
 
 // SnapshotPages reads the database file as a full-page image
 // (pageSize, commit, pages). It is the source for a KindSnapshot segment.

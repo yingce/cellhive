@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -357,5 +358,17 @@ func TestHostSnapshotCounts(t *testing.T) {
 	snap := srv.HostSnapshot()
 	if snap["a.test"] != 2 || snap["b.test"] != 1 {
 		t.Fatalf("host snapshot = %v", snap)
+	}
+}
+
+func TestReadLineLimitedBoundsAWritableHeaderLine(t *testing.T) {
+	br := bufio.NewReaderSize(strings.NewReader("aaaa... no newline here"), 8)
+	if _, err := readLineLimited(br, 16); !errors.Is(err, errHeadTooLarge) {
+		t.Fatalf("long line error = %v, want errHeadTooLarge", err)
+	}
+	br = bufio.NewReaderSize(strings.NewReader("Host: x\r\nbody"), 8)
+	line, err := readLineLimited(br, maxHeadBytes)
+	if err != nil || string(line) != "Host: x\r\n" {
+		t.Fatalf("normal line = %q, %v", line, err)
 	}
 }

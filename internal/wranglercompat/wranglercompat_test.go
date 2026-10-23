@@ -221,6 +221,18 @@ func TestVendorMatrixContract(t *testing.T) {
 	if res := Validate(reg); len(res.Errors) == 0 || res.Errors[0].Code != "binding_unregistered" {
 		t.Fatalf("unregistered vectorize index accepted: %+v", res.Errors)
 	}
+	// R2 is referenced by bucket_name (Binding.ID), not the env key. Two
+	// bindings with the same bucket must validate even when their names differ.
+	r2 := Input{Namespace: "acme", Worker: "api", BundleSHA: "sha",
+		IsRegistered: func(kind, name string) bool { return kind == "r2" && name == "assets" }}
+	r2.Bindings = []Binding{{Type: "r2", Name: "A", ID: "assets"}, {Type: "r2", Name: "B", ID: "assets"}}
+	if res := Validate(r2); len(res.Errors) != 0 {
+		t.Fatalf("r2 binding with registered bucket rejected: %+v", res.Errors)
+	}
+	r2.Bindings = []Binding{{Type: "r2", Name: "A", ID: "missing"}}
+	if res := Validate(r2); len(res.Errors) == 0 || res.Errors[0].Code != "binding_unregistered" {
+		t.Fatalf("unregistered r2 bucket accepted: %+v", res.Errors)
+	}
 	for _, k := range []string{"renamed_classes", "deleted_classes", "transferred_classes"} {
 		if !SupportedMigrationKeys[k] {
 			t.Fatalf("migration %q must be supported (ADR-082/084)", k)
