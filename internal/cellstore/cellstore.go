@@ -59,6 +59,10 @@ type Store struct {
 	MaxOpenCells int
 	IdleTTL      time.Duration
 	Drop         func(ctx context.Context, sc cell.Scope) error
+	// Pin, when set, excludes a scope from LRU/idle eviction. The control cell
+	// is pinned: it is the hottest cell, and reopening it re-runs schema
+	// migration and forces capture to rebuild its baseline (ADR-272).
+	Pin func(sc cell.Scope) bool
 
 	openMu                  sync.Mutex // serializes cold opens so one file is opened once
 	resourceGenerationLocks [64]sync.Mutex
@@ -154,10 +158,16 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	for s.evicting[key] {
 		s.cond.Wait() // an eviction is closing/deleting this cell
 	}
-	if c, ok := s.cells[p]; ok {
+	if c, ok := s.cells[p]; ok && !c.Closed() {
 		s.touchLocked(p)
 		s.mu.Unlock()
 		return c, nil
+	} else if ok {
+		delete(s.cells, p)
+		if e := s.byPath[p]; e != nil {
+			s.lru.Remove(e)
+			delete(s.byPath, p)
+		}
 	}
 	s.mu.Unlock()
 
@@ -170,10 +180,16 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	for s.evicting[key] {
 		s.cond.Wait()
 	}
-	if c, ok := s.cells[p]; ok {
+	if c, ok := s.cells[p]; ok && !c.Closed() {
 		s.touchLocked(p)
 		s.mu.Unlock()
 		return c, nil
+	} else if ok {
+		delete(s.cells, p)
+		if e := s.byPath[p]; e != nil {
+			s.lru.Remove(e)
+			delete(s.byPath, p)
+		}
 	}
 	s.mu.Unlock()
 
@@ -509,7 +525,7 @@ func (s *Store) evictOne(ctx context.Context) bool {
 			continue
 		}
 		key := cc.Scope.String()
-		if s.busy[key] > 0 || s.evicting[key] {
+		if s.busy[key] > 0 || s.evicting[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
 			continue
 		}
 		s.evicting[key] = true
@@ -888,7 +904,7 @@ type Cell struct {
 	DB     *sql.DB
 	Scope  cell.Scope
 	Path   string
-	closed bool
+	closed atomic.Bool
 
 	// writeMu serializes write transactions in-process. SQLite allows one
 	// writer, so without it concurrent writers collide and retry on
@@ -911,9 +927,14 @@ type Cell struct {
 	hydrateStop func()
 }
 
+// Closed reports whether the cell's SQLite handle has been closed (e.g. by an
+// eviction racing a caller). Callers that lazily initialize per-cell state can
+// re-fetch the cell and retry instead of failing (ADR-272).
+func (c *Cell) Closed() bool { return c.closed.Load() }
+
 // Close closes the cell.
 func (c *Cell) Close() error {
-	if c.closed {
+	if c.closed.Load() {
 		return nil
 	}
 	var pagedTxID uint64
@@ -923,7 +944,7 @@ func (c *Cell) Close() error {
 			pagedTxID, pagedTxKnown = txid, true
 		}
 	}
-	c.closed = true
+	c.closed.Store(true)
 	_ = c.ReleaseReadLock(context.Background())
 	if c.kvUpsert != nil {
 		_ = c.kvUpsert.Close()

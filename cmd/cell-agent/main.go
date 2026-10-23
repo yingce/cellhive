@@ -244,6 +244,10 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
+	// The control cell is the hottest cell in the fleet. Keep it resident:
+	// evicting it re-runs schema migration and forces capture to rebuild its
+	// baseline, which is both a cold-path cost and a migration/close race.
+	store.Pin = func(sc cell.Scope) bool { return sc == control.Scope() }
 	// Paged cold restore (ADR-160): when the cell's compacted restore chain is
 	// large enough, open the main database over a sparse local file and fault
 	// pages from the replica on first use instead of downloading the whole
@@ -676,6 +680,7 @@ func main() {
 			SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
 				return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
 			},
+			OnEnsure:            srv.RecordCaptureEnsure,
 			AutoCheckpointBytes: cfg.CellWALCheckpointBytes,
 			GroupCommitWait:     cfg.CaptureGroupCommitWait,
 			PipelineThreshold:   cfg.CapturePipelineThreshold,

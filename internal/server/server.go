@@ -148,6 +148,8 @@ type Server struct {
 
 	// Observability (ADR-165).
 	proofByNS     sync.Map // ns -> *proofHist (ADR-179)
+	ensureByNS    sync.Map // ns -> *proofHist for capture.Ensure (ADR-272)
+	ensureModes   sync.Map // "ns|mode" -> *atomic.Int64 (ADR-272)
 	bindingCalls  sync.Map // "ns|kind|outcome" -> *atomic.Int64 (ADR-179)
 	nsMu          sync.Mutex
 	nsSeen        map[string]struct{} // bounded ns label values (ADR-179)
@@ -602,6 +604,18 @@ func (s *Server) recordProof(ns string, d time.Duration) {
 	s.proofFor(s.nsLabel(ns)).observe(d.Seconds(), d.Microseconds())
 }
 
+// RecordCaptureEnsure records one capture.Ensure outcome (warm/resume/snapshot/
+// plain/error) and its latency. The durability-proof histogram only covers
+// Capture.Wait, so the cold snapshot cost needs its own series (ADR-272).
+func (s *Server) RecordCaptureEnsure(sc cell.Scope, mode string, d time.Duration) {
+	ns := s.nsLabel(sc.Namespace)
+	v, _ := s.ensureByNS.LoadOrStore(ns, &proofHist{})
+	v.(*proofHist).observe(d.Seconds(), d.Microseconds())
+	k := ns + "|" + mode
+	c, _ := s.ensureModes.LoadOrStore(k, &atomic.Int64{})
+	c.(*atomic.Int64).Add(1)
+}
+
 // recordBindingCall records one tenant binding call per (ns, kind, outcome).
 func (s *Server) recordBindingCall(ns, kind string, status int) {
 	outcome := "error"
@@ -770,6 +784,39 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=%q,le=\"+Inf\"} %d\n", ns, h.count.Load())
 			writeFmt(w, "cellhive_durability_proof_seconds_sum{ns=%q} %g\n", ns, float64(h.micros.Load())/1e6)
 			writeFmt(w, "cellhive_durability_proof_seconds_count{ns=%q} %d\n", ns, h.count.Load())
+		}
+	}
+	// Capture Ensure latency/outcomes per namespace (ADR-272). This is where the
+	// cold full-page snapshot cost shows up; the proof histogram does not cover
+	// it.
+	{
+		writeFmt(w, "# TYPE cellhive_capture_ensure_seconds histogram\n")
+		nss := make([]string, 0, 8)
+		s.ensureByNS.Range(func(k, _ any) bool { nss = append(nss, k.(string)); return true })
+		sort.Strings(nss)
+		for _, ns := range nss {
+			v, ok := s.ensureByNS.Load(ns)
+			if !ok {
+				continue
+			}
+			h := v.(*proofHist)
+			for i, b := range proofBucketBounds {
+				writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=%q,le=%q} %d\n", ns, strconv.FormatFloat(b, 'g', -1, 64), h.buckets[i].Load())
+			}
+			writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=%q,le=\"+Inf\"} %d\n", ns, h.count.Load())
+			writeFmt(w, "cellhive_capture_ensure_seconds_sum{ns=%q} %g\n", ns, float64(h.micros.Load())/1e6)
+			writeFmt(w, "cellhive_capture_ensure_seconds_count{ns=%q} %d\n", ns, h.count.Load())
+		}
+	}
+	{
+		writeFmt(w, "# TYPE cellhive_capture_ensure_total counter\n")
+		keys := make([]string, 0, 8)
+		s.ensureModes.Range(func(k, _ any) bool { keys = append(keys, k.(string)); return true })
+		sort.Strings(keys)
+		for _, k := range keys {
+			ns, mode, _ := strings.Cut(k, "|")
+			v, _ := s.ensureModes.Load(k)
+			writeFmt(w, "cellhive_capture_ensure_total{ns=%q,mode=%q} %d\n", ns, mode, v.(*atomic.Int64).Load())
 		}
 	}
 	// Owner lifecycle (ADR-165).

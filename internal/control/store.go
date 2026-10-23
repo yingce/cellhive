@@ -423,34 +423,64 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 
 // cell returns the single control cell, creating/migrating it on first use.
 func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
-	c, err := s.cs.Cell(ctx, Scope())
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	done := s.migrated[c]
-	s.mu.Unlock()
-	if done {
+	// A cellstore eviction can close the cell between Cell() and our lazy
+	// migration (the control cell used to be evictable). Re-fetch and retry
+	// once; a pinned control cell makes this a rare fallback (ADR-272).
+	for attempt := 0; attempt < 2; attempt++ {
+		c, err := s.cs.Cell(ctx, Scope())
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		done := s.migrated[c]
+		s.mu.Unlock()
+		if done {
+			if !c.Closed() {
+				return c, nil
+			}
+			continue
+		}
+		if c.Closed() {
+			continue
+		}
+		if err := s.migrateCell(ctx, c); err != nil {
+			if c.Closed() {
+				continue
+			}
+			return nil, err
+		}
+		if c.Closed() {
+			continue
+		}
+		s.mu.Lock()
+		s.migrated[c] = true
+		s.mu.Unlock()
 		return c, nil
 	}
+	return nil, fmt.Errorf("control: cell closed while migrating")
+}
+
+// migrateCell installs the control schema on a freshly opened cell. It is
+// idempotent and safe to retry on a new Cell instance.
+func (s *Store) migrateCell(ctx context.Context, c *cellstore.Cell) error {
 	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, schema)
 		return err
 	}); err != nil {
-		return nil, fmt.Errorf("control: migrate: %w", err)
+		return fmt.Errorf("control: migrate: %w", err)
 	}
 	// Columns added to legacy tables must exist before schemaV2's indexes.
 	if err := migrateColumns(ctx, c.DB); err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := c.DB.ExecContext(ctx, schemaV2); err != nil {
-		return nil, fmt.Errorf("control: migrate: %w", err)
+		return fmt.Errorf("control: migrate: %w", err)
 	}
 	// Historical secret values cannot be reconstructed. Pin the values known
 	// at upgrade time once, before any new version or secret write occurs.
 	var pending int
 	if err := c.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM versions WHERE secret_snapshot=0)`).Scan(&pending); err != nil {
-		return nil, fmt.Errorf("control: inspect secret snapshots: %w", err)
+		return fmt.Errorf("control: inspect secret snapshots: %w", err)
 	}
 	if pending != 0 {
 		if err := tx(ctx, c, func(t *sql.Tx) error {
@@ -464,13 +494,10 @@ func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 			_, err := t.ExecContext(ctx, `UPDATE versions SET secret_snapshot=1 WHERE secret_snapshot=0`)
 			return err
 		}); err != nil {
-			return nil, fmt.Errorf("control: migrate secret snapshots: %w", err)
+			return fmt.Errorf("control: migrate secret snapshots: %w", err)
 		}
 	}
-	s.mu.Lock()
-	s.migrated[c] = true
-	s.mu.Unlock()
-	return c, nil
+	return nil
 }
 
 // tx runs fn in one control transaction and bumps the revision.

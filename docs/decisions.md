@@ -9,7 +9,10 @@
   3. `cellcapture.Ensure` 在创建新 capture 时比较 `local txid`、cursor baseline 与 durable 水位：三者相等且 durable>0 → **跳过 Snapshot**，直接 `sqlcapture.New(..., baseline=durable)` 续 delta；本地领先（未 ack 尾巴）→ 维持全量快照兜底；本地落后于 durable → `ErrLocalBehindDurable` fail closed，避免在链上分叉。
   4. 只在创建 capture 时检查，warm `Ensure` 不读 bucket；热路径不新增 List。
 - **验证**：`internal/replica TestDurableWatermark`（manifest/snapshot marker/连续与 gap）、`internal/cellcapture TestEnsureContinuesDurableChain/TestEnsureFallsBackToSnapshotWhenBehind/TestEnsureFailsClosedWhenLocalBehindDurable`、`internal/server TestDeployResumesCaptureWithoutSnapshot`（模拟重启：第二次 deploy 只产生 1 条 delta，bucket 链可 restore 出 2 个版本）。
-- **边界**：本地领先仍走全量快照；流式/预算快照、控制 cell 常驻、`Ensure/Snapshot` 指标、`L>D` 的 gap 增量在后续阶段完成。
+- **补充（P1，同日）**：
+  1. 控制 cell 通过 `cellstore.Store.Pin` 排除出 LRU/idle 驱逐；`Cell.Closed()` + `control.Store.cell()` 在迁移遇到已关闭 cell 时重新取 cell 重试一次，消除 `control: migrate: sql: database is closed` 竞态。
+  2. 新增 `cellhive_capture_ensure_seconds{ns}` 直方图与 `cellhive_capture_ensure_total{ns,mode}` 计数（mode=warm/resume/snapshot/plain/error），由 `capture.Manager.OnEnsure` 上报；proof 直方图继续只覆盖 `Wait`。
+- **边界**：本地领先仍走全量快照；流式/预算快照、快照 part 批量/并发、`L>D` 的 gap 增量在后续阶段完成。
 
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
 

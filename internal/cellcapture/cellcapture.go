@@ -59,6 +59,10 @@ type Manager struct {
 	// SnapshotDone, when set, records that a full-page snapshot at txid was
 	// completely committed. Resume treats only marked snapshots as baselines.
 	SnapshotDone func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
+	// OnEnsure, when set, observes each Ensure with its outcome
+	// (warm/resume/snapshot/plain/error) and duration. Warm Ensure is a map
+	// lookup; the other modes are cold paths.
+	OnEnsure func(scope cell.Scope, mode string, d time.Duration)
 
 	// GroupCommitWait is the WAL coalescing window (0 = package default).
 	GroupCommitWait time.Duration
@@ -96,6 +100,13 @@ func (m *Manager) log() *slog.Logger {
 // baseline. It fails with ErrNotOwner when this node does not own the scope.
 // Call it before the write that must be captured.
 func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) {
+	start := time.Now()
+	mode := "error"
+	defer func() {
+		if m.OnEnsure != nil {
+			m.OnEnsure(scope, mode, time.Since(start))
+		}
+	}()
 	isOwner, epoch, err := m.Owner(ctx, scope)
 	if err != nil {
 		return 0, err
@@ -139,6 +150,7 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 						delete(m.caps, key)
 					default:
 						m.mu.Unlock()
+						mode = "warm"
 						return baseline, nil
 					}
 				}
@@ -195,6 +207,7 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				return 0, rerr
 			}
 			if resume {
+				mode = "resume"
 				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
 			} else {
 				if err := cap.Snapshot(ctx); err != nil {
