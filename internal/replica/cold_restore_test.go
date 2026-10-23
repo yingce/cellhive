@@ -193,3 +193,34 @@ func TestRestoreChainListsScopeOnce(t *testing.T) {
 		t.Fatalf("RestoreChain listed %d times, want 1", lists)
 	}
 }
+
+func TestRestoreChainSkipsEpochsOlderThanNewestBase(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "demo", Class: "__invocations__", ID: "main"}
+	old := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("old"))
+	if _, _, err := m.Append(ctx, sc, 1, old); err != nil {
+		t.Fatal(err)
+	}
+	_ = syntheticSnapshot(t, m, sc, 3, 4096, 1)
+	fresh := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 3, StartTxID: 2, EndTxID: 2}, []byte("fresh"))
+	if _, _, err := m.Append(ctx, sc, 3, fresh); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := m.RestoreChain(ctx, sc, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sg := range segs {
+		if sg.Header.Epoch < 3 {
+			t.Fatalf("restored old epoch segment %q above newest base", sg.Key)
+		}
+	}
+	if len(segs) < 2 {
+		t.Fatalf("segments = %d, want newest snapshot and its delta", len(segs))
+	}
+}

@@ -165,7 +165,7 @@ func (m *Manager) DurableWatermark(ctx context.Context, s cell.Scope, epoch uint
 		}
 		// A group-committed object can contain snapshot parts (and/or deltas);
 		// its name alone cannot tell, so decode the batch's headers.
-		if strings.HasSuffix(name, ".batch") {
+		if strings.HasSuffix(name, ".batch") && !batchSpanKnown(name) {
 			raw, err := m.ReadSegment(ctx, key)
 			if err != nil {
 				return 0, err
@@ -234,26 +234,51 @@ func (m *Manager) DurableWatermark(ctx context.Context, s cell.Scope, epoch uint
 // Epochs lists the epochs (<= maxEpoch, 0=unbounded) that have LTX objects for
 // the scope, ascending. Cold path.
 func (m *Manager) Epochs(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]uint64, error) {
-	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
-	if err != nil {
-		return nil, err
-	}
-	base := s.Key() + "/ltx/e"
+	return m.epochDirs(ctx, s, maxEpoch)
+}
+
+// epochDirs returns the epochs that have a prefix under <scope>/ltx/, ascending.
+// A delimiter listing returns only the e<N>/ directories, so its cost does not
+// grow with the number of objects in the chain; a bucket without it falls back
+// to listing every key.
+func (m *Manager) epochDirs(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]uint64, error) {
+	base := s.Key() + "/ltx/"
 	set := map[uint64]bool{}
-	for _, k := range keys {
-		rest, ok := strings.CutPrefix(k, base)
-		if !ok {
-			continue
+	add := func(rest string) {
+		rest = strings.TrimSuffix(rest, "/")
+		if !strings.HasPrefix(rest, "e") {
+			return
 		}
-		i := strings.IndexByte(rest, '/')
-		if i <= 0 {
-			continue
-		}
-		n, err := strconv.ParseUint(rest[:i], 10, 64)
+		n, err := strconv.ParseUint(rest[1:], 10, 64)
 		if err != nil || (maxEpoch > 0 && n > maxEpoch) {
-			continue
+			return
 		}
 		set[n] = true
+	}
+	if pl, ok := m.B.(bucket.PrefixLister); ok {
+		prefixes, err := pl.CommonPrefixes(ctx, base, "/")
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range prefixes {
+			if rest, ok := strings.CutPrefix(p, base); ok {
+				add(rest)
+			}
+		}
+	} else {
+		keys, err := m.B.List(ctx, base)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			rest, ok := strings.CutPrefix(k, base)
+			if !ok {
+				continue
+			}
+			if i := strings.IndexByte(rest, '/'); i > 0 {
+				add(rest[:i])
+			}
+		}
 	}
 	out := make([]uint64, 0, len(set))
 	for e := range set {
@@ -285,7 +310,7 @@ func (m *Manager) spansForEpoch(ctx context.Context, s cell.Scope, epoch uint64)
 		if i := strings.LastIndexByte(name, '/'); i >= 0 {
 			name = name[i+1:]
 		}
-		if strings.HasSuffix(name, ".batch") {
+		if strings.HasSuffix(name, ".batch") && !batchSpanKnown(name) {
 			raw, err := m.ReadSegment(ctx, key)
 			if err != nil {
 				return nil, err
@@ -374,8 +399,39 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
 	floor := uint64(0)
 	haveBase := false
+	// An epoch marker (ADR-275) kills every older-epoch object that ends above
+	// its cut. A fenced old owner's late tail must not extend the watermark.
+	cuts := map[uint64]uint64{}
+	for e, g := range groups {
+		for _, sp := range g.spans {
+			if sp.marker {
+				if c, ok := cuts[e]; !ok || sp.end < c {
+					cuts[e] = sp.end
+				}
+			}
+		}
+	}
+	deadAbove := func(epoch uint64) (uint64, bool) {
+		var lim uint64
+		found := false
+		for e, c := range cuts {
+			if e > epoch && (!found || c < lim) {
+				lim, found = c, true
+			}
+		}
+		return lim, found
+	}
 	for _, epoch := range epochs {
 		g := groups[epoch]
+		if lim, ok := deadAbove(epoch); ok {
+			kept := g.spans[:0]
+			for _, sp := range g.spans {
+				if sp.end <= lim || sp.marker {
+					kept = append(kept, sp)
+				}
+			}
+			g.spans = kept
+		}
 		if g.manifest != "" {
 			man, ok, merr := m.ReadManifest(ctx, s, epoch)
 			if merr != nil {
@@ -477,6 +533,17 @@ func (m *Manager) RetireEpochs(ctx context.Context, s cell.Scope, current uint64
 	return deleted, nil
 }
 
+// lastBase returns the index of the newest epoch with a complete restore base,
+// or -1 when no epoch has a snapshot/manifest.
+func lastBase(epochs []uint64, hasBase map[uint64]bool) int {
+	for i := len(epochs) - 1; i >= 0; i-- {
+		if hasBase[epochs[i]] {
+			return i
+		}
+	}
+	return -1
+}
+
 // RestoreChain reads the segments of every epoch up to maxEpoch (oldest first),
 // so a new epoch that only contains deltas can be restored on top of its
 // predecessor's snapshot. Cold path; the caller's restore planner selects the
@@ -490,6 +557,7 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 	}
 	base := s.Key() + "/ltx/e"
 	byEpoch := map[uint64][]string{}
+	hasBase := map[uint64]bool{}
 	var epochs []uint64
 	for _, key := range keys {
 		if !isSegmentKey(key) {
@@ -512,11 +580,23 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 			byEpoch[e] = nil
 		}
 		if strings.HasPrefix(rest[slash+1:], "L1/") {
+			if strings.HasSuffix(key, "/L1/manifest.json") {
+				hasBase[e] = true
+			}
 			continue
+		}
+		if strings.HasSuffix(key, ".snapshot") || strings.HasSuffix(key, ".snapshot-done") {
+			hasBase[e] = true
 		}
 		byEpoch[e] = append(byEpoch[e], key)
 	}
 	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	// Restore only needs the newest complete baseline and the epochs above it.
+	// Older epochs are dead weight; restoring every historical epoch made a
+	// cron/invocation cell with 100+ epochs exceed the hydrate deadline.
+	if start := lastBase(epochs, hasBase); start >= 0 {
+		epochs = epochs[start:]
+	}
 	var out []Segment
 	seen := map[string]bool{}
 	for _, epoch := range epochs {
@@ -539,6 +619,9 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 type segmentSpan struct {
 	start, end uint64
 	snapshot   bool
+	// marker is an epoch marker (ADR-275): the epoch starts at start and every
+	// older-epoch object ending above end (= start-1) is dead.
+	marker bool
 }
 
 // parseSegmentSpan decodes an L0 object name into its txid range. Snapshot parts
@@ -573,8 +656,22 @@ func parseSegmentSpan(name string) (segmentSpan, bool) {
 		return parseSegmentRange(base)
 	case strings.HasSuffix(name, ".ltx"):
 		return parseSegmentRange(strings.TrimSuffix(name, ".ltx"))
+	case strings.HasSuffix(name, ".marker"):
+		n, err := strconv.ParseUint(strings.TrimSuffix(name, ".marker"), 10, 64)
+		if err != nil || n == 0 {
+			return out, false
+		}
+		out.start, out.end, out.marker = n, n-1, true
+		return out, true
 	}
 	return out, false
+}
+
+// batchSpanKnown reports whether a .batch object's name alone says what it
+// holds: ".d.batch" is all deltas and ".s.batch" is snapshot parts of one
+// watermark. Legacy and ".m.batch" names need their headers decoded.
+func batchSpanKnown(name string) bool {
+	return strings.HasSuffix(name, ".d.batch") || strings.HasSuffix(name, ".s.batch")
 }
 
 // isSegmentKey reports whether an object under the epoch prefix is an LTX
@@ -587,7 +684,8 @@ func isSegmentKey(key string) bool {
 	return strings.HasSuffix(name, ".snapshot") ||
 		strings.HasSuffix(name, ".ltx") ||
 		strings.HasSuffix(name, ".batch") ||
-		strings.HasSuffix(name, ".link")
+		strings.HasSuffix(name, ".link") ||
+		strings.HasSuffix(name, ".marker")
 }
 
 func parseSegmentRange(base string) (segmentSpan, bool) {
@@ -613,34 +711,11 @@ func parseSegmentRange(base string) (segmentSpan, bool) {
 // scope has no replica objects. It lists the bucket, so it is a cold-path
 // operation for restore/takeover only.
 func (m *Manager) LatestEpoch(ctx context.Context, s cell.Scope, maxEpoch uint64) (uint64, bool, error) {
-	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
-	if err != nil {
+	epochs, err := m.epochDirs(ctx, s, maxEpoch)
+	if err != nil || len(epochs) == 0 {
 		return 0, false, err
 	}
-	base := s.Key() + "/ltx/e"
-	var best uint64
-	found := false
-	for _, k := range keys {
-		rest, ok := strings.CutPrefix(k, base)
-		if !ok {
-			continue
-		}
-		i := strings.IndexByte(rest, '/')
-		if i <= 0 {
-			continue
-		}
-		n, err := strconv.ParseUint(rest[:i], 10, 64)
-		if err != nil {
-			continue
-		}
-		if maxEpoch > 0 && n > maxEpoch {
-			continue
-		}
-		if n > best {
-			best, found = n, true
-		}
-	}
-	return best, found, nil
+	return epochs[len(epochs)-1], true, nil
 }
 
 // Append validates and stores a segment, returning its object key and etag.
@@ -1009,7 +1084,7 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 			// An L0 delta crossing the compaction floor still contains newer
 			// transactions. Keep it so restore can reject an ambiguous overlap
 			// instead of silently losing its tail.
-			if !l1Set[k] && floor > 0 && h.EndTxID <= floor {
+			if !l1Set[k] && floor > 0 && h.EndTxID <= floor && h.Kind != ltx.KindMarker {
 				continue
 			}
 			segs = append(segs, Segment{Key: fmt.Sprintf("%s#%d", k, i), Header: h, Raw: part})
