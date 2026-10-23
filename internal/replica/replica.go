@@ -24,8 +24,9 @@ import (
 
 // Manager reads and writes replication segments for cells.
 type Manager struct {
-	B             bucket.Bucket
-	resourceLocks [64]sync.RWMutex
+	B               bucket.Bucket
+	RestoreParallel int
+	resourceLocks   [64]sync.RWMutex
 
 	fenceMu    sync.Mutex
 	fenceCache map[string]fenceCacheEntry
@@ -928,8 +929,14 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 	keys = append(keys, l0...)
 
 	// Fetch objects concurrently; decoding and ordering stay deterministic.
+	// Keep this small: a control cell can have multi-MiB snapshot parts and the
+	// container memory limit is shared with capture/compaction.
+	parallel := m.RestoreParallel
+	if parallel <= 0 {
+		parallel = 4
+	}
 	raws := make([][]byte, len(keys))
-	sem := make(chan struct{}, 16)
+	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	var fetchErr error
 	var fetchMu sync.Mutex

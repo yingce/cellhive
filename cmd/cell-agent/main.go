@@ -184,6 +184,7 @@ func main() {
 	nodeLog := nodelog.New(b, cfg.NodeID)
 
 	rep := replica.New(b)
+	rep.RestoreParallel = cfg.RestoreParallel
 	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
 	om.BeforeTakeover = func(tctx context.Context, predecessor cell.Owner) error {
 		_, err := takeoverRecovery.Recover(tctx, nodeLog, predecessor.Node, predecessor.Session)
