@@ -170,6 +170,8 @@ type Server struct {
 	exportMu      sync.Mutex
 	d1Exports     map[string]*cloudflareD1Export
 	commits       atomic.Uint64
+	commitModes   sync.Map // mode -> *atomic.Uint64
+	followerCount atomic.Int64
 	readyFlag     atomic.Bool
 
 	// ProxySQL reconciles Hyperdrive origins when CELLHIVE_PROXYSQL_ADMIN is set.
@@ -603,6 +605,11 @@ func (s *Server) nsLabel(ns string) string {
 func (s *Server) proofFor(ns string) *proofHist {
 	v, _ := s.proofByNS.LoadOrStore(ns, &proofHist{})
 	return v.(*proofHist)
+}
+
+func (s *Server) recordCommit(mode string) {
+	v, _ := s.commitModes.LoadOrStore(mode, &atomic.Uint64{})
+	v.(*atomic.Uint64).Add(1)
 }
 
 // recordProof records one durability proof under its namespace (bounded label).
@@ -3284,8 +3291,10 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 						}()
 					}
 					s.commits.Add(1)
+					s.recordCommit("fleet")
 					return commitResult{Mode: "fleet", AckedBy: ackedBy}, nil
 				}
+				s.recordCommit("fleet-error")
 			}
 		}
 	}
@@ -3300,6 +3309,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 		if s.Uploader != nil {
 			s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
 			s.commits.Add(1)
+			s.recordCommit("bucket-async")
 			return commitResult{Mode: "bucket-async"}, nil
 		}
 	default:
@@ -3308,6 +3318,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 				return commitResult{}, err
 			}
 			s.commits.Add(1)
+			s.recordCommit("bucket-batch")
 			return commitResult{Mode: "bucket-batch"}, nil
 		}
 	}
@@ -3317,6 +3328,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 		return commitResult{}, uerr
 	}
 	s.commits.Add(1)
+	s.recordCommit("bucket")
 	return commitResult{Mode: "bucket", Key: key, Etag: etag}, nil
 }
 
@@ -3384,7 +3396,9 @@ func (s *Server) liveFollowers(ctx context.Context, max int) []string {
 		return nil
 	}
 	leases := s.Lease.SampleCached(ctx, s.followerSampleTTL())
-	return selectFollowers(leases, s.Cfg.NodeID, s.Cfg.PlacementAZ, time.Now(), max)
+	out := selectFollowers(leases, s.Cfg.NodeID, s.Cfg.PlacementAZ, time.Now(), max)
+	s.followerCount.Store(int64(len(out)))
+	return out
 }
 
 // selectFollowers picks up to max live peers, preferring a different failure
