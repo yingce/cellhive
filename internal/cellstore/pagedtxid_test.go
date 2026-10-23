@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,7 +98,7 @@ func TestPagedDirtyCacheFailsClosed(t *testing.T) {
 }
 
 // buildPagedCut builds a durable image and returns a source that serves it.
-func buildPagedCut(t *testing.T, id string) (cell.Scope, *fileSource) {
+func buildPagedCut(t *testing.T, id string) (cell.Scope, *fileSource, string) {
 	t.Helper()
 	ctx := context.Background()
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: id}
@@ -123,7 +126,7 @@ func buildPagedCut(t *testing.T, id string) (cell.Scope, *fileSource) {
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return sc, sourceFromImage(t, image)
+	return sc, sourceFromImage(t, image), image
 }
 
 func TestPagedCellSweepEvictionReopensWithData(t *testing.T) {
@@ -131,7 +134,7 @@ func TestPagedCellSweepEvictionReopensWithData(t *testing.T) {
 		t.Fatal("paged VFS unavailable")
 	}
 	ctx := context.Background()
-	sc, source := buildPagedCut(t, "evict")
+	sc, source, _ := buildPagedCut(t, "evict")
 	dir := t.TempDir()
 	st, err := New(dir)
 	if err != nil {
@@ -177,7 +180,7 @@ func TestPagedCellCrashLeavesDirtyMarkerAndFailsClosed(t *testing.T) {
 		t.Fatal("paged VFS unavailable")
 	}
 	ctx := context.Background()
-	sc, source := buildPagedCut(t, "crash")
+	sc, source, _ := buildPagedCut(t, "crash")
 	dir := t.TempDir()
 	st, err := New(dir)
 	if err != nil {
@@ -213,5 +216,63 @@ func TestPagedCellCrashLeavesDirtyMarkerAndFailsClosed(t *testing.T) {
 	st2.Paged = st.Paged
 	if _, err := st2.Cell(ctx, sc); !errors.Is(err, ErrPagedCacheUnusable) {
 		t.Fatalf("crash cache accepted: %v", err)
+	}
+}
+
+func TestPagedCellCrashHelper(t *testing.T) {
+	if os.Getenv("PAGED_CRASH_HELPER") != "1" {
+		return
+	}
+	image := os.Getenv("PAGED_CRASH_IMAGE")
+	dir := os.Getenv("PAGED_CRASH_DIR")
+	ctx := context.Background()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "kill"}
+	src := sourceFromImage(t, image)
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+		return src, true, nil
+	}
+	st.PagedHydrateMBPS = 0
+	pc, err := st.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pc.Get(ctx, "key-7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.Put(ctx, "acked-after-open", []byte("crash-me"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPagedCellProcessKillFailsClosed(t *testing.T) {
+	if !pagedvfs.Available() {
+		t.Skip("paged VFS unavailable")
+	}
+	_, _, image := buildPagedCut(t, "kill-parent")
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestPagedCellCrashHelper")
+	cmd.Env = append(os.Environ(), "PAGED_CRASH_HELPER=1", "PAGED_CRASH_IMAGE="+image, "PAGED_CRASH_DIR="+dir)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("helper did not crash: %s", out)
+	}
+	if _, _, _, clean, exists, valid := readPagedMarker(filepath.Join(dir, "cells", "acme", "__kv__", "kill.db")); !exists || !valid || clean {
+		t.Fatalf("process crash marker = clean=%v exists=%v valid=%v, want dirty", clean, exists, valid)
+	}
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+		return sourceFromImage(t, image), true, nil
+	}
+	if _, err := st.Cell(context.Background(), cell.Scope{Namespace: "acme", Class: "__kv__", ID: "kill"}); !errors.Is(err, ErrPagedCacheUnusable) {
+		t.Fatalf("process crash cache accepted: %v", err)
 	}
 }
