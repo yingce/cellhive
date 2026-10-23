@@ -22,6 +22,38 @@ Tenants ──(OpenObserve users/roles, or a thin query proxy)──► read onl
 - Compose: the `tracing` profile starts OpenObserve; add the collector with
   `--profile observability` (see `deploy/compose/docker-compose.yml`).
 
+
+## Optional Vector pipeline
+
+`vector.toml` is a Vector 0.58 reference pipeline for **OTLP logs/traces +
+Prometheus metrics**:
+
+```
+CellHive ──OTLP/HTTP──► Vector :4318 ──► ARMS OTLP (traces/metrics)
+CellHive /metrics ◄──prometheus_scrape──┘
+CellHive logs ────────────────► SLS Kafka (topic/logstore)
+```
+
+- CellHive config: `CELLHIVE_OTLP_ENDPOINT=http://vector:4318`,
+  `CELLHIVE_OTLP_LOGS=all` (or `tail`), `CELLHIVE_TENANT_LOG_CAPTURE=on`.
+- Metrics are **scraped**, not OTLP-pushed. Keep `/metrics` internal.
+- ARMS accepts traces at the existing `/api/otlp/traces` URL; the separate
+  metrics URL is configured independently. Do not point logs at the ARMS trace
+  endpoint (it does not accept OTLP logs).
+- SLS has no native Vector sink; use its Kafka upload protocol. The Kafka
+  bootstrap endpoint is `<project>.<region>.log.aliyuncs.com:10011` (VPC) or
+  `:10012` (public), SASL/SSL username is the SLS project, and password is
+  `<AccessKeyId>#<AccessKeySecret>`. Append `.json` to the logstore topic to
+  parse JSON fields.
+- Vector 0.57+ disables `${ENV}` interpolation by default; start with
+  `VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`.
+- Compose: `docker compose --profile vector up vector` (do not also enable the
+  `observability` profile; both bind 4317/4318).
+
+The config is validated with `vector validate` against Vector 0.58. The
+`cellhive_otlp.metrics` port is intentionally unconsumed today because CellHive
+does not push OTLP metrics; metrics come from `prometheus_scrape`.
+
 ## Multi-tenant model (which hop authenticates)
 
 1. **Node → Collector**: the platform's own credential (or none on a private

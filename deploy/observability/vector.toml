@@ -1,0 +1,89 @@
+# CellHive -> Vector -> ARMS (traces/metrics) + SLS Kafka (logs)
+#
+# CellHive pushes OTLP/HTTP for traces and (optionally) logs. Metrics stay
+# Prometheus-pull, so Vector scrapes /metrics separately.
+#
+# Enable interpolation when starting Vector (0.57+ disables env expansion by
+# default):
+#   VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true \
+#     vector --config /etc/vector/vector.toml
+#
+# Required env:
+#   ARMS_TRACES_ENDPOINT   full ARMS OTLP/HTTP traces URL (…/api/otlp/traces)
+#   ARMS_METRICS_ENDPOINT  full ARMS OTLP/HTTP metrics URL (…/api/otlp/metrics)
+#   SLS_KAFKA_BOOTSTRAP_SERVERS  <project>.<region>.log.aliyuncs.com:10011|10012
+#   SLS_KAFKA_TOPIC        SLS logstore (append .json to parse JSON fields)
+#   SLS_KAFKA_USERNAME     SLS project name (Kafka SASL username)
+#   SLS_KAFKA_PASSWORD     <AccessKeyId>#<AccessKeySecret>
+#   CELLHIVE_METRICS_URL   e.g. http://cellhive-sg-cell-agent:7001/metrics
+
+data_dir = "/var/lib/vector"
+
+[api]
+enabled = true
+address = "0.0.0.0:8687"
+
+[sources.cellhive_otlp]
+type = "opentelemetry"
+use_otlp_decoding.logs = false
+use_otlp_decoding.metrics = false
+use_otlp_decoding.traces = true
+
+[sources.cellhive_otlp.grpc]
+address = "0.0.0.0:4317"
+
+[sources.cellhive_otlp.http]
+address = "0.0.0.0:4318"
+
+# CellHive /metrics is unauthenticated Prometheus text. Keep it reachable only
+# from this Vector pod over the cluster network.
+[sources.cellhive_metrics]
+type = "prometheus_scrape"
+endpoints = ["${CELLHIVE_METRICS_URL}"]
+scrape_interval_secs = 15
+
+[sinks.arms_traces]
+type = "opentelemetry"
+inputs = ["cellhive_otlp.traces"]
+healthcheck.enabled = false
+
+[sinks.arms_traces.protocol]
+type = "http"
+uri = "${ARMS_TRACES_ENDPOINT}"
+
+[sinks.arms_traces.protocol.encoding]
+codec = "otlp"
+
+[sinks.arms_metrics]
+type = "opentelemetry"
+inputs = ["cellhive_metrics"]
+healthcheck.enabled = false
+
+[sinks.arms_metrics.protocol]
+type = "http"
+uri = "${ARMS_METRICS_ENDPOINT}"
+
+[sinks.arms_metrics.protocol.encoding]
+codec = "otlp"
+
+[sinks.sls_logs]
+type = "kafka"
+inputs = ["cellhive_otlp.logs"]
+bootstrap_servers = "${SLS_KAFKA_BOOTSTRAP_SERVERS}"
+topic = "${SLS_KAFKA_TOPIC}"
+encoding.codec = "json"
+healthcheck.enabled = false
+
+[sinks.sls_logs.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"
+
+[sinks.sls_logs.sasl]
+enabled = true
+mechanism = "PLAIN"
+username = "${SLS_KAFKA_USERNAME}"
+password = "${SLS_KAFKA_PASSWORD}"
+
+[sinks.sls_logs.tls]
+enabled = true

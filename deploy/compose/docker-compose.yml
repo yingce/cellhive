@@ -216,6 +216,33 @@ services:
     ports: ["4317:4317", "4318:4318"]
     depends_on: [openobserve]
 
+  # Optional Vector pipeline (profile "vector"): OTLP logs/traces in,
+  # Prometheus /metrics scraped, then ARMS (traces/metrics) + SLS Kafka (logs).
+  # Do not run this profile together with "observability": both bind 4317/4318.
+  # Set ARMS_* and SLS_KAFKA_* in the environment; see deploy/observability/README.md.
+  vector:
+    image: timberio/vector:0.58.0-alpine
+    profiles: ["vector"]
+    command: ["--config=/etc/vector/vector.toml"]
+    environment:
+      VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: "true"
+      ARMS_TRACES_ENDPOINT: ${ARMS_TRACES_ENDPOINT:-}
+      ARMS_METRICS_ENDPOINT: ${ARMS_METRICS_ENDPOINT:-}
+      SLS_KAFKA_BOOTSTRAP_SERVERS: ${SLS_KAFKA_BOOTSTRAP_SERVERS:-}
+      SLS_KAFKA_TOPIC: ${SLS_KAFKA_TOPIC:-cellhive.json}
+      SLS_KAFKA_USERNAME: ${SLS_KAFKA_USERNAME:-}
+      SLS_KAFKA_PASSWORD: ${SLS_KAFKA_PASSWORD:-}
+      CELLHIVE_METRICS_URL: ${CELLHIVE_METRICS_URL:-http://cell-agent:7001/metrics}
+    volumes:
+      - ../observability/vector.toml:/etc/vector/vector.toml:ro
+      - vector-data:/var/lib/vector
+    ports: ["4317:4317", "4318:4318", "8687:8687"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8687/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 6
+
   # Ops-provided edge; the platform does not push its config (ADR-132).
   edge:
     image: traefik:v3
@@ -230,3 +257,4 @@ volumes:
   gated-runtime-data:
   minio-data:
   openobserve-data:
+  vector-data:
