@@ -69,10 +69,12 @@ spec:
               valueFrom: {fieldRef: {fieldPath: status.podIP}}
             - name: CELLHIVE_NODE_ID
               value: $(POD_NAME)
+            # Stable Pod DNS, not the ephemeral Pod IP: owner records and
+            # takeover recovery survive a StatefulSet restart with a new IP.
             - name: CELLHIVE_ADVERTISE
-              value: $(POD_IP):7001
+              value: $(POD_NAME).{{ .Release.Name }}-cell-agent:7001
             - name: CELLHIVE_PEER_URL
-              value: http://$(POD_IP):7001
+              value: http://$(POD_NAME).{{ .Release.Name }}-cell-agent:7001
           ports:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}
