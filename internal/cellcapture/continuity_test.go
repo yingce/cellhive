@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
@@ -121,5 +122,99 @@ func TestEnsureFailsClosedWhenLocalBehindDurable(t *testing.T) {
 	}, &commits)
 	if _, err := m.Ensure(ctx, sc); !errors.Is(err, ErrLocalBehindDurable) {
 		t.Fatalf("ensure err = %v, want ErrLocalBehindDurable", err)
+	}
+}
+
+func TestEnsureSnapshotsNewEpochForSmallCell(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "newepoch"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		return local, nil // a predecessor chain exists in another epoch
+	}, &commits)
+	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil }
+	m.EpochSnapshotMaxBytes = 1 << 30
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if commits == 0 {
+		t.Fatal("a new small epoch must open with a snapshot")
+	}
+}
+
+func TestEnsureResumesLargeNewEpoch(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "largeepoch"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		return local, nil
+	}, &commits)
+	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil }
+	m.EpochSnapshotMaxBytes = 1 // DB is larger
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 0 {
+		t.Fatalf("large new epoch committed %d snapshot segments, want resume", commits)
+	}
+}
+
+// TestSweepEvictsCapturedCellWithoutDeadlock guards the eviction contract:
+// Store.evictOne holds openMu while calling Drop, so Drop must never reopen the
+// cell through Store.Cell (that deadlocked every cold open in production).
+func TestSweepEvictsCapturedCellWithoutDeadlock(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	cs.MaxOpenCells = 1
+	sc1 := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "evict1"}
+	sc2 := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "evict2"}
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) { return 0, nil }, &commits)
+	cs.Drop = m.Drop
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Cell(ctx, sc2); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { cs.Sweep(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sweep deadlocked in Drop")
 	}
 }

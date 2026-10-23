@@ -164,3 +164,68 @@ func TestDurableWatermarkChainAcrossEpochs(t *testing.T) {
 		t.Fatalf("restore chain epochs = %v, want 1 and 2", epochsSeen)
 	}
 }
+
+func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc"}
+	put := func(epoch uint64, name string) {
+		if _, err := b.Put(ctx, Prefix(sc, epoch)+name, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(1, "1.snapshot")
+	put(2, "2-2.ltx")
+	// No snapshot-done in epoch 2: nothing may be deleted.
+	if n, err := m.RetireEpochs(ctx, sc, 2, 1); err != nil || n != 0 {
+		t.Fatalf("retire without snapshot = %d, %v; want 0", n, err)
+	}
+	if err := m.MarkSnapshotDone(ctx, sc, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	put(3, "3.snapshot")
+	if err := m.MarkSnapshotDone(ctx, sc, 3, 3); err != nil {
+		t.Fatal(err)
+	}
+	// Keep current (3) and previous (2); delete epoch 1.
+	if n, err := m.RetireEpochs(ctx, sc, 3, 1); err != nil || n == 0 {
+		t.Fatalf("retire = %d, %v; want deletes", n, err)
+	}
+	keys, err := b.List(ctx, Prefix(sc, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("epoch 1 still has %d objects", len(keys))
+	}
+	for _, e := range []uint64{2, 3} {
+		keys, _ := b.List(ctx, Prefix(sc, e))
+		if len(keys) == 0 {
+			t.Fatalf("epoch %d was deleted", e)
+		}
+	}
+}
+
+func TestDurableWatermarkChainParsesGroupedSnapshotBatch(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "batchchain"}
+	const epoch = uint64(1)
+	if _, err := b.Put(ctx, Prefix(sc, epoch)+"40.p0-p3.batch", []byte("not-decoded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSnapshotDone(ctx, sc, epoch, 40); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := m.DurableWatermarkChain(ctx, sc, epoch); err != nil || got != 40 {
+		t.Fatalf("grouped snapshot watermark = %d, %v; want 40", got, err)
+	}
+}

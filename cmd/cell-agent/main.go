@@ -688,6 +688,22 @@ func main() {
 			Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
 				return rep.DurableWatermarkChain(cctx, sc, epoch)
 			},
+			HasEpoch: func(cctx context.Context, sc cell.Scope, epoch uint64) (bool, error) {
+				epochs, eerr := rep.Epochs(cctx, sc, epoch)
+				if eerr != nil {
+					return false, eerr
+				}
+				for _, e := range epochs {
+					if e == epoch {
+						return true, nil
+					}
+				}
+				return false, nil
+			},
+			EpochSnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
+			RetireEpochsFunc: func(cctx context.Context, sc cell.Scope, epoch uint64) (int, error) {
+				return rep.RetireEpochs(cctx, sc, epoch, cfg.EpochGCKeepPrevious)
+			},
 			SnapshotStarted: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
 				return rep.MarkSnapshotStarted(cctx, sc, epoch, txid)
 			},
@@ -724,6 +740,7 @@ func main() {
 			},
 		}
 		srv.Capture = captureMgr
+		go runEpochGCLoop(ctx, log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
 		// Queue consumer dispatch: poll registered queues and deliver claimed batches
 		// to the consuming worker via the dispatch endpoint (docs/bindings.md). Only
 		// the node that owns a queue's cell consumes it (OwnerGate claims unowned or
@@ -1016,6 +1033,45 @@ func main() {
 		log.Warn("close cell store", "err", err)
 	}
 	log.Info("cell-agent stopped")
+}
+
+// runEpochGCLoop runs celld-style epoch GC: after a small cell opened its new
+// epoch with a full snapshot, older epoch prefixes are dead weight. It only
+// deletes epochs older than the current and previous one, and only when the
+// current epoch has a completion marker.
+func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm *cellcapture.Manager, interval, initial time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	pass := func() {
+		for _, o := range om.OwnedScopes() {
+			n, err := cm.RetireEpochs(ctx, o.Scope, o.Epoch)
+			if err != nil {
+				log.Warn("epoch gc failed", "scope", o.Scope.String(), "err", err)
+				continue
+			}
+			if n > 0 {
+				log.Info("epoch gc", "scope", o.Scope.String(), "epoch", o.Epoch, "objects", n)
+			}
+		}
+	}
+	if initial <= 0 {
+		initial = time.Minute
+	}
+	timer := time.NewTimer(initial)
+	defer timer.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			pass()
+		case <-ticker.C:
+			pass()
+		}
+	}
 }
 
 // runCompactionLoop periodically folds each owned scope's L0 chain into an L1

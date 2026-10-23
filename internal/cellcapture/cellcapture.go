@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -56,6 +57,18 @@ type Manager struct {
 	// existing chain instead of taking a new whole-database snapshot when the
 	// local cell is exactly at that position (ADR-272).
 	Durable func(ctx context.Context, scope cell.Scope, epoch uint64) (uint64, error)
+	// HasEpoch reports whether the bucket already has LTX data for this epoch.
+	// A new owner epoch normally opens with a whole-database snapshot (celld
+	// format 1); only a large cell may continue its predecessor's chain.
+	HasEpoch func(ctx context.Context, scope cell.Scope, epoch uint64) (bool, error)
+	// EpochSnapshotMaxBytes bounds the database size that takes a fresh snapshot
+	// on every new epoch. Larger cells keep the cross-epoch chain until paged
+	// continuation is wired; 0 snapshots every new epoch.
+	EpochSnapshotMaxBytes int64
+	// RetireEpochs, when set, deletes epoch prefixes below the current one after
+	// the current epoch has a complete snapshot. Runs from the background GC
+	// loop, not on the request path.
+	RetireEpochsFunc func(ctx context.Context, scope cell.Scope, epoch uint64) (int, error)
 	// SnapshotDone, when set, records that a full-page snapshot at txid was
 	// completely committed. Resume treats only marked snapshots as baselines.
 	SnapshotDone func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
@@ -295,17 +308,50 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	if err != nil {
 		return false, err
 	}
-	switch {
-	case durable == baseline && durable == local:
-		return true, nil
-	case durable > local:
+	// A new snapshot at a position below the durable prefix would fork/lose
+	// acknowledged data, regardless of the epoch policy.
+	if durable > local {
 		return false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
-	default:
-		// Local ahead of the durable prefix (unacked tail) or a write landed
-		// between the baseline read and the cursor creation: snapshot.
-		m.log().Info("capture cannot resume; taking a snapshot", "scope", scope.String(), "baseline", baseline, "local", local, "durable", durable)
-		return false, nil
 	}
+	// celld uses one whole-database snapshot per epoch by default. A small cell
+	// that merely restarted must not append deltas across epochs: restoring
+	// thousands of tiny objects costs far more than a few MB snapshot. Large
+	// cells keep the cross-epoch chain until paged continuation exists.
+	if m.HasEpoch != nil {
+		exists, eerr := m.HasEpoch(ctx, scope, epoch)
+		if eerr != nil {
+			m.log().Warn("capture epoch lookup failed; taking a snapshot", "scope", scope.String(), "err", eerr)
+			return false, nil
+		}
+		if !exists {
+			size := int64(0)
+			if st, serr := os.Stat(c.Path); serr == nil {
+				size = st.Size()
+			}
+			if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
+				m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
+				return false, nil
+			}
+			m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
+		}
+	}
+	if durable == baseline && durable == local {
+		return true, nil
+	}
+	// Local ahead of the durable prefix (unacked tail) or a write landed between
+	// the baseline read and cursor creation: a new snapshot includes it.
+	m.log().Info("capture cannot resume; taking a snapshot", "scope", scope.String(), "baseline", baseline, "local", local, "durable", durable)
+	return false, nil
+}
+
+// RetireEpochs runs one epoch-GC pass for a scope. It is a no-op unless the
+// current epoch already has a complete snapshot; the background loop calls it
+// for owned scopes (celld epoch GC).
+func (m *Manager) RetireEpochs(ctx context.Context, scope cell.Scope, epoch uint64) (int, error) {
+	if m.RetireEpochsFunc == nil {
+		return 0, nil
+	}
+	return m.RetireEpochsFunc(ctx, scope, epoch)
 }
 
 // Wait blocks until a covering LTX segment is fleet-durable for txid.
