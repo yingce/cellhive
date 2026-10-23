@@ -907,10 +907,8 @@ func (c *Cell) Close() error {
 		return nil
 	}
 	if c.paged {
-		if ps, commit, _, exists, valid := readPagedMarker(c.Path); exists && valid {
-			if txid, err := c.TxID(context.Background()); err == nil {
-				_ = writePagedMarker(c.Path, ps, commit, txid)
-			}
+		if txid, err := c.TxID(context.Background()); err == nil {
+			persistPagedTxID(c.Path, txid)
 		}
 	}
 	c.closed = true
@@ -1000,6 +998,9 @@ func (c *Cell) SafeCheckpoint(ctx context.Context) (uint64, error) {
 	}
 	if err := c.loadTxID(ctx); err != nil {
 		return 0, err
+	}
+	if c.paged {
+		persistPagedTxID(c.Path, c.txid)
 	}
 	return c.txid, nil
 }

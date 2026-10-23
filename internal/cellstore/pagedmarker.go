@@ -58,6 +58,15 @@ func removePagedMarker(p string) {
 	_ = os.Remove(pagedMarkerPath(p))
 }
 
+// persistPagedTxID advances the local txid recorded in an existing marker. It
+// is called at checkpoints and close, shrinking the crash window in which the
+// bucket cut can be older than the local cache.
+func persistPagedTxID(path string, txid uint64) {
+	if ps, commit, _, exists, valid := readPagedMarker(path); exists && valid {
+		_ = writePagedMarker(path, ps, commit, txid)
+	}
+}
+
 // removeCellFileSet removes a cell's database, its WAL/SHM sidecars and the
 // paged-cache marker (if any).
 func removeCellFileSet(p string) error {
