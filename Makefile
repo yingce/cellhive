@@ -10,7 +10,7 @@ TAGS := sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata s
 GOTAGS := -tags "$(TAGS)"
 export CGO_ENABLED := 1
 
-.PHONY: e2e-do-rps e2e-service-headers all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
+.PHONY: e2e-do-rps e2e-service-headers deploy-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
 
 all: build
 
@@ -62,6 +62,11 @@ build:
 	$(GO) build $(GOTAGS) -o $(BIN)/kvbench ./cmd/kvbench
 	$(GO) build $(GOTAGS) -o $(BIN)/restoreverify ./cmd/restoreverify
 	$(GO) build $(GOTAGS) -o $(BIN)/recoververify ./cmd/recoververify
+
+# Real single-node deploy/rollback E2E (capture + workerd, asserts one proof
+# per deploy). See scripts/deploy-e2e.sh.
+deploy-e2e:
+	bash scripts/deploy-e2e.sh
 
 test:
 	# doruntime and userruntime spawn workerd on freePort() listeners; serialize
