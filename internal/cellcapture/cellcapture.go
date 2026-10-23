@@ -331,16 +331,10 @@ func (m *Manager) Drop(ctx context.Context, scope cell.Scope) error {
 	if st == nil {
 		return nil
 	}
-	// Drain before stopping: an eviction must not leave the local cell ahead of
-	// the durable chain, or the next wake would need a full snapshot. Bounded so
-	// a slow store cannot wedge eviction.
-	if c, err := m.Store.Cell(ctx, scope); err == nil {
-		if txid, terr := c.TxID(ctx); terr == nil {
-			dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			_ = st.cap.Wait(dctx, txid)
-			cancel()
-		}
-	}
+	// Do NOT open the cell here: Store.evictOne calls Drop while holding its
+	// openMu, and Store.Cell takes openMu. Doing a drain from Drop deadlocks the
+	// whole store (every cold cell open then hangs, including KV reads/writes).
+	// Capture is stopped; the acked write path already waited for durability.
 	m.mu.Lock()
 	if m.caps[key] == st {
 		st.cancel()

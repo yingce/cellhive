@@ -549,6 +549,8 @@ func (s *Store) evictOne(ctx context.Context) bool {
 		return false
 	}
 	if s.Drop != nil {
+		// Drop MUST NOT call back into Store.Cell: openMu is held here, and a
+		// cold open would deadlock the store. It only stops the capture loop.
 		_ = s.Drop(ctx, c.Scope)
 	}
 	_ = c.Close()
