@@ -1398,3 +1398,14 @@ func TestMetricsNamespaceLabels(t *testing.T) {
 		t.Fatalf("missing platform ns attribution:\n%s", rr.Body.String())
 	}
 }
+
+func TestFollowerSampleTTLBoundedByLeaseTTL(t *testing.T) {
+	s := &Server{Cfg: config.Config{LeaseTTL: 3 * time.Second}}
+	if got := s.followerSampleTTL(); got > 1500*time.Millisecond || got <= 0 {
+		t.Fatalf("follower sample TTL = %v for 3s lease, want <= 1.5s", got)
+	}
+	s.Cfg.LeaseTTL = 0
+	if got := s.followerSampleTTL(); got != 5*time.Second {
+		t.Fatalf("default follower sample TTL = %v, want 5s", got)
+	}
+}

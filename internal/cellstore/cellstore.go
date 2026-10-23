@@ -179,7 +179,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
-	markerPS, markerCommit, markerExists, markerValid := readPagedMarker(p)
+	markerPS, markerCommit, markerTx, markerExists, markerValid := readPagedMarker(p)
 	if missing && markerExists {
 		// A marker without its file is leftover state: drop it.
 		removePagedMarker(p)
@@ -196,10 +196,27 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
 		if ok {
+			srcTx := uint64(0)
+			if ts, ok := src.(interface{ TxID() uint64 }); ok {
+				srcTx = ts.TxID()
+			}
+			if markerTx > 0 && srcTx > 0 && srcTx < markerTx {
+				// The bucket cut is older than the local cache marker. Reusing or
+				// truncating here would roll back locally acked pages; leave the
+				// file in place for an operator/retry rather than lose data.
+				return nil, fmt.Errorf("%w: bucket cut txid %d older than local marker %d",
+					ErrPagedCacheUnusable, srcTx, markerTx)
+			}
 			reuse := markerExists && !missing && markerPS == src.PageSize() && markerCommit == src.Commit()
+			if reuse && markerTx > 0 && srcTx > 0 && markerTx != srcTx {
+				// The cut advanced since the cache was created. Re-registering the
+				// old hydration set would fault old pages; rebuild from the newer
+				// cut instead.
+				reuse = false
+			}
 			// Write the marker before the file can become sparse, so a crash in
 			// between cannot leave a sparse file that looks complete.
-			if err := writePagedMarker(p, src.PageSize(), src.Commit()); err != nil {
+			if err := writePagedMarker(p, src.PageSize(), src.Commit(), srcTx); err != nil {
 				return nil, fmt.Errorf("cellstore: paged marker %s: %w", sc, err)
 			}
 			if reuse {
@@ -229,7 +246,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if !paged && missing && s.Hydrate == nil {
-		if _, _, exists, _ := readPagedMarker(p); exists {
+		if _, _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -654,7 +671,7 @@ func (s *Store) LocalScopes() ([]cell.Scope, error) {
 // when the table exists but holds no pending row. A sparse (paged) cell that is
 // not mounted through the paged VFS is skipped rather than read as zeros.
 func PendingTimerMin(ctx context.Context, path string) (min int64, has bool, err error) {
-	if _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
+	if _, _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
 		return 0, false, nil
 	}
 	dsn := OpenDSN(path)
@@ -716,7 +733,7 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 		paged = pagedvfs.IsPaged(p)
 	}
 	if !paged {
-		if _, _, exists, _ := readPagedMarker(p); exists {
+		if _, _, _, exists, _ := readPagedMarker(p); exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -888,6 +905,13 @@ type Cell struct {
 func (c *Cell) Close() error {
 	if c.closed {
 		return nil
+	}
+	if c.paged {
+		if ps, commit, _, exists, valid := readPagedMarker(c.Path); exists && valid {
+			if txid, err := c.TxID(context.Background()); err == nil {
+				_ = writePagedMarker(c.Path, ps, commit, txid)
+			}
+		}
 	}
 	c.closed = true
 	_ = c.ReleaseReadLock(context.Background())

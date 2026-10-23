@@ -124,3 +124,17 @@ func TestListNodeFailsClosedOnCorruptRecord(t *testing.T) {
 		t.Fatal("ListNode accepted a corrupt recovery record; recovery would skip it")
 	}
 }
+
+func TestOpenRejectsSealedSessionReuse(t *testing.T) {
+	ctx := context.Background()
+	m := newMgr(t)
+	if _, err := m.Open(ctx, "s1", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Seal(ctx, "node-1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Open(ctx, "s1", 1, nil); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("reopen sealed session = %v, want ErrSessionClosed", err)
+	}
+}

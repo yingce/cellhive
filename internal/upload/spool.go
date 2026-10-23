@@ -220,18 +220,34 @@ func (s *Spool) Remove(id uint64) error {
 // Load returns pending entries oldest first. Unreadable/corrupt entries are
 // counted and corrupt entries are quarantined (renamed to *.corrupt) so one bad
 // file cannot permanently wedge the queue or hide in the entry cap.
-func (s *Spool) Load() ([]SpoolEntry, error) {
+func (s *Spool) Load() ([]SpoolEntry, error) { return s.load(0) }
+
+// LoadLimit is Load with a bounded number of decoded entries. Replay uses it so
+// a long bucket outage cannot materialize the entire spool (and all segment
+// bodies) in memory at once. limit <= 0 means no bound.
+func (s *Spool) LoadLimit(limit int) ([]SpoolEntry, error) {
+	return s.load(limit)
+}
+
+func (s *Spool) load(limit int) ([]SpoolEntry, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, err
 	}
-	var out []SpoolEntry
+	ids := make([]uint64, 0, len(entries))
 	for _, e := range entries {
-		id, ok := parseSpoolID(e.Name())
-		if !ok {
-			continue
+		if id, ok := parseSpoolID(e.Name()); ok {
+			ids = append(ids, id)
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	out := make([]SpoolEntry, 0, len(ids))
+	for _, id := range ids {
+		name := filepath.Base(s.path(id))
+		data, err := os.ReadFile(s.path(id))
 		if err != nil {
 			s.corrupt.Add(1)
 			continue
@@ -239,13 +255,12 @@ func (s *Spool) Load() ([]SpoolEntry, error) {
 		ent, err := decodeSpoolEntry(data)
 		if err != nil {
 			s.corrupt.Add(1)
-			s.quarantine(e.Name())
+			s.quarantine(name)
 			continue
 		}
 		ent.ID = id
 		out = append(out, ent)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 

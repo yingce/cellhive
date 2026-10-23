@@ -22,8 +22,9 @@ type PageFetcher struct {
 	idx      PageIndex
 	entryOf  map[uint32]int
 	l0       map[uint32][]byte
-	commit   uint32
-	pageSize uint32
+	commit    uint32
+	pageSize  uint32
+	watermark uint64 // highest txid included in the index/L0 cut
 }
 
 // NewPageFetcher builds a fetcher from the persisted L1 page index plus newer L0
@@ -38,7 +39,7 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 		return nil, fmt.Errorf("replica: no page index for %s (cell not compacted)", s.String())
 	}
 	pf := &PageFetcher{
-		m: m, scope: s, epoch: epoch, idx: idx,
+		m: m, scope: s, epoch: epoch, idx: idx, watermark: idx.Watermark,
 		entryOf: map[uint32]int{}, l0: map[uint32][]byte{},
 	}
 	for ei, e := range idx.Entries {
@@ -120,6 +121,9 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 			pf.l0[p.PageNo] = p.Data
 		}
 	}
+	if len(deltas) > 0 {
+		pf.watermark = deltas[len(deltas)-1].end
+	}
 	if pf.pageSize == 0 || pf.commit == 0 {
 		return nil, fmt.Errorf("replica: page index has no pages")
 	}
@@ -134,6 +138,11 @@ func (pf *PageFetcher) PageSize() uint32 { return pf.pageSize }
 
 // Watermark is the highest txid folded into the index.
 func (pf *PageFetcher) Watermark() uint64 { return pf.idx.Watermark }
+
+// TxID is the highest txid covered by the page source (index plus newer L0
+// deltas). Paged-cache reuse uses it to detect a bucket cut older than the
+// local cache.
+func (pf *PageFetcher) TxID() uint64 { return pf.watermark }
 
 // Page returns the final version of one page. Newer L0 deltas win; otherwise the
 // page is fetched from its L1 object with a single ranged read.

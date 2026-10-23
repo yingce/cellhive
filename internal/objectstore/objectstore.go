@@ -26,8 +26,10 @@ var ErrBadKey = errors.New("objectstore: unsafe key")
 // matching owner; NewObjects refuses reserved prefixes outright.
 const (
 	PrefixCells      = "cells/"        // cell replication segments/owner records (replica)
-	PrefixNodes      = "nodes/"        // node-log recovery records
+	PrefixNodes      = "nodes/"        // node liveness leases
+	PrefixNodeLogs   = "node-logs/"    // per-session recovery records
 	PrefixFleet      = "fleet/"        // waker election
+	PrefixDeploys    = "deploys/"      // legacy version pointers (control/artifacts)
 	PrefixBundles    = "bundles/"      // artifacts: content-addressed worker bundles
 	PrefixAssets     = "assets/"       // artifacts: versioned static assets
 	PrefixSupervisor = "dosupervisor/" // do-supervisor capture manifest + sidecars
@@ -50,7 +52,9 @@ const (
 var reserved = []struct{ Prefix, Owner string }{
 	{PrefixCells, OwnerReplica},
 	{PrefixNodes, OwnerNodeLog},
+	{PrefixNodeLogs, OwnerNodeLog},
 	{PrefixFleet, OwnerWaker},
+	{PrefixDeploys, OwnerArtifacts},
 	{PrefixBundles, OwnerArtifacts},
 	{PrefixAssets, OwnerArtifacts},
 	{PrefixSupervisor, OwnerSupervisor},

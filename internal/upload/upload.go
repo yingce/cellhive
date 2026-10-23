@@ -157,17 +157,33 @@ func (b *Batcher) replayLoop(ctx context.Context) {
 	}
 }
 
-// replayOnce uploads every pending spooled entry, oldest first, and removes the
-// ones that succeeded. Segment keys are txid-range named, so replaying out of
-// band cannot corrupt the replica (idempotent PUTs).
+// replayOnce uploads pending spooled entries oldest first in bounded windows and
+// removes the ones that succeeded. Segment keys are txid-range named, so
+// replaying out of band cannot corrupt the replica (idempotent PUTs). A failed
+// window stops the pass; the next replay tick retries from the oldest entry.
 func (b *Batcher) replayOnce(ctx context.Context) {
-	entries, err := b.spool.Load()
-	if err != nil {
-		if b.log != nil {
-			b.log.Warn("upload spool load failed", "err", err)
+	for {
+		before := b.spool.Count()
+		entries, err := b.spool.LoadLimit(512)
+		if err != nil {
+			if b.log != nil {
+				b.log.Warn("upload spool load failed", "err", err)
+			}
+			return
 		}
-		return
+		if len(entries) == 0 {
+			return
+		}
+		b.replayEntries(ctx, entries)
+		// Stop when a pass makes no progress (the remaining entries are all
+		// failing); the next replay tick retries them from the oldest.
+		if b.spool.Count() >= before {
+			return
+		}
 	}
+}
+
+func (b *Batcher) replayEntries(ctx context.Context, entries []SpoolEntry) {
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			return

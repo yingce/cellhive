@@ -298,3 +298,27 @@ func TestBatcherStatsIncludeSpoolDurability(t *testing.T) {
 		t.Fatalf("spool_file_syncs = %d, want 1", st["spool_file_syncs"])
 	}
 }
+
+func TestSpoolLoadLimitReturnsOldestBounded(t *testing.T) {
+	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
+	for i := 0; i < 3; i++ {
+		if _, err := sp.Append(sc, uint64(i+1), [][]byte{[]byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := sp.LoadLimit(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID > got[1].ID {
+		t.Fatalf("LoadLimit = %+v, want two oldest entries", got)
+	}
+	all, err := sp.Load()
+	if err != nil || len(all) != 3 {
+		t.Fatalf("Load = %d, %v, want 3", len(all), err)
+	}
+}

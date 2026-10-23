@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cellhive/internal/bucket"
+	"cellhive/internal/objectstore"
 )
 
 // Status is the recovery state of a session.
@@ -47,6 +48,10 @@ type Record struct {
 // ErrNotFound is returned when a node-log record does not exist.
 var ErrNotFound = errors.New("nodelog: not found")
 
+// ErrSessionClosed means a session record is sealed/recovering and cannot be
+// reopened for new acknowledgements.
+var ErrSessionClosed = errors.New("nodelog: session already closed")
+
 // ErrEnsembleMismatch means a session record already exists with recovery
 // coordinates different from the ensemble being opened. Reusing that record
 // would make later acknowledgements unrecoverable from the recorded peers.
@@ -55,11 +60,47 @@ var ErrEnsembleMismatch = errors.New("nodelog: session ensemble mismatch")
 // Manager reads and writes node-log records.
 type Manager struct {
 	B      bucket.Bucket
+	Objs   *objectstore.Objects
 	NodeID string
 }
 
-// New creates a node-log manager for a node.
-func New(b bucket.Bucket, nodeID string) *Manager { return &Manager{B: b, NodeID: nodeID} }
+// New creates a node-log manager for a node. The owned object view enforces
+// that every node-log key stays under the reserved node-logs/ prefix.
+func New(b bucket.Bucket, nodeID string) *Manager {
+	return &Manager{
+		B:      b,
+		Objs:   objectstore.NewOwned(b, objectstore.PrefixNodeLogs, objectstore.OwnerNodeLog),
+		NodeID: nodeID,
+	}
+}
+
+func (m *Manager) get(ctx context.Context, key string) ([]byte, string, error) {
+	if m.Objs != nil {
+		return m.Objs.GetVersion(ctx, key)
+	}
+	return m.B.Get(ctx, key)
+}
+
+func (m *Manager) conditionalCreate(ctx context.Context, key string, value []byte) (string, error) {
+	if m.Objs != nil {
+		return m.Objs.ConditionalCreate(ctx, key, value)
+	}
+	return m.B.ConditionalCreate(ctx, key, value)
+}
+
+func (m *Manager) cas(ctx context.Context, key string, value []byte, etag string) (string, error) {
+	if m.Objs != nil {
+		return m.Objs.CAS(ctx, key, value, etag)
+	}
+	return m.B.CAS(ctx, key, value, etag)
+}
+
+func (m *Manager) list(ctx context.Context, prefix string) ([]string, error) {
+	if m.Objs != nil {
+		return m.Objs.ListPrefix(ctx, prefix)
+	}
+	return m.B.List(ctx, prefix)
+}
 
 // Key returns the bucket key for a session.
 func Key(node, session string) string { return "node-logs/" + node + "/" + session + ".json" }
@@ -80,7 +121,7 @@ func (m *Manager) Open(ctx context.Context, session string, epoch uint64, follow
 		UpdatedMs:    time.Now().UnixMilli(),
 	}
 	data, _ := json.Marshal(r)
-	_, err := m.B.ConditionalCreate(ctx, Key(m.NodeID, session), data)
+	_, err := m.conditionalCreate(ctx, Key(m.NodeID, session), data)
 	if err != nil {
 		if errors.Is(err, bucket.ErrPrecondition) {
 			existing, _, gerr := m.Get(ctx, m.NodeID, session)
@@ -89,6 +130,9 @@ func (m *Manager) Open(ctx context.Context, session string, epoch uint64, follow
 			}
 			if existing.Node != m.NodeID || existing.Session != session || existing.ProtoVersion != ProtoVersionSession || !sameFollowers(existing.Followers, followers) {
 				return Record{}, ErrEnsembleMismatch
+			}
+			if existing.Status != StatusOpen {
+				return Record{}, fmt.Errorf("%w: %s", ErrSessionClosed, existing.Status)
 			}
 			return existing, nil
 		}
@@ -119,7 +163,7 @@ func sameFollowers(a, b []string) bool {
 
 // Get reads a record for a node/session.
 func (m *Manager) Get(ctx context.Context, node, session string) (Record, string, error) {
-	data, e, err := m.B.Get(ctx, Key(node, session))
+	data, e, err := m.get(ctx, Key(node, session))
 	if err != nil {
 		if errors.Is(err, bucket.ErrNotFound) {
 			return Record{}, "", ErrNotFound
@@ -142,7 +186,7 @@ func (m *Manager) SetStatus(ctx context.Context, node, session string, status St
 	r.Status = status
 	r.UpdatedMs = time.Now().UnixMilli()
 	data, _ := json.Marshal(r)
-	if _, err := m.B.CAS(ctx, Key(node, session), data, e); err != nil {
+	if _, err := m.cas(ctx, Key(node, session), data, e); err != nil {
 		return Record{}, err
 	}
 	return r, nil
@@ -159,7 +203,7 @@ func (m *Manager) SealCovered(ctx context.Context, node, session string, covered
 	r.CoveredSeq = covered
 	r.UpdatedMs = time.Now().UnixMilli()
 	data, _ := json.Marshal(r)
-	if _, err := m.B.CAS(ctx, Key(node, session), data, e); err != nil {
+	if _, err := m.cas(ctx, Key(node, session), data, e); err != nil {
 		return Record{}, err
 	}
 	return r, nil
@@ -172,13 +216,13 @@ func (m *Manager) Seal(ctx context.Context, node, session string) (Record, error
 
 // ListNode lists all records for a node (cold path; recovery only).
 func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
-	keys, err := m.B.List(ctx, "node-logs/"+node+"/")
+	keys, err := m.list(ctx, "node-logs/"+node+"/")
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Record, 0, len(keys))
 	for _, k := range keys {
-		data, _, err := m.B.Get(ctx, k)
+		data, _, err := m.get(ctx, k)
 		if err != nil {
 			if errors.Is(err, bucket.ErrNotFound) {
 				continue
@@ -200,7 +244,7 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 // path (bucket List) used only by recovery orchestration / operations, never on
 // the request hot path.
 func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
-	keys, err := m.B.List(ctx, "node-logs/")
+	keys, err := m.list(ctx, "node-logs/")
 	if err != nil {
 		return nil, err
 	}

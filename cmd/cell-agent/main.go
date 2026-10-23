@@ -1580,6 +1580,7 @@ type pagedSource struct {
 
 func (p pagedSource) PageSize() int { return int(p.pf.PageSize()) }
 func (p pagedSource) Commit() int   { return int(p.pf.Commit()) }
+func (p pagedSource) TxID() uint64  { return p.pf.TxID() }
 
 func (p pagedSource) ReadPage(pgno uint32) ([]byte, error) {
 	return p.pf.Page(context.Background(), pgno)

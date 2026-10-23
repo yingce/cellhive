@@ -3153,7 +3153,7 @@ func (s *Server) liveFollowers(ctx context.Context, max int) []string {
 	if s.Lease == nil {
 		return nil
 	}
-	leases := s.Lease.SampleCached(ctx, followerSampleTTL)
+	leases := s.Lease.SampleCached(ctx, s.followerSampleTTL())
 	return selectFollowers(leases, s.Cfg.NodeID, s.Cfg.PlacementAZ, time.Now(), max)
 }
 
@@ -3182,8 +3182,20 @@ func selectFollowers(leases []lease.NodeLease, self, selfAZ string, now time.Tim
 	return out
 }
 
-// followerSampleTTL bounds how often the node list is refreshed.
-const followerSampleTTL = 5 * time.Second
+// followerSampleTTL bounds how often the node list is refreshed. It must stay
+// comfortably below the node lease TTL: a 5s cache with a 3s lease would mark
+// every live peer expired for two seconds per refresh, silently degrading
+// fleet writes to the bucket ("no eligible peer").
+func (s *Server) followerSampleTTL() time.Duration {
+	ttl := 5 * time.Second
+	if s.Cfg.LeaseTTL > 0 && s.Cfg.LeaseTTL/2 < ttl {
+		ttl = s.Cfg.LeaseTTL / 2
+	}
+	if ttl < 100*time.Millisecond {
+		ttl = 100 * time.Millisecond
+	}
+	return ttl
+}
 
 // Run starts the HTTP server and serves until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {

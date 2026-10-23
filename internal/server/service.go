@@ -114,6 +114,18 @@ func (s *Server) handleServiceRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if raw := resp.Header.Get("x-cellhive-resp-headers"); raw != "" {
+		decoded, derr := base64.StdEncoding.DecodeString(raw)
+		var hdrs map[string]string
+		if derr == nil && json.Unmarshal(decoded, &hdrs) == nil {
+			for k, v := range hdrs {
+				if isHopHeader(k) || strings.EqualFold(k, "content-length") {
+					continue
+				}
+				w.Header().Set(k, v)
+			}
+		}
+	}
 	w.Header().Set("content-type", resp.Header.Get("content-type"))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -153,6 +165,14 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "worker_secret_failed", "worker bindings or secrets unavailable")
 		return
 	}
+	var reqHeaders map[string]string
+	if raw := r.Header.Get("x-cellhive-req-headers"); raw != "" {
+		decoded, derr := base64.StdEncoding.DecodeString(raw)
+		if derr != nil || json.Unmarshal(decoded, &reqHeaders) != nil {
+			writeErr(w, http.StatusBadRequest, "bad_headers", "x-cellhive-req-headers is not valid base64 JSON")
+			return
+		}
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"namespace": ns, "worker": target, "bundle_sha": tw.Version.BundleSHA,
 		"version":     tw.Version.Number,
@@ -161,6 +181,7 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		"method": r.Header.Get("x-cellhive-req-method"), "url": r.Header.Get("x-cellhive-req-url"),
 		"content_type": r.Header.Get("x-cellhive-req-content-type"),
 		"entrypoint":   r.Header.Get("x-cellhive-req-entrypoint"),
+		"headers":      reqHeaders,
 		"body":         base64.StdEncoding.EncodeToString(body),
 		"bindings":     bindings, "vars": vars,
 		"traceparent": r.Header.Get("traceparent"),
@@ -185,6 +206,18 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if raw := resp.Header.Get("x-cellhive-resp-headers"); raw != "" {
+		decoded, derr := base64.StdEncoding.DecodeString(raw)
+		var hdrs map[string]string
+		if derr == nil && json.Unmarshal(decoded, &hdrs) == nil {
+			for k, v := range hdrs {
+				if isHopHeader(k) || strings.EqualFold(k, "content-length") {
+					continue
+				}
+				w.Header().Set(k, v)
+			}
+		}
+	}
 	w.Header().Set("content-type", resp.Header.Get("content-type"))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)

@@ -695,6 +695,14 @@ export class ServiceBinding extends WorkerEntrypoint {
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
     const body = hasBody ? await req.arrayBuffer() : undefined;
+    const reqHeaders = {};
+    req.headers.forEach((v, k) => {
+      const lk = k.toLowerCase();
+      if (lk === "host" || lk.startsWith("x-cellhive-")) return;
+      reqHeaders[k] = v;
+    });
+    let encodedReqHeaders = "";
+    try { encodedReqHeaders = btoa(JSON.stringify(reqHeaders)); } catch (e) { /* non-Latin header value */ }
     const r = await call(this.env, "/v1/service/fetch?" + q({
       ns: p.caller_ns || p.ns,
       target_ns: p.caller_ns && p.caller_ns !== p.ns ? p.ns : undefined,
@@ -707,6 +715,7 @@ export class ServiceBinding extends WorkerEntrypoint {
         "x-cellhive-req-url": req.url,
         "x-cellhive-req-content-type": req.headers.get("content-type") || "text/plain",
         "x-cellhive-req-entrypoint": p.entrypoint || "",
+        "x-cellhive-req-headers": encodedReqHeaders,
       }),
       body,
     });
@@ -714,10 +723,10 @@ export class ServiceBinding extends WorkerEntrypoint {
       const detail = await r.text();
       throw new Error("service.fetch: " + r.status + (detail ? " " + detail.slice(0, 200) : ""));
     }
-    return new Response(await r.arrayBuffer(), {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "text/plain" },
-    });
+    const responseHeaders = { "content-type": r.headers.get("content-type") || "text/plain" };
+    const encodedRespHeaders = r.headers.get("x-cellhive-resp-headers");
+    if (encodedRespHeaders) responseHeaders["x-cellhive-resp-headers"] = encodedRespHeaders;
+    return new Response(await r.arrayBuffer(), { status: r.status, headers: responseHeaders });
   }
 }
 

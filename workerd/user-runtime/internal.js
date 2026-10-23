@@ -218,7 +218,7 @@ function publicInvocationResult(value){
 async function dispatchServiceFetch(req, env, ctx) {
   const body = await readJSON(req);
   if (body.error) return json({ error: "bad_json", message: body.error }, 400);
-  const { namespace, worker, bundle_sha, version, bindings, vars, method, url: targetURL, content_type, entrypoint } = body;
+  const { namespace, worker, bundle_sha, version, bindings, vars, method, url: targetURL, content_type, entrypoint, headers } = body;
   if (!namespace || !worker || !bundle_sha) {
     return json({ error: "bad_request", message: "namespace, worker, bundle_sha are required" }, 400);
   }
@@ -230,22 +230,30 @@ async function dispatchServiceFetch(req, env, ctx) {
   }
   const m = method || "GET";
   const init = { method: m };
+  const initHeaders = Object.assign({}, headers || {});
   if (m !== "GET" && m !== "HEAD") {
     const raw = body.body ? atob(body.body) : "";
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     init.body = bytes;
-    init.headers = { "content-type": content_type || "text/plain" };
+    if (!initHeaders["content-type"] && !initHeaders["Content-Type"]) {
+      initHeaders["content-type"] = content_type || "text/plain";
+    }
   }
-  if (body.traceparent) init.headers = Object.assign({}, init.headers, { traceparent: body.traceparent });
+  if (body.traceparent && !initHeaders.traceparent) initHeaders.traceparent = body.traceparent;
+  init.headers = initHeaders;
   try {
     const host = stub.getEntrypoint("CellHiveHost");
     const req = new Request(targetURL || "http://service/", init);
     const r = entrypoint ? await host.callMethod(entrypoint, "fetch", [req]) : await host.handleFetch(req);
-    return new Response(await r.arrayBuffer(), {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "text/plain" },
+    const respHeaders = {};
+    r.headers.forEach((v, k) => {
+      if (k.toLowerCase() === "content-type") return;
+      respHeaders[k] = v;
     });
+    const outHeaders = { "content-type": r.headers.get("content-type") || "text/plain" };
+    try { outHeaders["x-cellhive-resp-headers"] = btoa(JSON.stringify(respHeaders)); } catch (e) { /* non-Latin header */ }
+    return new Response(await r.arrayBuffer(), { status: r.status, headers: outHeaders });
   } catch (e) {
     return json({ error: "service_failed", message: String(e) }, 500);
   }

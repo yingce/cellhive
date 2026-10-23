@@ -29,26 +29,29 @@ func pagedMarkerPath(p string) string { return p + pagedMarkerSuffix }
 // readPagedMarker reports marker existence separately from validity. A malformed
 // marker still identifies a sparse cache and must fail closed; treating it as
 // absent could open unmaterialized pages as zeros.
-func readPagedMarker(p string) (pageSize, commit int, exists, valid bool) {
+func readPagedMarker(p string) (pageSize, commit int, txid uint64, exists, valid bool) {
 	data, err := os.ReadFile(pagedMarkerPath(p))
 	if err != nil {
-		return 0, 0, false, false
+		return 0, 0, 0, false, false
 	}
 	parts := strings.Fields(string(data))
-	if len(parts) != 2 {
-		return 0, 0, true, false
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, 0, 0, true, false
 	}
 	ps, err1 := strconv.Atoi(parts[0])
 	cm, err2 := strconv.Atoi(parts[1])
 	if err1 != nil || err2 != nil || ps <= 0 || cm <= 0 {
-		return 0, 0, true, false
+		return 0, 0, 0, true, false
 	}
-	return ps, cm, true, true
+	if len(parts) == 3 {
+		txid, _ = strconv.ParseUint(parts[2], 10, 64)
+	}
+	return ps, cm, txid, true, true
 }
 
-func writePagedMarker(p string, pageSize, commit int) error {
+func writePagedMarker(p string, pageSize, commit int, txid uint64) error {
 	return os.WriteFile(pagedMarkerPath(p),
-		[]byte(fmt.Sprintf("%d %d", pageSize, commit)), 0o644)
+		[]byte(fmt.Sprintf("%d %d %d", pageSize, commit, txid)), 0o644)
 }
 
 func removePagedMarker(p string) {
