@@ -40,6 +40,19 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: 30
+      # Prefer two user-runtime replicas on different nodes so one node loss
+      # cannot take the public loader fully down. Preferred (not DoNotSchedule):
+      # a small cluster can still schedule both rather than leave one pending.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: user-runtime
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: user-runtime
           image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
