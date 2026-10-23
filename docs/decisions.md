@@ -13,15 +13,15 @@
 - **升级**：新旧版本不能在同一个桶上混跑；全量替换，旧 record 可读并按 Expiry 判活。
 - **验证**：owner/lease/server 单测覆盖同 session 不 bump、活性判定、self-fence、legacy、DO 不变；cellstore 覆盖 OnEvicted；e2e 模拟 owned 增长、续约停顿、同目录 SIGKILL 和跨节点接管。
 
-## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，部分实现）
+## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，核心实现）
 
 - **决策**：capture 位置优先使用 `resume hint`（同 epoch 淘汰）、hydrate 得到的 `RestoreInfo`、fresh epoch；只有未知时才执行一次 `ChainView`（`CommonPrefixes` + 每个需要的 epoch 一次 `ListSizes`），后续 restore plan/durable watermark/has-epoch 都从该视图回答。`Fetch` 并发 16。`.batch` 名称带 `.d/.s/.m` span 标记，减少为解析 span 而下载对象。compaction 增加对象数阈值（默认 8），让小 cell 不长期挂 64 个 L0。该阶段目标是 A2/A5。
 - **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地；完整 ChainView（CommonPrefixes/ListSizes/paged）仍待。
 
-## ADR-275 跨 epoch 续链 marker（2026-10-24，待实现）
+## ADR-275 跨 epoch 续链 marker（2026-10-24，核心实现）
 
 - **决策**：新 epoch 允许不开整库快照，但必须先 durable 写 epoch marker（`<cut+1>.marker`，语义为 epoch e 从 cut+1 开始，旧 epoch txid>cut 的对象作废）；marker durable 前不服务。restore 先做 epoch 截断，再选最新完整快照和连续 delta；被 fence 旧 owner 晚到的 delta 不得进入新 lineage。paged/长链走后台基线，不在请求路径 HydrateAll。该阶段目标是写路径不再整库快照、A4 的恢复窗口可预测。
-- **状态**：设计已接受，尚未落地。
+- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值、A5 冷恢复 E2E 已落地；完整 ChainView（CommonPrefixes/ListSizes/paged）和 paged 新 epoch 去 HydrateAll 仍待。
 
 ## ADR-272 capture 冷启动沿用 celld/Litestream：durable position + 连续性续链（2026-10-23）✅P0 实现
 

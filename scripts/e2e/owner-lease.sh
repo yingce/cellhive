@@ -104,4 +104,25 @@ import sys
 sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)
 PY
 
+
+listops(){ curl -sS -m 5 "http://$REST/metrics" | awk '/^cellhive_bucket_ops_total\{op="list"\}/{print $NF}'; }
+
+# A5: wipe the local cell directory and force the control cell to hydrate from
+# the bucket. Hydration must be one scope listing at most (RestoreChain) plus
+# the LatestEpoch lookup, not one List per epoch.
+kill -9 "$AGENT" 2>/dev/null; wait "$AGENT" 2>/dev/null; AGENT=""
+rm -rf "$CELLHIVE_DATA_DIR/cells"
+start_agent owner-e2e-s3 || exit 1
+BEFORE_LIST=$(listops)
+COLD=$(deploy cold-k 'export default { async fetch() { return new Response("cold"); } };')
+AFTER_LIST=$(listops)
+echo "cold hydrate first deploy: $COLD list_delta=$((AFTER_LIST - BEFORE_LIST))"
+COLD_SECONDS=$(echo "$COLD" | awk '{print $1}')
+[[ $(echo "$COLD" | awk '{print $2}') == 200 ]] || fail "cold hydrate deploy failed: $COLD"
+[[ $((AFTER_LIST - BEFORE_LIST)) -le 3 ]] || fail "cold hydrate used $((AFTER_LIST - BEFORE_LIST)) bucket Lists (want <=3)"
+python3 - "$COLD_SECONDS" <<'PY' || fail "cold hydrate first write took ${COLD_SECONDS}s"
+import sys
+sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)
+PY
+
 if [[ $FAILED -eq 0 ]]; then echo "OWNER-E2E: PASS"; else echo "OWNER-E2E: FAIL"; exit 1; fi
