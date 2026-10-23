@@ -928,36 +928,50 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 	}
 	keys = append(keys, l0...)
 
-	// Fetch objects concurrently; decoding and ordering stay deterministic.
-	// Keep this small: a control cell can have multi-MiB snapshot parts and the
-	// container memory limit is shared with capture/compaction.
+	// Fetch objects with a bounded worker pool; decoding and ordering stay
+	// deterministic. Do not spawn one goroutine per key: a slow COS List/GET can
+	// leave hundreds of goroutines parked on a semaphore (observed as an OOM
+	// after the full replacement).
 	parallel := m.RestoreParallel
 	if parallel <= 0 {
 		parallel = 4
 	}
+	if parallel > len(keys) {
+		parallel = len(keys)
+	}
 	raws := make([][]byte, len(keys))
-	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	var fetchErr error
 	var fetchMu sync.Mutex
-	for i, k := range keys {
+	jobs := make(chan int)
+	for w := 0; w < parallel; w++ {
 		wg.Add(1)
-		go func(i int, k string) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			raw, err := m.ReadSegment(ctx, k)
-			if err != nil {
-				fetchMu.Lock()
-				if fetchErr == nil {
-					fetchErr = err
+			for i := range jobs {
+				raw, err := m.ReadSegment(ctx, keys[i])
+				if err != nil {
+					fetchMu.Lock()
+					if fetchErr == nil {
+						fetchErr = err
+					}
+					fetchMu.Unlock()
+					continue
 				}
-				fetchMu.Unlock()
-				return
+				raws[i] = raw
 			}
-			raws[i] = raw
-		}(i, k)
+		}()
 	}
+	for i := range keys {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, ctx.Err()
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	if fetchErr != nil {
 		return nil, fetchErr
