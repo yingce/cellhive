@@ -36,6 +36,9 @@ CellHive logs ────────────────► SLS Kafka (top
 
 - CellHive config: `CELLHIVE_OTLP_ENDPOINT=http://vector:4318`,
   `CELLHIVE_OTLP_LOGS=all` (or `tail`), `CELLHIVE_TENANT_LOG_CAPTURE=on`.
+  CellHive has **one** OTLP endpoint shared by traces and logs; pointing it at
+  Vector sends both. Keep traces direct to ARMS only if you do not route logs
+  through Vector, or add a separate log-endpoint configuration in CellHive.
 - Metrics are **scraped**, not OTLP-pushed. Keep `/metrics` internal.
 - ARMS accepts traces at the existing `/api/otlp/traces` URL; the separate
   metrics URL is configured independently. Do not point logs at the ARMS trace
@@ -45,6 +48,18 @@ CellHive logs ────────────────► SLS Kafka (top
   `:10012` (public), SASL/SSL username is the SLS project, and password is
   `<AccessKeyId>#<AccessKeySecret>`. Append `.json` to the logstore topic to
   parse JSON fields.
+- The CellHive logs are **remapped to `vwork.log.v1`** before the SLS Kafka
+  sink, so the existing `request.json` logstore can be reused:
+  - `source_service = "cellhive"`
+  - `category = function_request | queue_operation | cron_dispatch` for
+    invocation records, `user_console` for console lines
+  - `gateway_access` remains VWork's gateway category
+  - `app_id` is derived from a `vwork-<digits>` namespace; `function_name` is
+    the CellHive worker. If namespaces do not follow that convention, provide
+    an explicit mapping instead of relying on this derivation.
+  - `event_id` is deterministic from namespace/worker/request/category/span/
+    message/observed time. If VWork's Wrangler tail relay already writes the
+    same invocation, choose one path or dedupe by `event_id`.
 - Vector 0.57+ disables `${ENV}` interpolation by default; start with
   `VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`.
 - Compose: `docker compose --profile vector up vector` (do not also enable the

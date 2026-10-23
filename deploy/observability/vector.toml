@@ -12,7 +12,7 @@
 #   ARMS_TRACES_ENDPOINT   full ARMS OTLP/HTTP traces URL (…/api/otlp/traces)
 #   ARMS_METRICS_ENDPOINT  full ARMS OTLP/HTTP metrics URL (…/api/otlp/metrics)
 #   SLS_KAFKA_BOOTSTRAP_SERVERS  <project>.<region>.log.aliyuncs.com:10011|10012
-#   SLS_KAFKA_TOPIC        SLS logstore (append .json to parse JSON fields)
+#   SLS_KAFKA_TOPIC        SLS logstore; default request.json (shared vwork logstore)
 #   SLS_KAFKA_USERNAME     SLS project name (Kafka SASL username)
 #   SLS_KAFKA_PASSWORD     <AccessKeyId>#<AccessKeySecret>
 #   CELLHIVE_METRICS_URL   e.g. http://cellhive-sg-cell-agent:7001/metrics
@@ -66,9 +66,73 @@ uri = "${ARMS_METRICS_ENDPOINT}"
 [sinks.arms_metrics.protocol.encoding]
 codec = "otlp"
 
+# CellHive emits OTLP LogRecords; vwork dashboards query the shared
+# request.json logstore with schema vwork.log.v1. Normalize instead of dumping
+# raw OTLP fields so existing category/source_service queries keep working.
+[transforms.cellhive_logs_vwork]
+type = "remap"
+inputs = ["cellhive_otlp.logs"]
+source = '''
+attrs = .attributes
+ns = string(get(attrs, ["cellhive.namespace"]) ?? "") ?? ""
+worker = string(get(attrs, ["cellhive.worker"]) ?? "") ?? ""
+event_type = string(get(attrs, ["cellhive.event_type"]) ?? "") ?? ""
+request_id = string(get(attrs, ["cellhive.request_id"]) ?? "") ?? ""
+outcome = string(get(attrs, ["cellhive.outcome"]) ?? "") ?? ""
+script_version = string(get(attrs, ["cellhive.script_version"]) ?? "") ?? ""
+invocation = get(attrs, ["cellhive.invocation"]) ?? false
+if request_id == "" { request_id = ns + ":" + worker }
+
+.schema_version = "vwork.log.v1"
+.source_service = "cellhive"
+category = if invocation == true {
+  if event_type == "queue" { "queue_operation" } else if event_type == "scheduled" || event_type == "cron" { "cron_dispatch" } else { "function_request" }
+} else { "user_console" }
+.category = category
+message = string(.message) ?? ""
+.occurred_at = format_timestamp!(.timestamp, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
+.observed_at = format_timestamp!(.observed_timestamp, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
+.request_id = request_id
+.app_id = null
+parsed_app, app_err = parse_regex(ns, r'^vwork-(?P<app_id>[0-9]+)$')
+if app_err == null { .app_id = parsed_app.app_id }
+.function_id = null
+.function_name = worker
+.route_id = null
+.route = null
+.status = null
+.severity = string(.severity_text) ?? "info"
+.message = message
+.error_code = null
+.error_message = null
+trace_id = if exists(.trace_id) { string!(.trace_id) } else { "" }
+span_id = if exists(.span_id) { string!(.span_id) } else { "" }
+.trace_id = if trace_id == "" { null } else { trace_id }
+.span_id = if span_id == "" { null } else { span_id }
+.payload = {
+  "event_type": event_type,
+  "outcome": outcome,
+  "script_version": script_version,
+  "namespace": ns,
+  "worker": worker,
+  "args": get(attrs, ["cellhive.message_args"]) ?? null
+}
+del(.attributes)
+del(.resources)
+del(.scope)
+event_id_src = ns + "|" + worker + "|" + request_id + "|" + category + "|" + trace_id + "|" + span_id + "|" + message + "|" + .observed_at
+.event_id = sha2(event_id_src, variant: "SHA-256")
+del(.timestamp)
+del(.observed_timestamp)
+del(.severity_number)
+del(.severity_text)
+del(.source_type)
+del(.dropped_attributes_count)
+'''
+
 [sinks.sls_logs]
 type = "kafka"
-inputs = ["cellhive_otlp.logs"]
+inputs = ["cellhive_logs_vwork"]
 bootstrap_servers = "${SLS_KAFKA_BOOTSTRAP_SERVERS}"
 topic = "${SLS_KAFKA_TOPIC}"
 encoding.codec = "json"
