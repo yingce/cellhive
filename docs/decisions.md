@@ -29,6 +29,12 @@
   4. **eviction 死锁回归**：`Store.evictOne` 持 `openMu` 调 `Drop`，`Drop` 不得再调用 `Store.Cell`；新增 `TestSweepEvictsCapturedCellWithoutDeadlock`。
 - **P4 验证**：`TestEnsureSnapshotsNewEpochForSmallCell` / `TestEnsureResumesLargeNewEpoch` / `TestRetireEpochsRequiresCurrentSnapshot` / `TestSweepEvictsCapturedCellWithoutDeadlock`；`deploy-e2e` 重启后变为 `ensure_snapshot 0->1`、`ensure_resume 0->0`，并在 `CELLHIVE_EPOCH_GC_*` 测试参数下断言旧 `e1` 对象为 0。
 
+- **补充（P5：KV 热路径 200ms 与 eviction drain 死锁）**：
+  1. 每个 native KV/queue 请求要做两次 resource-fence 检查；fence 对象通常不存在，`SegmentedAuthority` 的 miss 路径是 current-window GET + 前缀 List + legacy GET，两次就是 ~200ms。现在只缓存 **absent fence** 1s；存在/已删除的 fence 不缓存，写提交前仍用 `resourceWriteGuard` 做 fresh 检查，本地删除会立即更新/清除缓存。
+  2. `Store.forget` 原先先置 `evicting` 再等 `busy`，而 busy 请求在 `BeginRequest` 之后调 `Cell` 会等 `evicting`，互相死锁；改为先在 `s.mu` 下等 `evicting/busy` 清零，再原子置 `evicting`。`prepareResourceAccessSnapshot` 的 stale-generation 路径改用 `TryForget`，不再在请求路径上阻塞。
+  3. 实测（SG，pod 内直连）：warm GET 多数 **0.5–3ms**，每 1s owner 缓存刷新一次 ~100ms；warm PUT ~36–78ms；40 路并发 GET 全部 200。首次 PUT 仍有一次新 epoch 快照/旧链扫描（~9s），epoch GC 后应下降。
+  4. 回归测试：`TestForgetDrainsBusyRequestWithoutDeadlock`、`TestSweepEvictsCapturedCellWithoutDeadlock`、`TestPreparedResourceAdmissionCachesAbsentFenceAndRejectsRevoke`。
+
 ## ADR-271 deploy 只等一次 durability proof；App 已存在时不再重写（2026-10-23）✅实现
 
 - **背景**：`POST /v1/control/deploy` 依次执行 3 个 `capturedWrite`（DO migrations、自动 CreateApp、版本提交），每次各自 `Capture.Wait` 一次 RPO=0 证明。控制面自 ADR-117 起是单个 `__platform__` cell，所以这些 proof 的 `ns` 标签是 `__platform__`，不是租户 namespace（例如 `vwork-24`）；空 migrations 不写库，但那次 capturedWrite 仍做一次 Wait；`CreateApp` 即使 App 已存在也每次写 `apps` 行 + `app.create` 审计并推进 txid。因此真实部署会有 2–3 次串行证明等待，发布风暴时控制 cell 的 proof 可排到数秒。
