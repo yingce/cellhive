@@ -459,13 +459,14 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	// which would deadlock against this wait. New Cell/BeginRequest callers
 	// already wait on evicting, so no new request can enter the cell.
 	s.mu.Lock()
-	for s.evicting[key] {
+	// Wait for the eviction gate and for in-flight requests WITHOUT setting
+	// evicting first: an in-flight request may still call Cell, and Cell waits
+	// on evicting. Setting it before the drain deadlocks the store whenever a
+	// request is between BeginRequest and its first Cell call.
+	for s.evicting[key] || s.busy[key] > 0 {
 		s.cond.Wait()
 	}
 	s.evicting[key] = true
-	for s.busy[key] > 0 {
-		s.cond.Wait()
-	}
 	s.mu.Unlock()
 
 	if verify != nil {

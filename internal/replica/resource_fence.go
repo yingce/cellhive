@@ -63,13 +63,22 @@ func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourc
 	if err != nil {
 		return f, etag, err
 	}
-	m.fenceMu.Lock()
-	if m.fenceCache == nil {
-		m.fenceCache = make(map[string]fenceCacheEntry)
+	// Only an absent fence is cached. A live/deleted fence is a rare control
+	// event; caching it could keep a stale generation on the request path and
+	// trigger repeated local eviction.
+	if fenceAbsent(f) {
+		m.fenceMu.Lock()
+		if m.fenceCache == nil {
+			m.fenceCache = make(map[string]fenceCacheEntry)
+		}
+		m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
+		m.fenceMu.Unlock()
 	}
-	m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
-	m.fenceMu.Unlock()
 	return f, etag, nil
+}
+
+func fenceAbsent(f resourceFence) bool {
+	return !f.Deleted && f.JobID == "" && f.Epoch == 0
 }
 
 // readResourceFenceFresh bypasses the cache for write-side fence updates and
@@ -97,11 +106,15 @@ func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (re
 
 func (m *Manager) cacheFence(sc cell.Scope, f resourceFence, etag string) {
 	m.fenceMu.Lock()
+	defer m.fenceMu.Unlock()
 	if m.fenceCache == nil {
 		m.fenceCache = make(map[string]fenceCacheEntry)
 	}
-	m.fenceCache[sc.String()] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
-	m.fenceMu.Unlock()
+	if fenceAbsent(f) {
+		m.fenceCache[sc.String()] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
+	} else {
+		delete(m.fenceCache, sc.String())
+	}
 }
 func (m *Manager) resourceWriteGuard(ctx context.Context, sc cell.Scope, epoch uint64) (func(), error) {
 	lock := m.resourceLock(sc)

@@ -3,6 +3,7 @@ package cellstore
 import (
 	"context"
 	"testing"
+	"time"
 
 	"cellhive/internal/cell"
 )
@@ -52,5 +53,45 @@ func TestPinSkipsEviction(t *testing.T) {
 	s.mu.Unlock()
 	if !stillOpen {
 		t.Fatal("pinned cell was forgotten")
+	}
+}
+
+func TestForgetDrainsBusyRequestWithoutDeadlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "forget"}
+	if _, err := s.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	end := s.BeginRequest(sc.String())
+	done := make(chan error, 1)
+	go func() { done <- s.Forget(ctx, sc) }()
+	// The busy request may still open the cell while Forget waits for it.
+	cellCh := make(chan error, 1)
+	go func() {
+		_, err := s.Cell(ctx, sc)
+		cellCh <- err
+	}()
+	select {
+	case err := <-cellCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Cell blocked while Forget waited for an in-flight request")
+	}
+	end()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Forget did not finish after the request drained")
 	}
 }

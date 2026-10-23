@@ -42,8 +42,15 @@ func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scop
 		o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
 		if err == nil && o.Epoch <= floor {
 			s.Owner.Invalidate(sc)
-			if err := s.Store.Forget(ctx, sc); err != nil {
-				return "", err
+			// Never block a request behind a full Forget: an in-flight request
+			// may still need to open the cell. TryForget returns false if the
+			// cell is busy; the caller can retry instead of deadlocking.
+			ok, ferr := s.Store.TryForget(ctx, sc, nil)
+			if ferr != nil {
+				return "", ferr
+			}
+			if !ok {
+				return "", fmt.Errorf("cell busy while retiring a stale generation")
 			}
 		}
 	}

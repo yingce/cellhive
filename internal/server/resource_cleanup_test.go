@@ -33,7 +33,7 @@ func (b *fenceCountingBucket) Get(ctx context.Context, key string) ([]byte, stri
 	return b.Bucket.Get(ctx, key)
 }
 
-func TestPreparedResourceAdmissionUsesTwoFenceReadsAndRejectsRevoke(t *testing.T) {
+func TestPreparedResourceAdmissionCachesAbsentFenceAndRejectsRevoke(t *testing.T) {
 	s := newDomainServer(t)
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "cache"}
 	counting := &fenceCountingBucket{Bucket: s.resourceReplica().B}
