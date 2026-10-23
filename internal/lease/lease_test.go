@@ -146,3 +146,82 @@ func TestNodeLeaseUsesSnapshotAndPointRead(t *testing.T) {
 		t.Fatalf("missing lease ok=%v err=%v", ok, err)
 	}
 }
+
+// A slow PUT must not extend the window in which the node keeps acking: Healthy
+// is measured from the Expiry that peers see, not from when the PUT returned.
+func TestHealthyMeasuresFromPublishedExpiry(t *testing.T) {
+	m := &Manager{TTL: 10 * time.Second}
+	// A lease published at T0 expires at T0+10s. Even if its PUT only returned at
+	// T0+3s, the node must stop acking before T0+10s-margin (margin = TTL/5).
+	t0 := time.Now()
+	m.publishedExpiry = t0.Add(10 * time.Second)
+	if !m.Healthy(t0.Add(7 * time.Second)) {
+		t.Fatal("expected healthy before expiry-margin")
+	}
+	if m.Healthy(t0.Add(8*time.Second + time.Millisecond)) {
+		t.Fatal("must be unhealthy once within margin of the published expiry")
+	}
+}
+
+func TestPublishNeverMovesExpiryBackwards(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(base, "n1", "s1", "addr", "", 10*time.Second)
+	if err := m.Publish(context.Background(), Load{}); err != nil {
+		t.Fatal(err)
+	}
+	first := m.publishedExpiry
+	m.TTL = time.Second // a shorter TTL must not shrink what peers already saw
+	if err := m.Publish(context.Background(), Load{}); err != nil {
+		t.Fatal(err)
+	}
+	if m.publishedExpiry.Before(first) {
+		t.Fatalf("publishedExpiry moved backwards: %v -> %v", first, m.publishedExpiry)
+	}
+}
+
+func TestLegacyPeersDetection(t *testing.T) {
+	now := time.Now()
+	live := now.Add(time.Minute).UnixMilli()
+	dead := now.Add(-time.Minute).UnixMilli()
+	leases := []NodeLease{
+		{Node: "self", Expiry: live},
+		{Node: "new", Expiry: live, Liveness: NodeLeaseLiveness},
+		{Node: "old-live", Expiry: live},
+		{Node: "old-dead", Expiry: dead},
+	}
+	got := LegacyPeers(leases, "self", now)
+	if len(got) != 1 || got[0].Node != "old-live" {
+		t.Fatalf("legacy peers = %+v, want only old-live", got)
+	}
+	m := &Manager{NodeID: "self", cached: leases}
+	if !m.LegacyPeerVisible(now) {
+		t.Fatal("legacy peer in snapshot must be visible")
+	}
+	m.cached = leases[:2]
+	if m.LegacyPeerVisible(now) {
+		t.Fatal("no legacy peer expected")
+	}
+}
+
+func TestNodeLeaseFreshBypassesSnapshot(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := NewManager(base, "n2", "s2", "addr", "", time.Minute)
+	if err := other.Publish(context.Background(), Load{}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(base, "n1", "s1", "addr", "", time.Minute)
+	m.cached, m.cachedAt = []NodeLease{}, time.Now() // stale snapshot that lacks n2
+	l, ok, err := m.NodeLeaseFresh(context.Background(), "n2")
+	if err != nil || !ok || l.Session != "s2" {
+		t.Fatalf("fresh read = %+v ok=%v err=%v", l, ok, err)
+	}
+	if _, ok, err := m.NodeLeaseFresh(context.Background(), "nobody"); err != nil || ok {
+		t.Fatalf("missing node ok=%v err=%v", ok, err)
+	}
+}

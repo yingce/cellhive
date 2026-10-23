@@ -73,6 +73,9 @@ type Manager struct {
 	// cross-epoch resume. The marker is what makes the old epoch's fenced tail
 	// safe to exclude on restore (ADR-275).
 	WriteMarker func(ctx context.Context, scope cell.Scope, epoch, cut uint64) error
+	// PagedBaselinePoll is how often a marker-resumed paged cell checks whether
+	// its background hydrate finished before taking its baseline (0 = 2s).
+	PagedBaselinePoll time.Duration
 	// RetireEpochs, when set, deletes epoch prefixes below the current one after
 	// the current epoch has a complete snapshot. Runs from the background GC
 	// loop, not on the request path.
@@ -457,23 +460,40 @@ func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
 // the capture loop's safe point, then records the done marker and retires the
 // predecessor. It never runs on the request path.
 func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap *sqlcapture.Capture, scope cell.Scope, epoch uint64) {
-	if c.Paged() {
-		// Snapshotting a sparse paged image would HydrateAll on the request/
-		// background path. Wait for a future explicit baseline after the paged
-		// hydrate completes.
-		m.log().Info("background baseline skipped for paged cell", "scope", scope.String(), "epoch", epoch)
-		return
+	if !c.PagedComplete() {
+		// A sparse paged image would make the snapshot HydrateAll inside the
+		// capture loop and stall every write's durability proof. Wait for the
+		// background hydrate to finish, then take the baseline from a full image.
+		interval := m.PagedBaselinePoll
+		if interval <= 0 {
+			interval = 2 * time.Second
+		}
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for !c.PagedComplete() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
 	}
-	if err := cap.RequestBaseline(ctx); err != nil {
+	var onStart func(ctx context.Context, label uint64) error
+	if m.SnapshotStarted != nil {
+		onStart = func(sctx context.Context, label uint64) error {
+			return m.SnapshotStarted(sctx, scope, epoch, label)
+		}
+	}
+	txid, err := cap.RequestBaseline(ctx, onStart)
+	if err != nil {
 		m.log().Warn("background baseline failed", "scope", scope.String(), "epoch", epoch, "err", err)
 		return
 	}
 	if m.SnapshotDone != nil {
-		if txid, err := c.TxID(ctx); err == nil {
-			if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
-				m.log().Warn("background snapshot done marker failed", "scope", scope.String(), "txid", txid, "err", merr)
-				return
-			}
+		// Mark the snapshot's own watermark; the cell's txid may already be ahead.
+		if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
+			m.log().Warn("background snapshot done marker failed", "scope", scope.String(), "txid", txid, "err", merr)
+			return
 		}
 	}
 	// Epoch GC is periodic: the background loop lists old epochs, and doing it

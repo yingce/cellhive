@@ -13,17 +13,32 @@
 - **升级**：新旧版本不能在同一个桶上混跑；全量替换，旧 record 可读并按 Expiry 判活。
 - **验证**：owner/lease/server 单测覆盖同 session 不 bump、活性判定、self-fence、legacy、DO 不变；cellstore 覆盖 OnEvicted；e2e 模拟 owned 增长、续约停顿、同目录 SIGKILL 和跨节点接管。
 - **P8 KV deadline 热修（2026-10-24）**：`vwork-sg-demo/functions/v1/kv-cache-counter` 报 `KV invocation deadline exceeded`，不是 user-runtime 502 的延续。cell-agent 在一次 claim 里同步 `registerPendingTimers`，冷 timer cell 的 hydrate 把 invocation/KV 请求堵住；同时后台 queue 的 `vwork-24/__queue__/events` hydrate 卡在一个 COS GET 上，占满当时唯一的 hydrate slot，KV get 永远拿不到槽。修复：pending timer 注册改为异步 + 去重；`hydrateSlot` 等待可取消；`CELLHIVE_HYDRATE_TIMEOUT=30s`；`CELLHIVE_HYDRATE_PARALLEL=2`。修复后 endpoint 200，首写冷 1.2–2.0s，warm 0.3–0.5s。
+- **审查修订（2026-10-24）**：
+  1. **接管判活用点读**：`Claim` 对“已死”的判定要再做一次 `nodes/<node>.json` 点读确认（`LeaseView` 可选实现 `NodeLeaseFresh`）。`SampleCached` 的 stale-while-revalidate 在后台刷新持续失败时可能几分钟不更新，用旧快照判定一个仍然存活的 owner 已死会造成双写者；点读失败则不接管。路由/转发仍用缓存快照。
+  2. **self-fence 从已发布的 Expiry 起算**：`Healthy` 以最近一次成功写入的租约 `Expiry` 减 `TTL/5` 为界，而不是以 PUT 返回的时刻为界。PUT 变慢只会缩小窗口，不会让节点在 peer 已可接管之后继续 ack。`Publish` 不会把已发布的 Expiry 往回拨。
+  3. **Wait 返回后复查**：`captureWaitTxID` 在持久证明返回后再次检查 `ackAllowed`，租约在等待期间失效则返回 503，不释放 ack。
+  4. **混合版本失败关闭**：节点租约新增 `Liveness:"node-lease"`。启动时若 `nodes/` 里存在存活且不带该字段的节点，拒绝启动；运行中租约快照里出现这样的节点，`ackAllowed` 返回 false（停止确认写入）。此前这条只写在文档里，代码里没有检测。
 - **P7 全量发布（2026-10-24）**：SG/USW 先优雅停掉旧 cell-agent，等待 `LEASE_TTL` 后启动新协议，旧/新二进制没有同时服务。首次全量替换暴露 mass-hydrate OOM：`restoreOnceKeys` 曾为每个对象起 goroutine 再等信号量，COS SlowDown 时 300+ goroutine 卡在 chan send；改为固定 worker pool，并限制 `CELLHIVE_HYDRATE_PARALLEL=1`、`CELLHIVE_RESTORE_PARALLEL=4`，cell-agent 内存上限调到 4Gi。发布后 10 分钟两区 0 restart，endpoint 0.14–0.16s。
 
 ## ADR-274 种子化 capture 位置 + 单次列举冷恢复（2026-10-24，核心实现）
 
 - **决策**：capture 位置优先使用 `resume hint`（同 epoch 淘汰）、hydrate 得到的 `RestoreInfo`、fresh epoch；只有未知时才执行一次 `ChainView`（`CommonPrefixes` + 每个需要的 epoch 一次 `ListSizes`），后续 restore plan/durable watermark/has-epoch 都从该视图回答。`Fetch` 并发 16。`.batch` 名称带 `.d/.s/.m` span 标记，减少为解析 span 而下载对象。compaction 增加对象数阈值（默认 8），让小 cell 不长期挂 64 个 L0。该阶段目标是 A2/A5。
-- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地并通过 A2/A5；功能目标达成。CommonPrefixes/ListSizes 与 paged 复用视图属于后续优化，不阻塞 A1–A6。
+- **状态**：resume hint、RestoreChain 单次列举 + 并行 Fetch、batch span 名、对象数 compaction 阈值已落地。
+- **审查修订（2026-10-24）**：
+  1. `LatestEpoch`/`Epochs`（被 `Hydrate`、`Paged`、`HasEpoch`、epoch GC 使用）改为 `CommonPrefixes(<scope>/ltx/, "/")`，代价不再随链上对象数增长；不支持分隔符列举的 bucket 回退全量 List。`FSBucket.CommonPrefixes` 现在不再报告已被删空的目录（对象存储里没有空目录）。
+  2. `DurableWatermark`/`spansForEpoch` 对 `.d.batch`、`.s.batch` 直接按文件名取 span，不再下载解码；旧名和 `.m.batch` 仍解码。
+  3. **未做**：设计稿里的 `ChainView`（hydrate 与 capture 共享同一次列举）和 `RestoreInfo` 透传。冷恢复现在是 `LatestEpoch`(1 次 CommonPrefixes) + `RestoreChain`(1 次 List) + capture 侧的 `Epochs`(1 次 CommonPrefixes) + `DurableWatermark*`(1 次 List)，仍是 2 次对象 List 加 2 次 CommonPrefixes，不是 1 次。此前这条被写成“后续优化，不阻塞”，说轻了。
+  4. 这里的 A2/A5 此前没有 COS 实测证据；本地 FS 上的 `list_delta` 不能代表对象存储。见 `scripts/e2e/cold-write-cos.sh`。
 
 ## ADR-275 跨 epoch 续链 marker（2026-10-24，核心实现）
 
 - **决策**：新 epoch 允许不开整库快照，但必须先 durable 写 epoch marker（`<cut+1>.marker`，语义为 epoch e 从 cut+1 开始，旧 epoch txid>cut 的对象作废）；marker durable 前不服务。restore 先做 epoch 截断，再选最新完整快照和连续 delta；被 fence 旧 owner 晚到的 delta 不得进入新 lineage。paged/长链走后台基线，不在请求路径 HydrateAll。该阶段目标是写路径不再整库快照、A4 的恢复窗口可预测。
-- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线（paged 跳过）、周期 GC 和保留 predecessor 的 A4 接管 E2E 已落地；A1/A3/A4/A5/A6 通过。paged 续链和 L1 依赖 GC 属于后续优化。
+- **状态**：marker 写入、restore 截断、跨 epoch 续链、capture-loop 后台基线、周期 GC 已落地。
+- **审查修订（2026-10-24）**：
+  1. **marker 对恢复不可见（严重）**：`isSegmentKey` 不认 `.marker`，所以 `RestoreChain`/`ListL0Segments` 把 marker 丢掉，`selectChain` 拿不到 cut，被 fence 的旧 owner 迟到的 delta 会进入恢复结果。原有单测直接把手工构造的 header 交给 `selectChain`，绕过了这一层。现已修复，并新增走 `MarkEpoch → RestoreChain` 的 replica 层测试；`parseSegmentSpan` 也识别 `.marker`，`DurableWatermarkChain` 对旧 epoch 中超过 cut 的 span 不再计入水位。marker 在 L1 floor 之下也不会被折叠掉。
+  2. **paged 的 marker epoch 现在有基线**：后台基线不再对 paged cell 直接跳过，而是等后台 hydrate 完成（`PagedComplete`）后再用完整镜像取基线，这样 epoch GC 的“当前 epoch 有独立 snapshot-done”条件最终会满足，链不会无限增长。
+  3. **基线的 done 标记用快照自己的水位**：`RequestBaseline` 返回快照实际使用的 txid，done 标记写在这个 txid 上，而不是事后读到的 cell txid（那时可能已有新写入）。并在上传第一个 part 前写 `snapshot-started`，防止崩溃在 part 之间时，恢复把残缺快照当成完整快照。
+  4. **仍未验证**：A1–A6 在 COS 上的实测数字。
 
 ## ADR-272 capture 冷启动沿用 celld/Litestream：durable position + 连续性续链（2026-10-23）✅P0 实现
 

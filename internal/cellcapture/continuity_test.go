@@ -344,3 +344,67 @@ func TestEvictionKeepsResumeHint(t *testing.T) {
 	}
 	m.Stop()
 }
+
+// A marker-resumed epoch gets its own baseline in the background. The snapshot
+// must be bracketed by started -> done markers for the snapshot's own watermark,
+// not for whatever the cell's txid has moved on to.
+func TestBackgroundBaselineBracketsSnapshotWithMarkers(t *testing.T) {
+	ctx := context.Background()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "baseline"}
+	c, err := cs.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tx(ctx, func(*sql.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := c.TxID(ctx)
+
+	var events []string
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+		return local, nil
+	}, &commits)
+	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil } // new epoch
+	m.EpochSnapshotMaxBytes = 1 << 30
+	m.WriteMarker = func(context.Context, cell.Scope, uint64, uint64) error {
+		events = append(events, "marker")
+		return nil
+	}
+	m.SnapshotStarted = func(_ context.Context, _ cell.Scope, _, txid uint64) error {
+		events = append(events, "started")
+		return nil
+	}
+	doneTx := make(chan uint64, 1)
+	m.SnapshotDone = func(_ context.Context, _ cell.Scope, _, txid uint64) error {
+		events = append(events, "done")
+		doneTx <- txid
+		return nil
+	}
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case txid := <-doneTx:
+		if txid < local {
+			t.Fatalf("done marker for txid %d, want >= %d", txid, local)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("background baseline never marked done; events=%v", events)
+	}
+	want := []string{"marker", "started", "done"}
+	if len(events) != len(want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events = %v, want %v", events, want)
+		}
+	}
+}

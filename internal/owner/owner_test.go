@@ -417,3 +417,59 @@ func TestSameNodeNewSessionTakesOverImmediately(t *testing.T) {
 		t.Fatalf("restart takeover = %+v recovered=%v err=%v", o2, recovered, err)
 	}
 }
+
+// freshLeaseView answers from a stale snapshot but has the true state behind
+// NodeLeaseFresh, like lease.Manager with a failing background refresh.
+type freshLeaseView struct {
+	stale fakeLeaseView
+	fresh fakeLeaseView
+	errs  bool
+}
+
+func (f freshLeaseView) NodeLease(ctx context.Context, node string) (lease.NodeLease, bool, error) {
+	return f.stale.NodeLease(ctx, node)
+}
+
+func (f freshLeaseView) NodeLeaseFresh(ctx context.Context, node string) (lease.NodeLease, bool, error) {
+	if f.errs {
+		return lease.NodeLease{}, false, errors.New("bucket unavailable")
+	}
+	return f.fresh.NodeLease(ctx, node)
+}
+
+// A stale snapshot saying "owner dead" must not be enough to take a cell over:
+// the takeover decision is confirmed with a fresh point read.
+func TestTakeoverConfirmsDeadVerdictWithFreshRead(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m1, _ := newManager(t, dir, "node-1")
+	m2, _ := newManager(t, dir, "node-2")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "stale"}
+	now := time.Now()
+	o1, err := m1.Claim(ctx, sc, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive := lease.NodeLease{Node: "node-1", Session: o1.Session, Expiry: now.Add(time.Minute).UnixMilli()}
+	m2.LeaseView = freshLeaseView{
+		stale: fakeLeaseView{}, // snapshot has never seen node-1
+		fresh: fakeLeaseView{"node-1": alive},
+	}
+	if _, err := m2.Claim(ctx, sc, now); !errors.Is(err, ErrOwnerLive) {
+		t.Fatalf("claim from stale 'dead' snapshot = %v, want ErrOwnerLive", err)
+	}
+	// If the fresh read itself fails we cannot prove the owner dead: no takeover.
+	m2.LeaseView = freshLeaseView{stale: fakeLeaseView{}, errs: true}
+	if _, err := m2.Claim(ctx, sc, now); err == nil || errors.Is(err, ErrOwnerLive) {
+		t.Fatalf("claim with unreadable lease = %v, want a lease read error", err)
+	}
+	// A genuinely dead owner is still taken over.
+	m2.LeaseView = freshLeaseView{
+		stale: fakeLeaseView{},
+		fresh: fakeLeaseView{"node-1": {Node: "node-1", Session: o1.Session, Expiry: now.Add(-time.Second).UnixMilli()}},
+	}
+	o2, err := m2.Claim(ctx, sc, now)
+	if err != nil || o2.Epoch <= o1.Epoch || o2.Node != "node-2" {
+		t.Fatalf("dead owner takeover = %+v err=%v", o2, err)
+	}
+}

@@ -33,7 +33,11 @@ type NodeLease struct {
 	// Instance is a random id persisted in the data directory. It lets a
 	// restarted process prove that a still-live lease belongs to its own
 	// previous incarnation rather than another host using the same node id.
-	Instance  string `json:"instance,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	// Liveness names the owner-liveness protocol this node speaks. Nodes that
+	// predate ADR-273 omit it, which is how a new node recognises (and refuses
+	// to run beside) a live legacy peer.
+	Liveness  string `json:"liveness,omitempty"`
 	Advertise string `json:"advertise"`
 	PeerURL   string `json:"peer_url"`
 	// AZ is the node's failure domain (rack/zone), used to prefer cross-AZ
@@ -43,6 +47,10 @@ type NodeLease struct {
 	ProtoVersion string `json:"proto_version"`
 	Load         Load   `json:"load"`
 }
+
+// NodeLeaseLiveness is the Liveness value of nodes that judge cell owners by
+// node lease (ADR-273).
+const NodeLeaseLiveness = "node-lease"
 
 // Key returns the bucket key for a node lease.
 func Key(node string) string { return "nodes/" + node + ".json" }
@@ -60,7 +68,10 @@ type Manager struct {
 	Instance string
 	renewKey string
 
-	lastOK time.Time
+	// publishedExpiry is the Expiry of the newest lease this node successfully
+	// wrote. Peers judge us dead once it passes, so Healthy measures from it and
+	// not from when the PUT happened to return.
+	publishedExpiry time.Time
 
 	mu         sync.Mutex
 	cached     []NodeLease
@@ -71,7 +82,7 @@ type Manager struct {
 
 // NewManager builds a lease manager.
 func NewManager(b bucket.Bucket, nodeID, session, advertise, peerURL string, ttl time.Duration) *Manager {
-	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID), lastOK: time.Now()}
+	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID), publishedExpiry: time.Now().Add(ttl)}
 }
 
 // Publish writes (or renews) this node's lease.
@@ -79,6 +90,7 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 	if load.SampledMs == 0 {
 		load.SampledMs = time.Now().UnixMilli()
 	}
+	expiry := time.Now().Add(m.TTL)
 	l := NodeLease{
 		Node:         m.NodeID,
 		Session:      m.Session,
@@ -86,8 +98,9 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		Advertise:    m.Advert,
 		PeerURL:      m.PeerURL,
 		AZ:           m.AZ,
-		Expiry:       time.Now().Add(m.TTL).UnixMilli(),
+		Expiry:       expiry.UnixMilli(),
 		ProtoVersion: "v1",
+		Liveness:     NodeLeaseLiveness,
 		Load:         load,
 	}
 	data, err := json.Marshal(l)
@@ -98,26 +111,55 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		return fmt.Errorf("publish lease: %w", err)
 	}
 	m.mu.Lock()
-	m.lastOK = time.Now()
+	if expiry.After(m.publishedExpiry) {
+		m.publishedExpiry = expiry
+	}
 	m.mu.Unlock()
 	return nil
 }
 
-// Healthy reports whether this node published its lease recently enough that
-// peers still consider it live. Write acknowledgements are refused while this
-// is false (ADR-273): a node that can no longer prove liveness must not ack.
+// Healthy reports whether peers will still consider this node live for the
+// next margin. It measures from the Expiry of the newest lease we managed to
+// write (ADR-273): a slow PUT shrinks the window instead of extending it, so a
+// node never acks after the moment a peer may start taking its cells over.
 func (m *Manager) Healthy(now time.Time) bool {
 	m.mu.Lock()
-	last := m.lastOK
+	exp := m.publishedExpiry
 	m.mu.Unlock()
-	if last.IsZero() {
+	if exp.IsZero() {
 		return false
 	}
 	margin := m.TTL / 5
 	if margin <= 0 {
 		margin = time.Second
 	}
-	return now.Sub(last) < m.TTL-margin
+	return now.Before(exp.Add(-margin))
+}
+
+// LegacyPeers returns the live leases, other than self, published by nodes that
+// predate ADR-273. Such a node judges owner records by their embedded Expiry,
+// which ADR-273 stops renewing, so it would take over cells that are still
+// being served. Mixing the two protocols on one bucket is unsafe and the new
+// node must refuse to run beside such a peer.
+func LegacyPeers(leases []NodeLease, self string, now time.Time) []NodeLease {
+	var out []NodeLease
+	for _, l := range leases {
+		if l.Node == self || !l.Live(now) || l.Liveness == NodeLeaseLiveness {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// LegacyPeerVisible reports whether the in-memory lease snapshot currently shows
+// a live pre-ADR-273 peer. It never touches the bucket, so the write path can
+// call it; the snapshot is kept fresh by the follower-selection refresh.
+func (m *Manager) LegacyPeerVisible(now time.Time) bool {
+	m.mu.Lock()
+	cached := m.cached
+	m.mu.Unlock()
+	return len(LegacyPeers(cached, m.NodeID, now)) > 0
 }
 
 // NodeLease returns a node's lease from the in-memory snapshot, falling back to
@@ -129,6 +171,21 @@ func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, 
 			return l, true, nil
 		}
 	}
+	l, err := m.Get(ctx, node)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return NodeLease{}, false, nil
+	}
+	if err != nil {
+		return NodeLease{}, false, err
+	}
+	return l, true, nil
+}
+
+// NodeLeaseFresh reads node's lease straight from the bucket. Takeover
+// decisions use it: the cached snapshot can lag by minutes when its background
+// refresh keeps failing, and judging a live owner dead from a stale snapshot is
+// a double-writer risk. It is a single point read, never a List.
+func (m *Manager) NodeLeaseFresh(ctx context.Context, node string) (NodeLease, bool, error) {
 	l, err := m.Get(ctx, node)
 	if errors.Is(err, bucket.ErrNotFound) {
 		return NodeLease{}, false, nil
@@ -253,4 +310,12 @@ func (m *Manager) refresh() {
 	}
 	m.cached = sample
 	m.cachedAt = time.Now()
+}
+
+// SetCachedForTest seeds the in-memory lease snapshot. Tests in other packages
+// use it to exercise snapshot-driven checks without a bucket.
+func (m *Manager) SetCachedForTest(leases []NodeLease) {
+	m.mu.Lock()
+	m.cached, m.cachedAt = leases, time.Now()
+	m.mu.Unlock()
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -370,9 +371,31 @@ func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string)
 		if !entry.IsDir() {
 			continue
 		}
+		// An object store has no empty directories: a prefix exists only while
+		// some key carries it. Deleting the last object here leaves the directory
+		// behind, so skip directories that hold no file.
+		if !dirHasFile(filepath.Join(b.path(prefix), entry.Name())) {
+			continue
+		}
 		out = append(out, prefix+entry.Name()+delimiter)
 	}
 	return out, nil
+}
+
+// dirHasFile reports whether dir or any directory below it contains a file.
+func dirHasFile(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipAll
+		}
+		if !d.IsDir() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // PresignGet implements Bucket (local dev returns a file:// style handle).

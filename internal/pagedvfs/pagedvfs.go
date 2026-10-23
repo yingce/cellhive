@@ -895,6 +895,28 @@ func SnapshotStatsAll() SnapshotStats {
 	return out
 }
 
+// Complete reports whether every page of the registered cut is hydrated, i.e.
+// the local file is already a full image. An unregistered path counts as
+// complete: it is not served by the paged VFS.
+func Complete(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return true
+	}
+	mu.Lock()
+	var r *reg
+	for _, rr := range regs {
+		if rr.path == abs {
+			r = rr
+		}
+	}
+	mu.Unlock()
+	if r == nil {
+		return true
+	}
+	return HydratedCount(abs) >= r.src.Commit()
+}
+
 // HydratedPages returns how many pages are hydrated (for tests/metrics).
 func HydratedPages(path string) int {
 	abs, err := filepath.Abs(path)

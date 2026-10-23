@@ -72,8 +72,11 @@ type Capture struct {
 	committer        Committer
 	barrier          *barrier
 	notify           chan struct{}
-	baselineReq      chan chan error
+	baselineReq      chan baselineRequest
 	done             chan struct{}
+	// onBaselineStart, set only while a requested baseline runs, is called with
+	// the snapshot's label before its first part is uploaded.
+	onBaselineStart func(ctx context.Context, label uint64) error
 
 	// GroupCommitWait and PipelineThreshold are tunable (0 = package defaults).
 	// They are set before Start.
@@ -144,7 +147,7 @@ func New(db *cellstore.Cell, scope cell.Scope, epoch, baselineTxID uint64, commi
 		cell: db, scope: scope, epoch: epoch, cursor: cursor, baselineWALBytes: cursor.BytesRead(),
 		nextTxID: baselineTxID, committer: committer,
 		barrier: newBarrier(baselineTxID), notify: make(chan struct{}, 1),
-		baselineReq: make(chan chan error, 1), done: make(chan struct{}),
+		baselineReq: make(chan baselineRequest, 1), done: make(chan struct{}),
 	}, nil
 }
 
@@ -160,21 +163,37 @@ func (c *Capture) Notify() {
 	}
 }
 
+// baselineResult is the outcome of a requested baseline: the txid the snapshot
+// is labelled with (its watermark), or the error that stopped it.
+type baselineResult struct {
+	txid uint64
+	err  error
+}
+
+type baselineRequest struct {
+	onStart func(ctx context.Context, label uint64) error
+	reply   chan baselineResult
+}
+
 // RequestBaseline asks the capture loop to emit a full-page baseline snapshot
-// at a safe point. It is used after a cross-epoch marker resume so the epoch
-// eventually owns an independent baseline and its predecessor can be GC'd.
-func (c *Capture) RequestBaseline(ctx context.Context) error {
-	req := make(chan error, 1)
+// at a safe point and returns the watermark txid it was labelled with. onStart,
+// if set, runs with that label before the first part is uploaded, so the caller
+// can record a "snapshot started" marker: without it a crash between parts
+// leaves a partial snapshot that restore would take for a complete one. The
+// caller must record its snapshot-done marker for exactly the returned txid;
+// reading the cell's txid afterwards can already include later writes.
+func (c *Capture) RequestBaseline(ctx context.Context, onStart func(ctx context.Context, label uint64) error) (uint64, error) {
+	req := baselineRequest{onStart: onStart, reply: make(chan baselineResult, 1)}
 	select {
 	case c.baselineReq <- req:
 	case <-ctx.Done():
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
 	select {
-	case err := <-req:
-		return err
+	case r := <-req.reply:
+		return r.txid, r.err
 	case <-ctx.Done():
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
 }
 
@@ -226,8 +245,10 @@ func (c *Capture) loop(ctx context.Context) {
 				return
 			}
 		case req := <-c.baselineReq:
+			c.onBaselineStart = req.onStart
 			err := c.rebaseline(ctx)
-			req <- err
+			c.onBaselineStart = nil
+			req.reply <- baselineResult{txid: c.nextTxID, err: err}
 			if err != nil {
 				c.barrier.fail(err)
 				return
@@ -580,6 +601,11 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 		return nil
 	}
 
+	if mode == snapshotModePages && c.onBaselineStart != nil {
+		if herr := c.onBaselineStart(ctx, label); herr != nil {
+			return fmt.Errorf("sqlcapture: baseline start marker: %w", herr)
+		}
+	}
 	var err error
 	if mode == snapshotModeCheckpoint {
 		var wm uint64

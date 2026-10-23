@@ -10,7 +10,7 @@ TAGS := sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata s
 GOTAGS := -tags "$(TAGS)"
 export CGO_ENABLED := 1
 
-.PHONY: e2e-do-rps e2e-service-headers deploy-e2e crash-e2e owner-e2e takeover-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
+.PHONY: e2e-cold-write e2e-do-rps e2e-service-headers deploy-e2e crash-e2e owner-e2e takeover-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
 
 all: build
 
@@ -82,6 +82,12 @@ owner-e2e:
 # the node-lease window while preserving A's acked control state (ADR-273).
 takeover-e2e:
 	bash scripts/e2e/owner-takeover.sh
+
+# Cold-path KV put latency on a few-MiB cell (steady/eviction/restart/takeover/
+# cold hydrate). fs bucket by default; CELLHIVE_E2E_BUCKET=cos for a real COS
+# bucket. See scripts/e2e/cold-write-cos.sh.
+e2e-cold-write:
+	bash scripts/e2e/cold-write-cos.sh
 
 test:
 	# doruntime and userruntime spawn workerd on freePort() listeners; serialize

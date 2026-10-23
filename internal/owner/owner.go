@@ -37,6 +37,32 @@ type LeaseView interface {
 	NodeLease(ctx context.Context, node string) (lease.NodeLease, bool, error)
 }
 
+// FreshLeaseView is an optional LeaseView extension that reads a node lease
+// straight from the bucket instead of the cached snapshot.
+type FreshLeaseView interface {
+	NodeLeaseFresh(ctx context.Context, node string) (lease.NodeLease, bool, error)
+}
+
+// liveFresh is Live for takeover decisions. The cached lease snapshot can be
+// minutes stale when its background refresh keeps failing; a stale snapshot is
+// only dangerous when it says "dead" about a node that is actually alive, so a
+// "dead" verdict is confirmed with one point read before anyone takes over.
+func (m *Manager) liveFresh(ctx context.Context, o cell.Owner, now time.Time) (bool, error) {
+	live, err := m.Live(ctx, o, now)
+	if err != nil || live || o.Liveness != "node-lease" {
+		return live, err
+	}
+	fv, ok := m.LeaseView.(FreshLeaseView)
+	if !ok {
+		return live, nil
+	}
+	l, found, ferr := fv.NodeLeaseFresh(ctx, o.Node)
+	if ferr != nil {
+		return false, ferr // cannot prove it dead: do not take over
+	}
+	return found && l.Live(now) && l.Session == o.Session, nil
+}
+
 // Live reports whether o is still a valid owner at now. Legacy records use the
 // embedded Expiry; node-lease records require a live lease with the same
 // session (so a restarted process invalidates its predecessor immediately).
@@ -201,7 +227,7 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 		m.rememberOwned(s, cur.Epoch)
 		return cur, nil
 	}
-	live, lerr := m.Live(ctx, cur, now)
+	live, lerr := m.liveFresh(ctx, cur, now)
 	if lerr != nil {
 		return cell.Owner{}, lerr
 	}
