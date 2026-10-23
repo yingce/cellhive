@@ -76,6 +76,10 @@ type Store struct {
 	lru    *list.List // front = most recently used; values are *lruEnt
 	byPath map[string]*list.Element
 	busy   map[string]int // in-flight requests per gate key (a cell scope)
+	// opening marks a cold open/hydrate in progress. Unlike openMu it is
+	// per-scope, so a slow bucket restore of one cell does not block every other
+	// cell open (which made rolling restarts look like a total KV outage).
+	opening map[string]bool
 	// evicting gates a key whose cell is being closed/deleted. INVARIANT: it is
 	// only set (forget, evictOne) and cleared while that same goroutine holds
 	// openMu. So a caller holding openMu can never observe evicting==true, and
@@ -155,8 +159,8 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	}
 	key := sc.String()
 	s.mu.Lock()
-	for s.evicting[key] {
-		s.cond.Wait() // an eviction is closing/deleting this cell
+	for s.evicting[key] || s.opening[key] {
+		s.cond.Wait() // an eviction or another cold open owns this scope
 	}
 	if c, ok := s.cells[p]; ok && !c.Closed() {
 		s.touchLocked(p)
@@ -169,29 +173,17 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			delete(s.byPath, p)
 		}
 	}
-	s.mu.Unlock()
-
-	s.openMu.Lock()
-	defer s.openMu.Unlock()
-	// Another goroutine may have opened it while we waited. The evicting
-	// re-check handles a forget that marked the key while we were waiting for
-	// openMu; Cell and BeginRequest both wait out an eviction.
-	s.mu.Lock()
-	for s.evicting[key] {
-		s.cond.Wait()
+	if s.opening == nil {
+		s.opening = make(map[string]bool)
 	}
-	if c, ok := s.cells[p]; ok && !c.Closed() {
-		s.touchLocked(p)
+	s.opening[key] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.opening, key)
+		s.cond.Broadcast()
 		s.mu.Unlock()
-		return c, nil
-	} else if ok {
-		delete(s.cells, p)
-		if e := s.byPath[p]; e != nil {
-			s.lru.Remove(e)
-			delete(s.byPath, p)
-		}
-	}
-	s.mu.Unlock()
+	}()
 
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
@@ -402,7 +394,7 @@ func (s *Store) TryForget(ctx context.Context, sc cell.Scope, verify func() erro
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 	s.mu.Lock()
-	if s.evicting[key] || s.busy[key] > 0 {
+	if s.evicting[key] || s.opening[key] || s.busy[key] > 0 {
 		s.mu.Unlock()
 		return false, nil
 	}
@@ -463,7 +455,7 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	// evicting first: an in-flight request may still call Cell, and Cell waits
 	// on evicting. Setting it before the drain deadlocks the store whenever a
 	// request is between BeginRequest and its first Cell call.
-	for s.evicting[key] || s.busy[key] > 0 {
+	for s.evicting[key] || s.opening[key] || s.busy[key] > 0 {
 		s.cond.Wait()
 	}
 	s.evicting[key] = true
@@ -535,7 +527,7 @@ func (s *Store) evictOne(ctx context.Context) bool {
 			continue
 		}
 		key := cc.Scope.String()
-		if s.busy[key] > 0 || s.evicting[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
+		if s.busy[key] > 0 || s.evicting[key] || s.opening[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
 			continue
 		}
 		s.evicting[key] = true

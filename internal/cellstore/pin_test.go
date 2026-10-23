@@ -2,6 +2,7 @@ package cellstore
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,5 +94,41 @@ func TestForgetDrainsBusyRequestWithoutDeadlock(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("Forget did not finish after the request drained")
+	}
+}
+
+func TestSlowHydrateDoesNotBlockOtherCells(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	slow := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "slow"}
+	fast := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "fast"}
+	release := make(chan struct{})
+	// Block the slow scope's hydrate only; another scope must still open.
+	var once sync.Once
+	s.Hydrate = func(_ context.Context, sc cell.Scope, _ string) error {
+		if sc == slow {
+			once.Do(func() { <-release })
+		}
+		return nil
+	}
+	slowDone := make(chan error, 1)
+	go func() { _, err := s.Cell(ctx, slow); slowDone <- err }()
+	time.Sleep(50 * time.Millisecond) // let the slow open take the gate
+	if _, err := s.Cell(ctx, fast); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-slowDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("slow hydrate did not finish")
 	}
 }
