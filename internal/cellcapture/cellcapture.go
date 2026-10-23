@@ -69,6 +69,10 @@ type Manager struct {
 	// on every new epoch. Larger cells keep the cross-epoch chain until paged
 	// continuation is wired; 0 snapshots every new epoch.
 	EpochSnapshotMaxBytes int64
+	// WriteMarker, when set, durably writes the next epoch's marker before a
+	// cross-epoch resume. The marker is what makes the old epoch's fenced tail
+	// safe to exclude on restore (ADR-275).
+	WriteMarker func(ctx context.Context, scope cell.Scope, epoch, cut uint64) error
 	// RetireEpochs, when set, deletes epoch prefixes below the current one after
 	// the current epoch has a complete snapshot. Runs from the background GC
 	// loop, not on the request path.
@@ -350,10 +354,17 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 			size = st.Size()
 		}
 		if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
-			m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
-			return false, nil
+			if m.WriteMarker == nil {
+				m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
+				return false, nil
+			}
+			if err := m.WriteMarker(ctx, scope, epoch, local); err != nil {
+				return false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
+			}
+			m.log().Info("capture continues cross-epoch chain with marker", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
+		} else {
+			m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
 		}
-		m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
 	}
 	if durable == baseline && durable == local {
 		return true, nil

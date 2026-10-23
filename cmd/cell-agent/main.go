@@ -701,6 +701,10 @@ func main() {
 				return false, nil
 			},
 			EpochSnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
+			WriteMarker: func(cctx context.Context, sc cell.Scope, epoch, cut uint64) error {
+				_, merr := rep.MarkEpoch(cctx, sc, epoch, cut)
+				return merr
+			},
 			RetireEpochsFunc: func(cctx context.Context, sc cell.Scope, epoch uint64) (int, error) {
 				return rep.RetireEpochs(cctx, sc, epoch, cfg.EpochGCKeepPrevious)
 			},

@@ -194,3 +194,30 @@ func TestSelectChainDoesNotMergeSnapshotsFromDifferentEpochs(t *testing.T) {
 		t.Fatalf("watermark=%d, want 101", watermark)
 	}
 }
+
+func TestMarkerTruncatesFencedOldEpochTail(t *testing.T) {
+	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
+	old := ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 6, EndTxID: 7, CRC: 2}
+	late := ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 8, EndTxID: 9, CRC: 3}
+	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 8, EndTxID: 7}
+	newDelta := ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 8, EndTxID: 9, CRC: 4}
+	_, deltas, watermark, err := selectChain([]ltx.Header{snap, old, late, marker, newDelta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != 9 || len(deltas) != 2 {
+		t.Fatalf("watermark=%d deltas=%v, want 9 and the old prefix + new-epoch delta", watermark, deltas)
+	}
+	if deltas[0] != 1 || deltas[1] != 4 {
+		t.Fatalf("chose delta indices %v, want old prefix and new epoch delta", deltas)
+	}
+}
+
+func TestMarkerWithoutPredecessorPrefixFailsClosed(t *testing.T) {
+	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
+	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}
+	newDelta := ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 9, EndTxID: 9, CRC: 4}
+	if _, _, _, err := selectChain([]ltx.Header{snap, marker, newDelta}); err == nil {
+		t.Fatal("marker gap should fail closed")
+	}
+}

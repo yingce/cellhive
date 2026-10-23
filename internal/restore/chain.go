@@ -16,10 +16,34 @@ func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint6
 		epoch uint64
 		base  uint64
 	}
+	// Epoch markers truncate tails from older epochs. A marker says epoch e
+	// starts at StartTxID; any older epoch object ending above EndTxID is from
+	// a fenced writer and must not enter the new lineage (ADR-275).
+	cut := map[uint64]uint64{}
+	for _, h := range headers {
+		if h.Kind == ltx.KindMarker {
+			cut[h.Epoch] = h.EndTxID
+		}
+	}
+	var keep []int
+	for i, h := range headers {
+		truncated := false
+		for e, c := range cut {
+			if e > h.Epoch && h.EndTxID > c {
+				truncated = true
+				break
+			}
+		}
+		if !truncated {
+			keep = append(keep, i)
+		}
+	}
+
 	sets := map[setKey][]int{}
 	baseSeen := map[uint64]bool{}
 	var bases []uint64
-	for i, h := range headers {
+	for _, i := range keep {
+		h := headers[i]
 		if h.Kind != ltx.KindSnapshot {
 			continue
 		}
@@ -62,7 +86,8 @@ func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint6
 				return a < b
 			})
 			var tail []int
-			for i, h := range headers {
+			for _, i := range keep {
+				h := headers[i]
 				if h.Kind == ltx.KindDelta && h.EndTxID > base {
 					tail = append(tail, i)
 				}

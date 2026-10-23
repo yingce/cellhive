@@ -703,6 +703,18 @@ func (m *Manager) AppendBatch(ctx context.Context, s cell.Scope, epoch uint64, s
 	return key, etag, nil
 }
 
+// MarkEpoch durably records that epoch starts at cut+1. It is idempotent and
+// written before the new epoch's capture can serve (ADR-275).
+func (m *Manager) MarkEpoch(ctx context.Context, s cell.Scope, epoch, cut uint64) (string, error) {
+	h := ltx.Header{Kind: ltx.KindMarker, Epoch: epoch, StartTxID: cut + 1, EndTxID: cut}
+	seg := ltx.Encode(h, nil)
+	key := Prefix(s, epoch) + ltx.SegmentName(h)
+	if _, err := m.B.Put(ctx, key, seg); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
 // ListSegments returns the keys of all segments for a scope/epoch (cold path).
 func (m *Manager) ListSegments(ctx context.Context, s cell.Scope, epoch uint64) ([]string, error) {
 	keys, err := m.B.List(ctx, Prefix(s, epoch))
@@ -997,6 +1009,8 @@ func rank(h ltx.Header) int {
 	case ltx.KindSnapshot:
 		return 0
 	case ltx.KindLink:
+		return 1
+	case ltx.KindMarker:
 		return 1
 	default:
 		return 2

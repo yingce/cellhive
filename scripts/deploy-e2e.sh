@@ -239,11 +239,11 @@ sleep 0.2
 snap_after=$(ensure_mode snapshot)
 resume_after=$(ensure_mode resume)
 
-# The restarted epoch opened with a snapshot, so the GC pass may drop the old
-# epoch entirely. Give the 2s loop one interval to run.
+# The restarted epoch resumes the predecessor chain via a marker; it depends on
+# the old epoch until a background baseline exists, so the old objects remain.
 sleep 3
 old_epoch_objects=$(find "$CELLHIVE_BUCKET_DIR" -type f -path '*__control__*/ltx/e1/*' 2>/dev/null | wc -l)
-echo "  old control epoch e1 objects: $old_epoch_objects (want 0 after GC)"
+echo "  old control epoch e1 objects: $old_epoch_objects (marker epoch depends on predecessor)"
 
 echo "RESULT[$LABEL]"
 echo "  deploy v1 (fresh ns):  ${t1}s  proof_delta=$d1"
@@ -252,7 +252,7 @@ echo "  rollback v2->v1:       ${t3}s  proof_delta=$d3"
 echo "  invoke v2:             ${body2}"
 echo "  invoke after rollback: ${body1}"
 echo "  app.create audits:     $audits"
-echo "  deploy v3 (restart):   ${t4}s  proof_delta=$d4  ensure_snapshot=${snap_before}->${snap_after} ensure_resume=${resume_before}->${resume_after} (new epoch opens with snapshot)"
+echo "  deploy v3 (restart):   ${t4}s  proof_delta=$d4  ensure_snapshot=${snap_before}->${snap_after} ensure_resume=${resume_before}->${resume_after} (marker cross-epoch resume)"
 echo "  invoke v3:             ${body3}"
 echo "  active version:        $(active_ver)"
 
@@ -264,9 +264,9 @@ fail=0
 [[ $body2 == *v2* ]] || { echo "ASSERT: invoke after v2 = '$body2'" >&2; fail=1; }
 [[ $body1 == *v1* ]] || { echo "ASSERT: invoke after rollback = '$body1'" >&2; fail=1; }
 [[ $d4 == 1 ]] || { echo "ASSERT: deploy v3 proofs=$d4, want 1" >&2; fail=1; }
-[[ $snap_after -gt $snap_before ]] || { echo "ASSERT: new epoch did not snapshot ($snap_before -> $snap_after)" >&2; fail=1; }
-[[ $resume_after == "$resume_before" ]] || { echo "ASSERT: new epoch resumed instead of snapshotting (resume $resume_before -> $resume_after)" >&2; fail=1; }
+[[ $snap_after == "$snap_before" ]] || { echo "ASSERT: marker epoch unexpectedly snapshotted ($snap_before -> $snap_after)" >&2; fail=1; }
+[[ $resume_after -gt $resume_before ]] || { echo "ASSERT: marker epoch did not resume (resume $resume_before -> $resume_after)" >&2; fail=1; }
 [[ $body3 == *v3* ]] || { echo "ASSERT: invoke after restart = '$body3'" >&2; fail=1; }
-[[ $old_epoch_objects == 0 ]] || { echo "ASSERT: old epoch e1 not GC'd ($old_epoch_objects objects)" >&2; fail=1; }
+[[ $old_epoch_objects -gt 0 ]] || { echo "ASSERT: marker epoch lost its predecessor ($old_epoch_objects objects)" >&2; fail=1; }
 [[ $fail == 0 ]] || exit 1
 echo "DEPLOY-E2E: PASS"

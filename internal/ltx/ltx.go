@@ -28,6 +28,7 @@ const (
 	KindDelta    Kind = 0 // incremental transactions
 	KindSnapshot Kind = 1 // full database image
 	KindLink     Kind = 2 // snapshot -> delta link marker
+	KindMarker   Kind = 3 // epoch marker: this epoch starts at StartTxID, old tail above EndTxID is dead
 )
 
 // Snapshot paging flags. A snapshot larger than one segment's byte budget is
@@ -150,6 +151,8 @@ func SegmentName(h Header) string {
 		return fmt.Sprintf("%d.snapshot", h.EndTxID)
 	case KindLink:
 		return fmt.Sprintf("%d.link", h.StartTxID)
+	case KindMarker:
+		return fmt.Sprintf("%d.marker", h.StartTxID)
 	default:
 		return fmt.Sprintf("%d-%d.ltx", h.StartTxID, h.EndTxID)
 	}
