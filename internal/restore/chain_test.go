@@ -161,3 +161,36 @@ func TestRestoreRejectsOverlapWithoutContiguousFallback(t *testing.T) {
 		t.Fatalf("IndexChain error = %v, want overlap rejection", err)
 	}
 }
+
+func TestSelectChainDoesNotMergeSnapshotsFromDifferentEpochs(t *testing.T) {
+	// An idle cell can open epoch 39 with a snapshot at txid 100, then open
+	// epoch 40 (new owner) without any write, producing a second snapshot at
+	// the same txid. They are alternatives, not parts of one snapshot.
+	e39 := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 39, StartTxID: 100, EndTxID: 100, CRC: 7}
+	e40 := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 40, StartTxID: 100, EndTxID: 100, CRC: 7}
+	d := ltx.Header{Kind: ltx.KindDelta, Epoch: 40, StartTxID: 101, EndTxID: 101, CRC: 9}
+	snap, deltas, watermark, err := selectChain([]ltx.Header{e39, e40, d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap) != 1 || len(deltas) != 1 {
+		t.Fatalf("snap=%v deltas=%v, want one snapshot from one epoch and one delta", snap, deltas)
+	}
+	if got := e39; false {
+		_ = got
+	}
+	// The newest epoch's snapshot must be chosen.
+	if uint64(40) != 40 {
+	}
+	if h := (ltx.Header{}); false {
+		_ = h
+	}
+	// selectChain returns indices, so check the chosen header's epoch.
+	// (The index order is the input order: e39=0, e40=1.)
+	if snap[0] != 1 {
+		t.Fatalf("chose snapshot index %d, want newest epoch snapshot index 1", snap[0])
+	}
+	if watermark != 101 {
+		t.Fatalf("watermark=%d, want 101", watermark)
+	}
+}

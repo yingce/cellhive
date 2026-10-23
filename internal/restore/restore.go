@@ -5,6 +5,7 @@
 package restore
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,8 +193,15 @@ func mergeChain(segments [][]byte) (pageSize, commit uint32, epoch, watermark ui
 			return 0, 0, 0, 0, nil, fmt.Errorf("restore: snapshot part commit mismatch %d != %d", c, commit)
 		}
 		for _, p := range pages {
-			if _, dup := pageMap[p.PageNo]; dup {
-				return 0, 0, 0, 0, nil, fmt.Errorf("restore: snapshot has duplicate page %d", p.PageNo)
+			if existing, dup := pageMap[p.PageNo]; dup {
+				// Different epochs can legitimately snapshot the same txid while
+				// an idle cell changes owner. If the page bytes are identical this
+				// is the same database state; keep one copy. Different bytes mean
+				// the chain is genuinely ambiguous and must fail closed.
+				if !bytes.Equal(existing, p.Data) {
+					return 0, 0, 0, 0, nil, fmt.Errorf("restore: snapshot has conflicting duplicate page %d", p.PageNo)
+				}
+				continue
 			}
 			pageMap[p.PageNo] = p.Data
 		}
