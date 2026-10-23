@@ -184,3 +184,24 @@ func TestEncodeSnapshotPartRejectsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestBatchNameSnapshotPartsAreUnique(t *testing.T) {
+	h := Header{Kind: KindSnapshot, Epoch: 1, StartTxID: 40, EndTxID: 40}
+	a := h
+	a.Flags = SnapshotFlags(0)
+	b := h
+	b.Flags = SnapshotFlags(7)
+	c := h
+	c.Flags = SnapshotFlags(8)
+	d := h
+	d.Flags = SnapshotFlags(11)
+	n1, n2 := BatchName(a, b), BatchName(c, d)
+	if n1 == n2 {
+		t.Fatalf("snapshot batch names collide: %q", n1)
+	}
+	for _, n := range []string{n1, n2} {
+		if n == "40-40.batch" {
+			t.Fatalf("snapshot batch fell back to the colliding txid name: %q", n)
+		}
+	}
+}

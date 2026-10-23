@@ -14,7 +14,7 @@
   2. 新增 `cellhive_capture_ensure_seconds{ns}` 直方图与 `cellhive_capture_ensure_total{ns,mode}` 计数（mode=warm/resume/snapshot/plain/error），由 `capture.Manager.OnEnsure` 上报；proof 直方图继续只覆盖 `Wait`。
 - **补充（P2/P3，同日）**：
   1. **流式快照**：`cellstore.SnapshotStream/SnapshotStreamPages` + `ltx.EncodeSnapshotPart`，按 part 读取/编码/提交，内存 O(part)；`SnapshotMaxBytes`（`CELLHIVE_CAPTURE_SNAPSHOT_MAX`，默认 8GiB）超限返回 `ErrSnapshotTooLarge`，不开始读库。
-  2. **批量/并发提交**：`sqlcapture.BatchCommitter`；server 的 `CommitBatch` 在有 follower 时以 4 路并发 replicate，无 follower 时按 ≤32MiB 合并成少量对象走 `EnqueueBatchWait`；`SnapshotBatchParts=8`。
+  2. **批量/并发提交**：`sqlcapture.BatchCommitter`；server 的 `CommitBatch` 在有 follower 时以 4 路并发 replicate，无 follower 时按 ≤32MiB 合并成少量对象走 `EnqueueBatchWait`；`SnapshotBatchParts=8`。同一 watermark 的 snapshot part 批次名带 part 区间（`<txid>.p<first>-p<last>.batch`），避免多个 8MiB 组互相覆盖。
   3. **完成标记**：snapshot 先写 `<txid>.snapshot-started`、全部 part 成功后写 `.snapshot-done`；restore 跳过“started 但未 done”的部分快照，legacy 无标记快照仍视为完整。
   4. **跨 epoch 续链**：`replica.Epochs/DurableWatermarkChain/RestoreChain`；新 owner 的新 epoch 的 delta 继续上一 epoch 的 txid 链，`Hydrate` 用 `RestoreChain` 组合多个 epoch，避免每次重启因 epoch 变化重拍全库。
   5. **优雅停机 drain**：SIGTERM 后先等 HTTP quiesce，再 `captureMgr.Drain`（5s）并 Stop；`Drop` 也先 drain 再停；control schema 迁移改为不推进 txid，避免重启后本地恰好领先一个 txid。

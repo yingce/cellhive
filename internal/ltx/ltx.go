@@ -184,5 +184,12 @@ func Split(b []byte) ([][]byte, error) {
 
 // BatchName returns the object key suffix for a batch of segments.
 func BatchName(first, last Header) string {
+	// Snapshot parts share one watermark, so the plain txid range would collide
+	// for every 8MiB group of the same full-page image. Include the part span.
+	if first.Kind == KindSnapshot && last.Kind == KindSnapshot && first.EndTxID == last.EndTxID {
+		fp, _ := SnapshotPart(first)
+		lp, _ := SnapshotPart(last)
+		return fmt.Sprintf("%d.p%d-p%d.batch", first.EndTxID, fp, lp)
+	}
 	return fmt.Sprintf("%d-%d.batch", first.StartTxID, last.EndTxID)
 }
