@@ -15,7 +15,7 @@ e2e_cli resource create e2eb r2 BUCKET >/dev/null
 SHA=$(e2e_upload "$E2E_ROOT/scripts/e2e/fixtures/bindings.js")
 [[ -n "$SHA" && "$SHA" != "null" ]] || e2e_fail "bundle upload failed"
 cat >"$E2E_BASE/deploy.json" <<JSON
-{"namespace":"e2eb","worker":"worker","bundle_sha":"$SHA","bindings":[{"type":"kv","name":"KV","id":"KV"},{"type":"d1","name":"DB","id":"DB"},{"type":"r2","name":"BUCKET","id":"BUCKET"}]}
+{"namespace":"e2eb","worker":"worker","bundle_sha":"$SHA","bindings":[{"type":"kv","name":"KV","id":"KV"},{"type":"d1","name":"DB","id":"DB"},{"type":"r2","name":"R2A","id":"BUCKET"},{"type":"r2","name":"R2B","id":"BUCKET"}]}
 JSON
 OUT=$(e2e_deploy "$E2E_BASE/deploy.json")
 [[ "$(jq -r '.number // empty' <<<"$OUT")" = "1" ]] || e2e_fail "deploy: $OUT"

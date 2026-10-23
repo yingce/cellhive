@@ -214,6 +214,14 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 	if err := m.PutIndex(ctx, s, epoch, idx); err != nil {
 		return Result{}, err
 	}
+	// Re-check ownership right before publishing the new manifest: the initial
+	// Verify may have passed while a takeover was in progress, and a stale owner
+	// must not replace the manifest/GC a chain a new owner is restoring.
+	if opts.Verify != nil {
+		if err := opts.Verify(ctx); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := m.PutManifest(ctx, s, epoch, man2); err != nil {
 		return Result{}, err
 	}
@@ -222,6 +230,11 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 		Parts: len(parts), MinTxID: minTx, MaxTxID: maxTx, Commit: commit,
 	}
 	if opts.GC {
+		if opts.Verify != nil {
+			if err := opts.Verify(ctx); err != nil {
+				return res, err
+			}
+		}
 		keep := make(map[string]bool, len(man2.Objects))
 		for _, k := range man2.Objects {
 			keep[k] = true

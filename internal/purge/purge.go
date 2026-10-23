@@ -115,9 +115,6 @@ func (p *Purger) delete(ctx context.Context, targets []target) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			if len(items) == 0 {
-				break
-			}
 			for _, it := range items {
 				if tg.match != nil && !tg.match(it.Key) {
 					continue
@@ -133,6 +130,12 @@ func (p *Purger) delete(ctx context.Context, targets []target) (bool, error) {
 			if next == "" {
 				break
 			}
+			if next == after {
+				return false, fmt.Errorf("purge: cursor did not advance at %q", after)
+			}
+			// A provider authority page can collapse to zero logical items
+			// (tombstoned/duplicate windows) while a physical cursor remains.
+			// Only next=="" means the prefix is exhausted.
 			after = next
 		}
 	}

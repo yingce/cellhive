@@ -947,6 +947,13 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	if !decodeControl(w, r, &req) {
 		return
 	}
+	// Authorize the body namespace before validation. validateDeploy performs
+	// control reads for the *body* namespace (bindings, bundle, service ACL);
+	// running it first would let a credential scoped to the query namespace
+	// probe another namespace for existence.
+	if !s.authorizeNS(w, r, req.Namespace) {
+		return
+	}
 	if req.Assets != nil && req.Assets.Binding != "" {
 		found := false
 		for _, b := range req.Bindings {
@@ -965,9 +972,6 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			"error":    "deploy_rejected",
 			"findings": res.Errors,
 		})
-		return
-	}
-	if !s.authorizeNS(w, r, req.Namespace) {
 		return
 	}
 	if err := s.checkDeployBudgets(r.Context(), req, bundleSize); err != nil {

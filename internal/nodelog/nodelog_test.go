@@ -113,3 +113,14 @@ func TestNodesListsDistinctNodesSorted(t *testing.T) {
 		t.Fatalf("nodes = %v; want [node-a node-b]", got)
 	}
 }
+
+func TestListNodeFailsClosedOnCorruptRecord(t *testing.T) {
+	ctx := context.Background()
+	m := newMgr(t)
+	if _, err := m.B.Put(ctx, Key("node-1", "bad"), []byte("{")); err != nil {
+		t.Fatalf("seed corrupt record: %v", err)
+	}
+	if _, err := m.ListNode(ctx, "node-1"); err == nil {
+		t.Fatal("ListNode accepted a corrupt recovery record; recovery would skip it")
+	}
+}

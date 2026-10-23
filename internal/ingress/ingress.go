@@ -330,6 +330,30 @@ var errHeadTooLarge = errors.New("request head too large")
 // readHead reads request line + headers (through the terminating blank line)
 // and returns the bytes plus the effective Host. Body bytes remain buffered in
 // br and are spliced afterwards.
+// readLineLimited reads through the next newline while keeping the accumulated
+// line at or below remaining bytes. bufio.Reader.ReadSlice returns ErrBufferFull
+// with a bounded fragment instead of growing an unbounded slice.
+func readLineLimited(br *bufio.Reader, remaining int) ([]byte, error) {
+	if remaining <= 0 {
+		return nil, errHeadTooLarge
+	}
+	var line []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		if len(line)+len(frag) > remaining {
+			return nil, errHeadTooLarge
+		}
+		line = append(line, frag...)
+		if err == nil {
+			return line, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
+}
+
 func readHead(br *bufio.Reader, conn net.Conn) ([]byte, string, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(headerTTL))
 	defer conn.SetReadDeadline(time.Time{})
@@ -337,12 +361,15 @@ func readHead(br *bufio.Reader, conn net.Conn) ([]byte, string, error) {
 	var host string
 	contentSeen := 0
 	for {
-		line, err := br.ReadBytes('\n')
-		head = append(head, line...)
-		contentSeen += len(line)
-		if contentSeen > maxHeadBytes {
+		// ReadBytes would accumulate an entire newline-free line before the
+		// maxHeadBytes check, so a single huge header could exhaust memory.
+		// ReadSlice returns bounded fragments from the bufio buffer instead.
+		line, err := readLineLimited(br, maxHeadBytes-contentSeen)
+		if errors.Is(err, errHeadTooLarge) {
 			return nil, "", errHeadTooLarge
 		}
+		head = append(head, line...)
+		contentSeen += len(line)
 		if err != nil {
 			if len(head) == 0 && errors.Is(err, io.EOF) {
 				return nil, "", err

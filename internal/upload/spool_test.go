@@ -221,6 +221,12 @@ func TestSpoolRoundTrip(t *testing.T) {
 	if entries, err = sp.Load(); err != nil || len(entries) != 2 {
 		t.Fatalf("load with corrupt file = %d entries, %v", len(entries), err)
 	}
+	if sp.Corrupt() != 1 {
+		t.Fatalf("corrupt counter = %d, want 1", sp.Corrupt())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "00000000000000000099.spool.corrupt")); err != nil {
+		t.Fatalf("corrupt entry was not quarantined: %v", err)
+	}
 	if err := sp.Remove(id1); err != nil {
 		t.Fatal(err)
 	}

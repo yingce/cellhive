@@ -180,12 +180,18 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 	for _, k := range keys {
 		data, _, err := m.B.Get(ctx, k)
 		if err != nil {
-			continue
+			if errors.Is(err, bucket.ErrNotFound) {
+				continue
+			}
+			// Recovery must fail closed: treating an unreadable session as absent
+			// would skip the only copy of follower-acked segments.
+			return nil, fmt.Errorf("nodelog: read %s: %w", k, err)
 		}
 		var r Record
-		if json.Unmarshal(data, &r) == nil {
-			out = append(out, r)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return nil, fmt.Errorf("nodelog: decode %s: %w", k, err)
 		}
+		out = append(out, r)
 	}
 	return out, nil
 }

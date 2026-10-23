@@ -47,6 +47,7 @@ type Spool struct {
 	dirSyncs     atomic.Int64
 	syncMicros   atomic.Int64
 	renameMicros atomic.Int64
+	corrupt      atomic.Int64
 }
 
 // Stats reports spool durability telemetry (fsync counts and microseconds).
@@ -56,7 +57,37 @@ func (s *Spool) Stats() map[string]int64 {
 		"dir_syncs":  s.dirSyncs.Load(),
 		"sync_us":    s.syncMicros.Load(),
 		"rename_us":  s.renameMicros.Load(),
+		"corrupt":    s.corrupt.Load(),
 	}
+}
+
+// Corrupt reports how many undecodable entries have been quarantined.
+func (s *Spool) Corrupt() uint64 { return uint64(s.corrupt.Load()) }
+
+// quarantine renames an undecodable entry out of the live .spool namespace so
+// it stops counting against the queue cap and is visible to operators. The
+// rename is best effort: a failure still leaves the corrupt counter set.
+func (s *Spool) quarantine(name string) {
+	src := filepath.Join(s.dir, name)
+	dst := src + ".corrupt"
+	if err := os.Rename(src, dst); err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// The corrupt file may or may not have been present/counted at OpenSpool
+	// time, so recount the live .spool namespace instead of guessing.
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return
+	}
+	n := 0
+	for _, e := range entries {
+		if _, ok := parseSpoolID(e.Name()); ok {
+			n++
+		}
+	}
+	s.n = n
 }
 
 // syncDir fsyncs a directory so a rename/creation inside it is durable.
@@ -187,7 +218,8 @@ func (s *Spool) Remove(id uint64) error {
 }
 
 // Load returns pending entries oldest first. Unreadable/corrupt entries are
-// skipped (and reported) so one bad file cannot wedge the queue.
+// counted and corrupt entries are quarantined (renamed to *.corrupt) so one bad
+// file cannot permanently wedge the queue or hide in the entry cap.
 func (s *Spool) Load() ([]SpoolEntry, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -201,10 +233,13 @@ func (s *Spool) Load() ([]SpoolEntry, error) {
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
 		if err != nil {
+			s.corrupt.Add(1)
 			continue
 		}
 		ent, err := decodeSpoolEntry(data)
 		if err != nil {
+			s.corrupt.Add(1)
+			s.quarantine(e.Name())
 			continue
 		}
 		ent.ID = id

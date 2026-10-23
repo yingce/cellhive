@@ -31,7 +31,13 @@ type hostEntry struct {
 	view    control.HostView
 	found   bool
 	expires time.Time
+	err     error
 }
+
+// maxCachedHosts bounds the per-request host cache. The Host header is
+// attacker-controlled (especially on the public loader), so an unbounded map
+// would be a remote memory-exhaustion primitive.
+const maxCachedHosts = 10000
 
 func NewRouter(cellURL, internalToken, dispatchToken string) *Router {
 	return &Router{cellURL: strings.TrimRight(cellURL, "/"), internalToken: internalToken, dispatchToken: dispatchToken, client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 64}}, hosts: map[string]hostEntry{}, inflight: map[string]chan struct{}{}}
@@ -45,6 +51,9 @@ func reject(code int, text string) error { return &workerdpool.HTTPError{Status:
 
 func (r *Router) Public(req *http.Request) (workerdpool.Route, error) {
 	host := control.NormalizeHost(req.Host)
+	if len(host) > 253 {
+		return workerdpool.Route{}, reject(400, "host too long")
+	}
 	view, found, err := r.hostView(req, host)
 	if err != nil {
 		return workerdpool.Route{}, err
@@ -59,7 +68,7 @@ func (r *Router) hostView(req *http.Request, host string) (control.HostView, boo
 	r.mu.Lock()
 	if e, ok := r.hosts[host]; ok && now.Before(e.expires) {
 		r.mu.Unlock()
-		return e.view, e.found, nil
+		return e.view, e.found, e.err
 	}
 	if wait, ok := r.inflight[host]; ok {
 		r.mu.Unlock()
@@ -72,7 +81,7 @@ func (r *Router) hostView(req *http.Request, host string) (control.HostView, boo
 		e, ok := r.hosts[host]
 		r.mu.Unlock()
 		if ok && time.Now().Before(e.expires) {
-			return e.view, e.found, nil
+			return e.view, e.found, e.err
 		}
 	}
 	if now.Sub(r.lookupAt) >= time.Second {
@@ -90,14 +99,39 @@ func (r *Router) hostView(req *http.Request, host string) (control.HostView, boo
 	view, found, err := r.fetchHost(req, host)
 	r.mu.Lock()
 	delete(r.inflight, host)
-	ttl := 10 * time.Second
 	if err != nil {
-		ttl = time.Second
+		// Cache the failure briefly so a control-plane outage does not turn
+		// every request into an upstream call; waiters receive the error, not a
+		// fabricated 404.
+		r.storeLocked(host, hostEntry{err: err, expires: time.Now().Add(time.Second)})
+	} else {
+		r.storeLocked(host, hostEntry{view: view, found: found, expires: time.Now().Add(10 * time.Second)})
 	}
-	r.hosts[host] = hostEntry{view: view, found: found, expires: time.Now().Add(ttl)}
 	close(ch)
 	r.mu.Unlock()
 	return view, found, err
+}
+
+// storeLocked inserts a host entry and evicts expired/oldest entries when the
+// cache is full. Caller holds r.mu.
+func (r *Router) storeLocked(host string, e hostEntry) {
+	if _, ok := r.hosts[host]; !ok && len(r.hosts) >= maxCachedHosts {
+		now := time.Now()
+		oldest := ""
+		for k, v := range r.hosts {
+			if !now.Before(v.expires) {
+				delete(r.hosts, k)
+				continue
+			}
+			if oldest == "" || v.expires.Before(r.hosts[oldest].expires) {
+				oldest = k
+			}
+		}
+		if len(r.hosts) >= maxCachedHosts && oldest != "" {
+			delete(r.hosts, oldest)
+		}
+	}
+	r.hosts[host] = e
 }
 func (r *Router) fetchHost(req *http.Request, host string) (control.HostView, bool, error) {
 	lookup, err := http.NewRequestWithContext(req.Context(), "GET", r.cellURL+"/v1/control/host?host="+url.QueryEscape(host), nil)

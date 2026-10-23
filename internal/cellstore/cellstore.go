@@ -1432,6 +1432,24 @@ func (c *Cell) Snapshot(ctx context.Context, dest string) error {
 // WALPath returns the path of the write-ahead log file.
 func (c *Cell) WALPath() string { return c.Path + "-wal" }
 
+// SnapshotConsistent checkpoints and reads a full-page image while holding the
+// cell write mutex. Without the lock a transaction could commit between the
+// checkpoint and the txid read: its txid would be claimed by the snapshot
+// watermark while its pages are still only in the fresh WAL, releasing an ack
+// with no durable proof. SnapshotPages alone is only safe for a quiesced cell.
+func (c *Cell) SnapshotConsistent(ctx context.Context) (uint64, uint32, uint32, map[uint32][]byte, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.CheckpointTruncate(ctx); err != nil {
+		return 0, 0, 0, nil, err
+	}
+	if err := c.loadTxID(ctx); err != nil {
+		return 0, 0, 0, nil, err
+	}
+	pageSize, commit, pages, err := c.SnapshotPages(ctx)
+	return c.txid, pageSize, commit, pages, err
+}
+
 // SnapshotPages reads the database file as a full-page image
 // (pageSize, commit, pages). It is the source for a KindSnapshot segment.
 //

@@ -56,6 +56,11 @@ type functionState struct {
 	hot, cold int
 }
 
+// maxFunctionStates bounds the per-function promotion state. Keys include the
+// immutable version and bundle SHA, so a long-lived runtime would otherwise
+// leak one entry for every deploy it has ever seen.
+const maxFunctionStates = 4096
+
 type Pool struct {
 	Config           Config
 	MemoryLimitBytes int64
@@ -285,6 +290,20 @@ func (p *Pool) ObserveFunction(key FunctionKey, hot bool) Mode {
 	p.init()
 	s := p.states[key]
 	if s == nil {
+		if len(p.states) >= maxFunctionStates {
+			for k, old := range p.states {
+				if old.mode == Shared {
+					delete(p.states, k)
+					break
+				}
+			}
+			if len(p.states) >= maxFunctionStates {
+				for k := range p.states {
+					delete(p.states, k)
+					break
+				}
+			}
+		}
 		s = &functionState{}
 		p.states[key] = s
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -310,5 +311,17 @@ func TestDOProxyDialFailureFailsOver(t *testing.T) {
 	}
 	if goodHits.Load() != 1 {
 		t.Fatalf("good runtime hits = %d, want 1", goodHits.Load())
+	}
+}
+
+func TestDOProxyRejectsBodyNamespaceOutsideToken(t *testing.T) {
+	srv := New(Deps{Cfg: config.Config{DoRuntimes: []string{"http://127.0.0.1:1"}}})
+	body, _ := json.Marshal(doInvokeReq{Namespace: "victim", Worker: "web", Class: "Room", ID: "x", BundleSHA: "sha"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), ctxScopeNS, "acme"))
+	rr := httptest.NewRecorder()
+	srv.handleDOProxy(rr, req)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "scope_namespace_mismatch") {
+		t.Fatalf("foreign namespace = %d %s, want 403 scope_namespace_mismatch", rr.Code, rr.Body.String())
 	}
 }

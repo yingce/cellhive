@@ -494,6 +494,12 @@ func (s *Server) handleVectorizeMetadataIndexes(w http.ResponseWriter, r *http.R
 		if !s.authorizeNS(w, r, ns) {
 			return
 		}
+		// Metadata indexes live in the index's vectorize cell. Admin traffic is
+		// load-balanced across replicas, so a non-owner must forward: a local
+		// read would be stale/empty and a local write would fork the cell.
+		if s.forwardRead(w, r, vectorize.Scope(ns, index), nil) {
+			return
+		}
 		mi, err := s.Vectorize.ListMetadataIndexes(r.Context(), ns, index)
 		if err != nil {
 			s.vectorizeErr(w, err)
@@ -514,12 +520,17 @@ func (s *Server) handleVectorizeMetadataIndexes(w http.ResponseWriter, r *http.R
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
-	var err error
-	if r.Method == http.MethodDelete {
-		err = s.Vectorize.DeleteMetadataIndex(r.Context(), ns, index, req.Property)
-	} else {
-		err = s.Vectorize.CreateMetadataIndex(r.Context(), ns, index, req.Property, req.Type)
+	sc := vectorize.Scope(ns, index)
+	if s.forwardOrClaim(w, r, sc, nil) {
+		return
 	}
+	var err error
+	err = s.capturedWrite(r.Context(), sc, func() error {
+		if r.Method == http.MethodDelete {
+			return s.Vectorize.DeleteMetadataIndex(r.Context(), ns, index, req.Property)
+		}
+		return s.Vectorize.CreateMetadataIndex(r.Context(), ns, index, req.Property, req.Type)
+	})
 	if err != nil {
 		s.vectorizeErr(w, err)
 		return

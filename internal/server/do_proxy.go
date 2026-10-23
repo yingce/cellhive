@@ -59,6 +59,17 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "namespace, worker, class and id are required")
 		return
 	}
+	// The scoped token on /v1/do/invoke is bound to a namespace and binding
+	// name. The JSON body is supplied by the caller (and by the tenant facade),
+	// so it must never override the namespace the token was issued for; without
+	// this check a valid do token could execute a bundle with another
+	// namespace/worker's binding spec. The direct handler tests call this
+	// function without scopeAuth, so only enforce when a claim is present.
+	if want := s.scopeNS(r); want != "" && req.Namespace != want {
+		writeErr(w, http.StatusForbidden, "scope_namespace_mismatch",
+			"request namespace does not match the scoped token")
+		return
+	}
 	if len(req.RPC) > 0 {
 		if req.Request != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", "request and rpc are mutually exclusive")

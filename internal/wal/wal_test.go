@@ -2,7 +2,10 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"cellhive/internal/cell"
@@ -154,5 +157,82 @@ func TestCursorDetectsCheckpoint(t *testing.T) {
 	}
 	if !res.Checkpoint {
 		t.Fatalf("checkpoint not detected (salt/truncation)")
+	}
+}
+
+func TestReadRejectsCorruptCommitFrame(t *testing.T) {
+	c, ctx := openCell(t)
+	if err := c.Put(ctx, "k", []byte("v"), nil); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	data, err := os.ReadFile(c.WALPath())
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	h, err := parseHeader(data[:walHeaderSize])
+	if err != nil {
+		t.Fatalf("header: %v", err)
+	}
+	frameSize := int(frameHdrSize) + int(h.PageSize)
+	total := (len(data) - walHeaderSize) / frameSize
+	if total == 0 {
+		t.Fatal("no frames written")
+	}
+	// Flip every page byte of the last frame while leaving its pgno/dbsize and
+	// stored checksum untouched. A checksum-validating reader must reject it.
+	off := walHeaderSize + (total-1)*frameSize + frameHdrSize
+	for i := off; i < off+int(h.PageSize); i++ {
+		data[i] ^= 0xff
+	}
+	path := filepath.Join(t.TempDir(), "torn-wal")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(path); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Read(corrupt) error = %v, want ErrChecksum", err)
+	}
+}
+
+func TestCursorReopensReplacedWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := cellstore.New(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	sc := cell.Scope{Namespace: "n", Class: "__kv__", ID: "reopen"}
+	c, err := store.Open(context.Background(), sc)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := c.Put(context.Background(), "a", []byte("1"), nil); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	cur := NewCursor()
+	if _, err := cur.Poll(c.WALPath()); err != nil {
+		t.Fatalf("baseline poll: %v", err)
+	}
+	walPath := c.WALPath()
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Simulate SQLite unlinking the WAL on last-connection close, then a new
+	// process recreating the same path.
+	_ = os.Remove(walPath)
+	c2, err := store.Open(context.Background(), sc)
+	if err != nil {
+		t.Fatalf("reopen cell: %v", err)
+	}
+	defer c2.Close()
+	for i := 0; i < 3; i++ {
+		if err := c2.Put(context.Background(), fmt.Sprintf("b%d", i), []byte("2"), nil); err != nil {
+			t.Fatalf("put after reopen: %v", err)
+		}
+	}
+	res, err := cur.Poll(c2.WALPath())
+	if err != nil {
+		t.Fatalf("poll replaced WAL: %v", err)
+	}
+	if len(res.Transactions) == 0 {
+		t.Fatal("cursor stayed on the unlinked inode: no transactions after WAL replacement")
 	}
 }

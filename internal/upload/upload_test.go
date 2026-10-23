@@ -193,3 +193,48 @@ func TestBatcherShardsOverlap(t *testing.T) {
 		t.Fatalf("received %d segments, want %d", len(sink.order), per*len(scopes))
 	}
 }
+
+func TestFlushDrainsAsyncSpool(t *testing.T) {
+	sink := &flakySink{}
+	sp, err := OpenSpool(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := New(sink, nil, 64, 1<<20, time.Hour)
+	b.SetSpool(sp)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "flush"}
+	b.Enqueue(context.Background(), sc, 1, []byte("seg"))
+	if err := b.Flush(context.Background()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if _, segs, _ := sink.snapshot(); segs != 1 {
+		t.Fatalf("segs uploaded = %d, want 1", segs)
+	}
+	if sp.Count() != 0 {
+		t.Fatalf("spool count = %d, want 0", sp.Count())
+	}
+}
+
+func TestFlushReportsUnprovenSpool(t *testing.T) {
+	sink := &flakySink{fail: true}
+	sp, err := OpenSpool(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := New(sink, nil, 64, 1<<20, time.Hour)
+	b.SetSpool(sp)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "flush-fail"}
+	b.Enqueue(context.Background(), sc, 1, []byte("seg"))
+	if err := b.Flush(context.Background()); err == nil {
+		t.Fatal("Flush succeeded with an unproven spool")
+	}
+	if sp.Count() == 0 {
+		t.Fatal("failed flush must retain the spool entry for recovery")
+	}
+}

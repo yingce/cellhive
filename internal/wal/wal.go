@@ -26,6 +26,10 @@ const (
 // ErrNoWAL indicates the WAL file is absent or too small to contain a header.
 var ErrNoWAL = errors.New("wal: no wal file")
 
+// ErrChecksum indicates that the WAL header or a frame failed SQLite's
+// checksum. Capture must not turn a torn/invalid frame into committed data.
+var ErrChecksum = errors.New("wal: checksum mismatch")
+
 // Header is the 32-byte WAL header.
 type Header struct {
 	Magic         uint32
@@ -84,6 +88,36 @@ func parseHeader(b []byte) (Header, error) {
 	return h, nil
 }
 
+// checksumBytes ports SQLite's walChecksumBytes. big selects the checksum
+// word byte order, which is encoded in the low bit of the WAL magic.
+func checksumBytes(b []byte, s1, s2 uint32, big bool) (uint32, uint32) {
+	for len(b) >= 8 {
+		var x, y uint32
+		if big {
+			x = binary.BigEndian.Uint32(b[0:4])
+			y = binary.BigEndian.Uint32(b[4:8])
+		} else {
+			x = binary.LittleEndian.Uint32(b[0:4])
+			y = binary.LittleEndian.Uint32(b[4:8])
+		}
+		s1 += x + s2
+		s2 += y + s1
+		b = b[8:]
+	}
+	return s1, s2
+}
+
+func checksumBig(h Header) bool { return h.Magic&1 == 1 }
+
+func headerChecksum(raw []byte, h Header) (uint32, uint32) {
+	return checksumBytes(raw[:walHeaderSize-8], 0, 0, checksumBig(h))
+}
+
+func frameChecksum(fh, page []byte, s1, s2 uint32, big bool) (uint32, uint32) {
+	s1, s2 = checksumBytes(fh[:8], s1, s2, big)
+	return checksumBytes(page, s1, s2, big)
+}
+
 // Read parses a WAL file and returns its committed frames.
 func Read(path string) (*Snapshot, error) {
 	data, err := os.ReadFile(path)
@@ -100,6 +134,11 @@ func Read(path string) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	big := checksumBig(h)
+	s1, s2 := headerChecksum(data[:walHeaderSize], h)
+	if s1 != h.Checksum1 || s2 != h.Checksum2 {
+		return nil, fmt.Errorf("%w: header", ErrChecksum)
+	}
 	frameSize := int(frameHdrSize) + int(h.PageSize)
 	if len(data) < walHeaderSize+frameSize {
 		return &Snapshot{Header: h}, nil
@@ -108,21 +147,27 @@ func Read(path string) (*Snapshot, error) {
 	frames := make([]Frame, 0, total)
 	lastCommit := -1
 	commits := 0
+	var badErr error
 	for i := 0; i < total; i++ {
 		off := walHeaderSize + i*frameSize
 		fh := data[off : off+frameHdrSize]
-		f := Frame{
-			PageNo: binary.BigEndian.Uint32(fh[0:4]),
-			DBSize: binary.BigEndian.Uint32(fh[4:8]),
-		}
 		salt1 := binary.BigEndian.Uint32(fh[8:12])
 		salt2 := binary.BigEndian.Uint32(fh[12:16])
 		if salt1 != h.Salt1 || salt2 != h.Salt2 {
 			break // frame belongs to a different (stale) WAL generation
 		}
-		page := make([]byte, h.PageSize)
-		copy(page, data[off+frameHdrSize:off+frameHdrSize+int(h.PageSize)])
-		f.Data = page
+		page := data[off+frameHdrSize : off+frameHdrSize+int(h.PageSize)]
+		ns1, ns2 := frameChecksum(fh, page, s1, s2, big)
+		if ns1 != binary.BigEndian.Uint32(fh[16:20]) || ns2 != binary.BigEndian.Uint32(fh[20:24]) {
+			badErr = fmt.Errorf("%w: frame %d", ErrChecksum, i)
+			break
+		}
+		s1, s2 = ns1, ns2
+		f := Frame{
+			PageNo: binary.BigEndian.Uint32(fh[0:4]),
+			DBSize: binary.BigEndian.Uint32(fh[4:8]),
+			Data:   append([]byte(nil), page...),
+		}
 		if f.DBSize != 0 {
 			lastCommit = i
 			commits++
@@ -130,13 +175,14 @@ func Read(path string) (*Snapshot, error) {
 		frames = append(frames, f)
 	}
 	if lastCommit < 0 {
-		return &Snapshot{Header: h, TotalFrames: total}, nil
+		return &Snapshot{Header: h, TotalFrames: total}, badErr
 	}
 	committed := frames[:lastCommit+1]
 	for i := range committed {
 		committed[i].Committed = true
 	}
-	return &Snapshot{Header: h, Frames: committed, CommitCount: commits, TotalFrames: total}, nil
+	snap := &Snapshot{Header: h, Frames: committed, CommitCount: commits, TotalFrames: total}
+	return snap, badErr
 }
 
 // PollResult is returned by Cursor.Poll.
@@ -149,9 +195,15 @@ type PollResult struct {
 
 // Cursor tracks (salt, frame) across polls and detects checkpoints.
 type Cursor struct {
-	haveSalt  bool
-	salt1     uint32
-	salt2     uint32
+	haveSalt bool
+	salt1    uint32
+	salt2    uint32
+	// cksum1/2 is the rolling SQLite checksum of the last consumed frame
+	// (initialized from the WAL header). It is only advanced through frames
+	// whose checksum has been verified.
+	cksum1    uint32
+	cksum2    uint32
+	haveCksum bool
 	frameIdx  int // complete frames already consumed
 	file      *os.File
 	path      string
@@ -164,7 +216,9 @@ func NewCursor() *Cursor { return &Cursor{} }
 func (c *Cursor) reset() {
 	c.frameIdx = 0
 	c.salt1, c.salt2 = 0, 0
+	c.cksum1, c.cksum2 = 0, 0
 	c.haveSalt = false
+	c.haveCksum = false
 }
 
 // Reset drops the held file and clears cursor state so the next Poll starts a
@@ -191,7 +245,15 @@ func (c *Cursor) Close() error {
 
 func (c *Cursor) open(path string) error {
 	if c.file != nil && c.path == path {
-		return nil
+		// SQLite may unlink and recreate the WAL on last-connection close. A
+		// cached fd then points at the deleted inode and Poll would silently
+		// see no transactions forever. Reopen whenever the path now names a
+		// different file.
+		cur, cerr := c.file.Stat()
+		now, serr := os.Stat(path)
+		if cerr == nil && serr == nil && os.SameFile(cur, now) {
+			return nil
+		}
 	}
 	_ = c.Close()
 	f, err := os.Open(path)
@@ -247,6 +309,11 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 	if err != nil {
 		return PollResult{}, err
 	}
+	big := checksumBig(h)
+	hs1, hs2 := headerChecksum(headerBytes[:], h)
+	if hs1 != h.Checksum1 || hs2 != h.Checksum2 {
+		return PollResult{Header: h}, fmt.Errorf("%w: header", ErrChecksum)
+	}
 
 	res := PollResult{Header: h}
 	// Checkpoint detection: salt rotated, or file shrank below our cursor.
@@ -256,10 +323,16 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 		c.frameIdx = 0
 		c.haveSalt = true
 		c.salt1, c.salt2 = h.Salt1, h.Salt2
+		c.cksum1, c.cksum2 = hs1, hs2
+		c.haveCksum = true
 		res.Checkpoint = true
 	} else {
 		c.haveSalt = true
 		c.salt1, c.salt2 = h.Salt1, h.Salt2
+		if !c.haveCksum {
+			c.cksum1, c.cksum2 = hs1, hs2
+			c.haveCksum = true
+		}
 	}
 
 	total := int((info.Size() - walHeaderSize) / int64(frameSize))
@@ -278,19 +351,32 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 	}
 	newFrames := make([]Frame, 0, count)
 	lastCommit := -1
+	s1, s2 := c.cksum1, c.cksum2
+	lastS1, lastS2 := s1, s2
+	bad := false
 	for i := 0; i < count; i++ {
 		off := i * frameSize
 		fh := tail[off : off+frameHdrSize]
 		if binary.BigEndian.Uint32(fh[8:12]) != h.Salt1 || binary.BigEndian.Uint32(fh[12:16]) != h.Salt2 {
 			break
 		}
+		page := tail[off+frameHdrSize : off+frameHdrSize+int(h.PageSize)]
+		ns1, ns2 := frameChecksum(fh, page, s1, s2, big)
+		if ns1 != binary.BigEndian.Uint32(fh[16:20]) || ns2 != binary.BigEndian.Uint32(fh[20:24]) {
+			// A torn/invalid frame must not be accepted as a commit. Stop
+			// before it; the next Poll retries once SQLite finishes the write.
+			bad = true
+			break
+		}
+		s1, s2 = ns1, ns2
 		f := Frame{
 			PageNo: binary.BigEndian.Uint32(fh[0:4]),
 			DBSize: binary.BigEndian.Uint32(fh[4:8]),
 		}
-		f.Data = tail[off+frameHdrSize : off+frameHdrSize+int(h.PageSize)]
+		f.Data = append([]byte(nil), page...)
 		if f.DBSize != 0 {
 			lastCommit = len(newFrames)
+			lastS1, lastS2 = s1, s2
 		}
 		newFrames = append(newFrames, f)
 	}
@@ -310,6 +396,10 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 			start = i + 1
 		}
 		c.frameIdx += lastCommit + 1
+		c.cksum1, c.cksum2 = lastS1, lastS2
+	}
+	if bad && lastCommit < 0 {
+		return res, fmt.Errorf("%w: frame %d", ErrChecksum, c.frameIdx)
 	}
 	return res, nil
 }
