@@ -201,11 +201,14 @@ func runSeed(seed int64, steps int, scopes []cell.Scope) error {
 			o, err := n.mgr.Claim(ctx, sc, now)
 			if err == nil {
 				prev, had := cur[key]
-				// Safety: a claim only wins after the prior lease expired.
-				if had && prev.exp > now.UnixMilli() {
+				// Safety: a different owner may only win after the prior lease
+				// expired. Re-entering the same node+session keeps the epoch by
+				// design (ADR-273), even if this process's clock says the old
+				// expiry passed.
+				if had && prev.node != o.Node && prev.exp > now.UnixMilli() {
 					return fmt.Errorf("claimed a live lease: prev exp=%d now=%d", prev.exp, now.UnixMilli())
 				}
-				if o.Epoch <= lastEpoch[key] && lastEpoch[key] != 0 {
+				if o.Epoch < lastEpoch[key] && lastEpoch[key] != 0 {
 					return fmt.Errorf("epoch regressed: got %d last %d", o.Epoch, lastEpoch[key])
 				}
 				lastEpoch[key] = o.Epoch

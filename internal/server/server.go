@@ -911,6 +911,22 @@ type resolveResp struct {
 	Expired bool        `json:"expired"`
 }
 
+// ownerLive is the ADR-273 liveness check. Legacy/DO records still use Expiry.
+func (s *Server) ownerLive(ctx context.Context, o cell.Owner, now time.Time) bool {
+	if s.Owner == nil {
+		return !o.Expired(now)
+	}
+	live, err := s.Owner.Live(ctx, o, now)
+	return err == nil && live
+}
+
+// ackAllowed is the ADR-273 self-fence: a node that cannot prove its node
+// lease is fresh must not acknowledge writes, even if the owner record still
+// names it. Capture-loop commits take the same check.
+func (s *Server) ackAllowed(now time.Time) bool {
+	return s.Lease == nil || s.Lease.Healthy(now)
+}
+
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	sc, err := cell.ParseScope(r.URL.Query().Get("scope"))
 	if err != nil {
@@ -926,7 +942,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "resolve_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, resolveResp{Owned: true, Owner: &o, Etag: e, Expired: o.Expired(time.Now())})
+	writeJSON(w, http.StatusOK, resolveResp{Owned: true, Owner: &o, Etag: e, Expired: !s.ownerLive(r.Context(), o, time.Now())})
 }
 
 type scopeReq struct {
@@ -1064,7 +1080,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 	now := time.Now()
 	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
 	switch {
-	case err == nil && !o.Expired(now):
+	case err == nil && s.ownerLive(r.Context(), o, now):
 		if o.Node == s.Cfg.NodeID {
 			if o.Session == s.Owner.Session {
 				return false
@@ -1072,6 +1088,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
 			return true
 		}
+		s.Owner.Forget(sc, 0)
 		return s.forwardNonOwner(w, r, sc, preRead, admin)
 	case err == nil || errors.Is(err, owner.ErrUnowned):
 		// Unowned or lease expired: claim it and proceed, unless this node is
@@ -1103,10 +1120,10 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 			// Lost the claim race: re-resolve. A concurrent request on this same
 			// node may have won, in which case this request can proceed locally.
 			if o2, _, rerr := s.Owner.ResolveCached(r.Context(), sc, 0); rerr == nil {
-				if o2.Node == s.Cfg.NodeID && o2.Session == s.Owner.Session && !o2.Expired(time.Now()) {
+				if o2.Node == s.Cfg.NodeID && o2.Session == s.Owner.Session && s.ownerLive(r.Context(), o2, time.Now()) {
 					return false
 				}
-				if o2.Node != s.Cfg.NodeID && !o2.Expired(time.Now()) && o2.Address != "" {
+				if o2.Node != s.Cfg.NodeID && s.ownerLive(r.Context(), o2, time.Now()) && o2.Address != "" {
 					return s.forwardNonOwner(w, r, sc, preRead, admin)
 				}
 			}
@@ -1150,7 +1167,8 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) {
 		if o.Node == s.Cfg.NodeID {
 			return // ours (a clean same-node reload): keep the local copy
 		}
-		if !o.Expired(time.Now()) && o.Address != "" {
+		s.Owner.Forget(sc, 0)
+		if s.ownerLive(ctx, o, time.Now()) && o.Address != "" {
 			return // a live peer owns it: the request forwards, local is unused
 		}
 	}
@@ -1190,7 +1208,7 @@ func (s *Server) gateScope(ctx context.Context, kind, ns, name string, q url.Val
 func (s *Server) refreshOwner(r *http.Request, sc cell.Scope) (ownerclient.Hint, bool) {
 	s.Owner.Invalidate(sc)
 	o, _, err := s.Owner.ResolveCached(r.Context(), sc, 0)
-	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || o.Expired(time.Now()) {
+	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || !s.ownerLive(r.Context(), o, time.Now()) {
 		return ownerclient.Hint{}, false
 	}
 	return ownerclient.Hint{Address: o.Address}, true
@@ -1227,7 +1245,7 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 		return nil, false, nil
 	}
 	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
-	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || o.Expired(time.Now()) {
+	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || !s.ownerLive(r.Context(), o, time.Now()) {
 		return nil, false, nil
 	}
 	body := preRead
@@ -1307,7 +1325,7 @@ func (s *Server) claimForRead(ctx context.Context, sc cell.Scope) error {
 		return nil
 	}
 	o, _, err := s.Owner.Resolve(ctx, sc)
-	if err == nil && !o.Expired(time.Now()) {
+	if err == nil && s.ownerLive(ctx, o, time.Now()) {
 		if o.Node == s.Cfg.NodeID && o.Session != s.Owner.Session {
 			return owner.ErrNotOwner
 		}
@@ -1356,7 +1374,7 @@ func (s *Server) forwardAdmin(w http.ResponseWriter, r *http.Request, sc cell.Sc
 		return false
 	}
 	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
-	if err != nil || o.Node == s.Cfg.NodeID || o.Expired(time.Now()) {
+	if err != nil || o.Node == s.Cfg.NodeID || !s.ownerLive(r.Context(), o, time.Now()) {
 		return false
 	}
 	addr := s.adminAddressFor(o)
@@ -3038,6 +3056,9 @@ func (s *Server) CaptureWrite(ctx context.Context, sc cell.Scope, fn func() erro
 // durable proof covering it (RPO=0). With no capture configured it is a plain
 // local write (dev/no-replication mode).
 func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func() error) error {
+	if !s.ackAllowed(time.Now()) {
+		return owner.ErrNotOwner
+	}
 	if s.Capture == nil {
 		return write()
 	}
@@ -3072,6 +3093,9 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 // returns the transaction it committed, so the output gate cannot accidentally
 // wait for a later concurrent transaction in the same cell.
 func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write func() (uint64, error)) (uint64, error) {
+	if !s.ackAllowed(time.Now()) {
+		return 0, owner.ErrNotOwner
+	}
 	if s.Capture == nil {
 		return write()
 	}
@@ -3089,6 +3113,9 @@ func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write 
 }
 
 func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uint64) error {
+	if !s.ackAllowed(time.Now()) {
+		return owner.ErrNotOwner
+	}
 	if s.Capture == nil {
 		return nil
 	}
@@ -3168,6 +3195,9 @@ type commitResult struct {
 // peer is eligible (never a silent ack). Shared by the HTTP commit handlers and
 // the cellstore capture committer.
 func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (commitResult, error) {
+	if !s.ackAllowed(time.Now()) {
+		return commitResult{}, owner.ErrNotOwner
+	}
 	// Epoch fence at the commit boundary: an in-flight write whose ownership
 	// moved while it was being captured must not be committed under the old
 	// epoch prefix (the new owner's restore would not contain it). The HTTP

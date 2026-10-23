@@ -182,7 +182,7 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 	}
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, control.Scope())
-		if err != nil || o.Expired(time.Now()) {
+		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
 			s.invalidateStaleLocal(ctx, control.Scope())
 			o, err = s.Owner.Claim(ctx, control.Scope(), time.Now())
 			if err != nil {
@@ -286,7 +286,7 @@ func (s *Server) cleanupResourceData(ctx context.Context, j control.ResourceClea
 	}
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, sc)
-		if err != nil || o.Expired(time.Now()) {
+		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
 			s.invalidateStaleLocal(ctx, sc)
 			o, err = s.Owner.Claim(ctx, sc, time.Now())
 			if err != nil {
@@ -314,7 +314,7 @@ func (s *Server) cleanupOwnedResource(ctx context.Context, j control.ResourceCle
 		if err != nil {
 			return false, err
 		}
-		if o.Node != s.Cfg.NodeID || o.Expired(time.Now()) {
+		if o.Node != s.Cfg.NodeID || !s.ownerLive(ctx, o, time.Now()) {
 			return false, fmt.Errorf("cleanup scope owner changed")
 		}
 		epoch = o.Epoch
@@ -462,7 +462,7 @@ func (s *Server) removeQueueSource(ctx context.Context, ns, queue, source, gener
 	}
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, sc)
-		if err != nil || o.Expired(time.Now()) {
+		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
 			s.invalidateStaleLocal(ctx, sc)
 			o, err = s.Owner.Claim(ctx, sc, time.Now())
 			if err != nil {

@@ -40,8 +40,11 @@ type Owner struct {
 	Role    Role   `json:"role"`
 	Session string `json:"session"`
 	Epoch   uint64 `json:"epoch"`
-	Expiry  int64  `json:"expiry"` // unix millis; always <= node lease expiry
-	Address string `json:"address"`
+	// Expiry is the legacy lease expiry (unix millis). Records written by
+	// ADR-273 set Expiry=0 and use the node lease named by Node instead.
+	Expiry   int64  `json:"expiry"`
+	Liveness string `json:"liveness,omitempty"` // "node-lease" for ADR-273 records
+	Address  string `json:"address"`
 	// AdminAddress is where owner-forwarded admin requests should land. It is
 	// separate from Address (the cell REST/peer endpoint): the admin listener
 	// has its own authentication surface and must not be folded into :7001.
@@ -49,8 +52,13 @@ type Owner struct {
 	ProtoVersion string `json:"proto_version"`
 }
 
-// Expired reports whether the owner record has expired at now.
+// Expired reports whether a legacy (expiry-based) owner record has expired.
+// New node-lease records carry Expiry=0; callers must use owner.Manager.Live,
+// which consults nodes/<node>.json, for those.
 func (o Owner) Expired(now time.Time) bool {
+	if o.Liveness == "node-lease" {
+		return false // liveness comes from the node lease, never this field
+	}
 	return now.UnixMilli() >= o.Expiry
 }
 

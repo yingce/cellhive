@@ -365,7 +365,7 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 	now := time.Now()
 	addr := ""
 	owned := false
-	if o, _, err := s.Owner.Resolve(ctx, sc); err == nil && !o.Expired(now) {
+	if o, _, err := s.Owner.Resolve(ctx, sc); err == nil && s.ownerLive(ctx, o, now) {
 		if o.Node == s.Cfg.NodeID {
 			owned = true
 		} else if o.Address != "" {

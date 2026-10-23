@@ -132,3 +132,53 @@ func TestSlowHydrateDoesNotBlockOtherCells(t *testing.T) {
 		t.Fatal("slow hydrate did not finish")
 	}
 }
+
+func TestEvictionCallsOnEvicted(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "a"}
+	b := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "b"}
+	if _, err := s.Cell(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Cell(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan string, 1)
+	s.OnEvicted = func(sc cell.Scope) { got <- sc.String() }
+	if !s.evictOne(ctx) {
+		t.Fatal("evictOne did not evict")
+	}
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("OnEvicted was not called")
+	}
+}
+
+func TestForgetCallsOnForget(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "forget-cb"}
+	if _, err := s.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan struct{}, 1)
+	s.OnForget = func(cell.Scope) { got <- struct{}{} }
+	if err := s.Forget(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("OnForget was not called")
+	}
+}

@@ -35,6 +35,7 @@ import (
 	"cellhive/internal/d1"
 	"cellhive/internal/dispatch"
 	"cellhive/internal/drain"
+	"cellhive/internal/instance"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/ltx"
@@ -62,12 +63,17 @@ import (
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		log.Error("invalid config", "err", err)
 		os.Exit(2)
 	}
+	inst, err := instance.Acquire(cfg.DataDir)
+	if err != nil {
+		log.Error("acquire data directory", "err", err)
+		os.Exit(1)
+	}
+	defer inst.Close()
 	for _, w := range config.LegacyEnvWarnings() {
 		log.Warn(w)
 	}
@@ -113,6 +119,7 @@ func main() {
 	log.Info("storage diagnose ok")
 
 	lm := lease.NewManager(b, cfg.NodeID, cfg.SessionID, cfg.Advertise, cfg.PeerURL, cfg.LeaseTTL)
+	lm.Instance = inst.ID
 	lm.AZ = cfg.PlacementAZ
 	adminAdvertise := ""
 	if host, _, err := net.SplitHostPort(cfg.Advertise); err == nil {
@@ -131,6 +138,7 @@ func main() {
 		Role:           cell.RoleCellAgent,
 		OwnerTTL:       cfg.LeaseTTL,
 	}
+	om.LeaseView = lm
 
 	placementWeight := cfg.PlacementWeight
 	if placementWeight <= 0 {
@@ -154,28 +162,6 @@ func main() {
 				return
 			case <-t.C:
 				publishLoad()
-			}
-		}
-	}()
-
-	// Renew owned cell leases at TTL/3. Without this an owner record expires
-	// after LeaseTTL, so backend-A capture stops and owner-gated writes fail
-	// (ADR-092). Renewal is idempotent per (scope, epoch); a lost lease is
-	// re-established through the normal claim path, not here.
-	go func() {
-		t := time.NewTicker(cfg.LeaseTTL / 3)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				now := time.Now()
-				for _, owned := range om.OwnedScopes() {
-					if _, err := om.Renew(ctx, owned.Scope, owned.Epoch, now); err != nil {
-						log.Warn("owner renew failed", "scope", owned.Scope.String(), "err", err)
-					}
-				}
 			}
 		}
 	}()
@@ -244,6 +230,8 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
+	store.OnEvicted = func(sc cell.Scope) { om.Forget(sc, 0) }
+	store.OnForget = func(sc cell.Scope) { om.Forget(sc, 0) }
 	// The control cell is the hottest cell in the fleet. Keep it resident:
 	// evicting it re-runs schema migration and forces capture to rebuild its
 	// baseline, which is both a cold-path cost and a migration/close race.
@@ -470,7 +458,8 @@ func main() {
 						continue
 					}
 					o, _, rerr := om.Resolve(wctx, sc)
-					if rerr != nil || o.Expired(now) {
+					live, lerr := om.Live(wctx, o, now)
+					if rerr != nil || lerr != nil || !live {
 						out = append(out, e.Scope)
 					}
 				}
@@ -725,11 +714,11 @@ func main() {
 			SnapshotBatchParts:  8,
 			Log:                 log,
 			Owner: func(cctx context.Context, sc cell.Scope) (bool, uint64, error) {
-				o, _, err := om.Resolve(cctx, sc)
+				o, _, err := om.ResolveCached(cctx, sc, time.Second)
 				if err != nil {
 					return false, 0, err
 				}
-				return o.Node == cfg.NodeID && !o.Expired(time.Now()), o.Epoch, nil
+				return o.Node == cfg.NodeID && o.Session == cfg.SessionID, o.Epoch, nil
 			},
 			// Ownership moved: forget the local cell so later reads re-hydrate
 			// from the bucket instead of serving a stale local copy (ADR-115).
@@ -866,7 +855,15 @@ func main() {
 		defer mu.Unlock()
 		now := time.Now()
 		current, _, err := om.Resolve(tctx, sc)
-		if err == nil && !current.Expired(now) {
+		live := false
+		if err == nil {
+			var lerr error
+			live, lerr = om.Live(tctx, current, now)
+			if lerr != nil {
+				return false, lerr
+			}
+		}
+		if err == nil && live {
 			if current.Node != cfg.NodeID || current.Session != cfg.SessionID {
 				return false, nil
 			}
@@ -908,7 +905,8 @@ func main() {
 		if err != nil {
 			return err
 		}
-		if o.Node != cfg.NodeID || o.Session != cfg.SessionID || o.Expired(time.Now()) {
+		live, lerr := om.Live(tctx, o, time.Now())
+		if lerr != nil || !live || o.Node != cfg.NodeID || o.Session != cfg.SessionID {
 			return owner.ErrNotOwner
 		}
 		return srv.CaptureWrite(tctx, sc, fn)
@@ -976,7 +974,8 @@ func main() {
 				continue
 			}
 			o, _, rerr := om.Resolve(ctx, sc)
-			if rerr != nil || o.Node != cfg.NodeID || o.Expired(now) {
+			live, lerr := om.Live(ctx, o, now)
+			if rerr != nil || lerr != nil || !live || o.Node != cfg.NodeID {
 				continue
 			}
 			registerTimerScope(ctx, openTimer, srv, sc)
@@ -1429,8 +1428,11 @@ func repairWakeIndexPass(ctx context.Context, log *slog.Logger, store *cellstore
 		if err := idx.Put(ctx, sc.String(), min, "", ""); err == nil {
 			repaired++
 		}
-		if o, _, rerr := om.Resolve(ctx, sc); rerr == nil && o.Node == nodeID && !o.Expired(time.Now()) {
-			registerTimerScope(ctx, open, srv, sc)
+		if o, _, rerr := om.Resolve(ctx, sc); rerr == nil {
+			live, lerr := om.Live(ctx, o, time.Now())
+			if lerr == nil && live && o.Node == nodeID {
+				registerTimerScope(ctx, open, srv, sc)
+			}
 		}
 	}
 	*cursor = (*cursor + examined) % len(scopes)

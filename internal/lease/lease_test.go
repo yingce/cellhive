@@ -108,3 +108,41 @@ func TestSampleCachedServesStaleWhileRefreshing(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestHealthyRequiresPublish(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Second, renewKey: Key("n1")}
+	if m.Healthy(time.Now()) {
+		t.Fatal("unpublished manager must not claim to be healthy")
+	}
+	if err := m.Publish(context.Background(), Load{}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.Healthy(time.Now()) {
+		t.Fatal("published manager should be healthy")
+	}
+	if m.Healthy(time.Now().Add(2 * time.Second)) {
+		t.Fatal("manager stayed healthy past its lease TTL")
+	}
+}
+
+func TestNodeLeaseUsesSnapshotAndPointRead(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(base, "n1", "s1", "addr", "", time.Minute)
+	if err := m.Publish(context.Background(), Load{}); err != nil {
+		t.Fatal(err)
+	}
+	l, ok, err := m.NodeLease(context.Background(), "n1")
+	if err != nil || !ok || l.Session != "s1" {
+		t.Fatalf("self lease = %+v ok=%v err=%v", l, ok, err)
+	}
+	if _, ok, err := m.NodeLease(context.Background(), "missing"); err != nil || ok {
+		t.Fatalf("missing lease ok=%v err=%v", ok, err)
+	}
+}

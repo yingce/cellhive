@@ -41,7 +41,7 @@ func (s *Server) ReconcileProxySQL(ctx context.Context) error {
 	}
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, control.Scope())
-		if err != nil || o.Expired(time.Now()) || o.Node != s.Cfg.NodeID {
+		if err != nil || !s.ownerLive(ctx, o, time.Now()) || o.Node != s.Cfg.NodeID {
 			return nil
 		}
 	}

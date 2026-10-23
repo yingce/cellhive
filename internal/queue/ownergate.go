@@ -32,10 +32,16 @@ func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scop
 		sc := Scope(ref.Namespace, ref.Name)
 		now := time.Now()
 		o, _, err := om.ResolveCached(ctx, sc, time.Second)
-		if err == nil && !o.Expired(now) {
-			// Another session on the same node is still a different writer; do
-			// not consume under it (its cell-agent may be restarting).
-			return o.Node == om.NodeID && o.Session == om.Session, nil
+		if err == nil {
+			live, lerr := om.Live(ctx, o, now)
+			if lerr != nil {
+				return false, lerr
+			}
+			if live {
+				// Another session on the same node is still a different writer; do
+				// not consume under it (its cell-agent may be restarting).
+				return o.Node == om.NodeID && o.Session == om.Session, nil
+			}
 		}
 		if err != nil && !errors.Is(err, owner.ErrUnowned) {
 			return false, err

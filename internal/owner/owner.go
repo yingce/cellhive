@@ -11,6 +11,7 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/lease"
 )
 
 var (
@@ -31,6 +32,41 @@ type cachedOwner struct {
 	at    time.Time
 }
 
+// LeaseView supplies node liveness for ADR-273 owner records.
+type LeaseView interface {
+	NodeLease(ctx context.Context, node string) (lease.NodeLease, bool, error)
+}
+
+// Live reports whether o is still a valid owner at now. Legacy records use the
+// embedded Expiry; node-lease records require a live lease with the same
+// session (so a restarted process invalidates its predecessor immediately).
+func (m *Manager) Live(ctx context.Context, o cell.Owner, now time.Time) (bool, error) {
+	if o.Liveness != "node-lease" {
+		return !o.Expired(now), nil
+	}
+	if m.LeaseView == nil {
+		// Compatibility/tests: without a node-lease view, fall back to the
+		// record expiry written alongside Liveness. Production wires LeaseView.
+		return now.UnixMilli() < o.Expiry, nil
+	}
+	l, ok, err := m.LeaseView.NodeLease(ctx, o.Node)
+	if err != nil {
+		return false, err
+	}
+	return ok && l.Live(now) && l.Session == o.Session, nil
+}
+
+// Forget removes a scope from the local owned set without touching the bucket
+// owner record. Eviction uses this: the node may own a hibernated cell without
+// paying per-cell renewal, and reopening keeps the same epoch (ADR-273).
+func (m *Manager) Forget(s cell.Scope, epoch uint64) {
+	m.ownedMu.Lock()
+	if cur, ok := m.owned[s.String()]; ok && (epoch == 0 || cur.Epoch == epoch) {
+		delete(m.owned, s.String())
+	}
+	m.ownedMu.Unlock()
+}
+
 // Manager performs owner operations for a node.
 type Manager struct {
 	B              bucket.Bucket
@@ -40,6 +76,9 @@ type Manager struct {
 	AdminAdvertise string
 	Role           cell.Role
 	OwnerTTL       time.Duration
+	// LeaseView resolves a node lease for ADR-273 liveness. Nil keeps legacy
+	// expiry semantics (tests/DO only).
+	LeaseView LeaseView
 
 	// BeforeTakeover must durably recover the expired predecessor session before
 	// its owner record is replaced. Nil is only safe for roles with no fleet
@@ -154,15 +193,24 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 		return cell.Owner{}, err
 	}
 
-	// A live lease blocks a claim regardless of who holds it: re-claiming our
-	// own live lease must not bump the epoch (that would advance the replication
-	// lineage without a restart). A restarted process with the same node id also
-	// waits out the old session's lease (ADR-037).
-	if !cur.Expired(now) {
+	// Re-entering our own live record is the common local re-open: keep the
+	// epoch, write nothing. A node-lease record does not self-expire while the
+	// node lease is published, so this also removes the old renew-driven epoch
+	// churn (ADR-273).
+	if cur.Node == m.NodeID && cur.Session == m.Session {
+		m.rememberOwned(s, cur.Epoch)
+		return cur, nil
+	}
+	live, lerr := m.Live(ctx, cur, now)
+	if lerr != nil {
+		return cell.Owner{}, lerr
+	}
+	if live {
 		m.takeoverBlocked.Add(1)
 		return cur, ErrOwnerLive
 	}
-	takeover := cur.Node != m.NodeID
+
+	takeover := cur.Node != m.NodeID || cur.Session != m.Session
 	if takeover && m.BeforeTakeover != nil {
 		if err := m.BeforeTakeover(ctx, cur); err != nil {
 			m.takeoverFailed.Add(1)
@@ -197,6 +245,17 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 	}
 	if cur.Node != m.NodeID || cur.Epoch != epoch {
 		return cell.Owner{}, ErrEpochMismatch
+	}
+	if cur.Liveness == "node-lease" {
+		if m.AdminAdvertise != "" && cur.AdminAddress != m.AdminAdvertise {
+			cur.AdminAddress = m.AdminAdvertise
+			data, _ := cell.MarshalOwner(cur)
+			if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
+				return cell.Owner{}, err
+			}
+		}
+		m.rememberOwned(s, cur.Epoch)
+		return cur, nil
 	}
 	cur.Expiry = now.Add(m.OwnerTTL).UnixMilli()
 	if m.AdminAdvertise != "" {
@@ -266,6 +325,7 @@ func (m *Manager) newOwner(epoch uint64, now time.Time) cell.Owner {
 		Session:      m.Session,
 		Epoch:        epoch,
 		Expiry:       now.Add(m.OwnerTTL).UnixMilli(),
+		Liveness:     "node-lease",
 		Address:      m.Advertise,
 		AdminAddress: m.AdminAdvertise,
 		ProtoVersion: cell.ProtoVersion,

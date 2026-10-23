@@ -4,6 +4,7 @@ package lease
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -27,8 +28,12 @@ type Load struct {
 
 // NodeLease is a node's self-published liveness record.
 type NodeLease struct {
-	Node      string `json:"node"`
-	Session   string `json:"session"`
+	Node    string `json:"node"`
+	Session string `json:"session"`
+	// Instance is a random id persisted in the data directory. It lets a
+	// restarted process prove that a still-live lease belongs to its own
+	// previous incarnation rather than another host using the same node id.
+	Instance  string `json:"instance,omitempty"`
 	Advertise string `json:"advertise"`
 	PeerURL   string `json:"peer_url"`
 	// AZ is the node's failure domain (rack/zone), used to prefer cross-AZ
@@ -52,7 +57,10 @@ type Manager struct {
 	// AZ is this node's failure domain, published for cross-AZ follower choice.
 	AZ       string
 	TTL      time.Duration
+	Instance string
 	renewKey string
+
+	lastOK time.Time
 
 	mu         sync.Mutex
 	cached     []NodeLease
@@ -63,7 +71,7 @@ type Manager struct {
 
 // NewManager builds a lease manager.
 func NewManager(b bucket.Bucket, nodeID, session, advertise, peerURL string, ttl time.Duration) *Manager {
-	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID)}
+	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID), lastOK: time.Now()}
 }
 
 // Publish writes (or renews) this node's lease.
@@ -74,6 +82,7 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 	l := NodeLease{
 		Node:         m.NodeID,
 		Session:      m.Session,
+		Instance:     m.Instance,
 		Advertise:    m.Advert,
 		PeerURL:      m.PeerURL,
 		AZ:           m.AZ,
@@ -88,7 +97,46 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 	if _, err := m.B.Put(ctx, m.renewKey, data); err != nil {
 		return fmt.Errorf("publish lease: %w", err)
 	}
+	m.mu.Lock()
+	m.lastOK = time.Now()
+	m.mu.Unlock()
 	return nil
+}
+
+// Healthy reports whether this node published its lease recently enough that
+// peers still consider it live. Write acknowledgements are refused while this
+// is false (ADR-273): a node that can no longer prove liveness must not ack.
+func (m *Manager) Healthy(now time.Time) bool {
+	m.mu.Lock()
+	last := m.lastOK
+	m.mu.Unlock()
+	if last.IsZero() {
+		return false
+	}
+	margin := m.TTL / 5
+	if margin <= 0 {
+		margin = time.Second
+	}
+	return now.Sub(last) < m.TTL-margin
+}
+
+// NodeLease returns a node's lease from the in-memory snapshot, falling back to
+// a point read for a node not present in the current snapshot. Never calls List
+// on the caller's hot path.
+func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, error) {
+	for _, l := range m.SampleCached(ctx, 5*time.Second) {
+		if l.Node == node {
+			return l, true, nil
+		}
+	}
+	l, err := m.Get(ctx, node)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return NodeLease{}, false, nil
+	}
+	if err != nil {
+		return NodeLease{}, false, err
+	}
+	return l, true, nil
 }
 
 // Get reads a single node lease.

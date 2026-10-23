@@ -8,6 +8,7 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/lease"
 )
 
 func newManager(t *testing.T, dir, node string) (*Manager, bucket.Bucket) {
@@ -341,5 +342,51 @@ func TestOwnerRecordCarriesAdminAddress(t *testing.T) {
 	after, _, err := m.Resolve(ctx, sc)
 	if err != nil || after.AdminAddress != m.AdminAdvertise {
 		t.Fatalf("renewed admin address = %q, err=%v", after.AdminAddress, err)
+	}
+}
+
+type fakeLeaseView map[string]lease.NodeLease
+
+func (f fakeLeaseView) NodeLease(_ context.Context, node string) (lease.NodeLease, bool, error) {
+	l, ok := f[node]
+	return l, ok, nil
+}
+
+func TestNodeLeaseOwnership(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m1, _ := newManager(t, dir, "node-1")
+	m2, _ := newManager(t, dir, "node-2")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "liveness"}
+	now := time.Now()
+	lv := fakeLeaseView{}
+	m1.LeaseView = lv
+	m2.LeaseView = lv
+	o1, err := m1.Claim(ctx, sc, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same session re-entry keeps the epoch and does not need a live lease.
+	m1.LeaseView = fakeLeaseView{}
+	o2, err := m1.Claim(ctx, sc, now.Add(time.Hour))
+	if err != nil || o2.Epoch != o1.Epoch {
+		t.Fatalf("same-session claim epoch=%d err=%v, want %d", o2.Epoch, err, o1.Epoch)
+	}
+	lv["node-1"] = lease.NodeLease{Node: "node-1", Session: o1.Session, Expiry: now.Add(time.Minute).UnixMilli()}
+	if _, err := m2.Claim(ctx, sc, now); !errors.Is(err, ErrOwnerLive) {
+		t.Fatalf("foreign claim with live node lease: %v, want ErrOwnerLive", err)
+	}
+	lv["node-1"] = lease.NodeLease{Node: "node-1", Session: o1.Session, Expiry: now.Add(-time.Second).UnixMilli()}
+	o3, err := m2.Claim(ctx, sc, now)
+	if err != nil || o3.Node != "node-2" || o3.Epoch <= o1.Epoch {
+		t.Fatalf("expired node lease takeover: %+v err=%v", o3, err)
+	}
+}
+
+func TestLiveFailsClosedWithoutLeaseView(t *testing.T) {
+	o := cell.Owner{Node: "n", Session: "s", Liveness: "node-lease", Expiry: time.Now().Add(-time.Hour).UnixMilli()}
+	m := &Manager{}
+	if live, err := m.Live(context.Background(), o, time.Now()); err != nil || live {
+		t.Fatalf("node-lease record without view = %v,%v; want false", live, err)
 	}
 }

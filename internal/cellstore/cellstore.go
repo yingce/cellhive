@@ -63,6 +63,12 @@ type Store struct {
 	// is pinned: it is the hottest cell, and reopening it re-runs schema
 	// migration and forces capture to rebuild its baseline (ADR-272).
 	Pin func(sc cell.Scope) bool
+	// OnEvicted runs after an LRU/idle eviction removed the local handle. It
+	// must not reopen the cell; cell-agent uses it to drop local bookkeeping
+	// (owned set, resume hints) while leaving the bucket owner record intact.
+	OnEvicted func(sc cell.Scope)
+	// OnForget runs after an explicit Forget/TryForget removed local files.
+	OnForget func(sc cell.Scope)
 
 	openMu                  sync.Mutex // serializes cold opens so one file is opened once
 	resourceGenerationLocks [64]sync.Mutex
@@ -436,6 +442,9 @@ func (s *Store) TryForget(ctx context.Context, sc cell.Scope, verify func() erro
 	delete(s.evicting, key)
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	if s.OnForget != nil {
+		s.OnForget(sc)
+	}
 	s.evicted.Add(1)
 	return true, nil
 }
@@ -505,6 +514,9 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	delete(s.evicting, key)
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	if s.OnForget != nil {
+		s.OnForget(sc)
+	}
 	if removeErr != nil {
 		return removeErr
 	}
@@ -551,6 +563,9 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	delete(s.evicting, c.Scope.String())
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	if s.OnEvicted != nil {
+		s.OnEvicted(c.Scope)
+	}
 	s.evicted.Add(1)
 	return true
 }
