@@ -69,6 +69,33 @@ The config is validated with `vector validate` against Vector 0.58. The
 `cellhive_otlp.metrics` port is intentionally unconsumed today because CellHive
 does not push OTLP metrics; metrics come from `prometheus_scrape`.
 
+
+## Production USW/SG deployment (logs-only phase)
+
+`vector-logs.toml` is the current production shape: OTLP logs are remapped to
+`vwork.log.v1` and written to the existing `request.json` SLS logstore; OTLP
+traces are forwarded to the existing ARMS trace endpoint. Metrics remain a
+separate phase.
+
+Per region (`cellhive-sg`, `cellhive-usw`):
+
+- Secret `cellhive-vector-secrets` with
+  `ARMS_TRACES_ENDPOINT`, `SLS_KAFKA_BOOTSTRAP_SERVERS`,
+  `SLS_KAFKA_TOPIC=request.json`, `SLS_KAFKA_USERNAME`, `SLS_KAFKA_PASSWORD`
+  (copy the ARMS/SLS values from `vwork-region-secrets`; never commit them).
+- ConfigMap `cellhive-vector-config` from `vector-logs.toml`.
+- Deployment `cellhive-vector` (Vector 0.58) and Service `cellhive-vector:4318`.
+- `cellhive-secrets` key `CELLHIVE_OTLP_ENDPOINT=http://cellhive-vector:4318`.
+- Helm values `telemetry.logs: all`; restart cell-agent, user-runtime and
+  do-runtime so the endpoint/log mode is re-read.
+
+Rollback: restore `CELLHIVE_OTLP_ENDPOINT` from
+`/tmp/cellhive-{sg,usw}-otlp.b64` and set `telemetry.logs: off`, then restart
+the three workloads. The Vector Deployment/Service can be deleted independently.
+`bin/sync-vwork-otel` now writes ARMS endpoints to
+`cellhive-vector-secrets/ARMS_TRACES_ENDPOINT` when that secret exists, so a
+credential rotation does not overwrite the Vector endpoint.
+
 ## Multi-tenant model (which hop authenticates)
 
 1. **Node → Collector**: the platform's own credential (or none on a private
