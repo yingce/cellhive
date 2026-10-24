@@ -83,6 +83,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 - 轮询 `CELLHIVE_TIMER_INTERVAL`（默认 1s，0=关）；单 pass 到期上限 `CELLHIVE_TIMER_BATCH`（默认 **256**）；fired 标记保留 `CELLHIVE_TIMER_FIRED_TTL`（默认 **24h**，防重复派发）。
 - 派发 at-least-once：成功后才标记 fired；崩溃/失败留待下轮。
 - 失败 cron token 的下一次尝试时间与次数写入 timer cell SQLite，按 5 秒起、最多 5 分钟的指数退避；原 slot/due_ms 不变，同 token 重复物化不清除退避，其他 timer 类型保持原重试语义（ADR-211）。
+- 已物化的 Cron slot 在移除或修改触发器后仍按原计划时间和原表达式投递给当前活跃 worker；活跃 worker 没有新 Cron 也可接收待投递 slot。控制面暂时不可读或 worker 已不存在时保留 timer 并退避，不发送缺失身份的请求（ADR-281）。
 
 **Waker（单 fleet wake + 死节点恢复）**
 - 轮询 `CELLHIVE_WAKER_INTERVAL`（默认 5s，0=关）；租约 TTL = **2×interval**；单 pass `CELLHIVE_WAKER_BATCH`（默认 256）；fired TTL `CELLHIVE_WAKER_FIRED_TTL`（默认 24h）。

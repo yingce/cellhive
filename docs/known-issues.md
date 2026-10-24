@@ -84,7 +84,7 @@ ADR-279 让后台节点租约列举复用物理列表中的最新分段，真实
 
 2026-10-18 SG 高频日志与 fleet session（ADR-210）
 
-SG 同一 `cell-agent` 服务的多个 cell epoch 不同；旧版 node-log 和服务端 session 缓存把首个 epoch 错当成整个进程 session 的不变量，导致其他 epoch 的写入每次退回 bucket 并打印 WARN。修复后仅 follower 集合保持不可变，fragment 的 scope/epoch 仍由 follower 日志逐条记录和恢复。cron 重复 500 另有租户 handler 错误：`vwork-24/kv-cache-counter` 报 `VWORK runtime context is invalid`，`vwork-40/vlog-automation` 报 `SUPABASE_URL is required`；失败 timer 改为持久化指数退避（ADR-211），但租户错误本身仍须修正。COS/OSS S3 兼容数据面按需校验响应 checksum，避免 AWS SDK 对每个不带可选 checksum 的成功 GET 打 WARN；TLS 和应用层 LTX 校验仍保留。
+SG 同一 `cell-agent` 服务的多个 cell epoch 不同；旧版 node-log 和服务端 session 缓存把首个 epoch 错当成整个进程 session 的不变量，导致其他 epoch 的写入每次退回 bucket 并打印 WARN。修复后仅 follower 集合保持不可变，fragment 的 scope/epoch 仍由 follower 日志逐条记录和恢复。cron 重复 500 另有租户 handler 错误：`vwork-24/kv-cache-counter` 报 `VWORK runtime context is invalid`，`vwork-40/vlog-automation` 报 `SUPABASE_URL is required`；失败 timer 改为持久化指数退避（ADR-211），但租户错误本身仍须修正。2026-10-24 SG 另发现 `vwork-24/kv-cache-counter` 旧 slot 在活跃版本 `Crons=[]` 后仍重试，派发缺少 worker/bundle 而返回 400；ADR-281 的代码修复使已物化 slot 可解析活跃 worker，发布后仍须观察其 handler 结果，不能将 400 消失视为执行成功。COS/OSS S3 兼容数据面按需校验响应 checksum，避免 AWS SDK 对每个不带可选 checksum 的成功 GET 打 WARN；TLS 和应用层 LTX 校验仍保留。
 
 ## 2026-10-18 DO 接管持久链（ADR-208）
 

@@ -1,5 +1,9 @@
 # 决策记录（ADR）
 
+## ADR-281 已物化 Cron slot 在移除触发器后继续派发（2026-10-24）
+
+Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是持久化的待投递事件，部署时移除或修改 Cron 表达式不撤销它。派发时从当前投影中的**活跃 worker**解析版本和 bundle，即使该 worker 的 `Crons` 已为空；事件仍从 occurrence 保留原表达式及原计划时间。投影读取失败、scope 无效或活跃 worker 不存在时，派发端返回明确错误并保留 timer 按原退避重试，不向 user-runtime 发送缺失身份的请求。租户 `scheduled()` 失败仍按 ADR-211 重试；移除触发器不会自动取消已物化事件，删除 worker 后的未投递事件需要单独的显式处置策略。此决策修复 SG `vwork-24/kv-cache-counter` 旧 timer 因活跃版本 `Crons=[]` 缺少 `worker`/`bundle_sha` 而持续 HTTP 400 的问题。
+
 ## ADR-280 owner 负向租约缓存须点读确认（2026-10-24）
 
 - **现场故障**：SG 同一个 control owner 在一个节点被判 `expired=false`，在另一节点被判 `expired=true`；后者每 2 秒清理任务尝试 `Claim`，随即被 fresh 租约拒绝为 `owner: live owner exists`。`SampleCached` 的 stale-while-revalidate 快照可能超过节点租约 TTL；`owner.Live` 把旧快照的负向结论当成当前事实，路由和后台任务因此错误地绕开仍存活的 owner。

@@ -1685,16 +1685,23 @@ type cronEnricher struct {
 }
 
 func (e *cronEnricher) Dispatch(ctx context.Context, t timer.Timer) error {
-	if t.Kind == timer.KindCron && t.Worker == "" && e.ctrl != nil {
-		if sc, err := cell.ParseScope(t.Scope); err == nil {
-			if targets, ok := e.lookup(ctx, sc.Namespace, sc.ID); ok && len(targets) > 0 {
-				tg := targets[0]
-				t.Worker = tg.Worker
-				t.BundleSHA = tg.BundleSHA
-				t.Version = tg.Version
-				t.Cron = cronExprForSlot(targets, t)
-			}
+	if t.Kind == timer.KindCron && t.Worker == "" {
+		sc, err := cell.ParseScope(t.Scope)
+		if err != nil {
+			return fmt.Errorf("cron dispatch scope: %w", err)
 		}
+		targets, err := e.lookup(ctx, sc.Namespace, sc.ID)
+		if err != nil {
+			return fmt.Errorf("cron dispatch target %s: %w", t.Scope, err)
+		}
+		if len(targets) == 0 {
+			return fmt.Errorf("cron dispatch target %s: active worker unavailable", t.Scope)
+		}
+		tg := targets[0]
+		t.Worker = tg.Worker
+		t.BundleSHA = tg.BundleSHA
+		t.Version = tg.Version
+		t.Cron = cronExprForSlot(targets, t)
 	}
 	return e.next.Dispatch(ctx, t)
 }
@@ -1722,24 +1729,49 @@ func cronExprForSlot(targets []control.CronTarget, t timer.Timer) string {
 	return ""
 }
 
-func (e *cronEnricher) lookup(ctx context.Context, ns, worker string) ([]control.CronTarget, bool) {
+func (e *cronEnricher) lookup(ctx context.Context, ns, worker string) ([]control.CronTarget, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.targets == nil || time.Since(e.at) > 5*time.Second {
+		if e.ctrl == nil {
+			return nil, errors.New("control plane unavailable")
+		}
 		proj, err := e.ctrl.Projection(ctx)
 		if err != nil {
-			return nil, false
+			return nil, err
 		}
-		m := map[string][]control.CronTarget{}
-		for _, tg := range proj.CronTargets() {
-			k := tg.Namespace + "\x00" + tg.Worker
-			m[k] = append(m[k], tg)
-		}
-		e.targets = m
+		e.targets = cronDispatchTargets(proj)
 		e.at = time.Now()
 	}
-	tgs, ok := e.targets[ns+"\x00"+worker]
-	return tgs, ok
+	return e.targets[ns+"\x00"+worker], nil
+}
+
+// An already materialized slot remains deliverable after a redeploy removes
+// its schedule. The occurrence retains the old expression, while the active
+// worker supplies the current bundle even when it has no new cron triggers.
+func cronDispatchTargets(proj control.Projection) map[string][]control.CronTarget {
+	m := make(map[string][]control.CronTarget)
+	for _, app := range proj.Apps {
+		for _, w := range app.Workers {
+			if w.Version.BundleSHA == "" {
+				continue
+			}
+			key := app.Namespace + "\x00" + w.Worker
+			for _, expr := range w.Version.Crons {
+				m[key] = append(m[key], control.CronTarget{
+					Namespace: app.Namespace, Worker: w.Worker, Cron: expr,
+					BundleSHA: w.Version.BundleSHA, Version: w.Version.Number,
+				})
+			}
+			if len(m[key]) == 0 {
+				m[key] = []control.CronTarget{{
+					Namespace: app.Namespace, Worker: w.Worker,
+					BundleSHA: w.Version.BundleSHA, Version: w.Version.Number,
+				}}
+			}
+		}
+	}
+	return m
 }
 
 // pagedSource adapts replica.PageFetcher to pagedvfs.Source: SQLite faults pages
