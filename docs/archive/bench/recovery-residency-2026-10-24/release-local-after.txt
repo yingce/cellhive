@@ -1,0 +1,4 @@
+{"applied":true,"ok":true,"txid":5}
+
+PUT HTTP=200 TOTAL=0.010413s
+node=0 phase=after values=PASS

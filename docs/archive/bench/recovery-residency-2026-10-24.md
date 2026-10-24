@@ -1,6 +1,6 @@
 # 异常恢复修复与 cell 驻留评估（2026-10-24）
 
-源码基线 main 81dc5b6；本轮改动尚未提交/部署。保留原有未提交 OTLP 改动，未调整 SG/USW 配置。设计契约 ADR-286，配置入口见 [configuration.md](../../configuration.md)。
+源码基线 main 81dc5b6；修复已提交并推送为 456f6c2，已发布本地、SG、USW（详见文末发布验收）。保留原有未提交 OTLP 改动，未纳入镜像。设计契约 ADR-286，配置入口见 [configuration.md](../../configuration.md)。
 
 ## 修复内容
 
@@ -19,7 +19,7 @@
 - make test、make vet、make build 通过。随后五个相关包再次运行 -count=1 通过；最终测试清理后定向回归和容量探针编译通过。
 - owner/peer/queue/cellstore/server 五包完整 -race -count=1 通过。
 - scripts/e2e/session-recovery.sh 真实双进程、真实HTTP通过，8.35s：双方地址改变、恢复中强杀后再次恢复、同名空盘拒绝、换回原盘、80个已确认值和旧 control 登记恢复、旧 session 封存。
-- E2E 使用本地 FS bucket，不等价于 COS/跨主机网络故障全覆盖；本轮未做线上故障注入或部署。
+- E2E 使用本地 FS bucket，不等价于 COS/跨主机网络故障全覆盖；本轮未做线上故障注入；发布验收见文末。
 - 具体输出在 [证据目录](recovery-residency-2026-10-24/)。红测中的 TestReview* 后续重命名为正式回归名称；make test 运行时尚未添加容量探针，最终单独编译并执行了探针。
 
 ## 恢复分页读取量
@@ -108,3 +108,15 @@ E2E具体边界：
 - B同名空目录产生新instance，A仍拒绝其替代旧follower盘；换回原盘后两节点恢复就绪。
 - 保留B陈旧的pinned control副本，强制B接管后校验两个资源登记；80个已ACK值全部逐一读回，并检查旧session已封存且covered_seq存在。
 - 该进程E2E关闭cron/timer/waker和idle回收；队列reset失败、busy失效、并发claim、句柄泄漏、误驱逐和分页损坏等新修复分支由定向回归/组件测试覆盖。它不是cron可靠性或队列业务投递的完整E2E。
+
+## 发布验收（2026-10-24 15:59 UTC）
+
+- 修复提交：`456f6c2`，已推送 origin/main。镜像来自隔离的已暂存树 `d6bc4d4bb462dfa6b85eb2f3db586f5ca32e6e42`，不包含工作区 OTLP 改动。
+- 发布前对该隔离快照重新执行 make test、make vet、session-recovery E2E，全部通过；镜像内五个 Go 二进制构建成功。
+- 镜像：`sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:4af65583df757de94b5856b3725654b7d38b6c0df45ee3ed2236ebf80b46c979`，标签 `456f6c2-recovery286`。
+- SG Helm revision 56、USW revision 46，均 deployed；各 6 个业务 Pod Ready，重启数 0，实际 imageID 全部匹配上述摘要。两区域升级后 Helm diff 均为空。
+- 本地 Compose 的 cell-agent、do-runtime、user-runtime 三服务均 healthy，实际镜像摘要匹配；mysql/proxysql 未重建。正常停机后备份 cell-agent 和 DO 数据到 `/tmp/cellhive-pre-recovery286/`，等待旧 node lease 过期后启动，未清空数据卷。旧镜像保留为 `cellhive:pre-recovery286`；备份在本机临时目录，不是异地备份。
+- 本地 1 节点、SG/USW 各 2 节点：升级前写入的值在升级后逐节点读回匹配，升级后各节点新 PUT/GET 均通过。详细输出见证据目录 release-*-before/after.txt。
+- 验收单次 PUT：本地 10.4ms，SG 519.2/148.1ms，USW 354.3/84.2ms。属于启动后正确性 canary，不是稳态性能测试，不代表线上 RPS 或旧新版 A/B。
+- 启动后日志检查：SG 与本地未发现错误；USW 有一条已删除资源的 `waker ownership check failed`（`resource incarnation is deleted`）警告，未见 ERROR/panic/fatal。本次不宣称修复该已删除资源告警。
+- 本次仅发布修复，open-cell 默认仍为 32、idle 5m；容量建议和本地 RPS 边界不变。

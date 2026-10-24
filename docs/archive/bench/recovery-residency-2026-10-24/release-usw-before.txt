@@ -1,0 +1,5 @@
+{"kind":"kv","name":"rollout","scope":"ops-session-20261024/__kv__/rollout","created_ms":1792857003090}
+{"applied":true,"ok":true,"txid":42}
+{"applied":true,"ok":true,"txid":43}
+node=0 phase=before values=PASS
+node=1 phase=before values=PASS
