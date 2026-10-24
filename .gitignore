@@ -5,6 +5,11 @@
 /cellhive
 /do-supervisor
 /user-runtime
+/.buildx/
+/.gocache/
+
+# --- local Kubernetes configuration ---
+/.kube/
 
 # --- local runtime state / data ---
 /.cellhive/
