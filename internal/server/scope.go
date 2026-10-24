@@ -202,16 +202,27 @@ func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, 
 		return e.ok, e.id, nil
 	}
 	s.bindMu.Unlock()
+	return s.refreshBindingInfo(ctx, ns, kind, name)
+}
 
+// refreshBindingInfo bypasses the TTL for proactive refresh. A control-plane
+// invalidation during the owner read must not be undone by its stale result.
+func (s *Server) refreshBindingInfo(ctx context.Context, ns, kind, name string) (bool, string, error) {
+	key := ns + "|" + kind + "|" + name
+	s.bindMu.Lock()
+	rev := s.bindRev
+	s.bindMu.Unlock()
 	id, ok, err := s.bindingFromOwner(ctx, ns, kind, name)
 	if err != nil {
 		return false, "", err
 	}
 	s.bindMu.Lock()
-	if s.bindCache == nil || len(s.bindCache) > 100000 {
-		s.bindCache = map[string]bindingEntry{}
+	if s.bindRev == rev && s.Cfg.BindingCacheTTL > 0 {
+		if s.bindCache == nil || len(s.bindCache) > 100000 {
+			s.bindCache = map[string]bindingEntry{}
+		}
+		s.bindCache[key] = bindingEntry{ok: ok, id: id, exp: time.Now().Add(s.Cfg.BindingCacheTTL)}
 	}
-	s.bindCache[key] = bindingEntry{ok: ok, id: id, exp: now.Add(ttl)}
 	s.bindMu.Unlock()
 	return ok, id, nil
 }
@@ -268,6 +279,7 @@ func (s *Server) invalidateBindings(ns string) {
 	}
 	prefix := ns + "|"
 	s.bindMu.Lock()
+	s.bindRev++
 	for k := range s.bindCache {
 		if strings.HasPrefix(k, prefix) {
 			delete(s.bindCache, k)

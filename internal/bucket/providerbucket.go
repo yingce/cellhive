@@ -23,6 +23,12 @@ type ProviderBucket struct {
 	appender   PositionAppender
 }
 
+// appendETagger is optional: COS returns the immutable object's ETag in the
+// append response, while other providers can keep using the HEAD fallback.
+type appendETagger interface {
+	AppendWithETag(context.Context, string, int64, []byte) (string, error)
+}
+
 func NewProviderBucket(data *S3Bucket, appendLog PositionAppender, opts ...AuthorityOptions) *ProviderBucket {
 	var authorityOpts AuthorityOptions
 	if len(opts) > 0 {
@@ -80,11 +86,21 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 		// Provider PutObject conditionals are not portable. Native append at
 		// position zero atomically creates an immutable segment; an existing
 		// object cannot be overwritten, including a legacy normal object.
-		if err := b.appender.Append(ctx, key, 0, data); err != nil {
+		var appendETag string
+		var err error
+		if a, ok := b.appender.(appendETagger); ok {
+			appendETag, err = a.AppendWithETag(ctx, key, 0, data)
+		} else {
+			err = b.appender.Append(ctx, key, 0, data)
+		}
+		if err != nil {
 			if _, _, getErr := b.S3Bucket.Get(ctx, key); getErr == nil {
 				return "", ErrPrecondition
 			}
 			return "", err
+		}
+		if appendETag != "" {
+			return appendETag, nil
 		}
 		_, etag, err := b.S3Bucket.Stat(ctx, key)
 		return etag, err

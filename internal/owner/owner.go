@@ -57,6 +57,12 @@ func (m *Manager) Live(ctx context.Context, o cell.Owner, now time.Time) (bool, 
 	if o.Liveness != "node-lease" {
 		return !o.Expired(now), nil
 	}
+	// This process knows whether its own lease was successfully published and
+	// remains inside the self-fence margin. A snapshot miss must not turn a
+	// locally healthy owner into a blocking bucket point read on every GET.
+	if own, ok := m.LeaseView.(*lease.Manager); ok && o.Node == m.NodeID && o.Session == m.Session && own.NodeID == m.NodeID && own.Session == m.Session {
+		return own.Healthy(now), nil
+	}
 	if m.LeaseView == nil {
 		// Compatibility/tests: without a node-lease view, fall back to the
 		// record expiry written alongside Liveness. Production wires LeaseView.
@@ -111,6 +117,7 @@ type Manager struct {
 	BeforeTakeover func(context.Context, cell.Owner) error
 	mu             sync.Mutex
 	cache          map[string]cachedOwner
+	cacheRev       map[string]uint64
 
 	ownedMu sync.Mutex
 	owned   map[string]OwnedScope
@@ -151,6 +158,7 @@ func Key(s cell.Scope) string { return s.Key() + "/owner.json" }
 func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Duration) (cell.Owner, string, error) {
 	key := s.String()
 	m.mu.Lock()
+	rev := m.cacheRev[key]
 	if c, ok := m.cache[key]; ok && time.Since(c.at) < ttl {
 		m.mu.Unlock()
 		return c.owner, c.etag, nil
@@ -162,10 +170,12 @@ func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Dura
 		return o, e, err
 	}
 	m.mu.Lock()
-	if m.cache == nil {
-		m.cache = make(map[string]cachedOwner)
+	if m.cacheRev[key] == rev {
+		if m.cache == nil {
+			m.cache = make(map[string]cachedOwner)
+		}
+		m.cache[key] = cachedOwner{owner: o, etag: e, at: time.Now()}
 	}
-	m.cache[key] = cachedOwner{owner: o, etag: e, at: time.Now()}
 	m.mu.Unlock()
 	return o, e, nil
 }
@@ -173,7 +183,12 @@ func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Dura
 // Invalidate drops a cached owner record (after claim/release).
 func (m *Manager) Invalidate(s cell.Scope) {
 	m.mu.Lock()
-	delete(m.cache, s.String())
+	key := s.String()
+	delete(m.cache, key)
+	if m.cacheRev == nil {
+		m.cacheRev = make(map[string]uint64)
+	}
+	m.cacheRev[key]++
 	m.mu.Unlock()
 }
 

@@ -3,6 +3,7 @@ package owner
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +11,81 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
 )
+
+type delayedOwnerGet struct {
+	bucket.Bucket
+	mu      sync.Mutex
+	block   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *delayedOwnerGet) Get(ctx context.Context, key string) ([]byte, string, error) {
+	data, etag, err := b.Bucket.Get(ctx, key)
+	b.mu.Lock()
+	block := b.block
+	if block {
+		b.block = false
+	}
+	b.mu.Unlock()
+	if block {
+		close(b.started)
+		<-b.release
+	}
+	return data, etag, err
+}
+
+func TestInvalidateRejectsInFlightCachedOwnerRefresh(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "refresh-race"}
+	if _, err := m.Claim(t.Context(), sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b := &delayedOwnerGet{Bucket: raw, block: true, started: make(chan struct{}), release: make(chan struct{})}
+	m.B = b
+	done := make(chan error, 1)
+	go func() { _, _, err := m.ResolveCached(t.Context(), sc, 0); done <- err }()
+	<-b.started
+	m.Invalidate(sc)
+	close(b.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	_, cached := m.cache[sc.String()]
+	m.mu.Unlock()
+	if cached {
+		t.Fatal("owner result read before invalidation repopulated the cache")
+	}
+}
+
+func TestOwnLeaseLivenessUsesPublishedSelfFence(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "node-1")
+	lm := lease.NewManager(raw, m.NodeID, m.Session, "", "", 5*time.Second)
+	m.LeaseView = lm
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "local-liveness"}
+	o, err := m.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A self owner must not read nodes/<self>.json on the request path.
+	lm.B = failingOwnerLeaseBucket{raw}
+	if live, err := m.Live(t.Context(), o, time.Now()); err != nil || !live {
+		t.Fatalf("published local lease = %v, %v", live, err)
+	}
+	if live, err := m.Live(t.Context(), o, time.Now().Add(5*time.Second)); err != nil || live {
+		t.Fatalf("expired local lease = %v, %v", live, err)
+	}
+}
+
+type failingOwnerLeaseBucket struct{ bucket.Bucket }
+
+func (b failingOwnerLeaseBucket) Get(context.Context, string) ([]byte, string, error) {
+	return nil, "", errors.New("unexpected bucket GET")
+}
 
 func newManager(t *testing.T, dir, node string) (*Manager, bucket.Bucket) {
 	t.Helper()

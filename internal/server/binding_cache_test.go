@@ -4,11 +4,61 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/control"
+	"cellhive/internal/owner"
 )
+
+type delayedBindingOwnerGet struct {
+	bucket.Bucket
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *delayedBindingOwnerGet) Get(ctx context.Context, key string) ([]byte, string, error) {
+	data, etag, err := b.Bucket.Get(ctx, key)
+	if key == owner.Key(control.Scope()) {
+		b.once.Do(func() { close(b.started); <-b.release })
+	}
+	return data, etag, err
+}
+
+func TestBindingInvalidationRejectsInFlightRefresh(t *testing.T) {
+	s := newScopeServer(t)
+	s.Cfg.BindingCacheTTL = time.Second
+	s.Owner = &owner.Manager{B: s.Bucket, NodeID: s.Cfg.NodeID, Session: "binding-race", Role: cell.RoleCellAgent, OwnerTTL: 10 * time.Second}
+	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Control.CreateResource(t.Context(), "acme", "kv", "KV", "main", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Owner.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b := &delayedBindingOwnerGet{Bucket: s.Bucket, started: make(chan struct{}), release: make(chan struct{})}
+	s.Owner.B = b
+	done := make(chan error, 1)
+	go func() { _, _, err := s.refreshBindingInfo(t.Context(), "acme", "kv", "KV"); done <- err }()
+	<-b.started
+	s.invalidateBindings("acme")
+	close(b.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	s.bindMu.Lock()
+	_, cached := s.bindCache["acme|kv|KV"]
+	s.bindMu.Unlock()
+	if cached {
+		t.Fatal("pre-invalidation binding refresh repopulated the cache")
+	}
+}
 
 // TestBindingCache verifies the scoped-token binding cache stores positive and
 // negative results, is dropped by control-plane invalidation, and is disabled

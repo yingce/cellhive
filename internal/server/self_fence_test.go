@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
 	"cellhive/internal/owner"
@@ -32,10 +33,17 @@ func TestCapturedWriteSelfFencesWhenLeaseUnhealthy(t *testing.T) {
 // The ack must not be released if the node's lease lapsed while the durability
 // proof was in flight: a peer may already be taking the cell over.
 func TestAckRefusedWhenLeaseLapsesDuringProof(t *testing.T) {
-	m := lease.NewManager(nil, "n", "s", "", "", 10*time.Second)
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := lease.NewManager(b, "n", "s", "", "", 10*time.Second)
+	if err := m.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{Lease: m}
 	if !s.ackAllowed(time.Now()) {
-		t.Fatal("fresh manager should allow acks")
+		t.Fatal("published manager should allow acks")
 	}
 	if s.ackAllowed(time.Now().Add(9 * time.Second)) {
 		t.Fatal("acks must stop inside the margin before the published expiry")
@@ -43,7 +51,14 @@ func TestAckRefusedWhenLeaseLapsesDuringProof(t *testing.T) {
 }
 
 func TestAckRefusedWhileLegacyPeerVisible(t *testing.T) {
-	m := lease.NewManager(nil, "n", "s", "", "", 10*time.Second)
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := lease.NewManager(b, "n", "s", "", "", 10*time.Second)
+	if err := m.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{Lease: m}
 	m.SetCachedForTest([]lease.NodeLease{{Node: "old", Expiry: time.Now().Add(time.Minute).UnixMilli()}})
 	if s.ackAllowed(time.Now()) {

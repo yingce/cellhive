@@ -9,9 +9,162 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"cellhive/internal/cell"
+	"cellhive/internal/timer"
 )
+
+type countingKVWake struct {
+	mu      sync.Mutex
+	puts    int
+	deletes int
+}
+
+func (w *countingKVWake) Put(context.Context, string, int64, string, string) error {
+	w.mu.Lock()
+	w.puts++
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *countingKVWake) Delete(context.Context, string) error {
+	w.mu.Lock()
+	w.deletes++
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *countingKVWake) counts() (int, int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.puts, w.deletes
+}
+
+func TestKVExpiryReusesDurableEarlyTimer(t *testing.T) {
+	ctx := t.Context()
+	s := newScopeServer(t)
+	s.Timers = timer.NewRegistry()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}
+	c, err := s.Store.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wake := &countingKVWake{}
+	opens := 0
+	s.OpenTimer = func(ctx context.Context, scope cell.Scope) (*timer.Store, error) {
+		opens++
+		st, err := timer.NewStore(ctx, c)
+		if err == nil {
+			st.Index = wake
+		}
+		return st, err
+	}
+	base := time.Now().Add(2 * time.Hour).UnixMilli()
+	put := func(key string, due int64) {
+		t.Helper()
+		if _, err := c.PutTxOpts(ctx, key, []byte("v"), nil, due); err != nil {
+			t.Fatal(err)
+		}
+		s.syncKVExpiry(ctx, sc)
+	}
+	due := func() int64 {
+		t.Helper()
+		st, err := timer.NewStore(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, exists, err := st.KVExpiryDue(ctx)
+		if err != nil || !exists {
+			t.Fatalf("KV expiry timer = %d/%t/%v", got, exists, err)
+		}
+		return got
+	}
+	put("first", base)
+	firstPuts, firstDeletes := wake.counts()
+	if opens != 1 || firstPuts == 0 || due() != base {
+		t.Fatalf("initial timer opens=%d puts=%d due=%d", opens, firstPuts, due())
+	}
+	// A later key must reuse the durable first wakeup, including after the
+	// process-local registry is replaced as it would be after a restart.
+	s.Timers = timer.NewRegistry()
+	put("later", base+time.Hour.Milliseconds())
+	if puts, deletes := wake.counts(); opens != 1 || puts != firstPuts || deletes != firstDeletes || due() != base {
+		t.Fatalf("redundant timer mutation opens=%d puts=%d deletes=%d due=%d", opens, puts, deletes, due())
+	}
+	put("earlier", base-time.Hour.Milliseconds())
+	if puts, _ := wake.counts(); opens != 2 || puts <= firstPuts || due() != base-time.Hour.Milliseconds() {
+		t.Fatalf("earlier expiry not published opens=%d puts=%d due=%d", opens, puts, due())
+	}
+	// The dispatcher deletes an already-due timer after handling it. It cannot
+	// be reused for a later key that still needs a wakeup.
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveByOccurrence(ctx, string(timer.KindKVExpire)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Upsert(ctx, timer.New(time.Now().Add(-time.Second).UnixMilli(), timer.KindKVExpire, sc.String(), string(timer.KindKVExpire))); err != nil {
+		t.Fatal(err)
+	}
+	s.syncKVExpiry(ctx, sc)
+	if got := due(); got != base-time.Hour.Milliseconds() {
+		t.Fatalf("already-due timer was reused: %d", got)
+	}
+	// Removing all expiries must disarm; re-querying SQLite prevents a stale
+	// cleanup result from deleting a new timer after a concurrent put.
+	for _, key := range []string{"first", "later", "earlier"} {
+		if _, err := c.PutTxOpts(ctx, key, []byte("v"), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.syncKVExpiry(ctx, sc)
+	st, err = timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, exists, err := st.KVExpiryDue(ctx); err != nil || exists || got != 0 {
+		t.Fatalf("timer after clearing TTL = %d/%t/%v", got, exists, err)
+	}
+}
+
+func TestKVExpiryConcurrentReconcileKeepsEarliest(t *testing.T) {
+	ctx := t.Context()
+	s := newScopeServer(t)
+	s.Timers = timer.NewRegistry()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}
+	c, err := s.Store.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.OpenTimer = func(ctx context.Context, scope cell.Scope) (*timer.Store, error) { return timer.NewStore(ctx, c) }
+	base := time.Now().Add(2 * time.Hour).UnixMilli()
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			due := base + int64(i-12)*time.Minute.Milliseconds()
+			if _, err := c.PutTxOpts(ctx, strconv.Itoa(i), []byte("v"), nil, due); err != nil {
+				t.Errorf("put %d: %v", i, err)
+				return
+			}
+			s.syncKVExpiry(ctx, sc)
+		}(i)
+	}
+	wg.Wait()
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, exists, err := st.KVExpiryDue(ctx)
+	if err != nil || !exists || got != base-12*time.Minute.Milliseconds() {
+		t.Fatalf("concurrent timer = %d/%t/%v, want %d", got, exists, err, base-12*time.Minute.Milliseconds())
+	}
+}
 
 // TestKVTTLAndMetadataE2E covers ADR-098: metadata round-trips, an expired key
 // is invisible, and the timer-driven internal cleanup endpoint deletes it.

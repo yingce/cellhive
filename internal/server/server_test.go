@@ -51,6 +51,9 @@ func newTestServer(t *testing.T) (*Server, string) {
 	}
 	cfg := config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", TokenLog: "tok", AdminToken: "admin-tok", BucketDir: dir, Durability: "auto", BucketWait: true}
 	lm := lease.NewManager(b, "node-1", "s1", "127.0.0.1:7000", "", 10*time.Second)
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatalf("publish test node lease: %v", err)
+	}
 	om := &owner.Manager{B: b, NodeID: "node-1", Session: "s1", Advertise: "127.0.0.1:7000", Role: cell.RoleCellAgent, OwnerTTL: 10 * time.Second}
 	rm := replica.New(b)
 	spool, err := peer.NewSpool(filepath.Join(dir, "peer-spool"))

@@ -83,7 +83,7 @@ type Manager struct {
 
 // NewManager builds a lease manager.
 func NewManager(b bucket.Bucket, nodeID, session, advertise, peerURL string, ttl time.Duration) *Manager {
-	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID), publishedExpiry: time.Now().Add(ttl)}
+	return &Manager{B: b, NodeID: nodeID, Session: session, Advert: advertise, PeerURL: peerURL, TTL: ttl, renewKey: Key(nodeID)}
 }
 
 // Publish writes (or renews) this node's lease.

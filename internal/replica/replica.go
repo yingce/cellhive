@@ -30,6 +30,7 @@ type Manager struct {
 
 	fenceMu    sync.Mutex
 	fenceCache map[string]fenceCacheEntry
+	fenceRev   uint64
 }
 
 // New creates a Manager.

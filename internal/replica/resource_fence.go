@@ -55,6 +55,7 @@ func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourc
 	}
 	key := sc.String()
 	m.fenceMu.Lock()
+	rev := m.fenceRev
 	if e, ok := m.fenceCache[key]; ok && time.Since(e.at) < resourceFenceCacheTTL {
 		m.fenceMu.Unlock()
 		return e.f, e.etag, nil
@@ -64,18 +65,40 @@ func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourc
 	if err != nil {
 		return f, etag, err
 	}
-	// Only an absent fence is cached. A live/deleted fence is a rare control
-	// event; caching it could keep a stale generation on the request path and
-	// trigger repeated local eviction.
-	if fenceAbsent(f) {
-		m.fenceMu.Lock()
-		if m.fenceCache == nil {
-			m.fenceCache = make(map[string]fenceCacheEntry)
-		}
-		m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
-		m.fenceMu.Unlock()
-	}
+	m.cacheReadFence(key, f, etag, rev)
 	return f, etag, nil
+}
+
+// RefreshResourceSnapshot refreshes the ordinary one-second read cache ahead
+// of a hot KV request. It never treats a failed bucket read as fresh.
+func (m *Manager) RefreshResourceSnapshot(ctx context.Context, sc cell.Scope) error {
+	m.fenceMu.Lock()
+	rev := m.fenceRev
+	m.fenceMu.Unlock()
+	f, etag, err := m.readResourceFenceFresh(ctx, sc)
+	if err != nil {
+		return err
+	}
+	m.cacheReadFence(sc.String(), f, etag, rev)
+	return nil
+}
+
+func (m *Manager) cacheReadFence(key string, f resourceFence, etag string, rev uint64) {
+	m.fenceMu.Lock()
+	defer m.fenceMu.Unlock()
+	if m.fenceRev != rev {
+		return // a local delete/recreate superseded this in-flight read
+	}
+	// A live/deleted fence is a rare control event; do not cache it. The
+	// ordinary absent fence is the only value served without a point read.
+	if !fenceAbsent(f) {
+		delete(m.fenceCache, key)
+		return
+	}
+	if m.fenceCache == nil {
+		m.fenceCache = make(map[string]fenceCacheEntry)
+	}
+	m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
 }
 
 func fenceAbsent(f resourceFence) bool {
@@ -129,6 +152,7 @@ func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (re
 func (m *Manager) cacheFence(sc cell.Scope, f resourceFence, etag string) {
 	m.fenceMu.Lock()
 	defer m.fenceMu.Unlock()
+	m.fenceRev++
 	if m.fenceCache == nil {
 		m.fenceCache = make(map[string]fenceCacheEntry)
 	}

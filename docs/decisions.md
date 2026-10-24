@@ -1,5 +1,25 @@
 # 决策记录（ADR）
 
+## ADR-284 COS 不可变 LTX Append 复用响应 ETag（2026-10-24）
+
+- **问题**：bucket 模式的 KV PUT 必须等资源删除 fence 点读、不可变 LTX 对象持久写入与 RPO=0 证明。COS 原生 Append 成功后，`ProviderBucket.ConditionalCreate` 还同步做一次 S3 HEAD，仅为取回 ETag；这让每次 LTX 写多一次 COS 往返。对测试桶的临时探针验证，15 次 Append 响应均带 ETag，且与随后 HEAD 的 ETag 15/15 相同。
+- **决策**：COS appender 可选返回成功 Append 响应的 ETag；不可变 LTX `ConditionalCreate` 直接使用非空响应 ETag，缺失时保持原 HEAD 回退。已有对象冲突仍按原流程点读确认，资源 fence/epoch 与删除清理继续使用实际 ETag；OSS 等没有该能力的 provider 保持原路径。数据持久化确认仍来自已成功的原生 Append，不提前应答。
+- **验收边界**：单测覆盖响应 ETag 免 HEAD 和缺失回退；真实 COS 用独立 namespace 验证 PUT/GET/删除，并与旧二进制顺序 A/B 测延迟。跨地域 COS 尾延迟及 SG 同区 fleet/公开入口另行验收，不以一次小样本差值宣称固定收益。
+
+## ADR-283 活跃 KV 读写的短缓存提前刷新（2026-10-24）
+
+- **问题**：已打开的 KV cell 连续热读为亚毫秒，但 binding、owner 与资源删除 fence 的 1 秒缓存同时到期时，请求会串行等待对象存储点读。本机到香港 COS 的单 agent 试验中，连续 300 次 GET p50 约 0.35ms，而每隔 1.15 秒的 8 次 GET 为 44–185ms。共享桶操作计数包含后台工作，不能据此逐次归因；代码路径证明失效请求至少可能同步触发 owner/fence 点读。
+- **决策**：只跟踪近期重复 GET 或成功 PUT 的有限数量 KV scope，由 cell-agent 后台在短缓存到期前刷新 binding、fence 和 owner。请求仍执行原有鉴权、generation gate、owner 路由、读写与写入持久化证明；后台刷新仅更新原有缓存，不提供额外授权或跳过请求检查。刷新失败不延长缓存有效期，过期请求仍同步验证并失败关闭。资源删除/重建与 owner 本地变更必须使异步旧结果不能重新填入缓存。已发布且处于 self-fence 健康窗口的本机 node lease 可以直接证明本机 owner 存活，不必因节点列表快照滞后而对 `nodes/<self>.json` 做同步点读；本机 lease 不健康时拒绝在原 owner 记录上自行重认领并继续读。
+- **边界**：同一 scope 在 2 秒内第二次 GET 或成功 PUT 才进入提前刷新；活跃集合有容量和空闲淘汰上限，刷新并发有上限；超出容量或刚恢复活跃的 scope 走原有同步路径。后台工作不改变资源删除和 owner 切换最多 1 秒的缓存可见边界，不向租户 runtime 提供桶凭据。PUT 的 RPO=0 持久化证明仍同步等待，故热 PUT 不以亚毫秒 GET 为性能目标。
+- **验证**：单测覆盖缓存命中/过期、PUT 激活提前刷新、异步刷新与撤销并发、失败不续期；真实 COS 的间隔热 PUT/GET、混合 put/get 对照与冷请求单独记录。修复版 SG 同区 fleet/公开入口另行验收。
+
+## ADR-282 KV TTL 写入复用已有最早唤醒（2026-10-24）
+
+- **问题**：`expiration_ttl` 的每次 KV put 在数据写入获得 RPO=0 证明后，仍同步执行 `RemoveByOccurrence`、`Upsert` 及多次 COS `wake/` 索引读写；即使该 cell 已有更早的过期 timer，也重复支付跨网络往返。SG 同 Pod 对照中普通小值 put 多次约 9–11ms，TTL put 约 191–300ms；本地 FS 对照中位数分别为 4.2/5.4ms。
+- **决策**：TTL put 和过期清理在每 cell 的同步锁下重新查询 SQLite `NextExpiry` 与**已持久化**的唯一 `kv-expire` timer。已有 timer 尚未到期、且不晚于当前最早到期时复用它，仅在进程内注册该到期时间；缺失、重复、已经到期（派发端即将删除旧 token）或晚于当前最早到期时才重建 timer 并同步更新 wake 索引。过期清理也重新读取当前到期，避免并发 put 之后依据旧 `next=0` 误删新 timer。锁只序列化 timer 对账，不包住 KV 事务或 RPO=0 证明。旧 timer 过早触发可安全地重新计算，不能让新、更早的到期没有唤醒记录。
+- **边界**：KV 写入的 follower fsync／桶回退证明不变；`wake/` 仍用于跨节点发现到期工作。已有 timer 但 wake 索引丢失时沿用后台索引修复机制，不把本地内存当权威；首次或更早到期仍可能同步访问 COS。当前 timer 发布失败后 KV 已提交而请求仍返回成功的语义单独审视，不以本次性能修复悄悄改变。
+- **验证**：单测覆盖重复 TTL 不产生额外索引写、较早到期会提前唤醒、并发重武装不把到期时间推后、已到期 timer 不可复用；真实进程 FS 验证 1 秒/3 秒物理清理，真实 COS 测试桶验证普通/TTL put A/B 与 2 秒/6 秒到期读回。SG 同区 fleet 模式与公开入口尚待部署复测，详见 `docs/archive/bench/kv-ttl-wake-2026-10-24.md`。
+
 ## ADR-281 已物化 Cron slot 在移除触发器后继续派发（2026-10-24）
 
 Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是持久化的待投递事件，部署时移除或修改 Cron 表达式不撤销它。派发时从当前投影中的**活跃 worker**解析版本和 bundle，即使该 worker 的 `Crons` 已为空；事件仍从 occurrence 保留原表达式及原计划时间。投影读取失败、scope 无效或活跃 worker 不存在时，派发端返回明确错误并保留 timer 按原退避重试，不向 user-runtime 发送缺失身份的请求。租户 `scheduled()` 失败仍按 ADR-211 重试；移除触发器不会自动取消已物化事件，删除 worker 后的未投递事件需要单独的显式处置策略。此决策修复 SG `vwork-24/kv-cache-counter` 旧 timer 因活跃版本 `Crons=[]` 缺少 `worker`/`bundle_sha` 而持续 HTTP 400 的问题。

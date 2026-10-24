@@ -110,11 +110,25 @@ func (c *COSAppender) Read(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(r.Body)
 }
 func (c *COSAppender) Append(ctx context.Context, key string, position int64, data []byte) error {
+	_, err := c.AppendWithETag(ctx, key, position, data)
+	return err
+}
+
+// AppendWithETag returns the ETag carried by a successful COS append. For a
+// newly created immutable object this is the object's ETag, avoiding a
+// separate HEAD after the append. Older/compatible endpoints may omit it.
+func (c *COSAppender) AppendWithETag(ctx context.Context, key string, position int64, data []byte) (string, error) {
 	if int64(int(position)) != position {
-		return fmt.Errorf("COS append position overflow")
+		return "", fmt.Errorf("COS append position overflow")
 	}
-	_, _, err := c.client.Object.Append(ctx, key, int(position), bytes.NewReader(data), nil)
-	return nativeCOSError(err)
+	_, resp, err := c.client.Object.Append(ctx, key, int(position), bytes.NewReader(data), nil)
+	if err != nil {
+		return "", nativeCOSError(err)
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
 }
 func nativeCOSError(err error) error {
 	if err == nil {

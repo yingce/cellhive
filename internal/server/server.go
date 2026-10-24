@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net"
@@ -146,6 +147,10 @@ type Server struct {
 	timerRegMu      sync.Mutex
 	timerRegPending map[string]bool
 	timerRegWG      sync.WaitGroup
+	// A KV cell can receive overlapping puts and expiry dispatches. Reconcile
+	// its durable timer in one order so a stale, later deadline cannot replace
+	// a newly published earlier one. Stripes bound the lock memory cost.
+	kvExpiryMu [64]sync.Mutex
 
 	requests atomic.Uint64
 	claims   atomic.Uint64
@@ -192,8 +197,13 @@ type Server struct {
 
 	// bindMu guards bindCache: scoped-token binding declarations, cached so a
 	// hot write does not read the control cell on every request.
-	bindMu    sync.Mutex
-	bindCache map[string]bindingEntry
+	bindMu               sync.Mutex
+	bindCache            map[string]bindingEntry
+	bindRev              uint64
+	hotKVAccessMu        sync.Mutex
+	hotKVAccesses        map[string]*hotKVAccess
+	hotKVRefreshes       atomic.Uint64
+	hotKVRefreshFailures atomic.Uint64
 
 	// vectorizeMu guards vectorizeCfg: index configs (dimensions + metric) cached
 	// so insert/query do not read the control cell on every request.
@@ -655,6 +665,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeFmt(w, "cellhive_requests_total %d\n", s.requests.Load())
 	writeFmt(w, "# TYPE cellhive_claims_total counter\n")
 	writeFmt(w, "cellhive_claims_total %d\n", s.claims.Load())
+	writeFmt(w, "# TYPE cellhive_hot_kv_access_refreshes_total counter\n")
+	writeFmt(w, "cellhive_hot_kv_access_refreshes_total %d\n", s.hotKVRefreshes.Load())
+	writeFmt(w, "# TYPE cellhive_hot_kv_access_refresh_failures_total counter\n")
+	writeFmt(w, "cellhive_hot_kv_access_refresh_failures_total %d\n", s.hotKVRefreshFailures.Load())
 	writeFmt(w, "# TYPE cellhive_append_total counter\n")
 	writeFmt(w, "cellhive_append_total %d\n", s.appends.Load())
 	writeFmt(w, "# TYPE cellhive_segments_read_total counter\n")
@@ -1148,6 +1162,12 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 		s.Owner.Forget(sc, 0)
 		return s.forwardNonOwner(w, r, sc, preRead, admin)
 	case err == nil || errors.Is(err, owner.ErrUnowned):
+		if local, ok := s.Owner.LeaseView.(*lease.Manager); err == nil && ok && local == s.Lease && o.Node == s.Cfg.NodeID && o.Session == s.Owner.Session && o.Liveness == "node-lease" {
+			// A self owner whose node lease is no longer healthy cannot safely
+			// reclaim the same record and serve stale reads before peers take over.
+			writeErr(w, http.StatusServiceUnavailable, "owner_lease_unhealthy", "local owner lease is not healthy")
+			return true
+		}
 		// Unowned or lease expired: claim it and proceed, unless this node is
 		// above its disk high watermark (then a peer should take it).
 		if s.overloaded() {
@@ -2273,42 +2293,68 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 	return 0, nil
 }
 
-// armKVExpiry (re)arms the cell's single kv-expire timer at the earliest pending
-// expiry. No-op when the timer subsystem is not configured.
-func (s *Server) armKVExpiry(ctx context.Context, scope cell.Scope) {
+// syncKVExpiry reconciles the cell's durable timer with the earliest KV expiry.
+// A persisted timer that is already early enough needs no bucket wake-index
+// writes: firing early merely rechecks the cell and arms the next deadline.
+func (s *Server) syncKVExpiry(ctx context.Context, scope cell.Scope) {
 	if s.OpenTimer == nil || s.Timers == nil {
 		return
 	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(scope.String()))
+	mu := &s.kvExpiryMu[h.Sum32()%uint32(len(s.kvExpiryMu))]
+	mu.Lock()
+	defer mu.Unlock()
+
 	c, err := s.Store.Cell(ctx, scope)
 	if err != nil {
 		return
 	}
 	next, err := c.NextExpiry(ctx)
-	if err != nil || next == 0 {
+	if err != nil {
+		return
+	}
+	// Read the timer from the same SQLite cell, without OpenTimer's resource
+	// fence and generation point reads. SQLite, not the process-local registry,
+	// is the authority after a restart or owner change.
+	current, err := timer.NewStore(ctx, c)
+	if err != nil {
+		return
+	}
+	currentDue, exists, err := current.KVExpiryDue(ctx)
+	if err != nil {
+		return
+	}
+	if next == 0 {
+		if exists || currentDue > 0 {
+			st, err := s.OpenTimer(ctx, scope)
+			if err != nil || st.RemoveByOccurrence(ctx, string(timer.KindKVExpire)) != nil {
+				return
+			}
+		}
+		s.Timers.Remove(scope.String())
+		return
+	}
+	// A due timer may already be in flight; the runner removes its token after
+	// dispatch succeeds. Reusing it would leave a later KV expiry unscheduled.
+	if exists && currentDue > time.Now().UnixMilli() && currentDue <= next {
+		s.Timers.Arm(scope.String(), currentDue)
 		return
 	}
 	st, err := s.OpenTimer(ctx, scope)
 	if err != nil {
 		return
 	}
-	_ = st.RemoveByOccurrence(ctx, string(timer.KindKVExpire))
+	if currentDue > 0 {
+		if err := st.RemoveByOccurrence(ctx, string(timer.KindKVExpire)); err != nil {
+			return
+		}
+	}
 	t := timer.New(next, timer.KindKVExpire, scope.String(), string(timer.KindKVExpire))
 	if err := st.Upsert(ctx, t); err != nil {
 		return
 	}
 	s.Timers.Arm(scope.String(), next)
-}
-
-// disarmKVExpiry removes the cell's kv-expire timer (no more pending expiries)
-// and forgets the scope so the polling runner stops opening it.
-func (s *Server) disarmKVExpiry(ctx context.Context, scope cell.Scope) {
-	if s.OpenTimer == nil || s.Timers == nil {
-		return
-	}
-	if st, err := s.OpenTimer(ctx, scope); err == nil {
-		_ = st.RemoveByOccurrence(ctx, string(timer.KindKVExpire))
-	}
-	s.Timers.Remove(scope.String())
 }
 
 // handleKVExpire is the timer-driven cleanup for one KV cell: delete expired
@@ -2342,11 +2388,7 @@ func (s *Server) handleKVExpire(w http.ResponseWriter, r *http.Request) {
 		s.captureErr(w, err, "expire_failed")
 		return
 	}
-	if next > 0 {
-		s.armKVExpiry(r.Context(), sc)
-	} else {
-		s.disarmKVExpiry(r.Context(), sc)
-	}
+	s.syncKVExpiry(r.Context(), sc)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "next_ms": next})
 }
 
@@ -2449,8 +2491,9 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if expiresMs > 0 {
-		s.armKVExpiry(r.Context(), scope)
+		s.syncKVExpiry(r.Context(), scope)
 	}
+	s.noteHotKVAccess(scope, ns, s.scopeName(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": true, "txid": txid})
 }
 
@@ -2585,7 +2628,7 @@ func (s *Server) handleKVIncr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if expiresMs > 0 {
-		s.armKVExpiry(r.Context(), scope)
+		s.syncKVExpiry(r.Context(), scope)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"value": next, "value_i64": strconv.FormatInt(next, 10), "applied": true, "txid": txid})
 }
@@ -2729,6 +2772,7 @@ func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
+	s.noteHotKVAccess(scope, s.scopeNS(r), s.scopeName(r))
 	v, meta, gerr := c.Get(r.Context(), key)
 	if errors.Is(gerr, cellstore.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "key not found")
@@ -2795,6 +2839,7 @@ func (s *Server) handleKVGetBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
+	s.noteHotKVAccess(scope, s.scopeNS(r), s.scopeName(r))
 	got, err := c.GetMany(r.Context(), req.Keys)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "get_failed", err.Error())
@@ -3519,6 +3564,10 @@ func (s *Server) followerSampleTTL() time.Duration {
 
 // Run starts the HTTP server and serves until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
+	warmCtx, stopWarm := context.WithCancel(ctx)
+	warmDone := make(chan struct{})
+	defer func() { stopWarm(); <-warmDone }()
+	go func() { s.runKVReadWarmLoop(warmCtx); close(warmDone) }()
 	srv := &http.Server{Addr: s.Cfg.RESTAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {

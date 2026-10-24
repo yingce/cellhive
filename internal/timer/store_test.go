@@ -89,6 +89,22 @@ func TestOpeningMigratedTimerStoreDoesNotWriteCell(t *testing.T) {
 	}
 }
 
+func TestKVExpiryDueRejectsDuplicateTimers(t *testing.T) {
+	ctx := t.Context()
+	st := newStore(t)
+	if due, exists, err := st.KVExpiryDue(ctx); err != nil || exists || due != 0 {
+		t.Fatalf("empty KV timer = %d/%t/%v", due, exists, err)
+	}
+	for _, due := range []int64{1000, 2000} {
+		if err := st.Upsert(ctx, New(due, KindKVExpire, st.cell.Scope.String(), string(KindKVExpire))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if due, exists, err := st.KVExpiryDue(ctx); err != nil || exists || due != 1000 {
+		t.Fatalf("duplicate KV timers = %d/%t/%v; must rebuild", due, exists, err)
+	}
+}
+
 func TestStoreDueOrderingAndDedup(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)

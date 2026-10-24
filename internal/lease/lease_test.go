@@ -114,7 +114,7 @@ func TestHealthyRequiresPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Second, renewKey: Key("n1")}
+	m := NewManager(base, "n1", "s1", "", "", time.Second)
 	if m.Healthy(time.Now()) {
 		t.Fatal("unpublished manager must not claim to be healthy")
 	}

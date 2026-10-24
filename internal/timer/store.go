@@ -90,6 +90,20 @@ func (s *Store) NextDue(ctx context.Context) (int64, error) {
 	return next.Int64, nil
 }
 
+// KVExpiryDue returns the sole durable KV expiry timer. A duplicate is treated
+// as missing so its caller rebuilds the single-timer invariant instead of
+// trusting one of several potentially stale wakeups.
+func (s *Store) KVExpiryDue(ctx context.Context) (int64, bool, error) {
+	var due sql.NullInt64
+	var count int
+	err := s.cell.DB.QueryRowContext(ctx, `SELECT MIN(due_ms), COUNT(*) FROM timers WHERE kind=? AND occurrence=?`,
+		string(KindKVExpire), string(KindKVExpire)).Scan(&due, &count)
+	if err != nil {
+		return 0, false, err
+	}
+	return due.Int64, count == 1, nil
+}
+
 // syncIndex mirrors the scope's earliest due into the wake index.
 func (s *Store) syncIndex(ctx context.Context) error {
 	if s.Index == nil {

@@ -1,14 +1,95 @@
 package replica
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 )
+
+type delayedFenceGet struct {
+	bucket.Bucket
+	mu      sync.Mutex
+	block   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+type failingFenceGet struct{ bucket.Bucket }
+
+func (b failingFenceGet) Get(context.Context, string) ([]byte, string, error) {
+	return nil, "", errors.New("bucket unavailable")
+}
+
+func TestResourceFenceFailedRefreshDoesNotExtendCache(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "refresh-error"}
+	if _, _, err := m.readResourceFence(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	m.fenceMu.Lock()
+	before := m.fenceCache[sc.String()].at
+	m.fenceMu.Unlock()
+	m.B = failingFenceGet{m.B}
+	if err := m.RefreshResourceSnapshot(t.Context(), sc); err == nil {
+		t.Fatal("failed bucket read was accepted")
+	}
+	m.fenceMu.Lock()
+	after := m.fenceCache[sc.String()].at
+	m.fenceMu.Unlock()
+	if !after.Equal(before) {
+		t.Fatal("failed refresh extended resource fence cache")
+	}
+}
+
+func (b *delayedFenceGet) Get(ctx context.Context, key string) ([]byte, string, error) {
+	data, etag, err := b.Bucket.Get(ctx, key)
+	b.mu.Lock()
+	block := b.block
+	if block {
+		b.block = false
+	}
+	b.mu.Unlock()
+	if block {
+		close(b.started)
+		<-b.release
+	}
+	return data, etag, err
+}
+
+func TestResourceFenceDeleteRejectsInFlightRefresh(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "refresh-race"}
+	if _, _, err := m.readResourceFenceFresh(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	b := &delayedFenceGet{Bucket: m.B, block: true, started: make(chan struct{}), release: make(chan struct{})}
+	m.B = b
+	done := make(chan error, 1)
+	go func() { done <- m.RefreshResourceSnapshot(t.Context(), sc) }()
+	<-b.started
+	if err := m.BlockResource(t.Context(), sc, "delete-job"); err != nil {
+		t.Fatal(err)
+	}
+	close(b.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	m.fenceMu.Lock()
+	_, cached := m.fenceCache[sc.String()]
+	m.fenceMu.Unlock()
+	if cached {
+		t.Fatal("pre-delete refresh repopulated the resource fence cache")
+	}
+	if blocked, err := m.ResourceBlocked(t.Context(), sc); err != nil || !blocked {
+		t.Fatalf("deleted resource became readable: blocked=%v err=%v", blocked, err)
+	}
+}
 
 func TestResourceFenceMigratesLegacyAndConcurrentReaders(t *testing.T) {
 	m := newManager(t)
