@@ -1,0 +1,5 @@
+ok  	cellhive/internal/cellstore	3.824s
+ok  	cellhive/internal/owner	2.144s
+ok  	cellhive/internal/peer	0.664s
+ok  	cellhive/internal/queue	1.729s
+ok  	cellhive/internal/server	24.900s

@@ -119,6 +119,9 @@ type Manager struct {
 	cache          map[string]cachedOwner
 	cacheRev       map[string]uint64
 
+	claimMu sync.Mutex
+	claims  map[string]chan struct{}
+
 	ownedMu sync.Mutex
 	owned   map[string]OwnedScope
 
@@ -214,12 +217,31 @@ func (m *Manager) Resolve(ctx context.Context, s cell.Scope) (cell.Owner, string
 // lease it returns ErrOwnerLive with that record. Races return
 // bucket.ErrPrecondition.
 func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.Owner, error) {
+	return m.ClaimWithReset(ctx, s, now, nil)
+}
+
+// ClaimWithReset finishes predecessor recovery and resets the obsolete local
+// replica BEFORE publishing ownership. Failed resets leave the old owner in
+// place, so retries cannot mistake an incomplete takeover for a ready owner.
+// reset must not re-enter Claim or wait on requests waiting for this claim.
+func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Time, reset func(context.Context, cell.Scope) error) (cell.Owner, error) {
+	release, err := m.lockClaim(ctx, s.String())
+	if err != nil {
+		return cell.Owner{}, err
+	}
+	defer release()
+
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
 		epoch, gerr := m.nextEpoch(ctx, s)
 		if gerr != nil {
 			return cell.Owner{}, gerr
+		}
+		if reset != nil {
+			if err := reset(ctx, s); err != nil {
+				return cell.Owner{}, err
+			}
 		}
 		o := m.newOwner(epoch, now)
 		data, _ := cell.MarshalOwner(o)
@@ -257,6 +279,11 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 			return cur, err
 		}
 	}
+	if reset != nil {
+		if err := reset(ctx, s); err != nil {
+			return cur, err
+		}
+	}
 	epoch, gerr := m.nextEpoch(ctx, s)
 	if gerr != nil {
 		return cell.Owner{}, gerr
@@ -275,6 +302,38 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 	m.Invalidate(s)
 	m.rememberOwned(s, o.Epoch)
 	return o, nil
+}
+
+// lockClaim serializes only the same scope; recovery of one large cell does
+// not hold a global/striped lock over unrelated claims. Waits are cancellable.
+func (m *Manager) lockClaim(ctx context.Context, key string) (func(), error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		m.claimMu.Lock()
+		if m.claims == nil {
+			m.claims = make(map[string]chan struct{})
+		}
+		wait, busy := m.claims[key]
+		if !busy {
+			done := make(chan struct{})
+			m.claims[key] = done
+			m.claimMu.Unlock()
+			return func() {
+				m.claimMu.Lock()
+				delete(m.claims, key)
+				close(done)
+				m.claimMu.Unlock()
+			}, nil
+		}
+		m.claimMu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // Renew refreshes the lease for a scope this node owns.

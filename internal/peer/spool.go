@@ -74,7 +74,17 @@ type spoolLog struct {
 
 // sessionLog caches the sequence recovered from a session append-log. Access
 // is serialized by the corresponding session lock.
+// sessionTailCursor is an optimization, never recovery authority. Only offsets
+// observed while validating an unchanged sealed log may be reused.
+type sessionTailCursor struct {
+	after  uint64
+	offset int64
+	final  uint64
+	info   os.FileInfo
+}
+
 type sessionLog struct {
+	tail   *sessionTailCursor
 	loaded bool
 	last   uint64
 	size   int64
@@ -643,11 +653,38 @@ func (s *Spool) tailPage(session string, after uint64, maxFragments, maxBytes in
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	cached, _ := s.sessionLogs.LoadOrStore(dir, &sessionLog{})
+	state := cached.(*sessionLog)
+	var sequence uint64
+	var offset int64
+	if c := state.tail; sealed != nil && c != nil && c.after == after && c.final == final &&
+		os.SameFile(c.info, info) && c.info.Size() == info.Size() && c.info.ModTime().Equal(info.ModTime()) {
+		if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
+			return nil, err
+		}
+		sequence, offset = c.after, c.offset
+	}
+	// Save the end of the last returned frame, not a look-ahead frame that did
+	// not fit the byte budget. Each sequential page now reads only its suffix.
+	returnedSequence, returnedOffset := sequence, offset
+	saveCursor := func() {
+		if sealed != nil {
+			state.tail = &sessionTailCursor{after: returnedSequence, offset: returnedOffset, final: final, info: info}
+		}
+	}
+
 	r := bufio.NewReader(f)
 	out := make([]SessionFragment, 0)
 	bytes := 0
-	var sequence uint64
 	for sealed == nil || sequence < final {
+		if maxFragments > 0 && len(out) >= maxFragments {
+			saveCursor()
+			return out, nil
+		}
 		var hdr [12]byte
 		if _, err := io.ReadFull(r, hdr[:]); errors.Is(err, io.EOF) && sealed == nil {
 			break
@@ -659,6 +696,10 @@ func (s *Spool) tailPage(session string, after uint64, maxFragments, maxBytes in
 		if n < 18 || seq != sequence+1 {
 			return nil, fmt.Errorf("spool: session tail gap at %d got %d", sequence, seq)
 		}
+		if int64(n)-8 > info.Size()-offset-12 {
+			return nil, fmt.Errorf("spool: incomplete session frame at %d", seq)
+		}
+		offset += int64(n) + 4
 		sequence = seq
 		if sequence <= after {
 			if _, err := io.CopyN(io.Discard, r, int64(n)-8); err != nil {
@@ -680,14 +721,17 @@ func (s *Spool) tailPage(session string, after uint64, maxFragments, maxBytes in
 		}
 		if len(out) > 0 && (maxFragments > 0 && len(out) >= maxFragments || maxBytes > 0 && bytes+fragmentBytes > maxBytes) {
 			// A whole-fragment page boundary is not a truncated sealed log.
+			saveCursor()
 			return out, nil
 		}
 		out = append(out, fragment)
 		bytes += fragmentBytes
+		returnedSequence, returnedOffset = sequence, offset
 	}
 	if sealed != nil && sequence < final && (maxFragments <= 0 || len(out) < maxFragments) && (maxBytes <= 0 || bytes < maxBytes) {
 		return nil, fmt.Errorf("spool: incomplete session tail: got %d want %d", sequence, final)
 	}
+	saveCursor()
 	return out, nil
 }
 

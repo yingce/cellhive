@@ -1,0 +1,16 @@
+=== RUN   TestTryInvalidateVerifyFailureKeepsHandle
+--- PASS: TestTryInvalidateVerifyFailureKeepsHandle (0.01s)
+PASS
+ok  	cellhive/internal/cellstore	0.015s
+=== RUN   TestOwnerGateResetFailureRemainsUnowned
+--- PASS: TestOwnerGateResetFailureRemainsUnowned (0.00s)
+PASS
+ok  	cellhive/internal/queue	0.005s
+=== RUN   TestSealedTailPaginationReadVolume
+    tail_scaling_test.go:61: frames=2048 pages=8 elapsed=9.989819ms read_bytes=8581912 file_bytes=8556544
+    tail_scaling_test.go:61: frames=4096 pages=16 elapsed=20.357928ms read_bytes=17167326 file_bytes=17113088
+    tail_scaling_test.go:61: frames=8192 pages=32 elapsed=48.893588ms read_bytes=34338143 file_bytes=34226176
+--- PASS: TestSealedTailPaginationReadVolume (0.16s)
+PASS
+ok  	cellhive/internal/peer	0.167s
+?   	cellhive/scripts/bench/cell-residency	[no test files]

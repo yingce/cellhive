@@ -1,0 +1,5 @@
+=== RUN   TestSessionRecoveryProcesses
+    session_e2e_test.go:301: PASS: both addresses changed; interrupted recovery restarted; empty replacement disk refused; original follower disk restored; 80 acknowledged values restored; stale pinned control registrations restored; both old sessions sealed
+--- PASS: TestSessionRecoveryProcesses (8.35s)
+PASS
+ok  	cellhive/cmd/cell-agent	8.358s

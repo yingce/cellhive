@@ -1,0 +1,31 @@
+RESULT_DIR /tmp/cellhive-current-rps-gh0guvpy
+{"round": 0, "route": "seed", "mode": "put", "concurrency": 1, "stdout": "mode=put cells=1  c=1    n=1000    fail=0    p50=6.01   ms p90=7.59   ms p99=9.57    ms mean=6.27   ms rps=159", "stderr": "", "exit": 0}
+before 0 cellhive_commit_total{mode="fleet"} 1029; cellhive_live_followers 1
+before 1 cellhive_live_followers 0
+{"round": 1, "route": "owner", "mode": "put", "concurrency": 1, "stdout": "mode=put cells=1  c=1    n=840     fail=0    p50=5.63   ms p90=7.21   ms p99=9.39    ms mean=5.96   ms rps=168", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "put", "concurrency": 1, "stdout": "mode=put cells=1  c=1    n=741     fail=0    p50=6.32   ms p90=8.69   ms p99=12.52   ms mean=6.75   ms rps=148", "stderr": "", "exit": 0}
+{"round": 1, "route": "owner", "mode": "get", "concurrency": 1, "stdout": "mode=get cells=1  c=1    n=23970   fail=0    p50=0.20   ms p90=0.23   ms p99=0.39    ms mean=0.21   ms rps=4794", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "get", "concurrency": 1, "stdout": "mode=get cells=1  c=1    n=11724   fail=0    p50=0.39   ms p90=0.49   ms p99=1.09    ms mean=0.42   ms rps=2344", "stderr": "", "exit": 0}
+{"round": 1, "route": "owner", "mode": "put", "concurrency": 16, "stdout": "mode=put cells=1  c=16   n=11878   fail=0    p50=6.38   ms p90=8.08   ms p99=10.72   ms mean=6.74   ms rps=2373", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "put", "concurrency": 16, "stdout": "mode=put cells=1  c=16   n=9699    fail=0    p50=7.48   ms p90=11.78  ms p99=16.04   ms mean=8.25   ms rps=1937", "stderr": "", "exit": 0}
+{"round": 1, "route": "owner", "mode": "get", "concurrency": 16, "stdout": "mode=get cells=1  c=16   n=84503   fail=0    p50=0.68   ms p90=1.98   ms p99=3.97    ms mean=0.95   ms rps=16898", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "get", "concurrency": 16, "stdout": "mode=get cells=1  c=16   n=47719   fail=0    p50=1.43   ms p90=2.91   ms p99=5.24    ms mean=1.68   ms rps=9540", "stderr": "", "exit": 0}
+{"round": 1, "route": "owner", "mode": "put", "concurrency": 32, "stdout": "mode=put cells=1  c=32   n=19503   fail=0    p50=7.53   ms p90=11.55  ms p99=16.03   ms mean=8.21   ms rps=3893", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "put", "concurrency": 32, "stdout": "mode=put cells=1  c=32   n=15301   fail=0    p50=10.06  ms p90=14.35  ms p99=21.31   ms mean=10.46  ms rps=3056", "stderr": "", "exit": 0}
+{"round": 1, "route": "owner", "mode": "get", "concurrency": 32, "stdout": "mode=get cells=1  c=32   n=85449   fail=0    p50=1.34   ms p90=4.09   ms p99=8.04    ms mean=1.87   ms rps=17084", "stderr": "", "exit": 0}
+{"round": 1, "route": "follower", "mode": "get", "concurrency": 32, "stdout": "mode=get cells=1  c=32   n=47118   fail=0    p50=3.05   ms p90=5.82   ms p99=8.77    ms mean=3.40   ms rps=9419", "stderr": "", "exit": 0}
+{"round": 2, "route": "owner", "mode": "put", "concurrency": 16, "stdout": "mode=put cells=1  c=16   n=11803   fail=0    p50=6.42   ms p90=8.24   ms p99=12.03   ms mean=6.79   ms rps=2356", "stderr": "", "exit": 0}
+{"round": 2, "route": "follower", "mode": "put", "concurrency": 16, "stdout": "mode=put cells=1  c=16   n=10101   fail=0    p50=7.07   ms p90=11.48  ms p99=15.33   ms mean=7.92   ms rps=2018", "stderr": "", "exit": 0}
+{"round": 2, "route": "owner", "mode": "get", "concurrency": 16, "stdout": "mode=get cells=1  c=16   n=85974   fail=0    p50=0.67   ms p90=1.95   ms p99=3.78    ms mean=0.93   ms rps=17192", "stderr": "", "exit": 0}
+{"round": 2, "route": "follower", "mode": "get", "concurrency": 16, "stdout": "mode=get cells=1  c=16   n=48718   fail=0    p50=1.41   ms p90=2.88   ms p99=4.75    ms mean=1.64   ms rps=9740", "stderr": "", "exit": 0}
+{"round": 2, "route": "owner", "mode": "put", "concurrency": 32, "stdout": "mode=put cells=1  c=32   n=19690   fail=0    p50=7.40   ms p90=11.37  ms p99=16.52   ms mean=8.13   ms rps=3934", "stderr": "", "exit": 0}
+{"round": 2, "route": "follower", "mode": "put", "concurrency": 32, "stdout": "mode=put cells=1  c=32   n=15267   fail=0    p50=10.18  ms p90=14.39  ms p99=19.64   ms mean=10.50  ms rps=3045", "stderr": "", "exit": 0}
+{"round": 2, "route": "owner", "mode": "get", "concurrency": 32, "stdout": "mode=get cells=1  c=32   n=86079   fail=0    p50=1.38   ms p90=4.01   ms p99=7.47    ms mean=1.86   ms rps=17210", "stderr": "", "exit": 0}
+{"round": 2, "route": "follower", "mode": "get", "concurrency": 32, "stdout": "mode=get cells=1  c=32   n=46257   fail=0    p50=3.09   ms p90=5.93   ms p99=9.11    ms mean=3.46   ms rps=9247", "stderr": "", "exit": 0}
+owner_resolution {"owned":true,"owner":{"node":"rps-0","role":"cell-agent","session":"1792856403525707823","epoch":1,"expiry":1792856413838,"liveness":"node-lease","address":"127.0.0.1:55835","admin_address":"127.0.0.1:57093","proto_version":"v1"},"etag":"9393cfa4fd4fce2b7e94a5edc5c9ec8002f5277c7e595ae49f4a65b29243f7f7","expired":false}
+
+owner_resolution {"owned":true,"owner":{"node":"rps-0","role":"cell-agent","session":"1792856403525707823","epoch":1,"expiry":1792856413838,"liveness":"node-lease","address":"127.0.0.1:55835","admin_address":"127.0.0.1:57093","proto_version":"v1"},"etag":"9393cfa4fd4fce2b7e94a5edc5c9ec8002f5277c7e595ae49f4a65b29243f7f7","expired":false}
+
+after 0 cellhive_commit_total{mode="bucket-batch"} 4; cellhive_commit_total{mode="fleet"} 9509; cellhive_live_followers 1
+after 1 cellhive_live_followers 0
+PASS payload spot checks through both nodes

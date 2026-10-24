@@ -1,0 +1,90 @@
+# doruntime and userruntime spawn workerd on freePort() listeners; serialize
+# packages so their real-process integration tests do not race those ports.
+go test -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -p 1 ./...
+ok  	cellhive/cmd/cell-agent	1.215s
+?   	cellhive/cmd/cell-supervisor	[no test files]
+ok  	cellhive/cmd/cellbench	0.006s
+ok  	cellhive/cmd/cellhive	0.436s
+ok  	cellhive/cmd/do-runtime	(cached)
+ok  	cellhive/cmd/do-supervisor	(cached)
+?   	cellhive/cmd/gatebench	[no test files]
+?   	cellhive/cmd/kvbench	[no test files]
+?   	cellhive/cmd/realbench	[no test files]
+?   	cellhive/cmd/recoververify	[no test files]
+?   	cellhive/cmd/restoreverify	[no test files]
+?   	cellhive/cmd/runtimebench	[no test files]
+?   	cellhive/cmd/s3init	[no test files]
+?   	cellhive/cmd/s3probe	[no test files]
+?   	cellhive/cmd/sqlbench	[no test files]
+ok  	cellhive/cmd/user-runtime	(cached)
+?   	cellhive/cmd/walscan	[no test files]
+ok  	cellhive/cmd/workerd-compat-gen	(cached)
+ok  	cellhive/deploy	(cached)
+ok  	cellhive/internal/admission	(cached)
+ok  	cellhive/internal/artifacts	(cached)
+ok  	cellhive/internal/auth	(cached)
+ok  	cellhive/internal/autoscaler	(cached)
+ok  	cellhive/internal/bucket	(cached)
+ok  	cellhive/internal/bundler	(cached)
+ok  	cellhive/internal/cell	(cached)
+ok  	cellhive/internal/cellcapture	0.691s
+ok  	cellhive/internal/cellstore	2.317s
+ok  	cellhive/internal/compaction	0.745s
+ok  	cellhive/internal/config	(cached)
+ok  	cellhive/internal/control	0.546s
+ok  	cellhive/internal/cron	0.041s
+ok  	cellhive/internal/d1	0.116s
+ok  	cellhive/internal/dispatch	0.021s
+ok  	cellhive/internal/doruntime	18.994s
+ok  	cellhive/internal/dosupervisor	0.323s
+ok  	cellhive/internal/doticket	(cached)
+ok  	cellhive/internal/drain	(cached)
+ok  	cellhive/internal/hotset	(cached)
+ok  	cellhive/internal/hybrid	(cached)
+ok  	cellhive/internal/hyperdriveauth	(cached)
+ok  	cellhive/internal/ingress	(cached)
+ok  	cellhive/internal/instance	(cached)
+ok  	cellhive/internal/invocation	0.083s
+ok  	cellhive/internal/lease	(cached)
+ok  	cellhive/internal/logbuf	(cached)
+ok  	cellhive/internal/ltx	(cached)
+ok  	cellhive/internal/lz4	(cached)
+ok  	cellhive/internal/nodelog	(cached)
+ok  	cellhive/internal/objectstore	(cached)
+ok  	cellhive/internal/objgc	(cached)
+ok  	cellhive/internal/owner	1.047s
+ok  	cellhive/internal/ownerclient	(cached)
+ok  	cellhive/internal/pagedvfs	(cached)
+ok  	cellhive/internal/peer	0.406s
+ok  	cellhive/internal/plangen	(cached)
+ok  	cellhive/internal/proxysql	(cached)
+ok  	cellhive/internal/purge	(cached)
+ok  	cellhive/internal/queue	1.388s
+ok  	cellhive/internal/r2	(cached)
+ok  	cellhive/internal/rebalance	(cached)
+ok  	cellhive/internal/recovery	0.679s
+ok  	cellhive/internal/replica	0.129s
+ok  	cellhive/internal/restore	0.419s
+ok  	cellhive/internal/runtimeenv	(cached)
+ok  	cellhive/internal/runtimelog	(cached)
+ok  	cellhive/internal/scopedtoken	(cached)
+ok  	cellhive/internal/server	25.235s
+ok  	cellhive/internal/sqlcapture	7.165s
+ok  	cellhive/internal/staticgen	(cached)
+ok  	cellhive/internal/telemetry	(cached)
+ok  	cellhive/internal/timer	0.142s
+ok  	cellhive/internal/upload	(cached)
+ok  	cellhive/internal/userruntime	30.105s
+ok  	cellhive/internal/userruntimepool	(cached)
+ok  	cellhive/internal/vectorize	0.103s
+ok  	cellhive/internal/wake	(cached)
+ok  	cellhive/internal/waker	0.027s
+ok  	cellhive/internal/wal	0.063s
+ok  	cellhive/internal/workerbudget	(cached)
+?   	cellhive/internal/workerdbin	[no test files]
+ok  	cellhive/internal/workerdcompat	(cached)
+ok  	cellhive/internal/workerdpool	(cached)
+ok  	cellhive/internal/workflow	0.113s
+ok  	cellhive/internal/wrangler	(cached)
+ok  	cellhive/internal/wranglercompat	0.006s
+ok  	cellhive/workerd/spikes/process-supervision	(cached)

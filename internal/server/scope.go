@@ -131,7 +131,10 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				// takeover). Done here, outside BeginRequest, so Forget never
 				// waits on this request's own eviction gate.
 				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
-					s.invalidateStaleLocal(r.Context(), sc)
+					if err := s.invalidateStaleLocal(r.Context(), sc); err != nil {
+						writeErr(w, 503, "local_invalidation_failed", err.Error())
+						return
+					}
 					preInvalidated = sc.String()
 				}
 				var end func()

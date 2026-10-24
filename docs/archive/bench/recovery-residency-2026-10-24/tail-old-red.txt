@@ -1,0 +1,7 @@
+=== RUN   TestSealedTailPaginationReadVolume
+    tail_scaling_test.go:46: frames=2048 pages=8 elapsed=130.768126ms read_bytes=38548156 file_bytes=8556544
+    tail_scaling_test.go:48: pagination reread too much data: read=38548156 log=8556544
+--- FAIL: TestSealedTailPaginationReadVolume (0.20s)
+FAIL
+FAIL	cellhive/internal/peer	0.216s
+FAIL

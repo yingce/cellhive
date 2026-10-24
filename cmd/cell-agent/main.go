@@ -279,6 +279,18 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
+	// Claim callbacks must not wait on a request that is itself waiting for
+	// the per-scope claim gate. Retry a busy replica without publishing owner.
+	resetLocal := func(rctx context.Context, sc cell.Scope) error {
+		ok, err := store.TryInvalidate(rctx, sc, nil)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("stale local cell is busy; retry ownership acquisition")
+		}
+		return nil
+	}
 	store.OnEvicted = func(sc cell.Scope) { om.Forget(sc, 0) }
 	store.OnForget = func(sc cell.Scope) { om.Forget(sc, 0) }
 	// The control cell is the hottest cell in the fleet. Keep it resident:
@@ -836,9 +848,7 @@ func main() {
 						if err := srv.PrepareResourceAccess(qctx, queue.Scope(ref.Namespace, ref.Name)); err != nil {
 							return false, err
 						}
-						return queue.OwnerGateWithReset(om, func(rctx context.Context, sc cell.Scope) error {
-							return store.Forget(rctx, sc)
-						})(qctx, ref)
+						return queue.OwnerGateWithReset(om, resetLocal)(qctx, ref)
 					},
 					Commit: func(cctx context.Context, ns, name string, fn func() error) error {
 						sc := queue.Scope(ns, name)
@@ -958,19 +968,12 @@ func main() {
 			if srv.Overloaded != nil && srv.Overloaded() {
 				return false, nil
 			}
-			claimed, cerr := om.Claim(tctx, sc, now)
+			_, cerr := om.ClaimWithReset(tctx, sc, now, resetLocal)
 			if cerr != nil {
 				if errors.Is(cerr, owner.ErrOwnerLive) || errors.Is(cerr, bucket.ErrPrecondition) {
 					return false, nil
 				}
 				return false, cerr
-			}
-			// The previous owner may have advanced its own local copy. Recover
-			// only after Claim's predecessor recovery has made its tail durable.
-			if err != nil || current.Node != claimed.Node || current.Session != claimed.Session {
-				if ferr := store.Invalidate(tctx, sc); ferr != nil {
-					return false, ferr
-				}
 			}
 		}
 		if captureMgr != nil {

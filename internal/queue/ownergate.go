@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/owner"
 )
@@ -17,12 +18,12 @@ func OwnerGate(om *owner.Manager) func(ctx context.Context, ref Ref) (bool, erro
 	return OwnerGateWithReset(om, nil)
 }
 
-// OwnerGateWithReset is OwnerGate with a post-claim reset hook. When the gate
+// OwnerGateWithReset is OwnerGate with a pre-publication reset hook. When the gate
 // claims a cell that was unowned or held by a different node/session, the
 // local SQLite file may be a stale copy from an earlier ownership period.
 // Consuming it would replay acked messages, hide messages produced by the
 // previous owner, and publish the stale state as the new epoch baseline. The
-// caller passes reset (normally store.Forget) so the next open hydrates the
+// caller passes a nonblocking reset (normally store.TryInvalidate) so the next open hydrates the
 // authoritative chain. A same-session expired lease keeps its local file.
 func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scope) error) func(ctx context.Context, ref Ref) (bool, error) {
 	return func(ctx context.Context, ref Ref) (bool, error) {
@@ -46,17 +47,10 @@ func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scop
 		if err != nil && !errors.Is(err, owner.ErrUnowned) {
 			return false, err
 		}
-		staleLocal := errors.Is(err, owner.ErrUnowned)
-		if err == nil && (o.Node != om.NodeID || o.Session != om.Session) {
-			staleLocal = true
-		}
-		if _, cerr := om.Claim(ctx, sc, now); cerr == nil {
-			if reset != nil && staleLocal {
-				if rerr := reset(ctx, sc); rerr != nil {
-					return false, rerr
-				}
-			}
+		if _, cerr := om.ClaimWithReset(ctx, sc, now, reset); cerr == nil {
 			return true, nil
+		} else if !errors.Is(cerr, owner.ErrOwnerLive) && !errors.Is(cerr, bucket.ErrPrecondition) {
+			return false, cerr
 		}
 		// A peer won the claim (or the race): let it consume.
 		return false, nil

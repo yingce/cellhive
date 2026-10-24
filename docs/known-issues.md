@@ -6,6 +6,13 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-24_
 
+## 2026-10-24 异常接管与驻留回收（ADR-286）
+
+本地已修复并验证：请求入口忽略失效错误；queue/timer 在本地清理前发布 owner；TryInvalidate 校验失败泄漏句柄；最旧项被 Pin/busy 保护时误驱逐未超时热 cell。claim 按 scope 串行化，前任恢复与本地清理成功后才发布 owner，失败保持可重试。sealed tail 使用服务端校验游标，连续分页实际读取量接近日志大小；重启/重试/截断/替换文件检查保留。
+
+全量测试、owner/peer/queue/cellstore/server race、vet/build、真实双进程换地址和中断恢复 E2E 已通过；尚未部署。驻留上限仍是软限制，capture 默认2ms轮询随 resident 写入 cell 增长；2核建议32–64起步，完整数据和验证边界见 [记录](archive/bench/recovery-residency-2026-10-24.md)。
+
+
 ## 2026-10-24 热 KV 读写的周期性 COS 等待（ADR-283）
 
 已打开 cell 的连续热 GET 约 0.3–0.4ms，但 binding、owner 和资源删除 fence 的 1 秒缓存失效后会在请求路径同步读取控制面/COS；本机到香港 COS 测试桶每隔 1.15 秒的 8 次 GET 曾为 44–185ms。分段诊断还发现本机 owner 被滞后的 node-lease 快照判为不存活时，GET 会同步点读 `nodes/<self>.json`，仅路由判活就耗 24–25ms。ADR-283 在有限活跃 KV 集合中提前刷新原有缓存，并以本机已成功发布且健康的 lease 直接判断本机 owner；未发布或不健康时失败关闭，失效边界和请求准入检查不变。最终版真实 COS 的 60 次写后 GET p50/p95/p99 为 0.60/0.76/1.03ms、最大 29.99ms；300 次空闲连续 GET p99 0.45ms；8 次间隔 1.15 秒 GET 均为 0.55–0.62ms。跨地域 COS 忙时提前刷新仍可能失败或晚于失效时间，此前复测曾见 20–61ms 残余尖峰；**长尾尚未证明完全消除**。首次读与冷写不在此次热缓存优化范围。SG 已做短时同 Pod 写后 GET 复验，公开入口和长时间 GET 尾延迟仍待测；详见 [对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。

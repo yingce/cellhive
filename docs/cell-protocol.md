@@ -404,3 +404,10 @@ _最后更新：2026-09-25_
 ### 固定驻留与 owner 切换
 
 `Pin` 只保护 LRU/磁盘回收等驻留策略，不是本地副本有效性的证明。owner 切换时使用 `Invalidate`/`TryInvalidate` 失效旧副本，即使控制 cell 固定驻留也必须重新从持久链恢复；普通 `Forget`/`TryForget`/`ForgetWithVerify` 仍遵守 Pin。失效过程仍遵守请求与打开中的互斥，不能直接删除正在使用的 SQLite 文件。2026-10-24 USW 真实发布发现固定驻留阻止旧控制副本失效，导致新 owner 的资源注册落后；此约束由 pinned takeover 回归测试覆盖。
+
+
+### ADR-286 接管本地准备与 sealed tail 游标（2026-10-24）
+
+后台 queue/timer 在 ClaimWithReset 内先恢复前任 session，再以非阻塞本地失效回调清理旧副本，最后条件发布 owner；同 scope 的进程内 Claim 共用可取消门，不允许并发绕过正在准备的接管。busy/失效失败不发布新 owner；请求入口同样必须传播预清理错误。该顺序不改变 bucket CAS、node lease 或 epoch fence 的权威。
+
+sealed tail 仅缓存服务端已经校验过的 sequence/offset，after、sealed final、文件身份/大小/修改时间均匹配才复用；重启或未命中从头校验一次。每页仍检查连续序号与完整 frame，覆盖 checkpoint 仅在该页持久化后推进，读游标不是持久化证明。HTTP/node-log 格式不变。

@@ -51,7 +51,8 @@ type Store struct {
 	// node at a time.
 	PagedHydrateMBPS int
 
-	// Eviction (disabled when both are zero, the default). MaxOpenCells caps the
+	// Eviction is disabled on a zero-valued Store; cell-agent config defaults
+	// to 32 handles / 5m idle. MaxOpenCells is a periodic soft cap on the
 	// number of cached cells; IdleTTL closes a cell after that long without use.
 	// Drop, when set, runs before a cell is closed so the owner can stop the
 	// cell's capture loop first. Eviction releases only the local handle: the
@@ -497,14 +498,6 @@ func (s *Store) TryInvalidate(ctx context.Context, sc cell.Scope, verify func() 
 		return false, nil
 	}
 	s.evicting[key] = true
-	c := s.cells[p]
-	if c != nil {
-		delete(s.cells, p)
-		if e := s.byPath[p]; e != nil {
-			s.lru.Remove(e)
-			delete(s.byPath, p)
-		}
-	}
 	s.mu.Unlock()
 	if verify != nil {
 		if err := verify(); err != nil {
@@ -515,6 +508,16 @@ func (s *Store) TryInvalidate(ctx context.Context, sc cell.Scope, verify func() 
 			return false, err
 		}
 	}
+	s.mu.Lock()
+	c := s.cells[p]
+	if c != nil {
+		delete(s.cells, p)
+		if e := s.byPath[p]; e != nil {
+			s.lru.Remove(e)
+			delete(s.byPath, p)
+		}
+	}
+	s.mu.Unlock()
 	if c != nil {
 		if s.Drop != nil {
 			_ = s.Drop(ctx, sc)
@@ -632,6 +635,12 @@ func (s *Store) evictOne(ctx context.Context) bool {
 		}
 		key := cc.Scope.String()
 		if s.busy[key] > 0 || s.evicting[key] || s.opening[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
+			continue
+		}
+		// The oldest entry may be protected. Do not let its age make a
+		// different, recently used cell eligible for idle eviction.
+		overCap := s.MaxOpenCells > 0 && len(s.cells) > s.MaxOpenCells
+		if !overCap && (s.IdleTTL <= 0 || time.Since(ent.last) < s.IdleTTL) {
 			continue
 		}
 		s.evicting[key] = true

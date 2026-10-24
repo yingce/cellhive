@@ -1,0 +1,10 @@
+=== RUN   TestSealedTailPaginationReadVolume
+    tail_scaling_test.go:46: frames=2048 pages=8 elapsed=31.094927ms read_bytes=38548156 file_bytes=8556544
+    tail_scaling_test.go:48: OLD IMPLEMENTATION rereads too much data: read=38548156 log=8556544
+    tail_scaling_test.go:46: frames=4096 pages=16 elapsed=85.655237ms read_bytes=145553967 file_bytes=17113088
+    tail_scaling_test.go:48: OLD IMPLEMENTATION rereads too much data: read=145553967 log=17113088
+    tail_scaling_test.go:46: frames=8192 pages=32 elapsed=332.278979ms read_bytes=564926569 file_bytes=34226176
+    tail_scaling_test.go:48: OLD IMPLEMENTATION rereads too much data: read=564926569 log=34226176
+--- PASS: TestSealedTailPaginationReadVolume (0.71s)
+PASS
+ok  	cellhive/internal/peer	0.726s

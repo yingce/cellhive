@@ -1,0 +1,114 @@
+# TYPE cellhive_commit_total counter
+# TYPE cellhive_live_followers gauge
+cellhive_live_followers 0
+# TYPE cellhive_requests_total counter
+cellhive_requests_total 253656
+# TYPE cellhive_claims_total counter
+cellhive_claims_total 0
+# TYPE cellhive_hot_kv_access_refreshes_total counter
+cellhive_hot_kv_access_refreshes_total 0
+# TYPE cellhive_hot_kv_access_refresh_failures_total counter
+cellhive_hot_kv_access_refresh_failures_total 0
+# TYPE cellhive_append_total counter
+cellhive_append_total 0
+# TYPE cellhive_segments_read_total counter
+cellhive_segments_read_total 0
+# TYPE cellhive_cellstore_open_cells gauge
+cellhive_cellstore_open_cells 1
+# TYPE cellhive_resident_cells gauge
+cellhive_resident_cells 1
+# TYPE cellhive_cellstore_evicted_total counter
+cellhive_cellstore_evicted_total 0
+# TYPE cellhive_cellstore_sweeps_total counter
+cellhive_cellstore_sweeps_total 3
+# TYPE cellhive_cellstore_disk_files gauge
+cellhive_cellstore_disk_files 1
+# TYPE cellhive_cellstore_disk_bytes gauge
+cellhive_cellstore_disk_bytes 716800
+# TYPE cellhive_cellstore_max_open_cells gauge
+cellhive_cellstore_max_open_cells 64
+# TYPE cellhive_cellstore_idle_ttl_seconds gauge
+cellhive_cellstore_idle_ttl_seconds 300
+# TYPE cellhive_restore_files_total counter
+cellhive_restore_files_total 0
+# TYPE cellhive_restore_image_bytes_total counter
+cellhive_restore_image_bytes_total 0
+# TYPE cellhive_restore_pages_total counter
+cellhive_restore_pages_total 0
+# TYPE cellhive_restore_last_image_bytes gauge
+cellhive_restore_last_image_bytes 0
+# TYPE cellhive_restore_max_image_bytes gauge
+cellhive_restore_max_image_bytes 0
+# TYPE cellhive_go_heap_alloc_bytes gauge
+cellhive_go_heap_alloc_bytes 9869240
+# TYPE cellhive_go_heap_inuse_bytes gauge
+cellhive_go_heap_inuse_bytes 12189696
+# TYPE cellhive_go_heap_sys_bytes gauge
+cellhive_go_heap_sys_bytes 23920640
+# TYPE cellhive_go_total_alloc_bytes counter
+cellhive_go_total_alloc_bytes 13150876656
+# TYPE cellhive_go_gc_total counter
+cellhive_go_gc_total 1736
+# TYPE cellhive_process_rss_bytes gauge
+cellhive_process_rss_bytes 42946560
+# TYPE cellhive_bucket_ops_total counter
+# TYPE cellhive_list_calls_total counter
+cellhive_list_calls_total 31
+cellhive_bucket_ops_total{op="cas"} 2
+cellhive_bucket_ops_total{op="conditional_create"} 3
+cellhive_bucket_ops_total{op="delete"} 3
+cellhive_bucket_ops_total{op="get"} 688
+cellhive_bucket_ops_total{op="list"} 31
+cellhive_bucket_ops_total{op="put"} 35
+# TYPE cellhive_paged_cells gauge
+cellhive_paged_cells 0
+# TYPE cellhive_paged_faults_total counter
+cellhive_paged_faults_total 0
+# TYPE cellhive_paged_runs_total counter
+cellhive_paged_runs_total 0
+# TYPE cellhive_paged_prefetch_hits_total counter
+cellhive_paged_prefetch_hits_total 0
+# TYPE cellhive_paged_hydrated_pages gauge
+cellhive_paged_hydrated_pages 0
+# TYPE cellhive_paged_total_pages gauge
+cellhive_paged_total_pages 0
+# TYPE cellhive_owned_cells gauge
+cellhive_owned_cells 0
+# TYPE cellhive_upload_batches_total counter
+cellhive_upload_batches_total 0
+# TYPE cellhive_upload_segments_total counter
+cellhive_upload_segments_total 0
+# TYPE cellhive_upload_dropped_total counter
+cellhive_upload_dropped_total 0
+# TYPE cellhive_upload_deferred_total counter
+cellhive_upload_deferred_total 0
+# TYPE cellhive_upload_replayed_total counter
+cellhive_upload_replayed_total 0
+# TYPE cellhive_upload_spool gauge
+cellhive_upload_spool 0
+# TYPE cellhive_upload_spool_file_syncs_total counter
+cellhive_upload_spool_file_syncs_total 0
+# TYPE cellhive_upload_spool_dir_syncs_total counter
+cellhive_upload_spool_dir_syncs_total 0
+# TYPE cellhive_upload_spool_sync_seconds_total counter
+cellhive_upload_spool_sync_seconds_total 0
+# TYPE cellhive_binding_calls_total counter
+cellhive_binding_calls_total{ns="rpscheck",kind="kv",outcome="ok"} 253649
+# TYPE cellhive_durability_proof_seconds histogram
+# TYPE cellhive_capture_ensure_seconds histogram
+# TYPE cellhive_capture_ensure_total counter
+# TYPE cellhive_owner_epoch_changes_total counter
+cellhive_owner_epoch_changes_total{role="owner"} 0
+# TYPE cellhive_takeover_total counter
+cellhive_takeover_total{outcome="success"} 0
+cellhive_takeover_total{outcome="failed"} 0
+cellhive_takeover_total{outcome="blocked"} 0
+# TYPE cellhive_route_projection_version gauge
+cellhive_route_projection_version 0
+# TYPE cellhive_peer_hedge_fired_total counter
+cellhive_peer_hedge_fired_total 0
+# TYPE cellhive_peer_hedge_won_total counter
+cellhive_peer_hedge_won_total 0
+# TYPE cellhive_replication_bytes_total counter
+cellhive_replication_bytes_total{kind="shipped"} 0
+cellhive_replication_bytes_total{kind="received"} 11790740

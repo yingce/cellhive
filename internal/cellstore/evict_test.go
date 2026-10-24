@@ -429,3 +429,38 @@ func TestForgetPrefixDropsMatchingScopes(t *testing.T) {
 		t.Fatalf("re-run = %d, %v; want 0", n, err)
 	}
 }
+
+// An old pinned/busy LRU entry must not make fresh unrelated cells eligible.
+func TestIdleSweepDoesNotEvictFreshCellsBehindProtectedOldest(t *testing.T) {
+	for _, protected := range []string{"pinned", "busy"} {
+		t.Run(protected, func(t *testing.T) {
+			ctx := context.Background()
+			s, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			s.IdleTTL = time.Minute
+			old := cell.Scope{Namespace: "test", Class: "kv", ID: "old"}
+			hot := cell.Scope{Namespace: "test", Class: "kv", ID: "hot"}
+			for _, sc := range []cell.Scope{old, hot} {
+				if _, err := s.Cell(ctx, sc); err != nil {
+					t.Fatal(err)
+				}
+			}
+			forceIdle(t, s, old, 2*time.Minute)
+			if protected == "pinned" {
+				s.Pin = func(sc cell.Scope) bool { return sc == old }
+			} else {
+				end := s.BeginRequest(old.String())
+				defer end()
+			}
+			if n := s.Sweep(ctx); n != 0 {
+				t.Fatalf("evicted %d fresh cells behind protected idle cell", n)
+			}
+			if _, ok := s.cellsMustExist(hot); !ok {
+				t.Fatal("fresh cell evicted")
+			}
+		})
+	}
+}

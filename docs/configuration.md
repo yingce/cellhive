@@ -120,11 +120,36 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `32` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |
+| `CELLHIVE_MAX_OPEN_CELLS` | `32` | 驻留句柄软上限（含 control）；`0` = 不限。周期性 LRU 回收，busy/pinned 可暂时超限，不是并发或硬内存限制 |
 | `CELLHIVE_CELL_IDLE` | `5m` | 空闲句柄关闭；`0` 关闭 TTL 驱逐 |
 | `CELLHIVE_CELL_DISK_MAX` | `0` 无限 | cell 文件字节预算（LRU 删非 owned） |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor 间隔 |
 | `CELLHIVE_DISK_HIGH` | `0` 关 | 高水位→overloaded 拒 claim |
+
+### 2 核 cell-agent 驻留配置建议（ADR-286）
+
+以下按 **cell-agent 本身可使用 2 核**、独立内存预算、普通 KV/Queue 混合负载给出起始配置，不是 SQLite 数据库数量的硬限制：
+
+| cell-agent 内存预算 | MAX_OPEN_CELLS | CELL_IDLE | 建议 |
+|---|---:|---|---|
+| 2 GiB | 32 | 5m | 保守默认；大值/重 D1 查询需进一步留余量 |
+| 4 GiB | 64 | 5m | 通用起点；同机共享 2 核时先保持 32 |
+| 8 GiB | 64，压测后可尝试 128 | 5m | CPU 不随内存增加；不建议仅凭内存直接调到 256 |
+
+例如 2 核/4 GiB 独立 cell-agent：
+
+```bash
+CELLHIVE_MAX_OPEN_CELLS=64
+CELLHIVE_CELL_IDLE=5m
+```
+
+- 空闲时间从最后一次 Store.Cell 访问算起，后台任务也可能刷新；正常 sweeper 每 30 秒检查，忙碌项暂缓，control Pin 不参与普通回收。5m 通常表示空闲约 5m–5m30s 后具备回收机会，不保证到点强关。
+- 固定热集可尝试 10m；大量一次性访问可尝试 2m，先观察重复打开与 p95。不要同时把句柄上限和 TTL 设为无限。
+- 回收只关闭 SQLite/capture 并保留磁盘文件；同 owner 重开可继续本地文件与 capture hint，不等同于每次从 bucket 冷恢复。
+- 每 cell 的连接池最多 3 个连接；本机实测 SQLite cache_size=-2000（约每连接 2MiB 目标缓存，并非预分配或硬上限）、mmap_size=0。RSS 还含 WAL 游标、Go/C 分配与恢复暂存，不能只看 Go heap。
+- capture 默认 2ms 检查 WAL。2 核亲和性下，64 个闲置但开启 capture 的 cell 消耗约 0.21 核；128 个约 0.43 核；256 个约 0.88 核。只打开 SQLite、没有 capture 的对照几乎无空闲 CPU。64 个各有 2MiB 值、预热两个连接的进程 RSS 约421MiB；该数字不包含完整服务、HTTP、fleet、恢复和负载突发。
+- 调整时观察 cellhive_cellstore_open_cells、cellhive_cellstore_evicted_total、cellhive_capture_ensure_total（标签区分重开）、Pod CPU/RSS、HTTP p95。软上限不能防住大量同时 active 的 cell；高写入并发应分流/加节点。
+- 当前默认仍为32/5m，本轮未修改生产配置。完整方法与范围见 [实测记录](archive/bench/recovery-residency-2026-10-24.md)。
 
 ## cell-agent：归属 / 伸缩
 

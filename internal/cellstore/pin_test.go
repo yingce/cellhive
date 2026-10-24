@@ -151,6 +151,7 @@ func TestEvictionCallsOnEvicted(t *testing.T) {
 	if _, err := s.Cell(ctx, b); err != nil {
 		t.Fatal(err)
 	}
+	s.MaxOpenCells = 1
 	got := make(chan string, 1)
 	s.OnEvicted = func(sc cell.Scope) { got <- sc.String() }
 	if !s.evictOne(ctx) {

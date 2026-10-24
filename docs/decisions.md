@@ -1,5 +1,13 @@
 # 决策记录（ADR）
 
+## ADR-286 异常接管与驻留回收（2026-10-24）
+
+- 所有请求入口必须传播旧副本失效错误，成功后才可标记预清理完成。
+- 后台 queue/timer 的接管顺序为：恢复前任 session → 清理旧本地副本 → 条件发布新 owner。通过 owner 的按 scope、可取消 claim 门串行化本进程认领；清理失败不得发布新 owner，下次重试仍须清理。清理回调不可等待持有请求门的调用方，忙碌时返回可重试错误。
+- sealed tail 复用服务端校验后的 sequence/byte offset 游标，仅在文件身份、大小、修改时间和 sealed final 未变化且 after 精确匹配时使用。冷启动/游标未命中仍从头校验；不改变 HTTP/node-log 格式或完整性要求。
+- TryInvalidate 的 verify 失败必须保留原句柄、LRU 与 capture；空闲回收仅能关闭实际超时的候选，最旧项被 Pin/busy 保护不得驱逐仍新鲜的其他项。
+- MAX_OPEN_CELLS 是周期性回收的驻留软上限，包含 control cell，不能当作硬内存上限。配置建议按 cell-agent 内存预算和活跃工作集给出；不改变现有默认32/5m。
+
 ## ADR-285 follower 身份与重启恢复（2026-10-24）
 
 - **问题**：v2 node-log 固化 follower URL，Pod 换 IP 后历史 session 无法 seal；自动恢复跳过同名存活节点的全部历史 session。

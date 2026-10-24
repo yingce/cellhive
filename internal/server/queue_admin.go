@@ -373,7 +373,9 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 		}
 	}
 	if !owned && addr == "" {
-		s.invalidateStaleLocal(ctx, sc)
+		if err := s.invalidateStaleLocal(ctx, sc); err != nil {
+			return err
+		}
 		if _, err := s.Owner.Claim(ctx, sc, now); err != nil {
 			// Lost the race to a peer: route to its current owner.
 			if o, _, rerr := s.Owner.Resolve(ctx, sc); rerr == nil && o.Node != s.Cfg.NodeID && o.Address != "" {

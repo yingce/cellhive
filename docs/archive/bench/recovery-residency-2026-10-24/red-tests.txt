@@ -1,0 +1,18 @@
+--- FAIL: TestReviewBusyScopeMustRefuseClaim (0.01s)
+    recovery_regression_test.go:76: claim: HTTP=200 owner=a/sa stale_file_exists=true body=
+FAIL
+FAIL	cellhive/internal/server	0.020s
+--- FAIL: TestReviewResetFailureMustRemainBlocked (0.00s)
+    recovery_regression_test.go:25: second call admitted without reset: ok=true err=<nil> reset_calls=1
+FAIL
+FAIL	cellhive/internal/queue	0.006s
+--- FAIL: TestIdleSweepDoesNotEvictFreshCellsBehindProtectedOldest (0.03s)
+    --- FAIL: TestIdleSweepDoesNotEvictFreshCellsBehindProtectedOldest/pinned (0.02s)
+        evict_test.go:459: evicted 1 fresh cells behind protected idle cell
+    --- FAIL: TestIdleSweepDoesNotEvictFreshCellsBehindProtectedOldest/busy (0.01s)
+        evict_test.go:459: evicted 1 fresh cells behind protected idle cell
+--- FAIL: TestReviewVerifyFailureMustKeepHandle (0.01s)
+    recovery_regression_test.go:26: verification failed but live cell handle removed from cache without closing
+FAIL
+FAIL	cellhive/internal/cellstore	0.043s
+FAIL

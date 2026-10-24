@@ -1,0 +1,66 @@
+import os,json,time,tempfile,socket,subprocess,urllib.request,secrets,pathlib
+root=pathlib.Path(tempfile.mkdtemp(prefix='cellhive-current-rps-'));print('RESULT_DIR',root,flush=True)
+env={k:v for k,v in os.environ.items() if not k.startswith(('CELLHIVE_','AWS_','COS_','OSS_'))}
+env.update(CELLHIVE_ROOT_KEY=secrets.token_hex(32),GOMAXPROCS='2')
+bin=pathlib.Path('/opt/cellhive/bin')
+def cred(role):return subprocess.check_output([str(bin/'cellhive'),'creds',role],env=env,text=True).strip()
+admin,internal=cred('admin'),cred('internal')
+def port():
+ s=socket.socket();s.bind(('127.0.0.1',0));p=s.getsockname()[1];s.close();return str(p)
+def request(url,path,method='GET',body=None,header=None):
+ data=json.dumps(body).encode() if isinstance(body,dict) else body
+ r=urllib.request.Request(url+path,data=data,method=method)
+ if header:r.add_header(*header)
+ with urllib.request.urlopen(r,timeout=15) as f:return f.read()
+procs=[];urls=[];ctls=[]
+try:
+ for i in range(2):
+  rest,ctl=port(),port();url='http://127.0.0.1:'+rest;urls.append(url);ctls.append('http://127.0.0.1:'+ctl)
+  e=env.copy();e.update(CELLHIVE_NODE_ID='rps-'+str(i),CELLHIVE_DATA_DIR=str(root/('node'+str(i))),CELLHIVE_BUCKET_DIR=str(root/'bucket'),CELLHIVE_REST_ADDR='127.0.0.1:'+rest,CELLHIVE_ADMIN_ADDR='127.0.0.1:'+ctl,CELLHIVE_ADVERTISE='127.0.0.1:'+rest,CELLHIVE_PEER_URL=url,CELLHIVE_DURABILITY='fleet',CELLHIVE_MAX_OPEN_CELLS='64',CELLHIVE_CELL_IDLE='5m')
+  f=open(root/('node'+str(i)+'.log'),'w');p=subprocess.Popen(['taskset','-c',('0,1' if i==0 else '2,3'),str(bin/'cell-agent')],env=e,stdout=f,stderr=f);procs.append(p);f.close()
+  for j in range(150):
+   try:request(url,'/readyz');break
+   except Exception:
+    if p.poll() is not None:raise RuntimeError('node exited '+str(i))
+    time.sleep(.1)
+  else:raise RuntimeError('ready timeout')
+ request(ctls[0],'/v1/control/resource','POST',{'namespace':'rpscheck','kind':'kv','name':'KV','scope':'rpscheck/__kv__/data'},('x-cellhive-admin-token',admin))
+ token=subprocess.check_output([str(bin/'kvbench'),'-ns','rpscheck','-print-token'],env=env,text=True).strip()
+ sh=('x-cellhive-scope-token',token)
+ request(urls[0],'/v1/kv/put?ns=rpscheck&key=verify','POST',b'x'*64,sh)
+ for j in range(100):
+  m=request(urls[0],'/metrics').decode()
+  if 'cellhive_live_followers 1' in m:break
+  time.sleep(.1)
+ else:raise RuntimeError('no follower')
+ def metrics(label):
+  for i,u in enumerate(urls):
+   raw=request(u,'/metrics').decode();(root/(label+'-'+str(i)+'.prom')).write_text(raw)
+   print(label,i,'; '.join(x for x in raw.splitlines() if x.startswith(('cellhive_live_followers ','cellhive_commit_total{'))),flush=True)
+ def bench(label,u,mode,c,round,d='5s',n=None):
+  cmd=['taskset','-c','4,5',str(bin/'kvbench'),'-addr',u,'-ns','rpscheck','-mode',mode,'-c',str(c),'-keys','1000','-bytes','64','-warm','100']
+  cmd+=['-n',str(n)] if n else ['-d',d]
+  r=subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=90)
+  result={'round':round,'route':label,'mode':mode,'concurrency':c,'stdout':r.stdout.strip(),'stderr':r.stderr.strip(),'exit':r.returncode}
+  with open(root/'results.jsonl','a') as f:f.write(json.dumps(result)+'\n')
+  print(json.dumps(result),flush=True)
+  if r.returncode:raise RuntimeError('benchmark failed')
+ bench('seed',urls[0],'put',1,0,n=1000)
+ metrics('before')
+ for round,concs in [(1,[1,16,32]),(2,[16,32])]:
+  for c in concs:
+   for mode in ['put','get']:
+    for label,u in [('owner',urls[0]),('follower',urls[1])]:bench(label,u,mode,c,round)
+ for u in urls:
+  for key in ['k0','k499','k999','verify']:
+   assert request(u,'/v1/kv/get?ns=rpscheck&key='+key,header=sh)==b'x'*64
+  owner=request(u,'/v1/internal/resolve?scope=rpscheck%2F__kv__%2Fdata',header=('x-cellhive-internal-token',internal))
+  print('owner_resolution',owner.decode(),flush=True)
+ metrics('after')
+ print('PASS payload spot checks through both nodes',flush=True)
+finally:
+ for p in procs:
+  if p.poll() is None:p.terminate()
+ for p in procs:
+  try:p.wait(timeout=20)
+  except subprocess.TimeoutExpired:p.kill();p.wait()
