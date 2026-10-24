@@ -437,6 +437,31 @@ func (f freshLeaseView) NodeLeaseFresh(ctx context.Context, node string) (lease.
 	return f.fresh.NodeLease(ctx, node)
 }
 
+func TestLiveConfirmsStaleNegativeLease(t *testing.T) {
+	now := time.Now()
+	o := cell.Owner{Node: "node-1", Session: "current", Liveness: "node-lease"}
+	alive := lease.NodeLease{Node: o.Node, Session: o.Session, Expiry: now.Add(time.Minute).UnixMilli()}
+	m := &Manager{LeaseView: freshLeaseView{
+		stale: fakeLeaseView{o.Node: {Node: o.Node, Session: o.Session, Expiry: now.Add(-time.Second).UnixMilli()}},
+		fresh: fakeLeaseView{o.Node: alive},
+	}}
+	if live, err := m.Live(context.Background(), o, now); err != nil || !live {
+		t.Fatalf("expired cached lease hid live owner: live=%t err=%v", live, err)
+	}
+	m.LeaseView = freshLeaseView{stale: fakeLeaseView{o.Node: {Node: o.Node, Session: "previous", Expiry: alive.Expiry}}, fresh: fakeLeaseView{o.Node: alive}}
+	if live, err := m.Live(context.Background(), o, now); err != nil || !live {
+		t.Fatalf("cached previous session hid live owner: live=%t err=%v", live, err)
+	}
+	m.LeaseView = freshLeaseView{stale: fakeLeaseView{}, errs: true}
+	if live, err := m.Live(context.Background(), o, now); err == nil || live {
+		t.Fatalf("unreadable fresh lease: live=%t err=%v", live, err)
+	}
+	m.LeaseView = freshLeaseView{stale: fakeLeaseView{}, fresh: fakeLeaseView{o.Node: {Node: o.Node, Session: o.Session, Expiry: now.Add(-time.Second).UnixMilli()}}}
+	if live, err := m.Live(context.Background(), o, now); err != nil || live {
+		t.Fatalf("genuinely expired lease: live=%t err=%v", live, err)
+	}
+}
+
 // A stale snapshot saying "owner dead" must not be enough to take a cell over:
 // the takeover decision is confirmed with a fresh point read.
 func TestTakeoverConfirmsDeadVerdictWithFreshRead(t *testing.T) {

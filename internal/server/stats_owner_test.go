@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -58,8 +59,23 @@ func TestStatsResolveRegistryFromControlOwner(t *testing.T) {
 	if followerRR.Code != http.StatusOK {
 		t.Fatalf("follower stats = %d, want 200: %s", followerRR.Code, followerRR.Body.String())
 	}
-	if got, want := followerRR.Body.String(), ownerRR.Body.String(); got != want {
-		t.Fatalf("follower stats served a different cell:\n got %s\nwant %s", got, want)
+	// SQLite may checkpoint or grow the WAL between these two requests, so
+	// physical byte counts are not stable evidence of which cell was read.
+	var ownerStats, followerStats struct {
+		Kind, Name, Namespace, Scope string
+		Stats                        struct {
+			Keys  int
+			Exact bool
+		}
+	}
+	if err := json.Unmarshal(ownerRR.Body.Bytes(), &ownerStats); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(followerRR.Body.Bytes(), &followerStats); err != nil {
+		t.Fatal(err)
+	}
+	if followerStats != ownerStats {
+		t.Fatalf("follower stats served a different cell:\n got %+v\nwant %+v", followerStats, ownerStats)
 	}
 	if !strings.Contains(followerRR.Body.String(), `"keys":1`) {
 		t.Fatalf("follower stats did not see the owner's key: %s", followerRR.Body.String())

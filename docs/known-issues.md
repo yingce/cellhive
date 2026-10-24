@@ -6,6 +6,10 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-24_
 
+## 2026-10-24 SG owner 判活分歧（ADR-280）
+
+SG revision 50 后观察到同一 control owner 在两个 cell-agent 上分别显示 `expired=false` 与 `expired=true`，后者的资源清理循环持续收到 `owner: live owner exists`。定位为旧节点租约快照的负向判定未向桶点读确认；修复与 SG 复验记录见 ADR-280。此问题与 Cron 租户派发 `status 400` 分开处理。
+
 ## 2026-10-24 invocation owner 换手时的 503
 
 已转发的 invocation 写请求可能在旧 owner 的 capture 预检前遇到 owner 换手。旧节点先前返回 503 `not_owner`，入口节点按 ADR-120 不重试 5xx，调用记录写入失败。已把**写入前**失权的转发请求改为 409 `not_owner`，让入口节点刷新 owner 并最多重试一次；写入后或结果未知的失败仍不可重放。`TestInvocationForwardedCaptureHandoff` 三节点 HTTP 回归在修复前稳定复现 503，修复后验证调用记录只写入新 owner、旧 owner 未执行写入，并通过 `-race`。本地 `make test`、`make vet`、`make build` 均通过。线上 503 与该路径的因果关系仍需部署后以响应正文和 owner/epoch 日志确认；Cron 同时出现的 timer owner 拒绝需独立追踪。

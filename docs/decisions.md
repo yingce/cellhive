@@ -1,5 +1,11 @@
 # 决策记录（ADR）
 
+## ADR-280 owner 负向租约缓存须点读确认（2026-10-24）
+
+- **现场故障**：SG 同一个 control owner 在一个节点被判 `expired=false`，在另一节点被判 `expired=true`；后者每 2 秒清理任务尝试 `Claim`，随即被 fresh 租约拒绝为 `owner: live owner exists`。`SampleCached` 的 stale-while-revalidate 快照可能超过节点租约 TTL；`owner.Live` 把旧快照的负向结论当成当前事实，路由和后台任务因此错误地绕开仍存活的 owner。
+- **决策**：`owner.Live` 对节点租约快照的“缺失、过期或 session 不匹配”结论，使用 `NodeLeaseFresh` 对该节点做一次权威点读；读失败则返回错误并失败关闭。缓存中的正向存活结论仍走热路径缓存；`Claim` 的负向确认复用这个逻辑，不再重复点读。不引入 bucket List，不改变单写者/epoch fence 或已执行写的重试规则。
+- **验收**：定向测试以旧快照和新租约复现负向误判，并覆盖 fresh 读取失败、真实失权；SG 发布后两个节点对同一 owner 的 `expired` 判定一致，清理任务不再因活 owner 反复 Claim。
+
 ## ADR-279 节点租约列举复用已列出的分段键（2026-10-24）
 
 - **问题**：`lease.Sample` 调 `ProviderBucket.List("nodes/")`。后者已拿到完整物理键列表，却又对每个 logical node 调 `Get`；历史节点没有当前小时分段时，`SegmentedAuthority.newestWindow` 会为每个节点重新 `List(<node>.json.w*)`。共享 COS 桶历史测试节点多时，后台一次采样膨胀为数十次 List，和热写竞争 COS 请求资源。
@@ -39,7 +45,7 @@
 - **验证**：owner/lease/server 单测覆盖同 session 不 bump、活性判定、self-fence、legacy、DO 不变；cellstore 覆盖 OnEvicted；e2e 模拟 owned 增长、续约停顿、同目录 SIGKILL 和跨节点接管。
 - **P8 KV deadline 热修（2026-10-24）**：`vwork-sg-demo/functions/v1/kv-cache-counter` 报 `KV invocation deadline exceeded`，不是 user-runtime 502 的延续。cell-agent 在一次 claim 里同步 `registerPendingTimers`，冷 timer cell 的 hydrate 把 invocation/KV 请求堵住；同时后台 queue 的 `vwork-24/__queue__/events` hydrate 卡在一个 COS GET 上，占满当时唯一的 hydrate slot，KV get 永远拿不到槽。修复：pending timer 注册改为异步 + 去重；`hydrateSlot` 等待可取消；`CELLHIVE_HYDRATE_TIMEOUT=30s`；`CELLHIVE_HYDRATE_PARALLEL=2`。修复后 endpoint 200，首写冷 1.2–2.0s，warm 0.3–0.5s。
 - **审查修订（2026-10-24）**：
-  1. **接管判活用点读**：`Claim` 对“已死”的判定要再做一次 `nodes/<node>.json` 点读确认（`LeaseView` 可选实现 `NodeLeaseFresh`）。`SampleCached` 的 stale-while-revalidate 在后台刷新持续失败时可能几分钟不更新，用旧快照判定一个仍然存活的 owner 已死会造成双写者；点读失败则不接管。路由/转发仍用缓存快照。
+  1. **负向判活用点读**：`Claim` 对“已死”的判定要再做一次 `nodes/<node>.json` 点读确认（`LeaseView` 可选实现 `NodeLeaseFresh`）。`SampleCached` 的 stale-while-revalidate 在后台刷新持续失败时可能几分钟不更新，用旧快照判定一个仍然存活的 owner 已死会造成双写者；点读失败则不接管。ADR-280 将同一确认扩展到路由/转发与后台任务的负向结论；正向结论仍使用缓存。
   2. **self-fence 从已发布的 Expiry 起算**：`Healthy` 以最近一次成功写入的租约 `Expiry` 减 `TTL/5` 为界，而不是以 PUT 返回的时刻为界。PUT 变慢只会缩小窗口，不会让节点在 peer 已可接管之后继续 ack。`Publish` 不会把已发布的 Expiry 往回拨。
   3. **Wait 返回后复查**：`captureWaitTxID` 在持久证明返回后再次检查 `ackAllowed`，租约在等待期间失效则返回 503，不释放 ack。
   4. **混合版本失败关闭**：节点租约新增 `Liveness:"node-lease"`。启动时若 `nodes/` 里存在存活且不带该字段的节点，拒绝启动；运行中租约快照里出现这样的节点，`ackAllowed` 返回 false（停止确认写入）。此前这条只写在文档里，代码里没有检测。
