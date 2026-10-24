@@ -216,7 +216,7 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 **存储位置**：bucket `node-logs/<node>/<session>.json`，由本节点写。
 
 **生命周期**：
-- **open**：节点第一次准备走 fleet-mode ack **之前**条件创建；只有创建成功且 `{node, session, epoch, followers}` 与既有记录完全一致，才允许 follower ack。一个进程 session 的 follower ensemble 不可变；ensemble/epoch 不一致时同步降级到 bucket，不得使用未被 node-log 覆盖的 follower 证明。
+- **open**：节点第一次准备走 fleet-mode ack **之前**条件创建；只有创建成功且 `{node, session, epoch, followers}` 与既有记录完全一致，才允许 follower ack。一个进程 session 的 follower 身份集合不可变，cell epoch 可以不同；身份集合不一致时同步降级到 bucket，不得使用未被 node-log 覆盖的 follower 证明。
 - follower 将每个已 fsync batch 写为该 owner session 下的连续序号 fragment；seal 与 append 使用同一 session 锁，seal 返回最终序号，之后 append 被拒绝。
 - **recovering**：另一节点看到 open 记录并开始执行 recovery 时设为 recovering（CAS）。
 - **sealed**：recovery 完成后写入每个 follower 的 `covered_seq` 并设为 sealed；节点优雅停止只有在 bucket 上传已排空后才可 seal。
@@ -232,9 +232,11 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 
 **fast path**：若 node-log 不存在（该 session 从未以 fleet 证明 ack）或已经 sealed，接管无需联系 follower。优雅停止必须先排空异步 bucket 上传，再写 sealed，不能仅因收到 SIGTERM 就声明完整。
 
-**自动编排（ADR-066）**：上述 recovery 不再依赖人工触发。fleet waker 的 leader 每轮 pass 顺带执行 `recovery.Runner.Pass`：用 `nodelog.Nodes` 枚举有 node-log 的节点，**以 node lease 判活**（存活→跳过，绝不恢复；缺失/过期→视为死亡；lease 读取出错→跳过以保证 fail-safe），对死亡节点执行上面的 1–6。整个过程**幂等**（sealed 快速路径、open→recovering→sealed 单向），可与 timer 派发共用同一次 leader 选举。
+**身份与启动恢复（ADR-285）**：v3 node-log 保存 follower 的 `{node, instance}` 及创建时 URL。身份在首次 fleet ACK 前固定，HTTP/stream 校验目标身份与响应证明。恢复按身份点查当前地址，v1/v2 仅使用原 URL，不自动推断映射。`nodes/<node>/recovery/<instance>` 是启动恢复地址，不是 lease；Sample 不枚举它作为成员。启动监听先提供恢复接口，恢复旧 session 后才发布新租约及开放业务。稳定 DNS 仍推荐，headless Service 须允许未 Ready 节点互相寻址。
 
-**follower seal 不可达**：若某 follower 在 recovery 期间也死了，其保留段不可获取 → recovery 从 bucket 已上传部分恢复（可能丢失该 follower 确认后但未上传的最后一段）→ RPO 退化为"已传段"的精确点。这是 fleet 模式下双节点同时崩溃的极端情况，≥3 节点时有第二 follower 兜底。
+**自动编排**：按 `{node, session}` 判断旧会话；当前租约存活且 session 相同则跳过，读取不确定则失败关闭。包括本机在内的旧 session 独立重试并记录失败/进度，后台恢复不阻塞 timer 派发。
+
+**follower 不可达或缺失**：不能以空日志或 bucket 中现有部分宣布恢复成功。维持 `recovering`，直到所有所需 follower 的连续日志覆盖得到验证并上传；不自动降低 RPO=0。
 
 ## 7. 优雅 handoff
 

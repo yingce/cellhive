@@ -55,7 +55,7 @@ start_agent(){ # SESSION
   "$BIN" >"$TMP/agent.log" 2>&1 &
   AGENT=$!
   for _ in $(seq 1 200); do
-    curl -sf "http://$REST/healthz" >/dev/null 2>&1 && return 0
+    curl -sf "http://$REST/readyz" >/dev/null 2>&1 && return 0
     kill -0 "$AGENT" 2>/dev/null || { fail "agent exited"; return 1; }
     sleep 0.05
   done

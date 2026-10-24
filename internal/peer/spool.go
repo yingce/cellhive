@@ -886,3 +886,44 @@ func syncDir(dir string) error {
 	defer f.Close()
 	return f.Sync()
 }
+
+// Prepare makes an empty session durable before the owner publishes its v3
+// recovery coordinates. Missing files during recovery are never empty proof.
+func (s *Spool) Prepare(session string) error {
+	if session == "" {
+		return fmt.Errorf("missing session")
+	}
+	mu := s.sessionMu(session)
+	mu.Lock()
+	defer mu.Unlock()
+	dir := s.sessionDir(session)
+	if _, err := os.Stat(filepath.Join(dir, sealName)); err == nil {
+		return ErrSessionSealed
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := s.ensureSessionDir(dir); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, sessionLogName), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return s.syncDir(dir)
+}
+func (s *Spool) SessionExists(session string) bool {
+	dir := s.sessionDir(session)
+	if _, err := os.Stat(filepath.Join(dir, sessionLogName)); err == nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, sealName))
+	return err == nil
+}

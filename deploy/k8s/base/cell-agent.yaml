@@ -8,6 +8,7 @@ metadata:
   labels: {app: cell-agent, app.kubernetes.io/part-of: cellhive}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector: {app: cell-agent}
   ports:
     - {name: rest, port: 7001, targetPort: 7001}
@@ -52,14 +53,14 @@ spec:
             - name: CELLHIVE_NODE_ID
               value: $(POD_NAME)
             - name: CELLHIVE_ADVERTISE
-              value: $(POD_IP):7001
+              value: $(POD_NAME).cell-agent.cellhive.svc.cluster.local:7001
             - name: CELLHIVE_PEER_URL
-              value: http://$(POD_IP):7001
+              value: http://$(POD_NAME).cell-agent.cellhive.svc.cluster.local:7001
           ports:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}
           startupProbe:
-            httpGet: {path: /readyz, port: 7001}
+            httpGet: {path: /healthz, port: 7001}
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:

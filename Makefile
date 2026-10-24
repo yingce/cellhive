@@ -174,3 +174,7 @@ run: build
 
 diagnose: build
 	$(BIN)/cellhive diagnose
+
+.PHONY: e2e-session-recovery
+e2e-session-recovery:
+	bash scripts/e2e/session-recovery.sh

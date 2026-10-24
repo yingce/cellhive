@@ -57,6 +57,7 @@ type HeldSegment struct {
 
 // HTTPTransport is the P0 peer transport.
 type HTTPTransport struct {
+	Targets *Targets
 	Token   string
 	Session string
 	Client  *http.Client
@@ -97,7 +98,7 @@ func (t *HTTPTransport) Append(ctx context.Context, baseURL string, scope cell.S
 		req.Header.Set("x-cellhive-owner-session", t.Session)
 	}
 	req.Header.Set("content-type", "application/octet-stream")
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return err
 	}
@@ -121,7 +122,7 @@ func (t *HTTPTransport) AppendBatch(ctx context.Context, baseURL string, scope c
 	if t.Session != "" {
 		req.Header.Set("x-cellhive-owner-session", t.Session)
 	}
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return err
 	}
@@ -148,7 +149,7 @@ func (t *HTTPTransport) Held(ctx context.Context, baseURL string) ([]HeldSegment
 		return nil, err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +187,7 @@ func (t *HTTPTransport) Seal(ctx context.Context, baseURL, session string) (uint
 		return 0, err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return 0, err
 	}
@@ -217,7 +218,7 @@ func (t *HTTPTransport) Head(ctx context.Context, baseURL, session string) (uint
 		return 0, err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return 0, err
 	}
@@ -241,7 +242,7 @@ func (t *HTTPTransport) TailOpen(ctx context.Context, baseURL, session, scope st
 		return nil, after, offset, err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return nil, after, offset, err
 	}
@@ -283,7 +284,7 @@ func (t *HTTPTransport) readTail(ctx context.Context, u, baseURL string) ([]Sess
 		return nil, err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +327,7 @@ func (t *HTTPTransport) Reclaim(ctx context.Context, baseURL, session string) er
 		return err
 	}
 	req.Header.Set("x-cellhive-internal-token", t.Token)
-	resp, err := t.Client.Do(req)
+	resp, err := t.do(req, baseURL)
 	if err != nil {
 		return err
 	}

@@ -1,5 +1,14 @@
 # 决策记录（ADR）
 
+## ADR-285 follower 身份与重启恢复（2026-10-24）
+
+- **问题**：v2 node-log 固化 follower URL，Pod 换 IP 后历史 session 无法 seal；自动恢复跳过同名存活节点的全部历史 session。
+- **决策**：新增 v3 node-log，保留 URL 兼容字段并记录每个 follower 的 node/instance 身份。首次 fleet ACK 前锁定身份；HTTP 和 stream 握手校验目标身份与响应证明。恢复通过节点租约或带 instance 的启动恢复地址点查当前地址，逐请求校验身份，不将空盘同名节点当作原 follower。v1/v2 保持原地址语义，不猜测历史 URL 的身份。
+- **启动**：持有数据目录 flock 后先开放只允许 peer seal/tail/head 的监听，在 `nodes/<node>/recovery/<instance>` 发布恢复地址（只用于寻址，绝不证明 owner 存活）。恢复所有旧 session 后才发布正常 lease、开放业务和新 follower append。同时重启的节点可先互相读取持久 spool；headless Service 发布未 Ready 地址。
+- **恢复**：新 session 与 node lease 中的 session 不同即可触发历史会话恢复；当前活 session 不得封存。恢复逐页严格校验连续 tail 到 final，记录覆盖进度并以 CAS 封存；中断/身份不符/缺失日志均保留恢复状态。后台每 session 独立退避重试，失败不阻塞 timer 派发。恢复成功后才允许 spool 回收。
+- **升级**：节点 liveness 协议标识升级，禁止旧 recovery 写者与 v3 混跑。部署需要停止旧版后启动新版；旧 URL 记录需先验证并修复可达性，失败时新版启动保持恢复模式。SG 旧 session 的生产修复需完整日志验证，不能仅凭 head 推断完整。
+- **验证**：真实 HTTP 身份错配、空盘、地址变化、同名新 session、当前活 session、恢复中断/分页 checkpoint 回归通过；真实双进程换地址、恢复中强杀、空盘替换后换回原盘，80 个已确认值全部读回。`make test/vet/build`、相关包 race、Helm/kustomize 渲染通过；详见 [恢复验证记录](archive/bench/session-recovery-2026-10-24.md)。
+
 ## ADR-284 COS 不可变 LTX Append 复用响应 ETag（2026-10-24）
 
 - **问题**：bucket 模式的 KV PUT 必须等资源删除 fence 点读、不可变 LTX 对象持久写入与 RPO=0 证明。COS 原生 Append 成功后，`ProviderBucket.ConditionalCreate` 还同步做一次 S3 HEAD，仅为取回 ETag；这让每次 LTX 写多一次 COS 往返。对测试桶的临时探针验证，15 次 Append 响应均带 ETag，且与随后 HEAD 的 ETag 15/15 相同。

@@ -228,9 +228,11 @@ Large numbers of dead nodes may make recovery take several minutes; requests wai
 
 **fast path**: if the node stops gracefully (SIGTERM completes handoff), it seals its own log and ensures upload is complete, so takeover skips the recovery step directly.
 
-**Automatic orchestration (ADR-066)**: the recovery above no longer depends on manual triggering. On each pass, the fleet waker leader also executes `recovery.Runner.Pass`: use `nodelog.Nodes` to enumerate nodes with node-logs, **use node leases for liveness** (alive → skip, never recover; missing/expired → considered dead; lease read error → skip to remain fail-safe), and execute steps 1–6 above for dead nodes. The entire process is **idempotent** (sealed fast path, one-way open→recovering→sealed) and can share the same leader election as timer dispatch.
+**Identity and startup recovery (ADR-285)**: v3 node logs retain each follower's `{node, instance}` and original URL. HTTP appends and stream handshakes check persistent identity and require matching response proof. Recovery point-reads the current endpoint for that identity. Legacy v1/v2 records retain their original URL semantics; no automatic identity inference is permitted. `nodes/<node>/recovery/<instance>` is a boot recovery address, never a liveness lease. Boot serves authenticated recovery requests before publishing a normal lease or accepting application requests/new replication. Headless DNS publishes not-ready endpoints to allow simultaneous restarts.
 
-**follower seal unreachable**: if a follower also dies during recovery, its retained segments cannot be fetched → recovery restores from the already-uploaded portion in the bucket (potentially losing the last segment that follower acknowledged but that was not uploaded) → RPO degrades to the exact point of "uploaded segments". This is the extreme case of two nodes crashing simultaneously in fleet mode; with ≥3 nodes, a second follower provides fallback.
+**Automatic orchestration**: inspect historical sessions even if the same node name is alive under a new session. Never seal the current live session. Each failed session backs off independently; page checkpoints record only uploaded fragments. Recovery runs separately from timer dispatch, sharing leader election but not its blocking pass.
+
+**Missing/unreachable follower**: retain the recovery requirement. Do not silently restore only bucket-covered data or treat a missing spool as a complete empty tail. Seal only after the required contiguous ranges have been uploaded.
 
 ## 7. Graceful handoff
 

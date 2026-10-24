@@ -75,13 +75,15 @@ const maxCommitJSONBytes = ((maxSegmentBytes + 2) / 3 * 4) + (1 << 20)
 
 // Deps are the Server's dependencies.
 type Deps struct {
-	Cfg     config.Config
-	Bucket  bucket.Bucket
-	Lease   *lease.Manager
-	Owner   *owner.Manager
-	Replica *replica.Manager
-	Spool   *peer.Spool
-	PeerMgr *peer.Manager
+	Cfg             config.Config
+	Bucket          bucket.Bucket
+	Lease           *lease.Manager
+	Owner           *owner.Manager
+	Replica         *replica.Manager
+	Spool           *peer.Spool
+	PeerMgr         *peer.Manager
+	PeerTargets     *peer.Targets
+	StartupListener *StartupListener
 	// PeerShipper group-commits fleet commits into framed batches (fleet log
 	// group commit); falls back to PeerMgr per-segment replication if nil.
 	PeerShipper *peer.ShipBatcher
@@ -189,6 +191,7 @@ type Server struct {
 	sessionMu        sync.Mutex
 	sessionOpen      bool
 	sessionFollowers []string
+	sessionRefs      map[cell.PeerIdentity]bool
 	draining         atomic.Bool
 
 	// ordered serializes pipelined commit frame writes per scope so the SQL
@@ -312,6 +315,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/commit_binary", s.auth(s.handleCommitBinary))
 	mux.HandleFunc("POST /v1/peer/append", s.roleAuth("peer")(s.handlePeerAppend))
 	mux.HandleFunc("POST /v1/peer/append_batch", s.roleAuth("peer")(s.handlePeerAppendBatch))
+	mux.HandleFunc("POST /v1/peer/prepare", s.roleAuth("peer")(s.handlePeerPrepare))
 	mux.HandleFunc("POST /v1/peer/seal", s.roleAuth("peer")(s.handlePeerSeal))
 	mux.HandleFunc("GET /v1/peer/head", s.roleAuth("peer")(s.handlePeerHead))
 	mux.HandleFunc("GET /v1/peer/tail", s.roleAuth("peer")(s.handlePeerTail))
@@ -422,7 +426,7 @@ func (s *Server) Handler() http.Handler {
 	// operator endpoints (internal token / admin JWT), not tenant data-plane
 	// paths, even though they share the /v1/<kind>/ prefix.
 	s.registerResourceRoutes(mux, s.auth)
-	return s.count(s.trace(mux))
+	return s.count(s.trace(s.peerIdentity(mux)))
 }
 
 func (s *Server) count(next http.Handler) http.Handler {
@@ -1892,7 +1896,7 @@ func (s *Server) handlePeerStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	if _, err := fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", peer.StreamProtocol); err != nil {
+	if _, err := fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: %s\r\nX-Cellhive-Target-Node: %s\r\nX-Cellhive-Target-Instance: %s\r\n\r\n", peer.StreamProtocol, w.Header().Get(peer.TargetNodeHeader), w.Header().Get(peer.TargetInstanceHeader)); err != nil {
 		return
 	}
 	if err := rw.Flush(); err != nil {
@@ -1975,6 +1979,10 @@ func (s *Server) handlePeerSeal(w http.ResponseWriter, r *http.Request) {
 	session := r.URL.Query().Get("session")
 	if session == "" {
 		writeErr(w, http.StatusBadRequest, "session_required", "owner session is required")
+		return
+	}
+	if !s.Spool.SessionExists(session) {
+		writeErr(w, 409, "session_missing", "retained session log is missing")
 		return
 	}
 	final, err := s.Spool.Seal(session)
@@ -3466,10 +3474,55 @@ func (s *Server) openFleetSession(ctx context.Context, epoch uint64, followers [
 	sort.Strings(followers)
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	if s.sessionOpen {
+	if s.sessionOpen && (s.PeerTargets == nil || s.Lease == nil) {
 		return slicesEqual(s.sessionFollowers, followers)
 	}
-	if _, err := s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers); err != nil {
+	var err error
+	if s.PeerTargets != nil && s.Lease != nil {
+		refs := make(map[string]cell.PeerIdentity, len(followers))
+		for _, addr := range followers {
+			for _, l := range s.Lease.SampleCached(ctx, s.followerSampleTTL()) {
+				if l.PeerURL == addr && l.Live(time.Now()) && l.Instance != "" {
+					refs[addr] = cell.PeerIdentity{Node: l.Node, Instance: l.Instance}
+					break
+				}
+			}
+			if _, ok := refs[addr]; !ok {
+				return false
+			}
+		}
+		if s.sessionOpen {
+			if len(refs) != len(s.sessionRefs) {
+				return false
+			}
+			for _, id := range refs {
+				if !s.sessionRefs[id] {
+					return false
+				}
+			}
+			return s.PeerTargets.Bind(refs) == nil
+		}
+		if err = s.PeerTargets.Bind(refs); err == nil {
+			tr := peer.NewHTTPTransport(s.Cfg.TokenPeer, nil)
+			tr.Targets = s.PeerTargets
+			for addr := range refs {
+				if err = tr.Prepare(ctx, addr, s.Cfg.SessionID); err != nil {
+					s.Log.Warn("prepare follower failed", "err", err)
+					return false
+				}
+			}
+			_, err = s.NodeLog.OpenIdentified(ctx, s.Cfg.SessionID, epoch, refs)
+			if err == nil {
+				s.sessionRefs = map[cell.PeerIdentity]bool{}
+				for _, id := range refs {
+					s.sessionRefs[id] = true
+				}
+			}
+		}
+	} else {
+		_, err = s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers)
+	}
+	if err != nil {
 		s.Log.Warn("node-log open failed", "err", err)
 		return false
 	}
@@ -3568,14 +3621,22 @@ func (s *Server) Run(ctx context.Context) error {
 	warmDone := make(chan struct{})
 	defer func() { stopWarm(); <-warmDone }()
 	go func() { s.runKVReadWarmLoop(warmCtx); close(warmDone) }()
-	srv := &http.Server{Addr: s.Cfg.RESTAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	errCh := make(chan error, 1)
-	go func() {
-		s.Log.Info("cell-agent listening", "addr", s.Cfg.RESTAddr, "node", s.Cfg.NodeID)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
+	var shutdown func(context.Context) error
+	var errCh chan error
+	if s.StartupListener != nil {
+		s.StartupListener.Promote(s.Handler())
+		shutdown = s.StartupListener.Shutdown
+		errCh = s.StartupListener.Errors
+	} else {
+		srv := &http.Server{Addr: s.Cfg.RESTAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+		shutdown = srv.Shutdown
+		errCh = make(chan error, 2)
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	// The control plane listens separately (ADR-012) with its own credential; the
 	// data listener never exposes control writes.
@@ -3599,7 +3660,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if admin != nil {
 			_ = admin.Shutdown(shutdownCtx)
 		}
-		return srv.Shutdown(shutdownCtx)
+		return shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}

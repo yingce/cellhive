@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"cellhive/internal/cell"
+	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
 	"cellhive/internal/replica"
@@ -15,9 +16,12 @@ import (
 
 // Manager performs follower-seal recovery.
 type Manager struct {
-	Replica *replica.Manager
-	Peer    peer.Transport
-	Sealed  peer.RecoveryTransport
+	Lease *lease.Manager
+	// Only the startup process holding its instance flock may enable this.
+	LocalInstanceLocked bool
+	Replica             *replica.Manager
+	Peer                peer.Transport
+	Sealed              peer.RecoveryTransport
 }
 
 // New creates a recovery manager.
@@ -72,20 +76,27 @@ func (m *Manager) Collect(ctx context.Context, followers []string) (int, error) 
 // collectSealed freezes each follower session and uploads its contiguous tail.
 // Recovery fails closed unless every recorded follower can be sealed and read
 // through the final sequence it reported.
-func (m *Manager) collectSealed(ctx context.Context, followers []string, session string) (int, map[string]uint64, error) {
+func (m *Manager) collectSealed(ctx context.Context, rec nodelog.Record, nl *nodelog.Manager) (int, map[string]uint64, error) {
 	if m.Sealed == nil {
 		return 0, nil, fmt.Errorf("recovery: peer transport lacks seal/tail support")
 	}
 	total := 0
-	covered := make(map[string]uint64, len(followers))
-	for _, follower := range followers {
-		final, err := m.Sealed.Seal(ctx, follower, session)
+	covered := make(map[string]uint64, len(rec.Followers))
+	for _, follower := range rec.Followers {
+		peerCtx, addr, err := m.follower(ctx, rec, follower)
+		if err != nil {
+			return total, covered, err
+		}
+		final, err := m.Sealed.Seal(peerCtx, addr, rec.Session)
 		if err != nil {
 			return total, covered, fmt.Errorf("recovery: seal follower %s: %w", follower, err)
 		}
-		var after uint64
+		after := rec.Progress[follower]
+		if after > final {
+			return total, covered, fmt.Errorf("recovery: follower final regressed below durable checkpoint")
+		}
 		for after < final {
-			fragments, err := m.Sealed.Tail(ctx, follower, session, after)
+			fragments, err := m.Sealed.Tail(peerCtx, addr, rec.Session, after)
 			if err != nil {
 				return total, covered, fmt.Errorf("recovery: tail follower %s after %d: %w", follower, after, err)
 			}
@@ -94,7 +105,7 @@ func (m *Manager) collectSealed(ctx context.Context, followers []string, session
 			}
 			for _, fragment := range fragments {
 				want := after + 1
-				if fragment.Sequence != want {
+				if fragment.Sequence != want || fragment.Sequence > final {
 					return total, covered, fmt.Errorf("recovery: follower %s tail gap: got %d want %d", follower, fragment.Sequence, want)
 				}
 				sc, err := cell.ParseScope(fragment.Scope)
@@ -115,6 +126,9 @@ func (m *Manager) collectSealed(ctx context.Context, followers []string, session
 				}
 				after = fragment.Sequence
 			}
+			if err := nl.Checkpoint(ctx, rec.Node, rec.Session, follower, after); err != nil {
+				return total, covered, err
+			}
 		}
 		covered[follower] = final
 	}
@@ -129,7 +143,7 @@ func (m *Manager) RecoverLiveScope(ctx context.Context, rec nodelog.Record, scop
 	if !ok {
 		return 0, fmt.Errorf("recovery: peer transport lacks live tail support")
 	}
-	if rec.ProtoVersion != nodelog.ProtoVersionSession || rec.Status != nodelog.StatusOpen {
+	if (rec.ProtoVersion != nodelog.ProtoVersionSession && rec.ProtoVersion != nodelog.ProtoVersionIdentity) || rec.Status != nodelog.StatusOpen {
 		return 0, fmt.Errorf("recovery: active session has unsupported state %s/%s", rec.ProtoVersion, rec.Status)
 	}
 	if len(rec.Followers) == 0 {
@@ -137,14 +151,18 @@ func (m *Manager) RecoverLiveScope(ctx context.Context, rec nodelog.Record, scop
 	}
 	total := 0
 	for _, follower := range rec.Followers {
-		final, err := live.Head(ctx, follower, rec.Session)
+		peerCtx, addr, err := m.follower(ctx, rec, follower)
+		if err != nil {
+			return total, err
+		}
+		final, err := live.Head(peerCtx, addr, rec.Session)
 		if err != nil {
 			return total, fmt.Errorf("recovery: follower head %s: %w", follower, err)
 		}
 		var after uint64
 		var offset int64
 		for after < final {
-			fragments, next, nextOffset, err := live.TailOpen(ctx, follower, rec.Session, scope.String(), after, final, offset)
+			fragments, next, nextOffset, err := live.TailOpen(peerCtx, addr, rec.Session, scope.String(), after, final, offset)
 			if err != nil {
 				return total, fmt.Errorf("recovery: follower tail %s: %w", follower, err)
 			}
@@ -202,8 +220,20 @@ func (m *Manager) Recover(ctx context.Context, nl *nodelog.Manager, deadNode, se
 		}
 		return 0, err
 	}
+	if rec.Node != deadNode || rec.Session != session {
+		return 0, fmt.Errorf("recovery: record identity mismatch")
+	}
 	if rec.Status == nodelog.StatusSealed {
 		return 0, nil
+	}
+	if rec.ProtoVersion == nodelog.ProtoVersionIdentity && (len(rec.Followers) == 0 || len(rec.FollowerRefs) != len(rec.Followers)) {
+		return 0, fmt.Errorf("recovery: invalid identified ensemble")
+	}
+	if err := m.checkSession(ctx, deadNode, session); err != nil {
+		return 0, err
+	}
+	if rec.ProtoVersion != "" && rec.ProtoVersion != nodelog.ProtoVersionLegacy && rec.ProtoVersion != nodelog.ProtoVersionSession && rec.ProtoVersion != nodelog.ProtoVersionIdentity {
+		return 0, fmt.Errorf("unsupported node-log protocol %q", rec.ProtoVersion)
 	}
 	if _, err := nl.SetStatus(ctx, deadNode, session, nodelog.StatusRecovering); err != nil {
 		return 0, err
@@ -211,8 +241,8 @@ func (m *Manager) Recover(ctx context.Context, nl *nodelog.Manager, deadNode, se
 	var n int
 	covered := map[string]uint64{}
 	if len(rec.Followers) > 0 {
-		if rec.ProtoVersion == nodelog.ProtoVersionSession {
-			n, covered, err = m.collectSealed(ctx, rec.Followers, rec.Session)
+		if rec.ProtoVersion == nodelog.ProtoVersionSession || rec.ProtoVersion == nodelog.ProtoVersionIdentity {
+			n, covered, err = m.collectSealed(ctx, rec, nl)
 		} else {
 			n, err = m.Collect(ctx, rec.Followers)
 		}
@@ -226,7 +256,9 @@ func (m *Manager) Recover(ctx context.Context, nl *nodelog.Manager, deadNode, se
 	for follower := range covered {
 		// Coverage is already durable in the sealed node-log. Reclamation is a
 		// space optimization and must not turn a completed recovery into failure.
-		_ = m.Sealed.Reclaim(ctx, follower, session)
+		if peerCtx, addr, err := m.follower(ctx, rec, follower); err == nil {
+			_ = m.Sealed.Reclaim(peerCtx, addr, session)
+		}
 	}
 	return n, nil
 }

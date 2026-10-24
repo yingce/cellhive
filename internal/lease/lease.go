@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,10 +49,10 @@ type NodeLease struct {
 	Load         Load   `json:"load"`
 }
 
-// NodeLeaseLiveness identifies the owner-liveness and resource-fence protocol.
-// The prior "node-lease" release writes resource-fence.json; it must not run
-// alongside nodes that use resource-fence.v2 (ADR-276).
-const NodeLeaseLiveness = "node-lease-fence-v2"
+// NodeLeaseLiveness gates owner, resource-fence and recovery compatibility.
+// Pre-v3 recovery writers could misinterpret identified logs as legacy Held
+// logs, so ADR-285 requires a coordinated replacement, not a rolling mix.
+const NodeLeaseLiveness = "node-lease-fence-v2-recovery-v3"
 
 // Key returns the bucket key for a node lease.
 func Key(node string) string { return "nodes/" + node + ".json" }
@@ -238,6 +239,9 @@ func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
 	}
 	out := make([]NodeLease, 0, len(keys))
 	for _, k := range keys {
+		if strings.Contains(strings.TrimPrefix(k, "nodes/"), "/") || !strings.HasSuffix(k, ".json") {
+			continue
+		}
 		data, _, err := m.B.Get(ctx, k)
 		if err != nil {
 			continue

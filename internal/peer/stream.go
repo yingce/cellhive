@@ -138,7 +138,7 @@ type rawStream struct {
 	failOne sync.Once
 }
 
-func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline int) (*rawStream, error) {
+func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline int, identities ...cell.PeerIdentity) (*rawStream, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, err
@@ -164,6 +164,11 @@ func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline
 	if session != "" {
 		req.Header.Set("X-Cellhive-Owner-Session", session)
 	}
+	var id cell.PeerIdentity
+	if len(identities) > 0 {
+		id = identities[0]
+	}
+	setIdentity(req.Header, id)
 	if err := req.Write(conn); err != nil {
 		conn.Close()
 		return nil, err
@@ -178,6 +183,11 @@ func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline
 		resp.Body.Close()
 		conn.Close()
 		return nil, fmt.Errorf("peer stream: upgrade returned %s", resp.Status)
+	}
+	if err := verifyIdentity(resp.Header, id); err != nil {
+		resp.Body.Close()
+		conn.Close()
+		return nil, err
 	}
 	if pipeline <= 0 {
 		pipeline = 4
@@ -322,6 +332,7 @@ func (s *rawStream) isFailed() bool {
 // StreamTransport keeps several persistent, scope-hashed lanes per follower.
 // Each lane preserves FIFO order and pipelines up to pipeline batches.
 type StreamTransport struct {
+	Targets  *Targets
 	token    string
 	session  string
 	lanes    int
@@ -369,7 +380,7 @@ func (t *StreamTransport) stream(ctx context.Context, baseURL string, scope cell
 	if s := t.streams[key]; s != nil && !s.isFailed() {
 		return s, nil
 	}
-	s, err := dialRawStream(ctx, baseURL, t.token, t.session, t.pipeline)
+	s, err := dialRawStream(ctx, baseURL, t.token, t.session, t.pipeline, targetIdentity(ctx, t.Targets, baseURL))
 	if err != nil {
 		return nil, err
 	}
@@ -430,4 +441,15 @@ func (t *StreamTransport) Tail(ctx context.Context, baseURL, session string, aft
 
 func (t *StreamTransport) Reclaim(ctx context.Context, baseURL, session string) error {
 	return t.fallback.Reclaim(ctx, baseURL, session)
+}
+
+// Close releases persistent lanes on shutdown; hijacked connections are not
+// closed by the HTTP server's Shutdown method.
+func (t *StreamTransport) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key, s := range t.streams {
+		s.fail(fmt.Errorf("peer stream transport closed"))
+		delete(t.streams, key)
+	}
 }

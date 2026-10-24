@@ -3,8 +3,10 @@ package recovery_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,12 +71,15 @@ func TestRunnerRecoversDeadNodeSkipsLiveAndSelf(t *testing.T) {
 		t.Fatalf("open node-2: %v", err)
 	}
 	ackSegment(t, t2, []string{f2}, sc2, 1, "node2-data")
-	lm2 := lease.NewManager(shared, "node-2", "sess2", "", "", time.Minute)
+	lm2 := lease.NewManager(shared, "node-2", "s1", "", "", time.Minute)
 	if err := lm2.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatalf("publish lease: %v", err)
 	}
 
-	// node-3: self.
+	// node-3: self with a live current session.
+	if err := lease.NewManager(shared, "node-3", "s1", "", "", time.Minute).Publish(ctx, lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
 	f3, t3 := follower(t, filepath.Join(dir, "f3"))
 	nl3 := nodelog.New(shared, "node-3")
 	sc3 := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "n3"}
@@ -205,5 +210,61 @@ func TestRunnerSkipsOnUncertainLeaseRead(t *testing.T) {
 	}
 	if r, _, _ := nl.Get(ctx, "node-y", "s1"); r.Status != nodelog.StatusOpen {
 		t.Fatalf("node-y should be untouched: %+v", r)
+	}
+}
+
+func TestRunnerRecoversOldSessionOfLiveNode(t *testing.T) {
+	ctx := context.Background()
+	b, _ := bucket.NewFSBucket(t.TempDir())
+	f, tr := follower(t, t.TempDir())
+	nl := nodelog.New(b, "restarted")
+	if _, err := nl.Open(ctx, "s1", 1, []string{f}); err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "test", Class: "kv", ID: "old"}
+	ackSegment(t, tr, []string{f}, sc, 1, "old acknowledged data")
+	lm := lease.NewManager(b, "restarted", "new-session", "", "", time.Minute)
+	if err := lm.Publish(ctx, lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recovery.Runner{Nodelog: nl, Lease: lm, Recovery: recovery.New(replica.New(b), tr), SelfNode: "restarted"}
+	_, _, _, err := runner.Pass(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := nl.Get(ctx, "restarted", "s1")
+	if err != nil || rec.Status != nodelog.StatusSealed {
+		t.Fatalf("old session must recover while new session lives: %+v %v", rec, err)
+	}
+}
+
+func TestRunnerBacksOffFailedSession(t *testing.T) {
+	ctx := context.Background()
+	b, _ := bucket.NewFSBucket(t.TempDir())
+	nl := nodelog.New(b, "dead")
+	var calls atomic.Int64
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); http.Error(w, "unavailable", 503) }))
+	defer h.Close()
+	if _, err := nl.Open(ctx, "old", 1, []string{h.URL}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "current", "", "", time.Minute), Recovery: recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil)), Now: func() time.Time { return now }}
+	_, _, _, _ = runner.Pass(ctx)
+	if calls.Load() != 1 {
+		t.Fatalf("first attempt calls=%d", calls.Load())
+	}
+	_, _, _, _ = runner.Pass(ctx)
+	if calls.Load() != 1 {
+		t.Fatal("retried without backoff")
+	}
+	now = now.Add(2 * time.Second)
+	_, _, _, _ = runner.Pass(ctx)
+	if calls.Load() != 2 {
+		t.Fatal("did not retry after backoff")
+	}
+	rec, _, _ := nl.Get(ctx, "dead", "old")
+	if rec.Status != nodelog.StatusRecovering {
+		t.Fatal("failed session lost")
 	}
 }

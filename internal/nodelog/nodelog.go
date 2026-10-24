@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
 
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/objectstore"
 )
 
@@ -27,8 +29,9 @@ const (
 	StatusRecovering Status = "recovering"
 	StatusSealed     Status = "sealed"
 
-	ProtoVersionLegacy  = "v1"
-	ProtoVersionSession = "v2"
+	ProtoVersionLegacy   = "v1"
+	ProtoVersionSession  = "v2"
+	ProtoVersionIdentity = "v3"
 )
 
 // Record is a node-log entry.
@@ -37,12 +40,14 @@ type Record struct {
 	Session string `json:"session"`
 	// Epoch is the first cell epoch observed in this process session. Each v2
 	// follower fragment carries its own scope and epoch for recovery.
-	Epoch        uint64            `json:"epoch"`
-	Followers    []string          `json:"followers"`
-	Status       Status            `json:"status"`
-	ProtoVersion string            `json:"proto_version"`
-	UpdatedMs    int64             `json:"updated_ms"`
-	CoveredSeq   map[string]uint64 `json:"covered_seq,omitempty"`
+	Epoch        uint64                       `json:"epoch"`
+	FollowerRefs map[string]cell.PeerIdentity `json:"follower_refs,omitempty"`
+	Progress     map[string]uint64            `json:"recovered_seq,omitempty"`
+	Followers    []string                     `json:"followers"`
+	Status       Status                       `json:"status"`
+	ProtoVersion string                       `json:"proto_version"`
+	UpdatedMs    int64                        `json:"updated_ms"`
+	CoveredSeq   map[string]uint64            `json:"covered_seq,omitempty"`
 }
 
 // ErrNotFound is returned when a node-log record does not exist.
@@ -110,14 +115,39 @@ func Key(node, session string) string { return "node-logs/" + node + "/" + sessi
 // is not significant. Cell epochs may differ within one process session: each
 // v2 follower fragment persists its own epoch.
 func (m *Manager) Open(ctx context.Context, session string, epoch uint64, followers []string) (Record, error) {
+	return m.open(ctx, session, epoch, followers, nil)
+}
+
+func (m *Manager) OpenIdentified(ctx context.Context, session string, epoch uint64, refs map[string]cell.PeerIdentity) (Record, error) {
+	var followers []string
+	seen := map[cell.PeerIdentity]bool{}
+	for addr, id := range refs {
+		if addr == "" || id.Node == "" || id.Instance == "" || seen[id] {
+			return Record{}, ErrEnsembleMismatch
+		}
+		seen[id] = true
+		followers = append(followers, addr)
+	}
+	if len(followers) == 0 {
+		return Record{}, ErrEnsembleMismatch
+	}
+	return m.open(ctx, session, epoch, followers, refs)
+}
+
+func (m *Manager) open(ctx context.Context, session string, epoch uint64, followers []string, refs map[string]cell.PeerIdentity) (Record, error) {
 	followers = canonicalFollowers(followers)
+	proto := ProtoVersionSession
+	if refs != nil {
+		proto = ProtoVersionIdentity
+	}
 	r := Record{
 		Node:         m.NodeID,
 		Session:      session,
 		Epoch:        epoch,
 		Followers:    followers,
 		Status:       StatusOpen,
-		ProtoVersion: ProtoVersionSession,
+		ProtoVersion: proto,
+		FollowerRefs: maps.Clone(refs),
 		UpdatedMs:    time.Now().UnixMilli(),
 	}
 	data, _ := json.Marshal(r)
@@ -128,7 +158,7 @@ func (m *Manager) Open(ctx context.Context, session string, epoch uint64, follow
 			if gerr != nil {
 				return Record{}, gerr
 			}
-			if existing.Node != m.NodeID || existing.Session != session || existing.ProtoVersion != ProtoVersionSession || !sameFollowers(existing.Followers, followers) {
+			if existing.Node != m.NodeID || existing.Session != session || existing.ProtoVersion != proto || !sameFollowers(existing.Followers, followers) || !maps.Equal(existing.FollowerRefs, refs) {
 				return Record{}, ErrEnsembleMismatch
 			}
 			if existing.Status != StatusOpen {
@@ -182,6 +212,9 @@ func (m *Manager) SetStatus(ctx context.Context, node, session string, status St
 	r, e, err := m.Get(ctx, node, session)
 	if err != nil {
 		return Record{}, err
+	}
+	if r.Status == StatusSealed && status != StatusSealed {
+		return r, ErrSessionClosed
 	}
 	r.Status = status
 	r.UpdatedMs = time.Now().UnixMilli()
@@ -265,4 +298,33 @@ func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// Checkpoint persists only fragments already uploaded to the bucket. CAS
+// contention never loses another recoverer's progress; replay is idempotent.
+func (m *Manager) Checkpoint(ctx context.Context, node, session, follower string, after uint64) error {
+	for attempts := 0; attempts < 8; attempts++ {
+		r, e, err := m.Get(ctx, node, session)
+		if err != nil {
+			return err
+		}
+		if r.Status == StatusSealed || r.Progress[follower] >= after {
+			return nil
+		}
+		if r.Status != StatusRecovering {
+			return ErrSessionClosed
+		}
+		if r.Progress == nil {
+			r.Progress = map[string]uint64{}
+		}
+		r.Progress[follower] = after
+		r.UpdatedMs = time.Now().UnixMilli()
+		data, _ := json.Marshal(r)
+		_, err = m.cas(ctx, Key(node, session), data, e)
+		if errors.Is(err, bucket.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return bucket.ErrPrecondition
 }

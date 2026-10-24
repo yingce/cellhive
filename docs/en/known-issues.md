@@ -402,3 +402,7 @@ Tests: `internal/cellcapture`, `TestKVCaptureReplicatesAndRestores`, `TestKVCapt
 | Coverage of entry `/ready` (ADR-156) | ⚠️ **Boundary**: it describes readiness of the **entry/DO host** (projection freshness, drain state), not tenant worker internal health; props-bound facades (KV/D1/R2/Queue in the loader isolate) have no independent probes |
 
 **Meaning (updated 2026-09-15)**: P3.7/P3.8 deliverables (facet discovery, object keys, per-object recovery, gates, cross-node cold activation/takeover, compat suite) **have all been implemented and verified**. All P3 items have been implemented/finalized (WS cross-node forwarding, `transferred_classes` within the same worker, runtime VFS lazy reads per ADR-160, `refreshFacets` incremental cache); only **Class C environment validation** remains (real cross-host RTT, cloud object storage, multi-host chaos/takeover) and cross-worker `transferred_classes` (intentionally rejected).
+
+## 2026-10-24 follower identity and session recovery (ADR-285)
+
+The v3 identity checks, boot recovery gate, page checkpoints and per-session retry are implemented locally. Legacy URL records do not acquire an inferred identity. The SG historical session has not been repaired or deployed by this change; its retained head alone is not a complete-tail proof. Local verification and deployment constraints are recorded in `../archive/bench/session-recovery-2026-10-24.md`.

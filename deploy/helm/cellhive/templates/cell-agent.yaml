@@ -7,6 +7,7 @@ metadata:
     app: cell-agent
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     app: cell-agent
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -79,7 +80,8 @@ spec:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}
           startupProbe:
-            httpGet: {path: /readyz, port: 7001}
+            # Recovery can take minutes; readiness still gates business traffic.
+            httpGet: {path: /healthz, port: 7001}
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:

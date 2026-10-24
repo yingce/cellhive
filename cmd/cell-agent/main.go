@@ -126,10 +126,11 @@ func main() {
 			os.Exit(1)
 		}
 	} else if lerr != nil && !errors.Is(lerr, bucket.ErrNotFound) {
-		log.Warn("read previous node lease failed", "err", lerr)
+		log.Error("read previous node lease failed", "err", lerr)
+		os.Exit(1)
 	}
 	lm.AZ = cfg.PlacementAZ
-	// ADR-273/276: both the owner and resource-fence protocols require a full
+	// ADR-273/276/285: owner, resource-fence and recovery protocols require a full
 	// replacement. Never start if we cannot establish the live peer set.
 	if peers, serr := lm.Sample(ctx); serr != nil {
 		log.Error("cannot verify peer protocol; refusing to start", "err", serr)
@@ -161,6 +162,45 @@ func main() {
 	}
 	om.LeaseView = lm
 
+	spool, err := peer.NewSpool(cfg.PeerSpoolDir)
+	if err != nil {
+		log.Error("open peer spool", "err", err)
+		os.Exit(1)
+	}
+	peerTransport := peer.NewHTTPTransport(cfg.TokenPeer, nil).WithSession(cfg.SessionID)
+	targets := &peer.Targets{}
+	peerTransport.Targets = targets
+	peerMgr := peer.NewManager(peerTransport)
+	nodeLog := nodelog.New(b, cfg.NodeID)
+
+	rep := replica.New(b)
+	rep.RestoreParallel = cfg.RestoreParallel
+	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
+	takeoverRecovery.Lease = lm
+	takeoverRecovery.LocalInstanceLocked = true
+	om.BeforeTakeover = func(tctx context.Context, predecessor cell.Owner) error {
+		_, err := takeoverRecovery.Recover(tctx, nodeLog, predecessor.Node, predecessor.Session)
+		return err
+	}
+	recoveryServer := server.New(server.Deps{Cfg: cfg, Lease: lm, Spool: spool, Log: log})
+	startupListener, err := server.StartRecoveryListener(cfg.RESTAddr, recoveryServer)
+	if err != nil {
+		log.Error("bind recovery listener", "err", err)
+		os.Exit(1)
+	}
+	defer startupListener.Close()
+	if err := lm.PublishRecoveryAddress(ctx); err != nil {
+		log.Error("publish recovery address", "err", err)
+		os.Exit(1)
+	}
+	if err := takeoverRecovery.RecoverLocal(ctx, nodeLog, cfg.NodeID, cfg.SessionID, log); err != nil {
+		log.Error("startup recovery stopped", "err", err)
+		if ctx.Err() == nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	placementWeight := cfg.PlacementWeight
 	if placementWeight <= 0 {
 		placementWeight = runtime.NumCPU()
@@ -187,22 +227,6 @@ func main() {
 		}
 	}()
 
-	spool, err := peer.NewSpool(cfg.PeerSpoolDir)
-	if err != nil {
-		log.Error("open peer spool", "err", err)
-		os.Exit(1)
-	}
-	peerTransport := peer.NewHTTPTransport(cfg.TokenPeer, nil).WithSession(cfg.SessionID)
-	peerMgr := peer.NewManager(peerTransport)
-	nodeLog := nodelog.New(b, cfg.NodeID)
-
-	rep := replica.New(b)
-	rep.RestoreParallel = cfg.RestoreParallel
-	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
-	om.BeforeTakeover = func(tctx context.Context, predecessor cell.Owner) error {
-		_, err := takeoverRecovery.Recover(tctx, nodeLog, predecessor.Node, predecessor.Session)
-		return err
-	}
 	// Keep the upload/ship loops alive through graceful handoff: the signal
 	// context is already cancelled when performHandoff runs, and a cancelled
 	// uploader would leave follower-acked segments in the local spool while the
@@ -233,7 +257,10 @@ func main() {
 	// CELLD_LOG_GROUP_COMMIT_MS + CELLD_LOG_PIPELINE=4. StreamTransport uses
 	// four scope-hashed HTTP 101 binary lanes per follower, with four batches
 	// allowed in flight per lane.
-	var shipTransport peer.Transport = peer.NewSessionStreamTransport(cfg.TokenPeer, cfg.SessionID, 4, 4)
+	streamTransport := peer.NewSessionStreamTransport(cfg.TokenPeer, cfg.SessionID, 4, 4)
+	streamTransport.Targets = targets
+	defer streamTransport.Close()
+	var shipTransport peer.Transport = streamTransport
 	if cfg.PeerLatency > 0 {
 		log.Info("peer latency injection enabled", "one_way", cfg.PeerLatency)
 		shipTransport = peer.NewLatencyTransport(shipTransport, cfg.PeerLatency)
@@ -465,10 +492,11 @@ func main() {
 	recoveryRunner := &recovery.Runner{
 		Nodelog:  nodeLog,
 		Lease:    lm,
-		Recovery: recovery.New(rep, peerTransport),
-		SelfNode: cfg.NodeID,
+		Recovery: takeoverRecovery,
 		Log:      log,
 	}
+	recoveryRunner.IsLeader = waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL).Acquire
+	go recoveryRunner.Run(ctx, 5*time.Second)
 	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
 		wakerRunner = &waker.Waker{
@@ -500,7 +528,6 @@ func main() {
 				return out, nil
 			},
 			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval, Log: log,
-			RecoverNodes: recoveryRunner.Pass,
 			Cleanup: func(cctx context.Context) (int, error) {
 				return wakeIdx.Cleanup(cctx, time.Now().Add(-time.Hour).UnixMilli(), 128)
 			},
@@ -643,6 +670,8 @@ func main() {
 	go runWorkflowRetentionLoop(ctx, log, ctrl, workflowStore)
 
 	srv := server.New(server.Deps{
+		PeerTargets:      targets,
+		StartupListener:  startupListener,
 		Cfg:              cfg,
 		Bucket:           b,
 		Lease:            lm,

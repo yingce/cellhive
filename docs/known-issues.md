@@ -519,3 +519,7 @@ Queue 生产/消费主链路已实现；`sendBatch()`、`json/text/bytes/v8`、1
 - Queue producer + consumer、并发批量、retry→DLQ 已 e2e；更长时间/大批量压测尚未覆盖。
 - 热集/Plan 刷新默认 30s；部署后的短暂窗口内可能继续服务旧静态版本（ingress 静态失败会回落动态）。
 - ingress 运维端点（`CELLHIVE_INGRESS_ADMIN_PORT`）无鉴权，应只暴露在私网。
+
+## ADR-285 session 恢复本地修复与验证
+
+v3 follower 身份、启动恢复门和按 session 退避重试已实现。真实双进程换地址重启、恢复中强杀、同名空盘拒绝后换回原盘通过，80 个已确认值全部读回；全量测试、vet/build 和相关包 race 检查通过。SG 历史 IP session 尚未执行生产恢复；仅有 head/spool 存在证据，不等同完整性验收。新旧 recovery 协议禁止混跑，旧 URL 记录必须先恢复可达性并完整封存；否则新版保持恢复模式。验证与部署约束见 [记录](archive/bench/session-recovery-2026-10-24.md)。
