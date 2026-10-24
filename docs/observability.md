@@ -67,6 +67,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - **可选 OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
   - `all`：首个配置的 cell-agent 后台按游标拉取并导出所有 runtime 日志（集中采集；量大）。该 agent 长时间失联或 runtime ring 溢出可能漏日志，属于 best-effort。
   - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续）；Wrangler Tail 的 WebSocket 会续订。cell-agent 在订阅有效时后台拉取对应 runtime ring，tail 退出后 ≤60s 停止导出。
+  - Queue/Cron/Workflow 持久调用的完成日志（成功或失败）从记录导出整数属性 `cellhive.started_ms` / `cellhive.finished_ms`（Unix 毫秒，正值才输出）；两者有效且结束不早于开始时，另导出 `cellhive.duration_ms = finished_ms - started_ms`（允许 0）。缺失或倒序时间不臆造 duration；普通 console/Tail 无这组时间时不补值。OTLP `timeUnixNano` 仍使用 `FinishedMs`，`cellhive.request_id` 原样保留。未提供可信单一父 span，不导出 `parent_span_id`；Queue 继续用 producer links。
   - 导出是旁路、best-effort、后台批量（`sdk/log` BatchProcessor，2s），失败不影响请求也不阻塞。
   - **fleet 广播**：`cellhive tail` 仍只连一台 cell-agent；那台在收到订阅后**向其它活节点广播**（内部端点 `POST /v1/internal/logs/subscribe`，同 TTL；每 worker 最多每 25s 广播一次）。节点名单来自 lease（`Advertise`），广播 best-effort——某节点短暂失联会漏一次，下次续订（tail 每轮 ≤1s）在 ≤25s 内补上。
 

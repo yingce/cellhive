@@ -647,6 +647,8 @@ Queue consumer 的 `max_batch_timeout_seconds` 从最早可领取消息的可见
 
 ## ADR-215 调用事件与结构化 OTLP 日志（2026-10-19）
 
+2026-10-24 补充：持久调用完成日志透传正值 `StartedMs` / `FinishedMs` 为整数属性 `cellhive.started_ms` / `cellhive.finished_ms`（Unix 毫秒）；两者有效且结束不早于开始时导出整数 `cellhive.duration_ms`，允许 0，缺失/倒序不生成 duration。成功与失败使用相同规则，OTLP 时间戳仍取 `FinishedMs`，request ID 不变；无时间数据的 console/Tail 不补造区间。调用记录无可信单一父 span（parent invocation IDs 不是 span IDs，Queue 可有多个 producer links），本次不增加 `parent_span_id`。
+
 stock workerd Tail 事件入站后，cell-agent 除保留有界 Tail 事件外，向可选 OTLP logs 导出一条调用记录（即使没有 console 输出），再逐条导出 console/exception 记录。记录属性包含 `cellhive.event_type`、`cellhive.script_version`（原始 JSON）、`cellhive.request_id`、`cellhive.outcome`、`cellhive.exceptions`（原始 JSON）；console 记录另含 `cellhive.message_args`（原始 JSON 数组）。由事件派生的本地 `logbuf.Entry` 同样保留事件类型、结果、版本和异常。保留 `CELLHIVE_OTLP_LOGS=off|tail|all` 门控，导出是异步、best-effort，不能替代权威业务写入或持久日志。每次调用额外一条 OTLP 记录会增加日志量；按 Worker 的独立采集策略与多节点 Tail 聚合另行验收。
 
 原版 Wrangler 4.133.0 的 Tail WebSocket 使用 `trace-v1` 子协议；服务端只在客户端请求该协议时回传它。无子协议的普通 WebSocket 客户端仍可使用。流中仅发送 TailItem，不发送 Wrangler 无法解析的自定义连接提示；Queue 事件以 `event.queue` 字符串和 `event.batchSize` 数字输出。`TestCloudflareTailWebSocket` 验证握手协商；原版客户端渲染需另做真实服务验收。

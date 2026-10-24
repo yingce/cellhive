@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	collectorlog "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	logsv1 "go.opentelemetry.io/proto/otlp/logs/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -63,6 +65,65 @@ func (s *logSink) record(body string) *logsv1.LogRecord {
 		}
 	}
 	return nil
+}
+
+func TestLogExportTimingAttributes(t *testing.T) {
+	sink := newLogSink(t)
+	tel, err := New(context.Background(), Config{Endpoint: sink.srv.URL, Logs: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name              string
+		started, finished int64
+		want              map[string]int64
+	}{
+		{"complete", 100, 137, map[string]int64{"cellhive.started_ms": 100, "cellhive.finished_ms": 137, "cellhive.duration_ms": 37}},
+		{"zero-duration", 100, 100, map[string]int64{"cellhive.started_ms": 100, "cellhive.finished_ms": 100, "cellhive.duration_ms": 0}},
+		{"absent", 0, 0, map[string]int64{}},
+		{"start-only", 100, 0, map[string]int64{"cellhive.started_ms": 100}},
+		{"finish-only", 0, 137, map[string]int64{"cellhive.finished_ms": 137}},
+		{"reversed", 137, 100, map[string]int64{"cellhive.started_ms": 137, "cellhive.finished_ms": 100}},
+		{"negative", -1, -2, map[string]int64{}},
+	}
+	for _, tc := range tests {
+		ExportLogWithMetadata("app", "worker", "info", tc.name, 200, "", "", LogMetadata{StartedMs: tc.started, FinishedMs: tc.finished, RequestID: "req-7"})
+	}
+	ExportLog("app", "worker", "info", "plain-console", 200, "", "")
+	shutdownTel(t, tel)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := sink.record(tc.name)
+			if rec == nil {
+				t.Fatal("missing log record")
+			}
+			got := map[string]int64{}
+			for _, kv := range rec.Attributes {
+				switch kv.Key {
+				case "cellhive.started_ms", "cellhive.finished_ms", "cellhive.duration_ms":
+					if _, ok := kv.Value.Value.(*commonv1.AnyValue_IntValue); !ok {
+						t.Errorf("%s is not an integer", kv.Key)
+					}
+					got[kv.Key] = kv.Value.GetIntValue()
+				case "cellhive.request_id":
+					if kv.Value.GetStringValue() != "req-7" {
+						t.Error("request ID changed")
+					}
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("timing = %v, want %v", got, tc.want)
+			}
+			if rec.TimeUnixNano != 200000000 {
+				t.Errorf("timestamp changed to %d", rec.TimeUnixNano)
+			}
+		})
+	}
+	for _, kv := range sink.record("plain-console").Attributes {
+		if kv.Key == "cellhive.started_ms" || kv.Key == "cellhive.finished_ms" || kv.Key == "cellhive.duration_ms" {
+			t.Errorf("console acquired timing: %s", kv.Key)
+		}
+	}
 }
 
 func TestStructuredLogExportIncludesInvocationWithoutConsole(t *testing.T) {

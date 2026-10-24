@@ -59,7 +59,7 @@ func (s *Server) handleInvocationPut(w http.ResponseWriter, r *http.Request) {
 			links, _ = json.Marshal(record.ProducerLinks)
 		}
 		telemetry.ExportLogWithMetadata(record.Namespace, record.Worker, "info", "invocation", record.FinishedMs, traceID, spanID,
-			telemetry.LogMetadata{EventType: record.Kind, RequestID: record.RequestID, Outcome: record.Status, Invocation: true, ProducerLinks: links})
+			telemetry.LogMetadata{EventType: record.Kind, RequestID: record.RequestID, Outcome: record.Status, Invocation: true, ProducerLinks: links, StartedMs: record.StartedMs, FinishedMs: record.FinishedMs})
 		if record.Kind == "queue" {
 			queueLinks := make([]telemetry.QueueLink, 0, len(record.ProducerLinks))
 			for _, link := range record.ProducerLinks {

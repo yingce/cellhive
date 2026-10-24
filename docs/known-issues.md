@@ -91,6 +91,8 @@ ADR-279 让后台节点租约列举复用物理列表中的最新分段，真实
 
 ## 2026-10-19 OTLP 日志与 trace 关联（ADR-222）
 
+2026-10-24 本地增强（ADR-215）：持久调用成功/失败的 OTLP 完成日志增加整数 `cellhive.started_ms` / `cellhive.finished_ms` / `cellhive.duration_ms`，时间戳及 request ID 语义不变。只导出正值起止时间；缺失或倒序不生成 duration，普通 console/Tail 不补造时间区间。仅本地 Go/OTLP protobuf 回归验证，未部署、未新增真实后端验收。调用记录没有可信单一父 span，因此未增加 `parent_span_id`；Queue producer links 与 Workflow 父链边界不变。
+
 真实 OpenObserve 验收发现 Worker 的请求和 traceparent 已正确进入租户，但 Tail 事件内部 `traceparent` 在 Go JSON 解码时被忽略，导致 OTLP 日志只有 request ID、没有 trace ID。现已保留入站关联值，公共 Wrangler Tail JSON 仍不展示内部字段；有效 ID 同时作为 OTLP 原生 trace/span ID 和可索引的 `cellhive.trace_id` / `cellhive.span_id` 属性输出。真实 Collector→OpenObserve 查询确认 HTTP fetch 的日志与 8 个 trace span 同 ID，也分别读回 Queue/Cron/Workflow 完成记录的 request ID 和 trace ID，见 `cf-compatibility-acceptance.md`。Queue 生产者上下文按消息持久关联，消费调用保持独立 trace 并通过 OTel links 关联；Workflow 创建请求到异步尝试的持久父链仍未实现。
 
 ## 2026-10-19 Wrangler 多节点发布与 Tail（ADR-221）

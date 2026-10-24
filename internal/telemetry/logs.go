@@ -28,6 +28,8 @@ type LogMetadata struct {
 	MessageArgs   []json.RawMessage
 	ScriptVersion json.RawMessage
 	RequestID     string
+	StartedMs     int64
+	FinishedMs    int64
 	Outcome       string
 	Exceptions    json.RawMessage
 	Invocation    bool
@@ -234,6 +236,16 @@ func ExportLogWithMetadata(ns, worker, level, message string, atMs int64, traceI
 	}
 	if meta.RequestID != "" {
 		rec.AddAttributes(attribute.String("cellhive.request_id", meta.RequestID))
+	}
+	if meta.StartedMs > 0 {
+		rec.AddAttributes(attribute.Int64("cellhive.started_ms", meta.StartedMs))
+	}
+	if meta.FinishedMs > 0 {
+		rec.AddAttributes(attribute.Int64("cellhive.finished_ms", meta.FinishedMs))
+	}
+	// Missing or reversed timestamps do not describe a valid duration.
+	if meta.StartedMs > 0 && meta.FinishedMs >= meta.StartedMs {
+		rec.AddAttributes(attribute.Int64("cellhive.duration_ms", meta.FinishedMs-meta.StartedMs))
 	}
 	if meta.Outcome != "" {
 		rec.AddAttributes(attribute.String("cellhive.outcome", meta.Outcome))
