@@ -968,7 +968,7 @@ func main() {
 			// The previous owner may have advanced its own local copy. Recover
 			// only after Claim's predecessor recovery has made its tail durable.
 			if err != nil || current.Node != claimed.Node || current.Session != claimed.Session {
-				if ferr := store.Forget(tctx, sc); ferr != nil {
+				if ferr := store.Invalidate(tctx, sc); ferr != nil {
 					return false, ferr
 				}
 			}

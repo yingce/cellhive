@@ -196,12 +196,24 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 			}
 		}
 	}
+	staleControlPath := filepath.Join(c.dir, "cells", "__platform__", "__control__", "main.db")
+	staleControl, err := os.ReadFile(staleControlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, v := range []*agent{a, c} {
 		for _, name := range []string{"cells", "upload-spool"} {
 			if err := os.RemoveAll(filepath.Join(v.dir, name)); err != nil {
 				t.Fatal(err)
 			}
 		}
+	}
+	// Retain B's obsolete pinned control replica, as a real PVC restart does.
+	if err := os.MkdirAll(filepath.Dir(staleControlPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleControlPath, staleControl, 0600); err != nil {
+		t.Fatal(err)
 	}
 	start(a, "a-new")
 	// B is offline; A must expose recovery but cannot serve application traffic.
@@ -259,6 +271,12 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	start(c, "b-new")
 	ready(a)
 	ready(c)
+	// B must take over control and hydrate the acknowledged registrations,
+	// even though its startup schema initialization pinned an older local DB.
+	code, body, err := call(c.admin, "GET", "/v1/control/resources?namespace=sessiontest", "x-cellhive-admin-token", creds.Admin, nil)
+	if err != nil || code != 200 || !bytes.Contains(body, []byte(`"name":"ka"`)) || !bytes.Contains(body, []byte(`"name":"kb"`)) {
+		t.Fatalf("pinned control takeover lost registrations: %d %s %v", code, body, err)
+	}
 	if a.rest == oldA || c.rest == oldB {
 		t.Fatal("test must change both peer addresses")
 	}
@@ -280,5 +298,5 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 			t.Fatalf("old session not durably covered: %+v %v", rec, err)
 		}
 	}
-	t.Log("PASS: both addresses changed; interrupted recovery restarted; empty replacement disk refused; original follower disk restored; 80 acknowledged values restored; both old sessions sealed")
+	t.Log("PASS: both addresses changed; interrupted recovery restarted; empty replacement disk refused; original follower disk restored; 80 acknowledged values restored; stale pinned control registrations restored; both old sessions sealed")
 }

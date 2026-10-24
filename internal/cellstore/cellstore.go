@@ -472,6 +472,18 @@ func (s *Store) TryForget(ctx context.Context, sc cell.Scope, verify func() erro
 	if s.Pin != nil && s.Pin(sc) {
 		return false, nil
 	}
+	return s.TryInvalidate(ctx, sc, verify)
+}
+
+// Invalidate removes an obsolete local replica even when it is pinned. Pin only
+// protects residency; it cannot authorize reading a stale ownership lineage.
+func (s *Store) Invalidate(ctx context.Context, sc cell.Scope) error {
+	return s.forget(ctx, sc, nil)
+}
+
+// TryInvalidate is the nonblocking ownership-invalidation path. It preserves
+// request/open gates and verification, but intentionally bypasses residency Pin.
+func (s *Store) TryInvalidate(ctx context.Context, sc cell.Scope, verify func() error) (bool, error) {
 	p, err := s.Path(sc)
 	if err != nil {
 		return false, err

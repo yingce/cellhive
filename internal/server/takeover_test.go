@@ -164,6 +164,8 @@ func TestInvalidateStaleLocal(t *testing.T) {
 	// stale foreign lineage and must be dropped.
 	foreign := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "foreign"}
 	pForeign := seed(foreign)
+	// Pinned control cells must also discard foreign stale state on takeover.
+	cs.Pin = func(sc cell.Scope) bool { return sc == foreign }
 	omB := &owner.Manager{B: b, NodeID: "b", Session: "sb", Advertise: "b:7001", OwnerTTL: time.Minute}
 	if _, err := omB.Claim(ctx, foreign, time.Now().Add(-2*time.Minute)); err != nil {
 		t.Fatalf("claim b: %v", err)
@@ -190,5 +192,40 @@ func TestInvalidateStaleLocal(t *testing.T) {
 	srv.invalidateStaleLocal(ctx, owned)
 	if _, err := os.Stat(pOwned); err != nil {
 		t.Fatalf("owned scope: local file dropped: %v", err)
+	}
+}
+
+func TestBusyPinnedStaleCellCannotBeClaimed(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "__platform__", Class: "__control__", ID: "main"}
+	cs.Pin = func(cell.Scope) bool { return true }
+	if _, err := cs.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "new", Session: "new-session", OwnerTTL: time.Minute}
+	srv := New(Deps{Cfg: config.Config{NodeID: "new"}, Bucket: b, Store: cs, Owner: om})
+	end := cs.BeginRequest(sc.String())
+	if err := srv.claimForRead(ctx, sc); err == nil {
+		t.Fatal("claimed busy stale cell")
+	}
+	if _, _, err := om.Resolve(ctx, sc); !errors.Is(err, owner.ErrUnowned) {
+		t.Fatalf("ownership published before invalidation: %v", err)
+	}
+	end()
+	if err := srv.claimForRead(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := cs.Path(sc)
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale pinned file remains: %v", err)
 	}
 }

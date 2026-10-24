@@ -3457,3 +3457,5 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 _最后更新：2026-10-22_
 
 - ADR-285 operational clarification (2026-10-24): automatic recovery remains fail-closed. Explicit operator acceptance of a named legacy missing tail requires original-object backup, durable audit, inactive-session guard and CAS closure with `recovery_resolution`, without fabricated coverage; see `cell-protocol.md`.
+
+- ADR-285/驻留优化澄清（2026-10-24）：Pin 保护缓存驻留，不得阻止 owner 切换时失效旧副本。所有权失效使用 Invalidate/TryInvalidate；普通回收仍尊重 Pin，旧副本忙碌或失效失败时禁止继续 claim。

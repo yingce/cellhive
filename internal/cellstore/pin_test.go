@@ -3,6 +3,7 @@ package cellstore
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -296,4 +297,64 @@ func TestInteractiveHydrateNotStarvedByBackground(t *testing.T) {
 		t.Fatal("interactive hydrate was starved by background hydrate")
 	}
 	close(release)
+}
+
+func TestPinnedOwnershipInvalidationRestoresNewerData(t *testing.T) {
+	for _, nonblocking := range []bool{false, true} {
+		t.Run(fmt.Sprint(nonblocking), func(t *testing.T) {
+			ctx := context.Background()
+			sc := cell.Scope{Namespace: "__platform__", Class: "__control__", ID: "main"}
+			source, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			latest, err := source.Cell(ctx, sc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := latest.Put(ctx, "resource", []byte("new-registration"), nil); err != nil {
+				t.Fatal(err)
+			}
+			path, _ := source.Path(sc)
+			if err := source.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer local.Close()
+			stale, err := local.Cell(ctx, sc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stale.Put(ctx, "resource", []byte("old-registration"), nil); err != nil {
+				t.Fatal(err)
+			}
+			local.Pin = func(cell.Scope) bool { return true }
+			local.Hydrate = func(_ context.Context, _ cell.Scope, dest string) error { return os.WriteFile(dest, data, 0600) }
+			if nonblocking {
+				ok, err := local.TryInvalidate(ctx, sc, nil)
+				if err != nil || !ok {
+					t.Fatalf("invalidate=%v,%v", ok, err)
+				}
+			} else {
+				if err := local.Invalidate(ctx, sc); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restored, err := local.Cell(ctx, sc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, _, err := restored.Get(ctx, "resource")
+			if err != nil || string(value) != "new-registration" {
+				t.Fatalf("restored=%q,%v", value, err)
+			}
+		})
+	}
 }

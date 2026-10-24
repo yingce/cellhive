@@ -1026,7 +1026,10 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	// Claiming may take over from a peer (or from nobody): drop any stale local
 	// copy first so the claim cannot capture on top of a foreign lineage.
-	s.invalidateStaleLocal(r.Context(), sc)
+	if err := s.invalidateStaleLocal(r.Context(), sc); err != nil {
+		writeErr(w, 503, "local_invalidation_failed", err.Error())
+		return
+	}
 	o, err := s.Owner.Claim(r.Context(), sc, time.Now())
 	s.claims.Add(1)
 	switch {
@@ -1181,7 +1184,10 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 		// The local file may be a replica left from another owner. Drop it
 		// before the claim makes this process visible as the new writer.
 		if r.Context().Value(ctxScopePreInvalidated) != sc.String() {
-			s.invalidateStaleLocal(r.Context(), sc)
+			if err := s.invalidateStaleLocal(r.Context(), sc); err != nil {
+				writeErr(w, 503, "local_invalidation_failed", err.Error())
+				return true
+			}
 		}
 		claimed, cerr := s.Owner.Claim(r.Context(), sc, now)
 		switch {
@@ -1236,24 +1242,31 @@ func (s *Server) forwardRead(w http.ResponseWriter, r *http.Request, sc cell.Sco
 // It must run OUTSIDE a BeginRequest gate for the scope: Forget waits for the
 // scope's in-flight requests to drain, so calling it from inside a gated request
 // would wait on itself. scopeAuth calls it before opening the gate.
-func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) {
+func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) error {
 	if s.Owner == nil || s.Store == nil {
-		return
+		return nil
 	}
 	o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
 	if err != nil && !errors.Is(err, owner.ErrUnowned) {
-		return // resolve failed: leave the local cell alone
+		return err
 	}
 	if err == nil {
 		if o.Node == s.Cfg.NodeID {
-			return // ours (a clean same-node reload): keep the local copy
+			return nil
 		}
 		s.Owner.Forget(sc, 0)
 		if s.ownerLive(ctx, o, time.Now()) && o.Address != "" {
-			return // a live peer owns it: the request forwards, local is unused
+			return nil
 		}
 	}
-	_, _ = s.Store.TryForget(ctx, sc, nil)
+	ok, err := s.Store.TryInvalidate(ctx, sc, nil)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("stale local cell is busy; retry ownership acquisition")
+	}
+	return nil
 }
 
 // gateScope returns the cell scope a binding request touches, mirroring gateKey.
@@ -1415,7 +1428,9 @@ func (s *Server) claimForRead(ctx context.Context, sc cell.Scope) error {
 	if err != nil && !errors.Is(err, owner.ErrUnowned) {
 		return err
 	}
-	s.invalidateStaleLocal(ctx, sc)
+	if err := s.invalidateStaleLocal(ctx, sc); err != nil {
+		return err
+	}
 	_, err = s.Owner.Claim(ctx, sc, time.Now())
 	if errors.Is(err, owner.ErrOwnerLive) {
 		return nil
@@ -2242,7 +2257,10 @@ func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 		if s.Store != nil {
 			if ns := r.URL.Query().Get("ns"); ns != "" {
 				if sc, ok := s.gateScope(ctx, "workflow", ns, "", r.URL.Query()); ok {
-					s.invalidateStaleLocal(ctx, sc)
+					if err := s.invalidateStaleLocal(ctx, sc); err != nil {
+						writeErr(w, 503, "local_invalidation_failed", err.Error())
+						return
+					}
 					ctx = context.WithValue(ctx, ctxScopePreInvalidated, sc.String())
 				}
 				end := s.Store.BeginRequest(s.gateKey(ctx, "workflow", ns, "", r.URL.Query()))

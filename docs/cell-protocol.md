@@ -400,3 +400,7 @@ _最后更新：2026-09-25_
 正常恢复仍要求全部 follower 尾日志持久化后才能 sealed。仅当操作者明确接受指定历史 session 的潜在数据丢失时，离线迁移工具可对该 session 执行终止恢复：先保存原始权威对象、逻辑记录及 SHA256 审计，再校验它不是当前活跃 session，使用原版本 CAS 写 sealed 和 `recovery_resolution`。该字段记录 `operator_accepted_missing_tail`、接受时间、审计对象键及原记录摘要。不得伪造 `covered_seq`，不得把此类 session 统计为完整恢复。该路径不是自动恢复策略，也不允许绕过仍可恢复的日志。已有桶数据保持不变；丢失尾日志涉及的历史写入可能无法恢复，仍有链缺口的 cell 可以继续报错，不能承诺所有历史数据可用。
 
 恢复 TailPage 在下一个完整 fragment 超过页字节预算时返回当前页；正常分页不是日志截断。真正 EOF、序号缺口、CRC 错误仍须失败。
+
+### 固定驻留与 owner 切换
+
+`Pin` 只保护 LRU/磁盘回收等驻留策略，不是本地副本有效性的证明。owner 切换时使用 `Invalidate`/`TryInvalidate` 失效旧副本，即使控制 cell 固定驻留也必须重新从持久链恢复；普通 `Forget`/`TryForget`/`ForgetWithVerify` 仍遵守 Pin。失效过程仍遵守请求与打开中的互斥，不能直接删除正在使用的 SQLite 文件。2026-10-24 USW 真实发布发现固定驻留阻止旧控制副本失效，导致新 owner 的资源注册落后；此约束由 pinned takeover 回归测试覆盖。
