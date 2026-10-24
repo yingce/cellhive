@@ -419,6 +419,17 @@ func (s *SegmentedAuthority) latest(ctx context.Context, logical string) (*autho
 	return legacy, gerr
 }
 
+// listed reads the newest window already found by a physical bucket List.
+// A diagnostic listing is a snapshot: rediscovering each key's window would
+// issue one extra List per historical authority record. A concurrent GC may
+// remove the selected window, in which case the caller can retry via Get.
+func (s *SegmentedAuthority) listed(ctx context.Context, logical string, window int64) (*authoritySegment, error) {
+	if window >= 0 {
+		return s.readSegmentAt(ctx, logical, window)
+	}
+	return s.readLegacy(ctx, logical)
+}
+
 func (s *SegmentedAuthority) appendAt(ctx context.Context, seg *authoritySegment, window, pos int64, instance [8]byte, data []byte, deleted bool) (string, error) {
 	frame := encodeSegmentFrame(data, deleted, instance)
 	if pos+int64(len(frame)) > s.max {

@@ -48,9 +48,10 @@ type NodeLease struct {
 	Load         Load   `json:"load"`
 }
 
-// NodeLeaseLiveness is the Liveness value of nodes that judge cell owners by
-// node lease (ADR-273).
-const NodeLeaseLiveness = "node-lease"
+// NodeLeaseLiveness identifies the owner-liveness and resource-fence protocol.
+// The prior "node-lease" release writes resource-fence.json; it must not run
+// alongside nodes that use resource-fence.v2 (ADR-276).
+const NodeLeaseLiveness = "node-lease-fence-v2"
 
 // Key returns the bucket key for a node lease.
 func Key(node string) string { return "nodes/" + node + ".json" }
@@ -136,11 +137,8 @@ func (m *Manager) Healthy(now time.Time) bool {
 	return now.Before(exp.Add(-margin))
 }
 
-// LegacyPeers returns the live leases, other than self, published by nodes that
-// predate ADR-273. Such a node judges owner records by their embedded Expiry,
-// which ADR-273 stops renewing, so it would take over cells that are still
-// being served. Mixing the two protocols on one bucket is unsafe and the new
-// node must refuse to run beside such a peer.
+// LegacyPeers returns live nodes using an incompatible owner or resource-fence
+// protocol. Mixing either protocol on one bucket is unsafe.
 func LegacyPeers(leases []NodeLease, self string, now time.Time) []NodeLease {
 	var out []NodeLease
 	for _, l := range leases {

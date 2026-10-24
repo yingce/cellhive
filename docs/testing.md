@@ -192,6 +192,7 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 - runtime-baseline 在镜像内执行 `cellhive app create` + TypeScript 源码 deploy；公开 `user-runtime :8081` 的随机 loopback 端口由 Bun 客户端完成真实 WebSocket 101 与双向消息。共享 `Counter` DO 的持久计数为 HTTP `1` → WS `2` → 重启 gated do-runtime → WS `3` → HTTP `4`，并产生权威 bucket LTX。
 
 - 同一隔离 Compose E2E 还从镜像内源码部署验证版本化静态资产读取、Queue 消费与 DLQ/运维重放、分钟级 Cron、Workflow `step.do`→`sleep`→恢复后的结果和 `createBatch`；发布第二版本后公开入口读取新配置，`rollback` 恢复前版，删除 worker 后路由返回 404。2026-09-22 实际运行 `PATH=/usr/local/go/bin:/root/.bun/bin:$PATH bash scripts/runtime-baseline-e2e.sh`：`RUNTIME-BASELINE-E2E: PASS`。
+- 2026-10-24 同脚本增加 Cron 强杀恢复检查：在 `cell-agent` SIGKILL/重启后读取两个表达式的 `scheduledTime`，要求均属于重启后的新分钟且 `duplicate=null`；等待置于 Queue crash-retry 验收之后，避免耗尽该消息的重试预算。固定镜像重跑完整脚本 `RUNTIME-BASELINE-E2E: PASS`（原始输出 `/tmp/cellhive-fence-v2-cron-e2e-rerun.log`）。此检查不覆盖停机跨过整分钟时未物化 slot 的补发。
 
 ## 部署产物校验（ADR-139）
 

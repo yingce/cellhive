@@ -14,6 +14,7 @@ import (
 type segmentMem struct {
 	mu      sync.Mutex
 	objects map[string][]byte
+	lists   int
 }
 
 func newSegmentMem() *segmentMem {
@@ -79,6 +80,7 @@ func (m *segmentMem) Stat(_ context.Context, key string) (int64, string, error) 
 func (m *segmentMem) List(_ context.Context, prefix string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lists++
 	var out []string
 	for key := range m.objects {
 		if strings.HasPrefix(key, prefix) {
@@ -86,6 +88,32 @@ func (m *segmentMem) List(_ context.Context, prefix string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+func TestSegmentedAuthorityListedOldWindowAvoidsSecondList(t *testing.T) {
+	ctx := t.Context()
+	auth, mem, clock := newTestSegmented(t)
+	key := "nodes/old.json"
+	if _, err := auth.ConditionalCreate(ctx, key, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(3 * time.Minute)
+	before := mem.lists
+	keys, err := mem.List(ctx, "nodes/")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("physical list = %v, %v", keys, err)
+	}
+	logical, window, ok := ParsePhysicalAuthorityKey(keys[0])
+	if !ok || logical != key {
+		t.Fatalf("physical key = %q", keys[0])
+	}
+	seg, err := auth.listed(ctx, logical, window)
+	if err != nil || string(seg.value) != "old" {
+		t.Fatalf("listed = %+v, %v", seg, err)
+	}
+	if mem.lists != before+1 {
+		t.Fatalf("listed authority performed %d extra Lists", mem.lists-before-1)
+	}
 }
 
 func (m *segmentMem) Delete(_ context.Context, key string) error {

@@ -7,9 +7,86 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/ltx"
+	"cellhive/internal/replica"
 )
+
+func TestInitialSnapshotMarkersUseCommittedSnapshotLabel(t *testing.T) {
+	ctx := t.Context()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "first"}
+	if _, err := cs.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		Store: cs, AutoSnapshot: true,
+		Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
+		Committer: committerFunc(func(ctx context.Context, sc cell.Scope, epoch uint64, data []byte) error {
+			_, _, err := rep.Append(ctx, sc, epoch, data)
+			return err
+		}),
+		Durable:              rep.DurableWatermark,
+		SnapshotStarted:      rep.MarkSnapshotStarted,
+		SnapshotDone:         rep.MarkSnapshotDone,
+		ClearSnapshotStarted: rep.ClearSnapshotStarted,
+	}
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := rep.RestoreChain(ctx, sc, 1)
+	if err != nil || len(segs) == 0 {
+		t.Fatalf("initial snapshot not recoverable: segments=%d err=%v", len(segs), err)
+	}
+	var label uint64
+	for _, seg := range segs {
+		if seg.Header.Kind == ltx.KindSnapshot {
+			label = seg.Header.EndTxID
+			break
+		}
+	}
+	if _, _, err := b.Get(ctx, replica.SnapshotStartedName(sc, 1, label)); err != nil {
+		t.Fatalf("started marker does not match snapshot %d: %v", label, err)
+	}
+	if _, _, err := b.Get(ctx, replica.SnapshotDoneName(sc, 1, label)); err != nil {
+		t.Fatalf("done marker does not match snapshot %d: %v", label, err)
+	}
+}
+
+func TestInitialSnapshotStartMarkerFailureStopsUpload(t *testing.T) {
+	ctx := t.Context()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "marker-failure"}
+	if _, err := cs.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	var commits int
+	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) { return 0, nil }, &commits)
+	m.SnapshotStarted = func(context.Context, cell.Scope, uint64, uint64) error { return errors.New("marker unavailable") }
+	defer m.Stop()
+	if _, err := m.Ensure(ctx, sc); err == nil {
+		t.Fatal("marker failure allowed capture to start")
+	}
+	if commits != 0 {
+		t.Fatalf("marker failure uploaded %d snapshot segments", commits)
+	}
+}
 
 func testCommitter(count *int) Committer {
 	return committerFunc(func(context.Context, cell.Scope, uint64, []byte) error {

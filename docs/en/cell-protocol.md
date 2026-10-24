@@ -85,6 +85,7 @@ nodes/<node>.json
 ```
 
 - One record per node, renewed at TTL/3; the default TTL is 10s (configurable).
+- `liveness=node-lease-fence-v2` identifies the node-lease and resource-fence protocol. Live peers using the prior `node-lease` value may still write the old fence and must not share a bucket. Startup fails if peer enumeration fails or finds an incompatible live node; a peer detected later stops write acknowledgements.
 - The node lease is the **liveness proof**: if a node becomes unreachable → all cells under it can be taken over.
 - `load` exposes scaling signals: `owned_cells`, `placement_weight`, `resident_cells`, `host_websockets`, `rss_bytes`, `cpu_percent_x100`, `pressured`, `memory_headroom`, `shed_cells`, `restoring`, `sampled_ms`.
 - **fleet capacity sample**: each node reads a shared snapshot every 5s; one node refreshes it (by reading each lease), and the others read the result, avoiding O(cells).
@@ -136,6 +137,8 @@ nodes/<node>.json
 
 That is: **epoch is the fence for "write validity"**. Combined with generation checks on the owner record, it makes writes from old owners harmless.
 
+KV and Queue deletion also use `cells/<scope>/resource-fence.v2`. On first access, the old `resource-fence.json` state (`job_id/deleted/epoch_floor`) is conditionally migrated into a stable append-position record. Every LTX commit reads it fresh under the local resource lock; deletion and generation updates use append-position CAS. App purge retains both fence formats. Updates fail closed at the 8 MiB cap; a negative cache never bypasses the commit-side check.
+
 ## 6. Replication and RPO=0
 
 ### Replication format
@@ -145,7 +148,9 @@ That is: **epoch is the fence for "write validity"**. Combined with generation c
 - Backend B: the supervisor of `do-runtime` captures WAL segments, **reports them to cell-agent**, and cell-agent performs replication and proof (see [`durable-objects.md`](durable-objects.md)).
 - Snapshot: for large-data cells, restore a full-database snapshot (L9) first during takeover to avoid replaying the entire history; otherwise materialize the L0 chain.
 - Cold restore and paging choose the newest snapshot with a complete, contiguous delta suffix. A batched delta crossing the snapshot watermark must not be discarded as a whole; if no earlier snapshot yields a contiguous chain, restore fails closed rather than treating the overlapping tail as already applied.
+- An initial snapshot's `snapshot-started` marker, LTX parts, and `snapshot-done` marker must all use the same post-checkpoint watermark. Failure to write the started marker aborts before the first part; neither the pre-checkpoint baseline nor a later `Cell.TxID()` may replace the snapshot label.
 - **compaction**: the background folds many L0 segments into L1 (triggered by `min_txids` / `min_mb`), so takeover reads only a small number of objects instead of thousands.
+- Once GC deletes every L0 object, `L1/manifest.json` remains a complete restore base for that epoch. Cold restore must recognize the manifest before filtering segment keys, so it never skips an L1-only epoch.
 - **paging**: cells above a threshold use sparse files + on-demand paging, so cold start does not need to download the full database.
 - **checkpoint alignment (I-03)**: the supervisor of backend B polls `(salt, frame)`; salt changes or frame resets to zero = a checkpoint has occurred → pause delta, use the **SQLite Online Backup API** (read-only connection) to take a consistent snapshot, upload it as an **L9 snapshot** and record txid, then resume delta from frame 0 and write a **snapshot→delta linkage marker**. P0 must test "checkpoint during active writes".
 

@@ -107,6 +107,23 @@ func TestAppendAuthorityRejectsCorruptLog(t *testing.T) {
 	}
 }
 
+func TestBoundedAppendAuthorityFailsClosedAtCap(t *testing.T) {
+	ctx := context.Background()
+	raw := &memoryAppender{objects: map[string][]byte{}}
+	b := NewBoundedAppendAuthority(raw, int64(len(encodeFrame([]byte("a"), false))))
+	token, err := b.ConditionalCreate(ctx, "fence", []byte("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.CAS(ctx, "fence", []byte("b"), token); !errors.Is(err, ErrAuthoritySegmentFull) {
+		t.Fatalf("bounded CAS = %v", err)
+	}
+	value, same, err := b.Get(ctx, "fence")
+	if err != nil || string(value) != "a" || same != token {
+		t.Fatalf("cap changed record: %q token=%q err=%v", value, same, err)
+	}
+}
+
 func TestAuthorityKeyDoesNotCaptureTenantObjects(t *testing.T) {
 	for _, key := range []string{"r2/demo/owner.json", "assets/demo/owner-gen", "r2/node-logs/x", "r2/nodes/x"} {
 		if authorityKey(key) {

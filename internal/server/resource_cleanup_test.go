@@ -27,7 +27,7 @@ type fenceCountingBucket struct {
 }
 
 func (b *fenceCountingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.HasSuffix(key, "/resource-fence.json") {
+	if strings.HasSuffix(key, "/resource-fence.v2") {
 		b.gets.Add(1)
 	}
 	return b.Bucket.Get(ctx, key)

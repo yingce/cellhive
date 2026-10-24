@@ -190,11 +190,12 @@ func TestLegacyPeersDetection(t *testing.T) {
 		{Node: "self", Expiry: live},
 		{Node: "new", Expiry: live, Liveness: NodeLeaseLiveness},
 		{Node: "old-live", Expiry: live},
+		{Node: "old-fence", Expiry: live, Liveness: "node-lease"},
 		{Node: "old-dead", Expiry: dead},
 	}
 	got := LegacyPeers(leases, "self", now)
-	if len(got) != 1 || got[0].Node != "old-live" {
-		t.Fatalf("legacy peers = %+v, want only old-live", got)
+	if len(got) != 2 || got[0].Node != "old-live" || got[1].Node != "old-fence" {
+		t.Fatalf("legacy peers = %+v, want old owner and fence protocols", got)
 	}
 	m := &Manager{NodeID: "self", cached: leases}
 	if !m.LegacyPeerVisible(now) {

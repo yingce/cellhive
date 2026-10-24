@@ -86,6 +86,7 @@ nodes/<node>.json
 ```
 
 - 每节点一条，按 TTL/3 续租；TTL 默认 10s（可配）。
+- `liveness=node-lease-fence-v2` 标明节点同时使用节点租约判活与 `resource-fence.v2` 协议；旧 `node-lease` 节点仍可能写旧栅栏，不能同桶混跑。启动时必须成功枚举并排除存活的旧协议节点；运行中发现旧节点则停止确认写入。
 - 节点 lease 是**存活证明**：节点失联 → 其名下所有 cell 可被接管。
 - `load` 暴露伸缩信号：`owned_cells`、`placement_weight`、`resident_cells`、`host_websockets`、`rss_bytes`、`cpu_percent_x100`、`pressured`、`memory_headroom`、`shed_cells`、`restoring`、`sampled_ms`。
 - **fleet capacity sample**：每节点每 5s 读一次共享快照；由一个节点刷新（读各 lease），其余读结果，避免 O(cells)。
@@ -137,6 +138,8 @@ nodes/<node>.json
 
 即：**epoch 是"写入有效性"的围栏**，配合 owner 记录上的代次校验，让旧 owner 的写入无害化。
 
+KV/Queue 的删除还使用 `cells/<scope>/resource-fence.v2`。首次访问把旧 `resource-fence.json` 的 `job_id/deleted/epoch_floor` 条件迁入稳定 append-position 记录；每次 LTX 提交在本地读锁内 fresh 点查该记录，删除/代际变更以 append-position CAS 更新。app 清理保留新旧栅栏；满 8 MiB 时拒绝更新并失败关闭。该记录不以负缓存绕过删除检查。
+
 ## 6. 复制与 RPO=0
 
 ### 复制格式
@@ -146,7 +149,9 @@ nodes/<node>.json
 - 后端 B：`do-runtime` 的 supervisor 捕获 WAL 段，**上报给 cell-agent**，由 cell-agent 执行复制与证明（见 [`durable-objects.md`](./durable-objects.md)）。
 - 快照：对大数据 cell，接管时先恢复一个整库快照（L9）以避免回放全部历史；否则物化 L0 链。
 - 冷恢复与分页索引选择**能接上完整、连续增量后缀的最新快照**。跨越快照水位的批量增量不能整段丢弃；若没有较早快照能提供连续链，则拒绝恢复，不能把重叠段当作已包含的事务。
+- 初始快照的 `snapshot-started`、LTX snapshot part 和 `snapshot-done` 必须使用同一个 checkpoint 后的实际水位。started 写入失败须在上传首个 part 前中止，不能用 checkpoint 前的 baseline 或上传后的 `Cell.TxID()` 代替快照标签。
 - **compaction**：后台把大量 L0 段折叠为 L1（`min_txids` / `min_mb` 触发），使接管只读少量对象而非成千上万。
+- GC 删除全部 L0 后，`L1/manifest.json` 仍是该 epoch 的完整恢复基线。冷恢复须在过滤 LTX 段之前识别 manifest；不能因为只剩 L1 而跳过这个 epoch。
 - **paging**：超过阈值的 cell 采用稀疏文件 + 按需分页，冷启动不必整库下载。
 - **checkpoint 对齐（I-03）**：后端 B 的 supervisor 轮询 `(salt, frame)`；salt 变化或 frame 归零 = 发生 checkpoint → 暂停 delta，用 **SQLite Online Backup API**（只读连接）取一致快照，上传为 **L9 快照**并记 txid，再从 frame 0 续 delta 并写 **snapshot→delta 衔接标记**。P0 必测"活跃写入期间 checkpoint"。
 

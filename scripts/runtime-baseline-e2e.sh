@@ -229,7 +229,7 @@ export default {
     }
     if (path === "/receipt") {
       const id = new URL(req.url).searchParams.get("id") || "job-1";
-      return Response.json({ queue: await env.KV.get("queue:" + id), metadata: await env.KV.get("queue:metadata"), lastBody: await env.KV.get("queue:last-body"), cron: await env.KV.get("cron:last"), cronA: await env.KV.get("cron:* * * * *"), cronB: await env.KV.get("cron:*/1 * * * *"), duplicate: await env.KV.get("cron:duplicate") });
+      return Response.json({ queue: await env.KV.get("queue:" + id), metadata: await env.KV.get("queue:metadata"), lastBody: await env.KV.get("queue:last-body"), cron: await env.KV.get("cron:last"), cronA: await env.KV.get("cron:* * * * *"), cronB: await env.KV.get("cron:*/1 * * * *"), cronASlot: await env.KV.get("cron:slot:* * * * *"), cronBSlot: await env.KV.get("cron:slot:*/1 * * * *"), duplicate: await env.KV.get("cron:duplicate") });
     }
     if (path === "/recover-queue") {
       await env.KV.put("queue:recover", "yes");
@@ -288,6 +288,7 @@ export default {
     await env.KV.put(key, String(count));
     if (count > 1) await env.KV.put("cron:duplicate", "yes");
     await env.KV.put("cron:" + event.cron, "ran");
+    await env.KV.put("cron:slot:" + event.cron, String(event.scheduledTime));
     await env.KV.put("cron:last", String(event.cron));
     if (event.cron === "* * * * *") { event.noRetry(); throw new Error("scheduled noRetry probe"); }
   }
@@ -633,6 +634,7 @@ retry_capture LEASED compose exec -T cell-agent sh -c \
   || fail "version-probe was not durably claimed before crash"
 compose kill -s SIGKILL cell-agent >/dev/null
 compose up -d --no-build cell-agent >/dev/null
+CRON_RESTART_FLOOR=$(( ($(date +%s) / 60 + 1) * 60000 ))
 retry_capture READY compose exec -T cell-agent curl -fsS http://127.0.0.1:7001/readyz \
   || fail "cell-agent did not recover after SIGKILL"
 # /readyz only proves the listener is up. The control cell may still be
@@ -658,6 +660,30 @@ retry_capture VERSION_RECEIPT compose exec -T cell-agent sh -c \
   || { compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose logs --tail=100 cell-agent user-runtime >&2 || true; fail "leased message was not redelivered to active v2"; }
 VERSION_INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&limit=100')
 [[ "$VERSION_INVOCATIONS" == *'version-probe'* ]] || fail "version-probe invocation was not observable"
+# Both expressions must materialize a new minute after the process restart.
+# An earlier receipt cannot satisfy this probe, and the noRetry expression
+# must still have one execution per slot. Wait after Queue crash recovery so
+# this minute-aligned check does not exhaust the Queue probe's retry budget.
+CRON_AFTER_RESTART=""
+for _ in $(seq 1 150); do
+  CRON_AFTER_RESTART=$(fetch_path '/receipt?id=job-42' 2>/dev/null || true)
+  if [[ -n "$CRON_AFTER_RESTART" ]] && python3 - "$CRON_AFTER_RESTART" "$CRON_RESTART_FLOOR" <<'PY'
+import json,sys
+try:
+    r=json.loads(sys.argv[1]); floor=int(sys.argv[2])
+    ok=int(r.get('cronASlot') or 0)>=floor and int(r.get('cronBSlot') or 0)>=floor and r.get('duplicate') is None
+except (ValueError, TypeError, json.JSONDecodeError): ok=False
+sys.exit(0 if ok else 1)
+PY
+  then break; fi
+  sleep 1
+done
+python3 - "$CRON_AFTER_RESTART" "$CRON_RESTART_FLOOR" <<'PY' || fail "cron did not materialize both new slots after SIGKILL/restart: $CRON_AFTER_RESTART"
+import json,sys
+r=json.loads(sys.argv[1]); floor=int(sys.argv[2])
+assert int(r.get('cronASlot') or 0)>=floor and int(r.get('cronBSlot') or 0)>=floor and r.get('duplicate') is None
+PY
+echo "cron after cell-agent SIGKILL/restart: both expressions advanced to a new slot without duplicate"
 assert_eq sent "$(fetch_path "/workflow/event?id=$WF_PIN_ID")" "post-crash workflow wake"
 WF_PIN_DONE=""
 retry_capture WF_PIN_DONE compose exec -T cell-agent sh -c \

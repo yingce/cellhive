@@ -45,6 +45,7 @@ type Stats struct {
 	WALBytesRead   uint64
 	LTXBinaryBytes uint64
 	Snapshots      uint64
+	SnapshotTxID   uint64 // label of the latest fully committed snapshot
 	BatchDurations []time.Duration
 }
 
@@ -465,6 +466,20 @@ func (c *Capture) Snapshot(ctx context.Context) error {
 	return c.emitSnapshotStream(ctx, snapshotModeCheckpoint, 0)
 }
 
+// SnapshotWithStart is the pre-Start baseline path. It records the started
+// marker using the snapshot's actual post-checkpoint watermark, then returns
+// that same label for the done marker. The cell txid before/after Snapshot may
+// differ from this label (for example, a first checkpoint advances 0 to 1).
+func (c *Capture) SnapshotWithStart(ctx context.Context, onStart func(context.Context, uint64) error) (uint64, error) {
+	c.onBaselineStart = onStart // Capture.Start has not been called yet.
+	err := c.emitSnapshotStream(ctx, snapshotModeCheckpoint, 0)
+	c.onBaselineStart = nil
+	if err != nil {
+		return 0, err
+	}
+	return c.Stats().SnapshotTxID, nil
+}
+
 // Checkpoint forces a WAL truncate checkpoint. The capture loop then emits a
 // full-page snapshot on its next poll, so the truncated WAL has a durable
 // baseline to restore from. Callers must not run it while writes are in flight.
@@ -569,6 +584,11 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 		}
 		if mode == snapshotModeCheckpoint && partIndex == 0 {
 			label = wm
+			if c.onBaselineStart != nil {
+				if err := c.onBaselineStart(ctx, label); err != nil {
+					return fmt.Errorf("sqlcapture: snapshot start marker: %w", err)
+				}
+			}
 		}
 		walPages := make([]ltx.WALPage, len(pages))
 		for i, data := range pages {
@@ -631,6 +651,7 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 	c.barrier.advance(label)
 	c.statsMu.Lock()
 	c.stats.Snapshots++
+	c.stats.SnapshotTxID = label
 	c.stats.LTXBinaryBytes += uint64(snapshotBytes)
 	c.statsMu.Unlock()
 	return nil

@@ -269,12 +269,14 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				mode = "resume"
 				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
 			} else {
+				var onStart func(context.Context, uint64) error
 				if m.SnapshotStarted != nil {
-					if serr := m.SnapshotStarted(ctx, scope, epoch, baseline); serr != nil {
-						m.log().Warn("snapshot started marker failed", "scope", key, "txid", baseline, "err", serr)
+					onStart = func(sctx context.Context, label uint64) error {
+						return m.SnapshotStarted(sctx, scope, epoch, label)
 					}
 				}
-				if err := cap.Snapshot(ctx); err != nil {
+				snapshotTxID, err := cap.SnapshotWithStart(ctx, onStart)
+				if err != nil {
 					cancel()
 					cap.Start(cctx)
 					<-cap.Done()
@@ -290,12 +292,10 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 					// The snapshot parts are durable now; the marker makes the
 					// snapshot a trusted resume baseline. A marker failure only
 					// costs a future snapshot, never correctness.
-					if txid, terr := c.TxID(ctx); terr == nil {
-						if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
-							m.log().Warn("snapshot done marker failed", "scope", key, "txid", txid, "err", merr)
-							if m.ClearSnapshotStarted != nil {
-								_ = m.ClearSnapshotStarted(ctx, scope, epoch, txid)
-							}
+					if merr := m.SnapshotDone(ctx, scope, epoch, snapshotTxID); merr != nil {
+						m.log().Warn("snapshot done marker failed", "scope", key, "txid", snapshotTxID, "err", merr)
+						if m.ClearSnapshotStarted != nil {
+							_ = m.ClearSnapshotStarted(ctx, scope, epoch, snapshotTxID)
 						}
 					}
 				}

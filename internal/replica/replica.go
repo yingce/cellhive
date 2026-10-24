@@ -560,9 +560,6 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 	hasBase := map[uint64]bool{}
 	var epochs []uint64
 	for _, key := range keys {
-		if !isSegmentKey(key) {
-			continue
-		}
 		rest, ok := strings.CutPrefix(key, base)
 		if !ok {
 			continue
@@ -575,14 +572,25 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		if perr != nil || (maxEpoch > 0 && e > maxEpoch) {
 			continue
 		}
+		// An epoch whose L0 was fully GC'd after compaction may contain only
+		// L1/manifest.json and L1 objects. It is still a complete restore base.
+		// Handle the manifest before isSegmentKey filters metadata keys out.
+		if rest[slash+1:] == "L1/manifest.json" {
+			if _, seen := byEpoch[e]; !seen {
+				epochs = append(epochs, e)
+				byEpoch[e] = nil
+			}
+			hasBase[e] = true
+			continue
+		}
+		if !isSegmentKey(key) {
+			continue
+		}
 		if _, seen := byEpoch[e]; !seen {
 			epochs = append(epochs, e)
 			byEpoch[e] = nil
 		}
 		if strings.HasPrefix(rest[slash+1:], "L1/") {
-			if strings.HasSuffix(key, "/L1/manifest.json") {
-				hasBase[e] = true
-			}
 			continue
 		}
 		if strings.HasSuffix(key, ".snapshot") || strings.HasSuffix(key, ".snapshot-done") {

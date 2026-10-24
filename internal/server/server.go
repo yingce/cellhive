@@ -3223,6 +3223,13 @@ func (s *Server) ensureOrForward(w http.ResponseWriter, r *http.Request, sc cell
 			if s.Owner != nil {
 				s.Owner.Invalidate(sc)
 			}
+			// A forwarded request has not executed its write yet. Tell the
+			// entry node to refresh ownership and retry once (ADR-120); a
+			// 503 would be treated as an ambiguous result and never retried.
+			if r.Header.Get(ownerclient.ForwardedHeader) != "" {
+				writeErr(w, http.StatusConflict, "not_owner", "this node does not own the cell")
+				return true
+			}
 			if s.forwardIfNonOwner(w, r, sc, preRead) {
 				return true
 			}

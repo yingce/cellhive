@@ -4,7 +4,23 @@
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-23_
+_最后更新：2026-10-24_
+
+## 2026-10-24 invocation owner 换手时的 503
+
+已转发的 invocation 写请求可能在旧 owner 的 capture 预检前遇到 owner 换手。旧节点先前返回 503 `not_owner`，入口节点按 ADR-120 不重试 5xx，调用记录写入失败。已把**写入前**失权的转发请求改为 409 `not_owner`，让入口节点刷新 owner 并最多重试一次；写入后或结果未知的失败仍不可重放。`TestInvocationForwardedCaptureHandoff` 三节点 HTTP 回归在修复前稳定复现 503，修复后验证调用记录只写入新 owner、旧 owner 未执行写入，并通过 `-race`。本地 `make test`、`make vet`、`make build` 均通过。线上 503 与该路径的因果关系仍需部署后以响应正文和 owner/epoch 日志确认；Cron 同时出现的 timer owner 拒绝需独立追踪。
+
+## 2026-10-24 COS 冷写性能与 L1 恢复（ADR-276/277）
+
+KV/Queue 每次 LTX 提交 fresh 读取资源删除栅栏；旧 `resource-fence.json` 缺失时分段 authority 会执行一次 `List`。已改为首次迁移、随后稳定点查的 `resource-fence.v2`，并用节点租约协议标识阻止新旧栅栏写者混跑；app purge 保留新旧栅栏。90 秒 COS 稳态的 put p99 从旧版 1092.9ms 降至 434.7ms，但仍高于 200ms 目标。全局 List 从 769 次降至 353 次，按前缀跟踪主要是后台 `nodes/` 租约枚举读到历史测试节点和 probe 对象，不能把这些 List 归因于新的栅栏写热路径。后台枚举和最大 3282.9ms 的偶发写延迟仍待处理。
+
+首次 COS 复测还暴露出更严重的 RPO 违例：compaction 删除全部 L0 后，冷恢复先过滤 `L1/manifest.json`，把仅有 L1 的 epoch 跳过；重启后 80 个已确认 key 全部读成 404。ADR-277 已修复，并在同参数 COS 五场景复测中读回全部 140 个最终 key（missing=0、wrong=0，SQLite `integrity_check=ok`）。复测的同节点重启首写 2346ms、跨节点接管后 50 次 put p99 633.6ms、删除本地目录冷恢复首写 3374ms，仍未达到各自设计目标。精确数据和测试边界见 [冷写栅栏 COS 实测](archive/bench/cold-write-fence-v2-2026-10-24.md)。Cron 使用独立的 `__cron__` cell 和定时派发，不直接读取 KV/Queue 的资源删除栅栏；共享节点租约、COS 和控制面拥塞可能间接影响派发。
+
+随后 FS 多 cell 接管又发现初始快照的 started 与 done 标记可分别写在 txid 0 和 1，导致已确认的 filler cell 在新 owner 上报 `restore: no snapshot in chain`。ADR-278 已让初始快照两种标记使用实际快照水位，started 写失败则拒绝写入；该缺陷的 FS/COS 完整复验结果见同一实测记录。Cron 的独立 Docker runtime e2e 使用 pinned workerd，在 `cell-agent` SIGKILL/重启后确认两个表达式都生成重启之后的新分钟 slot 且无重复；整体 `RUNTIME-BASELINE-E2E: PASS`。这只能证明恢复后继续派发，不代表停机覆盖整个分钟时会补发未物化的 slot；当前设计仍为 best-effort、不补跑。celld 则在保留的 cron cell 中持久化 alarm，重启时处理逾期 alarm，两者语义不同。
+
+ADR-278 后 180 秒真实 COS 五场景复验：稳态 put p99 511.8ms、GET p99 65.3ms、epoch 变化 0；重启首写 3874ms，冷恢复首写 4183ms；最终 140 个已确认 key missing/wrong=0，SQLite `integrity_check=ok`。测试脚本用 10 秒宽松阈值跑完完整性检查并报告 PASS，**设计性能门仍未通过**。重启/冷恢复多次列举与读取，以及 COS 写尾延迟仍待优化；详见上述实测记录。
+
+ADR-279 让后台节点租约列举复用物理列表中的最新分段，真实 COS 定向测试验证 3 个历史节点仅 1 次 List。同参数顺序复验的稳态全局 List 从 1243 降到 421，put p99 为 450.7ms，GET p99 为 56.1ms；重启首写仍为 3893ms，冷恢复首写 2868ms。两次完整性均通过，但写 p99、重启和冷恢复目标仍未达标。停止前 compaction 取消导致近千个 segment 留待重启恢复，是当前可观察的冷路径慢因之一。
 
 ## 2026-10-23 评审加固：WAL / snapshot / handoff / DO / R2 / paged
 

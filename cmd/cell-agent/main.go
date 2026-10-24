@@ -129,17 +129,17 @@ func main() {
 		log.Warn("read previous node lease failed", "err", lerr)
 	}
 	lm.AZ = cfg.PlacementAZ
-	// ADR-273: owner liveness follows the node lease. A live peer that still
-	// judges owner records by Expiry would take over cells this node serves, so
-	// refuse to start beside one. Full replacement is the only supported upgrade.
+	// ADR-273/276: both the owner and resource-fence protocols require a full
+	// replacement. Never start if we cannot establish the live peer set.
 	if peers, serr := lm.Sample(ctx); serr != nil {
-		log.Warn("legacy-peer check skipped: cannot list node leases", "err", serr)
+		log.Error("cannot verify peer protocol; refusing to start", "err", serr)
+		os.Exit(1)
 	} else if legacy := lease.LegacyPeers(peers, cfg.NodeID, time.Now()); len(legacy) > 0 {
 		names := make([]string, 0, len(legacy))
 		for _, l := range legacy {
 			names = append(names, l.Node)
 		}
-		log.Error("live node(s) use the pre-ADR-273 owner protocol; stop them before starting this version (mixed versions are unsafe)", "nodes", names)
+		log.Error("live node(s) use an incompatible owner or resource-fence protocol; stop them before starting this version", "nodes", names)
 		os.Exit(1)
 	}
 	adminAdvertise := ""

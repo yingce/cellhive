@@ -74,6 +74,34 @@ func TestAppPurgeDropsNamespaceData(t *testing.T) {
 	}
 }
 
+func TestAppPurgePreservesBothResourceFenceFormats(t *testing.T) {
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"cells/acme/__kv__/main/resource-fence.json",
+		"cells/acme/__kv__/main/resource-fence.v2",
+		"cells/acme/__kv__/main/owner-gen",
+		"cells/acme/__kv__/main/ltx/e1/1.ltx",
+	} {
+		put(t, b, objectstore.PrefixCells, objectstore.OwnerReplica, key)
+	}
+	p := &Purger{Bucket: b}
+	if done, err := p.Run(t.Context(), "acme", ""); err != nil || !done {
+		t.Fatalf("purge: done=%v err=%v", done, err)
+	}
+	got := list(t, b, objectstore.PrefixCells, objectstore.OwnerReplica)
+	if len(got) != 3 {
+		t.Fatalf("guards were purged or payload retained: %v", got)
+	}
+	for _, key := range got {
+		if strings.Contains(key, "/ltx/") {
+			t.Fatalf("payload retained: %v", got)
+		}
+	}
+}
+
 // TestWorkerPurgeDropsOnlyThatWorker: deleting a worker removes its DO storage
 // and assets but not other workers' DO storage or shared resources.
 func TestWorkerPurgeDropsOnlyThatWorker(t *testing.T) {

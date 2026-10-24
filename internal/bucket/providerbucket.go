@@ -18,8 +18,9 @@ import (
 // deleted after readers no longer need them.
 type ProviderBucket struct {
 	*S3Bucket
-	authority *SegmentedAuthority
-	appender  PositionAppender
+	authority  *SegmentedAuthority
+	pointFence *AppendAuthority
+	appender   PositionAppender
 }
 
 func NewProviderBucket(data *S3Bucket, appendLog PositionAppender, opts ...AuthorityOptions) *ProviderBucket {
@@ -28,9 +29,10 @@ func NewProviderBucket(data *S3Bucket, appendLog PositionAppender, opts ...Autho
 		authorityOpts = opts[0]
 	}
 	return &ProviderBucket{
-		S3Bucket:  data,
-		authority: NewSegmentedAuthority(appendLog, data, authorityOpts),
-		appender:  appendLog,
+		S3Bucket:   data,
+		authority:  NewSegmentedAuthority(appendLog, data, authorityOpts),
+		pointFence: NewBoundedAppendAuthority(appendLog, 8<<20),
+		appender:   appendLog,
 	}
 }
 
@@ -48,19 +50,29 @@ func authorityKey(key string) bool {
 		// instead of relying on PutObject If-Match, which they ignore or reject.
 		return strings.HasSuffix(key, "/owner.json") ||
 			strings.HasSuffix(key, "/owner-gen") ||
-			strings.HasSuffix(key, "/resource-fence.json")
+			strings.HasSuffix(key, "/resource-fence.json") || pointFenceKey(key)
 	}
 	return strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
 		key == "fleet/drain-token.json" || key == "fleet/waker.json"
 }
 
+func pointFenceKey(key string) bool {
+	return strings.HasPrefix(key, "cells/") && strings.HasSuffix(key, "/resource-fence.v2")
+}
+
 func (b *ProviderBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
+	if pointFenceKey(key) {
+		return b.pointFence.Get(ctx, key)
+	}
 	if authorityKey(key) {
 		return b.authority.Get(ctx, key)
 	}
 	return b.S3Bucket.Get(ctx, key)
 }
 func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+	if pointFenceKey(key) {
+		return b.pointFence.ConditionalCreate(ctx, key, data)
+	}
 	if authorityKey(key) {
 		return b.authority.ConditionalCreate(ctx, key, data)
 	}
@@ -89,36 +101,63 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 	return b.S3Bucket.Put(ctx, key, data)
 }
 func (b *ProviderBucket) CAS(ctx context.Context, key string, data []byte, token string) (string, error) {
+	if pointFenceKey(key) {
+		return b.pointFence.CAS(ctx, key, data, token)
+	}
 	if authorityKey(key) {
 		return b.authority.CAS(ctx, key, data, token)
 	}
 	return b.S3Bucket.CAS(ctx, key, data, token)
 }
 func (b *ProviderBucket) ConditionalDelete(ctx context.Context, key, token string) error {
+	if pointFenceKey(key) {
+		return b.pointFence.ConditionalDelete(ctx, key, token)
+	}
 	if authorityKey(key) {
 		return b.authority.ConditionalDelete(ctx, key, token)
 	}
 	return b.S3Bucket.ConditionalDelete(ctx, key, token)
 }
 func (b *ProviderBucket) Put(ctx context.Context, key string, data []byte) (string, error) {
+	if pointFenceKey(key) {
+		return "", ErrNotSupported
+	}
 	if authorityKey(key) {
 		return b.authority.Put(ctx, key, data)
 	}
 	return b.S3Bucket.Put(ctx, key, data)
 }
 func (b *ProviderBucket) Delete(ctx context.Context, key string) error {
+	if pointFenceKey(key) {
+		// Deleting a whole app/namespace must retire the physical point record.
+		return b.S3Bucket.Delete(ctx, key)
+	}
 	if authorityKey(key) {
 		return b.authority.Delete(ctx, key)
 	}
 	return b.S3Bucket.Delete(ctx, key)
 }
 func (b *ProviderBucket) Stat(ctx context.Context, key string) (int64, string, error) {
+	if pointFenceKey(key) {
+		data, token, err := b.pointFence.Get(ctx, key)
+		return int64(len(data)), token, err
+	}
 	if authorityKey(key) {
 		return b.authority.Stat(ctx, key)
 	}
 	return b.S3Bucket.Stat(ctx, key)
 }
 func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	if pointFenceKey(key) {
+		data, token, err := b.pointFence.Get(ctx, key)
+		if err != nil {
+			return nil, "", err
+		}
+		if off < 0 || length < 0 || off > int64(len(data)) || length > int64(len(data))-off {
+			return nil, "", ErrNotSupported
+		}
+		return data[off : off+length], token, nil
+	}
 	if authorityKey(key) {
 		return b.authority.RangedGet(ctx, key, off, length)
 	}
@@ -133,22 +172,41 @@ func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, err
 		return nil, err
 	}
 	out := make([]string, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
+	// The physical listing already identifies the latest authority window.
+	// Calling Get for every listed historical node would make each old window
+	// miss list its own prefix again (one List per node per lease sample).
+	windows := make(map[string]int64, len(keys))
 	for _, key := range keys {
-		logical := key
-		if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
-			logical = base
-		} else if !authorityKey(key) {
+		if base, window, ok := ParsePhysicalAuthorityKey(key); ok {
+			if prev, seen := windows[base]; !seen || window > prev {
+				windows[base] = window
+			}
+			continue
+		}
+		if !authorityKey(key) {
 			out = append(out, key)
 			continue
 		}
-		if _, ok := seen[logical]; ok {
+		if _, seen := windows[key]; !seen {
+			windows[key] = -1 // legacy unsegmented key
+		}
+	}
+	for logical, window := range windows {
+		var seg *authoritySegment
+		if pointFenceKey(logical) {
+			_, _, err = b.Get(ctx, logical)
+		} else {
+			seg, err = b.authority.listed(ctx, logical, window)
+			if errors.Is(err, ErrNotFound) && window >= 0 {
+				// GC raced the physical list: discover the current authority.
+				_, _, err = b.Get(ctx, logical)
+				seg = nil
+			}
+		}
+		if errors.Is(err, ErrNotFound) || (seg != nil && seg.deleted) {
 			continue
 		}
-		seen[logical] = struct{}{}
-		if _, _, err := b.authority.Get(ctx, logical); errors.Is(err, ErrNotFound) {
-			continue
-		} else if err != nil {
+		if err != nil {
 			return nil, fmt.Errorf("list authority %s: %w", logical, err)
 		}
 		out = append(out, logical)
@@ -183,7 +241,7 @@ func (b *ProviderBucket) ListSizes(ctx context.Context, prefix string) ([]Object
 			continue
 		}
 		seen[logical] = struct{}{}
-		size, token, serr := b.authority.Stat(ctx, logical)
+		size, token, serr := b.Stat(ctx, logical)
 		if errors.Is(serr, ErrNotFound) {
 			continue
 		}
@@ -220,7 +278,7 @@ func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, lim
 			continue
 		}
 		seen[logical] = struct{}{}
-		size, token, serr := b.authority.Stat(ctx, logical)
+		size, token, serr := b.Stat(ctx, logical)
 		if errors.Is(serr, ErrNotFound) {
 			continue
 		}

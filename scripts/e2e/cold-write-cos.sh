@@ -113,6 +113,7 @@ def put_retry(a, name, key, v, timeout, t0=None):
             ack(a, name, key, v)
             return True, n, ms, (time.time() - start) * 1000, code
         if time.time() - start > timeout:
+            sys.stderr.write("put timeout key=%s attempts=%d status=%d detail=%r\n" % (key, n, code, data[:160]))
             return False, n, ms, (time.time() - start) * 1000, code
         time.sleep(0.02)
 def cmd_preload(a):
@@ -130,7 +131,9 @@ def cmd_steady(a):
         if not 200 <= code < 300:
             errs += 1; sys.stderr.write("steady put %s -> %d %s\n" % (key, code, data[:120])); continue
         ack(a, a.name, key, v); lat(a, ms); puts += 1
-        code, data, _ = call(a, "GET", a.name, key)
+        code, data, get_ms = call(a, "GET", a.name, key)
+        if a.get_lat and code == 200:
+            with open(a.get_lat, "a") as f: f.write("%.3f\n" % get_ms)
         if code != 200 or data != v: getbad += 1
     print("puts=%d errs=%d getbad=%d" % (puts, errs, getbad)); return 1 if errs or getbad else 0
 def cmd_once(a):
@@ -183,6 +186,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("cmd"); ap.add_argument("--port", type=int, default=0); ap.add_argument("--ns", default="")
 ap.add_argument("--name", default="KV"); ap.add_argument("--key", default="once"); ap.add_argument("--tokdir", default="")
 ap.add_argument("--ledger", default=""); ap.add_argument("--lat", default=""); ap.add_argument("--size", type=int, default=4096)
+ap.add_argument("--get-lat", default="")
 ap.add_argument("--bytes", type=int, default=0); ap.add_argument("--seconds", type=float, default=0)
 ap.add_argument("--timeout", type=float, default=30); ap.add_argument("--n", type=int, default=50)
 ap.add_argument("--t0", type=float, default=0)
@@ -203,7 +207,11 @@ cleanup(){
   if [[ ${DELETE_APP:-0} == 1 && -n ${CUR_ALIVE:-} ]]; then delete_app; fi
   [[ -n ${A_PID:-} ]] && { kill -9 "$A_PID" 2>/dev/null; wait "$A_PID" 2>/dev/null; }
   [[ -n ${B_PID:-} ]] && { kill -9 "$B_PID" 2>/dev/null; wait "$B_PID" 2>/dev/null; }
-  rm -rf "$TMP"
+  if [[ ${CELLHIVE_E2E_KEEP_ARTIFACTS:-0} == 1 ]]; then
+    echo "COLD-E2E: artifacts=$TMP" >&2
+  else
+    rm -rf "$TMP"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -286,7 +294,7 @@ finish(){
   local name=$1 lat=$2 b=($3) a=($4) extra=${5:-} limit=${6:-$P99_LIMIT_MS}
   local pc vr port; port=$(rest_port "$CUR")
   pc=$(python3 "$TMP/kvc.py" pct --lat "$lat")
-  vr=$(kv verify --port "$port" --timeout 60)
+  vr=$(kv verify --port "$port" --timeout "${VERIFY_TIMEOUT:-60}")
   local p99 missing wrong
   p99=$(sed -n 's/.*p99_ms=\([0-9.]*\).*/\1/p' <<<"$pc")
   missing=$(sed -n 's/.*missing=\([0-9]*\).*/\1/p' <<<"$vr"); wrong=$(sed -n 's/.*wrong=\([0-9]*\).*/\1/p' <<<"$vr")
@@ -348,12 +356,14 @@ register_resource KV main || exit 1
 
 # ---- scenario 1: steady -------------------------------------------------------
 LAT=$TMP/lat-steady; : >"$LAT"
+LAT_GET=$TMP/lat-get-steady; : >"$LAT_GET"
 OUT=$(kv preload --port "$PORT_A" --name KV --size "$PRELOAD_VALUE_BYTES" --bytes "$PRELOAD_BYTES") || die "preload failed: $OUT"
 echo "preload: $OUT (${PRELOAD_BYTES}B in ${PRELOAD_VALUE_BYTES}B values)"
 B=$(snap "$PORT_A")
-OUT=$(kv steady --port "$PORT_A" --name KV --size "$PUT_BYTES" --seconds "$STEADY_SECONDS" --lat "$LAT") || fail "steady: $OUT"
+OUT=$(kv steady --port "$PORT_A" --name KV --size "$PUT_BYTES" --seconds "$STEADY_SECONDS" --lat "$LAT" --get-lat "$LAT_GET") || fail "steady: $OUT"
 A=$(snap "$PORT_A")
 finish steady "$LAT" "$B" "$A" "client=\"$OUT\""
+echo "READ_RESULT scenario=steady $(python3 "$TMP/kvc.py" pct --lat "$LAT_GET")"
 read -r -a _b <<<"$B"; read -r -a _a <<<"$A"
 [[ $((_a[3] - _b[3])) -eq 0 ]] || fail "steady: epoch changed during the window (${_b[3]} -> ${_a[3]})"
 

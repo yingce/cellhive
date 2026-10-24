@@ -1,5 +1,30 @@
 # 决策记录（ADR）
 
+## ADR-279 节点租约列举复用已列出的分段键（2026-10-24）
+
+- **问题**：`lease.Sample` 调 `ProviderBucket.List("nodes/")`。后者已拿到完整物理键列表，却又对每个 logical node 调 `Get`；历史节点没有当前小时分段时，`SegmentedAuthority.newestWindow` 会为每个节点重新 `List(<node>.json.w*)`。共享 COS 桶历史测试节点多时，后台一次采样膨胀为数十次 List，和热写竞争 COS 请求资源。
+- **决策**：provider 的诊断/采样 `List` 从已列出的物理 `.w<window>` 键中为每个 logical authority 选择最大窗口，直接点读其末帧并过滤 tombstone；没有分段的 legacy 键直接点读。若列举与读取间遇到对象被 GC，回退到原 fresh `Get`。这一接口本来是一次列举的快照，不能据此替代 owner 接管时的 fresh 节点租约点查，也不改变 CAS/条件创建的 authority 规则。写热路径仍不调用 List。
+- **验收**：多个历史分段/旧节点的逻辑列举只执行一次物理 List，返回最新非删除记录；真实 COS 对照观察全局 List 与写尾延迟，任何延迟结论以实测为准。
+
+## ADR-278 初始快照标记使用实际快照水位（2026-10-24，已实现）
+
+- **故障**：初始 `cellcapture.Ensure` 在 checkpoint 前用本地 `baseline` 写 `<txid>.snapshot-started`，快照落桶后却再读 `c.TxID()` 写 `<txid>.snapshot-done`。新 KV cell 可出现 `0.snapshot`、`0.snapshot-started`、`1.snapshot-done`；restore 把水位 0 的快照当作未完成而跳过，仅剩 delta 时返回 `restore: no snapshot in chain`。跨节点接管时 F1/F3/F5 等已确认 filler cell 500，违反 RPO=0 的可恢复要求。
+- **修复**：同步初始快照在首个 part 上传前拿到 checkpoint 后的实际 `wm`，以该值写 started；全部 part 提交成功后返回同一值写 done。写 started 失败即中止快照和写入；写 done 失败时仅清理同一水位的 started 标记。后台基线已使用 `RequestBaseline` 返回值，继续保持同一规则。
+- **验收**：新 KV cell 的 started、snapshot part、done 三者水位相同；FS 多 cell 淘汰、跨节点接管与 COS 完整冷写 e2e 回读已确认值。
+
+## ADR-277 冷恢复保留仅有 L1 manifest 的 epoch（2026-10-24，已实现）
+
+- **故障**：COS 稳态写入约 1,200 次后后台 compaction 把 700 余个 L0 折叠到 L1 并删除 L0。重启后的 `RestoreChain` 先用 `isSegmentKey` 过滤 `L1/manifest.json`，导致只剩 L1 的 epoch 整体消失；进程从空数据开始写，已确认的 80 个 key 全部返回 404，违反 RPO=0。`integrity_check=ok` 只能证明新 SQLite 文件结构正确，不能证明旧数据仍在。
+- **修复**：按 scope 列举恢复链时先识别 `L1/manifest.json`，把它所在 epoch 登记为完整基线，再过滤普通 LTX 段。后续 `restoreOnceKeys` 按 manifest 引用读取 L1。回归测试删除该 epoch 的全部 L0 后断言仍能恢复原快照。
+- **验收**：固定版本 COS 五场景冷写 e2e 在 compaction 后重启、跨节点接管和冷恢复均读回所有已确认值（missing=0、wrong=0），SQLite `integrity_check=ok`；性能未达标项单独列出，不因数据恢复成功而视为完成。
+
+## ADR-276 资源删除栅栏使用稳定点查记录（2026-10-24，已实现，性能验收未达标）
+
+- **问题**：KV/Queue 的 LTX 上传每次在 `resourceWriteGuard` 中 fresh 读取删除栅栏。原 `resource-fence.json` 走按时间窗口分段的 authority；大多数资源没有栅栏，miss 会列举 `resource-fence.json.w*`。COS 冷写 e2e 的稳态约 600 次 put 对应约 770 次全局 List，但这只是相关性，仍须用按调用点计数确认。
+- **决策**：栅栏改用稳定的 `resource-fence.v2` append-position 记录。首次访问先读取旧栅栏，再用条件创建把旧状态（或空状态）迁到 v2；竞争创建时重新读取 v2。之后每次提交仍 fresh 点查 v2，删除/代际更新仍通过 append-position CAS。该记录只在资源生命周期变更时追加，设 8 MiB 硬上限；满时失败关闭。app purge 保留新旧栅栏。旧栅栏在迁移后只供历史诊断，不再改写。节点租约将 `liveness` 升为 `node-lease-fence-v2`；启动无法枚举 peer 或发现活跃旧协议 peer 即拒绝启动，运行中发现则停止 ack。协议切换要求同一桶中所有 cell-agent 一次性升级。
+- **不变量**：不缓存提交路径的缺失结果；跨节点删除后下一次提交必须看到最新栅栏；旧栅栏中的 `JobID/Deleted/Epoch` 必须逐字迁移；旧代际上传不得复活；权威读取不依赖 bucket List。
+- **验收**：缺失栅栏多次 fresh 读取的 List=0（首次迁移的历史查找单独计数），跨节点 Block 后旧 epoch 上传被拒，旧 JSON 与旧分段栅栏迁移通过；固定版本真实 COS e2e 记录 p50/p99、每阶段 List/Get、缺失/错值、integrity check。Cron 用独立的真实 runtime 故障 e2e 验收，不能用 KV 测试替代。
+
 ## ADR-273 cell owner 由节点租约判活，取消 per-cell 续约（2026-10-24，阶段1 已实现）
 
 - **背景**：owner 记录用 `Expiry=now+LeaseTTL`，后台每 `TTL/3` 串行续所有 `OwnedScopes`；owned 只增不减，单个 owner 续约要多次串行 COS 权威读/写。cell 一多，一轮续约就超过 TTL，正在读写的 cell 也会过期；随后 `Claim` 自我 bump epoch，capture 重建、整库快照，`watchOwner` 再 `Forget`，表现为偶发 10s 冷写。
@@ -2114,6 +2139,7 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
      - **NeverConnected**：dial 失败（`net.OpError.Op=="dial"` / `ECONNREFUSED`，请求字节未发出）→ `refreshOwner`（`Owner.Invalidate` + 重解析）后重发；
      - **NotOwner**：对端回 **409**（已不再是 owner，未执行）→ 同样 `refreshOwner` 后重发。
      其它失败（超时/截断/5xx —— **Ambiguous**）**原样返回、绝不重发**，保 at-most-once（与 DO 的 `result_unknown` 不重放一致）。
+     已转发请求若在写入前的 `CaptureEnsure` 发现旧 owner 已失权，必须返回 **409 `not_owner`**；这属于未执行，入口节点才可按上述规则刷新并重试。写入开始后的失权、持久证明失败和未知结果仍返回原错误，绝不因 503 自动重放。
 - **测试**：`TestReadForwardingAndRetry`：A 拥有 KV cell → B 的 `kv get` 被转发并返回正确值，且 **B 本地无该 key**；stale owner 持续回 409 → **恰好 2 次尝试**并把 409 透传给调用方；死地址（dial 失败）→ 502，不挂起不循环。
 - **边界/取舍（如实）**：转发让一个 cell 的**读**汇聚到 owner → 读扩展性下降（多节点下 owner 成为该 cell 的读热点）；真正的扩展解法是 **follower 读副本**（把段 apply 到本地、追平（lag < 阈值）才读本地，否则转发）——独立大项，未做。另外：既然读统一转发，`Forget`（ADR-115）已改为**可选**并由磁盘预算的 LRU janitor 兜底（ADR-122）。
 

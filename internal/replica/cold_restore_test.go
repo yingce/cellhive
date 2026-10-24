@@ -105,6 +105,10 @@ func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
 	m := New(cb)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "big"}
 	seg := syntheticSnapshot(t, m, sc, 1, pageSize, pages)
+	// The write path may read/create a resource fence. Measure only hydrate.
+	cb.mu.Lock()
+	cb.gets, cb.rangedGets, cb.getBytes, cb.rangedBytes = 0, 0, 0, 0
+	cb.mu.Unlock()
 
 	// --- Path A: cell-agent hydrate (LatestEpoch -> Restore -> ApplyFile).
 	ep, ok, err := m.LatestEpoch(ctx, sc, 0)
@@ -191,6 +195,39 @@ func TestRestoreChainListsScopeOnce(t *testing.T) {
 	cb.mu.Unlock()
 	if lists != 1 {
 		t.Fatalf("RestoreChain listed %d times, want 1", lists)
+	}
+}
+
+func TestRestoreChainKeepsCompactedEpochWithOnlyL1Manifest(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "compacted"}
+	snapshot := syntheticSnapshot(t, m, sc, 1, 4096, 2)
+	l1, _, err := m.AppendL1(ctx, sc, 1, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutManifest(ctx, sc, 1, Manifest{MinTxID: 1, MaxTxID: 1, Objects: []string{l1}}); err != nil {
+		t.Fatal(err)
+	}
+	l0, err := m.ListL0Segments(ctx, sc, 1)
+	if err != nil || len(l0) == 0 {
+		t.Fatalf("L0 before GC: %v %v", l0, err)
+	}
+	for _, key := range l0 {
+		if err := m.DeleteObject(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A new owner restores an epoch with no L0 left. The manifest must still
+	// seed the chain; otherwise it silently boots an empty cell.
+	segs, err := m.RestoreChain(ctx, sc, 1)
+	if err != nil || len(segs) != 1 || string(segs[0].Raw) != string(snapshot) {
+		t.Fatalf("compacted base lost: segments=%d err=%v", len(segs), err)
 	}
 }
 

@@ -2,7 +2,15 @@
 
 This document records all issues found during the system review, as well as **the resolution decision for each issue**. See the appendix at the end for the original severity levels. The design documents (architecture / cell-protocol / durable-objects / networking / decisions) have been synchronized accordingly.
 
-_Last updated: 2026-10-15_
+_Last updated: 2026-10-24_
+
+## 2026-10-24 COS cell latency, restore, and Cron recovery (ADR-276–278)
+
+The KV/Queue resource deletion fence now uses a stable point-read key instead of repeatedly reading an absent segmented authority key that caused a bucket List on each write. Restore retains an epoch whose L0 was fully compacted into L1; initial snapshot start/done markers use the same committed watermark. A 180-second real-COS five-scenario run recovered all 140 acknowledged keys with `missing=0`, `wrong=0`, and SQLite `integrity_check=ok`. Its steady put p99 was 511.8ms (GET p99 65.3ms), restart first write 3874ms, and cold-restore first write 4183ms. **The design latency targets remain unmet**; the E2E script's PASS used a relaxed 10-second limit to complete integrity checks. Measurements and limits are recorded in [the COS benchmark](../archive/bench/cold-write-fence-v2-2026-10-24.md).
+
+Cron uses its own `__cron__` cell and does not directly read the KV/Queue resource fence. A pinned-workerd Docker E2E confirmed both expressions advanced to a new minute without duplicate slots after cell-agent SIGKILL/restart. This does not cover a whole minute missed during downtime: CellHive schedules the current minute best-effort and does not backfill. celld instead persists an alarm in its cron cell and can execute one overdue occurrence after downtime. Shared node-lease, COS, or control-plane contention can still indirectly delay Cron.
+
+ADR-279 reuses the physical authority windows already returned by a node-lease listing. A real-COS probe listed three historical nodes with one List; a subsequent 180-second sequential run reduced global steady Lists from 1243 to 421 and measured put p99 450.7ms, GET p99 56.1ms, restart first write 3893ms, and cold first write 2868ms. All 140 acknowledged keys survived, but the write, restart, and cold-restore latency targets remain unmet. A cancelled compaction left almost 1000 segments before restart, contributing to restore work; the existing restore concurrency limit protects against prior mass-hydrate OOM and must not be raised without a global resource bound.
 
 ## Resource operations and invocation records (ADR-205, 2026-10-15)
 

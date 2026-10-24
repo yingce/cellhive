@@ -24,7 +24,8 @@ type resourceFence struct {
 	Epoch   uint64 `json:"epoch_floor"`
 }
 
-func resourceFenceKey(sc cell.Scope) string { return sc.Key() + "/resource-fence.json" }
+func resourceFenceKey(sc cell.Scope) string       { return sc.Key() + "/resource-fence.v2" }
+func legacyResourceFenceKey(sc cell.Scope) string { return sc.Key() + "/resource-fence.json" }
 func (m *Manager) resourceLock(sc cell.Scope) *sync.RWMutex {
 	var hash uint64
 	for _, b := range []byte(sc.String()) {
@@ -90,9 +91,30 @@ func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (re
 	if sc.Class != "__kv__" && sc.Class != "__queue__" {
 		return resourceFence{}, "", nil
 	}
-	raw, etag, err := m.resourceObjects().GetVersion(ctx, resourceFenceKey(sc))
+	objects := m.resourceObjects()
+	raw, etag, err := objects.GetVersion(ctx, resourceFenceKey(sc))
 	if errors.Is(err, bucket.ErrNotFound) {
-		return resourceFence{}, "", nil
+		// The fixed-position record is created on first access. A successful
+		// create is the migration point: later readers never rediscover a
+		// missing fence by listing old authority windows. Every participant in
+		// a bucket must understand v2 before this path is enabled.
+		legacy, _, lerr := objects.GetVersion(ctx, legacyResourceFenceKey(sc))
+		if errors.Is(lerr, bucket.ErrNotFound) {
+			legacy = []byte("{}")
+		} else if lerr != nil {
+			return resourceFence{}, "", lerr
+		}
+		if !json.Valid(legacy) {
+			return resourceFence{}, "", fmt.Errorf("replica: corrupt legacy resource fence")
+		}
+		etag, err = objects.ConditionalCreate(ctx, resourceFenceKey(sc), legacy)
+		if errors.Is(err, bucket.ErrPrecondition) {
+			// A concurrent delete/migration may have won. Its value is the
+			// authority; never return the stale legacy value.
+			raw, etag, err = objects.GetVersion(ctx, resourceFenceKey(sc))
+		} else if err == nil {
+			raw = legacy
+		}
 	}
 	if err != nil {
 		return resourceFence{}, "", err

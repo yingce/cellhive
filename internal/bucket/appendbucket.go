@@ -18,9 +18,26 @@ type PositionAppender interface {
 
 // AppendAuthority implements conditional records without target-object overwrite
 // or conditional delete. Tokens are monotonically increasing byte positions.
-type AppendAuthority struct{ raw PositionAppender }
+type AppendAuthority struct {
+	raw PositionAppender
+	max int64
+}
 
 func NewAppendAuthority(raw PositionAppender) *AppendAuthority { return &AppendAuthority{raw: raw} }
+
+// NewBoundedAppendAuthority is for low-churn records whose stable key must
+// remain point-readable. Reaching the cap fails closed instead of growing an
+// append object without bound.
+func NewBoundedAppendAuthority(raw PositionAppender, max int64) *AppendAuthority {
+	return &AppendAuthority{raw: raw, max: max}
+}
+
+func (b *AppendAuthority) append(ctx context.Context, key string, pos int64, frame []byte) error {
+	if b.max > 0 && (pos > b.max || int64(len(frame)) > b.max-pos) {
+		return ErrAuthoritySegmentFull
+	}
+	return b.raw.Append(ctx, key, pos, frame)
+}
 
 const frameHeader = 13 // magic(4), operation(1), payload length(4), crc32(4)
 
@@ -98,7 +115,7 @@ func (b *AppendAuthority) ConditionalCreate(ctx context.Context, key string, dat
 		return "", err
 	}
 	frame := encodeFrame(data, false)
-	if err := b.raw.Append(ctx, key, pos, frame); err != nil {
+	if err := b.append(ctx, key, pos, frame); err != nil {
 		return "", err
 	}
 	return strconv.FormatInt(pos+int64(len(frame)), 10), nil
@@ -120,7 +137,7 @@ func (b *AppendAuthority) CAS(ctx context.Context, key string, data []byte, toke
 		return "", ErrPrecondition
 	}
 	frame := encodeFrame(data, false)
-	if err := b.raw.Append(ctx, key, pos, frame); err != nil {
+	if err := b.append(ctx, key, pos, frame); err != nil {
 		return "", err
 	}
 	return strconv.FormatInt(pos+int64(len(frame)), 10), nil
@@ -141,5 +158,5 @@ func (b *AppendAuthority) ConditionalDelete(ctx context.Context, key, token stri
 	if current != token {
 		return ErrPrecondition
 	}
-	return b.raw.Append(ctx, key, pos, encodeFrame(nil, true))
+	return b.append(ctx, key, pos, encodeFrame(nil, true))
 }

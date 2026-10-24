@@ -106,3 +106,88 @@ func TestProviderResourceFence(t *testing.T) {
 		t.Fatalf("legacy after CAS = %q err=%v", got, err)
 	}
 }
+
+func TestProviderPointResourceFence(t *testing.T) {
+	ctx := context.Background()
+	b := openProviderForFenceTest(t)
+	key := fmt.Sprintf("cells/itest/__kv__/point%d/resource-fence.v2", time.Now().UnixNano())
+	defer b.Delete(ctx, key)
+	if _, _, err := b.Get(ctx, key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing point fence = %v", err)
+	}
+	first := []byte(`{"job_id":"old","deleted":true,"epoch_floor":7}`)
+	token, err := b.ConditionalCreate(ctx, key, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ConditionalCreate(ctx, key, []byte(`{}`)); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("duplicate point fence create = %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		got, tkn, err := b.Get(ctx, key)
+		if err != nil || string(got) != string(first) || tkn != token {
+			t.Fatalf("read %d: data=%q token=%q err=%v", i, got, tkn, err)
+		}
+	}
+	if _, err := b.CAS(ctx, key, []byte(`{"deleted":false}`), token+"0"); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("stale CAS = %v", err)
+	}
+	next, err := b.CAS(ctx, key, []byte(`{"deleted":false}`), token)
+	if err != nil || next == token {
+		t.Fatalf("CAS token=%q err=%v", next, err)
+	}
+	if got, _, err := b.Get(ctx, key); err != nil || string(got) != `{"deleted":false}` {
+		t.Fatalf("new value=%q err=%v", got, err)
+	}
+}
+
+// Historical node leases have no current-window object. Listing their logical
+// keys must reuse the one physical listing instead of listing once per node.
+func TestProviderHistoricalNodeListDoesNotAmplifyLists(t *testing.T) {
+	ctx := t.Context()
+	b := openProviderForFenceTest(t)
+	current := time.Now().UTC().Truncate(time.Minute)
+	b.authority = NewSegmentedAuthority(b.appender, b.S3Bucket, AuthorityOptions{
+		Segment: time.Minute,
+		Now:     func() time.Time { return current },
+	})
+	prefix := fmt.Sprintf("nodes/itest-list-%d-", time.Now().UnixNano())
+	defer func() {
+		keys, err := b.S3Bucket.List(ctx, prefix)
+		if err != nil {
+			t.Errorf("cleanup list: %v", err)
+			return
+		}
+		for _, key := range keys {
+			if err := b.S3Bucket.Delete(ctx, key); err != nil {
+				t.Errorf("cleanup %s: %v", key, err)
+			}
+		}
+	}()
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("%s%d.json", prefix, i)
+		if _, err := b.ConditionalCreate(ctx, key, []byte(`{"expiry_ms":1}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current = current.Add(3 * time.Minute)
+	before := b.S3Bucket.Stats()["list"]
+	keys, err := b.List(ctx, prefix)
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("logical list = %v, %v", keys, err)
+	}
+	if delta := b.S3Bucket.Stats()["list"] - before; delta != 1 {
+		t.Fatalf("three historical nodes used %d physical Lists, want one", delta)
+	}
+	if err := b.Delete(ctx, prefix+"1.json"); err != nil {
+		t.Fatal(err)
+	}
+	before = b.S3Bucket.Stats()["list"]
+	keys, err = b.List(ctx, prefix)
+	if err != nil || len(keys) != 2 || keys[0] != prefix+"0.json" || keys[1] != prefix+"2.json" {
+		t.Fatalf("list after tombstone = %v, %v", keys, err)
+	}
+	if delta := b.S3Bucket.Stats()["list"] - before; delta != 1 {
+		t.Fatalf("tombstone list used %d physical Lists, want one", delta)
+	}
+}
