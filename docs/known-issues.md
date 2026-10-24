@@ -16,7 +16,7 @@ ADR-284 又去掉了 COS 不可变 LTX Append 成功后为取 ETag 做的常规 
 
 扩大到 120 对写入的临时分段诊断确认，数百毫秒尖峰主要落在 RPO=0 提交前的 COS 资源 fence 权威点读（最高观察到 778ms）或原生 COS Append（例如 412–472ms）；不是 SQLite 或 TTL 唤醒扫描。该 bucket 模式不能安全跳过 fresh fence 或先于 COS 持久化应答。需在 SG 同区 fleet 模式确认 follower fsync 正常承担热写证明、bucket 回退的频率和原因，并分别测同 Pod 与公开入口。
 
-SG 已在 2026-10-24 部署 `ac5ad43`（Helm revision 53）。独立 namespace 的 Pod 本地真实 HTTP 校验通过 10 次普通 PUT、10 次 TTL PUT 与逐次 GET；首写 752ms、次写 146ms，之后 18 次热 PUT p50 9.84ms、p95 11.44ms、最大 13.14ms。该窗口 `fleet` 提交 +22、`bucket-batch` +0，`live_followers=1`，产品 App 删除返回 200。通过 `kubectl port-forward` 的另一轮 20 次 PUT/GET 也全部正确，但其延迟包含隧道开销，不能用来判断同 Pod 性能；该轮记录到 fleet +17、bucket-batch +4，计数包括控制面提交，需继续追踪 bucket 回退。公开入口和较长时间的尾延迟仍待验收。滚动后 cell-agent-1 曾有一次对旧 follower IP `10.0.16.195` seal 超时的 recovery WARN；恢复过程失败关闭，旧 session 是否能最终封存尚未确认，需单独跟踪。
+SG 已在 2026-10-24 部署 `ac5ad43`（Helm revision 53）。独立 namespace 的 Pod 本地真实 HTTP 校验通过 10 次普通 PUT、10 次 TTL PUT 与逐次 GET；首写 752ms、次写 146ms，之后 18 次热 PUT p50 9.84ms、p95 11.44ms、最大 13.14ms。该窗口 `fleet` 提交 +22、`bucket-batch` +0，`live_followers=1`，产品 App 删除返回 200。通过 `kubectl port-forward` 的另一轮 20 次 PUT/GET 也全部正确，但其延迟包含隧道开销，不能用来判断同 Pod 性能；该轮记录到 fleet +17、bucket-batch +4，计数包括控制面提交，需继续追踪 bucket 回退。随后对原先的 `vwork-24`/`TEST` 同路径复测，连续热 TTL PUT 11 次中位数 9.41ms（旧版 6 次为 190.7–299.9ms），但首次冷请求 2.440 秒；间隔 1.15 秒的 8 次 TTL PUT 中又出现 159.59/108.33ms 两次慢写，并有 bucket-batch +1。**热 TTL 性能有明显提升，但冷请求、周期性长尾和公开入口仍未解决。**滚动后 cell-agent-1 曾有一次对旧 follower IP `10.0.16.195` seal 超时的 recovery WARN；恢复过程失败关闭，旧 session 是否能最终封存尚未确认，需单独跟踪。
 
 ## 2026-10-24 KV TTL 同步重设 timer 的写入延迟（ADR-282）
 

@@ -137,3 +137,7 @@ PUT 另有 GET 没有的固定成本：按 cell 捕获、SQLite 写入和 RPO=0 
 然后直接 `kubectl exec` 到 `cellhive-sg-cell-agent-0`，用 Pod 内 `curl 127.0.0.1:7001` 和另一独立 namespace 做同样 20 对真实 PUT/GET（普通/TTL 各 10 次）；全部 HTTP 200、GET 内容正确。前两次写分别 752/146ms，后 18 次热 PUT p50 9.84ms、p95 11.44ms、最大 13.14ms。窗口内 `cellhive_commit_total{mode="fleet"}` +22、`bucket-batch` +0，`cellhive_live_followers=1`；产品 App 删除 HTTP 200。此结果只覆盖单 Pod、短时间的小值写；公开入口、跨 Pod 入口和长期尾延迟仍需测。
 
 启动后 `cell-agent-1` 有一次恢复旧节点 session 时向旧 follower IP `10.0.16.195:7001` 发 seal 请求超时的 WARN。代码会在不完整 recovery 时拒绝封存，未观察到新写失败；旧 session 能否最终封存尚未确认，需另行追踪。
+
+同一 SG Pod 再以原先的 `vwork-24`/`TEST`、1 字节值、`expiration_ttl=300` 和独立诊断 key 复测，与部署前同路径对照：首个 TTL PUT 2.440 秒，随后 11 次连续 TTL PUT 为 8.77–16.28ms、中位数 9.41ms；12 次 PUT 全部 200，逐次 GET 内容正确。窗口内 fleet 提交 +14、bucket-batch +0，follower 数为 1。部署前同路径 6 次 TTL PUT 为 190.7–299.9ms，因此**热 TTL PUT 明显改善**，但首次冷请求没有改善。
+
+接着在相同 scope 每隔 1.15 秒做 8 次 TTL PUT，依次为 159.59、108.33、13.63、11.90、9.82、10.50、8.52、13.86ms，均为 200；窗口内 fleet +7、bucket-batch +1（计数包含后台提交，不能把那一次回退精确归到某个请求）。这表明周期性长尾仍存在。诊断 key 设置 300 秒 TTL 自动过期，没有删除原有业务 key。普通 PUT 的旧线上样本多次约 9–11ms，修复后独立测试 namespace 的热写约 8–13ms，不能宣称普通 PUT 有同等幅度提升。公开入口 590ms 的原始样本尚无部署后的同路径配对结果。
