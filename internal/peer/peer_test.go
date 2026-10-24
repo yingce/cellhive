@@ -1055,3 +1055,29 @@ func TestShipBatcherHedgeStats(t *testing.T) {
 		t.Fatalf("hedge stats = %d/%d, want 0/0", fired, won)
 	}
 }
+
+func TestSessionTailPageByteBoundaryIsNotTruncation(t *testing.T) {
+	ctx := context.Background()
+	sp, err := NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "byte-boundary"}
+	var size int
+	for i := uint64(1); i <= 4; i++ {
+		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, bytes.Repeat([]byte{byte(i)}, 128))
+		size = len(seg)
+		if _, _, err := sp.AppendBatchSession(ctx, "byte-boundary", sc, 1, [][]byte{seg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sp.Seal("byte-boundary"); err != nil {
+		t.Fatal(err)
+	}
+	for after := uint64(0); after < 4; after++ {
+		page, err := sp.TailPage("byte-boundary", after, 256, size+size/2)
+		if err != nil || len(page) != 1 || page[0].Sequence != after+1 {
+			t.Fatalf("after %d: page=%v err=%v", after, page, err)
+		}
+	}
+}

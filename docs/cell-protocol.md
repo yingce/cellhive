@@ -394,3 +394,9 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 | **group commit 合批比** | 高并发下每 ack 的 append/fsync 次数显著 < 1 |
 
 _最后更新：2026-09-25_
+
+### 运维接受历史日志缺失（2026-10-24）
+
+正常恢复仍要求全部 follower 尾日志持久化后才能 sealed。仅当操作者明确接受指定历史 session 的潜在数据丢失时，离线迁移工具可对该 session 执行终止恢复：先保存原始权威对象、逻辑记录及 SHA256 审计，再校验它不是当前活跃 session，使用原版本 CAS 写 sealed 和 `recovery_resolution`。该字段记录 `operator_accepted_missing_tail`、接受时间、审计对象键及原记录摘要。不得伪造 `covered_seq`，不得把此类 session 统计为完整恢复。该路径不是自动恢复策略，也不允许绕过仍可恢复的日志。已有桶数据保持不变；丢失尾日志涉及的历史写入可能无法恢复，仍有链缺口的 cell 可以继续报错，不能承诺所有历史数据可用。
+
+恢复 TailPage 在下一个完整 fragment 超过页字节预算时返回当前页；正常分页不是日志截断。真正 EOF、序号缺口、CRC 错误仍须失败。

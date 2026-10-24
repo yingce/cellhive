@@ -3455,3 +3455,5 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 - 早期草案中"凭据权威 + 字节直连"已被 ADR-023 取代。
 
 _最后更新：2026-10-22_
+
+- ADR-285 operational clarification (2026-10-24): automatic recovery remains fail-closed. Explicit operator acceptance of a named legacy missing tail requires original-object backup, durable audit, inactive-session guard and CAS closure with `recovery_resolution`, without fabricated coverage; see `cell-protocol.md`.

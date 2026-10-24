@@ -679,7 +679,8 @@ func (s *Spool) tailPage(session string, after uint64, maxFragments, maxBytes in
 			fragmentBytes += len(segment)
 		}
 		if len(out) > 0 && (maxFragments > 0 && len(out) >= maxFragments || maxBytes > 0 && bytes+fragmentBytes > maxBytes) {
-			break
+			// A whole-fragment page boundary is not a truncated sealed log.
+			return out, nil
 		}
 		out = append(out, fragment)
 		bytes += fragmentBytes

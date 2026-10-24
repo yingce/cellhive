@@ -34,10 +34,20 @@ const (
 	ProtoVersionIdentity = "v3"
 )
 
+// RecoveryResolution records an explicit operator exception, never an automatic
+// recovery result. Its audit preserves original bytes and loss authorization.
+type RecoveryResolution struct {
+	Kind           string `json:"kind"`
+	AcceptedMs     int64  `json:"accepted_ms"`
+	AuditKey       string `json:"audit_key"`
+	OriginalSHA256 string `json:"original_sha256"`
+}
+
 // Record is a node-log entry.
 type Record struct {
-	Node    string `json:"node"`
-	Session string `json:"session"`
+	RecoveryResolution *RecoveryResolution `json:"recovery_resolution,omitempty"`
+	Node               string              `json:"node"`
+	Session            string              `json:"session"`
 	// Epoch is the first cell epoch observed in this process session. Each v2
 	// follower fragment carries its own scope and epoch for recovery.
 	Epoch        uint64                       `json:"epoch"`

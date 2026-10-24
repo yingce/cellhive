@@ -138,3 +138,32 @@ func TestOpenRejectsSealedSessionReuse(t *testing.T) {
 		t.Fatalf("reopen sealed session = %v, want ErrSessionClosed", err)
 	}
 }
+
+func TestAcceptedLossResolutionSurvivesTerminalUpdate(t *testing.T) {
+	ctx := context.Background()
+	m := newMgr(t)
+	r, err := m.Open(ctx, "legacy-loss", 1, []string{"old-peer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Status = StatusSealed
+	r.RecoveryResolution = &RecoveryResolution{Kind: "operator_accepted_missing_tail", AcceptedMs: 123, AuditKey: "diag/recovery/test.json", OriginalSHA256: "original-digest"}
+	raw, _ := json.Marshal(r)
+	_, token, err := m.Get(ctx, r.Node, r.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.cas(ctx, Key(r.Node, r.Session), raw, token); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Seal(ctx, r.Node, r.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RecoveryResolution == nil || *got.RecoveryResolution != *r.RecoveryResolution || len(got.CoveredSeq) != 0 {
+		t.Fatalf("resolution lost or coverage invented: %+v", got)
+	}
+	if _, err = m.SetStatus(ctx, r.Node, r.Session, StatusRecovering); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("reopen: %v", err)
+	}
+}
