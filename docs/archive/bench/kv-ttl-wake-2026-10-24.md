@@ -127,3 +127,13 @@ PUT 另有 GET 没有的固定成本：按 cell 捕获、SQLite 写入和 RPO=0 
 | 200 | 6.64 / 8.86 / 11.23ms | 6.58 / 9.57 / 28.00ms | 0.50 / 0.73 / 1.00ms | 0.79 / 1.10 / 11.76ms |
 
 同一轮相邻请求的 `follower - owner` 配对差值：PUT 中位数分别为 -0.28ms 和 -0.04ms，均处于实验噪声量级；GET 中位数分别为 +0.26ms 和 +0.28ms。第二轮 follower PUT/GET p99 尾部明显高于 owner（分别 28.00/11.76ms），不能把尾部全部解释为一次 loopback 网络往返，需进一步区分 follower 路由/缓存失效等待与网络开销。本机稳态 PUT 的主要耗时仍是 owner 上的 SQLite 捕获和 follower fsync；以上差值不能外推跨机器网络。两轮均通过产品 App 删除 HTTP 200 清理。
+
+## SG revision 53 部署复验（2026-10-24）
+
+代码提交 `ac5ad43`、SG Helm 操作仓提交 `c3f66ab`，镜像 digest `sha256:255b951d1814e13dc84c910df6041ed4e34137a33c34e67892948f8f614ee381`。SG Helm revision 53 `deployed`；两个 cell-agent、两个 gated DO runtime、两个 user-runtime 的 Pod 均 Ready、实际 `imageID` 为该 digest、restartCount 为 0。
+
+先通过 `kubectl port-forward` 对独立测试 namespace 做 20 对真实 HTTP PUT/GET（普通和 300 秒 TTL 各 10 次），逐次检查状态和内容；全部通过，产品 App 删除 HTTP 200。该轮 owner 指标 `fleet` +17、`bucket-batch` +4；包含控制面提交，不能逐次归因到 KV。隧道测得约 130ms 热 PUT，**含 kubectl 隧道开销，不作为 SG 服务延迟**。
+
+然后直接 `kubectl exec` 到 `cellhive-sg-cell-agent-0`，用 Pod 内 `curl 127.0.0.1:7001` 和另一独立 namespace 做同样 20 对真实 PUT/GET（普通/TTL 各 10 次）；全部 HTTP 200、GET 内容正确。前两次写分别 752/146ms，后 18 次热 PUT p50 9.84ms、p95 11.44ms、最大 13.14ms。窗口内 `cellhive_commit_total{mode="fleet"}` +22、`bucket-batch` +0，`cellhive_live_followers=1`；产品 App 删除 HTTP 200。此结果只覆盖单 Pod、短时间的小值写；公开入口、跨 Pod 入口和长期尾延迟仍需测。
+
+启动后 `cell-agent-1` 有一次恢复旧节点 session 时向旧 follower IP `10.0.16.195:7001` 发 seal 请求超时的 WARN。代码会在不完整 recovery 时拒绝封存，未观察到新写失败；旧 session 能否最终封存尚未确认，需另行追踪。

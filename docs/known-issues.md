@@ -8,17 +8,19 @@ _最后更新：2026-10-24_
 
 ## 2026-10-24 热 KV 读写的周期性 COS 等待（ADR-283）
 
-已打开 cell 的连续热 GET 约 0.3–0.4ms，但 binding、owner 和资源删除 fence 的 1 秒缓存失效后会在请求路径同步读取控制面/COS；本机到香港 COS 测试桶每隔 1.15 秒的 8 次 GET 曾为 44–185ms。分段诊断还发现本机 owner 被滞后的 node-lease 快照判为不存活时，GET 会同步点读 `nodes/<self>.json`，仅路由判活就耗 24–25ms。ADR-283 在有限活跃 KV 集合中提前刷新原有缓存，并以本机已成功发布且健康的 lease 直接判断本机 owner；未发布或不健康时失败关闭，失效边界和请求准入检查不变。最终版真实 COS 的 60 次写后 GET p50/p95/p99 为 0.60/0.76/1.03ms、最大 29.99ms；300 次空闲连续 GET p99 0.45ms；8 次间隔 1.15 秒 GET 均为 0.55–0.62ms。跨地域 COS 忙时提前刷新仍可能失败或晚于失效时间，此前复测曾见 20–61ms 残余尖峰；**长尾尚未证明完全消除**。首次读与冷写不在此次热缓存优化范围。仍需用 SG 同区 fleet/公开入口复验；详见 [对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
+已打开 cell 的连续热 GET 约 0.3–0.4ms，但 binding、owner 和资源删除 fence 的 1 秒缓存失效后会在请求路径同步读取控制面/COS；本机到香港 COS 测试桶每隔 1.15 秒的 8 次 GET 曾为 44–185ms。分段诊断还发现本机 owner 被滞后的 node-lease 快照判为不存活时，GET 会同步点读 `nodes/<self>.json`，仅路由判活就耗 24–25ms。ADR-283 在有限活跃 KV 集合中提前刷新原有缓存，并以本机已成功发布且健康的 lease 直接判断本机 owner；未发布或不健康时失败关闭，失效边界和请求准入检查不变。最终版真实 COS 的 60 次写后 GET p50/p95/p99 为 0.60/0.76/1.03ms、最大 29.99ms；300 次空闲连续 GET p99 0.45ms；8 次间隔 1.15 秒 GET 均为 0.55–0.62ms。跨地域 COS 忙时提前刷新仍可能失败或晚于失效时间，此前复测曾见 20–61ms 残余尖峰；**长尾尚未证明完全消除**。首次读与冷写不在此次热缓存优化范围。SG 已做短时同 Pod 写后 GET 复验，公开入口和长时间 GET 尾延迟仍待测；详见 [对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
 
-PUT 共用上述 binding、资源 fence、owner 路由，原先只有 GET 能维持提前刷新：间隔 1.15 秒的纯 PUT 在最近 GET 停止后退回同步检查，分段诊断约 25–30ms binding、12–16ms fence、23–31ms gate，加上约 50ms 写入与 bucket 持久化证明。现成功 PUT 也维持活跃 scope；本机到香港 COS 的三轮间隔 PUT 各 12 次中，两轮全部约 43–66ms，另一轮 11 次约 49–66ms、一次 611ms。**PUT 仍须同步等待 RPO=0 证明**；诊断确认部分 80–181ms 连续写的增加量全部在证明等待中。611ms 单次尖峰未被同请求阶段日志覆盖，不能将所有尾延迟归因或称已解决；SG 同区 fleet/公开入口仍待验证。细节见同一[对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
+PUT 共用上述 binding、资源 fence、owner 路由，原先只有 GET 能维持提前刷新：间隔 1.15 秒的纯 PUT 在最近 GET 停止后退回同步检查，分段诊断约 25–30ms binding、12–16ms fence、23–31ms gate，加上约 50ms 写入与 bucket 持久化证明。现成功 PUT 也维持活跃 scope；本机到香港 COS 的三轮间隔 PUT 各 12 次中，两轮全部约 43–66ms，另一轮 11 次约 49–66ms、一次 611ms。**PUT 仍须同步等待 RPO=0 证明**；诊断确认部分 80–181ms 连续写的增加量全部在证明等待中。611ms 单次尖峰未被同请求阶段日志覆盖，不能将所有尾延迟归因或称已解决；SG 短时同 Pod fleet 复验见下文，公开入口和长期尾延迟仍待验证。细节见同一[对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
 
 ADR-284 又去掉了 COS 不可变 LTX Append 成功后为取 ETag 做的常规 HEAD：测试桶实测响应 ETag 与 HEAD 15/15 相同，缺失响应头时仍回退 HEAD。独立顺序 A/B 的普通 PUT p50 从 49.95ms 到 44.19ms，TTL PUT p50 从 48.78ms 到 46.57ms；不同轮 COS 波动不可归因于单项变更。优化后普通 PUT 仍有 544ms 尖峰，跨地域 bucket 模式的长尾与冷请求仍未解决。
 
 扩大到 120 对写入的临时分段诊断确认，数百毫秒尖峰主要落在 RPO=0 提交前的 COS 资源 fence 权威点读（最高观察到 778ms）或原生 COS Append（例如 412–472ms）；不是 SQLite 或 TTL 唤醒扫描。该 bucket 模式不能安全跳过 fresh fence 或先于 COS 持久化应答。需在 SG 同区 fleet 模式确认 follower fsync 正常承担热写证明、bucket 回退的频率和原因，并分别测同 Pod 与公开入口。
 
+SG 已在 2026-10-24 部署 `ac5ad43`（Helm revision 53）。独立 namespace 的 Pod 本地真实 HTTP 校验通过 10 次普通 PUT、10 次 TTL PUT 与逐次 GET；首写 752ms、次写 146ms，之后 18 次热 PUT p50 9.84ms、p95 11.44ms、最大 13.14ms。该窗口 `fleet` 提交 +22、`bucket-batch` +0，`live_followers=1`，产品 App 删除返回 200。通过 `kubectl port-forward` 的另一轮 20 次 PUT/GET 也全部正确，但其延迟包含隧道开销，不能用来判断同 Pod 性能；该轮记录到 fleet +17、bucket-batch +4，计数包括控制面提交，需继续追踪 bucket 回退。公开入口和较长时间的尾延迟仍待验收。滚动后 cell-agent-1 曾有一次对旧 follower IP `10.0.16.195` seal 超时的 recovery WARN；恢复过程失败关闭，旧 session 是否能最终封存尚未确认，需单独跟踪。
+
 ## 2026-10-24 KV TTL 同步重设 timer 的写入延迟（ADR-282）
 
-SG 同 Pod 的小值 KV put 对照中，不带 TTL 多次约 9–11ms（偶有 60–164ms），带 `expiration_ttl=300` 为 191–300ms；本地 FS 各 10 次的中位数分别为 4.2ms 和 5.4ms。写入持久化证明的平均值约 24ms，不能解释大部分 TTL 耗时。ADR-282 已实现复用已持久化、尚未到期且足够早的 `kv-expire` timer，避免每次 TTL put 都同步改写 COS `wake/` 索引；首次和更早到期仍要同步发布。本地修复后普通/TTL 中位数为 3.85/4.11ms，真实进程 1 秒/3 秒 TTL 物理清理和五场景 FS 冷写 E2E 均通过。真实 COS 测试桶（本机跨地域、bucket 模式）旧版普通/TTL 中位数 56.0/257.2ms、修复版 65.7/47.0ms；2 秒/6 秒 TTL 读回和到期均正确。SG 同区 fleet 模式与公开入口延迟尚未测、尚未部署；见 [TTL wake 对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
+SG 部署前同 Pod 的小值 KV put 对照中，不带 TTL 多次约 9–11ms（偶有 60–164ms），带 `expiration_ttl=300` 为 191–300ms；本地 FS 各 10 次的中位数分别为 4.2/5.4ms。写入持久化证明的平均值约 24ms，不能解释大部分 TTL 耗时。ADR-282 已实现复用已持久化、尚未到期且足够早的 `kv-expire` timer，避免每次 TTL put 都同步改写 COS `wake/` 索引；首次和更早到期仍要同步发布。本地修复后普通/TTL 中位数为 3.85/4.11ms，真实进程 1 秒/3 秒 TTL 物理清理和五场景 FS 冷写 E2E 均通过。真实 COS 测试桶（本机跨地域、bucket 模式）旧版普通/TTL 中位数 56.0/257.2ms、修复版 65.7/47.0ms；2 秒/6 秒 TTL 读回和到期均正确。SG 已部署并完成上述短时同 Pod 普通/TTL PUT 复验；公开入口延迟仍未测，见 [TTL wake 对照记录](archive/bench/kv-ttl-wake-2026-10-24.md)。
 
 ## 2026-10-24 SG owner 判活分歧（ADR-280）
 
