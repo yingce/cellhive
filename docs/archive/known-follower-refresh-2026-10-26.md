@@ -61,3 +61,20 @@ ADR-295 / `a3c5c7e`：cell-agent生命周期中启动独立已知节点刷新任
 测试结束再从两个入口核验100键，全部正确；正式API删除binding，cleanup `ds_59a2122f402919f0a3b89ad557f10f05`达到complete、attempts1；app删除ok=true，Pod临时probe移除。清理后业务Pod仍全部Ready、零重启。
 
 最终证据 `/tmp/sg-known-refresh/final/`：`summary.txt`、前后metrics、`requests.log`、agent日志、Pod imageID、发布前后校验、cleanup/finish；持久化摘要同时保存在 `/opt/cellhive-helm/reports/sg-known-refresh-2026-10-26/`。
+
+
+## USW / 本地部署（2026-10-26）
+
+按用户要求复用最终镜像 `29d8d55` / `sha256:9e9811870fe03e673b5e1ef4e0fb1cb54ed1984af8b34c1a7e524667b939fd89`，其中已包含 `e1e2383` 分段 trace / 慢提交诊断和 `44c2a36` enqueue 背压观测；源码已推送 origin/main。本轮没有修改可执行代码，因此复用上述全量测试、race、进程 E2E 和镜像结果，另做目标环境发布验收。
+
+USW 正式 Helm preflight / diff / atomic upgrade 退出0，revision51。diff 仅涉及三个业务工作负载的镜像。最终6个业务Pod Ready、imageID一致、容器重启计数0；但期间额外重建两个DO Pod，不能把零容器重启解释为没有Pod重建。SG仍为同镜像revision66，实查全部Ready。
+
+本地通过现有 Compose 三份配置及原env文件，给 `cellhive:dev` 标记同一镜像，`up -d --no-build --no-deps cell-agent user-runtime do-runtime`，保留数据卷。三个容器healthy、imageID一致、容器重启计数0；旧镜像保留为 `cellhive:pre-known-refresh-local`。
+
+两环境均先写KV及DO持久值，再升级读取验证。USW两个agent入口互读旧KV值及新写通过；本地KV通过。DO旧值、二进制、响应头、两个Set-Cookie、deleteAll、302重定向全部通过。最终USW两个样本PUT为10.05/11.87ms，本地9.13ms；仅冒烟样本，不作为RPS或分位数结论。首次USW升级后冷写450.58ms也保留，未将其解释为热写性能。
+
+### 发布中发现的恢复边界
+
+USW DO早于cell-agent滚动完成，两个DO `/ready` 持续返回503 `cell_unreachable`；同容器curl访问cell-agent `/readyz` 为200（约1.2ms），业务DO调用曾返回500 / do_unreachable。cell-agent全部就绪后，依次删除重建两个DO Pod恢复；随后正式Helm完成，完整验收重跑通过。疑似workerd旧连接或解析缓存，尚未确认根因，也未在本轮修复；后续需要复现并验证自动恢复。当前处置建议先完成agent滚动再更新DO；不能声称该滚动异常已经代码修复。
+
+证据：`/tmp/usw-local-refresh/`（before/after/final校验、diff、upgrade、最终imageID）；运维仓持久摘要 `reports/usw-local-known-refresh-2026-10-26/`。保留隔离验收namespace以便后续发布持续校验，KV预置值TTL为86400秒。
