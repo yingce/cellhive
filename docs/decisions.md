@@ -1,5 +1,28 @@
 # 决策记录（ADR）
 
+## ADR-294 后台基线快照独立于增量捕获（2026-10-25）
+
+marker 恢复后的 RequestBaseline 使用 SQLite backup 复制固定版本（保留页编号），在 cell 写锁内仅做本地复制，上传使用独立临时文件并释放原库锁。不对原库 checkpoint、重置 WAL cursor 或推进持久性 barrier；并发写仍必须由增量提交获得证明。临时文件中的 txid 是快照唯一水位，started/done 仍按该水位标记。失败或取消不发布 done，不停止原增量链；复制前按 SQLite page_count/page_size 检查 SnapshotMaxBytes（含 WAL 中的新页），流式编码保持分片内存预算；结束清理临时文件。capture 退出会取消并等待后台复制/上传，防止关闭 DB 时仍有后台任务。cell-agent 获得数据目录独占锁后，在启动阶段清理 cells/<ns>/<class> 下专用临时目录，回收 SIGKILL 遗留。首次无可恢复链的快照与 WAL 截断后的 rebaseline 仍采用同步输出门。不能用 VACUUM INTO 替代 backup，因为后续 WAL delta 依赖原页编号。
+
+## ADR-293 节点租约点查与首次发现非阻塞（2026-10-25）
+
+查询已知 node 的租约时仅读取已有内存快照，未命中则点查该 node；不得调用全量节点采样。SampleCached 的冷缓存和过期缓存均只安排一次后台刷新，使用独立 15s deadline 和既有失败退避，立即返回已有快照（未初始化时 nil）。后台扫描和单节点权威查询互不等待。没有 follower 快照时继续既有 bucket 持久性回退，不视为已有 peer fsync 证明；owner 接管的 fresh lease 校验、session/epoch fence、输出门不变。
+
+这修复了 NodeLease 注释承诺“不在请求路径 List”但首次调用实际同步扫描 nodes/ 的违约。HK COS 历史节点较多时，绑定检查/路由判活因此阻塞约 9–11s。后台枚举历史节点的总成本尚未在本条解决。管理员日志订阅是诊断路径，冷缓存时仍显式采样以保留向所有节点传播订阅的功能，不把空快照视为已完成 fanout。恢复已有 L1 manifest 的 epoch 时，在下载前按可验证的对象名范围跳过完全被 manifest 水位覆盖的 L0 对象；不省略 epoch marker、未知/混合 batch、跨越水位的对象，保留 manifest 前后版本检查和恢复链校验。此前下载后才过滤造成无效 COS 请求。不以文件名推断未知 batch 的安全性。详见 [计划](superpowers/plans/2026-10-25-cold-recovery-performance.md)。
+
+## ADR-292 跨模块资源边界与数据响应修复（2026-10-25）
+
+- Queue consumer `max_concurrency` 接受 0（默认串行）到 100；控制 API 和 Cloudflare 兼容入口拒绝超额值，runner 对历史值再次限幅。该上界是每队列在飞批次数，不是节点总并发准入。
+- 冷恢复任务类型在添加内部 deadline 前确定；REST/admin HTTP 入口显式标记交互任务，因为入站 HTTP context 通常没有 deadline。后台任务使用后台池。同 cell 打开/驱逐等待支持请求取消，不取消共享生产者；请求计数为零即删除 bookkeeping。生产调用使用 `BeginRequestContext`。
+- adaptive router 等待 flight 完成后重新进入加锁查询并检查取消，不能沿用已经解锁的临界区。
+- JWKS 未知 kid 刷新采用全局最小间隔 `min(30s, TTL)`，从刷新完成时计时；失败也退避，保留原 stale-key 行为。新轮换 key 最多等待该刷新窗口；不建立随机 kid 的无界负缓存。
+- D1 结果预算逐行累计，计入最终保留的字符串、数值和 BLOB 展开的 `[]int` 载荷；BLOB 扩展分配前先检查 32 MiB 总预算，每行检查取消。预算不含 Go 接口/切片头等全部内存开销，也不是最终 JSON 字节上限。
+- R2 每次 PUT 先点读旧 sidecar 的存储 ETag，成功写入对象后仅条件删除这一旧版本；并发替换导致条件不匹配时保留新 sidecar。已知不支持条件删除的 provider 在存在旧 sidecar 时于对象写入前返回不支持，不能降级为无条件删除。无 metadata 覆盖也处理旧 sidecar，包括相同内容覆盖。读取必须匹配对象的 ETag/size，sidecar 不得覆盖权威 size/ETag；range 读与 Stat 版本不一致返回 503。sidecar 读取/清理/发布失败不能返回成功。
+- R2 的对象和 sidecar 仍是两个非原子对象：迟到发布仍可能覆盖新 sidecar，读取过滤不同对象版本的 metadata，但不能区分相同内容 ETag 的并发写；失败响应也可能已写入对象。完整原子发布需要独立的版本/manifest 协议。本次成本是每次 PUT 增加一次 sidecar Get，存在旧 sidecar 时增加一次条件删除，带 metadata 时另有发布 Put；不新增热路径 List。此条取代 ADR-163 的“无 metadata 单写”和“range 优先 sidecar.size”。
+- GitHub Go 检查统一使用 `make vet`、`make test`，复用 Makefile SQLite tags。owner/epoch/复制输出门不变。
+
+实现与验收见 [修复记录](archive/project-review-fixes-2026-10-25.md) 和 [计划](superpowers/plans/2026-10-25-review-fixes.md)。
+
 ## ADR-291 节点租约不可逆失效与条件续租（2026-10-25）
 
 节点续租使用上次成功写入的 ETag CAS；首次发布先点读，使用条件创建或匹配原记录的 CAS，同持久 instance 的重启仍由数据目录锁保护。成功发布后的实际租约期限同时受单调时间和墙上时间约束；超过原期限，无论续租随后成功、失败或仍挂起，该 session 永久 fenced，禁止重新获得健康状态。TTL/5 的提前安全余量只暂停服务，原租期内成功续租仍可恢复；初次发布未获得有效租约则启动失败。
@@ -2906,8 +2929,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 - **背景**：`docs/dev-mode.md` 的契约对拍表记录了 facade/binding 相对 CF 的字段缺口：R2 `get()` 只有 `{etag,size,text/json/arrayBuffer}`、`put` 忽略 `httpMetadata/customMetadata/checksums`；D1 `run()` meta 缺 `last_row_id`；错误是平台 `{error:...}` 而非 `D1_ERROR`/`KVError`。
 - **决策**：
   - **R2 对象字段**：`get()` 返回完整 `R2ObjectBody`。实现关键：workerd RPC 会**按值序列化数据字段**、把**可枚举的函数属性序列化为可调用 stub**（`RpcTarget` 只暴露方法不暴露数据——实测验证），因此正文对象用「普通对象 + 数据字段 + 可枚举正文方法」：`obj.size`/`obj.httpMetadata` 与 `await obj.text()` 同时可用，`JSON.stringify` 自动跳过函数。`bodyUsed` 为快照值（读取后不翻转）。
-  - **R2 metadata sidecar**：`put(key,value,{httpMetadata,customMetadata,md5,sha256})`（md5/sha256 为 hex，写入前校验）把 metadata 存到 `r2meta/<ns>/<bucket>/<key>`（新增保留前缀，owner `r2`；同时登记 `r2/`）；`get()/head()` 读 sidecar 并回填；`delete` 一并删 sidecar。无 metadata 的 put 仍是单写。
-  - **`head()`** 新增（`GET /v1/r2/object?head=1`，只回 R2Object JSON，不声明 object 的 `content-length`）；range 响应用 `content-range: bytes a-b/total`（total 优先取 sidecar.size，否则 `bucket.Statter`）。
+  - **R2 metadata sidecar**：`put(key,value,{httpMetadata,customMetadata,md5,sha256})`（md5/sha256 为 hex，写入前校验）把 metadata 存到 `r2meta/<ns>/<bucket>/<key>`（新增保留前缀，owner `r2`；同时登记 `r2/`）；`get()/head()` 读 sidecar 并回填；`delete` 一并删 sidecar。无 metadata 的 put 原为单写；现由 ADR-292 的 sidecar 版本清理取代。
+  - **`head()`** 新增（`GET /v1/r2/object?head=1`，只回 R2Object JSON，不声明 object 的 `content-length`）；range 响应用 `content-range: bytes a-b/total`（total 取权威对象 Stat，并校验与读取版本一致，见 ADR-292）。
   - **`bucket.Statter`** 可选接口：S3 `HeadObject`（不传体）、FS 回退读体算 `sha256` etag；`r2.Stat` 优先用它。
   - **list**：透传 `truncated`/`cursor`，对象带 `key/size/etag/httpEtag/version`；**不逐对象**读 sidecar（避免 N 次读），其余字段为默认。
   - **D1**：`d1.Result` 增 `LastInsertID`（`sql.Result.LastInsertId()`），`run()/batch()` meta 增 `last_row_id`/`changed_db`；facade/binding 的错误按 CF 形状抛出（`err.name=D1_ERROR|KVError|R2Error|QueueError`、`err.code`=平台码、`err.status`）。

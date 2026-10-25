@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"cellhive/internal/control"
-	"cellhive/internal/queue"
+	queuepkg "cellhive/internal/queue"
 )
 
 func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
@@ -981,7 +981,7 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 		in.ScriptName = r.PathValue("consumer_id")
 	}
 	if !remove {
-		if in.Settings.BatchSize < 0 || in.Settings.BatchSize > 100 || in.Settings.MaxConcurrency < 0 || in.Settings.RetryDelay < 0 || (in.Settings.MaxRetries != nil && *in.Settings.MaxRetries <= 0) || (in.Settings.MaxWaitTimeMs != nil && (*in.Settings.MaxWaitTimeMs < 0 || *in.Settings.MaxWaitTimeMs > 60_000 || *in.Settings.MaxWaitTimeMs%1000 != 0)) {
+		if in.Settings.BatchSize < 0 || in.Settings.BatchSize > 100 || in.Settings.MaxConcurrency < 0 || in.Settings.MaxConcurrency > queuepkg.MaxConsumerConcurrency || in.Settings.RetryDelay < 0 || (in.Settings.MaxRetries != nil && *in.Settings.MaxRetries <= 0) || (in.Settings.MaxWaitTimeMs != nil && (*in.Settings.MaxWaitTimeMs < 0 || *in.Settings.MaxWaitTimeMs > 60_000 || *in.Settings.MaxWaitTimeMs%1000 != 0)) {
 			writeErr(w, http.StatusBadRequest, "invalid_consumer", "invalid queue consumer settings")
 			return
 		}
@@ -1087,10 +1087,10 @@ func (s *Server) handleCloudflareQueuePurge(w http.ResponseWriter, r *http.Reque
 		writeCloudflareRegistryError(w, err, http.StatusNotFound, "queue_not_found")
 		return
 	}
-	if s.forwardOrClaim(w, r, queue.Scope(ns, name), nil) {
+	if s.forwardOrClaim(w, r, queuepkg.Scope(ns, name), nil) {
 		return
 	}
-	if err := s.capturedWrite(r.Context(), queue.Scope(ns, name), func() error { return s.Queue.Purge(r.Context(), ns, name) }); err != nil {
+	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error { return s.Queue.Purge(r.Context(), ns, name) }); err != nil {
 		writeErr(w, http.StatusBadRequest, "queue_purge_failed", err.Error())
 		return
 	}

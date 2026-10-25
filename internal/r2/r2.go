@@ -67,8 +67,8 @@ func prefix(ns, bucketName string) (string, error) {
 }
 
 // Metadata is the R2 object metadata exposed on R2Object/R2ObjectBody. It is
-// stored in a sidecar object (r2meta/<ns>/<bucket>/<key>) written only when the
-// caller supplies metadata or checksums, so the common put stays one write.
+// stored in a sidecar object (r2meta/<ns>/<bucket>/<key>). Every successful
+// object write invalidates the old sidecar before publishing new metadata.
 type Metadata struct {
 	HTTP       map[string]string `json:"http,omitempty"`
 	Custom     map[string]string `json:"custom,omitempty"`
@@ -155,17 +155,36 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 			}
 		}
 	}
-	if condition == nil {
-		etag, err = s.B.Put(ctx, k, data)
-	} else {
-		_, old, getErr := s.B.Get(ctx, k)
-		exists := getErr == nil
+	var old string
+	var exists bool
+	if condition != nil {
+		var getErr error
+		_, old, getErr = s.B.Get(ctx, k)
+		exists = getErr == nil
 		if getErr != nil && !errors.Is(getErr, bucket.ErrNotFound) {
 			return "", false, getErr
 		}
 		if !condition.matches(exists, old) {
 			return "", false, nil
 		}
+	}
+	// Snapshot the sidecar's storage revision before changing the object.
+	// Cleanup must never erase a newer writer's acknowledged metadata.
+	mk, _ := metaKey(ns, bucketName, key)
+	_, priorMetaETag, metaErr := s.B.Get(ctx, mk)
+	if metaErr != nil && !errors.Is(metaErr, bucket.ErrNotFound) {
+		return "", false, metaErr
+	}
+	if metaErr == nil {
+		// Some provider gateways ignore DeleteObject If-Match. Do not mutate
+		// data when the adapter explicitly cannot fence sidecar cleanup.
+		if support, ok := s.B.(interface{ SupportsConditionalDelete(string) bool }); ok && !support.SupportsConditionalDelete(mk) {
+			return "", false, bucket.ErrNotSupported
+		}
+	}
+	if condition == nil {
+		etag, err = s.B.Put(ctx, k, data)
+	} else {
 		if exists {
 			etag, err = s.B.CAS(ctx, k, data, old)
 		} else {
@@ -180,6 +199,14 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 	}
 	size := int64(len(data))
 	s.recordUsage(ctx, ns, bucketName, key, &size)
+	// The data and sidecar are separate bucket objects, not an atomic pair.
+	// Invalidate even for identical data: content ETags cannot distinguish two
+	// writes of the same bytes. Failures here must not be acknowledged.
+	if metaErr == nil {
+		if err := s.B.ConditionalDelete(ctx, mk, priorMetaETag); err != nil && !errors.Is(err, bucket.ErrPrecondition) {
+			return "", false, err
+		}
+	}
 	if md == nil || (len(md.HTTP) == 0 && len(md.Custom) == 0 && md.MD5 == "" && md.SHA256 == "") {
 		return etag, true, nil
 	}
@@ -187,13 +214,9 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 	stored.Size = int64(len(data))
 	stored.ETag = etag
 	if stored.UploadedMs == 0 {
-		stored.UploadedMs = time.Now().UnixMilli()
+		stored.UploadedMs = s.now().UnixMilli()
 	}
 	buf, err := json.Marshal(stored)
-	if err != nil {
-		return "", false, err
-	}
-	mk, err := metaKey(ns, bucketName, key)
 	if err != nil {
 		return "", false, err
 	}
@@ -203,8 +226,40 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 	return etag, true, nil
 }
 
-// GetMeta returns the object's metadata sidecar, or (nil, nil) when absent.
+// GetMeta returns metadata matching the current object, or nil when absent
+// or obsolete. Backend and decoding failures are returned to the caller.
 func (s *Store) GetMeta(ctx context.Context, ns, bucketName, key string) (*Metadata, error) {
+	md, err := s.getMeta(ctx, ns, bucketName, key)
+	if err != nil || md == nil {
+		return md, err
+	}
+	size, etag, err := s.Stat(ctx, ns, bucketName, key)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !md.Matches(size, etag) {
+		return nil, nil
+	}
+	return md, nil
+}
+
+// GetMetaForVersion reads metadata for a caller's already-read object version,
+// avoiding a second object read/HEAD. A mismatching sidecar is omitted.
+func (s *Store) GetMetaForVersion(ctx context.Context, ns, bucketName, key string, size int64, etag string) (*Metadata, error) {
+	md, err := s.getMeta(ctx, ns, bucketName, key)
+	if err != nil {
+		return nil, err
+	}
+	if !md.Matches(size, etag) {
+		return nil, nil
+	}
+	return md, nil
+}
+
+func (s *Store) getMeta(ctx context.Context, ns, bucketName, key string) (*Metadata, error) {
 	mk, err := metaKey(ns, bucketName, key)
 	if err != nil {
 		return nil, err
@@ -221,6 +276,12 @@ func (s *Store) GetMeta(ctx context.Context, ns, bucketName, key string) (*Metad
 		return nil, err
 	}
 	return &md, nil
+}
+
+// Matches checks a sidecar against authoritative object information. Content
+// ETags do not identify separate writes of identical bytes.
+func (md *Metadata) Matches(size int64, etag string) bool {
+	return md != nil && etag != "" && md.ETag == etag && md.Size == size
 }
 
 // Stat returns the object size and etag. It uses the backend's Statter (S3

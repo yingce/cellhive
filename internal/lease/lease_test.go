@@ -62,16 +62,18 @@ func TestSampleCachedDoesNotHoldLockDuringIO(t *testing.T) {
 	}
 	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Minute}
 	var held atomic.Bool
+	probed := make(chan struct{})
 	m.B = &probeBucket{Bucket: base, probe: func() {
+		defer close(probed)
 		if !m.mu.TryLock() {
 			held.Store(true)
 			return
 		}
 		m.mu.Unlock()
 	}}
-	if got := m.SampleCached(context.Background(), time.Minute); got == nil {
-		t.Fatalf("SampleCached returned nil")
-	}
+	m.SampleCached(context.Background(), time.Minute)
+	<-probed
+	waitLeaseSample(t, m)
 	if held.Load() {
 		t.Fatalf("SampleCached held mu during bucket I/O")
 	}
@@ -83,9 +85,8 @@ func TestSampleCachedServesStaleWhileRefreshing(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &Manager{B: base, NodeID: "n1", Session: "s1", TTL: time.Minute}
-	if got := m.SampleCached(context.Background(), time.Millisecond); got == nil {
-		t.Fatal("first sample should populate the cache")
-	}
+	m.SampleCached(context.Background(), time.Millisecond)
+	waitLeaseSample(t, m)
 	block := make(chan struct{})
 	release := make(chan struct{})
 	m.B = &probeBucket{Bucket: base, probe: func() {
@@ -107,6 +108,7 @@ func TestSampleCachedServesStaleWhileRefreshing(t *testing.T) {
 		t.Fatal("background refresh did not start")
 	}
 	close(release)
+	waitLeaseSample(t, m)
 }
 
 func TestHealthyRequiresPublish(t *testing.T) {
@@ -224,5 +226,24 @@ func TestNodeLeaseFreshBypassesSnapshot(t *testing.T) {
 	}
 	if _, ok, err := m.NodeLeaseFresh(context.Background(), "nobody"); err != nil || ok {
 		t.Fatalf("missing node ok=%v err=%v", ok, err)
+	}
+}
+
+// Wait for asynchronous discovery to finish before changing its bucket or
+// removing the test directory; do not race background I/O with test cleanup.
+func waitLeaseSample(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		m.mu.Lock()
+		done := !m.refreshing && m.cached != nil
+		m.mu.Unlock()
+		if done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lease sample did not finish")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

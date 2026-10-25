@@ -1,0 +1,4 @@
+ok  	cellhive/internal/cellstore	4.442s
+ok  	cellhive/internal/sqlcapture	23.880s
+ok  	cellhive/internal/cellcapture	1.863s
+ok  	cellhive/internal/server	44.379s

@@ -1,0 +1,5 @@
+ok  	cellhive/internal/lease	1.042s
+ok  	cellhive/internal/owner	20.202s
+ok  	cellhive/internal/replica	2.722s
+ok  	cellhive/internal/recovery	2.036s
+ok  	cellhive/internal/server	43.061s

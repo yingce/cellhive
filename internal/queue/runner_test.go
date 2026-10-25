@@ -437,3 +437,17 @@ func TestRunnerCommitWrapsMutations(t *testing.T) {
 		t.Fatalf("depth = %d, want 0", depth)
 	}
 }
+
+func TestRunnerLegacyHugeConcurrencyEmptyQueue(t *testing.T) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.Fatalf("untrusted concurrency caused allocation panic: %v", v)
+		}
+	}()
+	r := &queue.Runner{Store: newStore(t), Dispatch: &fakeDispatcher{}, Queues: func(context.Context) ([]queue.Ref, error) {
+		return []queue.Ref{{Namespace: "demo", Name: "empty", MaxConcurrency: int(^uint(0) >> 1)}}, nil
+	}}
+	if n, err := r.Pass(context.Background()); err != nil || n != 0 {
+		t.Fatalf("Pass = %d, %v", n, err)
+	}
+}

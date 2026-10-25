@@ -426,7 +426,15 @@ func (s *Server) Handler() http.Handler {
 	// operator endpoints (internal token / admin JWT), not tenant data-plane
 	// paths, even though they share the /v1/<kind>/ prefix.
 	s.registerResourceRoutes(mux, s.auth)
-	return s.count(s.trace(s.peerIdentity(mux)))
+	return s.interactiveHydration(s.count(s.trace(s.peerIdentity(mux))))
+}
+
+// HTTP deadlines are not transmitted by clients. Explicitly classify
+// request-driven cold work before any storage helper adds its own timeout.
+func (s *Server) interactiveHydration(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(cellstore.WithInteractiveHydration(r.Context())))
+	})
 }
 
 func (s *Server) count(next http.Handler) http.Handler {
@@ -2153,7 +2161,11 @@ func (s *Server) handleTimerUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Store != nil {
-		end := s.Store.BeginRequest(sc.String())
+		end, err := s.Store.BeginRequestContext(r.Context(), sc.String())
+		if err != nil {
+			s.captureErr(w, err, "request_gate_failed")
+			return
+		}
 		defer end()
 	}
 	t := timer.New(req.DueAtMs, timer.Kind(req.Kind), sc.String(), req.Occurrence)
@@ -2265,7 +2277,11 @@ func (s *Server) pinNSMW(next http.HandlerFunc) http.HandlerFunc {
 					}
 					ctx = context.WithValue(ctx, ctxScopePreInvalidated, sc.String())
 				}
-				end := s.Store.BeginRequest(s.gateKey(ctx, "workflow", ns, "", r.URL.Query()))
+				end, err := s.Store.BeginRequestContext(ctx, s.gateKey(ctx, "workflow", ns, "", r.URL.Query()))
+				if err != nil {
+					s.captureErr(w, err, "request_gate_failed")
+					return
+				}
 				defer end()
 			}
 		}

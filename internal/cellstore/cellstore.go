@@ -28,6 +28,14 @@ import (
 // ErrNotFound is returned when a key does not exist.
 var ErrNotFound = errors.New("cellstore: not found")
 
+type interactiveHydrationKey struct{}
+
+// WithInteractiveHydration marks request-driven cold work independently of
+// deadlines: an incoming HTTP context normally has no deadline at all.
+func WithInteractiveHydration(ctx context.Context) context.Context {
+	return context.WithValue(ctx, interactiveHydrationKey{}, true)
+}
+
 // Store opens cells under a data directory.
 type Store struct {
 	DataDir string
@@ -63,8 +71,8 @@ type Store struct {
 	// opens are parallel, but a mass restart must not hydrate every cell at once
 	// (parallel RestoreChain fetches can exceed the container memory limit).
 	HydrateParallel int
-	// HydrateInteractiveParallel bounds hydrates started by callers with a
-	// deadline (HTTP requests). Background cron/queue/waker hydration uses the
+	// HydrateInteractiveParallel bounds explicitly marked request hydrates or
+	// callers with their own deadline. Background cron/queue/waker uses the
 	// separate HydrateParallel pool, so a stuck background restore cannot starve
 	// invocation/KV requests.
 	HydrateInteractiveParallel int
@@ -144,16 +152,49 @@ func newStore(dataDir string, hydrateParallel int) (*Store, error) {
 	return s, nil
 }
 
-// BeginRequest marks a request in flight for a gate key (a cell scope string)
-// and returns its end function. It blocks while that key is being evicted, so a
-// request never races the close of the cell it uses. An empty key is ignored.
-func (s *Store) BeginRequest(key string) (end func()) {
+// waitLocked waits for a store predicate while respecting cancellation. The
+// caller holds s.mu. Cancellation only wakes waiters; it cannot cancel another
+// request's open/eviction or change its gate.
+func (s *Store) waitLocked(ctx context.Context, blocked func() bool) error {
+	if !blocked() {
+		return ctx.Err()
+	}
+	stop := context.AfterFunc(ctx, func() {
+		s.mu.Lock()
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	})
+	defer stop()
+	for blocked() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.cond.Wait()
+	}
+	return ctx.Err()
+}
+
+// BeginRequest is the compatibility gate for callers without a context.
+// Request paths must use BeginRequestContext so an eviction cannot hold an
+// already cancelled request indefinitely.
+func (s *Store) BeginRequest(key string) func() {
+	end, _ := s.BeginRequestContext(context.Background(), key)
+	return end
+}
+
+// BeginRequestContext pins a gate key until end is called. Cancellation while
+// waiting does not admit a request and does not alter the active eviction.
+func (s *Store) BeginRequestContext(ctx context.Context, key string) (func(), error) {
 	if key == "" {
-		return func() {}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return func() {}, nil
 	}
 	s.mu.Lock()
-	for s.evicting[key] {
-		s.cond.Wait()
+	if err := s.waitLocked(ctx, func() bool { return s.evicting[key] }); err != nil {
+		s.mu.Unlock()
+		return nil, err
 	}
 	s.busy[key]++
 	s.mu.Unlock()
@@ -163,10 +204,11 @@ func (s *Store) BeginRequest(key string) (end func()) {
 			s.busy[key]--
 		}
 		if s.busy[key] == 0 {
+			delete(s.busy, key)
 			s.cond.Broadcast()
 		}
 		s.mu.Unlock()
-	}
+	}, nil
 }
 
 func (s *Store) touchLocked(p string) {
@@ -176,12 +218,11 @@ func (s *Store) touchLocked(p string) {
 	}
 }
 
-func (s *Store) hydrateSlot(ctx context.Context) (func(), error) {
+func (s *Store) hydrateSlot(ctx context.Context, interactive bool) (func(), error) {
 	n := s.HydrateParallel
 	if n <= 0 {
 		n = 2
 	}
-	_, interactive := ctx.Deadline()
 	if interactive {
 		n = s.HydrateInteractiveParallel
 		if n <= 0 {
@@ -228,9 +269,13 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		return nil, err
 	}
 	key := sc.String()
+	// Classify the caller before hydrateContext adds its internal timeout.
+	_, interactive := ctx.Deadline()
+	interactive = interactive || ctx.Value(interactiveHydrationKey{}) == true
 	s.mu.Lock()
-	for s.evicting[key] || s.opening[key] {
-		s.cond.Wait() // an eviction or another cold open owns this scope
+	if err := s.waitLocked(ctx, func() bool { return s.evicting[key] || s.opening[key] }); err != nil {
+		s.mu.Unlock()
+		return nil, err
 	}
 	if c, ok := s.cells[p]; ok && !c.Closed() {
 		s.touchLocked(p)
@@ -270,7 +315,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	paged := false
 	if cold && (missing || markerValid) && s.Paged != nil {
 		hctx, cancel := s.hydrateContext(ctx)
-		release, rerr := s.hydrateSlot(hctx)
+		release, rerr := s.hydrateSlot(hctx, interactive)
 		if rerr != nil {
 			cancel()
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, rerr)
@@ -338,7 +383,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	}
 	if missing && s.Hydrate != nil {
 		hctx, cancel := s.hydrateContext(ctx)
-		release, rerr := s.hydrateSlot(hctx)
+		release, rerr := s.hydrateSlot(hctx, interactive)
 		if rerr != nil {
 			cancel()
 			return nil, fmt.Errorf("cellstore: hydrate %s: %w", sc, rerr)
@@ -559,8 +604,9 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	// evicting first: an in-flight request may still call Cell, and Cell waits
 	// on evicting. Setting it before the drain deadlocks the store whenever a
 	// request is between BeginRequest and its first Cell call.
-	for s.evicting[key] || s.opening[key] || s.busy[key] > 0 {
-		s.cond.Wait()
+	if err := s.waitLocked(ctx, func() bool { return s.evicting[key] || s.opening[key] || s.busy[key] > 0 }); err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	s.evicting[key] = true
 	s.mu.Unlock()

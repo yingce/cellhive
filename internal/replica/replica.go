@@ -1010,7 +1010,21 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 		}
 		floor = man.MaxTxID
 	}
-	keys = append(keys, l0...)
+	for _, key := range l0 {
+		name := key[strings.LastIndexByte(key, '/')+1:]
+		span, known := parseSegmentSpan(name)
+		// A trusted manifest already covers these objects. Filtering after
+		// download wastes one remote GET per obsolete L0 file. Keep epoch
+		// fences and unknown/mixed batches: their names do not prove that all
+		// contents are covered. A span crossing the floor must stay intact.
+		if strings.HasSuffix(name, ".batch") && !batchSpanKnown(name) {
+			known = false
+		}
+		if floor > 0 && known && !span.marker && span.end <= floor {
+			continue
+		}
+		keys = append(keys, key)
+	}
 
 	// Fetch objects with a bounded worker pool; decoding and ordering stay
 	// deterministic. Do not spawn one goroutine per key: a slow COS List/GET can

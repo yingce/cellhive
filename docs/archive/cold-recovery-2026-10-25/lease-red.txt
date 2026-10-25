@@ -1,0 +1,7 @@
+--- FAIL: TestNodeLeaseColdLookupDoesNotSampleFleet (0.00s)
+    cold_sample_test.go:44: single-node lookup: lists=1 gets=1; want 0/1
+--- FAIL: TestSampleCachedColdDoesNotWaitForFleetScan (0.20s)
+    cold_sample_test.go:65: first caller blocked on fleet enumeration
+FAIL
+FAIL	cellhive/internal/lease	0.206s
+FAIL

@@ -153,16 +153,16 @@ func (r *Runner) Pass(ctx context.Context) (dispatched int, err error) {
 	return dispatched, nil
 }
 
+// MaxConsumerConcurrency bounds queue batch fan-out and allocation.
+const MaxConsumerConcurrency = 100
+
 // dispatchRef dispatches one wave of up to Ref.MaxConcurrency batches (0/1 =
 // sequential, the default), keeping them in flight concurrently. The next Pass
 // takes the next wave, so a pass never blocks indefinitely on a busy queue.
 // Batch order within a wave is not guaranteed, which matches the queue's
 // at-least-once contract.
 func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
-	conc := ref.MaxConcurrency
-	if conc < 1 {
-		conc = 1
-	}
+	conc := min(max(ref.MaxConcurrency, 1), MaxConsumerConcurrency)
 	batch := r.Batch
 	if ref.MaxBatchSize > 0 {
 		batch = ref.MaxBatchSize

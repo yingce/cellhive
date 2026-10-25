@@ -1,0 +1,2 @@
+ok  	cellhive/internal/replica	2.565s
+ok  	cellhive/internal/recovery	1.948s

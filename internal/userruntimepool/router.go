@@ -64,38 +64,40 @@ func (r *Router) Public(req *http.Request) (workerdpool.Route, error) {
 	return r.routeView(req, view)
 }
 func (r *Router) hostView(req *http.Request, host string) (control.HostView, bool, error) {
-	now := time.Now()
-	r.mu.Lock()
-	if e, ok := r.hosts[host]; ok && now.Before(e.expires) {
-		r.mu.Unlock()
-		return e.view, e.found, e.err
-	}
-	if wait, ok := r.inflight[host]; ok {
-		r.mu.Unlock()
-		select {
-		case <-wait:
-		case <-req.Context().Done():
-			return control.HostView{}, false, req.Context().Err()
+	var ch chan struct{}
+	for {
+		if err := req.Context().Err(); err != nil {
+			return control.HostView{}, false, err
 		}
+		now := time.Now()
 		r.mu.Lock()
-		e, ok := r.hosts[host]
-		r.mu.Unlock()
-		if ok && time.Now().Before(e.expires) {
+		if e, ok := r.hosts[host]; ok && now.Before(e.expires) {
+			r.mu.Unlock()
 			return e.view, e.found, e.err
 		}
-	}
-	if now.Sub(r.lookupAt) >= time.Second {
-		r.lookupAt = now
-		r.lookupCount = 0
-	}
-	if r.lookupCount >= 100 {
+		if wait, ok := r.inflight[host]; ok {
+			r.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-req.Context().Done():
+				return control.HostView{}, false, req.Context().Err()
+			}
+		}
+		if now.Sub(r.lookupAt) >= time.Second {
+			r.lookupAt = now
+			r.lookupCount = 0
+		}
+		if r.lookupCount >= 100 {
+			r.mu.Unlock()
+			return control.HostView{}, false, reject(429, "host lookup rate limited")
+		}
+		r.lookupCount++
+		ch = make(chan struct{})
+		r.inflight[host] = ch
 		r.mu.Unlock()
-		return control.HostView{}, false, reject(429, "host lookup rate limited")
+		break
 	}
-	r.lookupCount++
-	ch := make(chan struct{})
-	r.inflight[host] = ch
-	r.mu.Unlock()
 	view, found, err := r.fetchHost(req, host)
 	r.mu.Lock()
 	delete(r.inflight, host)

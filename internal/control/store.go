@@ -16,6 +16,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/queue"
 )
 
 const (
@@ -1140,7 +1141,7 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		return Version{}, fmt.Errorf("control: limits.cpuMs must be positive")
 	}
 	for _, consumer := range spec.Consumers {
-		if consumer.MaxRetries < 0 || consumer.RetryDelaySeconds < 0 || consumer.MaxBatchTimeoutSeconds < 0 || consumer.MaxBatchTimeoutSeconds > 60 || consumer.MaxBatchSize < 0 || consumer.MaxBatchSize > 100 || consumer.MaxConcurrency < 0 {
+		if consumer.MaxRetries < 0 || consumer.RetryDelaySeconds < 0 || consumer.MaxBatchTimeoutSeconds < 0 || consumer.MaxBatchTimeoutSeconds > 60 || consumer.MaxBatchSize < 0 || consumer.MaxBatchSize > 100 || consumer.MaxConcurrency < 0 || consumer.MaxConcurrency > queue.MaxConsumerConcurrency {
 			return Version{}, fmt.Errorf("control: invalid queue consumer settings for %s", consumer.Queue)
 		}
 	}

@@ -332,6 +332,32 @@ func TestCommitAutoSelectsFollowersFromLeases(t *testing.T) {
 		AckedBy string `json:"acked_by"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if res.Mode != "bucket-batch" {
+		t.Fatalf("cold discovery must use bucket proof, got %+v", res)
+	}
+	// Discovery proceeds asynchronously; the next write can select a peer
+	// once the real lease snapshot has arrived, without replaying the first.
+	deadline := time.Now().Add(time.Second)
+	for {
+		found := false
+		for _, l := range ownerSrv.Lease.SampleCached(context.Background(), time.Second) {
+			found = found || l.Node == "node-2"
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background peer discovery did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	seg = ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("after-discovery"))
+	body = fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[]}`, sc, base64.StdEncoding.EncodeToString(seg))
+	rr = do(t, oh, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("warm discovery commit: %d %s", rr.Code, rr.Body.String())
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
 	if res.Mode != "fleet" || res.AckedBy != fh.URL {
 		t.Fatalf("auto commit result = %+v, want fleet via %s", res, fh.URL)
 	}

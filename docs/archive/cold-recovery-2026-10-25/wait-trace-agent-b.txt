@@ -1,0 +1,80 @@
+time=2026-10-25T17:31:03.419+08:00 level=INFO msg="storage diagnose ok"
+COLD_TRACE stage=replica.RestoreChain scope=__platform__/__control__/main elapsed=141.677256ms
+COLD_TRACE stage=cellstore.Cell scope=__platform__/__control__/main elapsed=212.601163ms
+time=2026-10-25T17:31:16.669+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:26313
+time=2026-10-25T17:31:16.702+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+COLD_TRACE stage=server.invalidateStaleLocal scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=103.749782ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=830.277324ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=263.54338ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=336.153587ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=313.979522ms
+time=2026-10-25T17:31:18.322+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1792920581-a99944/__kv__/main epoch=4 cut=407 bytes=3481600
+COLD_TRACE stage=cellcapture.canResume scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=112.884232ms
+time=2026-10-25T17:31:18.322+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1792920581-a99944/__kv__/main txid=407
+COLD_TRACE stage=cellcapture.Ensure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=449.257823ms
+COLD_TRACE stage=server.CaptureEnsure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=449.262043ms
+COLD_TRACE stage=server.captureWaitTxID scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=199.032199ms
+COLD_TRACE stage=cellcapture.backgroundBaseline scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=217.483853ms
+COLD_TRACE stage=server.invalidateStaleLocal scope=__platform__/__control__/main elapsed=126.60498ms
+COLD_TRACE stage=replica.RestoreChain scope=__platform__/__control__/main elapsed=164.736988ms
+COLD_TRACE stage=cellstore.Cell scope=__platform__/__control__/main elapsed=230.948808ms
+COLD_TRACE stage=server.bindingInfo scope=e2e-cold-1792920581-a99944 elapsed=333.053341ms
+COLD_TRACE stage=server.invalidateStaleLocal scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=111.165303ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=488.182581ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=116.119763ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=171.325599ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=171.351709ms
+COLD_TRACE stage=server.invalidateStaleLocal scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=138.021184ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=410.88305ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=129.608158ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=129.625987ms
+COLD_TRACE stage=server.invalidateStaleLocal scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=115.294883ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=987.540335ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=150.785165ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=149.905607ms
+COLD_TRACE stage=server.invalidateStaleLocal scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=147.393547ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=400.423672ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=174.17089ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=241.806027ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=241.745307ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=487.405571ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=140.398027ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=140.400197ms
+COLD_TRACE stage=server.captureWaitTxID scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=863.763004ms
+time=2026-10-25T17:31:28.236+08:00 level=INFO msg="storage diagnose ok"
+COLD_TRACE stage=replica.RestoreChain scope=__platform__/__control__/main elapsed=122.021331ms
+COLD_TRACE stage=cellstore.Cell scope=__platform__/__control__/main elapsed=178.202214ms
+time=2026-10-25T17:31:38.464+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:26313
+time=2026-10-25T17:31:38.502+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=430.36571ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=308.974453ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=367.517998ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=344.496034ms
+time=2026-10-25T17:31:39.806+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1792920581-a99944/__kv__/main epoch=5 cut=458 bytes=3624960
+COLD_TRACE stage=cellcapture.canResume scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=119.586421ms
+time=2026-10-25T17:31:39.806+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1792920581-a99944/__kv__/main txid=458
+COLD_TRACE stage=cellcapture.Ensure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=487.304454ms
+COLD_TRACE stage=server.CaptureEnsure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=487.309083ms
+COLD_TRACE stage=server.captureWaitTxID scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=236.519273ms
+COLD_TRACE stage=cellcapture.backgroundBaseline scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=240.984847ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=497.422429ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=189.840492ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=189.836943ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=414.837954ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=119.956771ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=175.45065ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=175.414851ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=433.185232ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=135.829268ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=135.839257ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=985.63226ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=123.809098ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=122.160258ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=883.236585ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=142.79558ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=142.861047ms
+COLD_TRACE stage=replica.DurableWatermarkChain scope=__platform__/__control__/main elapsed=890.774772ms
+time=2026-10-25T17:31:46.069+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=__platform__/__control__/main epoch=111 cut=367 bytes=368640
+COLD_TRACE stage=cellcapture.canResume scope=__platform__/__control__/main elapsed=1.002429945s
+time=2026-10-25T17:31:46.069+08:00 level=INFO msg="capture continues durable chain" scope=__platform__/__control__/main txid=367
+COLD_TRACE stage=cellcapture.Ensure scope=__platform__/__control__/main elapsed=1.002498093s

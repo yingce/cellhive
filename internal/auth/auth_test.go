@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -192,4 +193,87 @@ func TestJWKSServesStaleDuringRefresh(t *testing.T) {
 		t.Fatal("Key blocked on an in-flight refresh instead of serving the cached key")
 	}
 	close(release)
+}
+
+func TestJWKSRefreshThrottleAndRotation(t *testing.T) {
+	for _, ttl := range []time.Duration{time.Minute, time.Second} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			var calls atomic.Int32
+			fail := false
+			kid := "old"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if fail {
+					w.WriteHeader(503)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{"kty": "RSA", "kid": kid, "n": "AQAB", "e": "AQAB"}}})
+			}))
+			defer srv.Close()
+			p := &JWKS{URL: srv.URL, TTL: ttl, Now: func() time.Time { return now }}
+			if _, err := p.Key("old"); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 20; i++ {
+				if _, err := p.Key(fmt.Sprint("unknown", i)); err == nil {
+					t.Fatal("accepted unknown key")
+				}
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("unknown kid fetched %d times", got)
+			}
+			interval := min(30*time.Second, ttl)
+			now = now.Add(interval)
+			kid = "new"
+			if _, err := p.Key("new"); err != nil {
+				t.Fatalf("rotation: %v", err)
+			}
+			now = now.Add(ttl)
+			fail = true
+			if _, err := p.Key("new"); err != nil {
+				t.Fatalf("lost stale key: %v", err)
+			}
+			before := calls.Load()
+			for i := 0; i < 20; i++ {
+				_, _ = p.Key(fmt.Sprint("failed", i))
+				_, _ = p.Key("new")
+			}
+			if got := calls.Load(); got != before {
+				t.Fatalf("failure backoff fetched %d extra times", got-before)
+			}
+			now = now.Add(interval)
+			fail = false
+			kid = "recovered"
+			if _, err := p.Key("recovered"); err != nil {
+				t.Fatalf("recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestJWKSInitialFailureBackoff(t *testing.T) {
+	now := time.Unix(1000, 0)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	p := &JWKS{URL: srv.URL, Now: func() time.Time { return now }}
+	for i := 0; i < 20; i++ {
+		if _, err := p.Key(fmt.Sprint(i)); err == nil {
+			t.Fatal("accepted key after failed initial fetch")
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("initial failure fetched %d times", got)
+	}
+	now = now.Add(30 * time.Second)
+	if _, err := p.Key("retry"); err == nil {
+		t.Fatal("accepted key on failed retry")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("backoff did not permit retry: calls=%d", got)
+	}
 }

@@ -595,7 +595,11 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		return Result{}, err
 	}
 	out := Result{Columns: cols}
+	resultBytes := 0
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {
@@ -604,24 +608,17 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 		if err := rows.Scan(ptrs...); err != nil {
 			return Result{}, err
 		}
-		rowBytes := 0
-		for _, v := range vals {
-			switch x := v.(type) {
-			case string:
-				rowBytes += len(x)
-			case []byte:
-				rowBytes += len(x)
-			}
-		}
+		rowBytes, expandedBytes := resultRowBytes(vals)
 		if rowBytes > MaxValueBytes {
 			return Result{}, fmt.Errorf("d1: result row exceeds %d bytes", MaxValueBytes)
 		}
 		if len(out.Rows) >= MaxResultRows {
 			return Result{}, fmt.Errorf("d1: result exceeds %d rows", MaxResultRows)
 		}
-		if totalResultBytes(out.Rows)+rowBytes > MaxResultBytes {
+		if expandedBytes > MaxResultBytes-resultBytes {
 			return Result{}, fmt.Errorf("d1: result exceeds %d bytes", MaxResultBytes)
 		}
+		resultBytes += expandedBytes
 		for i, v := range vals {
 			if b, ok := v.([]byte); ok {
 				encoded := make([]int, len(b))
@@ -654,21 +651,27 @@ func runOne(ctx context.Context, db *sql.DB, tx *sql.Tx, sqlText string, params 
 	return out, nil
 }
 
-func totalResultBytes(rows [][]any) int {
-	total := 0
-	for _, row := range rows {
-		for _, value := range row {
-			switch v := value.(type) {
-			case string:
-				total += len(v)
-			case []byte:
-				total += len(v)
-			case []int:
-				total += len(v) * 8
-			}
+// resultRowBytes measures SQLite payload and the retained result representation.
+// BLOBs become []int for the D1 wire contract, so charge their expanded size
+// before allocating that slice. Numeric SQLite values also consume budget.
+func resultRowBytes(row []any) (payload, retained int) {
+	for _, value := range row {
+		switch v := value.(type) {
+		case string:
+			payload += len(v)
+			retained += len(v)
+		case []byte:
+			payload += len(v)
+			retained += len(v) * (strconv.IntSize / 8)
+		case int64, float64:
+			payload += 8
+			retained += 8
+		case bool:
+			payload++
+			retained++
 		}
 	}
-	return total
+	return
 }
 
 // IsReadOnly reports whether a statement can never write, so the capture layer

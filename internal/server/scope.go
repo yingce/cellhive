@@ -144,13 +144,22 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 						var err error
 						end, err = s.beginPreparedResourceRequest(r.Context(), sc, preparedGeneration)
 						if err != nil {
+							if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+								s.captureErr(w, err, "request_gate_failed")
+								return
+							}
 							writeErr(w, 403, "resource_generation_changed", err.Error())
 							return
 						}
 					}
 				}
 				if end == nil {
-					end = s.Store.BeginRequest(s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
+					var err error
+					end, err = s.Store.BeginRequestContext(r.Context(), s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
+					if err != nil {
+						s.captureErr(w, err, "request_gate_failed")
+						return
+					}
 				}
 				defer end()
 			}

@@ -1,0 +1,31 @@
+HK-REVIEW artifacts=/tmp/hk-review-1792929570-7829fd-s4yhwuwl compute=local storage=HK-COS durability=bucket
+START review-fixes.sh ns=hk-review-1792929570-7829fd-0
+[e2e] R2 different/same-body overwrite, HEAD/GET/range PASS
+[e2e] D1 rows=20000 sample=1 HTTP_total_s=0.112838 binding_ms=110
+[e2e] D1 rows=20000 sample=2 HTTP_total_s=0.066094 binding_ms=65
+[e2e] D1 rows=20000 sample=3 HTTP_total_s=0.067598 binding_ms=66
+[e2e] D1 rows=20000 sample=4 HTTP_total_s=0.065671 binding_ms=64
+[e2e] D1 rows=20000 sample=5 HTTP_total_s=0.070166 binding_ms=65
+E2E-REVIEW-FIXES: PASS
+HK-CLEANUP ns=hk-review-1792929570-7829fd-0 success=1 http=200
+[e2e] kept /tmp/cellhive-e2e.Cu0M1I
+END review-fixes.sh exit=0 cleanup=True
+START queue.sh ns=hk-review-1792929570-7829fd-1
+[e2e] base=/tmp/cellhive-e2e.Jnnud2 agent=26520 runtime=26522
+[e2e] queue R2 metadata: text/x-queue
+[e2e] retry exhausted -> DLQ depth=1
+E2E-QUEUE: PASS
+HK-CLEANUP ns=hk-review-1792929570-7829fd-1 success=1 http=200
+[e2e] kept /tmp/cellhive-e2e.Jnnud2
+END queue.sh exit=0 cleanup=True
+START queue-multinode.sh ns=hk-review-1792929570-7829fd-2
+[e2e] base=/tmp/cellhive-e2e.rIsSDc n1=26540 n2=26544
+[e2e] consumed after 5: 5
+[e2e] DLQ depth=1
+[e2e] killed n1; waiting lease
+[e2e] consumed after failover: 8
+E2E-QUEUE-MULTINODE: PASS
+HK-CLEANUP ns=hk-review-1792929570-7829fd-2 success=1 http=200
+[e2e] kept /tmp/cellhive-e2e.rIsSDc
+END queue-multinode.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/tmp/hk-review-1792929570-7829fd-s4yhwuwl

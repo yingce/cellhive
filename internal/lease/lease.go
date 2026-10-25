@@ -254,7 +254,12 @@ func (m *Manager) LegacyPeerVisible(now time.Time) bool {
 // a point read for a node not present in the current snapshot. Never calls List
 // on the caller's hot path.
 func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, error) {
-	for _, l := range m.SampleCached(ctx, 5*time.Second) {
+	// Do not initialize fleet discovery here: a cold snapshot must not turn a
+	// single-owner lookup into List(nodes/) plus a GET for every historical node.
+	m.mu.Lock()
+	cached := m.cached
+	m.mu.Unlock()
+	for _, l := range cached {
 		if l.Node == node {
 			return l, true, nil
 		}
@@ -343,46 +348,23 @@ func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
 	return out, nil
 }
 
-// SampleCached returns the node list, refreshing at most once per ttl. Hot
-// paths use this so they never hit the object store's List on every request.
-func (m *Manager) SampleCached(ctx context.Context, ttl time.Duration) []NodeLease {
+// SampleCached returns the latest node snapshot without waiting for bucket I/O.
+// Both initial population and stale refresh run in the background. An empty
+// cache returns nil; callers must use the bucket durability posture until a
+// usable follower snapshot is available.
+func (m *Manager) SampleCached(_ context.Context, ttl time.Duration) []NodeLease {
 	m.mu.Lock()
-	if m.cached != nil && time.Since(m.cachedAt) < ttl {
-		cached := m.cached
-		m.mu.Unlock()
-		return cached
+	cached := m.cached
+	fresh := cached != nil && time.Since(m.cachedAt) < ttl
+	refresh := !fresh && !m.refreshing && time.Now().After(m.retryAt)
+	if refresh {
+		m.refreshing = true
 	}
-	if m.cached != nil {
-		// Stale-while-revalidate: a hot write must never block on a bucket
-		// List. Return the previous snapshot and refresh in the background.
-		if !m.refreshing && time.Now().After(m.retryAt) {
-			m.refreshing = true
-			go m.refresh()
-		}
-		cached := m.cached
-		m.mu.Unlock()
-		return cached
-	}
-	if m.refreshing || time.Now().Before(m.retryAt) {
-		// A cold first sample is already in flight; do not pile more bucket
-		// Lists behind it. The caller falls back to the bucket posture.
-		m.mu.Unlock()
-		return nil
-	}
-	m.refreshing = true
 	m.mu.Unlock()
-
-	sample, err := m.Sample(ctx)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.refreshing = false
-	if err != nil {
-		m.retryAt = time.Now().Add(5 * time.Second)
-		return nil
+	if refresh {
+		go m.refresh()
 	}
-	m.cached = sample
-	m.cachedAt = time.Now()
-	return sample
+	return cached
 }
 
 // refresh updates the lease snapshot without blocking a request path. The

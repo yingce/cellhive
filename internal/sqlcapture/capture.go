@@ -33,7 +33,7 @@ type BatchCommitter interface {
 // ErrSnapshotTooLarge reports that a full-page snapshot image exceeds
 // Capture.SnapshotMaxBytes. No part is committed when it is returned, so the
 // existing durable chain is untouched.
-var ErrSnapshotTooLarge = errors.New("sqlcapture: snapshot exceeds SnapshotMaxBytes")
+var ErrSnapshotTooLarge = cellstore.ErrSnapshotTooLarge
 
 // Stats summarizes capture batching.
 type Stats struct {
@@ -64,6 +64,12 @@ const (
 // Capture polls a cell WAL, emits real WAL-page LTX segments, and advances a
 // durability barrier only after Committer confirms fleet durability.
 type Capture struct {
+	backgroundMu     sync.Mutex
+	backgroundWG     sync.WaitGroup
+	backgroundClosed bool
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+
 	cell             *cellstore.Cell
 	scope            cell.Scope
 	epoch            uint64
@@ -73,7 +79,6 @@ type Capture struct {
 	committer        Committer
 	barrier          *barrier
 	notify           chan struct{}
-	baselineReq      chan baselineRequest
 	done             chan struct{}
 	// onBaselineStart, set only while a requested baseline runs, is called with
 	// the snapshot's label before its first part is uploaded.
@@ -144,11 +149,13 @@ func New(db *cellstore.Cell, scope cell.Scope, epoch, baselineTxID uint64, commi
 	if _, err := cursor.Poll(db.WALPath()); err != nil && !errors.Is(err, wal.ErrNoWAL) {
 		return nil, fmt.Errorf("sqlcapture: baseline WAL poll: %w", err)
 	}
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	return &Capture{
+		backgroundCtx: backgroundCtx, backgroundCancel: backgroundCancel,
 		cell: db, scope: scope, epoch: epoch, cursor: cursor, baselineWALBytes: cursor.BytesRead(),
 		nextTxID: baselineTxID, committer: committer,
 		barrier: newBarrier(baselineTxID), notify: make(chan struct{}, 1),
-		baselineReq: make(chan baselineRequest, 1), done: make(chan struct{}),
+		done: make(chan struct{}),
 	}, nil
 }
 
@@ -164,38 +171,40 @@ func (c *Capture) Notify() {
 	}
 }
 
-// baselineResult is the outcome of a requested baseline: the txid the snapshot
-// is labelled with (its watermark), or the error that stopped it.
-type baselineResult struct {
-	txid uint64
-	err  error
-}
-
-type baselineRequest struct {
-	onStart func(ctx context.Context, label uint64) error
-	reply   chan baselineResult
-}
-
-// RequestBaseline asks the capture loop to emit a full-page baseline snapshot
-// at a safe point and returns the watermark txid it was labelled with. onStart,
-// if set, runs with that label before the first part is uploaded, so the caller
-// can record a "snapshot started" marker: without it a crash between parts
-// leaves a partial snapshot that restore would take for a complete one. The
-// caller must record its snapshot-done marker for exactly the returned txid;
-// reading the cell's txid afterwards can already include later writes.
-func (c *Capture) RequestBaseline(ctx context.Context, onStart func(ctx context.Context, label uint64) error) (uint64, error) {
-	req := baselineRequest{onStart: onStart, reply: make(chan baselineResult, 1)}
-	select {
-	case c.baselineReq <- req:
-	case <-ctx.Done():
-		return 0, ctx.Err()
+// RequestBaseline uploads an independent fixed image without stopping WAL
+// capture. It does not reset the cursor or advance the write durability barrier:
+// callers must already have a recoverable chain (for example an epoch marker).
+// A failed optional baseline leaves that chain intact. The returned label belongs
+// to the copied image, never to the later live database.
+func (c *Capture) RequestBaseline(ctx context.Context, onStart func(context.Context, uint64) error) (uint64, error) {
+	c.backgroundMu.Lock()
+	if c.backgroundClosed {
+		c.backgroundMu.Unlock()
+		return 0, context.Canceled
 	}
-	select {
-	case r := <-req.reply:
-		return r.txid, r.err
-	case <-ctx.Done():
-		return 0, ctx.Err()
+	c.backgroundWG.Add(1)
+	c.backgroundMu.Unlock()
+	defer c.backgroundWG.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.backgroundCtx, cancel)
+	defer func() { stop(); cancel() }()
+
+	shadow := &Capture{cell: c.cell, scope: c.scope, epoch: c.epoch, committer: c.committer,
+		cursor: wal.NewCursor(), barrier: newBarrier(0), onBaselineStart: onStart,
+		SnapshotMaxBytes: c.SnapshotMaxBytes, SnapshotPartBytes: c.SnapshotPartBytes,
+		SnapshotBatchParts: c.SnapshotBatchParts}
+	err := shadow.emitSnapshotStream(ctx, snapshotModeDetached, 0)
+	if err != nil {
+		return 0, err
 	}
+	c.statsMu.Lock()
+	c.stats.Snapshots++
+	if shadow.nextTxID > c.stats.SnapshotTxID {
+		c.stats.SnapshotTxID = shadow.nextTxID
+	}
+	c.stats.LTXBinaryBytes += shadow.stats.LTXBinaryBytes
+	c.statsMu.Unlock()
+	return shadow.nextTxID, nil
 }
 
 // Wait blocks until a covering LTX segment is fleet-durable.
@@ -218,6 +227,13 @@ func (c *Capture) Done() <-chan struct{} { return c.done }
 
 func (c *Capture) loop(ctx context.Context) {
 	defer close(c.done)
+	defer func() {
+		c.backgroundMu.Lock()
+		c.backgroundClosed = true
+		c.backgroundCancel()
+		c.backgroundMu.Unlock()
+		c.backgroundWG.Wait()
+	}()
 	defer c.cursor.Close()
 	// The idle poll cadence follows the group-commit window, otherwise a fixed
 	// 1ms ticker drains the WAL before the window can coalesce and the window
@@ -242,15 +258,6 @@ func (c *Capture) loop(ctx context.Context) {
 				wg = captureGroupCommitWait
 			}
 			if err := waitGroupCommit(ctx, c.notify, wg); err != nil {
-				c.barrier.fail(err)
-				return
-			}
-		case req := <-c.baselineReq:
-			c.onBaselineStart = req.onStart
-			err := c.rebaseline(ctx)
-			c.onBaselineStart = nil
-			req.reply <- baselineResult{txid: c.nextTxID, err: err}
-			if err != nil {
 				c.barrier.fail(err)
 				return
 			}
@@ -452,6 +459,7 @@ const (
 	// snapshotModePages streams an image the caller already checkpointed (with
 	// the writer paused) and labels it with the capture's watermark.
 	snapshotModePages
+	snapshotModeDetached
 )
 
 // maxSnapshotBatchBytes caps the encoded bytes buffered for one CommitBatch.
@@ -582,7 +590,7 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 				return fmt.Errorf("%w: image %d bytes, budget %d", ErrSnapshotTooLarge, imageBytes, max)
 			}
 		}
-		if mode == snapshotModeCheckpoint && partIndex == 0 {
+		if (mode == snapshotModeCheckpoint || mode == snapshotModeDetached) && partIndex == 0 {
 			label = wm
 			if c.onBaselineStart != nil {
 				if err := c.onBaselineStart(ctx, label); err != nil {
@@ -627,7 +635,13 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 		}
 	}
 	var err error
-	if mode == snapshotModeCheckpoint {
+	if mode == snapshotModeDetached {
+		var wm uint64
+		wm, _, _, err = c.cell.SnapshotDetached(ctx, partBytes, c.SnapshotMaxBytes, stream)
+		if err == nil {
+			label = wm
+		}
+	} else if mode == snapshotModeCheckpoint {
 		var wm uint64
 		wm, _, _, err = c.cell.SnapshotStream(ctx, partBytes, stream)
 		if err == nil {

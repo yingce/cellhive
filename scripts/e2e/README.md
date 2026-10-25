@@ -38,3 +38,26 @@ outside `make e2e` because it needs Docker and network access on first build.
 (default 4). Messages are sent sequentially; concurrent `Promise.all(QUEUE.send(...))` is not used.
 
 These are runtime tests. Postgres/MySQL/ProxySQL/Hyperdrive matrices remain manual.
+
+ADR-292 跨模块修复验收：`bash scripts/e2e/review-fixes.sh`。启动独立 agent +
+user-runtime，验证 Queue 并发上限、R2 不同/相同内容覆盖后的 HEAD/GET/range，
+以及 20,000 行 D1 的完整结果与五次真实 HTTP 时延。结果是同机文件桶验收，
+不能外推为生产 COS 性能。
+
+### HK COS review acceptance
+
+`python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3` runs the review,
+Queue and two-agent failover suites against the fixed dedicated
+`vwork-e2e-hk-1376795072` COS bucket. It uses locally built binaries and the pinned
+fork at `/opt/cellhive/deploy/workerd-fork/workerd`, unique namespaces/node IDs,
+`durability=bucket`, and removes each test app before stopping its processes.
+Logs are retained under the printed `/tmp/hk-review-*` directory. Credentials
+are parsed without shell execution and never logged. Do not interpret these
+local-compute/remote-storage measurements as HK same-region or peer-fsync performance.
+
+For cold KV recovery, run `cold-write-cos.sh` with `CELLHIVE_E2E_BUCKET=cos`,
+`CELLHIVE_COS_ENV_FILE=/opt/.secrets/s3`, and `BIN` pointing to the same build.
+Run sequentially with the above suite because the dedicated bucket has shared
+platform control cells. The cold harness waits for readiness/admin startup and
+checks the target scope's owner epoch; global epoch/List counters include other
+background scopes and cannot alone establish hot-path activity.

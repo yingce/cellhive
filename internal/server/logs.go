@@ -226,6 +226,16 @@ func (s *Server) fanOutLogSubscribe(ctx context.Context, ns, worker string, ttl 
 	s.logFanMu.Unlock()
 
 	leases := s.Lease.SampleCached(ctx, s.followerSampleTTL())
+	if leases == nil {
+		// Operator subscription setup needs all known peers even before the
+		// discovery cache is populated. This diagnostic path may enumerate;
+		// ordinary data-plane routing and commits must never wait for it.
+		var sampleErr error
+		leases, sampleErr = s.Lease.Sample(ctx)
+		if sampleErr != nil {
+			return
+		}
+	}
 	body, err := json.Marshal(map[string]any{"namespace": ns, "worker": worker, "ttl_ms": ttl.Milliseconds()})
 	if err != nil {
 		return

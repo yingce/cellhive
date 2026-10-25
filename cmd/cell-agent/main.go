@@ -74,6 +74,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer inst.Close()
+	if err := cellstore.CleanupSnapshotCopies(cfg.DataDir); err != nil {
+		log.Error("cleanup temporary snapshot copies", "err", err)
+		os.Exit(1)
+	}
 	for _, w := range config.LegacyEnvWarnings() {
 		log.Warn(w)
 	}

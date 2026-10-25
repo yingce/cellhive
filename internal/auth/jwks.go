@@ -12,16 +12,18 @@ import (
 )
 
 // JWKS fetches and caches an OIDC JWKS (JSON Web Key Set) and resolves RSA keys
-// by kid. The set is refreshed at most once per TTL.
+// by kid. Unknown key ids trigger a globally rate-limited refresh.
 type JWKS struct {
 	URL  string
 	HTTP *http.Client
 	TTL  time.Duration
 	Now  func() time.Time
 
-	mu        sync.Mutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu           sync.Mutex
+	keys         map[string]*rsa.PublicKey
+	fetchedAt    time.Time
+	refreshAfter time.Time
+	refreshErr   error
 	// fetching/fetchDone single-flight the refresh so one slow IdP response does
 	// not serialize every JWT verification behind the mutex (stale keys are
 	// served while a refresh is in flight).
@@ -69,6 +71,20 @@ func (p *JWKS) Key(kid string) (*rsa.PublicKey, error) {
 		}
 		return nil, errNoKey
 	}
+	// Bound sequential misses and failed refreshes without retaining attacker
+	// supplied key ids. Existing keys remain available during the backoff.
+	if p.now().Before(p.refreshAfter) {
+		k, ok := p.keys[kid]
+		err := p.refreshErr
+		p.mu.Unlock()
+		if ok {
+			return k, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, errNoKey
+	}
 	p.fetching = true
 	p.fetchDone = make(chan struct{})
 	done := p.fetchDone
@@ -78,6 +94,10 @@ func (p *JWKS) Key(kid string) (*rsa.PublicKey, error) {
 
 	p.mu.Lock()
 	p.fetching = false
+	// Cap the minimum interval at TTL so short-lived sets can still refresh
+	// when they expire. Start it at completion to back off slow failures too.
+	p.refreshAfter = p.now().Add(min(30*time.Second, p.ttl()))
+	p.refreshErr = err
 	if err == nil {
 		p.keys = keys
 		p.fetchedAt = p.now()

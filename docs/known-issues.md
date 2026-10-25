@@ -6,6 +6,20 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-25_
 
+## 2026-10-25 后台快照阻塞写入（ADR-294）
+
+marker 恢复后的后台基线已改为 SQLite backup 固定副本，释放原库写锁后上传，不占用增量 capture 循环、不截断源 WAL、不提前推进确认水位。上传失败/取消保留旧链；退出等待后台任务，大小预算覆盖 WAL 页，启动时清理强杀遗留副本。首次无恢复链和 WAL 截断后的快照仍同步；本地复制仍需短暂写锁和额外磁盘。全量检查、相关 race 与真实 HK R2/D1/Queue 回归通过；最终 HK 冷重建 1660ms、重启首写 885ms，140 个确认键正确。冷重建仍未过 1s 门槛，见 [验收记录](archive/detached-snapshot-2026-10-25.md)。
+
+## 2026-10-25 真实 HK COS 冷恢复性能验收未通过
+
+前测发现的重启 8.7s / 冷重建 9.2s 已定位为首次 NodeLease 同步扫描 nodes/ 的阻塞。ADR-293 改为目标节点点查、异步 fleet 采样，并在下载前过滤 manifest 已覆盖的 L0。最终无插桩真实 HK COS 测试（本机计算，durability=bucket）重启首写 974ms、冷重建 2318ms；接管请求 1673ms、故障到成功 11909ms。140 个已确认键无缺失/内容错误，SQLite integrity 正常；**冷重建仍未通过原 1s 性能门槛**。后台历史节点扫描成本仍存在，未测 HK 同区计算、跨机器 fleet 或长期生产负载。见 [本次修复与证据](archive/cold-recovery-2026-10-25.md) 和 [前测](archive/hk-review-2026-10-25.md)。
+
+## 2026-10-25 跨模块审查修复（ADR-292）
+
+F1–F9 的 Queue 并发分配、adaptive router 解锁错误、冷恢复池分类、R2 旧 metadata、D1 二次方累计、等待取消、JWKS 刷新放大、busy map 残留及 CI SQLite tags 已实施修复。新增回归包含真实 HTTP 无 deadline 的交互请求隔离，以及两个 R2 Store 并发时旧清理不能删除新 metadata。验证与待发布状态以 [修复验收记录](archive/project-review-fixes-2026-10-25.md) 为准。
+
+R2 双对象发布仍非原子：迟到 sidecar 发布和同内容并发写未解决，错误响应可能已经更新数据；已知不支持条件删除的 provider 对存在旧 sidecar 的覆盖会提前拒绝。D1 32 MiB 是保留载荷预算，不等于进程 RSS。Queue 上界是单队列并发，不是全节点资源配额。后续 Queue 批量事务、公平调度、DO 重连/续租容量、SQLite RSS/FD 准入和 Cron 补跑属于独立阶段，尚未实现。
+
 ## 2026-10-25 失租后迟到续租复活（ADR-291）
 
 原 Publish 无条件 Put 且可恢复 Healthy，导致原租期已过的进程重新恢复服务，或迟到写覆盖替代 session。改为不可逆 fence、ETag 条件续租、独立退出 watchdog；新 session 走既有恢复。初始回归已复现过期后重发、挂起续租返回、覆盖替代 session 三个问题。全量测试、lease/owner/recovery/server/queue/cell-agent race、vet/build，以及真实双进程 SIGSTOP 超期→peer 恢复接管→SIGCONT 旧进程退出→新 session 恢复均通过。见 [验证及发布记录](archive/lease-fence-2026-10-25.md)。代码 `520b61b` 已部署本地、SG revision 59、USW revision 48。

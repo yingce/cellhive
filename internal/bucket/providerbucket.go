@@ -125,12 +125,27 @@ func (b *ProviderBucket) CAS(ctx context.Context, key string, data []byte, token
 	}
 	return b.S3Bucket.CAS(ctx, key, data, token)
 }
+
+// SupportsConditionalDelete reports whether the adapter can fence deletion
+// for this key. Authority records use native append fencing. Raw COS deletion
+// honors If-Match; OSS ignores it, and unknown append providers are unverified.
+func (b *ProviderBucket) SupportsConditionalDelete(key string) bool {
+	if pointFenceKey(key) || authorityKey(key) {
+		return true
+	}
+	_, ok := b.appender.(*COSAppender)
+	return ok
+}
+
 func (b *ProviderBucket) ConditionalDelete(ctx context.Context, key, token string) error {
 	if pointFenceKey(key) {
 		return b.pointFence.ConditionalDelete(ctx, key, token)
 	}
 	if authorityKey(key) {
 		return b.authority.ConditionalDelete(ctx, key, token)
+	}
+	if !b.SupportsConditionalDelete(key) {
+		return ErrNotSupported
 	}
 	return b.S3Bucket.ConditionalDelete(ctx, key, token)
 }

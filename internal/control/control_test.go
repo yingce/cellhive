@@ -1109,3 +1109,19 @@ func TestReleasesCarryCrons(t *testing.T) {
 		t.Fatalf("v1 release = %+v", rel[1])
 	}
 }
+
+func TestDeployConsumerConcurrencyBound(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, false)
+	if _, err := s.CreateApp(ctx, "acme", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{101, int(^uint(0) >> 1)} {
+		if _, err := s.Deploy(ctx, "acme", "consumer", DeploySpec{BundleSHA: "sha", Consumers: []Consumer{{Queue: "jobs", MaxConcurrency: n}}}, "ops"); err == nil {
+			t.Fatalf("accepted concurrency %d", n)
+		}
+	}
+	if _, err := s.Deploy(ctx, "acme", "consumer", DeploySpec{BundleSHA: "sha", Consumers: []Consumer{{Queue: "jobs", MaxConcurrency: 100}}}, "ops"); err != nil {
+		t.Fatal(err)
+	}
+}

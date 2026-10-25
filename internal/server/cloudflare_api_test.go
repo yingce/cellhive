@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -396,6 +397,15 @@ func TestCloudflareQueueConsumerLifecycle(t *testing.T) {
 	}
 	if rr := call(http.MethodGet, "/client/v4/accounts/acme/queues/jobs/consumers", ""); rr.Code != 200 || !bytes.Contains(rr.Body.Bytes(), []byte(`"consumer_id":"worker"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"retry_delay":7`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"max_wait_time_ms":5000`)) {
 		t.Fatalf("consumer list %d %s", rr.Code, rr.Body.String())
+	}
+	for _, n := range []int{101, int(^uint(0) >> 1)} {
+		body := fmt.Sprintf(`{"type":"worker","script_name":"worker","settings":{"max_concurrency":%d}}`, n)
+		if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", body); rr.Code != http.StatusBadRequest {
+			t.Fatalf("concurrency %d: %d %s", n, rr.Code, rr.Body.String())
+		}
+	}
+	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"max_concurrency":100}}`); rr.Code != 200 {
+		t.Fatalf("boundary: %d %s", rr.Code, rr.Body.String())
 	}
 	if rr := call(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/consumers", `{"type":"worker","script_name":"worker","settings":{"max_retries":0}}`); rr.Code != http.StatusBadRequest {
 		t.Fatalf("explicit zero max_retries = %d %s", rr.Code, rr.Body.String())

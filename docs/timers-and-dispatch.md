@@ -94,3 +94,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 - 容量：随 `CELLHIVE_CELLS_PER_NODE` 与磁盘预算；无单独的 timer 配额。
 
 _最后更新：2026-09-17_
+
+### Queue 消费并发上限（ADR-292）
+
+`max_concurrency` 是每队列同时在飞的批次数，配置接受 0..100（0/1 串行）；原生和兼容控制 API 拒绝超额值，runner 对存量值限幅后才分配。它不是节点总并发限制，不改变 Cron 不补跑和既有 Queue 重投语义。

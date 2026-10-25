@@ -457,8 +457,8 @@ func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
 }
 
 // backgroundBaseline gives a marker-resumed epoch its own complete snapshot in
-// the capture loop's safe point, then records the done marker and retires the
-// predecessor. It never runs on the request path.
+// a detached SQLite backup image, then records the done marker. Upload does not
+// occupy the capture loop or the cell write lock; epoch GC retires predecessors.
 func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap *sqlcapture.Capture, scope cell.Scope, epoch uint64) {
 	if !c.PagedComplete() {
 		// A sparse paged image would make the snapshot HydrateAll inside the

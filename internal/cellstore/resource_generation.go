@@ -86,7 +86,10 @@ func (s *Store) EnsureResourceGenerationFromSnapshot(ctx context.Context, sc cel
 // the generation lock so concurrent requests for one cell do not serialize on
 // object-store latency. A concurrent Forget waits for this gate to drain.
 func (s *Store) BeginPreparedResourceRequest(ctx context.Context, sc cell.Scope, generation string, authoritative func() (string, error)) (func(), error) {
-	end := s.BeginRequest(sc.String())
+	end, err := s.BeginRequestContext(ctx, sc.String())
+	if err != nil {
+		return nil, err
+	}
 	current, err := authoritative()
 	if err != nil || current != generation {
 		end()
@@ -166,7 +169,10 @@ func (s *Store) BeginResourceRequest(ctx context.Context, sc cell.Scope, authori
 	if err := s.ensureResourceGenerationLocked(ctx, sc, generation); err != nil {
 		return nil, err
 	}
-	end := s.BeginRequest(sc.String())
+	end, err := s.BeginRequestContext(ctx, sc.String())
+	if err != nil {
+		return nil, err
+	}
 	current, err := authoritative()
 	if err != nil || current != generation {
 		end()

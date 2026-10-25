@@ -173,9 +173,9 @@ func (s *Server) AdminHandler() http.Handler {
 	s.registerVectorizeRoutes(mux, false, s.adminAuth)
 	// Mark requests so forwardOrClaim sends control-cell admin work to the
 	// owner's admin listener (with admin credentials), never to the REST port.
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return s.interactiveHydration(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(withAdminForward(r.Context())))
-	})
+	}))
 }
 
 func (s *Server) handleHyperdriveProxyStatus(w http.ResponseWriter, r *http.Request) {

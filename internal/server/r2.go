@@ -157,14 +157,7 @@ func r2ObjectJSON(key, etag string, size int64, md *r2.Metadata) map[string]any 
 		"customMetadata": map[string]string{},
 		"checksums":      map[string]string{},
 	}
-	if md != nil {
-		if md.Size > 0 {
-			out["size"] = md.Size
-		}
-		if md.ETag != "" {
-			out["etag"] = md.ETag
-			out["httpEtag"] = `"` + md.ETag + `"`
-		}
+	if md.Matches(size, etag) {
 		if md.UploadedMs > 0 {
 			out["uploaded"] = time.UnixMilli(md.UploadedMs).UTC().Format(time.RFC3339Nano)
 		}
@@ -353,7 +346,11 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "r2_head_failed", err.Error())
 			return
 		}
-		md, _ := s.R2.GetMeta(r.Context(), ns, bucketName, key)
+		md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, size, etag)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
+			return
+		}
 		// No content-length here: the body is the R2Object JSON, not the object
 		// bytes (the size lives in the JSON). Declaring the object size would
 		// mismatch the body and break the HTTP response.
@@ -363,7 +360,6 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	md, _ := s.R2.GetMeta(r.Context(), ns, bucketName, key)
 	if off, length, ok := parseRange(r.Header.Get("Range")); ok {
 		data, etag, err := s.R2.GetRange(r.Context(), ns, bucketName, key, off, length)
 		if err != nil {
@@ -374,12 +370,17 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "r2_get_failed", err.Error())
 			return
 		}
-		total := "*"
-		if md != nil && md.Size > 0 {
-			total = strconv.FormatInt(md.Size, 10)
-		} else if sz, _, serr := s.R2.Stat(r.Context(), ns, bucketName, key); serr == nil {
-			total = strconv.FormatInt(sz, 10)
+		size, statETag, err := s.R2.Stat(r.Context(), ns, bucketName, key)
+		if err != nil || statETag != etag {
+			writeErr(w, http.StatusServiceUnavailable, "r2_version_changed", "object changed during range read")
+			return
 		}
+		md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, size, etag)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
+			return
+		}
+		total := strconv.FormatInt(size, 10)
 		w.Header().Set("etag", etag)
 		w.Header().Set("content-range", "bytes "+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+int64(len(data))-1, 10)+"/"+total)
 		w.Header().Set("content-type", "application/octet-stream")
@@ -395,6 +396,11 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "r2_get_failed", err.Error())
+		return
+	}
+	md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, int64(len(data)), etag)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
 		return
 	}
 	w.Header().Set("etag", etag)
@@ -479,7 +485,7 @@ func (s *Server) handleR2List(w http.ResponseWriter, r *http.Request) {
 		for _, o := range objs {
 			var md *r2.Metadata
 			if wantMeta {
-				m, err := s.R2.GetMeta(r.Context(), ns, bucketName, o.Key)
+				m, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, o.Key, o.Size, o.ETag)
 				if err != nil {
 					return nil, err
 				}

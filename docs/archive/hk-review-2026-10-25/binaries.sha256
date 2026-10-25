@@ -1,0 +1,4 @@
+73dbf07504e61d61d381b6b3f4a4cc5fffc505e39780ab000b933b09c8e670cb  bin/cell-agent
+dd3dd1654ae5fa0ef8953900682b66fdf94010abbbb9fea673907239671e7cb8  bin/user-runtime
+db61fdb2137c20a5807d214bb22f16e4f08f6e3d196f1a61ebe56ff30eed7452  bin/cellhive
+63009b9b507a7b4fefb77de9ecb4ef87252476783da96054502965fbb984760c  /opt/cellhive/deploy/workerd-fork/workerd

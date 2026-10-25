@@ -1,0 +1,48 @@
+COLD-E2E: bucket=cos ns=e2e-cold-1792920581-a99944 lease_ttl=10s steady=20s preload=3145728B p99_limit=1000ms bin=/tmp/cellhive-cold-trace/cell-agent-trace-wait
+preload: keys=48 failed=0 (3145728B in 65536B values)
+RESULT scenario=steady puts=335 p50_ms=45.6 p99_ms=603.4 max_ms=978.3 list_ops=174 get_ops=477 put_ops=0 epoch_changes=0 acked=80 missing=0 wrong=0 client="puts=335 errs=0 getbad=0"
+READ_RESULT scenario=steady puts=335 p50_ms=0.7 p99_ms=1.2 max_ms=1.6
+TARGET_OWNER scenario=steady epoch_before=1 epoch_after=1
+eviction: evicted_delta=11 open_cells=1 (cap 3)
+RESULT scenario=eviction puts=1 p50_ms=130.0 p99_ms=130.0 max_ms=130.0 list_ops=1 get_ops=5 put_ops=0 epoch_changes=0 acked=87 missing=0 wrong=0 single_op_ms=129.8 ok=1 ttfs_ms=130.0 attempts=1 put_ms=129.8 last_code=200
+RESULT scenario=restart puts=1 p50_ms=784.5 p99_ms=784.5 max_ms=784.5 list_ops=4 get_ops=29 put_ops=3 epoch_changes=1 acked=88 missing=0 wrong=0 single_op_ms=784.4 ok=1 ttfs_ms=784.5 attempts=1 put_ms=784.4 last_code=200
+RESULT scenario=takeover_first puts=1 p50_ms=15863.0 p99_ms=15863.0 max_ms=15863.0 list_ops=7 get_ops=57 put_ops=3 epoch_changes=1 acked=109 missing=0 wrong=0 single_op_ms=1692.6 ok=1 ttfs_ms=15863.0 attempts=1 put_ms=1692.6 last_code=200 lease_ttl_ms=10000
+RESULT scenario=takeover_next50 puts=50 p50_ms=46.0 p99_ms=864.8 max_ms=864.8 list_ops=46 get_ops=147 put_ops=0 epoch_changes=0 acked=139 missing=0 wrong=0 client="puts=50 errs=0"
+RESULT scenario=cold puts=1 p50_ms=1318.6 p99_ms=1318.6 max_ms=1318.6 list_ops=7 get_ops=84 put_ops=3 epoch_changes=1 acked=140 missing=0 wrong=0 single_op_ms=1318.4 ok=1 ttfs_ms=1318.6 attempts=1 put_ms=1318.4 last_code=200
+COLD-E2E: FAIL: cold: p99 1318.6ms > limit 1000ms
+--- tail agent-a.log ---
+time=2026-10-25T17:30:57.437+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:26311
+time=2026-10-25T17:30:57.776+08:00 level=INFO msg="wake index repaired" examined=7 repaired=7
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=325.679099ms
+time=2026-10-25T17:30:58.112+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1792920581-a99944/__kv__/main epoch=3 cut=386 bytes=3387392
+COLD_TRACE stage=cellcapture.canResume scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=113.856999ms
+time=2026-10-25T17:30:58.112+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1792920581-a99944/__kv__/main txid=386
+COLD_TRACE stage=cellcapture.Ensure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=131.821284ms
+COLD_TRACE stage=server.CaptureEnsure scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=131.825964ms
+COLD_TRACE stage=cellcapture.backgroundBaseline scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=188.145753ms
+COLD_TRACE stage=server.captureWaitTxID scope=e2e-cold-1792920581-a99944/__kv__/main elapsed=209.100276ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=361.928614ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=426.899542ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=524.344638ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=466.508787ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=434.075949ms
+--- tail agent-b.log ---
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=189.840492ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill1 elapsed=189.836943ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=414.837954ms
+COLD_TRACE stage=replica.RestoreChain scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=119.956771ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=175.45065ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill2 elapsed=175.414851ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=433.185232ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=135.829268ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill3 elapsed=135.839257ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=985.63226ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=123.809098ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill4 elapsed=122.160258ms
+COLD_TRACE stage=server.forwardOrClaimMode scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=883.236585ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=142.79558ms
+COLD_TRACE stage=cellstore.Cell scope=e2e-cold-1792920581-a99944/__kv__/fill5 elapsed=142.861047ms
+integrity_check: ok (cells/e2e-cold-1792920581-a99944/__kv__/main.db)
+COLD-E2E: FAIL
+cleanup: delete app e2e-cold-1792920581-a99944 http=200 {"deleted":{"segments":513},"namespace":"e2e-cold-1792920581-a99944","ok":true,"workflows_dropped":0}
+COLD-E2E: artifacts=/tmp/cellhive-cold-e2e.uJMztw

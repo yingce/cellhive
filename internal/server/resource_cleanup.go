@@ -103,7 +103,7 @@ func (s *Server) BeginResourceRequest(ctx context.Context, sc cell.Scope) (func(
 		return func() {}, nil
 	}
 	if s.resourceReplica() == nil {
-		return s.Store.BeginRequest(sc.String()), nil
+		return s.Store.BeginRequestContext(ctx, sc.String())
 	}
 	return s.Store.BeginResourceRequest(ctx, sc, func() (string, error) { return s.resourceReplica().ResourceGeneration(ctx, sc) })
 }

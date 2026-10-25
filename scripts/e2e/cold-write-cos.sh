@@ -178,6 +178,23 @@ def cmd_mint(a):
     t = b64(payload) + "." + b64(hmac.new(secret, payload, hashlib.sha256).digest())
     with open(os.path.join(a.tokdir, "tok-%s-%s" % (a.ns, a.name)), "w") as f: f.write(t)
     return 0
+def cmd_owner(a):
+    import base64, hmac, json
+    root = bytes.fromhex(os.environ["CELLHIVE_ROOT_KEY"].strip())
+    prk = hmac.new(b"\0" * 32, root, hashlib.sha256).digest()
+    raw = hmac.new(prk, b"cellhive/token/internal\x01", hashlib.sha256).digest()
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    conn = http.client.HTTPConnection("127.0.0.1", a.port, timeout=15)
+    scope = urllib.parse.quote(a.ns + "/__kv__/main", safe="")
+    conn.request("GET", "/v1/internal/resolve?scope=" + scope,
+                 headers={"x-cellhive-internal-token": token})
+    response = conn.getresponse()
+    data = json.loads(response.read())
+    if response.status != 200 or not data.get("owned"):
+        raise RuntimeError("target owner could not be verified")
+    print(data["owner"]["epoch"])
+    return 0
+
 def cmd_ttl(a):
     import re
     m = re.fullmatch(r"([0-9.]+)(ms|s|m)", a.key)
@@ -192,7 +209,7 @@ ap.add_argument("--timeout", type=float, default=30); ap.add_argument("--n", typ
 ap.add_argument("--t0", type=float, default=0)
 a = ap.parse_args()
 sys.exit({"preload": cmd_preload, "steady": cmd_steady, "once": cmd_once, "seq": cmd_seq,
-          "verify": cmd_verify, "pct": cmd_pct, "mint": cmd_mint, "ttl": cmd_ttl}[a.cmd](a))
+          "verify": cmd_verify, "pct": cmd_pct, "mint": cmd_mint, "ttl": cmd_ttl, "owner": cmd_owner}[a.cmd](a))
 PY
 }
 write_client
@@ -247,12 +264,17 @@ start_agent(){ # TAG MAXOPEN IDLE
   if [[ $tag == a ]]; then A_PID=$pid; else B_PID=$pid; fi
   CUR=$tag; CUR_ALIVE=1
   local i
-  for i in $(seq 1 400); do
-    curl -sf -m 1 "http://127.0.0.1:$rest/healthz" >/dev/null 2>&1 && return 0
+  for i in $(seq 1 900); do
+    # healthz can precede recovery and admin-listener startup on remote buckets.
+    # Wait for service readiness AND an accepting admin socket before setup.
+    if curl -sf -m 1 "http://127.0.0.1:$rest/readyz" >/dev/null 2>&1 &&
+       curl -s -m 1 -o /dev/null "http://127.0.0.1:$admin/"; then
+      return 0
+    fi
     kill -0 "$pid" 2>/dev/null || { fail "agent $tag exited during startup"; return 1; }
-    sleep 0.05
+    sleep 0.2
   done
-  fail "agent $tag not healthy"; return 1
+  fail "agent $tag not ready"; return 1
 }
 kill_agent(){ # TAG
   local pid
@@ -349,8 +371,16 @@ TARGET_DB_REL="cells/$NS/__kv__/main.db"
 
 # ---- setup: agent A, app, target KV cell ------------------------------------
 start_agent a 32 5m || exit 1
+# A shared test bucket can still be releasing its previous control owner.
+# Retry only the explicit pre-execution invalidation rejection, never ambiguous writes.
+for setup_attempt in $(seq 1 30); do
 code=$(curl -sS -m 60 -o "$TMP/app.out" -w '%{http_code}' -X POST -H "x-cellhive-admin-token: $TOKEN_ADMIN" \
   -H 'content-type: application/json' --data-binary "{\"namespace\":\"$NS\"}" "http://127.0.0.1:$A_ADMIN_PORT/v1/control/app")
+  [[ $code == 200 ]] && break
+  [[ $code == 503 ]] && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("error") != "local_invalidation_failed")' "$TMP/app.out" || break
+  echo "setup: control owner busy; explicit pre-execution rejection attempt=$setup_attempt"
+  sleep 1
+done
 [[ $code == 200 ]] || die "create app: http=$code $(head -c 300 "$TMP/app.out")"
 register_resource KV main || exit 1
 
@@ -359,13 +389,16 @@ LAT=$TMP/lat-steady; : >"$LAT"
 LAT_GET=$TMP/lat-get-steady; : >"$LAT_GET"
 OUT=$(kv preload --port "$PORT_A" --name KV --size "$PRELOAD_VALUE_BYTES" --bytes "$PRELOAD_BYTES") || die "preload failed: $OUT"
 echo "preload: $OUT (${PRELOAD_BYTES}B in ${PRELOAD_VALUE_BYTES}B values)"
+TARGET_EPOCH_BEFORE=$(kv owner --port "$PORT_A") || die "cannot read target owner before steady"
 B=$(snap "$PORT_A")
 OUT=$(kv steady --port "$PORT_A" --name KV --size "$PUT_BYTES" --seconds "$STEADY_SECONDS" --lat "$LAT" --get-lat "$LAT_GET") || fail "steady: $OUT"
 A=$(snap "$PORT_A")
 finish steady "$LAT" "$B" "$A" "client=\"$OUT\""
 echo "READ_RESULT scenario=steady $(python3 "$TMP/kvc.py" pct --lat "$LAT_GET")"
 read -r -a _b <<<"$B"; read -r -a _a <<<"$A"
-[[ $((_a[3] - _b[3])) -eq 0 ]] || fail "steady: epoch changed during the window (${_b[3]} -> ${_a[3]})"
+TARGET_EPOCH_AFTER=$(kv owner --port "$PORT_A") || die "cannot read target owner after steady"
+echo "TARGET_OWNER scenario=steady epoch_before=$TARGET_EPOCH_BEFORE epoch_after=$TARGET_EPOCH_AFTER"
+[[ "$TARGET_EPOCH_BEFORE" = "$TARGET_EPOCH_AFTER" ]] || fail "steady: target epoch changed ($TARGET_EPOCH_BEFORE -> $TARGET_EPOCH_AFTER)"
 
 # ---- scenario 2: eviction -----------------------------------------------------
 # Graceful restart with a tiny open-cell cap / short idle TTL, touch the target

@@ -1,0 +1,5 @@
+--- FAIL: TestBackgroundSnapshotUploadDoesNotBlockDurableWrites (0.32s)
+    background_snapshot_test.go:31: snapshot upload blocks write durability
+FAIL
+FAIL	cellhive/internal/sqlcapture	0.321s
+FAIL

@@ -67,7 +67,7 @@ loader 解析出活跃 version 后，若 `assets_sha` 非空则**资产优先**�
 
 ## Cron → scheduled()（ADR-070，已实现）
 
-`Version.Crons`（CLI `--cron`）→ `Projection.CronTargets()`；cell-agent 对 `KindCron` 定时器（scope 约定 `<ns>/__cron__/<worker>`）在派发时补 `worker`+`bundle_sha` → user-runtime `POST /v1/timers/dispatch` → workerLoader 加载 → `scheduled(event, env, ctx)`。**消费者配置/死信（ADR-072）**：`Consumer{Queue,MaxRetries,DeadLetterQueue,MaxBatchSize,MaxConcurrency}`；runner 达上限入 DLQ（同 ns `Send`）或丢弃告警；`max_concurrency` 为每队列**同时在飞的批次数**上限（默认 0/1=串行，ADR-112）。CLI `--consumer <queue>[:maxRetries[:dlq[:maxConcurrency]]]`。**调度器（ADR-076）**：`internal/cron` 按 5 字段 UTC 表达式物化 slot 为 `KindCron` 定时器（`CELLHIVE_CRON_INTERVAL` 默认 30s，幂等、不补跑）。
+`Version.Crons`（CLI `--cron`）→ `Projection.CronTargets()`；cell-agent 对 `KindCron` 定时器（scope 约定 `<ns>/__cron__/<worker>`）在派发时补 `worker`+`bundle_sha` → user-runtime `POST /v1/timers/dispatch` → workerLoader 加载 → `scheduled(event, env, ctx)`。**消费者配置/死信（ADR-072）**：`Consumer{Queue,MaxRetries,DeadLetterQueue,MaxBatchSize,MaxConcurrency}`；runner 达上限入 DLQ（同 ns `Send`）或丢弃告警；`max_concurrency` 为每队列**同时在飞的批次数**上限（接受 0..100，默认 0/1=串行；超额配置拒绝，历史值在 runner 限幅，ADR-112/292）。CLI `--consumer <queue>[:maxRetries[:dlq[:maxConcurrency]]]`。**调度器（ADR-076）**：`internal/cron` 按 5 字段 UTC 表达式物化 slot 为 `KindCron` 定时器（`CELLHIVE_CRON_INTERVAL` 默认 30s，幂等、不补跑）。
 
 ## 待细化
 
@@ -200,3 +200,9 @@ CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133,mysql://proxysql:6033
    esbuild：`--platform=neutral --main-fields=main,module --conditions=workerd --external:cloudflare:sockets --external:node:* --external:events --external:util --external:crypto --external:buffer --external:stream --external:net --external:tls --external:dns --external:fs --external:path --external:os --external:readline`。
 
 以上两条均已在真实 Postgres 17 上验证 `select 1, current_database()`；连接池（`max`）是 **per-isolate** 的，不是 CF 的全局 Hyperdrive 池。
+
+### 结果预算与 R2 metadata 边界（ADR-292）
+
+D1 结果按最终保留载荷线性累计，32 MiB 总预算包含数值和 BLOB 展开为整数数组后的载荷；不包含全部 Go 容器开销，也不是 JSON wire size 上限。逐行检查请求取消。
+
+R2 GET/HEAD/list 的 metadata 仅在 ETag/size 匹配对象版本时返回，size/ETag 以对象为准。无 metadata 的覆盖会清理观察到的旧 sidecar（包含相同内容），条件删除不会清掉并发的新版本；已知不支持条件删除的 provider 在存在旧 sidecar 时拒绝覆盖。每次 PUT 增加 sidecar 点读，存在旧 sidecar 时另需条件删除。数据与 metadata 不是原子发布，迟到发布及同内容并发仍有边界，失败响应可能已更新数据；不保证完整 Cloudflare R2 并发原子语义。

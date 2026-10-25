@@ -1,0 +1,5 @@
+--- FAIL: TestCaptureStopCancelsBackgroundSnapshot (0.31s)
+    background_snapshot_test.go:169: capture shutdown did not cancel snapshot
+FAIL
+FAIL	cellhive/internal/sqlcapture	0.319s
+FAIL
