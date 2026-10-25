@@ -73,3 +73,6 @@ platform/log-tail.js新增共用readLogCapture，DO host、公开loader、内部
 - USW一次waker告警：`resource incarnation is deleted`，scope为 `vwork-74/__kv__/kvns_2dacf8ed-8eef-4c52-a060-47a9c3ac5b78`；需要区分删除后的残留任务与业务异常。
 
 发布命令与现场日志保留于 `/tmp/release297-{build,push,local,sg-upgrade,usw-upgrade,sg-diff,usw-diff}.log`、`/tmp/release297-{sg,usw}-{pods.json,agent.log,do.log}`。旧故障隔离证据与全量/race/session测试见前文。
+
+
+后续进展：上述SG invocation数据链问题已作为P0定位并修复（ADR-298），SG revision68/USW revision53及本地已发布，实际compaction/GC后冷恢复与原记录逐行比对通过，详见[P0闭环记录](p0-snapshot-boundary-2026-10-26.md)。其他告警仍保留各自边界。

@@ -9,7 +9,7 @@ _最后更新：2026-10-26_
 
 ## 2026-10-26 P0：后台快照与增量批次边界不一致（ADR-298）
 
-SG invocation链故障已从现场副本复现：snapshot3771跨delta3770..3772，恢复过早剪掉e22基线。完整保留链可恢复，1887条invocation、SQLite integrity正常；修复批次切分、跨epoch严格回退、compaction修复路径及GC前验证。现场副本compaction前后恢复数据库SHA一致；实现和发布状态见[P0记录](archive/p0-snapshot-boundary-2026-10-26.md)。不能将本scope验证扩展为所有历史scope均安全。
+SG invocation链故障已从现场副本复现：snapshot3771跨delta3770..3772，恢复过早剪掉e22基线。完整保留链可恢复，1887条invocation、SQLite integrity正常；修复批次切分、跨epoch严格回退、compaction修复路径及GC前验证。现场副本compaction前后恢复数据库SHA一致；已发布SG revision68、USW revision53及本地。SG实际compaction/GC后的单个L1冷恢复成功，1900条invocation中原1887条逐行一致；实现和发布状态见[P0记录](archive/p0-snapshot-boundary-2026-10-26.md)。不能将本scope验证扩展为所有历史scope均安全。
 
 
 ## 2026-10-26 ADR-296/297 已发布与残余告警

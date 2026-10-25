@@ -25,4 +25,19 @@ RestoreChain此前仅凭最新epoch包含snapshot就裁掉前驱；compaction仅
 
 进程session恢复E2E通过（12.189s）：地址变化、中断恢复、空替换盘拒绝、保留盘恢复80个确认值及控制注册、旧session封存、SIGSTOP超过TTL后接管、旧owner恢复后退出、新session读到确认值。
 
-第一次全量测试包含正在修改的临时诊断cmd，导致临时工具编译失败；诊断源码移出仓库后，make test及make vet重跑均通过。新增100次确认写入与10次后台快照并发，每个快照独立加尾部增量恢复全部100个值，race重复5次通过。生产部署尚未进行；线上修复验收待记录。
+第一次全量测试包含正在修改的临时诊断cmd，导致临时工具编译失败；诊断源码移出仓库后，make test及make vet重跑均通过。新增100次确认写入与10次后台快照并发，每个快照独立加尾部增量恢复全部100个值，race重复5次通过。生产部署及原故障scope冷恢复验证已完成，见下文。
+
+
+## 发布与原故障数据验收
+
+应用修复 `3932b56` 已推送。镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:780b7228589ad1d26c65ca8a85ee649816dd0f931fabc262229c17a3a7c9d630`，SG revision68、USW revision53、本地三个业务服务均更新。两地各6个业务Pod全部Ready且restartCount0，imageID逐个核对；本地三个服务healthy且restartCount0。使用官方Helm preflight/diff/atomic upgrade，diff仅业务镜像及对应generation。Compose保留原配置、环境与数据卷，回滚镜像 `cellhive:pre-298-local`。
+
+三处发布前后KV与DO持久值正确；两地分别经两个agent验证KV，DO binary/headers/双Cookie/deleteAll/redirect均通过。没有把滚动后的单次PUT样本作为热性能结论。
+
+SG原故障scope在新epoch25从3818继续：delta3819..3820、snapshot3820、delta3821及后续，快照准确落在批次边界。第一份发布后桶数据副本独立恢复到3823，SQLite integrity_check=ok，1899条invocation；原1887条逐行全部一致，新增12条。
+
+线上日志随后确认 `compacted scope=vwork-77/__invocations__/main inputs=8 parts=1 min_txid=3819 max_txid=3825 deleted_l0=8`。旧epoch GC已执行。再次从空诊断目录重新下载桶内当前对象（没有复用第一次下载的旧文件）：共9个对象、931306bytes，当前L1快照3825与manifest。只用权威链选择出的1个L1即可恢复，SQLite integrity_check=ok，共1900条invocation，原1887条逐行全部一致。该证据验证实际compaction/GC之后的冷恢复，不依赖在线SQLite或已保全的旧epoch。
+
+SG最后3分钟日志无compaction/non-contiguous错误；USW本次新Pod日志无同类错误。该观察窗口有限，不等于全桶历史scope审计。原先DO recovery pointer CAS错误/桶回退另案待查，本P0未修改该路径。
+
+本机受限证据目录 `/tmp/p0-chain-20261026/` 保存原始对象副本、发布后两次对象副本、完整性及逐行比对输入、red/green/race/全量测试/session E2E日志、build/push/Helm日志和Pod回读。临时诊断源码移出仓库，Pod内诊断工具及临时副本已清理；本机原始证据保留。
