@@ -9,10 +9,10 @@ not ok 1 - early redispatch of memoized sleep re-parks the current lease
   error: |-
     Expected values to be strictly equal:
     + actual - expected
-    
+
     + 'step.get'
     - 'sleep'
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: 'sleep'

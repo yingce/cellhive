@@ -11,7 +11,7 @@ _最后更新：2026-10-26_
 
 本地已修复旧 run 回调跨 restart 写入新执行、事件消费与步骤保存之间中断导致漏事件，以及并发消费重复领取同一事件。回调写入在事务内校验 run token，事件消费与步骤结果同事务提交；暂停/终止/错误终态同步清理租约。无 schema 迁移，仍等待原有持久证明；升级前已消费但没有步骤结果的事件不能自动重建。
 
-HK COS 验收还发现提前唤醒已记忆 sleep 时没有释放新 run lease，已补原 deadline 再 park；删除重建同 scope 的 schema 缓存失效问题也已修复。回归和发布状态以 [验收记录](archive/workflow-atomic-recovery-2026-10-26.md) 为准；尚未发布 SG/USW/本地常驻服务。
+HK COS 验收还发现提前唤醒已记忆 sleep 时没有释放新 run lease，已补原 deadline 再 park；删除重建同 scope 的 schema 缓存失效问题也已修复。回归和发布状态以 [验收记录](archive/workflow-atomic-recovery-2026-10-26.md) 为准；已随 `dd614b4` 发布 SG revision69、USW revision54 及本地；三处 Workflow 事件完成、KV/DO 数据回读通过，DO recovery pointer 既有告警仍保留。
 
 ## 2026-10-26 P0：后台快照与增量批次边界不一致（ADR-298）
 

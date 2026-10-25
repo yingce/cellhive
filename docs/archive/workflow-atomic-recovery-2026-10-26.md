@@ -1,6 +1,6 @@
 # Workflow 事务栅栏与事件恢复验收（2026-10-26）
 
-基于 `720f5b9` 的工作区修复，ADR-299。未提交、未发布 SG/USW/本地常驻服务。
+修复提交 `dd614b4`（基于 `720f5b9`），ADR-299，已推送并发布 SG/USW/本地常驻服务。
 
 ## 修复
 
@@ -50,3 +50,17 @@ python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3 --suite workflow
 第二轮故障注入代理采用 HTTP/1.0、默认小连接 backlog 时，实例在消费前报 Network connection lost（16 个事件均未消费）；测试代理改为 HTTP/1.1 和 128 backlog，并分离串行投递与真正的 16 路并发消费，之后并发消费和冷恢复成功。代理只打印操作路径/异常类型，不记录内部 token。
 
 随后功能用例全部通过，但两个 namespace 的 app 删除报告 `workflow drop ...: no such table: steps`，不能将该轮整体算通过。已确认 Workflow schema 缓存按 scope 而不是句柄导致重开空库时漏建表，添加红绿回归并修复；前一 namespace 由新 agent 重试清理 HTTP 200，后一 namespace 也已由最终验收环境的新 agent 清理，HTTP 200；见 [清理重试](workflow-atomic-recovery-2026-10-26/cleanup-retry.txt)。
+
+## 发布验收
+
+镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879`。SG Helm revision **69**，USW **54**；官方 wrapper preflight/diff/atomic upgrade，diff 仅三个业务工作负载的镜像与对应 generation。运维仓提交 `9235f4e`（该仓未配置 remote）。本地 Compose 保留现有 env、配置、数据卷及 Hyperdrive overlay，只更新三个业务服务；回滚标签 `cellhive:pre-299-local`。
+
+两地各 6 个业务 Pod 的实际 imageID 与新 digest 一致，全部 Ready、restartCount=0；本地三个服务使用同 digest，healthy、restartCount=0。[发布及探针输出](workflow-atomic-recovery-2026-10-26/release.txt)。
+
+- 三处发布前建立 Workflow 实例。SG/USW 旧版本的 waiting 预检未通过（实例停在 running），本地在一次 app create owner 拒绝后重试创建成功并 waiting；未把旧版本预检记作全部通过。
+- 发布后三处都读到 waiting，投递事件后 complete，结果 value=299；测试 app 删除均 HTTP 200。
+- 发布前 KV 写入并从两地各两个 agent 交叉读回；发布后原值保持一致，新 PUT/GET 正确。本地同样通过。这些单次请求耗时不是热性能基准。
+- 三处 DO 原有持久值正确；binary、headers、双 Cookie、deleteAll、redirect 探针通过。SG 首次 DO 探针退出 1，未记录其响应体；随后 supervisor 完成冷恢复，直接 GET 为原值且 HTTP 200，完整探针重跑通过，不将首次失败隐藏为无中断。
+- 部署观察窗口内仍有已知 DO recovery pointer CAS 告警（写入等待桶确认）、短时 workflow run lease held，以及 USW 对已删除 resource incarnation 的失败关闭告警。没有把这些说成已修复或全程零告警；本次不修改其协议。有限发布验收不替代全桶审计或长期混合负载验证。
+
+三处 Workflow 测试应用已清理；KV 探针带 TTL，DO 使用既有运维探针实例。受限本机证据 `/tmp/workflow299-release/` 保留构建、push、Helm diff、Pod 回读和日志；部署没有做故障注入，SIGKILL/COS 冷恢复验证仅在专用 HK 测试桶完成。

@@ -1,0 +1,107 @@
+== sg-upgrade.log ==
+chart sync check passed
+==> Linting /opt/cellhive-helm/charts/cellhive
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+sg: vector preflight passed
+sg: preflight passed
+deployment "cellhive-vector" successfully rolled out
+Release "cellhive-sg" has been upgraded. Happy Helming!
+NAME: cellhive-sg
+LAST DEPLOYED: Mon Oct 26 03:28:46 2026
+NAMESPACE: cellhive-sg
+STATUS: deployed
+REVISION: 69
+TEST SUITE: None
+
+== usw-upgrade.log ==
+chart sync check passed
+==> Linting /opt/cellhive-helm/charts/cellhive
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+usw: vector preflight passed
+usw: preflight passed
+deployment "cellhive-vector" successfully rolled out
+Release "cellhive-usw" has been upgraded. Happy Helming!
+NAME: cellhive-usw
+LAST DEPLOYED: Mon Oct 26 03:28:55 2026
+NAMESPACE: cellhive-usw
+STATUS: deployed
+REVISION: 54
+TEST SUITE: None
+
+== sg-verified.txt ==
+cellhive-sg-cell-agent-0 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-sg-cell-agent-1 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-sg-do-runtime-gated-0 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-sg-do-runtime-gated-1 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-sg-user-runtime-664bdfdc56-bz4b2 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-sg-user-runtime-664bdfdc56-rrwr8 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+
+== usw-verified.txt ==
+cellhive-usw-cell-agent-0 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-usw-cell-agent-1 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-usw-do-runtime-gated-0 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-usw-do-runtime-gated-1 ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-usw-user-runtime-68c84d856c-lbrdj ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+cellhive-usw-user-runtime-68c84d856c-lzlhd ready=True restarts=0 imageID=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879
+
+== local-verified.txt ==
+/cellhive-cell-agent-1 sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879 healthy restarts=0
+/cellhive-user-runtime-1 sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879 healthy restarts=0
+/cellhive-do-runtime-1 sha256:afdc37dfa36e1b9c96edbf8cc1290dd6e714d93214813b9fda6b6ebd529be879 healthy restarts=0
+
+== local-after-workflow.log ==
+{"status":"waiting"}local workflow persisted across rollout + event completion PASS {"status":"complete","output":{"type":"ready","payload":{"value":299}}}
+{"deleted":{"segments":32},"namespace":"ops-workflow299","ok":true,"workflows_dropped":1}
+local workflow test cleanup PASS
+
+== sg-after-workflow.log ==
+{"status":"waiting"}sg workflow persisted across rollout + event completion PASS {"status":"complete","output":{"type":"ready","payload":{"value":299}}}
+{"deleted":{"segments":42},"namespace":"ops-workflow299","ok":true,"workflows_dropped":1}
+sg workflow test cleanup PASS
+
+== usw-after-workflow.log ==
+{"status":"waiting"}usw workflow persisted across rollout + event completion PASS {"status":"complete","output":{"type":"ready","payload":{"value":299}}}
+{"deleted":{"segments":31},"namespace":"ops-workflow299","ok":true,"workflows_dropped":1}
+usw workflow test cleanup PASS
+
+== local-after-kv.log ==
+{"applied":true,"ok":true,"txid":36}
+
+PUT HTTP=200 TOTAL=0.492718s
+node=0 phase=after values=PASS
+
+== sg-after-kv.log ==
+{"applied":true,"ok":true,"txid":100}
+
+PUT HTTP=200 TOTAL=0.380416s
+node=0 phase=after values=PASS
+{"applied":true,"ok":true,"txid":103}
+
+PUT HTTP=200 TOTAL=0.013645s
+node=1 phase=after values=PASS
+
+== usw-after-kv.log ==
+{"applied":true,"ok":true,"txid":66}
+
+PUT HTTP=200 TOTAL=0.882661s
+node=0 phase=after values=PASS
+{"applied":true,"ok":true,"txid":69}
+
+PUT HTTP=200 TOTAL=0.012909s
+node=1 phase=after values=PASS
+
+== local-after-do.log ==
+local DO persisted value phase=after PASS
+local DO binary+headers+cookies+deleteAll+redirect PASS
+
+== sg-after-do-retry.log ==
+sg DO persisted value phase=after PASS
+sg DO binary+headers+cookies+deleteAll+redirect PASS
+
+== usw-after-do.log ==
+usw DO persisted value phase=after PASS
+usw DO binary+headers+cookies+deleteAll+redirect PASS
