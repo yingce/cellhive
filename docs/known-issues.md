@@ -12,7 +12,7 @@ _最后更新：2026-10-25_
 
 首次发布后长时间并发GET暴露另一问题：默认转发transport每目标仅保留2条idle连接，SG agent-1累积28,261个TIME_WAIT，触发 `dial tcp ... cannot assign requested address` / HTTP502。已将默认转发client复用并扩大idle pool至256/128，定向HTTP测试同样5轮×8并发的建连数从32降至8；线上长测和最终发布状态见同一验收记录。
 
-SG revision64分段观测已确认另一条热写尖峰：HTTP555.8ms中SQLite仅0.111ms，bucket提交等待553.1ms；选择时follower缓存租约已过期约2.57s，`no_eligible_follower`触发`bucket-batch`。前序提交又使后续请求达到604ms。已知follower刷新仍依赖后台全量nodes采样，刷新解耦优化尚未实施；不允许延长过期租约或取消RPO=0回退。该结论不解释所有历史proof之外的耗时，详见同一测试记录。
+SG revision64分段观测已确认另一条热写尖峰：HTTP555.8ms中SQLite仅0.111ms，bucket提交等待553.1ms；选择时follower缓存租约已过期约2.57s，`no_eligible_follower`触发`bucket-batch`。前序提交又使后续请求达到604ms。ADR-295已增加独立已知节点点查刷新（默认2秒、单次最多1秒、最多8并发），慢全量扫描不得覆盖较新点查；本地单元及双节点真实HTTP回归通过，SG发布验收待完成；不允许延长过期租约或取消RPO=0回退。该结论不解释所有历史proof之外的耗时，详见同一测试记录。
 
 ## 2026-10-25 后台快照阻塞写入（ADR-294）
 

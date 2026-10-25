@@ -87,6 +87,9 @@ type Manager struct {
 	cachedAt   time.Time
 	refreshing bool
 	retryAt    time.Time
+	// observed fences late discovery results against newer point reads.
+	observed     map[string]time.Time
+	knownRunning bool
 }
 
 // NewManager builds a lease manager.
@@ -371,6 +374,7 @@ func (m *Manager) SampleCached(_ context.Context, ttl time.Duration) []NodeLease
 // object-store List can take seconds in SG; writes only need the previous
 // snapshot to choose a follower.
 func (m *Manager) refresh() {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	sample, err := m.Sample(ctx)
@@ -381,7 +385,7 @@ func (m *Manager) refresh() {
 		m.retryAt = time.Now().Add(5 * time.Second)
 		return
 	}
-	m.cached = sample
+	m.mergeSampleLocked(sample, started)
 	m.cachedAt = time.Now()
 }
 

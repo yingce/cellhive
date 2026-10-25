@@ -1,5 +1,13 @@
 # 决策记录（ADR）
 
+## ADR-295 已知节点租约独立刷新（2026-10-25）
+
+全量 nodes 采样继续负责发现；cell-agent 生命周期内独立后台任务刷新缓存中的已知非本机节点，不等待 List，也不由业务请求执行桶 I/O。默认每2秒（min(LeaseTTL/5, 2s)）一轮，最多8个并发点查，每次deadline不超过1秒和刷新周期；轮次不重叠，退出取消并等待本轮结束。只追踪仍存活或过期不超过一个LeaseTTL的节点，历史死节点不持续轮询。
+
+点查成功按桶中原始session/instance/address/expiry替换缓存，不在本地延长租约；404移除，超时/错误保留旧记录但不修改expiry，过期仍不能作为follower证明。节点身份必须与点查key一致。后台扫描结果与点查通过读取开始时间合并：扫描开始后取得的点查结果（包括404）不得被慢扫描覆盖；快照采用copy-on-write，正在遍历旧快照的请求不受写入数据竞争影响。旧扫描返回后不得把新的进程身份、地址或删除状态回退。保持owner接管fresh check、session/instance fence、RPO=0和无可用follower时的桶回退。
+
+验证目标：阻塞全量List仍刷新已知peer；旧扫描不能覆盖新点查或复活404节点；错误不续期；取消终止后台I/O；双节点真实HTTP在发现阻塞/旧缓存到期后仍取得fleet证明，真实peer过期仍回退桶。SG实测结果另行记录，不以本地单测宣称线上尾延迟已消除。
+
 ## ADR-294 后台基线快照独立于增量捕获（2026-10-25）
 
 marker 恢复后的 RequestBaseline 使用 SQLite backup 复制固定版本（保留页编号），在 cell 写锁内仅做本地复制，上传使用独立临时文件并释放原库锁。不对原库 checkpoint、重置 WAL cursor 或推进持久性 barrier；并发写仍必须由增量提交获得证明。临时文件中的 txid 是快照唯一水位，started/done 仍按该水位标记。失败或取消不发布 done，不停止原增量链；复制前按 SQLite page_count/page_size 检查 SnapshotMaxBytes（含 WAL 中的新页），流式编码保持分片内存预算；结束清理临时文件。capture 退出会取消并等待后台复制/上传，防止关闭 DB 时仍有后台任务。cell-agent 获得数据目录独占锁后，在启动阶段清理 cells/<ns>/<class> 下专用临时目录，回收 SIGKILL 遗留。首次无可恢复链的快照与 WAL 截断后的 rebaseline 仍采用同步输出门。不能用 VACUUM INTO 替代 backup，因为后续 WAL delta 依赖原页编号。

@@ -228,6 +228,15 @@ func main() {
 		os.Exit(1)
 	})
 
+	// Keep known peer leases current independently of full fleet discovery.
+	knownCtx, stopKnown := context.WithCancel(ctx)
+	knownDone := make(chan struct{})
+	go func() {
+		defer close(knownDone)
+		lm.RunKnownRefresh(knownCtx)
+	}()
+	defer func() { stopKnown(); <-knownDone }()
+
 	// Renew node lease at TTL/3.
 	go func() {
 		t := time.NewTicker(cfg.LeaseTTL / 3)
