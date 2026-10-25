@@ -64,6 +64,10 @@ const (
 // Capture polls a cell WAL, emits real WAL-page LTX segments, and advances a
 // durability barrier only after Committer confirms fleet durability.
 type Capture struct {
+	// pollMu coordinates only the local copy boundary, never snapshot upload.
+	pollMu       sync.Mutex
+	baselineCuts []uint64
+
 	backgroundMu     sync.Mutex
 	backgroundWG     sync.WaitGroup
 	backgroundClosed bool
@@ -189,8 +193,24 @@ func (c *Capture) RequestBaseline(ctx context.Context, onStart func(context.Cont
 	stop := context.AfterFunc(c.backgroundCtx, cancel)
 	defer func() { stop(); cancel() }()
 
+	c.pollMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			c.pollMu.Unlock()
+		}
+	}()
+	boundary := func(ctx context.Context, label uint64) error {
+		c.baselineCuts = append(c.baselineCuts, label)
+		locked = false
+		c.pollMu.Unlock()
+		if onStart != nil {
+			return onStart(ctx, label)
+		}
+		return nil
+	}
 	shadow := &Capture{cell: c.cell, scope: c.scope, epoch: c.epoch, committer: c.committer,
-		cursor: wal.NewCursor(), barrier: newBarrier(0), onBaselineStart: onStart,
+		cursor: wal.NewCursor(), barrier: newBarrier(0), onBaselineStart: boundary,
 		SnapshotMaxBytes: c.SnapshotMaxBytes, SnapshotPartBytes: c.SnapshotPartBytes,
 		SnapshotBatchParts: c.SnapshotBatchParts}
 	err := shadow.emitSnapshotStream(ctx, snapshotModeDetached, 0)
@@ -286,6 +306,8 @@ func waitGroupCommit(ctx context.Context, notify <-chan struct{}, delay time.Dur
 }
 
 func (c *Capture) poll(ctx context.Context) error {
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
 	// Always advance the barrier through completed chunks first. An ack that
 	// arrived after the previous post-dispatch drain must not be stranded just
 	// because this poll found no new WAL transactions.
@@ -325,7 +347,19 @@ func (c *Capture) poll(ctx context.Context) error {
 		}
 		txs = append(txs, out)
 	}
-	for _, chunk := range chunkTransactions(result.Header.PageSize, txs) {
+	// A detached baseline is useful on its own only if no delta straddles it.
+	var chunks [][]ltx.WALTransaction
+	start := c.nextTxID
+	for _, cut := range c.baselineCuts {
+		if cut <= start || cut > start+uint64(len(txs)) {
+			continue
+		}
+		n := int(cut - start)
+		chunks = append(chunks, chunkTransactions(result.Header.PageSize, txs[:n])...)
+		txs, start = txs[n:], cut
+	}
+	chunks = append(chunks, chunkTransactions(result.Header.PageSize, txs)...)
+	for _, chunk := range chunks {
 		commit, pages, err := ltx.PageMapFromTransactions(result.Header.PageSize, chunk)
 		if err != nil {
 			return fmt.Errorf("sqlcapture: build page map: %w", err)
@@ -378,6 +412,13 @@ func (c *Capture) poll(ctx context.Context) error {
 			return err
 		}
 	}
+	kept := c.baselineCuts[:0]
+	for _, cut := range c.baselineCuts {
+		if cut > c.nextTxID {
+			kept = append(kept, cut)
+		}
+	}
+	c.baselineCuts = kept
 	if err := c.maybeAutoCheckpoint(ctx); err != nil {
 		return err
 	}

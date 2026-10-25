@@ -7,6 +7,11 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 _最后更新：2026-10-26_
 
 
+## 2026-10-26 P0：后台快照与增量批次边界不一致（ADR-298）
+
+SG invocation链故障已从现场副本复现：snapshot3771跨delta3770..3772，恢复过早剪掉e22基线。完整保留链可恢复，1887条invocation、SQLite integrity正常；修复批次切分、跨epoch严格回退、compaction修复路径及GC前验证。现场副本compaction前后恢复数据库SHA一致；实现和发布状态见[P0记录](archive/p0-snapshot-boundary-2026-10-26.md)。不能将本scope验证扩展为所有历史scope均安全。
+
+
 ## 2026-10-26 ADR-296/297 已发布与残余告警
 
 peer stream 超时/并发ACK及runtime日志配置读取超时已随 `0e7c67d` 发布至SG revision67、USW revision52和本地；新镜像地址切换E2E、发布前后KV/DO持久化检查通过，USW DO探针网络故障自动恢复。两地仍观察到DO recovery pointer CAS竞争后的bucket回退；SG `vwork-77/__invocations__/main` 持续compaction报 non-contiguous chain（expected3772/got3770），该scope冷恢复尚未验证。另记录滚动期cron500/invocation502及USW已删除resource的waker告警。不能据此宣称所有数据恢复/性能问题均已解决；详见[发布与未解决项](archive/do-address-recovery-2026-10-26.md)。

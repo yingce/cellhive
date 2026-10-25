@@ -8,6 +8,7 @@ import (
 	"cellhive/internal/restore"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -258,5 +259,126 @@ func TestBackgroundSnapshotDoesNotAdvanceDeltaBarrier(t *testing.T) {
 	close(c.release)
 	if err := capture.Wait(ctx, tx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Force a copy between two unpolled WAL commits, exactly the production
+// snapshot-at-3771 / delta-3770..3772 shape. No timing sleeps are needed.
+func TestDetachedBaselineSplitsPendingWALBatch(t *testing.T) {
+	ctx := context.Background()
+	db, scope, _ := openStreamCell(t, ctx, "boundary", 1)
+	rec := &recordingCommitter{}
+	c, _ := newCapture(t, db, scope, rec)
+	if _, err := db.PutTx(ctx, "before", []byte("one"), nil); err != nil {
+		t.Fatal(err)
+	}
+	watermark, err := c.RequestBaseline(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := db.PutTx(ctx, "after", []byte("two"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var tail [][]byte
+	for _, raw := range rec.segments {
+		h, _, _ := ltx.Decode(raw)
+		if h.Kind == ltx.KindSnapshot || h.EndTxID > watermark {
+			tail = append(tail, raw)
+		}
+		if h.Kind == ltx.KindDelta && h.StartTxID <= watermark && h.EndTxID > watermark {
+			t.Fatalf("delta %d..%d crosses snapshot %d", h.StartTxID, h.EndTxID, watermark)
+		}
+	}
+	dest := filepath.Join(t.TempDir(), "restored.db")
+	if _, err := restore.ApplyFile(dest, tail); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cellstore.OpenAt(ctx, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Close()
+	if tx, err := got.TxID(ctx); err != nil || tx != end {
+		t.Fatalf("txid=%d want=%d err=%v", tx, end, err)
+	}
+	for k, want := range map[string]string{"before": "one", "after": "two"} {
+		v, _, err := got.Get(ctx, k)
+		if err != nil || string(v) != want {
+			t.Fatalf("%s: %q %v", k, v, err)
+		}
+	}
+}
+
+func TestDetachedBaselinesDuringConcurrentWritesRemainIndependentlyRestorable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db, sc, _ := openStreamCell(t, ctx, "many-boundaries", 1)
+	rec := &recordingCommitter{}
+	c, _ := newCapture(t, db, sc, rec)
+	c.Start(ctx)
+	defer func() { cancel(); <-c.Done() }()
+	writes := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			tx, e := db.PutTx(ctx, fmt.Sprintf("saved-%03d", i), []byte(fmt.Sprintf("value-%03d", i)), nil)
+			if e == nil {
+				c.Notify()
+				e = c.Wait(ctx, tx)
+			}
+			if e != nil {
+				writes <- e
+				return
+			}
+		}
+		writes <- nil
+	}()
+	for i := 0; i < 10; i++ {
+		if _, e := c.RequestBaseline(ctx, nil); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e := <-writes; e != nil {
+		t.Fatal(e)
+	}
+	rec.mu.Lock()
+	segments := append([][]byte(nil), rec.segments...)
+	rec.mu.Unlock()
+	checked := 0
+	for _, baseline := range segments {
+		h, _, _ := ltx.Decode(baseline)
+		if h.Kind != ltx.KindSnapshot {
+			continue
+		}
+		chain := [][]byte{baseline}
+		for _, raw := range segments {
+			d, _, _ := ltx.Decode(raw)
+			if d.Kind == ltx.KindDelta && d.EndTxID > h.EndTxID {
+				chain = append(chain, raw)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "image.db")
+		if _, e := restore.ApplyFile(path, chain); e != nil {
+			t.Fatalf("baseline %d: %v", h.EndTxID, e)
+		}
+		got, e := cellstore.OpenAt(ctx, path)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for i := 0; i < 100; i++ {
+			v, _, e := got.Get(ctx, fmt.Sprintf("saved-%03d", i))
+			if e != nil || string(v) != fmt.Sprintf("value-%03d", i) {
+				got.Close()
+				t.Fatalf("baseline %d lost key %d: %v", h.EndTxID, i, e)
+			}
+		}
+		got.Close()
+		checked++
+	}
+	if checked != 10 {
+		t.Fatalf("checked %d snapshots", checked)
 	}
 }

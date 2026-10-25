@@ -20,6 +20,7 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
+	"cellhive/internal/restore"
 )
 
 // Manager reads and writes replication segments for cells.
@@ -489,6 +490,17 @@ func (m *Manager) HasCompleteSnapshot(ctx context.Context, s cell.Scope, epoch u
 	}
 	for _, key := range keys {
 		if strings.HasSuffix(key, ".snapshot-done") {
+			segs, err := m.Restore(ctx, s, epoch)
+			if err != nil {
+				return false, err
+			}
+			raws := make([][]byte, len(segs))
+			for i, seg := range segs {
+				raws[i] = seg.Raw
+			}
+			if err := restore.ValidateChain(raws); err != nil {
+				return false, fmt.Errorf("replica: epoch GC requires independently restorable chain: %w", err)
+			}
 			return true, nil
 		}
 	}
@@ -603,25 +615,55 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 	// Restore only needs the newest complete baseline and the epochs above it.
 	// Older epochs are dead weight; restoring every historical epoch made a
 	// cron/invocation cell with 100+ epochs exceed the hydrate deadline.
-	if start := lastBase(epochs, hasBase); start >= 0 {
-		epochs = epochs[start:]
+	start := lastBase(epochs, hasBase)
+	if start < 0 {
+		start = 0
 	}
-	var out []Segment
-	seen := map[string]bool{}
-	for _, epoch := range epochs {
-		segs, rerr := m.restoreOnceKeys(ctx, s, epoch, byEpoch[epoch])
-		if rerr != nil {
-			return nil, rerr
-		}
-		for _, sg := range segs {
-			if seen[sg.Key] {
-				continue
+	loaded := map[uint64][]Segment{}
+	var firstErr error
+	for {
+		var out []Segment
+		seen := map[string]bool{}
+		for _, epoch := range epochs[start:] {
+			segs, ok := loaded[epoch]
+			if !ok {
+				var err error
+				segs, err = m.restoreOnceKeys(ctx, s, epoch, byEpoch[epoch])
+				if err != nil {
+					return nil, err
+				}
+				loaded[epoch] = segs
 			}
-			seen[sg.Key] = true
-			out = append(out, sg)
+			for _, sg := range segs {
+				if !seen[sg.Key] {
+					seen[sg.Key] = true
+					out = append(out, sg)
+				}
+			}
 		}
+		// Marker-only epochs still rely on their predecessor; preserve the
+		// legacy no-base result for callers which explicitly handle no data.
+		if lastBase(epochs, hasBase) < 0 {
+			return out, nil
+		}
+		raws := make([][]byte, len(out))
+		for i, seg := range out {
+			raws[i] = seg.Raw
+		}
+		if err := restore.ValidateChain(raws); err == nil {
+			return out, nil
+		} else if firstErr == nil {
+			firstErr = err
+		}
+		if start == 0 {
+			return nil, firstErr
+		}
+		previous := lastBase(epochs[:start], hasBase)
+		if previous < 0 {
+			previous = 0
+		}
+		start = previous
 	}
-	return out, nil
 }
 
 // segmentSpan is one L0 object's txid coverage.

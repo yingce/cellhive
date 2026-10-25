@@ -167,3 +167,18 @@ func completeSnapshotSet(headers []ltx.Header, idx []int) bool {
 	}
 	return true
 }
+
+// ValidateChain checks checksums, complete snapshot parts and exact delta
+// continuity without materializing database pages. It never skips a newer tail.
+func ValidateChain(segments [][]byte) error {
+	headers := make([]ltx.Header, len(segments))
+	for i, raw := range segments {
+		h, _, err := ltx.Decode(raw)
+		if err != nil {
+			return err
+		}
+		headers[i] = h
+	}
+	_, _, _, err := selectChain(headers)
+	return err
+}

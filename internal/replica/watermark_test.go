@@ -187,7 +187,10 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 	if err := m.MarkSnapshotDone(ctx, sc, 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	put(3, "3.snapshot")
+	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 3, StartTxID: 3, EndTxID: 3}, []byte("snapshot"))
+	if _, err := b.Put(ctx, Prefix(sc, 3)+"3.snapshot", raw); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.MarkSnapshotDone(ctx, sc, 3, 3); err != nil {
 		t.Fatal(err)
 	}

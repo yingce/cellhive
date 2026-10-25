@@ -173,7 +173,37 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 
 	parts, err := restore.Compact(segs, opts.MaxPartBytes)
 	if err != nil {
-		return Result{}, err
+		// Older detached baselines can straddle a delta batch. Recover from
+		// a retained predecessor, with the same strict chain validation; do
+		// not discard the overlapping delta's newer tail.
+		chain, rerr := m.RestoreChain(ctx, s, epoch)
+		if rerr != nil {
+			return Result{}, fmt.Errorf("compaction: current chain: %v; predecessor recovery: %w", err, rerr)
+		}
+		segs = nil
+		inputBytes = 0
+		for _, seg := range chain {
+			segs = append(segs, seg.Raw)
+			inputBytes += int64(len(seg.Raw))
+		}
+		parts, err = restore.Compact(segs, opts.MaxPartBytes)
+		if err != nil {
+			return Result{}, err
+		}
+		for i, part := range parts {
+			h, payload, err := ltx.Decode(part)
+			if err != nil {
+				return Result{}, err
+			}
+			h.Epoch = epoch
+			parts[i] = ltx.Encode(h, payload)
+			maxTx = h.EndTxID
+		}
+		if opts.Verify != nil {
+			if err := opts.Verify(ctx); err != nil {
+				return Result{}, err
+			}
+		}
 	}
 	_, payload, err := ltx.Decode(parts[0])
 	if err != nil {

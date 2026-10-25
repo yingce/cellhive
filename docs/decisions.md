@@ -1,5 +1,12 @@
 # 决策记录（ADR）
 
+## ADR-298 后台快照边界、跨 epoch 回退与删除前验证（2026-10-26）
+
+SG现场证明独立backup可落在尚未捕获的WAL批次中间。保持严格连续性校验：后台复制与capture poll协调，复制完成取得水位后、上传前登记增量批次切分边界，禁止后续delta跨越该快照水位。协调锁不得覆盖后台快照上传；不重置cursor、不提前释放durability barrier。
+
+历史链恢复先尝试最新基线；完整性/连续性验证失败时按需加载前一基线及中间epochs，仍要求最终链完整连续，不能丢弃有更新尾部的跨水位delta。正常恢复保持一次List与最新基线快路径。compaction允许从验证后的跨epoch链重建当前epoch快照，发布前保持owner/epoch校验；旧epoch GC必须验证当前epoch自身可恢复，仅snapshot-done标记不足以授权删除前驱。缺段、冲突和无法恢复时保留所有输入并失败。
+
+
 ## ADR-297 日志配置拉取必须有完整请求上限（2026-10-26）
 
 实际DO runtime故障注入确认：后台log-capture请求挂在旧地址时，workerd共享HTTP客户端保持活动，不能drain并清理已解析地址；改DNS后即使curl访问新地址成功，ready的800ms超时仍可能连续失败。readiness自身有超时不等于同目标后台请求有超时。
