@@ -14,7 +14,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -89,7 +88,7 @@ CREATE INDEX IF NOT EXISTS events_instance ON events(instance_id, id);
 type Store struct {
 	cs       *cellstore.Store
 	now      func() time.Time
-	migrated sync.Map // scope string -> migrated once per process
+	migrated sync.Map // scope string -> cell handle whose schema was migrated
 	Index    timer.Index
 	Register func(string)
 }
@@ -171,10 +170,10 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := s.migrated.Load(scope.String()); ok {
+	if previous, ok := s.migrated.Load(scope.String()); ok && previous == c {
 		return c, nil
 	}
-	// The schema and best-effort ALTERs are idempotent; run them once per process
+	// The schema and best-effort ALTERs are idempotent; run them once per cell handle
 	// so a read API does not advance the capture txid on every call (read traffic
 	// -> replication). Each statement goes through Cell.Tx so a cold cell's
 	// migration cannot desynchronise capture's txid sequence.
@@ -208,7 +207,7 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 		s.migrated.Delete(scope.String())
 		return nil, err
 	}
-	s.migrated.Store(scope.String(), struct{}{})
+	s.migrated.Store(scope.String(), c)
 	return c, nil
 }
 
@@ -461,12 +460,12 @@ func (s *Store) GetAttempt(ctx context.Context, ns, name, id, step string) (int,
 }
 
 // SetAttempt upserts the retry attempt count/error for a step (durable retries).
-func (s *Store) SetAttempt(ctx context.Context, ns, name, id, step string, attempts int, lastErr string) error {
+func (s *Store) SetAttempt(ctx context.Context, ns, name, id, step string, attempts int, lastErr string, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c,
+	_, err = execRunCell(ctx, c, id, run,
 		`INSERT INTO step_attempts(instance_id, name, attempts, last_error) VALUES(?,?,?,?)
 		 ON CONFLICT(instance_id, name) DO UPDATE SET attempts = excluded.attempts, last_error = excluded.last_error`,
 		id, step, attempts, lastErr)
@@ -474,12 +473,12 @@ func (s *Store) SetAttempt(ctx context.Context, ns, name, id, step string, attem
 }
 
 // ClearAttempt removes a step's retry state (on success/restart).
-func (s *Store) ClearAttempt(ctx context.Context, ns, name, id, step string) error {
+func (s *Store) ClearAttempt(ctx context.Context, ns, name, id, step string, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c, `DELETE FROM step_attempts WHERE instance_id = ? AND name = ?`, id, step)
+	_, err = execRunCell(ctx, c, id, run, `DELETE FROM step_attempts WHERE instance_id = ? AND name = ?`, id, step)
 	return err
 }
 
@@ -496,12 +495,12 @@ func (s *Store) SetWait(ctx context.Context, ns, name, id, step string, deadline
 }
 
 // ClearWait removes a waitForEvent entry.
-func (s *Store) ClearWait(ctx context.Context, ns, name, id, step string) error {
+func (s *Store) ClearWait(ctx context.Context, ns, name, id, step string, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c, `DELETE FROM waits WHERE instance_id = ? AND name = ?`, id, step)
+	_, err = execRunCell(ctx, c, id, run, `DELETE FROM waits WHERE instance_id = ? AND name = ?`, id, step)
 	return err
 }
 
@@ -525,46 +524,93 @@ func (s *Store) GetWait(ctx context.Context, ns, name, id, step string) (int64, 
 // ConsumeEvent returns the oldest unconsumed event for an instance (optionally
 // matching a JSON "type" field) and marks it consumed.
 func (s *Store) ConsumeEvent(ctx context.Context, ns, name, id, evType string) ([]byte, bool, error) {
+	return s.ConsumeEventForStep(ctx, ns, name, id, "", evType, "")
+}
+
+// ConsumeEventForStep commits consumption and its replayable step result together.
+// An empty step is the legacy, non-replayable internal consumption API.
+func (s *Store) ConsumeEventForStep(ctx context.Context, ns, name, id, step, evType, token string) ([]byte, bool, error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return nil, false, err
 	}
-	rows, err := c.DB.QueryContext(ctx, `SELECT id, payload FROM events WHERE instance_id = ? AND consumed = 0 ORDER BY id`, id)
+	var payload []byte
+	var found bool
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		if err := checkRunTx(ctx, tx, id, []string{token}); err != nil {
+			return err
+		}
+		if step != "" {
+			err := tx.QueryRowContext(ctx, `SELECT result FROM steps WHERE instance_id=? AND name=?`, id, step).Scan(&payload)
+			if err == nil {
+				found = true
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		var eventID int64
+		err := tx.QueryRowContext(ctx, `SELECT id,payload FROM events WHERE instance_id=? AND consumed=0 AND (?='' OR CASE WHEN json_valid(CAST(payload AS TEXT)) THEN json_extract(CAST(payload AS TEXT),'$.type') END=?) ORDER BY id LIMIT 1`, id, evType, evType).Scan(&eventID, &payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET consumed=1 WHERE id=?`, eventID); err != nil {
+			return err
+		}
+		if step != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO steps(instance_id,name,result) VALUES(?,?,?)`, id, step, payload); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM waits WHERE instance_id=? AND name=?`, id, step); err != nil {
+				return err
+			}
+		}
+		found = true
+		return nil
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	type row struct {
-		id      int64
-		payload []byte
+	return payload, found, nil
+}
+
+// checkRunTx is deliberately inside the same write transaction as the mutation.
+func checkRunTx(ctx context.Context, tx *sql.Tx, id string, run []string) error {
+	if len(run) == 0 || run[0] == "" {
+		return nil
 	}
-	var all []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.payload); err != nil {
-			rows.Close()
-			return nil, false, err
+	var current string
+	err := tx.QueryRowContext(ctx, `SELECT run_token FROM instances WHERE id=?`, id).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrStaleRun
+	}
+	if err != nil {
+		return err
+	}
+	if current != run[0] {
+		return ErrStaleRun
+	}
+	return nil
+}
+
+func execRunCell(ctx context.Context, c *cellstore.Cell, id string, run []string, q string, args ...any) (int64, error) {
+	var n int64
+	_, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		if err := checkRunTx(ctx, tx, id, run); err != nil {
+			return err
 		}
-		all = append(all, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
-	for _, r := range all {
-		if evType != "" {
-			var probe struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(r.payload, &probe) != nil || probe.Type != evType {
-				continue
-			}
+		res, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			return err
 		}
-		if _, err := execCell(ctx, c, `UPDATE events SET consumed = 1 WHERE id = ?`, r.id); err != nil {
-			return nil, false, err
-		}
-		return r.payload, true, nil
-	}
-	return nil, false, nil
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
 }
 
 // execCell runs one cell write through Cell.Tx so it advances the cell's txid
@@ -726,14 +772,14 @@ func (s *Store) ListPage(ctx context.Context, ns, name string, limit, offset int
 }
 
 // SetStatus updates an instance's status (and error text when provided).
-func (s *Store) SetStatus(ctx context.Context, ns, name, id string, status Status, errText string) error {
+func (s *Store) SetStatus(ctx context.Context, ns, name, id string, status Status, errText string, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c,
-		`UPDATE instances SET status = ?, error = ?, updated_ms = ? WHERE id = ?`,
-		string(status), errText, s.now().UnixMilli(), id)
+	_, err = execRunCell(ctx, c, id, run,
+		`UPDATE instances SET status = ?, error = ?, updated_ms = ?, run_token = CASE WHEN ? THEN '' ELSE run_token END, lease_until_ms = CASE WHEN ? THEN 0 ELSE lease_until_ms END WHERE id = ?`,
+		string(status), errText, s.now().UnixMilli(), status != StatusRunning, status != StatusRunning, id)
 	return err
 }
 
@@ -768,12 +814,12 @@ func (s *Store) Delete(ctx context.Context, ns, name, id string) (bool, error) {
 }
 
 // SetOutput stores the final output and marks the instance complete.
-func (s *Store) SetOutput(ctx context.Context, ns, name, id string, output []byte) error {
+func (s *Store) SetOutput(ctx context.Context, ns, name, id string, output []byte, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c,
+	_, err = execRunCell(ctx, c, id, run,
 		`UPDATE instances SET status = ?, output = ?, updated_ms = ?, run_token = '', lease_until_ms = 0 WHERE id = ?`,
 		string(StatusComplete), output, s.now().UnixMilli(), id)
 	return err
@@ -781,10 +827,7 @@ func (s *Store) SetOutput(ctx context.Context, ns, name, id string, output []byt
 
 // Pause/Resume/Terminate change instance status without touching steps.
 func (s *Store) Pause(ctx context.Context, ns, name, id string) error {
-	if err := s.SetStatus(ctx, ns, name, id, StatusPaused, ""); err != nil {
-		return err
-	}
-	return s.ReleaseRun(ctx, ns, name, id, "")
+	return s.SetStatus(ctx, ns, name, id, StatusPaused, "")
 }
 
 func (s *Store) Resume(ctx context.Context, ns, name, id string) error {
@@ -802,10 +845,7 @@ func (s *Store) Resume(ctx context.Context, ns, name, id string) error {
 }
 
 func (s *Store) Terminate(ctx context.Context, ns, name, id string) error {
-	if err := s.SetStatus(ctx, ns, name, id, StatusTerminated, ""); err != nil {
-		return err
-	}
-	return s.ReleaseRun(ctx, ns, name, id, "")
+	return s.SetStatus(ctx, ns, name, id, StatusTerminated, "")
 }
 
 // Restart clears all memoized steps and re-queues the instance from the start.
@@ -833,12 +873,12 @@ func (s *Store) Restart(ctx context.Context, ns, name, id string) error {
 }
 
 // PutStep memoizes a step result (idempotent per (instance, step)).
-func (s *Store) PutStep(ctx context.Context, ns, name, id, step string, result []byte) error {
+func (s *Store) PutStep(ctx context.Context, ns, name, id, step string, result []byte, run ...string) error {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return err
 	}
-	_, err = execCell(ctx, c,
+	_, err = execRunCell(ctx, c, id, run,
 		`INSERT INTO steps(instance_id, name, result) VALUES(?,?,?)
 		 ON CONFLICT(instance_id, name) DO NOTHING`, id, step, result)
 	return err

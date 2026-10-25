@@ -1,0 +1,5 @@
+--- FAIL: TestWorkflowRecreatedCellMigrates (0.02s)
+    event_atomic_test.go:195: recreated cell reused old schema cache: no such table: instances
+FAIL
+FAIL	cellhive/internal/workflow	0.024s
+FAIL

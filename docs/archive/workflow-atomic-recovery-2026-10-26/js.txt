@@ -1,0 +1,361 @@
+node --check workerd/platform/bindings.js
+node --check workerd/platform/facades.js
+node --check workerd/platform/rpc-codec.js
+node --check workerd/platform/log-tail.js
+node --check workerd/platform/telemetry.js
+node --check workerd/platform/lifecycle.js
+node --test workerd/platform/telemetry.test.mjs
+TAP version 13
+# Subtest: nested platform span uses the supplied parent span
+ok 1 - nested platform span uses the supplied parent span
+  ---
+  duration_ms: 4.472473
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 69.314064
+node --test workerd/platform/lifecycle.test.mjs
+TAP version 13
+# Subtest: quota wrapper invokes binding methods without RPC apply lookup
+ok 1 - quota wrapper invokes binding methods without RPC apply lookup
+  ---
+  duration_ms: 1.756527
+  type: 'test'
+  ...
+# Subtest: byte cache evicts by weight, updates accounting and skips oversized values
+ok 2 - byte cache evicts by weight, updates accounting and skips oversized values
+  ---
+  duration_ms: 1.63795
+  type: 'test'
+  ...
+# Subtest: retirement waits for handler, response body and background completion
+ok 3 - retirement waits for handler, response body and background completion
+  ---
+  duration_ms: 30.655928
+  type: 'test'
+  ...
+# Subtest: stream is not eagerly consumed and error releases lifetime
+ok 4 - stream is not eagerly consumed and error releases lifetime
+  ---
+  duration_ms: 1.897584
+  type: 'test'
+  ...
+# Subtest: small JSON body is buffered and released before the client reads it
+ok 5 - small JSON body is buffered and released before the client reads it
+  ---
+  duration_ms: 2.403813
+  type: 'test'
+  ...
+# Subtest: plain-text body under the cap is buffered without changing bytes or status
+ok 6 - plain-text body under the cap is buffered without changing bytes or status
+  ---
+  duration_ms: 0.983016
+  type: 'test'
+  ...
+# Subtest: event-stream body stays lazy and is tracked until cancel
+ok 7 - event-stream body stays lazy and is tracked until cancel
+  ---
+  duration_ms: 1.098973
+  type: 'test'
+  ...
+# Subtest: oversized plain-text body falls back to a tracked stream
+ok 8 - oversized plain-text body falls back to a tracked stream
+  ---
+  duration_ms: 1.962592
+  type: 'test'
+  ...
+# Subtest: empty 204 response releases the lifetime without buffering
+ok 9 - empty 204 response releases the lifetime without buffering
+  ---
+  duration_ms: 0.516868
+  type: 'test'
+  ...
+# Subtest: capacity reserves synchronously across concurrent cold requests
+ok 10 - capacity reserves synchronously across concurrent cold requests
+  ---
+  duration_ms: 0.650333
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 134.248773
+node --test workerd/platform/queue-codec.test.mjs
+TAP version 13
+# Subtest: Queue v8 envelope preserves structured values and shared references
+ok 1 - Queue v8 envelope preserves structured values and shared references
+  ---
+  duration_ms: 2.454701
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 70.063275
+node --test workerd/platform/do-http.test.mjs workerd/do-runtime/renew.test.mjs
+TAP version 13
+# Subtest: transport error of one lease does not stop renewing the others
+ok 1 - transport error of one lease does not stop renewing the others
+  ---
+  duration_ms: 26.288164
+  type: 'test'
+  ...
+# Subtest: late failed renewal cannot delete a replacement claim
+ok 2 - late failed renewal cannot delete a replacement claim
+  ---
+  duration_ms: 1.158852
+  type: 'test'
+  ...
+# Subtest: renewal deadline also covers a hung response body
+ok 3 - renewal deadline also covers a hung response body
+  ---
+  duration_ms: 0.975407
+  type: 'test'
+  ...
+# Subtest: DO transport preserves request and response bytes and tenant headers
+ok 4 - DO transport preserves request and response bytes and tenant headers
+  ---
+  duration_ms: 35.256377
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 204
+ok 5 - DO transport preserves null body 204
+  ---
+  duration_ms: 1.572622
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 205
+ok 6 - DO transport preserves null body 205
+  ---
+  duration_ms: 1.24848
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 304
+ok 7 - DO transport preserves null body 304
+  ---
+  duration_ms: 1.379646
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 119.122308
+node --test workerd/user-runtime/loader.test.mjs workerd/user-runtime/internal-identity.test.mjs workerd/user-runtime/workflow-wrapper.test.mjs
+TAP version 13
+# Subtest: legacy same numeric version revalidates metadata after worker recreation
+ok 1 - legacy same numeric version revalidates metadata after worker recreation
+  ---
+  duration_ms: 33.92574
+  type: 'test'
+  ...
+# Subtest: legacy cached version cannot accept a different returned SHA
+ok 2 - legacy cached version cannot accept a different returned SHA
+  ---
+  duration_ms: 2.186146
+  type: 'test'
+  ...
+# Subtest: rejects mismatched version
+ok 3 - rejects mismatched version
+  ---
+  duration_ms: 1.592701
+  type: 'test'
+  ...
+# Subtest: rejects mismatched SHA
+ok 4 - rejects mismatched SHA
+  ---
+  duration_ms: 1.328358
+  type: 'test'
+  ...
+# Subtest: rejects mismatched incarnation
+ok 5 - rejects mismatched incarnation
+  ---
+  duration_ms: 2.107889
+  type: 'test'
+  ...
+# Subtest: rejects mismatched missing incarnation
+ok 6 - rejects mismatched missing incarnation
+  ---
+  duration_ms: 1.417366
+  type: 'test'
+  ...
+# Subtest: version zero retains active lookup semantics without immutable caching
+ok 7 - version zero retains active lookup semantics without immutable caching
+  ---
+  duration_ms: 2.826611
+  type: 'test'
+  ...
+# Subtest: SHA-only explicit service pins and absent numeric versions remain supported
+ok 8 - SHA-only explicit service pins and absent numeric versions remain supported
+  ---
+  duration_ms: 1.688198
+  type: 'test'
+  ...
+# Subtest: loadWorker separates returned incarnations for legacy requests
+ok 9 - loadWorker separates returned incarnations for legacy requests
+  ---
+  duration_ms: 3.910915
+  type: 'test'
+  ...
+# Subtest: loadWorkflowWorker separates returned incarnations for legacy requests
+ok 10 - loadWorkflowWorker separates returned incarnations for legacy requests
+  ---
+  duration_ms: 3.909925
+  type: 'test'
+  ...
+# Subtest: loadWorker uses resolved version for active identity
+ok 11 - loadWorker uses resolved version for active identity
+  ---
+  duration_ms: 2.622576
+  type: 'test'
+  ...
+# Subtest: loadWorkflowWorker uses resolved version for active identity
+ok 12 - loadWorkflowWorker uses resolved version for active identity
+  ---
+  duration_ms: 2.227265
+  type: 'test'
+  ...
+# Subtest: service fetch retains supplied incarnation validation
+ok 13 - service fetch retains supplied incarnation validation
+  ---
+  duration_ms: 4.046601
+  type: 'test'
+  ...
+# Subtest: service run retains supplied incarnation validation
+ok 14 - service run retains supplied incarnation validation
+  ---
+  duration_ms: 2.274445
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/old
+ok 15 - pool incarnation new/old
+  ---
+  duration_ms: 3.629682
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/undefined
+ok 16 - pool incarnation new/undefined
+  ---
+  duration_ms: 1.753738
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/new
+ok 17 - pool incarnation new/new
+  ---
+  duration_ms: 1.701908
+  type: 'test'
+  ...
+# Subtest: pool incarnation undefined/
+ok 18 - pool incarnation undefined/
+  ---
+  duration_ms: 1.474974
+  type: 'test'
+  ...
+# Subtest: pool incarnation /undefined
+ok 19 - pool incarnation /undefined
+  ---
+  duration_ms: 1.569032
+  type: 'test'
+  ...
+# Subtest: explicit version lookup fails closed instead of using another cached version
+ok 20 - explicit version lookup fails closed instead of using another cached version
+  ---
+  duration_ms: 4.024692
+  type: 'test'
+  ...
+# Subtest: explicit lookup does not populate active pointer cache
+ok 21 - explicit lookup does not populate active pointer cache
+  ---
+  duration_ms: 1.406816
+  type: 'test'
+  ...
+# Subtest: recreated worker same version cannot reuse old SHA or environment
+ok 22 - recreated worker same version cannot reuse old SHA or environment
+  ---
+  duration_ms: 1.22294
+  type: 'test'
+  ...
+# Subtest: cached immutable old identity remains usable by already-pinned requests
+ok 23 - cached immutable old identity remains usable by already-pinned requests
+  ---
+  duration_ms: 1.175741
+  type: 'test'
+  ...
+# Subtest: returned immutable identity must match version SHA and incarnation
+ok 24 - returned immutable identity must match version SHA and incarnation
+  ---
+  duration_ms: 3.256611
+  type: 'test'
+  ...
+# Subtest: late pinned 404 cannot poison active lookup
+ok 25 - late pinned 404 cannot poison active lookup
+  ---
+  duration_ms: 1.464935
+  type: 'test'
+  ...
+# Subtest: resident version keys include incarnation even for identical code/version
+ok 26 - resident version keys include incarnation even for identical code/version
+  ---
+  duration_ms: 1.256779
+  type: 'test'
+  ...
+# Subtest: host deadline aborts a hung response body and releases the flight
+ok 27 - host deadline aborts a hung response body and releases the flight
+  ---
+  duration_ms: 32.063124
+  type: 'test'
+  ...
+# Subtest: warm host replaces stuck flight and ignores its late response
+ok 28 - warm host replaces stuck flight and ignores its late response
+  ---
+  duration_ms: 2.840721
+  type: 'test'
+  ...
+# Subtest: early redispatch of memoized sleep re-parks the current lease
+ok 29 - early redispatch of memoized sleep re-parks the current lease
+  ---
+  duration_ms: 3.27954
+  type: 'test'
+  ...
+# Subtest: expired memoized sleep proceeds without extending the deadline
+ok 30 - expired memoized sleep proceeds without extending the deadline
+  ---
+  duration_ms: 2.06605
+  type: 'test'
+  ...
+1..30
+# tests 30
+# suites 0
+# pass 30
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 167.215276
+# -p 1: userruntime and doruntime each spawn real workerd processes on
+# freePort() ports; running the two packages in parallel races those ports
+# (Address already in use). Serialize the packages.
+go test -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" ./internal/userruntime/ ./internal/doruntime/ -count=1 -p 1
+ok  	cellhive/internal/userruntime	32.620s
+ok  	cellhive/internal/doruntime	30.581s

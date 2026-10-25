@@ -1,0 +1,2 @@
+200 {"deleted":{"segments":30},"namespace":"hk-review-1792955455-193ca9-0","ok":true,"workflows_dropped":0}
+200 {"deleted":{"segments":2},"namespace":"hk-review-1792955455-193ca9-1","ok":true,"workflows_dropped":0}

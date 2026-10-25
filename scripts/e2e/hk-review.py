@@ -14,6 +14,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--credentials', required=True)
 parser.add_argument('--port-base', type=int, default=26500)
+parser.add_argument('--suite', choices=('review', 'workflow'), default='review')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 creds = {}
@@ -38,8 +39,11 @@ run = 'hk-review-' + str(int(time.time())) + '-' + secrets.token_hex(3)
 artifacts = Path(tempfile.mkdtemp(prefix=run + '-'))
 print(f'HK-REVIEW artifacts={artifacts} compute=local storage=HK-COS durability=bucket', flush=True)
 failed = []
-for index, (script, original_ns) in enumerate([
-        ('review-fixes.sh', 'review'), ('queue.sh', 'e2eq'), ('queue-multinode.sh', 'e2emn')]):
+suites = {
+    'review': [('review-fixes.sh', 'review'), ('queue.sh', 'e2eq'), ('queue-multinode.sh', 'e2emn')],
+    'workflow': [('workflow.sh', 'e2ewf'), ('workflow-recovery.sh', 'e2ewfr')],
+}
+for index, (script, original_ns) in enumerate(suites[args.suite]):
     ns = f'{run}-{index}'
     case = artifacts / str(index)
     case.mkdir()

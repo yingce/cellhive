@@ -381,7 +381,7 @@ func (s *Server) handleWorkflowAttempt(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		attempts, lastErr, ok, err := s.Workflows.GetAttempt(r.Context(), ns, name, id, step)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_attempt_failed", err.Error())
+			writeWorkflowError(w, "workflow_attempt_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"found": ok, "attempts": attempts, "error": lastErr})
@@ -391,17 +391,17 @@ func (s *Server) handleWorkflowAttempt(w http.ResponseWriter, r *http.Request) {
 			attempts, _ = strconv.Atoi(v)
 		}
 		if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
-			return s.Workflows.SetAttempt(r.Context(), ns, name, id, step, attempts, q.Get("error"))
+			return s.Workflows.SetAttempt(r.Context(), ns, name, id, step, attempts, q.Get("error"), q.Get("run"))
 		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_attempt_failed", err.Error())
+			writeWorkflowError(w, "workflow_attempt_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case http.MethodDelete:
 		if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
-			return s.Workflows.ClearAttempt(r.Context(), ns, name, id, step)
+			return s.Workflows.ClearAttempt(r.Context(), ns, name, id, step, q.Get("run"))
 		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_attempt_failed", err.Error())
+			writeWorkflowError(w, "workflow_attempt_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -456,8 +456,18 @@ func (s *Server) fenceRun(w http.ResponseWriter, r *http.Request, ns, name, id s
 			writeErr(w, http.StatusConflict, "stale_run", "run token is no longer current")
 			return false
 		}
+		writeWorkflowError(w, "workflow_renew_failed", err)
+		return false
 	}
 	return true
+}
+
+func writeWorkflowError(w http.ResponseWriter, code string, err error) {
+	if errors.Is(err, workflow.ErrStaleRun) {
+		writeErr(w, http.StatusConflict, "stale_run", "run token is no longer current")
+		return
+	}
+	writeErr(w, http.StatusInternalServerError, code, err.Error())
 }
 
 // handleWorkflowEventConsume returns and consumes the oldest matching event.
@@ -472,14 +482,18 @@ func (s *Server) handleWorkflowEventConsume(w http.ResponseWriter, r *http.Reque
 	if !s.fenceRun(w, r, q.Get("ns"), q.Get("workflow"), q.Get("id")) {
 		return
 	}
+	if q.Get("run") != "" && q.Get("name") == "" {
+		writeErr(w, http.StatusBadRequest, "missing_step", "event consumption requires a step name")
+		return
+	}
 	var payload []byte
 	var found bool
 	if err := s.capturedWorkflow(r.Context(), q.Get("ns"), q.Get("workflow"), func() error {
 		var e error
-		payload, found, e = s.Workflows.ConsumeEvent(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("type"))
+		payload, found, e = s.Workflows.ConsumeEventForStep(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("name"), q.Get("type"), q.Get("run"))
 		return e
 	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, "workflow_consume_failed", err.Error())
+		writeWorkflowError(w, "workflow_consume_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"found": found, "event": base64.StdEncoding.EncodeToString(payload)})
@@ -509,7 +523,7 @@ func (s *Server) handleWorkflowWait(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		deadline, found, err := s.Workflows.GetWait(r.Context(), ns, name, id, step)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_wait_failed", err.Error())
+			writeWorkflowError(w, "workflow_wait_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"found": found, "deadline_ms": deadline})
@@ -521,15 +535,15 @@ func (s *Server) handleWorkflowWait(w http.ResponseWriter, r *http.Request) {
 		if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
 			return s.Workflows.ParkWait(r.Context(), ns, name, id, step, q.Get("run"), q.Get("type"), deadline)
 		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_wait_failed", err.Error())
+			writeWorkflowError(w, "workflow_wait_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case http.MethodDelete:
 		if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
-			return s.Workflows.ClearWait(r.Context(), ns, name, id, step)
+			return s.Workflows.ClearWait(r.Context(), ns, name, id, step, q.Get("run"))
 		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_wait_failed", err.Error())
+			writeWorkflowError(w, "workflow_wait_failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -554,7 +568,7 @@ func (s *Server) handleWorkflowStepGet(w http.ResponseWriter, r *http.Request) {
 	}
 	result, found, err := s.Workflows.GetStep(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("name"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "workflow_step_failed", err.Error())
+		writeWorkflowError(w, "workflow_step_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -579,9 +593,9 @@ func (s *Server) handleWorkflowStepPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.capturedWorkflow(r.Context(), q.Get("ns"), q.Get("workflow"), func() error {
-		return s.Workflows.PutStep(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("name"), body)
+		return s.Workflows.PutStep(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("name"), body, q.Get("run"))
 	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, "workflow_step_failed", err.Error())
+		writeWorkflowError(w, "workflow_step_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -618,7 +632,7 @@ func (s *Server) handleWorkflowSleep(w http.ResponseWriter, r *http.Request) {
 	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {
 		return s.Workflows.ParkSleep(r.Context(), ns, name, id, q.Get("run"), wakeAt)
 	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, "timer_upsert_failed", err.Error())
+		writeWorkflowError(w, "timer_upsert_failed", err)
 		return
 	}
 	if s.Timers != nil {
@@ -645,19 +659,18 @@ func (s *Server) handleWorkflowFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	if errText := q.Get("error"); errText != "" {
 		if err := s.capturedWorkflow(r.Context(), q.Get("ns"), q.Get("workflow"), func() error {
-			return s.Workflows.SetStatus(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), workflow.StatusErrored, errText)
+			return s.Workflows.SetStatus(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), workflow.StatusErrored, errText, q.Get("run"))
 		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "workflow_finish_failed", err.Error())
+			writeWorkflowError(w, "workflow_finish_failed", err)
 			return
 		}
-		_ = s.Workflows.ReleaseRun(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), q.Get("run"))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": workflow.StatusErrored})
 		return
 	}
 	if err := s.capturedWorkflow(r.Context(), q.Get("ns"), q.Get("workflow"), func() error {
-		return s.Workflows.SetOutput(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), body)
+		return s.Workflows.SetOutput(r.Context(), q.Get("ns"), q.Get("workflow"), q.Get("id"), body, q.Get("run"))
 	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, "workflow_finish_failed", err.Error())
+		writeWorkflowError(w, "workflow_finish_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": workflow.StatusComplete})

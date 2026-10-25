@@ -232,7 +232,13 @@ function makeStep(bridge, id) {
       const got = await getStep(name);
       if (got.found) {
         const wake = JSON.parse(b64decode(got.result)).wake_at_ms;
-        if (Date.now() < wake) throw new SleepSignal();
+        if (Date.now() < wake) {
+          // An event or racing wake can claim a fresh attempt before the sleep
+          // deadline. Release that attempt again, preserving the original wake.
+          const r = await call(bridge, "sleep", Object.assign(named(name), { wake_at_ms: wake }));
+          if (!r.ok) throw new Error("step sleep " + r.status);
+          throw new SleepSignal();
+        }
         return;
       }
       const wake = Date.now() + parseDurationMs(duration);

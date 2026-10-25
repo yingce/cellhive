@@ -1,0 +1,22 @@
+TAP version 13
+# Subtest: early redispatch of memoized sleep re-parks the current lease
+ok 1 - early redispatch of memoized sleep re-parks the current lease
+  ---
+  duration_ms: 2.565847
+  type: 'test'
+  ...
+# Subtest: expired memoized sleep proceeds without extending the deadline
+ok 2 - expired memoized sleep proceeds without extending the deadline
+  ---
+  duration_ms: 1.786187
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 66.997398

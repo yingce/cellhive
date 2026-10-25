@@ -1,0 +1,21 @@
+HK-REVIEW artifacts=/tmp/hk-review-1792955684-83bde0-vpn6ipfy compute=local storage=HK-COS durability=bucket
+START workflow.sh ns=hk-review-1792955684-83bde0-0
+[e2e] base=/tmp/cellhive-e2e.6YG0fp agent=26700 runtime=26702
+[e2e] sleep: waiting -> complete
+[e2e] timeout: waiting -> errored
+[e2e] retry: failed twice -> complete on attempt 3
+[e2e] r2 workflow metadata: text/x-workflow
+E2E-WORKFLOW: PASS
+HK-CLEANUP ns=hk-review-1792955684-83bde0-0 success=1 http=200
+[e2e] kept /tmp/cellhive-e2e.6YG0fp
+END workflow.sh exit=0 cleanup=True
+START workflow-recovery.sh ns=hk-review-1792955684-83bde0-1
+PASS stale step/finish callbacks return 409; new execution output=7
+PASS real workerd 16 concurrent waits consume 16 distinct events
+INJECT SIGKILL runtime + agent after durable consume, before response; fresh local data directory
+PASS fresh agent restores all three results from object storage; lost response event output=42
+E2E-WORKFLOW-RECOVERY: PASS
+HK-CLEANUP ns=hk-review-1792955684-83bde0-1 success=1 http=200
+[e2e] kept /tmp/cellhive-e2e.87fknu
+END workflow-recovery.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/tmp/hk-review-1792955684-83bde0-vpn6ipfy
