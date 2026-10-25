@@ -354,3 +354,79 @@ func TestDOProxyRejectsDifferentBindingInSameNamespace(t *testing.T) {
 		t.Fatalf("class mismatch = %d %s, want 403 scope_binding_mismatch", rr.Code, rr.Body.String())
 	}
 }
+
+func TestDOProxyPreservesHTTPResponse(t *testing.T) {
+	for _, status := range []int{200, 302} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var followed atomic.Bool
+			runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/do/invoke" {
+					followed.Store(true)
+					w.WriteHeader(418)
+					return
+				}
+				w.Header().Set("X-Cellhive-Do-App", "1")
+				w.Header().Set("X-Result", "kept")
+				w.Header().Add("Set-Cookie", "a=b")
+				w.Header().Add("Set-Cookie", "c=d")
+				w.Header().Set("Location", "/redirect-must-not-run")
+				w.Header().Set("X-Cellhive-Internal-Token", "must-not-leak")
+				w.WriteHeader(status)
+				w.Write([]byte{0, 255, 128, 65})
+			}))
+			defer runtime.Close()
+			s := &Server{Cfg: config.Config{DoRuntimes: []string{runtime.URL}}}
+			got := invokeDO(t, s, "one")
+			if followed.Load() || got.Code != status {
+				t.Fatalf("redirect followed or status changed: %d", got.Code)
+			}
+			if !bytes.Equal(got.Body.Bytes(), []byte{0, 255, 128, 65}) || got.Header().Get("X-Result") != "kept" || len(got.Header().Values("Set-Cookie")) != 2 || got.Header().Get("Location") != "/redirect-must-not-run" {
+				t.Fatalf("response changed: %v %x", got.Header(), got.Body.Bytes())
+			}
+			if got.Header().Get("X-Cellhive-Internal-Token") != "" {
+				t.Fatal("platform header leaked")
+			}
+		})
+	}
+}
+
+func TestDOProxyAuthorizesAgainstControlOwner(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	primary, om, primaryHTTP := newControlForwardServer(t, dir, "primary")
+	follower, _, _ := newControlForwardServer(t, dir, "follower")
+	om.Advertise = primaryHTTP.URL
+	if _, err := om.Claim(ctx, control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := primary.Control.CreateApp(ctx, "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := primary.Control.Deploy(ctx, "acme", "web", control.DeploySpec{BundleSHA: "sha", Bindings: []control.Binding{{Type: "do", Name: "ROOM", ID: "Room"}}}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := follower.Control.WorkerEnv(ctx, "acme", "web"); err != nil || ok {
+		t.Fatalf("expected stale follower: %v %v", ok, err)
+	}
+	var hits atomic.Int64
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.Write([]byte("ok")) }))
+	defer runtime.Close()
+	follower.Cfg.DoRuntimes = []string{runtime.URL}
+	for _, class := range []string{"Room", "Other"} {
+		body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: class, ID: "x", BundleSHA: "sha"})
+		req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+		req.Header.Set("x-cellhive-scope-token", mint(t, follower, "acme", "do", "ROOM"))
+		rr := httptest.NewRecorder()
+		follower.Handler().ServeHTTP(rr, req)
+		want := http.StatusOK
+		if class == "Other" {
+			want = http.StatusForbidden
+		}
+		if rr.Code != want {
+			t.Fatalf("class=%s got %d %s want %d", class, rr.Code, rr.Body.String(), want)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("runtime hits=%d", hits.Load())
+	}
+}

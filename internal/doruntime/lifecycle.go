@@ -11,8 +11,9 @@ import (
 // RenewEvery is how often a do-runtime renews its owner leases with the local
 // host actor; DrainBudget bounds the best-effort drain on shutdown (ADR-078).
 const (
-	RenewEvery  = 10 * time.Second
-	DrainBudget = 15 * time.Second
+	RenewEvery          = 10 * time.Second
+	DrainBudget         = 15 * time.Second
+	RenewRequestTimeout = 5 * time.Second
 )
 
 // PostLocal sends a small JSON POST to the local host actor with the internal
@@ -49,7 +50,10 @@ func RenewLoop(ctx context.Context, base, token string, every time.Duration, onE
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := PostLocal(ctx, base, token, "/v1/do/renew", "{}"); err != nil && onErr != nil {
+			attempt, cancel := context.WithTimeout(ctx, RenewRequestTimeout)
+			err := PostLocal(attempt, base, token, "/v1/do/renew", "{}")
+			cancel()
+			if err != nil && onErr != nil {
 				onErr(err)
 			}
 		}

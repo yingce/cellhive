@@ -26,6 +26,7 @@ type FunctionKey struct {
 	Worker    string
 	Version   int
 	BundleSHA string
+	StorageID string
 }
 
 type Config struct {

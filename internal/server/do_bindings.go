@@ -179,13 +179,16 @@ func (s *Server) handleInternalBindings(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]any{"bindings": map[string]any{}, "vars": map[string]any{}})
 		return
 	}
-	spec, vars := s.bindingSpecFor(r.Context(), ns, worker, version)
+	// Pin the already-resolved version: an intervening deploy must not pair
+	// version A's identity with the new active version B's variables/bindings.
+	spec, vars := s.bindingSpecFor(r.Context(), ns, worker, view.Version)
 	if spec == nil {
 		writeErr(w, http.StatusServiceUnavailable, "worker_secret_failed", "worker bindings or secrets unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bindings": spec, "vars": vars,
+		"version": view.Version, "bundle_sha": view.BundleSHA, "storage_id": view.StorageID,
 		"compat_date": view.CompatDate, "compat_flags": view.CompatFlags,
 		"limits": view.Limits,
 	})

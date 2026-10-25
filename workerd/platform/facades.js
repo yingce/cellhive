@@ -213,7 +213,7 @@ export function makeKV(platform, ns, scopeToken) {
 }
 
 // Durable Object binding (ADR-080): env.DO.get(id).fetch(...) is placed by
-// cell-agent onto a do-runtime by shard. Text bodies only (documented).
+// cell-agent onto a do-runtime by shard. HTTP bodies use a byte-safe envelope.
 export function makeDO(platform, spec) {
   // Owner hint (ADR-105): after the router (cell-agent) answers once, cache the
   // owner address plus a short-lived ticket and call the owner directly next
@@ -242,7 +242,7 @@ export function makeDO(platform, spec) {
         direct = await pfetch(platform, hint.url + "/v1/do/invoke", {
           method: "POST",
           headers: { "content-type": "application/json", "x-cellhive-do-ticket": hint.ticket },
-          body: payload,
+          body: payload, redirect: "manual",
         });
       } catch (e) {
         // Transport failure: the request may or may not have reached the owner.
@@ -261,7 +261,7 @@ export function makeDO(platform, spec) {
     const r = await pfetch(platform, platform.url + "/v1/do/invoke", {
       method: "POST",
       headers: { ...headers(platform, spec.token), "content-type": "application/json" },
-      body: payload,
+      body: payload, redirect: "manual",
     });
     if (r.ok) {
       const owner = r.headers.get("x-cellhive-do-owner");
@@ -317,9 +317,9 @@ export function makeDO(platform, spec) {
     }
     const method = req.method || "GET";
     const url = new URL(req.url);
-    let body;
-    if (method !== "GET" && method !== "HEAD") {
-      try { body = await req.text(); } catch { body = undefined; }
+    let body_base64;
+    if (method !== "GET" && method !== "HEAD" && req.body !== null) {
+      body_base64 = base64Queue(await req.arrayBuffer());
     }
     const hdrs = {};
     req.headers.forEach((v, k) => {
@@ -327,7 +327,7 @@ export function makeDO(platform, spec) {
     });
     const payload = JSON.stringify({
       ...identity(id),
-      request: { method, path: url.pathname + url.search, headers: hdrs, body },
+      request: { method, path: url.pathname + url.search, headers: hdrs, body_base64 },
     });
     const r = await invoke(id, payload, false);
     // A DO fetch resolves with the object's Response, including 4xx/5xx; only a
@@ -335,9 +335,13 @@ export function makeDO(platform, spec) {
     if (!r.ok && r.headers.get("x-cellhive-do-app") !== "1") {
       throw new Error("do: " + r.status + " " + (await r.text()));
     }
-    return new Response(await r.text(), {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "text/plain" },
+    const responseHeaders = new Headers(r.headers);
+    for (const key of [...responseHeaders.keys()]) {
+      if (key.toLowerCase().startsWith("x-cellhive-") || key.toLowerCase() === "content-length") responseHeaders.delete(key);
+    }
+    const bytes = await r.arrayBuffer();
+    return new Response(method === "HEAD" || [204, 205, 304].includes(r.status) ? null : bytes, {
+      status: r.status, statusText: r.statusText, headers: responseHeaders,
     });
   }
 

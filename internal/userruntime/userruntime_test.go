@@ -2361,7 +2361,7 @@ func TestUserRuntimeDurableObjectBinding(t *testing.T) {
 		t.Fatalf("do invoke body = %+v", doBody)
 	}
 	req := doBody["request"].(map[string]any)
-	if req["method"] != "POST" || req["body"] != "hi" {
+	if req["method"] != "POST" || req["body_base64"] != "aGk=" {
 		t.Fatalf("do request = %+v", req)
 	}
 

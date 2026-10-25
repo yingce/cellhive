@@ -1,5 +1,22 @@
 # 决策记录（ADR）
 
+## ADR-288 DO HTTP 字节与响应头、完整清空及续租边界（2026-10-25）
+
+- 发布验收补充：DO invoke 的 worker/class 绑定鉴权必须点查控制 cell 的当前 owner；禁止读取 follower 的本地 Projection（可能永久缺少新 Worker）。仅转发只读元数据查询，DO 请求体和响应仍走原代理，保持大小、多值头和不重放语义。无法确认 owner 时返回 503。
+
+- DO fetch 请求在现有 JSON envelope 中增加 `request.body_base64`，按原始字节编码；host 仍接受旧 `body` 文本。旧 host 不支持新字段，部署须暂停/排空 DO 调用流量，升级全部 do-runtime，再升级调用方后恢复流量（do-runtime 自身也可调用其它 DO）；不能把混合版本的二进制传输称为兼容。RPC tagged envelope 和 WebSocket 独立路径不变。
+- 返回值在 do-runtime、cell-agent 和 binding 全链路按字节传递，保留租户响应头（包括重复 Set-Cookie、Location），移除逐跳头及内部 x-cellhive-*；owner/ticket/app 标记仅由平台添加，在 tenant binding 返回前剥离。代理不得跟随 DO 返回的重定向；204/205/304 和 HEAD 使用空 body。仍为有界代理/缓冲路径，不宣称流式 DO fetch。
+- deleteAll 的 KV list 返回 Map，无 cursor；重复删除第一页直到为空/不足一页，并清除全部 alarm shim 元数据。保持原有清理用户 SQL 表的行为，不新增并发写入下的原子清空承诺。
+- 后台续租每次本地 HTTP 调用有期限；host 对单个 owner renew 的 fetch 和读取响应体设置期限，异常只影响该租约并继续处理其余条目。失败时不继续派发，不绕过 epoch/output gate；短 TTL 配置和大量 shard 的续租容量仍需单独评估。
+
+## ADR-287 user-runtime 不可变执行身份与路由刷新（2026-10-25）
+
+- host pointer 增加已有 worker `storage_id`（实例代际）；执行身份使用 namespace/worker/storage_id/version/bundle SHA，删除清理后重建即使复用版本号与相同代码也不得复用旧变量、绑定、compat 或 resident。无 storage_id 的旧指针必须重新读取 worker env，不得仅按数字版本永久命中缓存。
+- active 指针缓存与指定 version/SHA 的不可变 env 缓存隔离。指定身份读取失败或响应身份不符必须失败关闭，不能回退另一版本；延迟 404 只能影响对应查询，不能覆盖 active 或其它版本。已持有合法旧身份的在途请求可继续完成。
+- host 刷新以 5s deadline 覆盖 fetch 与响应体读取，AbortController 取消底层请求，并用 flight generation + route epoch 拒绝被替换请求的迟到结果/异常/finally。暖缓存也能替换超时 flight；路由仍保留既有 stale-while-revalidate/失败退避策略，不宣称部署同步强一致。
+- pool 公共路由、FunctionKey、专属 child target 与可信头传播 storage_id；过滤外部 Connection 对 x-cellhive-* 的提名，防止 ReverseProxy 移除固定身份。内部 dispatch 保留可选 storage_id，bindings 元数据返回 version/bundle_sha/storage_id，spec 缓存与 worker/workflow loader ID 带代际；没有代际的旧请求每次重新查询，保留已有 SHA-only service pin 与旧元数据缺字段/不可用的兼容行为（未提供可信代际时不宣称完整身份校验）。
+- 本地回归覆盖身份复用、错误回退、active 污染、404 竞态和挂起刷新；尚未部署。该修复不等于确认 request_id `53900423061812ab6983f683207f7742` 命中漏洞（该请求早于新版创建）。
+
 ## ADR-286 异常接管与驻留回收（2026-10-24）
 
 - 所有请求入口必须传播旧副本失效错误，成功后才可标记预清理完成。

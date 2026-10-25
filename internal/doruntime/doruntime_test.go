@@ -288,7 +288,9 @@ func invokeSpec(t *testing.T, base string, spec map[string]any) (*http.Response,
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/do/invoke", bytes.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-cellhive-internal-token", "tok")
-	resp, err := noProxyClient().Do(req)
+	client := noProxyClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("invoke: %v", err)
 	}

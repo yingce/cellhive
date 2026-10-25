@@ -41,7 +41,7 @@ func NewManager(parent context.Context, bin, dir string, cfg userruntime.Config,
 		child.InternalPort = ports.Internal
 		child.PoolMode = true
 		if slot.Mode == workerdpool.Dedicated {
-			child.PoolTarget = &userruntime.ExecutionTarget{Namespace: slot.Key.Namespace, Worker: slot.Key.Worker, Version: slot.Key.Version, BundleSHA: slot.Key.BundleSHA}
+			child.PoolTarget = &userruntime.ExecutionTarget{Namespace: slot.Key.Namespace, Worker: slot.Key.Worker, Version: slot.Key.Version, BundleSHA: slot.Key.BundleSHA, StorageID: slot.Key.StorageID}
 		}
 		root := filepath.Join(dir, fmt.Sprintf("%s-g%d", slot.ID, slot.Generation))
 		path, err := userruntime.Render(root, child)

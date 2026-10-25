@@ -30,7 +30,6 @@ export class DurableObject extends NativeDurableObject {
     const rawGet = storage.get.bind(storage);
     const rawPut = storage.put.bind(storage);
     const rawDelete = storage.delete.bind(storage);
-    let cursor;
 
     define(storage, "setAlarm", async (scheduledTime) => {
       const ms = typeof scheduledTime === "number" ? scheduledTime : Number(scheduledTime);
@@ -58,14 +57,12 @@ export class DurableObject extends NativeDurableObject {
     // tables, and clear the shimmed alarm.
     define(storage, "deleteAll", async () => {
       const LIMIT = 256;
-      for (let i = 0; i < 100000; i++) {
+      for (;;) {
         const opts = { limit: LIMIT };
-        if (cursor !== undefined) opts.startAfter = cursor;
         const page = await storage.list(opts);
         const keys = [...page.keys()];
         if (keys.length) await storage.delete(keys);
-        if (keys.length === 0 || page.list_complete === true || page.cursor === undefined || keys.length < LIMIT) break;
-        cursor = page.cursor;
+        if (keys.length < LIMIT) break;
       }
       if (storage.sql) {
         const rows = [...storage.sql.exec(
@@ -76,7 +73,7 @@ export class DurableObject extends NativeDurableObject {
           storage.sql.exec('DROP TABLE IF EXISTS "' + name + '"');
         }
       }
-      await rawDelete(ALARM_KEY);
+      await rawDelete([ALARM_KEY, ALARM_ID, ALARM_PENDING]);
     });
   }
 

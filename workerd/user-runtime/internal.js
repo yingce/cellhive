@@ -17,7 +17,7 @@ import { tailQuery } from "log-tail.js";
 //     { namespace, worker, bundle_sha, version, kind, scheduled_time_ms, cron?, bindings?, vars? }
 //
 // When a dispatch body omits `bindings`, the worker's binding spec is fetched
-// from cell-agent once per (worker, version) and injected into env, so queue()/
+// from cell-agent and injected into env, so queue()/
 // scheduled()/workflow handlers see the same env as fetch() (ADR-128).
 
 export default {
@@ -29,7 +29,7 @@ export default {
       if(!authorized(req,env))return json({error:"unauthorized"},401);
       let identity;try{identity=await req.clone().json();}catch(e){return json({error:"bad_json"},400);}
       const target=JSON.parse(env.CH_POOL_TARGET);
-      if(identity.namespace!==target.namespace||identity.worker!==target.worker||identity.version!==target.version||identity.bundle_sha!==target.bundle_sha)return json({error:"dedicated_target_mismatch"},403);
+      if(identity.namespace!==target.namespace||identity.worker!==target.worker||identity.version!==target.version||identity.bundle_sha!==target.bundle_sha||(identity.storage_id||"")!==(target.storage_id||""))return json({error:"dedicated_target_mismatch"},403);
     }
     if (req.method === "POST" && url.pathname === "/v1/queues/dispatch") {
       if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
@@ -224,7 +224,7 @@ async function dispatchServiceFetch(req, env, ctx) {
   }
   let stub;
   try {
-    stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, bindings: bindings || {}, vars: vars || {} });
+    stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, storage_id: body.storage_id, bindings: bindings || {}, vars: vars || {} });
   } catch (e) {
     return workerLoadFailure(e);
   }
@@ -268,7 +268,7 @@ async function dispatchServiceRun(req, env, ctx) {
   }
   let stub;
   try {
-    stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, bindings: bindings || {}, vars: vars || {} });
+    stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, storage_id: body.storage_id, bindings: bindings || {}, vars: vars || {} });
   } catch (e) {
     return workerLoadFailure(e);
   }
@@ -379,8 +379,9 @@ async function loadWorkflowWorker(env, ctx, body) {
     .replaceAll("'cloudflare:workflows'", "'cellhive-workflow.js'");
   // Include the version when given: a binding/vars-only redeploy keeps the sha
   // but must not reuse the old isolate/env (see loader.js workerStub).
-  const wfVer = body.version != null ? `${body.version}-` : "";
   const spec = await specFor(env, body);
+  const resolvedVersion = body.version > 0 ? body.version : spec.version;
+  const wfVer = resolvedVersion != null ? `${resolvedVersion}-` : "";
   const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
@@ -403,7 +404,7 @@ async function loadWorkflowWorker(env, ctx, body) {
   };
   return checkedWorkerGet(
     env.LOADER,
-    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}~wf${variantSuffix(tailOn)}`,
+    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}~wf${variantSuffix(tailOn)}`,
     workerCode,
     spec.vars,
     spec.bindings,
@@ -446,9 +447,10 @@ async function loadWorker(env, ctx, body) {
     .replaceAll("'cloudflare:workers'","'__cellhive-invocation-workers.js'");
   const spec = await specFor(env, body);
   const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
-  // Same id format as loader.js workerStub (ADR-126/127): a worker's fetch and
-  // queue/scheduled/service handlers share one isolate per (worker, version).
-  const ver = body.version != null ? `${body.version}-` : "";
+  // Separate delete/recreate incarnations even when version and SHA are reused.
+  // Use resolved metadata so legacy producers need not supply storage_id.
+  const resolvedVersion = body.version > 0 ? body.version : spec.version;
+  const ver = resolvedVersion != null ? `${resolvedVersion}-` : "";
   const tailKey = tailOn ? crypto.randomUUID() : "";
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
@@ -472,7 +474,7 @@ async function loadWorker(env, ctx, body) {
   };
   return checkedWorkerGet(
     env.LOADER,
-    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}${variantSuffix(tailOn)}`,
+    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}${variantSuffix(tailOn)}`,
     workerCode,
     spec.vars,
     spec.bindings,
@@ -514,15 +516,23 @@ async function loadSource(env, sha) {
 
 // specFor resolves the binding spec + vars for a dispatch body. An explicit
 // body.bindings wins (service dispatch carries the cell-agent-resolved spec);
-// otherwise the spec is fetched once per (worker, version) (ADR-128).
+// otherwise resolve metadata. Numeric versions alone are reusable after delete/
+// recreate, so only a complete immutable identity is safe to cache.
 async function specFor(env, body) {
-  const key = `${body.namespace}/${body.worker}@${body.version !== undefined ? body.version : ""}`;
-  let spec = specCache.get(key);
+  const hasVersion = Number.isSafeInteger(body.version) && body.version > 0;
+  const pinned = hasVersion && body.bundle_sha && body.storage_id;
+  const key = JSON.stringify([body.namespace, body.worker, body.version, body.bundle_sha, body.storage_id || ""]);
+  let spec = pinned ? specCache.get(key) : undefined;
   if (spec === undefined) {
     spec = await fetchSpec(env, body.namespace, body.worker, body.version);
-    // Only successful lookups are cached: a cell-agent blip must not pin an
-    // empty spec for the worker's lifetime.
-    if (spec.ok !== false) cachePut(specCache, key, spec, SPEC_CACHE_MAX);
+    // Explicit service specs can intentionally pin only a SHA, with no numeric
+    // version; the active version's SHA is not authoritative for that request.
+    if ((hasVersion && spec.version != null && body.version !== spec.version) ||
+        ((hasVersion || body.bindings === undefined) && spec.bundle_sha && body.bundle_sha !== spec.bundle_sha) ||
+        (body.storage_id && body.storage_id !== (spec.storage_id || ""))) {
+      throw new Error("worker identity mismatch");
+    }
+    if (pinned && spec.ok !== false) cachePut(specCache, key, spec, SPEC_CACHE_MAX);
   }
   if (body.bindings !== undefined) {
     return {
@@ -546,7 +556,7 @@ async function fetchSpec(env, ns, worker, version) {
     });
     if (!r.ok) return { ok: false, bindings: {}, vars: {} };
     const j = await r.json();
-    return { ok: true, bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits };
+    return { ok: true, version: j.version, bundle_sha: j.bundle_sha, storage_id: j.storage_id || "", bindings: j.bindings || {}, vars: j.vars || {}, compat_date: j.compat_date, compat_flags: j.compat_flags, limits:j.limits };
   } catch (e) {
     return { ok: false, bindings: {}, vars: {} };
   }

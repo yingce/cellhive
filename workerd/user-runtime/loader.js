@@ -51,7 +51,7 @@ class LRU {
 
 // hostCache: host -> { value(pointer view|null for known-404), etag, expiresAt, inflight }
 const hostCache = new LRU(10000);
-// envCache: "ns/worker" -> { version, value(immutable view), activeExpiresAt }
+// envCache: disjoint active-pointer and immutable-incarnation query identities.
 const envCache = new ByteLRU(2000, 16*1024*1024, jsonWeight);
 const envInflight = new Map(); // "ns/worker@version" -> Promise
 const bundleCache = new ByteLRU(2000, 32*1024*1024, textWeight); // sha -> source
@@ -182,12 +182,13 @@ export default {
       if (!secureEqual(req.headers.get("x-cellhive-internal-token") || "", env.CELL_TOKEN || "")) return text("unauthorized", 401);
       const ns=req.headers.get("x-cellhive-pool-namespace"),worker=req.headers.get("x-cellhive-pool-worker");
       const number=Number(req.headers.get("x-cellhive-pool-version")),sha=req.headers.get("x-cellhive-pool-bundle");
+      const storageID=req.headers.get("x-cellhive-pool-storage-id")||"";
       if(!ns||!worker||!Number.isSafeInteger(number)||number<=0||!sha)return text("invalid execution identity",400);
       const target=JSON.parse(env.CH_POOL_TARGET||"null");
-      if(target&&(target.namespace!==ns||target.worker!==worker||target.version!==number||target.bundle_sha!==sha))return text("dedicated target mismatch",403);
+      if(target&&(target.namespace!==ns||target.worker!==worker||target.version!==number||target.bundle_sha!==sha||(target.storage_id||"")!==storageID))return text("dedicated target mismatch",403);
       let version;
-      try{version=await workerEnv(env,ns,worker,number);}catch(e){return text("worker env unavailable",503);}
-      if(!version||version.bundle_sha!==sha)return text("execution version mismatch",409);
+      try{version=await workerEnv(env,ns,worker,number,sha,storageID);}catch(e){return text("worker env unavailable",503);}
+      if(!version||version.version!==number||version.bundle_sha!==sha)return text("execution version mismatch",409);
       // Go already stripped the route mount and pinned this immutable version.
       // Reuse the existing asset/worker routing contract below with no control
       // lookup of active version in the child.
@@ -218,7 +219,7 @@ export default {
     }
     let version;
     try {
-      version = await workerEnv(env, route.ns, route.worker, ptr.version);
+      version = await workerEnv(env, route.ns, route.worker, ptr.version, ptr.bundle_sha, ptr.storage_id);
     } catch (e) {
       return text("worker env unavailable", 503);
     }
@@ -351,7 +352,7 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
 }
 
 function workerVersionKey(app, worker, version) {
-  return `${app.namespace}/${worker}@${version.version}-${version.bundle_sha}`;
+  return `${app.namespace}/${worker}@${version.storage_id || "legacy"}:${version.version}-${version.bundle_sha}`;
 }
 
 async function preparedWorker(env, app, worker, version, classStorage, deletedClasses) {
@@ -974,7 +975,7 @@ async function hostView(env, host, ctx) {
       return e.value;
     }
     if (now < e.expiresAt) return e.value;
-    if (!e.inflight && now >= backoffUntil) {
+    if ((!e.inflight || now - (e.inflightAt || 0) >= 5000) && now >= backoffUntil) {
       // Stale-while-revalidate. The refresh must be tied to ctx.waitUntil,
       // otherwise workerd cancels it after the response and the entry would stay
       // marked in-flight forever.
@@ -1013,96 +1014,102 @@ async function hostView(env, host, ctx) {
 // host (request coalescing) and ETag revalidation.
 function revalidateHost(env, host, e) {
   const epoch = routeEpoch;
-  if (e.inflight) {
-    // A cancelled background refresh would otherwise leave the entry unusable.
-    if (Date.now() - (e.inflightAt || 0) < 5000) return e.inflight;
-    e.inflight = null;
-  }
+  if (e.inflight && Date.now() - (e.inflightAt || 0) < 5000) return e.inflight;
+  // Supersede hung flights before aborting them; late success/error/finally may
+  // not mutate the new generation. Epoch additionally guards route invalidation.
+  const generation = (e.generation || 0) + 1;
+  e.generation = generation;
+  if (e.controller) e.controller.abort();
+  const controller = new AbortController();
+  e.controller = controller;
   e.inflightAt = Date.now();
-  e.inflight = (async () => {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("host view timeout")); }, 5000);
+  });
+  const current = () => e.generation === generation;
+  const p = (async () => {
     try {
       const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
       if (e.etag) headers["if-none-match"] = e.etag;
-      const r = await fetch(env.CELL_URL + "/v1/control/host?host=" + encodeURIComponent(host), { headers });
-      if (r.status === 304) {
-        noteSuccess();
-        if (epoch === routeEpoch) e.expiresAt = Date.now() + hostTtlMs(env);
-        return;
-      }
-      if (r.status !== 200 && r.status !== 404) throw new Error("host view " + r.status);
-      const etag = r.headers.get("etag") || "";
-      const value = r.status === 200 ? await r.json() : null; // 404 -> negative entry
+      const read = (async () => {
+        const r = await fetch(env.CELL_URL + "/v1/control/host?host=" + encodeURIComponent(host), { headers, signal: controller.signal });
+        if (r.status === 304) return { unchanged: true };
+        if (r.status !== 200 && r.status !== 404) throw new Error("host view " + r.status);
+        return { etag: r.headers.get("etag") || "", value: r.status === 200 ? await r.json() : null };
+      })();
+      const result = await Promise.race([read, timeout]);
+      if (!current()) return;
       noteSuccess();
-      if (epoch !== routeEpoch) {
-        // A rev change landed while this fetch was in flight: the response may
-        // predate it. Leave the entry expired so the next request refetches.
-        e.expiresAt = 0;
-        return;
-      }
-      e.value = value;
-      e.etag = etag;
+      if (epoch !== routeEpoch) { e.expiresAt = 0; return; }
+      if (!result.unchanged) { e.value = result.value; e.etag = result.etag; }
       e.expiresAt = Date.now() + hostTtlMs(env);
     } catch (err) {
-      // stale-on-error: keep the last known value; back off before retrying so
-      // an unavailable cell-agent is not hit once per request.
-      noteFailure();
-      e.expiresAt = backoffUntil;
+      if (current()) { noteFailure(); e.expiresAt = backoffUntil; }
       throw err;
     } finally {
-      e.inflight = null;
+      clearTimeout(timer);
+      if (current()) { e.inflight = null; e.controller = null; }
     }
   })();
-  return e.inflight;
+  e.inflight = p;
+  return p;
 }
 
 // workerEnv returns the immutable per-version env for a worker. Public fetch
 // supplies the version from the host pointer. Service bindings do not have a
 // pointer, so active lookups must revalidate after a short TTL.
-async function workerEnv(env, ns, worker, wantVersion, wantSHA) {
-  const key = ns + "/" + worker;
+async function workerEnv(env, ns, worker, wantVersion, wantSHA, wantStorageID) {
+  const pinned = wantVersion !== undefined || !!wantSHA;
+  // An explicit version number/SHA alone is not an incarnation identity: purge
+  // can reuse the number (and identical source can have a new environment).
+  // Legacy pointers without storage_id must revalidate, never cache forever.
+  const cacheable = !pinned || !!wantStorageID;
+  const key = JSON.stringify([ns, worker, pinned ? "pinned" : "active",
+    wantVersion ?? null, wantSHA || "", wantStorageID || ""]);
   const e = envCache.get(key);
-  const matches = (entry) => {
-    if (!entry) return false;
-    if (wantSHA) return entry.value && entry.value.bundle_sha === wantSHA;
-    if (wantVersion !== undefined) return entry.version === wantVersion;
-    return Date.now() < (entry.activeExpiresAt || 0);
-  };
-  if (matches(e)) return e.value;
-  const inflightKey = key + "@" + (wantVersion === undefined ? "" : wantVersion) + (wantSHA ? "#" + wantSHA : "");
-  const running = envInflight.get(inflightKey);
+  if (cacheable && e && (pinned || Date.now() < e.activeExpiresAt)) return e.value;
+  const running = envInflight.get(key);
   if (running) return running;
   const p = (async () => {
     try {
       let q = "?ns=" + encodeURIComponent(ns) + "&worker=" + encodeURIComponent(worker);
-      if (wantSHA) q += "&sha=" + encodeURIComponent(wantSHA);
-      else if (wantVersion !== undefined) q += "&version=" + encodeURIComponent(wantVersion);
+      // Numeric version is authoritative when both version and SHA are supplied.
+      if (wantVersion !== undefined) q += "&version=" + encodeURIComponent(wantVersion);
+      else if (wantSHA) q += "&sha=" + encodeURIComponent(wantSHA);
       const r = await fetch(env.CELL_URL + "/v1/control/worker" + q, {
         headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
       });
       if (r.status === 404) {
         noteSuccess();
-        envCache.set(key, { version: wantVersion || 0, value: null, activeExpiresAt: Date.now() + hostTtlMs(env) });
+        // Never poison a different identity (nor retain a pinned negative).
+        if (!pinned) envCache.set(key, { value: null, activeExpiresAt: Date.now() + hostTtlMs(env) });
         return null;
       }
       if (!r.ok) throw new Error("worker env " + r.status);
       const value = await r.json();
-      noteSuccess();
-      const current = envCache.get(key);
-      // Versions are monotonic: an older in-flight fetch must not overwrite a
-      // newer version's env (ADR-134).
-      if (!current || current.version === undefined || value.version >= current.version) {
-        envCache.set(key, { version: value.version, value, activeExpiresAt: Date.now() + hostTtlMs(env) });
+      if (!value || (wantVersion !== undefined && value.version !== wantVersion) ||
+          (wantSHA && value.bundle_sha !== wantSHA) ||
+          (wantStorageID && value.storage_id !== wantStorageID)) {
+        const err = new Error("worker execution identity mismatch");
+        err.identityMismatch = true;
+        throw err;
       }
+      noteSuccess();
+      if (cacheable) envCache.set(key, { value, activeExpiresAt: pinned ? 0 : Date.now() + hostTtlMs(env) });
       return value;
     } catch (err) {
-      noteFailure();
-      if (e) return e.value; // stale-on-error
+      // A healthy response for a different identity must not postpone the host
+      // refresh needed to resolve that mismatch on the next request.
+      if (!err.identityMismatch) noteFailure();
+      // A resolved immutable pointer may never silently execute another version.
+      // Active lookups also fail closed after their TTL rather than hiding errors.
       throw err;
     } finally {
-      envInflight.delete(inflightKey);
+      envInflight.delete(key);
     }
   })();
-  envInflight.set(inflightKey, p);
+  envInflight.set(key, p);
   return p;
 }
 

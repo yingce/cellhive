@@ -1,0 +1,5 @@
+ok  	cellhive/internal/doruntime	26.112s
+ok  	cellhive/internal/server	35.566s
+ok  	cellhive/internal/control	1.646s
+ok  	cellhive/internal/userruntimepool	39.386s
+ok  	cellhive/internal/workerdpool	1.293s

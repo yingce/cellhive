@@ -143,6 +143,7 @@ type ExecutionTarget struct {
 	Worker    string `json:"worker"`
 	Version   int    `json:"version"`
 	BundleSHA string `json:"bundle_sha"`
+	StorageID string `json:"storage_id,omitempty"`
 }
 
 func (c Config) PoolTargetJSON() string { b, _ := json.Marshal(c.PoolTarget); return string(b) }

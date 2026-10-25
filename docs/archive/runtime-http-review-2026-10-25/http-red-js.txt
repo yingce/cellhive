@@ -1,0 +1,90 @@
+TAP version 13
+# Subtest: DO transport preserves request and response bytes and tenant headers
+not ok 1 - DO transport preserves request and response bytes and tenant headers
+  ---
+  duration_ms: 27.489514
+  type: 'test'
+  location: '/opt/cellhive/workerd/platform/do-http.test.mjs:11:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + undefined
+    - 'AP+AQQ=='
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'AP+AQQ=='
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///opt/cellhive/workerd/platform/do-http.test.mjs:15:9)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: DO transport preserves null body 204
+not ok 2 - DO transport preserves null body 204
+  ---
+  duration_ms: 1.28103
+  type: 'test'
+  location: '/opt/cellhive/workerd/platform/do-http.test.mjs:19:35'
+  failureType: 'testCodeFailure'
+  error: 'Response constructor: Invalid response status code 204'
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    webidl.errors.exception (node:internal/deps/undici/undici:3769:14)
+    initializeResponse (node:internal/deps/undici/undici:9705:31)
+    new Response (node:internal/deps/undici/undici:9476:9)
+    call (evalmachine.<anonymous>:335:12)
+    async TestContext.<anonymous> (file:///opt/cellhive/workerd/platform/do-http.test.mjs:21:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: DO transport preserves null body 205
+not ok 3 - DO transport preserves null body 205
+  ---
+  duration_ms: 1.200241
+  type: 'test'
+  location: '/opt/cellhive/workerd/platform/do-http.test.mjs:19:35'
+  failureType: 'testCodeFailure'
+  error: 'Response constructor: Invalid response status code 205'
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    webidl.errors.exception (node:internal/deps/undici/undici:3769:14)
+    initializeResponse (node:internal/deps/undici/undici:9705:31)
+    new Response (node:internal/deps/undici/undici:9476:9)
+    call (evalmachine.<anonymous>:335:12)
+    async TestContext.<anonymous> (file:///opt/cellhive/workerd/platform/do-http.test.mjs:21:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: DO transport preserves null body 304
+not ok 4 - DO transport preserves null body 304
+  ---
+  duration_ms: 1.113073
+  type: 'test'
+  location: '/opt/cellhive/workerd/platform/do-http.test.mjs:19:35'
+  failureType: 'testCodeFailure'
+  error: 'Response constructor: Invalid response status code 304'
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    webidl.errors.exception (node:internal/deps/undici/undici:3769:14)
+    initializeResponse (node:internal/deps/undici/undici:9705:31)
+    new Response (node:internal/deps/undici/undici:9476:9)
+    call (evalmachine.<anonymous>:335:12)
+    async TestContext.<anonymous> (file:///opt/cellhive/workerd/platform/do-http.test.mjs:21:16)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 0
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 102.157407

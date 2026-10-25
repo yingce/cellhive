@@ -1,5 +1,7 @@
 # Durable Objects
 
+> **2026-10-25 HTTP 修订（ADR-288，本地未部署）**：DO fetch 使用 `request.body_base64` 保留请求字节，仍接受旧文本 `body`；响应各跳按字节处理并保留租户响应头及重定向，平台标记不透传给租户。204/205/304/HEAD 使用空 body。deleteAll 重复删除 Map 的第一页直至清空。后台续租本地 HTTP 超时 5s，单 scope fetch/读取响应超时 2s。升级时暂停/排空 DO 流量，全部 do-runtime 与调用方升级完成后再恢复；仍不提供流式 DO fetch。
+
 > **2026-10-19 接管修订（ADR-208/212）**：DO shard owner epoch 与 supervisor 的 LTX capture epoch 相互独立。新 supervisor 首次捕获每个文件时，读取并校验该 scope 的持久链水位，从下一序号写 baseline snapshot，再连续提交 delta；请求输出门只捕获当前 host；同名 LTX 段只允许同字节重放。旧版 DO 每次等 bucket ack。新代码在 follower fsync 确认前持久记录该捕获 scope 的恢复指针；新 shard claim 后、首次派发前按 host manifest 对每个文件补传 follower 尾部，再从 bucket 恢复。活 cell-agent 的进程 session 不封存，其他 cell 继续写；失败时拒绝冷恢复。无 follower 时仍等 bucket。双 cell-agent k3d 的未落桶强杀 A→B→A 和 A→B→C 接管已通过，生产仍是旧镜像，真实 COS 故障窗口待验收。DO `/ready` 对 cell-agent 健康探测设 800ms 超时，避免滚动更新期间旧连接无限挂起使 Pod 持续未就绪。
 
 > **2026-10-15 alarm 修订（取代下方历史上报/消费描述）**：`setAlarm` 经对象绑定 capability 先确认统一 timer 持久化，再写对象时间/generation；交接失败不静默确认。派发验证 generation，active→pending 原子消费，失败保留重试、成功不误删 handler 新设 alarm。retryCount/isRetry 记录在 pending 中，重试节奏仍为统一 runner，非 CF 原生退避/次数上限。旧数字 alarm 惰性兼容。见 [计时器契约](timers-and-dispatch.md) 与 [验收](archive/timer-correctness-2026-10-15.md)。

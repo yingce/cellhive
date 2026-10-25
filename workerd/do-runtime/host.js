@@ -228,6 +228,17 @@ async function indexObject(env, o, remove) {
   } catch (e) { /* best effort */ }
 }
 
+function responseHeaders(res, tenant = false) {
+  const headers = new Headers(res.headers);
+  const hop = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length"]);
+  for (const token of (headers.get("connection") || "").split(",")) hop.add(token.trim().toLowerCase());
+  for (const name of [...headers.keys()]) {
+    if (hop.has(name.toLowerCase()) || (tenant && name.toLowerCase().startsWith("x-cellhive-"))) headers.delete(name);
+  }
+  return headers;
+}
+function emptyHTTPBody(status, method) { return method === "HEAD" || [204, 205, 304].includes(status); }
+
 async function invoke(req, env, ticket) {
   if (draining) return json({ error: "draining" }, 503);
   let spec;
@@ -294,6 +305,7 @@ async function invoke(req, env, ticket) {
   inflight++;
   try {
     const res = await host.fetch("http://host/invoke", {
+      redirect: "manual",
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...spec, shard, owner_node: env.NODE_ID,
@@ -305,15 +317,15 @@ async function invoke(req, env, ticket) {
     if (!c || c.expiryMs < Date.now()) {
       return json({ error: "result_unknown", reason: "ownership_lost_after_dispatch" }, 409);
     }
-    const body = await res.text();
-    const hdrs = { "content-type": res.headers.get("content-type") || "text/plain" };
+    const body = await res.arrayBuffer();
+    const hdrs = responseHeaders(res);
     // Preserve the tenant-response marker through the sharding wrapper so the
     // caller facade can return 4xx/5xx Durable Object responses.
-    if (res.headers.get("x-cellhive-do-app") === "1") hdrs["x-cellhive-do-app"] = "1";
+    if (res.headers.get("x-cellhive-do-app") === "1") hdrs.set("x-cellhive-do-app", "1");
     // Tell upstreams that this runtime is the owner, so they can cache a hint
     // and skip the sharding router next time (ADR-103).
-    if (env.ADVERTISE) hdrs["x-cellhive-do-owner"] = String(env.ADVERTISE);
-    return new Response(body, { status: res.status, headers: hdrs });
+    if (env.ADVERTISE) hdrs.set("x-cellhive-do-owner", String(env.ADVERTISE));
+    return new Response(emptyHTTPBody(res.status, spec.request?.method) ? null : body, { status: res.status, headers: hdrs });
   } catch (e) {
     const budget = budgetErrorBody(e);
     if (budget) return json(budget, 500);
@@ -330,13 +342,14 @@ async function forward(env, address, spec) {
     const r = await fetch(ownerURL(address) + "/v1/do/invoke", {
       method: "POST",
       headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
-      body: JSON.stringify(spec),
+      body: JSON.stringify(spec), redirect: "manual",
     });
-    const hdrs = { "content-type": r.headers.get("content-type") || "text/plain" };
-    if (r.headers.get("x-cellhive-do-app") === "1") hdrs["x-cellhive-do-app"] = "1";
+    const hdrs = responseHeaders(r);
+    if (r.headers.get("x-cellhive-do-app") === "1") hdrs.set("x-cellhive-do-app", "1");
     const owner = r.headers.get("x-cellhive-do-owner");
-    if (owner) hdrs["x-cellhive-do-owner"] = owner; // propagate the owner hint
-    return new Response(await r.text(), { status: r.status, headers: hdrs });
+    if (owner) hdrs.set("x-cellhive-do-owner", owner); // propagate the owner hint
+    const bytes = await r.arrayBuffer();
+    return new Response(emptyHTTPBody(r.status, spec.request?.method) ? null : bytes, { status: r.status, headers: hdrs });
   } catch (e) {
     return json({ error: "result_unknown", reason: "forward_transport_failed" }, 409);
   }
@@ -410,17 +423,15 @@ async function ensureClaim(env, spec, shard) {
     finally { if (pendingClaims.get(key) === task) pendingClaims.delete(key); }
   }
   if (c.expiryMs - now < GUARD_MS) {
-    const r = await post(env, "/v1/internal/do/renew", {
-      namespace: c.spec.namespace, worker: c.spec.worker, class: c.spec.class, shard: c.shard,
-      node: env.NODE_ID, epoch: c.epoch, ttl_seconds: leaseTtlS(env),
-    });
-    if (!r.ok) {
-      claims.delete(key); // self-fence: stale owner must not dispatch
-      return { resp: json({ error: "owner_unavailable", reason: "renew_" + r.status }, 503) };
+    try {
+      const o = await renewLease(env, c);
+      if (claims.get(key) !== c) return { resp: json({ error: "owner_unavailable", reason: "claim_changed" }, 503) };
+      c.epoch = o.epoch;
+      c.expiryMs = o.expiry_ms;
+    } catch (e) {
+      if (claims.get(key) === c) claims.delete(key);
+      return { resp: json({ error: "owner_unavailable", reason: "renew_failed" }, 503) };
     }
-    const o = await r.json();
-    c.epoch = o.epoch;
-    c.expiryMs = o.expiry_ms;
   }
   return null;
 }
@@ -643,23 +654,41 @@ async function restartObjects(req, env) {
   return json({ restarted });
 }
 
+// Bound both fetch and body consumption. One dead connection must not wedge
+// the only renewal loop (or pre-dispatch guard) indefinitely.
+async function renewLease(env, c) {
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("renew timeout")); }, 2000);
+  });
+  try {
+    return await Promise.race([(async () => {
+      const r = await post(env, "/v1/internal/do/renew", {
+        namespace: c.spec.namespace, worker: c.spec.worker, class: c.spec.class, shard: c.shard,
+        node: env.NODE_ID, epoch: c.epoch, ttl_seconds: leaseTtlS(env),
+      }, controller.signal);
+      if (!r.ok) throw new Error("renew " + r.status);
+      return await r.json();
+    })(), timeout]);
+  } finally { clearTimeout(timer); }
+}
+
 async function renewAll(env) {
   let renewed = 0;
   let lost = 0;
   for (const [key, c] of [...claims.entries()]) {
-    const r = await post(env, "/v1/internal/do/renew", {
-      namespace: c.spec.namespace, worker: c.spec.worker, class: c.spec.class, shard: c.shard,
-      node: env.NODE_ID, epoch: c.epoch, ttl_seconds: leaseTtlS(env),
-    });
-    if (!r.ok) {
-      claims.delete(key);
+    try {
+      const o = await renewLease(env, c);
+      if (claims.get(key) !== c) continue;
+      c.epoch = o.epoch;
+      c.expiryMs = o.expiry_ms;
+      renewed++;
+    } catch (e) {
+      // A delayed renewal must never remove a newer claim of the same scope.
+      if (claims.get(key) === c) claims.delete(key);
       lost++;
-      continue;
     }
-    const o = await r.json();
-    c.epoch = o.epoch;
-    c.expiryMs = o.expiry_ms;
-    renewed++;
   }
   return json({ renewed, lost });
 }
@@ -908,9 +937,10 @@ export class Host extends DurableObject {
       const hdrs = Object.assign({}, init.headers || {});
       if (spec.traceparent && !hdrs["traceparent"]) hdrs["traceparent"] = spec.traceparent;
       const doReq = new Request("http://do" + (init.path || "/"), {
+        redirect: "manual",
         method: init.method || "GET",
         headers: hdrs,
-        body: init.body,
+        body: init.body_base64 !== undefined ? Uint8Array.from(atob(init.body_base64), ch => ch.charCodeAt(0)) : init.body,
       });
       res = await facet.fetch(doReq);
     }
@@ -931,9 +961,9 @@ export class Host extends DurableObject {
     }
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(this.env);
-    const out = new Response(await res.text(), {
-      status: res.status,
-      headers: { "content-type": res.headers.get("content-type") || "text/plain" },
+    const bytes = await res.arrayBuffer();
+    const out = new Response(emptyHTTPBody(res.status, spec.request?.method) ? null : bytes, {
+      status: res.status, headers: responseHeaders(res, true),
     });
     // Mark a tenant-produced response so the caller facade returns its status
     // rather than treating every non-2xx as a transport failure: Cloudflare's
@@ -1089,8 +1119,9 @@ async function fetchBundle(env, sha) {
   return await r.text();
 }
 
-function post(env, path, body) {
+function post(env, path, body, signal) {
   return fetch(env.CELL_URL + path, {
+    signal,
     method: "POST",
     headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
     body: JSON.stringify(body),

@@ -177,9 +177,24 @@ func (r *Router) routeView(req *http.Request, view control.HostView) (workerdpoo
 	if !ok || ptr.Version <= 0 || ptr.BundleSHA == "" {
 		return workerdpool.Route{}, reject(503, "no active worker version")
 	}
-	key := workerdpool.FunctionKey{Namespace: chosen.Namespace, Worker: chosen.Worker, Version: ptr.Version, BundleSHA: ptr.BundleSHA}
+	key := workerdpool.FunctionKey{Namespace: chosen.Namespace, Worker: chosen.Worker, Version: ptr.Version, BundleSHA: ptr.BundleSHA, StorageID: ptr.StorageID}
 	prefix := strings.TrimRight(chosen.Path, "/")
 	return workerdpool.Route{Key: key, PrepareRequest: func(out *http.Request) error {
+		// ReverseProxy removes Connection-nominated headers after this callback.
+		// Public callers must not be able to remove our freshly installed pins.
+		var connection []string
+		for _, value := range out.Header.Values("Connection") {
+			for _, token := range strings.Split(value, ",") {
+				token = strings.TrimSpace(token)
+				if token != "" && !strings.HasPrefix(strings.ToLower(token), "x-cellhive-") {
+					connection = append(connection, token)
+				}
+			}
+		}
+		out.Header.Del("Connection")
+		if len(connection) > 0 {
+			out.Header.Set("Connection", strings.Join(connection, ", "))
+		}
 		for name := range out.Header {
 			if strings.HasPrefix(strings.ToLower(name), "x-cellhive-") {
 				out.Header.Del(name)
@@ -190,6 +205,9 @@ func (r *Router) routeView(req *http.Request, view control.HostView) (workerdpoo
 		out.Header.Set("x-cellhive-pool-worker", key.Worker)
 		out.Header.Set("x-cellhive-pool-version", strconv.Itoa(key.Version))
 		out.Header.Set("x-cellhive-pool-bundle", key.BundleSHA)
+		if key.StorageID != "" {
+			out.Header.Set("x-cellhive-pool-storage-id", key.StorageID)
+		}
 		if prefix != "" {
 			path := strings.TrimPrefix(out.URL.Path, prefix)
 			if path == "" {
@@ -233,6 +251,7 @@ func (r *Router) Internal(req *http.Request) (workerdpool.Route, error) {
 		Worker    string `json:"worker"`
 		Version   int    `json:"version"`
 		BundleSHA string `json:"bundle_sha"`
+		StorageID string `json:"storage_id,omitempty"`
 	}
 	if err = json.Unmarshal(b, &identity); err != nil {
 		return workerdpool.Route{}, reject(400, "invalid dispatch JSON")
@@ -240,5 +259,5 @@ func (r *Router) Internal(req *http.Request) (workerdpool.Route, error) {
 	if identity.Namespace == "" || identity.Worker == "" || identity.BundleSHA == "" || identity.Version < 0 {
 		return workerdpool.Route{}, reject(400, "invalid dispatch identity")
 	}
-	return workerdpool.Route{Internal: true, Key: workerdpool.FunctionKey{Namespace: identity.Namespace, Worker: identity.Worker, Version: identity.Version, BundleSHA: identity.BundleSHA}}, nil
+	return workerdpool.Route{Internal: true, Key: workerdpool.FunctionKey{Namespace: identity.Namespace, Worker: identity.Worker, Version: identity.Version, BundleSHA: identity.BundleSHA, StorageID: identity.StorageID}}, nil
 }

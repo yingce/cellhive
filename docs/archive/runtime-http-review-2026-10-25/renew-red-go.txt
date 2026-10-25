@@ -1,0 +1,5 @@
+--- FAIL: TestRenewLoopRecoversHungRequest (8.01s)
+    lifecycle_test.go:111: hung renewal never timed out
+FAIL
+FAIL	cellhive/internal/doruntime	8.014s
+FAIL

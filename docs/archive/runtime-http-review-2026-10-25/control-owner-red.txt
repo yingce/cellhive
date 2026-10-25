@@ -1,0 +1,6 @@
+--- FAIL: TestDOProxyAuthorizesAgainstControlOwner (0.03s)
+    do_proxy_test.go:426: class=Room got 403 {"error":"scope_binding_mismatch","message":"worker has no such Durable Object binding"}
+         want 200
+FAIL
+FAIL	cellhive/internal/server	0.038s
+FAIL

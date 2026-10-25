@@ -1,0 +1,67 @@
+TAP version 13
+# Subtest: transport error of one lease does not stop renewing the others
+not ok 1 - transport error of one lease does not stop renewing the others
+  ---
+  duration_ms: 2.748963
+  type: 'test'
+  location: '/opt/cellhive/workerd/do-runtime/renew.test.mjs:13:1'
+  failureType: 'testCodeFailure'
+  error: 'offline'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    file:///opt/cellhive/workerd/do-runtime/renew.test.mjs:14:53
+    Object.renewAll (evalmachine.<anonymous>:5:21)
+    TestContext.<anonymous> (file:///opt/cellhive/workerd/do-runtime/renew.test.mjs:16:23)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: late failed renewal cannot delete a replacement claim
+not ok 2 - late failed renewal cannot delete a replacement claim
+  ---
+  duration_ms: 22.937384
+  type: 'test'
+  location: '/opt/cellhive/workerd/do-runtime/renew.test.mjs:18:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + undefined
+    - {
+    -   epoch: 2,
+    -   expiryMs: 0,
+    -   shard: 1,
+    -   spec: {
+    -     class: 'C',
+    -     namespace: 'ns',
+    -     worker: 'w'
+    -   }
+    - }
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    epoch: 2
+    spec:
+      namespace: 'ns'
+      worker: 'w'
+      class: 'C'
+    shard: 1
+    expiryMs: 0
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///opt/cellhive/workerd/do-runtime/renew.test.mjs:21:9)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 0
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 86.695371

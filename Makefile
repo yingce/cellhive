@@ -113,6 +113,8 @@ js-test:
 	node --test workerd/platform/telemetry.test.mjs
 	node --test workerd/platform/lifecycle.test.mjs
 	node --test workerd/platform/queue-codec.test.mjs
+	node --test workerd/platform/do-http.test.mjs workerd/do-runtime/renew.test.mjs
+	node --test workerd/user-runtime/loader.test.mjs workerd/user-runtime/internal-identity.test.mjs
 	# -p 1: userruntime and doruntime each spawn real workerd processes on
 	# freePort() ports; running the two packages in parallel races those ports
 	# (Address already in use). Serialize the packages.

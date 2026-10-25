@@ -93,3 +93,50 @@ func TestDrain(t *testing.T) {
 		t.Fatalf("token = %q", got)
 	}
 }
+
+// A hung local renewal must not consume the only renewal loop forever.
+func TestRenewLoopRecoversHungRequest(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	errorsSeen := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RenewLoop(ctx, srv.URL, "tok", 10*time.Millisecond, func(err error) {
+			select {
+			case errorsSeen <- err:
+			default:
+			}
+		})
+	}()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-errorsSeen:
+	case <-ctx.Done():
+		t.Fatal("hung renewal never timed out")
+	}
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for calls.Load() < 2 {
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("renew loop did not resume")
+		}
+	}
+}

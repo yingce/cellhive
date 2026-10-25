@@ -1031,6 +1031,17 @@ func TestInternalBindingsVersionPin(t *testing.T) {
 	if strings.Contains(rr.Body.String(), `"MODE":"v2"`) {
 		t.Fatalf("version=1 leaked the active env: %s", rr.Body.String())
 	}
+	var identity struct {
+		Version   int    `json:"version"`
+		BundleSHA string `json:"bundle_sha"`
+		StorageID string `json:"storage_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &identity); err != nil {
+		t.Fatal(err)
+	}
+	if identity.Version != 1 || identity.BundleSHA != "sha1" || identity.StorageID == "" {
+		t.Fatalf("pinned bindings lack immutable identity: %+v", identity)
+	}
 	// Absent version: active (v2). The do-runtime alias serves the same handler.
 	rr = do(t, s.Handler(), http.MethodGet, "/v1/internal/do/bindings?ns=acme&worker=w", "tok", nil)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"MODE":"v2"`) {

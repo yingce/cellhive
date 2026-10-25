@@ -154,6 +154,8 @@ type HostRoute struct {
 // It deliberately carries no bindings/vars (those are fetched per worker
 // version via WorkerView, which is immutable and cacheable).
 type HostWorkerPtr struct {
+	// StorageID distinguishes a recreated worker even when number and code repeat.
+	StorageID string `json:"storage_id,omitempty"`
 	Active    int    `json:"active"`
 	Version   int    `json:"version"`
 	BundleSHA string `json:"bundle_sha"`
@@ -230,7 +232,7 @@ func (p Projection) HostView(host string) HostView {
 					continue
 				}
 				view.Workers[key] = HostWorkerPtr{
-					Active: w.Active, Version: w.Version.Number,
+					Active: w.Active, Version: w.Version.Number, StorageID: w.Version.StorageID,
 					BundleSHA: w.Version.BundleSHA, AssetsSHA: w.Version.AssetsSHA,
 				}
 			}

@@ -1,0 +1,38 @@
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//headers
+    http_regression_test.go:35: status=200 body="ok" headers=map[Content-Length:[2] Content-Type:[text/plain;charset=UTF-8] Location:[/next] Set-Cookie:[a=b] X-Cellhive-Do-App:[1] X-Review:[kept]]
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//binary
+    http_regression_test.go:35: status=200 body="\x00\xff\x80A" headers=map[Content-Length:[4] X-Cellhive-Do-App:[1]]
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//empty
+    http_regression_test.go:35: status=204 body="" headers=map[X-Cellhive-Do-App:[1]]
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//delete
+    http_regression_test.go:35: status=200 body="0" headers=map[Content-Length:[1] Content-Type:[text/plain;charset=UTF-8] X-Cellhive-Do-App:[1]]
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//echo
+    http_regression_test.go:35: status=200 body="\x00\xff\x80A" headers=map[Content-Length:[4] X-Cellhive-Do-App:[1]]
+=== RUN   TestDOHTTPBytesHeadersAndDeleteAll//redirect
+    http_regression_test.go:35: status=302 body="" headers=map[Content-Length:[0] Location:[/must-not-follow] X-Cellhive-Do-App:[1]]
+--- PASS: TestDOHTTPBytesHeadersAndDeleteAll (0.31s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//headers (0.02s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//binary (0.01s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//empty (0.01s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//delete (0.02s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//echo (0.02s)
+    --- PASS: TestDOHTTPBytesHeadersAndDeleteAll//redirect (0.01s)
+=== RUN   TestPublicDOHTTPRoundTrip
+=== RUN   TestPublicDOHTTPRoundTrip//echo
+=== RUN   TestPublicDOHTTPRoundTrip//binary
+=== RUN   TestPublicDOHTTPRoundTrip//headers
+=== RUN   TestPublicDOHTTPRoundTrip//empty
+=== RUN   TestPublicDOHTTPRoundTrip//redirect
+=== RUN   TestPublicDOHTTPRoundTrip//failed
+=== RUN   TestPublicDOHTTPRoundTrip//delete
+--- PASS: TestPublicDOHTTPRoundTrip (0.54s)
+    --- PASS: TestPublicDOHTTPRoundTrip//echo (0.04s)
+    --- PASS: TestPublicDOHTTPRoundTrip//binary (0.00s)
+    --- PASS: TestPublicDOHTTPRoundTrip//headers (0.01s)
+    --- PASS: TestPublicDOHTTPRoundTrip//empty (0.00s)
+    --- PASS: TestPublicDOHTTPRoundTrip//redirect (0.00s)
+    --- PASS: TestPublicDOHTTPRoundTrip//failed (0.01s)
+    --- PASS: TestPublicDOHTTPRoundTrip//delete (0.01s)
+PASS
+ok  	cellhive/internal/doruntime	0.850s

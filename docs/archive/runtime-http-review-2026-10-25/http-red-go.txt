@@ -1,0 +1,23 @@
+--- FAIL: TestDOHTTPBytesHeadersAndDeleteAll (0.29s)
+    --- FAIL: TestDOHTTPBytesHeadersAndDeleteAll//headers (0.02s)
+        http_regression_test.go:25: status=200 body="ok" headers=map[Content-Length:[2] Content-Type:[text/plain;charset=UTF-8] X-Cellhive-Do-App:[1]]
+        http_regression_test.go:27: tenant headers lost
+    --- FAIL: TestDOHTTPBytesHeadersAndDeleteAll//binary (0.01s)
+        http_regression_test.go:25: status=200 body="\x00��A" headers=map[Content-Length:[8] Content-Type:[text/plain] X-Cellhive-Do-App:[1]]
+        http_regression_test.go:28: binary changed: 00efbfbdefbfbd41
+    --- FAIL: TestDOHTTPBytesHeadersAndDeleteAll//delete (0.02s)
+        http_regression_test.go:25: status=200 body="44" headers=map[Content-Length:[2] Content-Type:[text/plain;charset=UTF-8] X-Cellhive-Do-App:[1]]
+        http_regression_test.go:30: deleteAll left keys
+    --- FAIL: TestDOHTTPBytesHeadersAndDeleteAll//echo (0.02s)
+        http_regression_test.go:25: status=200 body="" headers=map[Content-Length:[0] Content-Type:[text/plain] X-Cellhive-Do-App:[1]]
+        http_regression_test.go:28: binary changed:
+FAIL
+FAIL	cellhive/internal/doruntime	0.293s
+--- FAIL: TestDOProxyPreservesHTTPResponse (0.00s)
+    --- FAIL: TestDOProxyPreservesHTTPResponse/200 (0.00s)
+        do_proxy_test.go:373: response changed: map[Content-Type:[application/octet-stream] X-Cellhive-Do-App:[1]] 00ff8041
+    --- FAIL: TestDOProxyPreservesHTTPResponse/302 (0.00s)
+        do_proxy_test.go:372: redirect followed or status changed: 418
+FAIL
+FAIL	cellhive/internal/server	0.011s
+FAIL

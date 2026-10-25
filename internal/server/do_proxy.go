@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -75,18 +76,17 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	// declares this binding for this class; otherwise a token for one DO
 	// binding could load another worker's binding spec in the same namespace.
 	if name := s.scopeName(r); name != "" && s.Control != nil {
-		proj, err := s.Control.Projection(r.Context())
+		tw, ok, err := s.doWorkerFromOwner(r.Context(), req.Namespace, req.Worker)
 		if err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "control_unavailable", err.Error())
 			return
 		}
-		tw, ok := proj.WorkerFor(req.Namespace, req.Worker)
 		if !ok {
 			writeErr(w, http.StatusForbidden, "scope_binding_mismatch", "worker has no such Durable Object binding")
 			return
 		}
 		matched := false
-		for _, b := range tw.Version.Bindings {
+		for _, b := range tw.Bindings {
 			if b.Type == "do" && b.Name == name && (b.ID == req.Class || (b.ID == "" && b.Name == req.Class)) {
 				matched = true
 				break
@@ -228,11 +228,12 @@ func (s *Server) handleDOConnectLookup(w http.ResponseWriter, r *http.Request) {
 
 // doResult carries a do-runtime invoke response through the sharding router.
 type doResult struct {
-	status int
-	body   []byte
-	owner  string
-	app    bool   // tenant-produced response (x-cellhive-do-app), any status
-	ctype  string // tenant/platform content-type
+	status  int
+	body    []byte
+	owner   string
+	app     bool   // tenant-produced response (x-cellhive-do-app), any status
+	ctype   string // tenant/platform content-type
+	headers http.Header
 }
 
 func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, body []byte) (doResult, error) {
@@ -245,7 +246,10 @@ func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, b
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
-	resp, err := client.Do(req)
+	// A tenant redirect is a response, not another platform invocation.
+	forwardClient := *client
+	forwardClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := forwardClient.Do(req)
 	if err != nil {
 		return doResult{}, err
 	}
@@ -258,11 +262,12 @@ func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, b
 		return doResult{}, fmt.Errorf("do-runtime response exceeds %d bytes", doProxyRespLimit)
 	}
 	return doResult{
-		status: resp.StatusCode,
-		body:   respBody,
-		owner:  resp.Header.Get("x-cellhive-do-owner"),
-		app:    resp.Header.Get("x-cellhive-do-app") == "1",
-		ctype:  resp.Header.Get("Content-Type"),
+		status:  resp.StatusCode,
+		body:    respBody,
+		owner:   resp.Header.Get("x-cellhive-do-owner"),
+		app:     resp.Header.Get("x-cellhive-do-app") == "1",
+		ctype:   resp.Header.Get("Content-Type"),
+		headers: resp.Header.Clone(),
 	}, nil
 }
 
@@ -274,6 +279,20 @@ func ownerKey(req doInvokeReq, shardClass string, shard int) string {
 // writeDO forwards a do-runtime response, passing the owner hint and a fresh
 // owner ticket through so clients may call the owner directly (ADR-105).
 func writeDO(w http.ResponseWriter, res doResult, ticket string, exp int64) {
+	nominated := make(map[string]bool)
+	for _, value := range res.headers.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			nominated[strings.ToLower(strings.TrimSpace(token))] = true
+		}
+	}
+	for name, values := range res.headers {
+		if isHopHeader(name) || nominated[strings.ToLower(name)] || strings.HasPrefix(strings.ToLower(name), "x-cellhive-") {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
 	// Preserve the Durable Object's own content-type (Cloudflare returns the
 	// object's Response headers); platform envelopes are JSON.
 	ctype := res.ctype
@@ -366,4 +385,52 @@ func doRetryable(status int, body []byte) bool {
 		return true
 	}
 	return strings.Contains(string(body), "owner_unavailable")
+}
+
+// doWorkerFromOwner authorizes against the active worker on the control owner.
+// Only the read is forwarded: forwarding the invocation would change its
+// response limits and introduce another transport with an ambiguous outcome.
+func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (control.WorkerView, bool, error) {
+	if s.Owner != nil {
+		o, _, err := s.Owner.ResolveCached(ctx, control.Scope(), ownerCacheTTL)
+		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
+			if err := s.claimForRead(ctx, control.Scope()); err != nil {
+				return control.WorkerView{}, false, err
+			}
+			s.Owner.Invalidate(control.Scope())
+		}
+	}
+	q := url.Values{"ns": {ns}, "worker": {worker}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://cellhive.internal/v1/control/worker?"+q.Encode(), http.NoBody)
+	if err != nil {
+		return control.WorkerView{}, false, err
+	}
+	resp, forwarded, err := s.forwardTo(req, control.Scope(), []byte{})
+	if err != nil {
+		return control.WorkerView{}, false, err
+	}
+	if forwarded {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return control.WorkerView{}, false, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			return control.WorkerView{}, false, fmt.Errorf("control worker owner returned %d", resp.StatusCode)
+		}
+		var view control.WorkerView
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&view); err != nil {
+			return control.WorkerView{}, false, err
+		}
+		return view, true, nil
+	}
+	if s.Owner != nil {
+		o, _, err := s.Owner.ResolveCached(ctx, control.Scope(), ownerCacheTTL)
+		if err != nil {
+			return control.WorkerView{}, false, err
+		}
+		if o.Node != s.Cfg.NodeID || o.Session != s.Owner.Session || !s.ownerLive(ctx, o, time.Now()) {
+			return control.WorkerView{}, false, fmt.Errorf("control owner unavailable")
+		}
+	}
+	return s.Control.WorkerEnv(ctx, ns, worker)
 }
