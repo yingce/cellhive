@@ -54,7 +54,7 @@ func (s *Server) validateDOCommit(ctx context.Context, id doCommitIdentity) erro
 	if s.Owner == nil {
 		return fmt.Errorf("DO owner manager unavailable")
 	}
-	o, _, err := s.Owner.ResolveCached(ctx, id.Scope, ownerCacheTTL)
+	o, _, err := s.Owner.ResolveRoute(ctx, id.Scope)
 	if err != nil {
 		return err
 	}

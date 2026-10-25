@@ -13,10 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/config"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
@@ -299,4 +301,67 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 		}
 	}
 	t.Log("PASS: both addresses changed; interrupted recovery restarted; empty replacement disk refused; original follower disk restored; 80 acknowledged values restored; stale pinned control registrations restored; both old sessions sealed")
+	// Pause the actual owner beyond its published lease, let its peer recover
+	// and take over, then resume it. Its late renewal must not resurrect it.
+	scope := cell.Scope{Namespace: "sessiontest", Class: "__kv__", ID: "ka"}
+	raw, _, err := b.Get(context.Background(), scope.Key()+"/owner.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := cell.UnmarshalOwner(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, peerAgent := a, c
+	if prior.Node == c.node {
+		paused, peerAgent = c, a
+	} else if prior.Node != a.node {
+		t.Fatalf("unknown owner %+v", prior)
+	}
+	if err := paused.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3300 * time.Millisecond)
+	code, data, err := call(peerAgent.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "x-cellhive-scope-token", tokens["ka"], nil)
+	if err != nil || code != 200 || string(data) != "a-value0" {
+		t.Fatalf("paused-owner takeover: %d %q %v", code, data, err)
+	}
+	raw, _, err = b.Get(context.Background(), scope.Key()+"/owner.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := cell.UnmarshalOwner(raw)
+	if err != nil || current.Node != peerAgent.node || current.Epoch <= prior.Epoch {
+		t.Fatalf("peer did not take over: %+v %v", current, err)
+	}
+	resumed := paused.cmd
+	if err := resumed.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- resumed.Wait() }()
+	select {
+	case err := <-exited:
+		paused.cmd = nil
+		if err == nil || resumed.ProcessState.ExitCode() != 1 {
+			t.Fatalf("expired process exit=%v state=%v", err, resumed.ProcessState)
+		}
+	case <-time.After(5 * time.Second):
+		_ = resumed.Process.Kill()
+		<-exited
+		paused.cmd = nil
+		t.Fatal("resumed expired session did not exit")
+	}
+	oldLog, _ := os.ReadFile(paused.log)
+	if !bytes.Contains(oldLog, []byte("permanently fenced")) {
+		t.Fatalf("missing fence exit: %s", oldLog)
+	}
+	start(paused, paused.node+"-after-fence")
+	ready(paused)
+	code, data, err = call(paused.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "x-cellhive-scope-token", tokens["ka"], nil)
+	if err != nil || code != 200 || string(data) != "a-value0" {
+		t.Fatalf("fresh-session read after fence: %d %q %v", code, data, err)
+	}
+	t.Log("PASS: SIGSTOP owner past TTL; peer recovered and advanced epoch; SIGCONT old owner exited 1; new session recovered and read acknowledged value")
+
 }

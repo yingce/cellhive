@@ -8,7 +8,7 @@ import (
 	"cellhive/internal/cell"
 )
 
-// A bounded active set moves the one-second control/owner/fence refresh off
+// A bounded active set moves the control/fence refresh and lease-bounded owner lookup off
 // requests that repeatedly access the same resident KV cell. Cache validity and
 // all fail-closed checks still live in their original request paths.
 const (
@@ -131,11 +131,11 @@ func (s *Server) refreshHotKVAccess(ctx context.Context, e *hotKVAccess) error {
 	if ref != e.scope.ID && ref != e.scope.String() {
 		return nil
 	}
-	// These two point reads are independent. Fetch them together so one slow
-	// object-store RTT does not push the other cache past its one-second TTL.
+	// Refresh the resource fence independently of the lease-bounded route.
+	// A cold route lookup must not delay the fence refresh.
 	fence := make(chan error, 1)
 	go func() { fence <- s.resourceReplica().RefreshResourceSnapshot(ctx, e.scope) }()
-	_, _, ownerErr := s.Owner.ResolveCached(ctx, e.scope, 0)
+	_, _, ownerErr := s.Owner.ResolveRoute(ctx, e.scope)
 	fenceErr := <-fence
 	if ownerErr != nil {
 		return ownerErr

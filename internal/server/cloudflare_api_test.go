@@ -563,6 +563,7 @@ func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
 	peerHTTP := httptest.NewServer(b.Handler())
 	defer peerHTTP.Close()
 	otherLease := lease.NewManager(a.Bucket, "node-2", "session-2", peerHTTP.URL, peerHTTP.URL, 30*time.Second)
+	otherLease.Instance = "tail-persistent-instance"
 	if err := otherLease.Publish(t.Context(), lease.Load{}); err != nil {
 		t.Fatal(err)
 	}
@@ -634,6 +635,7 @@ func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
 	restartedHTTP := httptest.NewServer(restarted.Handler())
 	defer restartedHTTP.Close()
 	newLease := lease.NewManager(a.Bucket, "node-2", "session-3", restartedHTTP.URL, restartedHTTP.URL, 30*time.Second)
+	newLease.Instance = otherLease.Instance // same locked disk, new process session
 	if err := newLease.Publish(t.Context(), lease.Load{}); err != nil {
 		t.Fatal(err)
 	}

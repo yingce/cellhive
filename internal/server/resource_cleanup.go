@@ -39,7 +39,7 @@ func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scop
 		}
 	}
 	if floor > 0 && s.Owner != nil && s.Store != nil {
-		o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+		o, _, err := s.Owner.ResolveRoute(ctx, sc)
 		if err == nil && o.Epoch <= floor {
 			s.Owner.Invalidate(sc)
 			// Never block a request behind a full Forget: an in-flight request
@@ -87,7 +87,7 @@ func (s *Server) PrepareResourceAccess(ctx context.Context, sc cell.Scope) error
 		}
 	}
 	if floor > 0 && s.Owner != nil && s.Store != nil {
-		o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+		o, _, err := s.Owner.ResolveRoute(ctx, sc)
 		if err == nil && o.Epoch <= floor {
 			s.Owner.Invalidate(sc)
 			if err := s.Store.Forget(ctx, sc); err != nil {

@@ -118,6 +118,8 @@ type Manager struct {
 	mu             sync.Mutex
 	cache          map[string]cachedOwner
 	cacheRev       map[string]uint64
+	routes         map[string]ownerRoute
+	routeFlights   map[string]*routeFlight
 
 	claimMu sync.Mutex
 	claims  map[string]chan struct{}
@@ -188,6 +190,7 @@ func (m *Manager) Invalidate(s cell.Scope) {
 	m.mu.Lock()
 	key := s.String()
 	delete(m.cache, key)
+	delete(m.routes, key)
 	if m.cacheRev == nil {
 		m.cacheRev = make(map[string]uint64)
 	}
@@ -343,6 +346,7 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 		return cell.Owner{}, err
 	}
 	if cur.Node != m.NodeID || cur.Epoch != epoch {
+		m.Invalidate(s)
 		return cell.Owner{}, ErrEpochMismatch
 	}
 	if cur.Liveness == "node-lease" {
@@ -375,6 +379,7 @@ func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error
 		return err
 	}
 	if cur.Node != m.NodeID || cur.Epoch != epoch {
+		m.Invalidate(s)
 		return ErrEpochMismatch
 	}
 	// Conditional delete: if the lease expired and a peer re-claimed between the

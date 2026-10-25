@@ -6,6 +6,14 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-25_
 
+## 2026-10-25 失租后迟到续租复活（ADR-291）
+
+原 Publish 无条件 Put 且可恢复 Healthy，导致原租期已过的进程重新恢复服务，或迟到写覆盖替代 session。改为不可逆 fence、ETag 条件续租、独立退出 watchdog；新 session 走既有恢复。初始回归已复现过期后重发、挂起续租返回、覆盖替代 session 三个问题。全量测试、lease/owner/recovery/server/queue/cell-agent race、vet/build，以及真实双进程 SIGSTOP 超期→peer 恢复接管→SIGCONT 旧进程退出→新 session 恢复均通过。见 [验证记录](archive/lease-fence-2026-10-25.md)。未提交、未部署。
+
+## 2026-10-25 owner 路由周期性点查（ADR-290）
+
+改为本机连续安全租约窗口快速路径、远端观察租约期限缓存和同 cell 并发解析合并；不再以固定 1s 刷新普通请求 owner。热 KV 后台预热也复用路由解析。首次访问、期限已过、显式失效仍可能等待对象存储；此优化不消除其他资源 fence、绑定、持久性等待。全量测试、owner/lease/queue/server race、vet/build 和真实 HTTP 双入口/交接回归通过；同机文件桶加 owner GET 延迟的对照见 [验证记录](archive/bench/owner-route-cache-2026-10-25.md)。尚未部署，未宣称生产 COS 或跨机器 fleet 性能。
+
 ## 2026-10-25 DO capture 重启 fence（ADR-289）
 
 SG 发布验收发现 capture epoch 固定 1 与 cell-agent 接管后 owner epoch 增长冲突，DO 恢复后持续 gate_500/epoch_mismatch。现分离 LTX epoch 和 capture owner epoch，同时验证 DO shard fence；回归覆盖 agent epoch 增长后的真实 HTTP commit、旧 capture/shard fence 拒绝及普通 cell fence 保留。另修复失败捕获后 cursor 已推进而遗漏未确认 WAL 的问题：保留原始片段直到确认，真实 SQLite 恢复测试覆盖提交前拒绝、确认丢失后新写入。部署状态见发布记录。

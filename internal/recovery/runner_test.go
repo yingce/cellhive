@@ -2,6 +2,7 @@ package recovery_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -146,10 +147,11 @@ func TestRunnerExpiredLeaseIsDead(t *testing.T) {
 	}
 	ackSegment(t, tr, []string{f}, sc, 1, "x-data")
 
-	// Publish a lease that is already expired.
-	lmx := lease.NewManager(shared, "node-x", "sx", "", "", -time.Minute)
-	if err := lmx.Publish(ctx, lease.Load{}); err != nil {
-		t.Fatalf("publish: %v", err)
+	// Seed an expired historical record. Publish now correctly rejects leases
+	// that returned already expired, so it cannot construct this fixture.
+	expired, _ := json.Marshal(lease.NodeLease{Node: "node-x", Session: "sx", Expiry: time.Now().Add(-time.Minute).UnixMilli(), Liveness: lease.NodeLeaseLiveness})
+	if _, err := shared.Put(ctx, lease.Key("node-x"), expired); err != nil {
+		t.Fatal(err)
 	}
 
 	rep := replica.New(shared)

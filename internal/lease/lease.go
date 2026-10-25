@@ -13,6 +13,10 @@ import (
 	"cellhive/internal/bucket"
 )
 
+// ErrFenced means this process has irreversibly lost node authority. Only a
+// new process session, after startup recovery, may publish again.
+var ErrFenced = errors.New("node lease fenced; restart with a new session")
+
 // Load is the node load sample exposed for discovery and autoscaling.
 type Load struct {
 	OwnedCells     int   `json:"owned_cells"`
@@ -74,6 +78,9 @@ type Manager struct {
 	// wrote. Peers judge us dead once it passes, so Healthy measures from it and
 	// not from when the PUT happened to return.
 	publishedExpiry time.Time
+	fenced          bool
+	publishMu       sync.Mutex
+	publishedETag   string
 
 	mu         sync.Mutex
 	cached     []NodeLease
@@ -89,35 +96,104 @@ func NewManager(b bucket.Bucket, nodeID, session, advertise, peerURL string, ttl
 
 // Publish writes (or renews) this node's lease.
 func (m *Manager) Publish(ctx context.Context, load Load) error {
+	m.publishMu.Lock()
+	defer m.publishMu.Unlock()
+	if m.Fenced() {
+		return ErrFenced
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if load.SampledMs == 0 {
 		load.SampledMs = time.Now().UnixMilli()
 	}
 	expiry := time.Now().Add(m.TTL)
+	// Never shorten the actual bucket lease while keeping a longer local proof.
+	m.mu.Lock()
+	if m.publishedExpiry.After(expiry) {
+		expiry = m.publishedExpiry
+	}
+	m.mu.Unlock()
 	l := NodeLease{
-		Node:         m.NodeID,
-		Session:      m.Session,
-		Instance:     m.Instance,
-		Advertise:    m.Advert,
-		PeerURL:      m.PeerURL,
-		AZ:           m.AZ,
-		Expiry:       expiry.UnixMilli(),
-		ProtoVersion: "v1",
-		Liveness:     NodeLeaseLiveness,
-		Load:         load,
+		Node: m.NodeID, Session: m.Session, Instance: m.Instance,
+		Advertise: m.Advert, PeerURL: m.PeerURL, AZ: m.AZ,
+		Expiry: expiry.UnixMilli(), ProtoVersion: "v1",
+		Liveness: NodeLeaseLiveness, Load: load,
 	}
 	data, err := json.Marshal(l)
 	if err != nil {
 		return err
 	}
-	if _, err := m.B.Put(ctx, m.renewKey, data); err != nil {
-		return fmt.Errorf("publish lease: %w", err)
+	expected := m.publishedETag
+	if expected == "" {
+		previous, etag, rerr := m.B.Get(ctx, m.renewKey)
+		switch {
+		case errors.Is(rerr, bucket.ErrNotFound):
+		case rerr != nil:
+			return fmt.Errorf("read initial lease: %w", rerr)
+		default:
+			var prev NodeLease
+			if err := json.Unmarshal(previous, &prev); err != nil {
+				return fmt.Errorf("decode initial lease: %w", err)
+			}
+			// The process holds its data-directory instance lock. Only that same
+			// persistent instance may replace its live predecessor during restart.
+			if prev.Live(time.Now()) && prev.Session != m.Session && (m.Instance == "" || prev.Instance != m.Instance) {
+				return fmt.Errorf("node lease held by another instance")
+			}
+			expected = etag
+		}
+	}
+	// A slow initial read must not let a previously held lease cross expiry.
+	if m.Fenced() {
+		return ErrFenced
+	}
+	var etag string
+	if expected == "" {
+		etag, err = m.B.ConditionalCreate(ctx, m.renewKey, data)
+	} else {
+		etag, err = m.B.CAS(ctx, m.renewKey, data, expected)
 	}
 	m.mu.Lock()
-	if expiry.After(m.publishedExpiry) {
-		m.publishedExpiry = expiry
+	defer m.mu.Unlock()
+	now := time.Now()
+	if m.expiredLocked(now) {
+		return ErrFenced
 	}
-	m.mu.Unlock()
+	if err != nil {
+		// A changed ETag may be another process or an ambiguous earlier write.
+		// Never overwrite it or guess that authority survived.
+		if m.publishedETag != "" && errors.Is(err, bucket.ErrPrecondition) {
+			m.fenced = true
+			return fmt.Errorf("%w: lease was replaced", ErrFenced)
+		}
+		return fmt.Errorf("publish lease: %w", err)
+	}
+	if !now.Before(expiry) || now.UnixMilli() >= l.Expiry {
+		// An initial write that returned already expired never granted authority.
+		return fmt.Errorf("initial node lease write returned expired")
+	}
+	m.publishedETag = etag
+	m.publishedExpiry = expiry
 	return nil
+}
+
+// expiredLocked permanently revokes a previously acquired lease at its real
+// published deadline. The earlier safety margin only pauses service; a renewal
+// within the original lease can still restore health without losing authority.
+func (m *Manager) expiredLocked(now time.Time) bool {
+	if !m.publishedExpiry.IsZero() && (!now.Before(m.publishedExpiry) || now.UnixMilli() >= m.publishedExpiry.UnixMilli()) {
+		m.fenced = true
+	}
+	return m.fenced
+}
+
+// Fenced is also checked by a watchdog independently of bucket I/O, so a hung
+// renewal cannot keep a dead session running indefinitely.
+func (m *Manager) Fenced() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.expiredLocked(time.Now())
 }
 
 // Healthy reports whether peers will still consider this node live for the
@@ -126,16 +202,29 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 // node never acks after the moment a peer may start taking its cells over.
 func (m *Manager) Healthy(now time.Time) bool {
 	m.mu.Lock()
+	fenced := m.expiredLocked(now)
+	m.mu.Unlock()
+	return !fenced && now.Before(m.HealthyUntil())
+}
+
+// HealthyUntil returns the last published lease deadline minus the self-fence
+// margin. The time retains its monotonic component; renewal cannot authorize
+// reuse of a cell route whose previously observed deadline has already passed.
+func (m *Manager) HealthyUntil() time.Time {
+	m.mu.Lock()
 	exp := m.publishedExpiry
+	if m.expiredLocked(time.Now()) {
+		exp = time.Time{}
+	}
 	m.mu.Unlock()
 	if exp.IsZero() {
-		return false
+		return time.Time{}
 	}
 	margin := m.TTL / 5
 	if margin <= 0 {
 		margin = time.Second
 	}
-	return now.Before(exp.Add(-margin))
+	return exp.Add(-margin)
 }
 
 // LegacyPeers returns live nodes using an incompatible owner or resource-fence

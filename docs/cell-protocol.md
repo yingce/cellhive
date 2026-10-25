@@ -411,3 +411,11 @@ _最后更新：2026-09-25_
 后台 queue/timer 在 ClaimWithReset 内先恢复前任 session，再以非阻塞本地失效回调清理旧副本，最后条件发布 owner；同 scope 的进程内 Claim 共用可取消门，不允许并发绕过正在准备的接管。busy/失效失败不发布新 owner；请求入口同样必须传播预清理错误。该顺序不改变 bucket CAS、node lease 或 epoch fence 的权威。
 
 sealed tail 仅缓存服务端已经校验过的 sequence/offset，after、sealed final、文件身份/大小/修改时间均匹配才复用；重启或未命中从头校验一次。每页仍检查连续序号与完整 frame，覆盖 checkpoint 仅在该页持久化后推进，读游标不是持久化证明。HTTP/node-log 格式不变。
+
+### owner 路由缓存（ADR-290）
+
+普通请求使用 lease-bounded ResolveRoute，远端路由复用到观察到的节点租约截止时间；本机路由在连续的安全租约窗口内随续租延长，跨窗口必须重新解析。同 cell 并发 miss 合并，失效 revision 阻止迟到结果回填/返回；claim/release 立即撤销旧路由。路由附带的远端租约证据可用于转发存活判断，但不得替代接管确认、接收端 self-fence 或提交 epoch fence。Legacy/DO 路由最多缓存 1 秒；无租约视图的测试兼容路径沿用短缓存。所有 lookup 为点查。
+
+### 节点续租连续性（ADR-291）
+
+已获得的节点租约一旦跨过实际发布期限，该 session 不可逆失效；迟到的写成功不能复活。续租 ETag CAS 防止旧进程覆盖替代进程；独立 watchdog 在失租或冲突后立即退出，不执行已失去权限的交接。新进程通过持久 instance 锁、新 session 和既有启动恢复重新进入服务。安全余量内但尚未真正过期的续租允许恢复健康。

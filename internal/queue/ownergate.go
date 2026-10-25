@@ -31,10 +31,10 @@ func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scop
 			return true, nil
 		}
 		sc := Scope(ref.Namespace, ref.Name)
+		o, _, err := om.ResolveRoute(ctx, sc)
 		now := time.Now()
-		o, _, err := om.ResolveCached(ctx, sc, time.Second)
 		if err == nil {
-			live, lerr := om.Live(ctx, o, now)
+			live, lerr := om.LiveRoute(ctx, sc, o, now)
 			if lerr != nil {
 				return false, lerr
 			}

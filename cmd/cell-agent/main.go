@@ -205,13 +205,24 @@ func main() {
 	if placementWeight <= 0 {
 		placementWeight = runtime.NumCPU()
 	}
-	publishLoad := func() {
+	publishLoad := func() error {
 		owned := len(om.OwnedScopes())
 		if err := lm.Publish(ctx, lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
 			log.Warn("lease publish failed", "err", err)
+			return err
 		}
+		return nil
 	}
-	publishLoad()
+	if err := publishLoad(); err != nil {
+		log.Error("initial node lease failed", "err", err)
+		os.Exit(1)
+	}
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	go watchNodeLease(watchCtx, lm, func() {
+		log.Error("node lease permanently fenced; exiting without handoff", "session", cfg.SessionID)
+		os.Exit(1)
+	})
 
 	// Renew node lease at TTL/3.
 	go func() {
@@ -222,7 +233,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				publishLoad()
+				_ = publishLoad()
 			}
 		}
 	}()
@@ -793,11 +804,12 @@ func main() {
 			SnapshotBatchParts:  8,
 			Log:                 log,
 			Owner: func(cctx context.Context, sc cell.Scope) (bool, uint64, error) {
-				o, _, err := om.ResolveCached(cctx, sc, time.Second)
+				o, _, err := om.ResolveRoute(cctx, sc)
 				if err != nil {
 					return false, 0, err
 				}
-				return o.Node == cfg.NodeID && o.Session == cfg.SessionID, o.Epoch, nil
+				live, lerr := om.LiveRoute(cctx, sc, o, time.Now())
+				return live && o.Node == cfg.NodeID && o.Session == cfg.SessionID, o.Epoch, lerr
 			},
 			// Ownership moved: forget the local cell so later reads re-hydrate
 			// from the bucket instead of serving a stale local copy (ADR-115).

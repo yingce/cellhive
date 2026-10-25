@@ -392,8 +392,8 @@ func doRetryable(status int, body []byte) bool {
 // response limits and introduce another transport with an ambiguous outcome.
 func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (control.WorkerView, bool, error) {
 	if s.Owner != nil {
-		o, _, err := s.Owner.ResolveCached(ctx, control.Scope(), ownerCacheTTL)
-		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
+		o, _, err := s.Owner.ResolveRoute(ctx, control.Scope())
+		if err != nil || !s.routeLive(ctx, control.Scope(), o, time.Now()) {
 			if err := s.claimForRead(ctx, control.Scope()); err != nil {
 				return control.WorkerView{}, false, err
 			}
@@ -424,11 +424,11 @@ func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (cont
 		return view, true, nil
 	}
 	if s.Owner != nil {
-		o, _, err := s.Owner.ResolveCached(ctx, control.Scope(), ownerCacheTTL)
+		o, _, err := s.Owner.ResolveRoute(ctx, control.Scope())
 		if err != nil {
 			return control.WorkerView{}, false, err
 		}
-		if o.Node != s.Cfg.NodeID || o.Session != s.Owner.Session || !s.ownerLive(ctx, o, time.Now()) {
+		if o.Node != s.Cfg.NodeID || o.Session != s.Owner.Session || !s.routeLive(ctx, control.Scope(), o, time.Now()) {
 			return control.WorkerView{}, false, fmt.Errorf("control owner unavailable")
 		}
 	}

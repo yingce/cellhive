@@ -957,6 +957,12 @@ func (s *Server) ownerLive(ctx context.Context, o cell.Owner, now time.Time) boo
 	return err == nil && live
 }
 
+// routeLive uses the lease evidence already obtained by ResolveRoute.
+func (s *Server) routeLive(ctx context.Context, sc cell.Scope, o cell.Owner, now time.Time) bool {
+	live, err := s.Owner.LiveRoute(ctx, sc, o, now)
+	return err == nil && live
+}
+
 // ackAllowed is the ADR-273 self-fence: a node that cannot prove its node
 // lease is fresh must not acknowledge writes, even if the owner record still
 // names it. Capture-loop commits take the same check.
@@ -1134,10 +1140,6 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "released"})
 }
 
-// ownerCacheTTL bounds how long a resolved owner record is cached. The hot
-// path must not read object storage on every request.
-const ownerCacheTTL = 1 * time.Second
-
 // forwardOrClaim makes a cell write work on any node (ADR-118): if another live
 // node owns the scope, the request is forwarded to it; if the scope is unowned
 // or its lease expired, this node claims it and proceeds locally. It returns true
@@ -1155,10 +1157,10 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 	if s.Owner == nil {
 		return false
 	}
+	o, _, err := s.Owner.ResolveRoute(r.Context(), sc)
 	now := time.Now()
-	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
 	switch {
-	case err == nil && s.ownerLive(r.Context(), o, now):
+	case err == nil && s.routeLive(r.Context(), sc, o, now):
 		if o.Node == s.Cfg.NodeID {
 			if o.Session == s.Owner.Session {
 				return false
@@ -1246,7 +1248,7 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) error 
 	if s.Owner == nil || s.Store == nil {
 		return nil
 	}
-	o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+	o, _, err := s.Owner.ResolveRoute(ctx, sc)
 	if err != nil && !errors.Is(err, owner.ErrUnowned) {
 		return err
 	}
@@ -1255,7 +1257,7 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) error 
 			return nil
 		}
 		s.Owner.Forget(sc, 0)
-		if s.ownerLive(ctx, o, time.Now()) && o.Address != "" {
+		if s.routeLive(ctx, sc, o, time.Now()) && o.Address != "" {
 			return nil
 		}
 	}
@@ -1338,8 +1340,8 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 	if s.Owner == nil {
 		return nil, false, nil
 	}
-	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
-	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || !s.ownerLive(r.Context(), o, time.Now()) {
+	o, _, err := s.Owner.ResolveRoute(r.Context(), sc)
+	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || !s.routeLive(r.Context(), sc, o, time.Now()) {
 		return nil, false, nil
 	}
 	body := preRead
@@ -1469,8 +1471,8 @@ func (s *Server) forwardAdmin(w http.ResponseWriter, r *http.Request, sc cell.Sc
 	if s.Owner == nil {
 		return false
 	}
-	o, _, err := s.Owner.ResolveCached(r.Context(), sc, ownerCacheTTL)
-	if err != nil || o.Node == s.Cfg.NodeID || !s.ownerLive(r.Context(), o, time.Now()) {
+	o, _, err := s.Owner.ResolveRoute(r.Context(), sc)
+	if err != nil || o.Node == s.Cfg.NodeID || !s.routeLive(r.Context(), sc, o, time.Now()) {
 		return false
 	}
 	addr := s.adminAddressFor(o)
@@ -1585,7 +1587,7 @@ func isHopHeader(k string) bool {
 
 // requireOwnerEpoch enforces the epoch fence for a scope.
 func (s *Server) requireOwnerEpoch(ctx context.Context, sc cell.Scope, epoch uint64) error {
-	o, _, err := s.Owner.ResolveCached(ctx, sc, ownerCacheTTL)
+	o, _, err := s.Owner.ResolveRoute(ctx, sc)
 	if err != nil {
 		return err
 	}

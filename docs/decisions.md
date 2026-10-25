@@ -1,5 +1,17 @@
 # 决策记录（ADR）
 
+## ADR-291 节点租约不可逆失效与条件续租（2026-10-25）
+
+节点续租使用上次成功写入的 ETag CAS；首次发布先点读，使用条件创建或匹配原记录的 CAS，同持久 instance 的重启仍由数据目录锁保护。成功发布后的实际租约期限同时受单调时间和墙上时间约束；超过原期限，无论续租随后成功、失败或仍挂起，该 session 永久 fenced，禁止重新获得健康状态。TTL/5 的提前安全余量只暂停服务，原租期内成功续租仍可恢复；初次发布未获得有效租约则启动失败。
+
+独立 watchdog 不等待桶 I/O，也在正常排空期间继续检查租约；真正失租或续租 ETag 冲突时直接非零退出，跳过旧 session 的 snapshot/release/handoff，由新 session 启动恢复处理。模糊写结果不猜测成功：后续 CAS 冲突保守退出，允许可用性损失，不允许覆盖新进程租约。默认 10s、TTL/3 续租频率不变，不引入每 cell 续租。
+
+## ADR-290 owner 路由按租约缓存与查询合并（2026-10-25）
+
+请求路由改用 ResolveRoute：远端 node-lease owner 缓存到本次观察到的节点租约截止时间，同时受单调时间及墙上时间约束，不随远端续租无限延长旧 cell 路由。本进程同 session 的路由只在原已观察安全期限内、当前本机租约健康时随本机续租延长；跨过原期限或失租后必须重新查询 owner，不能用恢复后的租约复活旧路由。冷启动/claim/恢复仍走现有协议，SQLite 打开或 OwnedScopes 辅助列表不是 ownership 证明。
+
+路由缓存最多保留 4096 条，淘汰只触发下次重新解析。同 scope 的并发解析共享一次查询；等待可取消；领取、释放、明确失效会撤销缓存，失效前开始的查询不能回填或作为当前解析结果返回。Legacy/DO owner 保留最多 1s 的短缓存。Resolve/ResolveCached(ttl=0)、接管条件写、epoch/session/输出门与数据恢复保持原语义；路由缓存不是 follower 副本关系，也不是持久性证明。后台热 KV 预热复用同一路由缓存，不再每 500ms 强制读 owner。路由过期仍按需点查，不在请求路径 List，不新增模糊写结果重放。
+
 ## ADR-289 DO capture 存储 epoch 与接收节点租约分离（2026-10-25）
 
 SG 升级验收发现：supervisor 的持久 capture epoch 固定为 1，而 cell-agent 重启接管后的 owner epoch 已增长，输出门永久 epoch_mismatch。DO commit 保留原 LTX epoch/恢复链，另携带 capture owner epoch；仅有有效 DO shard 身份的请求可使用此字段。接收端和最终提交边界同时验证当前 capture owner epoch 与 DO shard fence；普通 KV/D1 仍严格使用 LTX epoch。客户端缓存 claim/resolve 得到的 capture owner epoch，409 清缓存供后续输出门重新解析，不自动重放租户操作。supervisor 必须保留未确认的原始 LTX 片段及快照剩余分片；后续 gate 先以相同字节补确认，再继续 Poll，避免 WAL cursor 已推进造成漏传。
