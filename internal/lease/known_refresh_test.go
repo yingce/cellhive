@@ -253,3 +253,21 @@ func TestKnownRefreshBoundsConcurrentReads(t *testing.T) {
 	}
 	cancel()
 }
+
+// Sample skips failed GETs. Absence from that partial discovery result is not
+// an authoritative deletion and must not discard a valid known peer.
+func TestKnownRefreshDiscoveryOmissionKeepsKnownLease(t *testing.T) {
+	now := time.Now()
+	m := &Manager{TTL: time.Second}
+	live := NodeLease{Node: "live", Expiry: now.Add(time.Second).UnixMilli()}
+	dead := NodeLease{Node: "dead", Expiry: now.Add(-time.Hour).UnixMilli()}
+	m.SetCachedForTest([]NodeLease{live, dead})
+	m.applyKnownRead(live.Node, live, nil, now.Add(-time.Millisecond))
+	m.mu.Lock()
+	m.mergeSampleLocked(nil, now)
+	got := m.cached
+	m.mu.Unlock()
+	if len(got) != 1 || got[0] != live {
+		t.Fatalf("partial discovery discarded valid peer or retained ancient peer: %+v", got)
+	}
+}

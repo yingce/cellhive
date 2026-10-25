@@ -165,9 +165,14 @@ func (m *Manager) mergeSampleLocked(sample []NodeLease, started time.Time) {
 			m.observed[l.Node] = started
 		}
 	}
+	// Sample omits failed GETs, so absence is not a deletion proof. Keep
+	// recent peers for independent point reads; only a point-read 404 removes
+	// one immediately. Ancient expired records can still be pruned.
+	floor := time.Now().Add(-m.knownTTL()).UnixMilli()
 	for _, l := range m.cached {
-		if !seen[l.Node] && m.observed[l.Node].After(started) {
+		if !seen[l.Node] && (m.observed[l.Node].After(started) || l.Expiry > floor) {
 			next = append(next, l)
+			seen[l.Node] = true
 		}
 	}
 	// A tombstone need only outlive scans that began before it. Do not retain
