@@ -1,0 +1,16 @@
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/cell-agent ./cmd/cell-agent
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/cellhive ./cmd/cellhive
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/user-runtime ./cmd/user-runtime
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/do-runtime ./cmd/do-runtime
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/do-supervisor ./cmd/do-supervisor
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/cellbench ./cmd/cellbench
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/realbench ./cmd/realbench
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/sqlbench ./cmd/sqlbench
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/s3init ./cmd/s3init
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/s3probe ./cmd/s3probe
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/walscan ./cmd/walscan
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/cell-supervisor ./cmd/cell-supervisor
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/gatebench ./cmd/gatebench
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/kvbench ./cmd/kvbench
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/restoreverify ./cmd/restoreverify
+go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" -o ./bin/recoververify ./cmd/recoververify

@@ -1,0 +1,8 @@
+{"applied":true,"ok":true,"txid":17}
+
+PUT HTTP=200 TOTAL=0.524473s
+node=0 phase=after values=PASS
+{"applied":true,"ok":true,"txid":20}
+
+PUT HTTP=200 TOTAL=0.104569s
+node=1 phase=after values=PASS

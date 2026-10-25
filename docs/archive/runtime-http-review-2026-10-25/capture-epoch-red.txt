@@ -1,0 +1,5 @@
+--- FAIL: TestDOCaptureSurvivesAgentEpochChange (0.01s)
+    do_capture_epoch_test.go:49: DO fixed capture epoch after restart: sqlcapture: commit status 409: {"error":"epoch_mismatch","message":"ownership moved"}
+FAIL
+FAIL	cellhive/internal/server	0.019s
+FAIL

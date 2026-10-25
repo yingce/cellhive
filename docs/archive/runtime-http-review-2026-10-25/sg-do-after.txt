@@ -1,0 +1,2 @@
+sg DO persisted value phase=after PASS
+sg DO binary+headers+cookies+deleteAll+redirect PASS

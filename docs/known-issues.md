@@ -14,13 +14,13 @@ SG 发布验收发现 capture epoch 固定 1 与 cell-agent 接管后 owner epoc
 
 发布前双节点验收另发现：DO invoke 的绑定检查读取 follower 本地 Projection，造成新 Worker 持续 403。现按当前 control owner 点查 active Worker，读取失败返回 503；只读查询可转发，DO 调用不因此重放。双节点回归覆盖合法 class 成功、非法 class 拒绝。
 
-本地修复：deleteAll 原先误读 Map 的 cursor，300 个键只删 256 个；DO fetch 在共享 binding 与 host 多次 text()，破坏非 UTF-8 请求/响应；host、cell-agent、binding 丢失租户响应头；Go/内部 fetch 自动跟随 302。现改用 base64 请求 envelope、字节响应及多值响应头，保留状态/Location/Set-Cookie，过滤内部和逐跳头；重复分页直到清空，并清除 alarm shim 元数据。新请求字段要求暂停/排空 DO 流量，升级全部 do-runtime 和调用方后恢复；do-runtime 自身也可调用其它 DO，不能仅靠先滚动 do-runtime 保证安全。未部署。
+本地修复：deleteAll 原先误读 Map 的 cursor，300 个键只删 256 个；DO fetch 在共享 binding 与 host 多次 text()，破坏非 UTF-8 请求/响应；host、cell-agent、binding 丢失租户响应头；Go/内部 fetch 自动跟随 302。现改用 base64 请求 envelope、字节响应及多值响应头，保留状态/Location/Set-Cookie，过滤内部和逐跳头；重复分页直到清空，并清除 alarm shim 元数据。新请求字段要求暂停/排空 DO 流量，升级全部 do-runtime 和调用方后恢复；do-runtime 自身也可调用其它 DO，不能仅靠先滚动 do-runtime 保证安全。已随 004401c 部署本地、SG revision 58、USW revision 47。
 
 续租增加本地 HTTP 5s deadline、单 scope fetch/body 2s deadline，单个失败继续处理其余租约，迟到失败不会删除更新的 claim。仍按 scope 串行续租，不宣称解决大量 shard 或过短租约下的容量问题。HTTP 仍经过缓冲和既有大小限制，非流式传输。验证范围和 user-runtime 合并审查见 [记录](archive/runtime-http-review-2026-10-25.md)。
 
 ## 2026-10-25 user-runtime 旧版本/实例缓存（ADR-287）
 
-本地修复：指定 version 读取失败回退到其它缓存版本；显式历史版本误填 active 缓存；旧查询 404 覆盖新 env；删除清理后重建复用 version/SHA 导致旧代码或旧变量/绑定 resident 命中；暖 host 的挂起刷新绕过原 5s 兜底。host pointer 传播 storage_id，缓存和 resident 使用代际身份；无代际旧指针重新查询并核验，错误不降级为另一版本。host 刷新使用 5s AbortController/deadline 及 generation/epoch 双重结果守卫。有效在途旧版本可完成；路由 SWR 与投影 stale-on-error 可见性边界未改变。尚未部署；不得把代码级复现直接归因到请求 `53900423061812ab6983f683207f7742`。
+本地修复：指定 version 读取失败回退到其它缓存版本；显式历史版本误填 active 缓存；旧查询 404 覆盖新 env；删除清理后重建复用 version/SHA 导致旧代码或旧变量/绑定 resident 命中；暖 host 的挂起刷新绕过原 5s 兜底。host pointer 传播 storage_id，缓存和 resident 使用代际身份；无代际旧指针重新查询并核验，错误不降级为另一版本。host 刷新使用 5s AbortController/deadline 及 generation/epoch 双重结果守卫。有效在途旧版本可完成；路由 SWR 与投影 stale-on-error 可见性边界未改变。已随 004401c 部署本地、SG revision 58、USW revision 47；不得把代码级复现直接归因到请求 `53900423061812ab6983f683207f7742`。
 
 pool 路由/专属进程传播并校验 storage_id，实际反向代理测试覆盖 Connection 头不能删除可信身份头；内部 bindings 端点返回 version/bundle_sha/storage_id，Queue/Timer/Service/Workflow adapter 不再永久缓存无代际版本，加载实例带代际。旧 metadata 响应不带身份或不可用时的 fail-open 兼容语义未整体移除，SHA-only service 仍不是完整环境 pin；这些边界及投影读取快照一致性、bundle 读后哈希验证不属于本次完整解决范围。
 

@@ -1,0 +1,4 @@
+ok  	cellhive/internal/dosupervisor	1.505s
+ok  	cellhive/internal/server	3.944s
+ok  	cellhive/internal/sqlcapture	1.131s
+ok  	cellhive/internal/cellcapture	1.407s

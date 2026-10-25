@@ -1,0 +1,4 @@
+canary response: durable-before-runtime288-sg
+sg scoped DO read through agent-0 PASS
+canary response: durable-before-runtime288-sg
+sg scoped DO read through agent-1 PASS

@@ -1,0 +1,8 @@
+--- FAIL: TestFailedCaptureRetainsExactLTX (0.04s)
+    --- FAIL: TestFailedCaptureRetainsExactLTX/delta-rejected (0.01s)
+        pending_capture_test.go:84: next gate: dosupervisor: delta commit: failed LTX was skipped or changed
+    --- FAIL: TestFailedCaptureRetainsExactLTX/delta-ack-lost (0.01s)
+        pending_capture_test.go:84: next gate: dosupervisor: delta commit: failed LTX was skipped or changed
+FAIL
+FAIL	cellhive/internal/dosupervisor	0.050s
+FAIL

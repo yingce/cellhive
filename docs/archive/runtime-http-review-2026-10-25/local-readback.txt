@@ -1,0 +1,3 @@
+/cellhive-cell-agent-1 sha256:a49a31196cf71791308fe705a5a86c27a8c46c09ece0878792d87208032b0a4f healthy restart=0
+/cellhive-do-runtime-1 sha256:a49a31196cf71791308fe705a5a86c27a8c46c09ece0878792d87208032b0a4f healthy restart=0
+/cellhive-user-runtime-1 sha256:a49a31196cf71791308fe705a5a86c27a8c46c09ece0878792d87208032b0a4f healthy restart=0

@@ -1,0 +1,2 @@
+local DO persisted value phase=after PASS
+local DO binary+headers+cookies+deleteAll+redirect PASS
