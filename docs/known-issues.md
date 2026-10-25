@@ -6,9 +6,11 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-25_
 
-## 2026-10-25 SG KV 转发热缓存与残余尾延迟
+## 2026-10-25 SG KV 转发热缓存、连接复用与残余尾延迟
 
 转发节点此前在成功转发后直接返回，遗漏热访问登记，导致 binding/资源 fence 缓存过期后仍同步查询。现已让成功的转发 PUT/GET/get-batch（含正常 GET 404）进入原有有界热访问刷新集合；鉴权、删除 fence、owner lease 和 RPO=0 确认规则保持不变。拒绝/失败请求不激活刷新。发布前后证据见 [SG 分批测试记录](archive/sg-kv-performance-2026-10-25.md)。owner 直连约390ms样本中仍有约270ms在持久化span之外，具体分段尚未定位；本修复不宣称消除全部400ms尾延迟。
+
+首次发布后长时间并发GET暴露另一问题：默认转发transport每目标仅保留2条idle连接，SG agent-1累积28,261个TIME_WAIT，触发 `dial tcp ... cannot assign requested address` / HTTP502。已将默认转发client复用并扩大idle pool至256/128，定向HTTP测试同样5轮×8并发的建连数从32降至8；线上长测和最终发布状态见同一验收记录。
 
 ## 2026-10-25 后台快照阻塞写入（ADR-294）
 

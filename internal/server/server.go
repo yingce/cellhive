@@ -1363,10 +1363,7 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 		}
 		body = b
 	}
-	client := s.ForwardClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
+	client := s.forwardHTTPClient()
 	// send performs one forwarding attempt to the given owner address.
 	send := func(hint ownerclient.Hint) (*http.Response, error) {
 		target := ownerclient.OwnerURL(hint) + r.URL.RequestURI()
@@ -1509,10 +1506,7 @@ func (s *Server) forwardAdmin(w http.ResponseWriter, r *http.Request, sc cell.Sc
 		}
 	}
 	req.Header.Set(ownerclient.ForwardedHeader, "1")
-	client := s.ForwardClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
+	client := s.forwardHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "admin_forward_failed", err.Error())

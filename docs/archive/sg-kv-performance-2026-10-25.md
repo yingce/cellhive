@@ -106,3 +106,11 @@ round=3 target=1 fleet_delta=436 bucket_batch_delta=106 proof_count=2427 proof_m
 在 `forwardIfNonOwner` 完成成功响应转发后，为 scoped KV PUT/GET/get-batch 登记热访问，含 GET 404。失败响应不登记。只复用原有后台刷新机制，不改变鉴权、owner/fence有效期或持久化确认。回归覆盖七种成功/未命中/失败场景，实际HTTP转发后核验热集合及刷新后owner身份不变。部署结果将在验收后追加。
 
 发布前验证：`make test`、`make vet` 全部退出0；`go test -race`（SQLite完整tags）对 `TestForwardedKVAccessWarmsIngress|TestHotKVAccess|TestSuccessfulPuts` 通过。Docker生产镜像构建通过，保持同一workerd fork二进制。首次诊断回归在未修复代码上失败、修复后通过。
+
+## SG 初次发布与连接池问题
+
+`bb03fef` 已推送并发布SG revision62，digest `48f2acd462b7e90b38d22f21dd80f6ff2782207cfa58d1b1988b5fcc9e6a4763`。六个业务Pod Ready、零重启、镜像一致；旧KV/DO持久值及DO行为验收通过。随后持续8并发GET出现2次失败；错误增强探针复测30s/45s分别出现3/18次HTTP502，响应明确为owner转发dial `cannot assign requested address`。agent-1 `/proc/net/tcp` 显示TIME_WAIT=28,261，可用临时端口32768–60999（28,232个）。不能将第一次发布视为性能验收通过。
+
+原因：默认转发HTTP client使用默认transport，每目标仅2条idle连接，并发8时反复建连/关闭导致TIME_WAIT积累。修复：共享默认client，克隆默认transport，MaxIdleConns=256、MaxIdleConnsPerHost=128，保持30s超时及原重试边界，支持显式ForwardClient覆盖。真实HTTP并发回归（5轮×8，上一轮完全读完再开始下一轮）在默认池2时新建32条连接、按复用预期失败；池128时复用8条连接、通过。此修复不改变写入持久性。
+
+连接池修复发布前检查：`make test`、`make vet` 均退出0；定向 `go test -race`（`TestForwardTransport|TestForwardedKV|TestHotKVAccess`，完整SQLite tags）通过。
