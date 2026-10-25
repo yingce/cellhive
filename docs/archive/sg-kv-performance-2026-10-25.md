@@ -114,3 +114,23 @@ round=3 target=1 fleet_delta=436 bucket_batch_delta=106 proof_count=2427 proof_m
 原因：默认转发HTTP client使用默认transport，每目标仅2条idle连接，并发8时反复建连/关闭导致TIME_WAIT积累。修复：共享默认client，克隆默认transport，MaxIdleConns=256、MaxIdleConnsPerHost=128，保持30s超时及原重试边界，支持显式ForwardClient覆盖。真实HTTP并发回归（5轮×8，上一轮完全读完再开始下一轮）在默认池2时新建32条连接、按复用预期失败；池128时复用8条连接、通过。此修复不改变写入持久性。
 
 连接池修复发布前检查：`make test`、`make vet` 均退出0；定向 `go test -race`（`TestForwardTransport|TestForwardedKV|TestHotKVAccess`，完整SQLite tags）通过。
+
+## 最终 SG 发布验收
+
+代码 `a8496c7`（含前一提交 `bb03fef`）已推送；镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:1ffeb257fece77306b7147df32888338eebba4222e690aa28806840f901ce1a7`。通过正式Helm脚本发布SG revision63，六个业务Pod Ready、restartCount=0、imageID一致。USW和本地本次未更新。
+
+两次滚动发布后，原有KV/DO持久值、DO binary/header/cookies/deleteAll/redirect检查均通过。最终压测前，测试cell的100个1KiB值经两个入口读取全部正确；owner仍为agent0，新session/epoch3，expired=false。
+
+最终同区HTTP、1KiB、单cell、8并发（warm10不计入）：
+
+|入口/操作|持续时间|成功数|失败|p50 ms|p99 ms|max ms|RPS|
+|---|---:|---:|---:|---:|---:|---:|---:|
+|owner PUT|15s|5884|0|11.95|100.65|526.46|392|
+|转发 PUT|15s|6590|0|13.18|114.13|264.36|439|
+|转发 GET|90s|410208|0|1.59|4.11|284.49|4558|
+
+总计422,682次计量请求无失败。入口agent1的6次TCP采样中TIME_WAIT为28、23、16、27、24、33；ESTABLISHED为15–24。未再复现临时端口耗尽/502。发布前10秒转发PUT基线387 RPS/p99 156.72ms，GET3400 RPS/p99 4.88ms；最终测试时长和进程状态不同，不能把单组差值当作严格A/B或稳定容量保证。
+
+owner热PUT仍有526.46ms尖峰，转发GET仍有284.49ms尖峰；本次只确认热访问登记与连接池复用问题修复，未宣称消除所有尾延迟。
+
+测试结束再次从两个入口逐字节核验100个键，然后通过正式API删除binding和app。cleanup `ds_9daded439ac671ea2c41bcf4f30aeec1` 达到complete、attempts1，app删除ok=true；Pod中的临时探针已删除。证据见 `/tmp/sg-forward-warm-release/` 和 `/opt/cellhive-helm/reports/sg-forward-warm-2026-10-25/`。
