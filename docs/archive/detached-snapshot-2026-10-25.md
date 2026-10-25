@@ -49,3 +49,14 @@
 最终版本 [真实 HK HTTP 回归](detached-snapshot-2026-10-25/bindings-hk.txt) 全部通过（exit 0）：R2 覆盖/HEAD/GET/range，D1 20000 行查询，Queue 重试/DLQ、双节点 kill owner 后消费接管。三个独立应用均清理 HTTP 200。D1 五次 HTTP 总耗时 66–113ms。额外 replica/recovery race 通过，见 [恢复检查](detached-snapshot-2026-10-25/recovery-race.txt)。
 
 最终状态：本次代码与回归完成，冷重建仍未达到 1s 性能目标；未提交、未部署。
+
+## 发布验收
+
+- 应用代码 `428cde5` 已推送 main；镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:4f4b3569757042c3e94a1d0482d1d3a23cab73e683d31295f866e1d9933d0c43`。
+- 本地 Compose 三服务 healthy、镜像一致、重启 0；使用原数据卷，只重建 cell-agent/user-runtime/do-runtime，未重建 MySQL/ProxySQL。
+- SG Helm revision 60、USW revision 49 deployed；通过 `/opt/cellhive-helm/bin/cellhive-helm` 发布，chart/preflight/diff 检查通过，values 仅变更镜像 digest。两地各 6 个业务 Pod 的 spec/imageID、Ready、重启 0 全部核对。
+- 三处读回升级前的 KV 和 DO 持久化值，KV 新写入并读回；SG/USW 分别覆盖两个 agent 入口。DO 二进制、headers、两条 cookies、专用测试 DO 的 deleteAll 300 keys、302 redirect 全部通过。
+- 发布中两地 DO canary 出现恢复指针 CAS 竞争，回退等待 bucket 后成功。USW waker 对旧 scope 一次报告 resource incarnation is deleted；本地启动一次 queue runner database-is-closed 警告在后续 2 分钟窗口未重复。记录这些现象，不将成功发布当作相关根因修复。
+- 运维配置与发布证据已提交 `/opt/cellhive-helm`：`b0eba96`，目录 `reports/review-fixes-2026-10-25/`。该运维仓库没有配置远端；应用代码和本发布记录推送应用仓库。
+
+本次生产验收是健康、功能和持久化检查，未在生产注入故障或测长期 p99。原 HK 冷重建 1s 门槛仍未达标。
