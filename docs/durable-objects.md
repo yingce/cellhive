@@ -252,3 +252,7 @@ do-runtime 的 supervisor 主动向 cell-agent 发起 claim。流程：
 - 自研 PID1 supervisor 需正确编排跨进程关停顺序。
 
 _最后更新：2026-09-25_
+
+### Capture epoch 与 cell-agent 租约（ADR-289）
+
+LTX capture epoch 不随接收 cell-agent 重启增长。输出门单独携带 x-cellhive-capture-owner-epoch，且必须同时携带有效 DO shard 身份；接收和最终提交均检查两种 ownership fence。此路径不接受 pipelined 模式。客户端从 claim/resolve 缓存 capture owner epoch，409 仅清客户端缓存，不重放租户操作。supervisor 保留未确认的原始 LTX/快照分片，后续 gate 先补确认，再读新 WAL；不可用新的字节覆盖相同 txid。

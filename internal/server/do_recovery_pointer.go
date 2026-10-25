@@ -172,3 +172,21 @@ func (s *Server) ensureDORecoveryPointer(ctx context.Context, sc cell.Scope, wan
 	}
 	return fmt.Errorf("DO recovery pointer CAS contention")
 }
+
+// captureOwnerEpochKey is accepted only together with a verified DO shard claim.
+// LTX epoch remains the stable capture-chain identity across agent restarts.
+type captureOwnerEpochKey struct{}
+
+func (s *Server) requireCommitOwner(ctx context.Context, sc cell.Scope, epoch uint64) error {
+	if captureEpoch, ok := ctx.Value(captureOwnerEpochKey{}).(uint64); ok {
+		id, ok := ctx.Value(doCommitIdentityKey{}).(doCommitIdentity)
+		if !ok || captureEpoch == 0 {
+			return fmt.Errorf("DO capture owner identity required")
+		}
+		if err := s.validateDOCommit(ctx, id); err != nil {
+			return err
+		}
+		epoch = captureEpoch
+	}
+	return s.requireOwnerEpoch(ctx, sc, epoch)
+}

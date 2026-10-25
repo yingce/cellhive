@@ -6,6 +6,10 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-25_
 
+## 2026-10-25 DO capture 重启 fence（ADR-289）
+
+SG 发布验收发现 capture epoch 固定 1 与 cell-agent 接管后 owner epoch 增长冲突，DO 恢复后持续 gate_500/epoch_mismatch。现分离 LTX epoch 和 capture owner epoch，同时验证 DO shard fence；回归覆盖 agent epoch 增长后的真实 HTTP commit、旧 capture/shard fence 拒绝及普通 cell fence 保留。另修复失败捕获后 cursor 已推进而遗漏未确认 WAL 的问题：保留原始片段直到确认，真实 SQLite 恢复测试覆盖提交前拒绝、确认丢失后新写入。部署状态见发布记录。
+
 ## 2026-10-25 DO HTTP 与完整清空（ADR-288）
 
 发布前双节点验收另发现：DO invoke 的绑定检查读取 follower 本地 Projection，造成新 Worker 持续 403。现按当前 control owner 点查 active Worker，读取失败返回 503；只读查询可转发，DO 调用不因此重放。双节点回归覆盖合法 class 成功、非法 class 拒绝。

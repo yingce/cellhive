@@ -2949,6 +2949,15 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), doCommitIdentityKey{}, doID))
 	}
+	if raw := r.Header.Get("x-cellhive-capture-owner-epoch"); raw != "" {
+		epoch, err := strconv.ParseUint(raw, 10, 64)
+		_, hasDO := r.Context().Value(doCommitIdentityKey{}).(doCommitIdentity)
+		if err != nil || epoch == 0 || !hasDO || r.URL.Query().Get("pipelined") == "1" {
+			writeErr(w, 400, "bad_capture_owner", "capture owner epoch requires a valid DO owner")
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), captureOwnerEpochKey{}, epoch))
+	}
 	sc, err := cell.ParseScope(r.URL.Query().Get("scope"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_scope", err.Error())
@@ -2962,7 +2971,7 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 	if s.forwardIfNonOwner(w, r, sc, nil) {
 		return
 	}
-	if err := s.requireOwnerEpoch(r.Context(), sc, epoch); err != nil {
+	if err := s.requireCommitOwner(r.Context(), sc, epoch); err != nil {
 		mapOwnerErr(w, err)
 		return
 	}
@@ -3396,7 +3405,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	// paths check this too; doing it here covers every caller, including the
 	// capture loop's own commits.
 	if s.Owner != nil {
-		if err := s.requireOwnerEpoch(ctx, sc, epoch); err != nil {
+		if err := s.requireCommitOwner(ctx, sc, epoch); err != nil {
 			return commitResult{}, err
 		}
 	}

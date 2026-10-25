@@ -146,6 +146,16 @@ func TestFailedCaptureWithoutSnapshotStaysClosed(t *testing.T) {
 	if err := m.Wait(wctx, scope, txid); err == nil {
 		t.Fatal("failed commit acknowledged")
 	}
+	// Wait observes the barrier failure before Run's deferred Done close. This
+	// test checks a stopped capture, so wait for that lifecycle boundary first.
+	m.mu.Lock()
+	done := m.caps[scope.String()].cap.Done()
+	m.mu.Unlock()
+	select {
+	case <-done:
+	case <-wctx.Done():
+		t.Fatal("failed capture did not stop")
+	}
 	if _, err := m.Ensure(ctx, scope); err == nil {
 		t.Fatal("dead capture without snapshot was restarted")
 	}

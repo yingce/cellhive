@@ -185,8 +185,12 @@ func TestHTTPCommitterRequireBucketProof(t *testing.T) {
 
 func TestHTTPCommitterDOOwnerProofOrBucketFallback(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/internal/resolve" {
+			_, _ = w.Write([]byte(`{"owned":true,"owner":{"epoch":7}}`))
+			return
+		}
 		if r.Header.Get("x-cellhive-do-owner-epoch") == "3" {
-			if r.Header.Get("x-cellhive-do-owner-node") != "do-b" || r.Header.Get("x-cellhive-bucket-proof") != "" {
+			if r.Header.Get("x-cellhive-capture-owner-epoch") != "7" || r.Header.Get("x-cellhive-do-owner-node") != "do-b" || r.Header.Get("x-cellhive-bucket-proof") != "" {
 				http.Error(w, "bad DO fleet identity", http.StatusBadRequest)
 				return
 			}
@@ -783,5 +787,47 @@ func TestHTTPCommitterProofModes(t *testing.T) {
 		if !c.ok && err == nil {
 			t.Fatalf("mode %q: err = nil, want rejection", c.mode)
 		}
+	}
+}
+
+func TestHTTPCommitterDOEpochConflictDoesNotReplay(t *testing.T) {
+	var resolves, commits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/internal/resolve" {
+			resolves++
+			fmt.Fprintf(w, `{"owned":true,"owner":{"epoch":%d}}`, resolves+1)
+			return
+		}
+		commits++
+		want := fmt.Sprint(commits + 1)
+		if r.Header.Get("x-cellhive-capture-owner-epoch") != want {
+			t.Errorf("capture epoch=%s want %s", r.Header.Get("x-cellhive-capture-owner-epoch"), want)
+		}
+		if r.URL.Query().Get("epoch") != "1" {
+			t.Error("storage epoch changed")
+		}
+		if commits == 1 {
+			w.WriteHeader(409)
+			w.Write([]byte(`{"error":"epoch_mismatch"}`))
+			return
+		}
+		w.Write([]byte(`{"mode":"bucket"}`))
+	}))
+	defer server.Close()
+	c := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	c.RequireDOOwner = true
+	sc := cell.Scope{Namespace: "workerd", Class: "C", ID: "object"}
+	ctx := WithDOOwner(context.Background(), DOOwnerIdentity{Scope: cell.Scope{Namespace: "app", Class: "__do__", ID: "w~C~shard0"}, Node: "do", Epoch: 1})
+	if err := c.Commit(ctx, sc, 1, []byte("segment")); err == nil {
+		t.Fatal("conflict accepted")
+	}
+	if commits != 1 || resolves != 1 {
+		t.Fatalf("commit replayed: commits=%d resolves=%d", commits, resolves)
+	}
+	if err := c.Commit(ctx, sc, 1, []byte("segment")); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 2 || resolves != 2 {
+		t.Fatalf("owner not refreshed: commits=%d resolves=%d", commits, resolves)
 	}
 }

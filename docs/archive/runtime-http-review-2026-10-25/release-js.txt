@@ -1,0 +1,280 @@
+TAP version 13
+# Subtest: transport error of one lease does not stop renewing the others
+ok 1 - transport error of one lease does not stop renewing the others
+  ---
+  duration_ms: 67.17477
+  type: 'test'
+  ...
+# Subtest: late failed renewal cannot delete a replacement claim
+ok 2 - late failed renewal cannot delete a replacement claim
+  ---
+  duration_ms: 2.654896
+  type: 'test'
+  ...
+# Subtest: renewal deadline also covers a hung response body
+ok 3 - renewal deadline also covers a hung response body
+  ---
+  duration_ms: 3.29913
+  type: 'test'
+  ...
+# Subtest: DO transport preserves request and response bytes and tenant headers
+ok 4 - DO transport preserves request and response bytes and tenant headers
+  ---
+  duration_ms: 59.534944
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 204
+ok 5 - DO transport preserves null body 204
+  ---
+  duration_ms: 1.956813
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 205
+ok 6 - DO transport preserves null body 205
+  ---
+  duration_ms: 2.197967
+  type: 'test'
+  ...
+# Subtest: DO transport preserves null body 304
+ok 7 - DO transport preserves null body 304
+  ---
+  duration_ms: 4.684167
+  type: 'test'
+  ...
+# Subtest: quota wrapper invokes binding methods without RPC apply lookup
+ok 8 - quota wrapper invokes binding methods without RPC apply lookup
+  ---
+  duration_ms: 1.759127
+  type: 'test'
+  ...
+# Subtest: byte cache evicts by weight, updates accounting and skips oversized values
+ok 9 - byte cache evicts by weight, updates accounting and skips oversized values
+  ---
+  duration_ms: 2.492669
+  type: 'test'
+  ...
+# Subtest: retirement waits for handler, response body and background completion
+ok 10 - retirement waits for handler, response body and background completion
+  ---
+  duration_ms: 40.757087
+  type: 'test'
+  ...
+# Subtest: stream is not eagerly consumed and error releases lifetime
+ok 11 - stream is not eagerly consumed and error releases lifetime
+  ---
+  duration_ms: 1.688639
+  type: 'test'
+  ...
+# Subtest: small JSON body is buffered and released before the client reads it
+ok 12 - small JSON body is buffered and released before the client reads it
+  ---
+  duration_ms: 5.636903
+  type: 'test'
+  ...
+# Subtest: plain-text body under the cap is buffered without changing bytes or status
+ok 13 - plain-text body under the cap is buffered without changing bytes or status
+  ---
+  duration_ms: 2.49846
+  type: 'test'
+  ...
+# Subtest: event-stream body stays lazy and is tracked until cancel
+ok 14 - event-stream body stays lazy and is tracked until cancel
+  ---
+  duration_ms: 2.919401
+  type: 'test'
+  ...
+# Subtest: oversized plain-text body falls back to a tracked stream
+ok 15 - oversized plain-text body falls back to a tracked stream
+  ---
+  duration_ms: 4.456262
+  type: 'test'
+  ...
+# Subtest: empty 204 response releases the lifetime without buffering
+ok 16 - empty 204 response releases the lifetime without buffering
+  ---
+  duration_ms: 3.70092
+  type: 'test'
+  ...
+# Subtest: capacity reserves synchronously across concurrent cold requests
+ok 17 - capacity reserves synchronously across concurrent cold requests
+  ---
+  duration_ms: 0.79289
+  type: 'test'
+  ...
+# Subtest: legacy same numeric version revalidates metadata after worker recreation
+ok 18 - legacy same numeric version revalidates metadata after worker recreation
+  ---
+  duration_ms: 40.645499
+  type: 'test'
+  ...
+# Subtest: legacy cached version cannot accept a different returned SHA
+ok 19 - legacy cached version cannot accept a different returned SHA
+  ---
+  duration_ms: 2.074881
+  type: 'test'
+  ...
+# Subtest: rejects mismatched version
+ok 20 - rejects mismatched version
+  ---
+  duration_ms: 1.676689
+  type: 'test'
+  ...
+# Subtest: rejects mismatched SHA
+ok 21 - rejects mismatched SHA
+  ---
+  duration_ms: 1.556784
+  type: 'test'
+  ...
+# Subtest: rejects mismatched incarnation
+ok 22 - rejects mismatched incarnation
+  ---
+  duration_ms: 2.788744
+  type: 'test'
+  ...
+# Subtest: rejects mismatched missing incarnation
+ok 23 - rejects mismatched missing incarnation
+  ---
+  duration_ms: 1.388426
+  type: 'test'
+  ...
+# Subtest: version zero retains active lookup semantics without immutable caching
+ok 24 - version zero retains active lookup semantics without immutable caching
+  ---
+  duration_ms: 2.173467
+  type: 'test'
+  ...
+# Subtest: SHA-only explicit service pins and absent numeric versions remain supported
+ok 25 - SHA-only explicit service pins and absent numeric versions remain supported
+  ---
+  duration_ms: 1.68786
+  type: 'test'
+  ...
+# Subtest: loadWorker separates returned incarnations for legacy requests
+ok 26 - loadWorker separates returned incarnations for legacy requests
+  ---
+  duration_ms: 4.683057
+  type: 'test'
+  ...
+# Subtest: loadWorkflowWorker separates returned incarnations for legacy requests
+ok 27 - loadWorkflowWorker separates returned incarnations for legacy requests
+  ---
+  duration_ms: 3.33087
+  type: 'test'
+  ...
+# Subtest: loadWorker uses resolved version for active identity
+ok 28 - loadWorker uses resolved version for active identity
+  ---
+  duration_ms: 3.291372
+  type: 'test'
+  ...
+# Subtest: loadWorkflowWorker uses resolved version for active identity
+ok 29 - loadWorkflowWorker uses resolved version for active identity
+  ---
+  duration_ms: 2.240287
+  type: 'test'
+  ...
+# Subtest: service fetch retains supplied incarnation validation
+ok 30 - service fetch retains supplied incarnation validation
+  ---
+  duration_ms: 3.896036
+  type: 'test'
+  ...
+# Subtest: service run retains supplied incarnation validation
+ok 31 - service run retains supplied incarnation validation
+  ---
+  duration_ms: 3.239893
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/old
+ok 32 - pool incarnation new/old
+  ---
+  duration_ms: 2.54502
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/undefined
+ok 33 - pool incarnation new/undefined
+  ---
+  duration_ms: 1.628441
+  type: 'test'
+  ...
+# Subtest: pool incarnation new/new
+ok 34 - pool incarnation new/new
+  ---
+  duration_ms: 2.02993
+  type: 'test'
+  ...
+# Subtest: pool incarnation undefined/
+ok 35 - pool incarnation undefined/
+  ---
+  duration_ms: 1.418675
+  type: 'test'
+  ...
+# Subtest: pool incarnation /undefined
+ok 36 - pool incarnation /undefined
+  ---
+  duration_ms: 1.420716
+  type: 'test'
+  ...
+# Subtest: explicit version lookup fails closed instead of using another cached version
+ok 37 - explicit version lookup fails closed instead of using another cached version
+  ---
+  duration_ms: 2.50781
+  type: 'test'
+  ...
+# Subtest: explicit lookup does not populate active pointer cache
+ok 38 - explicit lookup does not populate active pointer cache
+  ---
+  duration_ms: 1.079134
+  type: 'test'
+  ...
+# Subtest: recreated worker same version cannot reuse old SHA or environment
+ok 39 - recreated worker same version cannot reuse old SHA or environment
+  ---
+  duration_ms: 0.959467
+  type: 'test'
+  ...
+# Subtest: cached immutable old identity remains usable by already-pinned requests
+ok 40 - cached immutable old identity remains usable by already-pinned requests
+  ---
+  duration_ms: 0.929388
+  type: 'test'
+  ...
+# Subtest: returned immutable identity must match version SHA and incarnation
+ok 41 - returned immutable identity must match version SHA and incarnation
+  ---
+  duration_ms: 2.188026
+  type: 'test'
+  ...
+# Subtest: late pinned 404 cannot poison active lookup
+ok 42 - late pinned 404 cannot poison active lookup
+  ---
+  duration_ms: 0.83961
+  type: 'test'
+  ...
+# Subtest: resident version keys include incarnation even for identical code/version
+ok 43 - resident version keys include incarnation even for identical code/version
+  ---
+  duration_ms: 0.735302
+  type: 'test'
+  ...
+# Subtest: host deadline aborts a hung response body and releases the flight
+ok 44 - host deadline aborts a hung response body and releases the flight
+  ---
+  duration_ms: 27.059165
+  type: 'test'
+  ...
+# Subtest: warm host replaces stuck flight and ignores its late response
+ok 45 - warm host replaces stuck flight and ignores its late response
+  ---
+  duration_ms: 3.065747
+  type: 'test'
+  ...
+1..45
+# tests 45
+# suites 0
+# pass 45
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 243.203813

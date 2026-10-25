@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cellhive/internal/cell"
@@ -29,6 +30,8 @@ type HTTPCommitter struct {
 	// RequireDOOwner keeps administrative whole-directory captures on bucket
 	// proof when no claimed shard identity is attached to the gate context.
 	RequireDOOwner bool
+	captureMu      sync.Mutex
+	captureEpochs  map[string]uint64
 }
 
 type doOwnerContextKey struct{}
@@ -66,6 +69,15 @@ func (c *HTTPCommitter) Claim(ctx context.Context, scope cell.Scope) error {
 	}
 	if status != http.StatusOK && status != http.StatusConflict {
 		return fmt.Errorf("sqlcapture: claim status %d: %s", status, response)
+	}
+	if c.RequireDOOwner {
+		var result struct {
+			Owner cell.Owner `json:"owner"`
+		}
+		if err := json.Unmarshal(response, &result); err != nil || result.Owner.Epoch == 0 {
+			return fmt.Errorf("sqlcapture: claim did not return a capture owner")
+		}
+		c.setCaptureEpoch(scope, result.Owner.Epoch)
 	}
 	return nil
 }
@@ -105,6 +117,11 @@ func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint
 	req.Header.Set("x-cellhive-followers", strings.Join(c.followers, ","))
 	doOwner, hasDOOwner := ctx.Value(doOwnerContextKey{}).(DOOwnerIdentity)
 	if hasDOOwner && doOwner.Epoch != 0 {
+		captureEpoch, err := c.captureEpoch(ctx, scope)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("x-cellhive-capture-owner-epoch", strconv.FormatUint(captureEpoch, 10))
 		req.Header.Set("x-cellhive-do-owner-scope", doOwner.Scope.String())
 		req.Header.Set("x-cellhive-do-owner-node", doOwner.Node)
 		req.Header.Set("x-cellhive-do-owner-epoch", strconv.FormatUint(doOwner.Epoch, 10))
@@ -123,6 +140,9 @@ func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint
 	}
 	status := resp.StatusCode
 	if status != http.StatusOK {
+		if status == http.StatusConflict {
+			c.setCaptureEpoch(scope, 0)
+		}
 		return fmt.Errorf("sqlcapture: commit status %d: %s", status, response)
 	}
 	var result struct {
@@ -158,4 +178,61 @@ func (c *HTTPCommitter) post(ctx context.Context, path string, body []byte) (int
 	defer resp.Body.Close()
 	response, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, response, err
+}
+
+func (c *HTTPCommitter) setCaptureEpoch(scope cell.Scope, epoch uint64) {
+	c.captureMu.Lock()
+	defer c.captureMu.Unlock()
+	if c.captureEpochs == nil {
+		c.captureEpochs = make(map[string]uint64)
+	}
+	if epoch == 0 {
+		delete(c.captureEpochs, scope.String())
+	} else {
+		c.captureEpochs[scope.String()] = epoch
+	}
+}
+
+func (c *HTTPCommitter) captureEpoch(ctx context.Context, scope cell.Scope) (uint64, error) {
+	c.captureMu.Lock()
+	epoch := c.captureEpochs[scope.String()]
+	c.captureMu.Unlock()
+	if epoch != 0 {
+		return epoch, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.owner+"/v1/internal/resolve?scope="+url.QueryEscape(scope.String()), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("x-cellhive-internal-token", c.token)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("sqlcapture: resolve capture owner status %d", resp.StatusCode)
+	}
+	var result struct {
+		Owned   bool       `json:"owned"`
+		Expired bool       `json:"expired"`
+		Owner   cell.Owner `json:"owner"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return 0, err
+	}
+	if !result.Owned || result.Expired || result.Owner.Epoch == 0 {
+		if err := c.Claim(ctx, scope); err != nil {
+			return 0, err
+		}
+		c.captureMu.Lock()
+		epoch = c.captureEpochs[scope.String()]
+		c.captureMu.Unlock()
+		if epoch == 0 {
+			return 0, fmt.Errorf("sqlcapture: capture owner unavailable")
+		}
+		return epoch, nil
+	}
+	c.setCaptureEpoch(scope, result.Owner.Epoch)
+	return result.Owner.Epoch, nil
 }

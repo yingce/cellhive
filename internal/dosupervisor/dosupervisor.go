@@ -664,12 +664,15 @@ func (s *Supervisor) RestoreAll(ctx context.Context, outDir string) (int, error)
 }
 
 type fileState struct {
-	mu       sync.Mutex
-	path     string
-	scope    cell.Scope
-	cursor   *wal.Cursor
-	seq      uint64
-	baseline bool
+	mu              sync.Mutex
+	path            string
+	scope           cell.Scope
+	cursor          *wal.Cursor
+	seq             uint64
+	baseline        bool
+	pending         [][]byte
+	pendingEnd      uint64
+	pendingSnapshot bool
 }
 
 func (s *Supervisor) logf(format string, args ...any) {
@@ -987,6 +990,9 @@ func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 	if err := s.ensureClaim(ctx, fs.scope); err != nil {
 		return err
 	}
+	if err := s.flushPending(ctx, fs); err != nil {
+		return err
+	}
 	if !fs.baseline {
 		if err := s.seedCaptureWatermark(ctx, fs); err != nil {
 			return err
@@ -1128,12 +1134,10 @@ func (s *Supervisor) snapshot(ctx context.Context, fs *fileState, why string) er
 	if err != nil {
 		return err
 	}
-	for _, seg := range parts {
-		if err := s.Committer.Commit(ctx, fs.scope, s.Epoch, seg); err != nil {
-			return fmt.Errorf("dosupervisor: snapshot commit (%s): %w", why, err)
-		}
+	fs.pending, fs.pendingEnd, fs.pendingSnapshot = parts, fs.seq, true
+	if err := s.flushPending(ctx, fs); err != nil {
+		return fmt.Errorf("dosupervisor: snapshot commit (%s): %w", why, err)
 	}
-	fs.cursor.Reset()
 	s.logf("%s snapshot scope=%s pages=%d commit=%d parts=%d", why, fs.scope.String(), len(sorted), commit, len(parts))
 	return nil
 }
@@ -1157,10 +1161,30 @@ func (s *Supervisor) delta(ctx context.Context, fs *fileState, res wal.PollResul
 	}
 	start, end := fs.seq+1, fs.seq+uint64(len(txs))
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: s.Epoch, StartTxID: start, EndTxID: end}, payload)
-	if err := s.Committer.Commit(ctx, fs.scope, s.Epoch, seg); err != nil {
-		return fmt.Errorf("dosupervisor: delta commit: %w", err)
+	fs.pending, fs.pendingEnd, fs.pendingSnapshot = [][]byte{seg}, end, false
+	return s.flushPending(ctx, fs)
+}
+
+// Poll advances the WAL cursor before durability is known. Retain exact LTX
+// bytes until acknowledged, so a later gate cannot skip a failed delta or
+// replace a partially committed snapshot with different bytes at the same txid.
+func (s *Supervisor) flushPending(ctx context.Context, fs *fileState) error {
+	if len(fs.pending) == 0 {
+		return nil
 	}
-	fs.seq = end
+	for len(fs.pending) > 0 {
+		if err := s.Committer.Commit(ctx, fs.scope, s.Epoch, fs.pending[0]); err != nil {
+			return fmt.Errorf("dosupervisor: pending capture commit: %w", err)
+		}
+		fs.pending[0] = nil
+		fs.pending = fs.pending[1:]
+	}
+	fs.seq = fs.pendingEnd
+	if fs.pendingSnapshot {
+		fs.cursor.Reset()
+		fs.baseline = true
+	}
+	fs.pendingSnapshot = false
 	return nil
 }
 

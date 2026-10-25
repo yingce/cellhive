@@ -1,5 +1,9 @@
 # 决策记录（ADR）
 
+## ADR-289 DO capture 存储 epoch 与接收节点租约分离（2026-10-25）
+
+SG 升级验收发现：supervisor 的持久 capture epoch 固定为 1，而 cell-agent 重启接管后的 owner epoch 已增长，输出门永久 epoch_mismatch。DO commit 保留原 LTX epoch/恢复链，另携带 capture owner epoch；仅有有效 DO shard 身份的请求可使用此字段。接收端和最终提交边界同时验证当前 capture owner epoch 与 DO shard fence；普通 KV/D1 仍严格使用 LTX epoch。客户端缓存 claim/resolve 得到的 capture owner epoch，409 清缓存供后续输出门重新解析，不自动重放租户操作。supervisor 必须保留未确认的原始 LTX 片段及快照剩余分片；后续 gate 先以相同字节补确认，再继续 Poll，避免 WAL cursor 已推进造成漏传。
+
 ## ADR-288 DO HTTP 字节与响应头、完整清空及续租边界（2026-10-25）
 
 - 发布验收补充：DO invoke 的 worker/class 绑定鉴权必须点查控制 cell 的当前 owner；禁止读取 follower 的本地 Projection（可能永久缺少新 Worker）。仅转发只读元数据查询，DO 请求体和响应仍走原代理，保持大小、多值头和不重放语义。无法确认 owner 时返回 503。
