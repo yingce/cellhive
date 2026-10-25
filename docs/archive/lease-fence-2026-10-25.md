@@ -1,6 +1,6 @@
 # 节点租约连续性修复与验证（2026-10-25）
 
-对应 ADR-291，叠加在尚未提交的 ADR-290 owner 路由优化之上。未提交、未部署。
+对应 ADR-291，与 ADR-290 owner 路由优化一起提交为 `520b61b`，已发布本地、SG、USW。
 
 ## 原问题与修复
 
@@ -39,7 +39,7 @@
 - SIGCONT 原进程，确认以退出码 1 结束，日志包含 permanently fenced；不能恢复旧身份。
 - 同磁盘新 session 重新启动，ready 后通过 HTTP 读回已确认值。
 
-这不是实际 COS 网络故障、跨地域或 Kubernetes 重启验收；没有部署生产。
+以上故障注入使用本地文件桶，不代表实际 COS 网络故障验收。生产滚动更新与数据验收见下。
 
 ## 检查
 
@@ -48,3 +48,23 @@
 - `make vet build`：通过。
 
 所有运行日志位于 `/tmp/cellhive-lease-*.log`；关键场景、命令和结果保存在本记录及仓库测试中。
+
+
+## 发布验收（2026-10-25）
+
+- 代码：`520b61b`（已推送）；镜像：`sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:5bc84b3ab55c501d386bdef2448a3237c7635520505194dd8b3d9ae3ea9e6a25`。
+- 本地 Compose：cell-agent、user-runtime、do-runtime 均 healthy，镜像核对一致，重启计数 0；保留现有数据及 MySQL/ProxySQL。
+- SG：通过运维仓库 `bin/cellhive-helm sg upgrade` 发布，Helm revision 59 deployed。
+- USW：通过同一 wrapper 发布，Helm revision 48 deployed。
+- 两地各 6 个业务 Pod 的 spec image、imageID、Ready 均核对通过，最终重启计数均为 0。此计数不包含滚动替换和下述手动重建的旧 Pod。
+- 三处均读回升级前 KV 值，写入并读回新值；两地分别经过两个 agent 入口。
+- 三处 DO 验收均通过：升级前持久化值、二进制 00ff8041、headers、两条 cookies、独立 DO 的 deleteAll 300 keys、302 redirect。
+- 最后检查两地 4 个 agent 最近 3 分钟日志，未见 lease publish failed、permanently fenced 或 WARN/ERROR。
+
+### 发布中观察到的异常
+
+USW 的 do-runtime-gated-1 在 agent 地址变化后持续返回 ready 503（cell_unreachable），但同容器直接请求 cell-agent readyz 返回 200。疑似 workerd 连接或地址缓存未刷新，根因尚未确认。仅重建该未就绪 Pod，保留 PVC，随后 Ready 且上述 DO 持久化验收通过。该运行时重连问题仍需单独跟进，不能以本次恢复视为根因修复。
+
+SG DO 验收期间出现恢复指针 CAS 竞争、回退等待 bucket 的警告，请求最终成功。本地启动时一次 queue runner 的 database is closed 警告未在后续观察中重复。
+
+本次是滚动发布及功能、持久化冒烟验收，未在生产注入暂停/网络故障，也未做生产稳态吞吐压测；首次请求包含冷恢复，不作为性能提升证据。构建与发布日志在 `/tmp/cellhive-291-*.log`。

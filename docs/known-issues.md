@@ -8,11 +8,15 @@ _最后更新：2026-10-25_
 
 ## 2026-10-25 失租后迟到续租复活（ADR-291）
 
-原 Publish 无条件 Put 且可恢复 Healthy，导致原租期已过的进程重新恢复服务，或迟到写覆盖替代 session。改为不可逆 fence、ETag 条件续租、独立退出 watchdog；新 session 走既有恢复。初始回归已复现过期后重发、挂起续租返回、覆盖替代 session 三个问题。全量测试、lease/owner/recovery/server/queue/cell-agent race、vet/build，以及真实双进程 SIGSTOP 超期→peer 恢复接管→SIGCONT 旧进程退出→新 session 恢复均通过。见 [验证记录](archive/lease-fence-2026-10-25.md)。未提交、未部署。
+原 Publish 无条件 Put 且可恢复 Healthy，导致原租期已过的进程重新恢复服务，或迟到写覆盖替代 session。改为不可逆 fence、ETag 条件续租、独立退出 watchdog；新 session 走既有恢复。初始回归已复现过期后重发、挂起续租返回、覆盖替代 session 三个问题。全量测试、lease/owner/recovery/server/queue/cell-agent race、vet/build，以及真实双进程 SIGSTOP 超期→peer 恢复接管→SIGCONT 旧进程退出→新 session 恢复均通过。见 [验证及发布记录](archive/lease-fence-2026-10-25.md)。代码 `520b61b` 已部署本地、SG revision 59、USW revision 48。
 
 ## 2026-10-25 owner 路由周期性点查（ADR-290）
 
-改为本机连续安全租约窗口快速路径、远端观察租约期限缓存和同 cell 并发解析合并；不再以固定 1s 刷新普通请求 owner。热 KV 后台预热也复用路由解析。首次访问、期限已过、显式失效仍可能等待对象存储；此优化不消除其他资源 fence、绑定、持久性等待。全量测试、owner/lease/queue/server race、vet/build 和真实 HTTP 双入口/交接回归通过；同机文件桶加 owner GET 延迟的对照见 [验证记录](archive/bench/owner-route-cache-2026-10-25.md)。尚未部署，未宣称生产 COS 或跨机器 fleet 性能。
+改为本机连续安全租约窗口快速路径、远端观察租约期限缓存和同 cell 并发解析合并；不再以固定 1s 刷新普通请求 owner。热 KV 后台预热也复用路由解析。首次访问、期限已过、显式失效仍可能等待对象存储；此优化不消除其他资源 fence、绑定、持久性等待。全量测试、owner/lease/queue/server race、vet/build 和真实 HTTP 双入口/交接回归通过；同机文件桶加 owner GET 延迟的对照见 [验证记录](archive/bench/owner-route-cache-2026-10-25.md)。已随 `520b61b` 部署本地、SG、USW，持久化冒烟验收通过；未宣称生产 COS 或跨机器 fleet 稳态性能。
+
+## 2026-10-25 USW DO 滚动更新后连接未恢复（待定位）
+
+agent 地址变化后，一个 DO Pod 持续 ready 503/cell_unreachable；同容器直连 agent readyz 返回 200。保留 PVC 重建该 Pod 后恢复，原 DO 数据与 HTTP 验收通过。疑似 workerd 连接或地址缓存未刷新，尚无根因证据，不能视为已修复。见 [发布记录](archive/lease-fence-2026-10-25.md)。
 
 ## 2026-10-25 DO capture 重启 fence（ADR-289）
 

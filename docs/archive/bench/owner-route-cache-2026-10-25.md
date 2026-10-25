@@ -1,6 +1,6 @@
 # Owner 路由缓存优化验证（2026-10-25）
 
-实现 ADR-290，未提交、未部署。普通 server 路由、capture Owner callback、queue OwnerGate 和热 KV 预热使用 ResolveRoute。Resolve 和 ResolveCached(ttl=0) 的权威点查语义保留。
+实现 ADR-290，代码提交 `520b61b`，已部署本地、SG、USW。普通 server 路由、capture Owner callback、queue OwnerGate 和热 KV 预热使用 ResolveRoute。Resolve 和 ResolveCached(ttl=0) 的权威点查语义保留。
 
 ## 行为
 
@@ -52,6 +52,6 @@ GET 紧随 PUT，因此旧实现 GET 已被 PUT 预热；此对照不声称 GET 
 - `go test -race -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' ./internal/owner ./internal/lease ./internal/queue ./internal/server -count=1`。
 - `go test -tags 'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook' ./internal/server -run '^TestOwnerRouteHTTP$' -v -count=1`。
 
-最终结果：以上新实现命令全部退出 0；全量测试通过，owner/lease/queue/server race 通过，vet/build 通过。旧实现 overlay 对照按预期因查询次数断言失败。未部署，未运行真实 COS/跨机器 fleet 性能验收。
+最终结果：以上新实现命令全部退出 0；全量测试通过，owner/lease/queue/server race 通过，vet/build 通过。旧实现 overlay 对照按预期因查询次数断言失败。已完成本地、SG、USW 发布与数据冒烟验收，见 [发布记录](../lease-fence-2026-10-25.md)。未运行真实 COS/跨机器 fleet 稳态性能验收。
 
 后续 ADR-291 补齐实际节点失租后的不可逆隔离和条件续租；原路由优化继续保留，完整过程见 [续租连续性验证](../lease-fence-2026-10-25.md)。
