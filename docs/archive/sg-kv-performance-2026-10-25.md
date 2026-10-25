@@ -134,3 +134,7 @@ round=3 target=1 fleet_delta=436 bucket_batch_delta=106 proof_count=2427 proof_m
 owner热PUT仍有526.46ms尖峰，转发GET仍有284.49ms尖峰；本次只确认热访问登记与连接池复用问题修复，未宣称消除所有尾延迟。
 
 测试结束再次从两个入口逐字节核验100个键，然后通过正式API删除binding和app。cleanup `ds_9daded439ac671ea2c41bcf4f30aeec1` 达到complete、attempts1，app删除ok=true；Pod中的临时探针已删除。证据见 `/tmp/sg-forward-warm-release/` 和 `/opt/cellhive-helm/reports/sg-forward-warm-2026-10-25/`。
+
+## 尾延迟分段诊断
+
+新增请求 spans：binding lookup/refresh、resource prepare/gate、实际 owner/fence bucket read、capture preflight/ensure、SQLite write，并给 durability proof 和 SQLite write 标注 txid。后台 capture 不继承某一次请求的取消上下文；通过 scope/epoch/txid 区间与请求关联。提交超过50ms时记录实际 mode、fallback reason、owner/selection/session/replication/bucket 等耗时及选择当时的 lease snapshot；不额外请求对象存储。观测不改变复制、租约、缓存和持久化确认规则。`bucket_ms` 包含上传队列等待和上传，不能直接等同单次 COS HTTP 耗时。

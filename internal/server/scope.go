@@ -201,6 +201,8 @@ func (s *Server) admit(next http.HandlerFunc) http.HandlerFunc {
 // declaration's resource id alongside ok. Negative results are cached too;
 // control-plane writes invalidate the namespace.
 func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.binding_lookup")
+	defer span.End()
 	ttl := s.Cfg.BindingCacheTTL
 	if ttl <= 0 {
 		id, ok, err := s.bindingFromOwner(ctx, ns, kind, name)
@@ -220,6 +222,8 @@ func (s *Server) bindingInfo(ctx context.Context, ns, kind, name string) (bool, 
 // refreshBindingInfo bypasses the TTL for proactive refresh. A control-plane
 // invalidation during the owner read must not be undone by its stale result.
 func (s *Server) refreshBindingInfo(ctx context.Context, ns, kind, name string) (bool, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.binding_refresh")
+	defer span.End()
 	key := ns + "|" + kind + "|" + name
 	s.bindMu.Lock()
 	rev := s.bindRev

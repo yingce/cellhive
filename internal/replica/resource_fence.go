@@ -2,6 +2,7 @@ package replica
 
 import (
 	"bytes"
+	"cellhive/internal/telemetry"
 	"context"
 	"encoding/json"
 	"errors"
@@ -108,6 +109,8 @@ func fenceAbsent(f resourceFence) bool {
 // readResourceFenceFresh bypasses the cache for write-side fence updates and
 // delete validation.
 func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (resourceFence, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.fence_bucket_read")
+	defer span.End()
 	if err := sc.Validate(); err != nil {
 		return resourceFence{}, "", err
 	}

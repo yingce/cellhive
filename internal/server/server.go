@@ -3252,6 +3252,7 @@ func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.durability_proof",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
+	span.SetAttributes(attribute.String("cell.txid", strconv.FormatUint(txid, 10)))
 	proofStart := time.Now()
 	werr := s.Capture.Wait(ctx, scope, txid)
 	s.recordProof(scope.Namespace, time.Since(proofStart))
@@ -3277,10 +3278,16 @@ func (s *Server) capturedWriteTxID(ctx context.Context, scope cell.Scope, write 
 	if err := s.ensureControlSchema(ctx, scope); err != nil {
 		return 0, err
 	}
-	if _, err := s.Capture.Ensure(ctx, scope); err != nil {
+	ensureCtx, ensureSpan := telemetry.Tracer().Start(ctx, "cell.capture_ensure")
+	_, ensureErr := s.Capture.Ensure(ensureCtx, scope)
+	telemetry.End(ensureSpan, ensureErr)
+	if err := ensureErr; err != nil {
 		return 0, err
 	}
+	_, writeSpan := telemetry.Tracer().Start(ctx, "cell.sqlite_write")
 	txid, err := write()
+	writeSpan.SetAttributes(attribute.String("cell.txid", strconv.FormatUint(txid, 10)))
+	telemetry.End(writeSpan, err)
 	if err != nil {
 		return txid, err
 	}
@@ -3300,6 +3307,7 @@ func (s *Server) captureWaitTxID(ctx context.Context, scope cell.Scope, txid uin
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.durability_proof",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(telemetry.ScopeAttrs(scope.Namespace, scope.Class, scope.ID, scope.String())...))
+	span.SetAttributes(attribute.String("cell.txid", strconv.FormatUint(txid, 10)))
 	proofStart := time.Now()
 	werr := s.Capture.Wait(ctx, scope, txid)
 	s.recordProof(scope.Namespace, time.Since(proofStart))
@@ -3347,6 +3355,8 @@ func (s *Server) ensureOrForward(w http.ResponseWriter, r *http.Request, sc cell
 }
 
 func (s *Server) CaptureEnsure(ctx context.Context, scope cell.Scope) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.capture_preflight")
+	defer span.End()
 	if s.Capture == nil {
 		return nil
 	}
@@ -3419,7 +3429,26 @@ type commitResult struct {
 // upload is asynchronous/batched. "fleet" degrades to a bucket wait when no
 // peer is eligible (never a silent ack). Shared by the HTTP commit handlers and
 // the cellstore capture committer.
-func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (commitResult, error) {
+func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (result commitResult, commitErr error) {
+	started := time.Now()
+	stage := started
+	var ownerTime, selectTime, sessionTime, replicateTime, bucketTime time.Duration
+	var leaseSnapshot []lease.NodeLease
+	reason := "configured_bucket"
+	if requireBucket {
+		reason = "required_bucket"
+	}
+	defer func() {
+		elapsed := time.Since(started)
+		if elapsed < 50*time.Millisecond || s.Log == nil {
+			return
+		}
+		attrs := []any{"scope", sc.String(), "epoch", epoch, "mode", result.Mode, "reason", reason, "total_ms", float64(elapsed) / float64(time.Millisecond), "owner_ms", float64(ownerTime) / float64(time.Millisecond), "select_ms", float64(selectTime) / float64(time.Millisecond), "session_ms", float64(sessionTime) / float64(time.Millisecond), "replicate_ms", float64(replicateTime) / float64(time.Millisecond), "bucket_ms", float64(bucketTime) / float64(time.Millisecond), "followers", len(followers), "lease_snapshot", leaseSnapshot, "err", commitErr}
+		if h, _, err := ltx.Decode(seg); err == nil {
+			attrs = append(attrs, "start_txid", h.StartTxID, "end_txid", h.EndTxID)
+		}
+		s.Log.Info("slow cell commit", attrs...)
+	}()
 	if !s.ackAllowed(time.Now()) {
 		return commitResult{}, owner.ErrNotOwner
 	}
@@ -3433,28 +3462,43 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 			return commitResult{}, err
 		}
 	}
+	ownerTime = time.Since(stage)
+	stage = time.Now()
 	// Durability posture: "bucket" skips peers entirely; "auto" and "fleet" try
 	// peers first.
 	tryFleet := !requireBucket && s.Cfg.Durability != "bucket"
+	if tryFleet {
+		reason = "no_eligible_follower"
+	}
 	if tryFleet && len(followers) == 0 {
 		// liveFollowers reads the in-memory lease snapshot; it must not block a
 		// capture commit on a bucket List (lease.SampleCached refreshes in the
 		// background).
-		followers = s.liveFollowers(ctx, 2)
+		followers, leaseSnapshot = s.liveFollowersSnapshot(ctx, 2)
+	}
+	selectTime = time.Since(stage)
+	if tryFleet && len(followers) > 0 && s.PeerMgr == nil {
+		reason = "peer_manager_unavailable"
 	}
 	if tryFleet && len(followers) > 0 && s.PeerMgr != nil {
-		if !s.openFleetSession(ctx, epoch, followers) {
+		reason = "session_unavailable"
+		stage = time.Now()
+		sessionOK := s.openFleetSession(ctx, epoch, followers)
+		sessionTime = time.Since(stage)
+		if !sessionOK {
 			s.Log.Warn("fleet recovery ensemble unavailable; writes wait for the bucket", "epoch", epoch)
 		} else {
 			if doID, ok := ctx.Value(doCommitIdentityKey{}).(doCommitIdentity); ok {
 				if err := s.ensureDOCommitPointer(ctx, sc, doID); err != nil {
 					s.Log.Warn("DO follower recovery coordinate unavailable; write waits for bucket", "scope", sc.String(), "err", err)
+					reason = "do_coordinate_unavailable"
 					requireBucket = true
 				} else if err := s.validateDOCommit(ctx, doID); err != nil {
 					return commitResult{}, err
 				}
 			}
 			if !requireBucket {
+				stage = time.Now()
 				var ackedBy string
 				var rerr error
 				if prebatched && s.PeerShipper != nil {
@@ -3462,7 +3506,10 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 				} else {
 					ackedBy, rerr = s.replicate(ctx, followers, sc, epoch, seg)
 				}
+				replicateTime = time.Since(stage)
+				reason = "replication_failed"
 				if rerr == nil {
+					reason = "peer_ack"
 					if s.Uploader != nil {
 						s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
 					} else {
@@ -3494,7 +3541,10 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 		}
 	default:
 		if s.Uploader != nil {
-			if err := s.Uploader.EnqueueWait(ctx, sc, epoch, seg); err != nil {
+			bucketStart := time.Now()
+			err := s.Uploader.EnqueueWait(ctx, sc, epoch, seg)
+			bucketTime = time.Since(bucketStart)
+			if err != nil {
 				return commitResult{}, err
 			}
 			s.commits.Add(1)
@@ -3503,7 +3553,9 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 		}
 	}
 
+	bucketStart := time.Now()
 	key, etag, uerr := s.Replica.Append(ctx, sc, epoch, seg)
+	bucketTime = time.Since(bucketStart)
 	if uerr != nil {
 		return commitResult{}, uerr
 	}
@@ -3617,13 +3669,19 @@ func (s *Server) commitSegment(w http.ResponseWriter, r *http.Request, sc cell.S
 // liveFollowers returns up to max peer URLs of live nodes other than this one.
 // It uses the cached node sample so the hot path never Lists the object store.
 func (s *Server) liveFollowers(ctx context.Context, max int) []string {
+	out, _ := s.liveFollowersSnapshot(ctx, max)
+	return out
+}
+
+// liveFollowersSnapshot retains the exact selection snapshot for slow-commit diagnostics.
+func (s *Server) liveFollowersSnapshot(ctx context.Context, max int) ([]string, []lease.NodeLease) {
 	if s.Lease == nil {
-		return nil
+		return nil, nil
 	}
 	leases := s.Lease.SampleCached(ctx, s.followerSampleTTL())
 	out := selectFollowers(leases, s.Cfg.NodeID, s.Cfg.PlacementAZ, time.Now(), max)
 	s.followerCount.Store(int64(len(out)))
-	return out
+	return out, leases
 }
 
 // selectFollowers picks up to max live peers, preferring a different failure

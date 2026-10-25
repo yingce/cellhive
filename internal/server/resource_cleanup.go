@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cellhive/internal/telemetry"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,8 @@ func (s *Server) resourceReplica() *replica.Manager { return s.resourceRep }
 // gate. Admission below rechecks it after acquiring the gate; a stale snapshot
 // can therefore neither serve a deleted resource nor roll back its marker.
 func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scope) (string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.resource_prepare")
+	defer span.End()
 	generation, blocked, floor, err := s.resourceReplica().ResourceSnapshot(ctx, sc)
 	if err != nil {
 		return "", err
@@ -58,6 +61,8 @@ func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scop
 }
 
 func (s *Server) beginPreparedResourceRequest(ctx context.Context, sc cell.Scope, generation string) (func(), error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.resource_gate")
+	defer span.End()
 	return s.Store.BeginPreparedResourceRequest(ctx, sc, generation, func() (string, error) {
 		return s.resourceReplica().ResourceGeneration(ctx, sc)
 	})

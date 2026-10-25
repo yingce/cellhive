@@ -2,6 +2,7 @@
 package owner
 
 import (
+	"cellhive/internal/telemetry"
 	"context"
 	"errors"
 	"fmt"
@@ -200,6 +201,8 @@ func (m *Manager) Invalidate(s cell.Scope) {
 
 // Resolve returns the current owner record and its etag, or ErrUnowned.
 func (m *Manager) Resolve(ctx context.Context, s cell.Scope) (cell.Owner, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.owner_bucket_read")
+	defer span.End()
 	data, e, err := m.B.Get(ctx, Key(s))
 	if err != nil {
 		if errors.Is(err, bucket.ErrNotFound) {
