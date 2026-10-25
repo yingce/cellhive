@@ -12,6 +12,8 @@ _最后更新：2026-10-25_
 
 首次发布后长时间并发GET暴露另一问题：默认转发transport每目标仅保留2条idle连接，SG agent-1累积28,261个TIME_WAIT，触发 `dial tcp ... cannot assign requested address` / HTTP502。已将默认转发client复用并扩大idle pool至256/128，定向HTTP测试同样5轮×8并发的建连数从32降至8；线上长测和最终发布状态见同一验收记录。
 
+SG revision64分段观测已确认另一条热写尖峰：HTTP555.8ms中SQLite仅0.111ms，bucket提交等待553.1ms；选择时follower缓存租约已过期约2.57s，`no_eligible_follower`触发`bucket-batch`。前序提交又使后续请求达到604ms。已知follower刷新仍依赖后台全量nodes采样，刷新解耦优化尚未实施；不允许延长过期租约或取消RPO=0回退。该结论不解释所有历史proof之外的耗时，详见同一测试记录。
+
 ## 2026-10-25 后台快照阻塞写入（ADR-294）
 
 marker 恢复后的后台基线已改为 SQLite backup 固定副本，释放原库写锁后上传，不占用增量 capture 循环、不截断源 WAL、不提前推进确认水位。上传失败/取消保留旧链；退出等待后台任务，大小预算覆盖 WAL 页，启动时清理强杀遗留副本。首次无恢复链和 WAL 截断后的快照仍同步；本地复制仍需短暂写锁和额外磁盘。全量检查、相关 race 与真实 HK R2/D1/Queue 回归通过；最终 HK 冷重建 1660ms、重启首写 885ms，140 个确认键正确。冷重建仍未过 1s 门槛，见 [验收记录](archive/detached-snapshot-2026-10-25.md)。

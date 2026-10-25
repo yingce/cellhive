@@ -138,3 +138,33 @@ owner热PUT仍有526.46ms尖峰，转发GET仍有284.49ms尖峰；本次只确�
 ## 尾延迟分段诊断
 
 新增请求 spans：binding lookup/refresh、resource prepare/gate、实际 owner/fence bucket read、capture preflight/ensure、SQLite write，并给 durability proof 和 SQLite write 标注 txid。后台 capture 不继承某一次请求的取消上下文；通过 scope/epoch/txid 区间与请求关联。提交超过50ms时记录实际 mode、fallback reason、owner/selection/session/replication/bucket 等耗时及选择当时的 lease snapshot；不额外请求对象存储。观测不改变复制、租约、缓存和持久化确认规则。`bucket_ms` 包含上传队列等待和上传，不能直接等同单次 COS HTTP 耗时。
+
+### 已确认：过期 follower 缓存触发桶提交，出现 555–604ms 热写
+
+诊断代码 `e1e2383` / `44c2a36` 已推送，SG revision64：`sha256:63254793185266ce876c367a5eec15fb4991ee2e9b9ef7247cd499116278cbd1`。6个业务Pod均Ready、restartCount=0且imageID一致。发布前后KV/DO持久值、DO binary/header/cookies/deleteAll/redirect通过。最终源码 `make test`、`make vet`、相关server/upload race均exit0，Docker构建/推送、正式Helm preflight/diff/upgrade均通过。USW/本地本次未部署。
+
+独立namespace `ops-sg-latency-confirm-20261025`，owner agent-0，真实同区HTTP、1KiB、100键、单cell，每组warm100不计量：
+
+|入口|并发|时间|成功数|失败|p50 ms|p99 ms|max ms|RPS|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|owner PUT|1|20s|1621|0|9.40|56.77|160.58|81|
+|owner PUT|8|20s|9442|0|11.97|92.69|212.87|471|
+|转发 PUT|1|20s|1506|0|10.67|58.29|155.28|75|
+|转发 PUT|8|20s|9502|0|13.29|92.53|230.67|475|
+|owner PUT 延长测试|8|60s|28792|0|11.67|92.20|604.13|479|
+
+计量请求50,863次无失败；加warm共51,363个逐请求记录。启用采样traceparent、逐请求日志，仅用于归因，不能与无插桩测量做严格性能A/B。两次Vector tap合计匹配48,307个请求trace；第二次tap结束时kubectl通道connection reset，采集并不完整，但下述关键请求的完整分段已经取得。
+
+直接证据（epoch1）：
+
+- trace `7a6c7571677a6868697a747075716569`，txid28112，HTTP555.825ms；SQLite write0.111ms，durability proof554.671ms。
+- 同一scope的commit区间28110–28112：`mode=bucket-batch reason=no_eligible_follower`，bucket等待553.122ms，owner检查0.005ms、follower选择0.001ms、replicate/enqueue均0ms。提交完成时间15:25:46.075 UTC。
+- 选择时follower缓存记录Expiry=`1792941942948`（15:25:42.948 UTC），而本次提交约15:25:45.522 UTC开始，缓存记录已过期约2.57s。该旧样本的SampledMs=`1792941932948`，选择时样本已有约12.57s。日志记录的是选择当时的快照，不是事后重新读取。
+- trace `756a6373776662706179666971726f6f`，txid28116，HTTP604.118ms；SQLite write0.453ms，durability proof600.725ms。它与上一批同时写入，等待窗口覆盖前序桶提交，直到15:25:46.123 UTC才释放。capture按连续txid推进确认，前序慢提交会拖住后续票据。不能只查包含本txid的慢commit而忽略前序提交。
+- 本次目标scope记录215条>=50ms慢commit，214条为`bucket-batch/no_eligible_follower`，1条为`fleet/peer_ack`。没有记录>=50ms的slow upload enqueue；未把“队列满后同步上传”归为这次555ms事件的原因。
+
+结论：已确认这次复现的大尖峰主要由**follower租约缓存过期 → 无合格peer → 等桶持久化及后续提交排队**引起。`bucket_ms`包含队列和上传，不等于COS单次HTTP RTT；本次没有把这553ms进一步拆到COS服务端、网络与上传队列。之前390ms中proof之外的约270ms仍无法追溯，不能把所有历史慢请求都归因到本事件。
+
+两个agent测试期间均Ready且零重启，采集日志无lease publish failed/permanently fenced；缓存刷新使用后台全量nodes采样，List后串行GET，旧样本可以超过10s租期。具体是哪次List/GET拖慢刷新尚未逐调用计时。下一步应将已知follower的后台点查刷新与全量发现解耦，临近过期主动刷新；不得把过期租约继续当作有效证明，也不得取消RPO=0桶回退。本次仅添加观测并确认原因，尚未实施该刷新优化。
+
+结束后通过两个入口逐字节检查100键全部正确；正式API删除binding，cleanup `ds_67adf49878d0804d0b5c8cf30ac43781` 达到complete/attempts1，app删除ok=true，Pod临时探针删除。证据目录 `/tmp/sg-latency-confirm/`：请求日志、tap、joined.json、agent日志、测试/构建/发布及清理记录。

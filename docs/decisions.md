@@ -3529,3 +3529,5 @@ _最后更新：2026-10-22_
 - KV 热访问刷新补全（2026-10-25）：成功转发的 PUT/GET/get-batch 与 owner 本地访问同样登记原有有界热集合；正常 GET 404 视为有效读取，鉴权失败及服务端失败不激活。只移动既有缓存刷新到后台，不延长缓存/租约、不绕过删除 fence，也不改变确认持久性。证据见 `archive/sg-kv-performance-2026-10-25.md`。
 
 - owner 转发连接复用补全（2026-10-25）：数据面与admin转发共用默认HTTP client，保留原30s超时和重试规则，idle pool总上限256、每目标128。Go默认每目标仅2条idle连接会在并发流量下频繁关闭连接，SG连续GET已实际触发临时端口耗尽/502；不通过修改系统端口或降低安全检查规避。显式注入的 `ForwardClient` 保持优先。
+
+- SG KV 尾延迟观测（2026-10-25）：请求分段span与后台commit用scope/epoch/txid区间关联；>=50ms提交记录mode、fallback原因和选择时lease快照。实际确认follower缓存过期导致桶回退；本次不改变ADR-293的发现/采样实现和既有RPO=0规则。上传队列满仍可能同步回压，单独记录enqueue耗时；本次555ms样本明确是no_eligible_follower桶等待。见 `archive/sg-kv-performance-2026-10-25.md`。
