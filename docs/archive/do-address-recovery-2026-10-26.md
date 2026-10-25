@@ -49,4 +49,27 @@ platform/log-tail.js新增共用readLogCapture，DO host、公开loader、内部
 
 原始证据 `/tmp/do-network-recovery/`：`poll-timeout-red.log`、`poll-timeout-green.log`、`script-red.log`、`diagnostics-only-run.log`、`script-green.log`、各运行目录的探针/后端stats/runtime日志、`user-poll-timeout.log`、`all-test.log`、`vet.log`、`js-test.log`。所有隔离容器和网络已清理。
 
-修复尚未提交或发布。线上USW故障与本机制症状一致，但缺少被删旧Pod的完整请求证据，不能唯一追溯其触发原因。
+修复已随代码 `0e7c67d` 推送并部署，见下方发布验收。此前线上USW故障与本机制症状一致，但缺少被删旧Pod的完整请求证据，不能唯一追溯其触发原因。
+
+
+## 2026-10-26 发布验收
+
+- 应用代码：`0e7c67d`，已推送 origin/main；包含 ADR-296 peer stream 修复与 ADR-297 runtime 配置读取超时。
+- 镜像：`sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:50fc86bc80bd7476680fd929f33a0911a642466d9b63cd1fbc7c702218758506`。
+- 新镜像原生 JS（不挂源码）的 `do-network-recovery.sh` 通过：elapsed=1s HTTP503，elapsed=2s HTTP200，随后连续成功，重启计数0。证据 `/tmp/release297-image-e2e/`。
+- SG Helm revision67、USW revision52，均通过官方 preflight/diff/atomic upgrade；diff仅业务镜像及对应generation变化。两地各6个业务Pod的imageID均回读为上述digest，全部Ready、restartCount0。
+- 本地沿用三份Compose配置和原env/volume，只更新cell-agent、user-runtime、do-runtime；三者上述镜像、healthy、restartCount0。回滚镜像保留为 `cellhive:pre-297-local`。
+- 三处发布前写入KV与DO标记，发布后均读回；两地KV分别经两个agent验证，新增写入读回通过。DO持久值、binary、headers、双Set-Cookie、deleteAll、302/Location全部通过；SG又重复通过一次。
+- USW两个DO均记录一次 `do_readiness_failed` network，随后 `do_readiness_recovered` failures=1；滚动自动恢复，无额外删除/重建DO Pod。
+- KV单次发布后PUT样本：本地11.049ms；SG419.039/57.980ms；USW1099.383/11.760ms。这是恢复后验收样本，不能当作热请求benchmark或RPS提升证据。
+
+### 发布后仍需跟进
+
+不能把本轮部署视为全部稳定性问题已闭环：
+
+- 两地DO验收对象出现 `DO recovery pointer CAS contention`，触发 `do_coordinate_unavailable`，写入等待bucket确认后成功。SG重复验收仍观察到，不能仅归为启动瞬时告警；未修改该逻辑。
+- SG `vwork-77/__invocations__/main` 多次compaction失败：`restore: non-contiguous chain: expected txid 3772, got 3770`。本轮未验证该scope的冷恢复，不能由测试namespace读写通过推断该数据链安全；根因和是否历史遗留未确认。
+- SG滚动窗口一次cron dispatch500，user-runtime记录invocation persistence502；未声称该次业务任务已经补偿成功。
+- USW一次waker告警：`resource incarnation is deleted`，scope为 `vwork-74/__kv__/kvns_2dacf8ed-8eef-4c52-a060-47a9c3ac5b78`；需要区分删除后的残留任务与业务异常。
+
+发布命令与现场日志保留于 `/tmp/release297-{build,push,local,sg-upgrade,usw-upgrade,sg-diff,usw-diff}.log`、`/tmp/release297-{sg,usw}-{pods.json,agent.log,do.log}`。旧故障隔离证据与全量/race/session测试见前文。

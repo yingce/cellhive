@@ -6,6 +6,11 @@ Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 AS
 
 _最后更新：2026-10-26_
 
+
+## 2026-10-26 ADR-296/297 已发布与残余告警
+
+peer stream 超时/并发ACK及runtime日志配置读取超时已随 `0e7c67d` 发布至SG revision67、USW revision52和本地；新镜像地址切换E2E、发布前后KV/DO持久化检查通过，USW DO探针网络故障自动恢复。两地仍观察到DO recovery pointer CAS竞争后的bucket回退；SG `vwork-77/__invocations__/main` 持续compaction报 non-contiguous chain（expected3772/got3770），该scope冷恢复尚未验证。另记录滚动期cron500/invocation502及USW已删除resource的waker告警。不能据此宣称所有数据恢复/性能问题均已解决；详见[发布与未解决项](archive/do-address-recovery-2026-10-26.md)。
+
 ## 2026-10-25 SG KV 转发热缓存、连接复用与残余尾延迟
 
 转发节点此前在成功转发后直接返回，遗漏热访问登记，导致 binding/资源 fence 缓存过期后仍同步查询。现已让成功的转发 PUT/GET/get-batch（含正常 GET 404）进入原有有界热访问刷新集合；鉴权、删除 fence、owner lease 和 RPO=0 确认规则保持不变。拒绝/失败请求不激活刷新。发布前后证据见 [SG 分批测试记录](archive/sg-kv-performance-2026-10-25.md)。owner 直连约390ms样本中仍有约270ms在持久化span之外，具体分段尚未定位；本修复不宣称消除全部400ms尾延迟。
