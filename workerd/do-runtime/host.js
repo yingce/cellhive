@@ -28,7 +28,7 @@ import { quotaSource } from "lifecycle.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
-import { tailQuery } from "log-tail.js";
+import { tailQuery, readLogCapture } from "log-tail.js";
 
 const SHARD_COUNT = 16;
 // Owner lease TTL. Longer TTLs reduce renew churn and tolerate a slow/partitioned
@@ -93,19 +93,41 @@ async function reportDoStats(env) {
 
 // GET /ready is the readiness/drain probe for rolling updates (ADR-156): 503
 // while draining (POST /v1/do/drain) or while cell-agent is unreachable.
+let readinessFailures = 0;
+let readinessLastLog = 0;
+
+function readinessFailure(kind, started, details = {}) {
+  const diagnostic = { failure_kind: kind, elapsed_ms: Date.now() - started, ...details };
+  readinessFailures++;
+  if (readinessFailures === 1 || Date.now() - readinessLastLog >= 30000) {
+    readinessLastLog = Date.now();
+    console.warn(JSON.stringify({ event: "do_readiness_failed", failures: readinessFailures, ...diagnostic }));
+  }
+  return json({ ready: false, reason: "cell_unreachable", ...diagnostic }, 503);
+}
+
 async function ready(env) {
   if (draining) return json({ ready: false, reason: "draining" }, 503);
-  // An old pooled connection can outlive a cell-agent Pod during a rolling
-  // update. Bound the probe so readiness can retry against the new endpoint.
+  const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 800);
   try {
     const r = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/readyz", { method: "GET", signal: controller.signal });
-    if (!r.ok) return json({ ready: false, reason: "cell_unreachable" }, 503);
+    // The probe only needs status. Explicitly release the body/connection;
+    // never log the backend body, URL, credentials or raw exception text.
+    try { await r.body?.cancel(); } catch (_) { /* status already received */ }
+    if (!r.ok) return readinessFailure("http", started, { upstream_status: r.status });
   } catch (e) {
-    return json({ ready: false, reason: "cell_unreachable" }, 503);
+    const kind = controller.signal.aborted ? "timeout" : "network";
+    const name = String(e?.name || "Error").replace(/[^a-zA-Z0-9_]/g, "").slice(0, 64);
+    const ref = /reference = ([a-z0-9]{1,64})/i.exec(String(e?.message || ""))?.[1];
+    return readinessFailure(kind, started, { error_name: name, ...(ref ? { error_reference: ref } : {}) });
   } finally {
     clearTimeout(timeout);
+  }
+  if (readinessFailures) {
+    console.info(JSON.stringify({ event: "do_readiness_recovered", failures: readinessFailures, elapsed_ms: Date.now() - started }));
+    readinessFailures = 0;
   }
   return json({ ready: true, projection_age_ms: 0, cell: "ok" });
 }
@@ -123,11 +145,7 @@ let captureOK = false;
 
 async function pollLogCaptureOnce(env) {
   try {
-    const r = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/v1/internal/log-capture", {
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-    });
-    if (!r.ok) return false;
-    const body = await r.json();
+    const body = await readLogCapture(env);
     captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
     captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
     captureOK = true;

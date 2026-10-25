@@ -5,7 +5,7 @@ import { ByteLRU, textWeight, jsonWeight, quotaSource, invocationSource } from "
 import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
-import { tailQuery } from "log-tail.js";
+import { tailQuery, readLogCapture } from "log-tail.js";
 //
 // Runs tenant handlers that are not fetch: queue() and scheduled(). It loads the
 // tenant's immutable bundle through workerLoader, wrapped by a platform module
@@ -332,11 +332,7 @@ let captureOK = false;
 
 async function pollLogCaptureOnce(env) {
   try {
-    const r = await fetch(env.CELL_URL + "/v1/internal/log-capture", {
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-    });
-    if (!r.ok) return false;
-    const body = await r.json();
+    const body = await readLogCapture(env);
     captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
     captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
     captureOK = true;

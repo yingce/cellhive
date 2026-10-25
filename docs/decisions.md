@@ -1,5 +1,19 @@
 # 决策记录（ADR）
 
+## ADR-297 日志配置拉取必须有完整请求上限（2026-10-26）
+
+实际DO runtime故障注入确认：后台log-capture请求挂在旧地址时，workerd共享HTTP客户端保持活动，不能drain并清理已解析地址；改DNS后即使curl访问新地址成功，ready的800ms超时仍可能连续失败。readiness自身有超时不等于同目标后台请求有超时。
+
+DO host、user-runtime public loader和internal dispatcher共用platform/log-tail.js的有界配置读取，2秒上限覆盖连接、响应头和JSON body；无论成功失败都结束取消作用域，避免未读body留存。失败保留既有capture策略及legacy fallback，不延长业务权限、不变更数据持久证明。并发拉取仍合并；超时释放captureInflight以允许下次重试。该值是小型控制面GET的故障上限，不应用于租户长请求或DO执行。
+
+验收必须包含：响应头不返回、响应头后body挂起、旧地址仍接TCP但不响应且DNS已改为新地址；实际DO runtime不重启即可恢复ready和配置拉取。USW历史Pod已删除，复现证明可导致同症状的代码缺陷，不声称已通过历史日志唯一归因。
+
+## ADR-296 Peer stream故障边界与DO就绪诊断（2026-10-26）
+
+连接池全局锁仅管理map；同target/lane建立连接合并，其他目标不等待网络I/O。握手、单帧写入和ACK停滞分别设置5秒上限，较短的调用context优先约束握手/写入；未发出的等待可取消而不破坏共享连接。已经开始写入后取消或失败须退役连接，禁止盲目重放未知结果。ACK等待的调用取消只结束该调用，不把取消当作持久证明，也不立即取消其他在飞帧；每帧从进入发送阶段起最多5秒仍未收到ACK则退役连接、失败全部pending、释放槽位。空闲连接不适用ACK上限。连接退役后的新调用可重新建连；Close永久拒绝新建并取消在途握手。现有session/instance/epoch fence、FIFO和桶持久证明规则不变。
+
+DO readiness保留ready/reason兼容字段，增加无凭据的分类（HTTP/timeout/network）、HTTP状态及耗时；失败日志按30秒限频并累计次数，恢复记录一次。HTTP响应体显式释放。该观测改动不代表USW未自动恢复已获根因或已修复。本轮不取消上传队列满的安全背压，不变更生产服务入口。
+
 ## ADR-295 已知节点租约独立刷新（2026-10-25）
 
 全量 nodes 采样继续负责发现；cell-agent 生命周期内独立后台任务刷新缓存中的已知非本机节点，不等待 List，也不由业务请求执行桶 I/O。默认每2秒（min(LeaseTTL/5, 2s)）一轮，最多8个并发点查，每次deadline不超过1秒和刷新周期；轮次不重叠，退出取消并等待本轮结束。只追踪仍存活或过期不超过一个LeaseTTL的节点，历史死节点不持续轮询。

@@ -16,7 +16,7 @@ import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits }
 import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
-import { tailQuery } from "log-tail.js";
+import { tailQuery, readLogCapture } from "log-tail.js";
 
 const SCOPE_TOKEN_TTL_S = 300;
 
@@ -913,11 +913,7 @@ let captureOK = false; // false until the first successful poll => legacy behavi
 
 async function pollLogCaptureOnce(env) {
   try {
-    const r = await fetch(env.CELL_URL + "/v1/internal/log-capture", {
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
-    });
-    if (!r.ok) return false;
-    const body = await r.json();
+    const body = await readLogCapture(env);
     captureMode = body && (body.mode === "all" || body.mode === "off") ? body.mode : "tail";
     captureWorkers = new Set(body && Array.isArray(body.workers) ? body.workers : []);
     captureOK = true;

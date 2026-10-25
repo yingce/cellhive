@@ -1,5 +1,23 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+// A stuck control-plane read must not pin workerd's shared HTTP client's old
+// resolved address indefinitely. The budget includes response body parsing.
+export async function readLogCapture(env) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/v1/internal/log-capture", {
+      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("log capture configuration unavailable");
+    return await response.json();
+  } finally {
+    controller.abort();
+    clearTimeout(timeout);
+  }
+}
+
 function formatValue(value) {
   if (typeof value === "string") return value;
   if (typeof value === "bigint") return `${value}n`;

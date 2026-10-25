@@ -588,3 +588,7 @@ v3 follower 身份、启动恢复门和按 session 退避重试已实现。真�
 - 2026-10-24 SG legacy migration: two explicitly authorized missing-tail sessions may be closed with audited `recovery_resolution`; this is accepted unknown historical loss, not RPO=0 recovery. TailPage byte-budget false truncation is fixed and covered by regression tests; see `cell-protocol.md` and `archive/bench/session-recovery-rollout-2026-10-24.md`.
 
 - 2026-10-24 pinned control takeover fix: USW returned binding_not_registered after owner change because Pin suppressed stale-file invalidation (local txid 4516 vs bucket 4518). Ownership invalidation now bypasses residency Pin and refuses a busy stale cell. The old binary fails the retained-control-DB process E2E; the fixed binary restores registrations and all 80 KV values.
+
+## 2026-10-26 稳定性复查与修复状态
+
+ADR-296已在源码修复peer握手/Write取消失效、建连持全局锁、异步ACK无限占槽；增加5秒连接/写入/ACK停滞边界、按lane合并建连及共享失败，保留调用取消与整条lane退役的区别。DO readiness已增加限频分类诊断和恢复日志。真实HTTP桶回退→fleet恢复、workerd后端故障恢复、race和session恢复验证见 [稳定性与性能review及修复记录](archive/stability-performance-review-2026-10-26.md)。尚未发布；后续ADR-297已复现并修复DO后台日志配置GET无超时导致共享HTTP客户端保留旧地址的问题，同样修复user-runtime两入口，见 [DO地址恢复实验](archive/do-address-recovery-2026-10-26.md)。这证明了可导致USW同症状的机制，但不是历史事件唯一归因。headless业务入口包含未就绪节点及fleet上传队列满同步等桶仍为剩余边界。

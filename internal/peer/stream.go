@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"cellhive/internal/cell"
 )
@@ -121,24 +122,32 @@ func DecodeBatchFrames(r *bufio.Reader, maxFrames, maxBytes int) ([]BatchFrame, 
 	return frames, nil
 }
 
+// streamIOTimeout bounds each handshake, frame write and outstanding ACK.
+// It is deliberately independent of request cancellation on shared lanes.
+const streamIOTimeout = 5 * time.Second
+
 type streamPending struct {
-	done chan error
+	done      chan error
+	timer     *time.Timer
+	completed bool // protected by rawStream.stateMu
 }
 
 type rawStream struct {
-	conn    net.Conn
-	reader  *bufio.Reader
-	writer  *bufio.Writer
-	writeMu sync.Mutex
-	stateMu sync.Mutex
-	pending chan *streamPending
-	slots   chan struct{}
-	closed  chan struct{}
-	failed  bool
-	failOne sync.Once
+	conn       net.Conn
+	reader     *bufio.Reader
+	writer     *bufio.Writer
+	writeGate  chan struct{}
+	stateMu    sync.Mutex
+	pending    []*streamPending
+	slots      chan struct{}
+	closed     chan struct{}
+	failed     bool
+	ackTimeout time.Duration
 }
 
 func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline int, identities ...cell.PeerIdentity) (*rawStream, error) {
+	ctx, cancel := context.WithTimeout(ctx, streamIOTimeout)
+	defer cancel()
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, err
@@ -148,6 +157,14 @@ func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
 	if err != nil {
+		return nil, err
+	}
+	// DialContext only bounds TCP establishment, not the HTTP upgrade.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		conn.Close()
 		return nil, err
 	}
 	path := strings.TrimSuffix(u.Path, "/") + "/v1/peer/stream"
@@ -189,19 +206,54 @@ func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline
 		conn.Close()
 		return nil, err
 	}
+	if !stop() || ctx.Err() != nil {
+		conn.Close()
+		return nil, ctx.Err()
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	if pipeline <= 0 {
 		pipeline = 4
 	}
 	s := &rawStream{
-		conn:    conn,
-		reader:  reader,
-		writer:  bufio.NewWriterSize(conn, 64<<10),
-		pending: make(chan *streamPending, pipeline),
-		slots:   make(chan struct{}, pipeline),
-		closed:  make(chan struct{}),
+		conn:       conn,
+		reader:     reader,
+		writer:     bufio.NewWriterSize(conn, 64<<10),
+		writeGate:  make(chan struct{}, 1),
+		ackTimeout: streamIOTimeout,
+		slots:      make(chan struct{}, pipeline),
+		closed:     make(chan struct{}),
 	}
 	go s.readAcks()
 	return s, nil
+}
+
+// finishLocked owns both completion and slot release, including timer/ACK races.
+func (s *rawStream) finishLocked(p *streamPending, err error) {
+	if p.completed {
+		return
+	}
+	p.completed = true
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	<-s.slots
+	p.done <- err
+}
+
+func (s *rawStream) failLocked(err error) {
+	if s.failed {
+		return
+	}
+	s.failed = true
+	close(s.closed)
+	s.conn.Close()
+	for _, p := range s.pending {
+		s.finishLocked(p, err)
+	}
+	s.pending = nil
 }
 
 func (s *rawStream) readAcks() {
@@ -211,20 +263,30 @@ func (s *rawStream) readAcks() {
 			s.fail(fmt.Errorf("peer stream: read ack: %w", err))
 			return
 		}
-		p := <-s.pending
-		<-s.slots
-		if ack[0] == 1 {
-			p.done <- nil
-		} else {
-			p.done <- fmt.Errorf("peer stream: follower rejected batch")
+		s.stateMu.Lock()
+		if s.failed {
+			s.stateMu.Unlock()
+			return
 		}
+		if len(s.pending) == 0 {
+			s.failLocked(fmt.Errorf("peer stream: unsolicited ack"))
+			s.stateMu.Unlock()
+			return
+		}
+		p := s.pending[0]
+		s.pending[0] = nil
+		s.pending = s.pending[1:]
+		var err error
+		if ack[0] != 1 {
+			err = fmt.Errorf("peer stream: follower rejected batch")
+		}
+		s.finishLocked(p, err)
+		s.stateMu.Unlock()
 	}
 }
 
-// submit acquires a pipeline slot, registers the pending ack, and writes the
-// frame. The frame is on the wire (ordered by writeMu) when submit returns, so
-// callers that issue frames sequentially preserve lane order while resolving
-// acks asynchronously.
+// Gate acquisition is cancellable. Pending ACK order and wire order are both
+// registered inside this gate, so concurrent senders cannot swap their ACKs.
 func (s *rawStream) submit(ctx context.Context, frame []byte) (*streamPending, error) {
 	select {
 	case s.slots <- struct{}{}:
@@ -233,26 +295,65 @@ func (s *rawStream) submit(ctx context.Context, frame []byte) (*streamPending, e
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	p := &streamPending{done: make(chan error, 1)}
+	select {
+	case s.writeGate <- struct{}{}:
+	case <-s.closed:
+		<-s.slots
+		return nil, fmt.Errorf("peer stream: closed")
+	case <-ctx.Done():
+		<-s.slots
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.writeGate }()
+	if err := ctx.Err(); err != nil {
+		<-s.slots
+		return nil, err
+	}
 	s.stateMu.Lock()
 	if s.failed {
 		s.stateMu.Unlock()
 		<-s.slots
 		return nil, fmt.Errorf("peer stream: closed")
 	}
-	s.pending <- p
+	p := &streamPending{done: make(chan error, 1)}
+	s.pending = append(s.pending, p)
+	timeout := s.ackTimeout
+	if timeout <= 0 {
+		timeout = streamIOTimeout
+	}
+	p.timer = time.AfterFunc(timeout, func() {
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
+		if !p.completed {
+			s.failLocked(fmt.Errorf("peer stream: ack timeout"))
+		}
+	})
 	s.stateMu.Unlock()
 
-	s.writeMu.Lock()
-	_, err := s.writer.Write(frame)
+	// Cancellation after a possible partial write retires the entire stream:
+	// continuing would lose frame boundaries and ACK correspondence.
+	writeCtx, cancel := context.WithTimeout(ctx, streamIOTimeout)
+	defer cancel()
+	stop := context.AfterFunc(writeCtx, func() { s.fail(writeCtx.Err()) })
+	deadline, _ := writeCtx.Deadline()
+	err := s.conn.SetWriteDeadline(deadline)
+	if err == nil {
+		_, err = s.writer.Write(frame)
+	}
 	if err == nil {
 		err = s.writer.Flush()
 	}
-	s.writeMu.Unlock()
+	stopped := stop()
+	if err == nil && (!stopped || writeCtx.Err() != nil) {
+		err = writeCtx.Err()
+	}
+	if err == nil {
+		err = s.conn.SetWriteDeadline(time.Time{})
+	}
 	if err != nil {
 		s.fail(err)
 	}
-	return p, nil
+	return p, err
 }
 
 func (s *rawStream) send(ctx context.Context, frame []byte) error {
@@ -263,21 +364,11 @@ func (s *rawStream) send(ctx context.Context, frame []byte) error {
 	select {
 	case err := <-p.done:
 		return err
-	case <-s.closed:
-		select {
-		case err := <-p.done:
-			return err
-		default:
-			return fmt.Errorf("peer stream: closed")
-		}
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// sendAsync writes the frame and returns a channel that receives the ack (or
-// error) later. Pipelining the caller over one lane is safe because this lane
-// is a single reader on the follower and applies frames in arrival order.
 func (s *rawStream) sendAsync(ctx context.Context, frame []byte) <-chan error {
 	out := make(chan error, 1)
 	p, err := s.submit(ctx, frame)
@@ -289,38 +380,17 @@ func (s *rawStream) sendAsync(ctx context.Context, frame []byte) <-chan error {
 		select {
 		case err := <-p.done:
 			out <- err
-		case <-s.closed:
-			select {
-			case err := <-p.done:
-				out <- err
-			default:
-				out <- fmt.Errorf("peer stream: closed")
-			}
+		case <-ctx.Done():
+			out <- ctx.Err()
 		}
 	}()
 	return out
 }
 
 func (s *rawStream) fail(err error) {
-	s.failOne.Do(func() {
-		s.stateMu.Lock()
-		s.failed = true
-		close(s.closed)
-		s.conn.Close()
-		for {
-			select {
-			case p := <-s.pending:
-				select {
-				case <-s.slots:
-				default:
-				}
-				p.done <- err
-			default:
-				s.stateMu.Unlock()
-				return
-			}
-		}
-	})
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.failLocked(err)
 }
 
 func (s *rawStream) isFailed() bool {
@@ -340,6 +410,8 @@ type StreamTransport struct {
 	fallback *HTTPTransport
 	mu       sync.Mutex
 	streams  map[string]*rawStream
+	dialing  map[string]*streamDial
+	closed   bool
 }
 
 func (t *StreamTransport) Head(ctx context.Context, baseURL, session string) (uint64, error) {
@@ -372,20 +444,63 @@ func NewSessionStreamTransport(token, session string, lanes, pipeline int) *Stre
 	}
 }
 
+type streamDial struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error // published by closing done
+}
+
 func (t *StreamTransport) stream(ctx context.Context, baseURL string, scope cell.Scope) (*rawStream, error) {
-	lane := shardIndex(scope.String(), t.lanes)
-	key := fmt.Sprintf("%s#%d", baseURL, lane)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if s := t.streams[key]; s != nil && !s.isFailed() {
-		return s, nil
+	key := fmt.Sprintf("%s#%d", baseURL, shardIndex(scope.String(), t.lanes))
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		t.mu.Lock()
+		if t.closed {
+			t.mu.Unlock()
+			return nil, fmt.Errorf("peer stream transport closed")
+		}
+		if s := t.streams[key]; s != nil && !s.isFailed() {
+			t.mu.Unlock()
+			return s, nil
+		}
+		if d := t.dialing[key]; d != nil {
+			t.mu.Unlock()
+			select {
+			case <-d.done:
+				if d.err != nil {
+					return nil, d.err
+				}
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		dialCtx, cancel := context.WithCancel(ctx)
+		d := &streamDial{done: make(chan struct{}), cancel: cancel}
+		if t.dialing == nil {
+			t.dialing = make(map[string]*streamDial)
+		}
+		t.dialing[key] = d
+		t.mu.Unlock()
+		s, err := dialRawStream(dialCtx, baseURL, t.token, t.session, t.pipeline, targetIdentity(ctx, t.Targets, baseURL))
+		cancel()
+		t.mu.Lock()
+		delete(t.dialing, key)
+		if t.closed && s != nil {
+			s.fail(fmt.Errorf("peer stream transport closed"))
+			s = nil
+			err = fmt.Errorf("peer stream transport closed")
+		}
+		if err == nil {
+			t.streams[key] = s
+		}
+		d.err = err
+		close(d.done)
+		t.mu.Unlock()
+		return s, err
 	}
-	s, err := dialRawStream(ctx, baseURL, t.token, t.session, t.pipeline, targetIdentity(ctx, t.Targets, baseURL))
-	if err != nil {
-		return nil, err
-	}
-	t.streams[key] = s
-	return s, nil
 }
 
 // AsyncTransport is an optional Transport extension: AppendBatchAsync writes
@@ -448,6 +563,10 @@ func (t *StreamTransport) Reclaim(ctx context.Context, baseURL, session string) 
 func (t *StreamTransport) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.closed = true
+	for _, d := range t.dialing {
+		d.cancel()
+	}
 	for key, s := range t.streams {
 		s.fail(fmt.Errorf("peer stream transport closed"))
 		delete(t.streams, key)
