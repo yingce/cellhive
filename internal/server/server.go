@@ -1581,6 +1581,18 @@ func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc ce
 	}
 	defer resp.Body.Close()
 	copyForwardResponse(w, resp)
+	// Forwarded KV requests return before the local handlers register hot
+	// access. Keep the entry node's binding/fence caches warm too; their
+	// ordinary validity checks still run before every forwarded request.
+	if sc.Class == "__kv__" && s.scopeNS(r) == sc.Namespace && s.scopeName(r) != "" {
+		path := r.URL.Path
+		kvAccess := path == "/v1/kv/put" || path == "/v1/kv/get" || path == "/v1/kv/get-batch"
+		ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+		miss := path == "/v1/kv/get" && resp.StatusCode == http.StatusNotFound
+		if kvAccess && (ok || miss) {
+			s.noteHotKVAccess(sc, sc.Namespace, s.scopeName(r))
+		}
+	}
 	return true
 }
 

@@ -3525,3 +3525,5 @@ _最后更新：2026-10-22_
 - ADR-285 operational clarification (2026-10-24): automatic recovery remains fail-closed. Explicit operator acceptance of a named legacy missing tail requires original-object backup, durable audit, inactive-session guard and CAS closure with `recovery_resolution`, without fabricated coverage; see `cell-protocol.md`.
 
 - ADR-285/驻留优化澄清（2026-10-24）：Pin 保护缓存驻留，不得阻止 owner 切换时失效旧副本。所有权失效使用 Invalidate/TryInvalidate；普通回收仍尊重 Pin，旧副本忙碌或失效失败时禁止继续 claim。
+
+- KV 热访问刷新补全（2026-10-25）：成功转发的 PUT/GET/get-batch 与 owner 本地访问同样登记原有有界热集合；正常 GET 404 视为有效读取，鉴权失败及服务端失败不激活。只移动既有缓存刷新到后台，不延长缓存/租约、不绕过删除 fence，也不改变确认持久性。证据见 `archive/sg-kv-performance-2026-10-25.md`。
