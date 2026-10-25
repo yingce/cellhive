@@ -445,6 +445,13 @@ func (b *Batcher) EnqueueBatchWait(ctx context.Context, s cell.Scope, epoch uint
 // segment is persisted first, so a failure or a restart defers it instead of
 // losing it (ADR-143).
 func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg []byte) {
+	started := time.Now()
+	synchronous := false
+	defer func() {
+		if elapsed := time.Since(started); elapsed >= 50*time.Millisecond && b.log != nil {
+			b.log.Info("slow upload enqueue", "scope", s.String(), "epoch", epoch, "synchronous", synchronous, "elapsed_ms", float64(elapsed)/float64(time.Millisecond))
+		}
+	}()
 	var spoolID uint64
 	if b.spool != nil {
 		id, err := b.spool.Append(s, epoch, [][]byte{seg})
@@ -462,6 +469,7 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 	case sh.ch <- item{scope: s, epoch: epoch, seg: seg, spoolID: spoolID}:
 	default:
 		// Queue full: upload synchronously (backpressure, no loss).
+		synchronous = true
 		if _, _, err := b.sink.AppendBatch(ctx, s, epoch, [][]byte{seg}); err != nil {
 			b.errors.Add(1)
 			if spoolID != 0 {

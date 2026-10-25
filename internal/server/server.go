@@ -3432,7 +3432,7 @@ type commitResult struct {
 func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (result commitResult, commitErr error) {
 	started := time.Now()
 	stage := started
-	var ownerTime, selectTime, sessionTime, replicateTime, bucketTime time.Duration
+	var ownerTime, selectTime, sessionTime, replicateTime, bucketTime, enqueueTime time.Duration
 	var leaseSnapshot []lease.NodeLease
 	reason := "configured_bucket"
 	if requireBucket {
@@ -3443,7 +3443,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 		if elapsed < 50*time.Millisecond || s.Log == nil {
 			return
 		}
-		attrs := []any{"scope", sc.String(), "epoch", epoch, "mode", result.Mode, "reason", reason, "total_ms", float64(elapsed) / float64(time.Millisecond), "owner_ms", float64(ownerTime) / float64(time.Millisecond), "select_ms", float64(selectTime) / float64(time.Millisecond), "session_ms", float64(sessionTime) / float64(time.Millisecond), "replicate_ms", float64(replicateTime) / float64(time.Millisecond), "bucket_ms", float64(bucketTime) / float64(time.Millisecond), "followers", len(followers), "lease_snapshot", leaseSnapshot, "err", commitErr}
+		attrs := []any{"scope", sc.String(), "epoch", epoch, "mode", result.Mode, "reason", reason, "total_ms", float64(elapsed) / float64(time.Millisecond), "owner_ms", float64(ownerTime) / float64(time.Millisecond), "select_ms", float64(selectTime) / float64(time.Millisecond), "session_ms", float64(sessionTime) / float64(time.Millisecond), "replicate_ms", float64(replicateTime) / float64(time.Millisecond), "enqueue_ms", float64(enqueueTime) / float64(time.Millisecond), "bucket_ms", float64(bucketTime) / float64(time.Millisecond), "followers", len(followers), "lease_snapshot", leaseSnapshot, "err", commitErr}
 		if h, _, err := ltx.Decode(seg); err == nil {
 			attrs = append(attrs, "start_txid", h.StartTxID, "end_txid", h.EndTxID)
 		}
@@ -3511,7 +3511,9 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 				if rerr == nil {
 					reason = "peer_ack"
 					if s.Uploader != nil {
+						enqueueStart := time.Now()
 						s.Uploader.Enqueue(context.Background(), sc, epoch, seg)
+						enqueueTime = time.Since(enqueueStart)
 					} else {
 						go func() {
 							_, _, _ = s.Replica.Append(context.Background(), sc, epoch, seg)
