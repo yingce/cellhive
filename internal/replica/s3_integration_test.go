@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,13 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	if _, err := compaction.Compact(ctx, rep, scope, 1, compaction.Options{MinSegments: 1}); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+	// A no-op pass must not fetch the old snapshot, including on real COS.
+	probe := &compactionReadProbe{Bucket: store}
+	result, err := compaction.Compact(ctx, replica.New(probe), scope, 1, compaction.Options{MinSegments: 64, MinBytes: 64 << 20, MinObjects: 8})
+	if err != nil || result.Compacted || result.Skipped != "already compacted" || probe.baselineReads != 0 {
+		t.Fatalf("no-op compaction=%+v err=%v baseline GET=%d", result, err, probe.baselineReads)
+	}
+	t.Log("no-op compaction baseline payload GET=0")
 	pf, err := rep.NewPageFetcher(ctx, scope, 1)
 	if err != nil {
 		t.Fatalf("page fetcher: %v", err)
@@ -154,4 +162,17 @@ func s3TestEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// This wrapper is used only by the sequential no-op compaction probe.
+type compactionReadProbe struct {
+	bucket.Bucket
+	baselineReads int
+}
+
+func (p *compactionReadProbe) Get(ctx context.Context, key string) ([]byte, string, error) {
+	if strings.Contains(key, "/L1/") && !strings.HasSuffix(key, ".json") {
+		p.baselineReads++
+	}
+	return p.Bucket.Get(ctx, key)
 }

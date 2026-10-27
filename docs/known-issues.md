@@ -669,3 +669,9 @@ ADR-296已在源码修复peer握手/Write取消失效、建连持全局锁、异
 ### 2026-10-27 release observation
 
 COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local; direct KV/TTL and Worker binding smoke tests passed on all three. Residual warnings remain recorded: SG deleted test app `ops-workflow299` restore chain; one local queue `database is closed`; USW rolling cron 500 and deleted-resource wake. Final regional agent 60-second window had no WARN/ERROR, but residual cleanup causes and individual cron retry outcomes remain unverified. See [release record](archive/release-2026-10-27.md).
+
+### 数据路径性能后续计划（2026-10-27，未实施）
+
+源码确认compaction在阈值判定前下载基线/增量且字节阈值包含旧L1；fleet确认后上传Enqueue仍同步写本机spool，队列满时可同步COS；capture默认每cell 2ms轮询。实际线上贡献需按[优化实施计划](superpowers/plans/2026-10-27-data-path-optimization.md)建立基线后验证，不将候选优化描述为已修复。所有阶段保留连续durability屏障与真实HK COS双agent验收。
+
+- compaction预检第一步已在隔离分支实现：空尾部/低于阈值不下载L1，旧L1及完全覆盖的L0不计入触发阈值。相关race与HK COS契约通过；仍读取L0正文，dirty队列及完整性能矩阵尚未实施，未发布。见[验证记录](archive/compaction-preflight-2026-10-27.md)。

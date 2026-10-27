@@ -1,0 +1,3 @@
+ok  	cellhive/internal/compaction	17.138s
+ok  	cellhive/internal/replica	7.052s
+ok  	cellhive/internal/restore	6.157s

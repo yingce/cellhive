@@ -1,0 +1,8 @@
+--- FAIL: TestCompactPreflightDoesNotReadBaseline (0.01s)
+    --- FAIL: TestCompactPreflightDoesNotReadBaseline/no_new_data (0.00s)
+        preflight_test.go:67: read baseline 1 times without enough new data
+    --- FAIL: TestCompactPreflightDoesNotReadBaseline/below_threshold (0.00s)
+        preflight_test.go:64: unexpected compaction: {Compacted:true Skipped: Inputs:2 InputBytes:200 NewL0:1 Parts:1 MinTxID:1 MaxTxID:2 Commit:1 DeletedL1:0 DeletedL0:0}
+FAIL
+FAIL	cellhive/internal/compaction	0.012s
+FAIL

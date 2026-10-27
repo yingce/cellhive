@@ -3633,3 +3633,11 @@ cell-agent 的 COS 上传周期从20ms调整为200ms，保留64项/1MiB阈值、
 ### Append authority首次创建空对象观察（2026-10-27）
 
 HK COS真实并发请求捕获：首次POST Append(position=0)尚未返回时，GET可返回200、Content-Length=0、X-Cos-Object-Type=appendable；之后GET读到完整CHL1记录。AppendAuthority对成功但零字节的读做最多5次观察（等待5/10/20/40ms），覆盖Get及ConditionalCreate，CAS/ConditionalDelete通过Get复用。仅重读，不重试Append、不将空对象转换成NotFound、不使用空内容构造token。持续为空仍失败，非空截断/CRC/格式错误立即失败；等待响应context取消。每次网络请求继续使用调用者context，75ms仅是额外退避上限，不是总网络时限。既有位置条件写、单winner、删除/epoch fence保持不变。
+
+### 数据路径优化计划（2026-10-27，未实施）
+
+后续优化按[实施计划](superpowers/plans/2026-10-27-data-path-optimization.md)逐项设计与验收。优先减少compaction无效读取、优化上传spool持久化和capture空闲轮询；第一轮保持桶格式、确认条件、epoch/resource fence不变。增量分层和跨cell bundle仅列为独立设计/实验，不代表已经采纳新格式或放宽RPO=0。
+
+### Compaction 新增尾部预检（2026-10-27，实施中）
+
+读取manifest后先读取并校验L0，统计未被manifest水位覆盖的去重逻辑段、字节和对象；旧L1及完全覆盖的残留L0不参与触发阈值。只有达到阈值才下载L1进行完整合并，发布manifest和GC继续遵守原链校验与owner检查。此阶段不省略L0正文校验，不增加新对象格式；无新尾部时不下载L1，不能以此宣称零COS访问或已有L1正文已被重新校验。

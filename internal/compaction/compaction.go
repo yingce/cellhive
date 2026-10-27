@@ -20,12 +20,12 @@ import (
 // Options controls when and how a compaction runs.
 type Options struct {
 	// MinSegments and MinBytes gate the fold: compaction runs only when the
-	// chain has at least MinSegments segments, or its raw size is at least
+	// uncovered L0 tail has at least MinSegments segments, or its raw size is at least
 	// MinBytes. The thresholds are an OR so either a long or a large chain
 	// triggers a fold.
 	MinSegments int
 	MinBytes    int64
-	// MinObjects is an OR threshold on the number of L0 objects (not segments):
+	// MinObjects is an OR threshold on L0 objects with an uncovered tail:
 	// cold-restore RTT is driven by object count, and a .batch may hold many
 	// segments. 0 disables this threshold.
 	MinObjects int
@@ -72,8 +72,73 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 	var oldL1 []string
 	seen := map[string]bool{}
 
-	// The current L1 snapshot is the fold baseline.
 	floor := uint64(0)
+	if haveMan {
+		floor = man.MaxTxID
+	}
+
+	l0, err := m.ListL0Segments(ctx, s, epoch)
+	if err != nil {
+		return Result{}, err
+	}
+	l0Max := map[string]uint64{}
+	newL0 := 0
+	newObjects := 0
+	for _, k := range l0 {
+		objectHasNew := false
+		raw, err := m.ReadSegment(ctx, k)
+		if err != nil {
+			return Result{}, err
+		}
+		parts, err := ltx.Split(raw)
+		if err != nil {
+			return Result{}, fmt.Errorf("compaction: corrupt L0 object %s: %w", k, err)
+		}
+		for _, part := range parts {
+			h, _, derr := ltx.Decode(part)
+			if derr != nil {
+				return Result{}, derr
+			}
+			if h.EndTxID > l0Max[k] {
+				l0Max[k] = h.EndTxID
+			}
+			if haveMan && h.EndTxID <= floor {
+				continue // already folded into the L1 baseline
+			}
+			objectHasNew = true // Count physical objects even when their tail overlaps.
+			if seen[h.ID()] {
+				continue // duplicate from mixed batch/single storage
+			}
+			seen[h.ID()] = true
+			newL0++
+			if h.Kind == ltx.KindSnapshot {
+				haveSnap = true
+			}
+			if minTx == 0 || h.StartTxID < minTx {
+				minTx = h.StartTxID
+			}
+			if h.EndTxID > maxTx {
+				maxTx = h.EndTxID
+			}
+			segs = append(segs, part)
+			inputBytes += int64(len(part))
+		}
+		if objectHasNew {
+			newObjects++
+		}
+	}
+
+	if !haveSnap && !haveMan {
+		return Result{Skipped: "no snapshot baseline"}, nil
+	}
+	if newL0 == 0 && haveMan {
+		return Result{Skipped: "already compacted"}, nil
+	}
+	belowObjects := opts.MinObjects <= 0 || newObjects < opts.MinObjects
+	if len(segs) < opts.MinSegments && inputBytes < opts.MinBytes && belowObjects {
+		return Result{Skipped: "below threshold", Inputs: len(segs), InputBytes: inputBytes}, nil
+	}
+	// Download the baseline only after the new tail passes the threshold.
 	if haveMan {
 		oldL1 = append([]string(nil), man.Objects...)
 		for _, k := range man.Objects {
@@ -107,64 +172,12 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 				inputBytes += int64(len(part))
 			}
 		}
-		floor = man.MaxTxID
-	}
-
-	l0, err := m.ListL0Segments(ctx, s, epoch)
-	if err != nil {
-		return Result{}, err
-	}
-	l0Max := map[string]uint64{}
-	newL0 := 0
-	for _, k := range l0 {
-		raw, err := m.ReadSegment(ctx, k)
-		if err != nil {
-			return Result{}, err
-		}
-		parts, err := ltx.Split(raw)
-		if err != nil {
-			return Result{}, fmt.Errorf("compaction: corrupt L0 object %s: %w", k, err)
-		}
-		for _, part := range parts {
-			h, _, derr := ltx.Decode(part)
-			if derr != nil {
-				return Result{}, derr
-			}
-			if h.EndTxID > l0Max[k] {
-				l0Max[k] = h.EndTxID
-			}
-			if floor > 0 && h.EndTxID <= floor {
-				continue // already folded into the L1 baseline
-			}
-			if seen[h.ID()] {
-				continue // duplicate from mixed batch/single storage
-			}
-			seen[h.ID()] = true
-			newL0++
-			if h.Kind == ltx.KindSnapshot {
-				haveSnap = true
-			}
-			if minTx == 0 || h.StartTxID < minTx {
-				minTx = h.StartTxID
-			}
-			if h.EndTxID > maxTx {
-				maxTx = h.EndTxID
-			}
-			segs = append(segs, part)
-			inputBytes += int64(len(part))
-		}
 	}
 
 	if !haveSnap {
 		return Result{Skipped: "no snapshot baseline"}, nil
 	}
-	if newL0 == 0 && haveMan {
-		return Result{Skipped: "already compacted"}, nil
-	}
-	belowObjects := opts.MinObjects <= 0 || len(l0) < opts.MinObjects
-	if len(segs) < opts.MinSegments && inputBytes < opts.MinBytes && belowObjects {
-		return Result{Skipped: "below threshold", Inputs: len(segs), InputBytes: inputBytes}, nil
-	}
+
 	if opts.Verify != nil {
 		if err := opts.Verify(ctx); err != nil {
 			return Result{}, err
