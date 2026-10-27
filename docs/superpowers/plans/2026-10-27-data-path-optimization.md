@@ -205,3 +205,5 @@ P0–P3分别有：设计契约、最小失败回归、修复、完整测试、H
 - 证据：[compaction预检](../../archive/compaction-preflight-2026-10-27.md)。不自动推送或部署。
 
 - P0 trace跟进：定位并修复纯转发入口fence阻塞和同scope查询放大；真实COS验收见 [修复报告](../../archive/kv-forward-fence-fix-2026-10-27.md)。owner路由查询长尾仍未解决，不将P0–P3整体标为完成。
+
+- P0路由跟进：远端提示复用同session有效节点租约，点查节点加入known refresh，Worker遥测上报移出响应等待。真实COS全量trace确认后续热转发无前台owner读取；恢复与生命周期测试通过，详见 [闭环报告](../../archive/kv-forward-route-fix-2026-10-27.md)。全量计划仍未完成；首次节点发现串行瓶颈另补有界并发解析；历史记录规模效应及Worker并发trace关联缺口保留。

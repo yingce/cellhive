@@ -51,7 +51,7 @@ env.update(
     CELLHIVE_S3_TEST_PATH_STYLE='false',
     CELLHIVE_S3_TEST_DISABLE_CHECKSUMS='true')
 tests = (
-    'TestS3ReplicationRestoreChain', 'TestProviderCloudDiagnose',
+    'TestS3ReplicationRestoreChain', 'TestProviderCloudDiagnose', 'TestProviderListCloud',
     'TestNativeAppendCloud', 'TestCOSConditionalDelete',
     'TestCOSDataContract', 'TestCOSLargePagedRestore',
 )

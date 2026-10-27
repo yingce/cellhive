@@ -353,3 +353,72 @@ func TestRouteDelayedLocalReadCannotCrossLeaseGap(t *testing.T) {
 		t.Fatalf("late route authorized expired session: %v %v", live, err)
 	}
 }
+
+func TestForwardHintUsesRenewedPeerLeaseWithoutRevivingAuthority(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "a")
+	lm := lease.NewManager(raw, m.NodeID, m.Session, "", "", 10*time.Second)
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	m.LeaseView = lm
+	sc := cell.Scope{Namespace: "app", Class: "kv", ID: "forward-renew"}
+	if _, err := m.Claim(t.Context(), sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m.NodeID = "b"
+	m.Session = "b-s1"
+	original, _, err := m.ResolveRoute(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	c := m.routes[sc.String()]
+	c.until = time.Now().Add(-time.Second)
+	c.wallExpiry = c.until.UnixMilli()
+	m.routes[sc.String()] = c
+	m.mu.Unlock()
+	lm.SetCachedForTest([]lease.NodeLease{{Node: original.Node, Session: original.Session, Expiry: time.Now().Add(time.Minute).UnixMilli()}})
+	m.B = failingOwnerLeaseBucket{raw}
+	if got, _, err := m.ResolveForwardRoute(t.Context(), sc); err != nil || got != original {
+		t.Fatalf("forward hint: %+v %v", got, err)
+	}
+	if _, ok := m.LocalReadGuard(sc); ok {
+		t.Fatal("remote hint became local authority")
+	}
+	if _, _, err := m.ResolveRoute(t.Context(), sc); err == nil {
+		t.Fatal("forward hint revived authoritative route")
+	}
+}
+
+func TestForwardHintRejectsChangedOrExpiredSession(t *testing.T) {
+	for _, mode := range []string{"changed", "expired", "missing", "invalidated", "self"} {
+		t.Run(mode, func(t *testing.T) {
+			m, raw := newManager(t, t.TempDir(), "b")
+			lm := lease.NewManager(raw, "b", m.Session, "", "", 10*time.Second)
+			m.LeaseView = lm
+			sc := cell.Scope{Namespace: "app", Class: "kv", ID: "hint"}
+			o := cell.Owner{Node: "a", Session: "a-s1", Liveness: "node-lease"}
+			l := lease.NodeLease{Node: o.Node, Session: o.Session, Expiry: time.Now().Add(time.Minute).UnixMilli()}
+			switch mode {
+			case "changed":
+				l.Session = "a-s2"
+			case "expired":
+				l.Expiry = time.Now().Add(-time.Second).UnixMilli()
+			case "self":
+				o.Node = m.NodeID
+				l.Node = m.NodeID
+			}
+			m.routes = map[string]ownerRoute{sc.String(): {owner: o, until: time.Now().Add(-time.Second)}}
+			if mode != "missing" {
+				lm.SetCachedForTest([]lease.NodeLease{l})
+			}
+			if mode == "invalidated" {
+				m.Invalidate(sc)
+			}
+			m.B = failingOwnerLeaseBucket{raw}
+			if _, _, err := m.ResolveForwardRoute(t.Context(), sc); err == nil {
+				t.Fatal("unsafe hint accepted")
+			}
+		})
+	}
+}

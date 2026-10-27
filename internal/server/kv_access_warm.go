@@ -156,7 +156,7 @@ func (s *Server) refreshHotKVAccess(ctx context.Context, e *hotKVAccess) error {
 	// A cold route lookup must not delay the fence refresh.
 	fence := make(chan error, 1)
 	go func() { fence <- s.resourceReplica().RefreshResourceSnapshot(ctx, e.scope) }()
-	_, _, ownerErr := s.Owner.ResolveRoute(ctx, e.scope)
+	_, _, ownerErr := s.Owner.ResolveForwardRoute(ctx, e.scope)
 	fenceErr := <-fence
 	if ownerErr != nil {
 		return ownerErr

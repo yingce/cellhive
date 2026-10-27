@@ -1379,7 +1379,7 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 	if s.Owner == nil {
 		return nil, false, nil
 	}
-	o, _, err := s.Owner.ResolveRoute(r.Context(), sc)
+	o, _, err := s.Owner.ResolveForwardRoute(r.Context(), sc)
 	if err != nil || o.Node == s.Cfg.NodeID || o.Address == "" || !s.routeLive(r.Context(), sc, o, time.Now()) {
 		return nil, false, nil
 	}

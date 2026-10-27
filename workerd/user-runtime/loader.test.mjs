@@ -64,3 +64,16 @@ test('warm host replaces stuck flight and ignores its late response',async()=>{
  resolveOld({status:200,headers:new Headers(),json:async()=>({id:'old'})});await old;
  assert.equal(entry.value.id,'new');
 });
+test('sampled response and resident release do not wait for telemetry export',async()=>{
+ for(const failed of [false,true]) {
+  let finishExport, released=0, settled=false;
+  const exportPromise=new Promise(resolve=>finishExport=resolve), background=[];
+  const c=vm.createContext({preparedCache:new Map([['key',true]]),coldLoads:0,workerVersionKey:()=> 'key',preparedWorker:async()=>({}),tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){released++;}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:true}),startSpan:()=>({}),endSpan(){},flushSpans:()=>exportPromise,managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(failed)throw Error('tenant failed');return {status:200};}})}),text:(_s,status)=>({status})});
+  vm.runInContext(extract('async function runWorker(', 'function workerVersionKey('),c);
+  const result=c.runWorker({}, {}, {waitUntil:p=>background.push(p)}, {namespace:'ns'}, 'fn', {}, null, []).then(r=>{settled=true;return r;});
+  // All mocks except export settle immediately; run through their microtasks.
+  for(let i=0;i<20;i++)await Promise.resolve();
+  try {assert.equal(settled,true);assert.equal(released,1);assert.equal(background.length,1);assert.equal((await result).status,failed?500:200);}
+  finally {finishExport();await result;}
+ }
+});

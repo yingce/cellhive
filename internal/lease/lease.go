@@ -267,7 +267,11 @@ func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, 
 			return l, true, nil
 		}
 	}
+	started := time.Now()
 	l, err := m.Get(ctx, node)
+	if ctx.Err() == nil {
+		m.applyKnownRead(node, l, err, started)
+	}
 	if errors.Is(err, bucket.ErrNotFound) {
 		return NodeLease{}, false, nil
 	}
@@ -282,7 +286,11 @@ func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, 
 // refresh keeps failing, and judging a live owner dead from a stale snapshot is
 // a double-writer risk. It is a single point read, never a List.
 func (m *Manager) NodeLeaseFresh(ctx context.Context, node string) (NodeLease, bool, error) {
+	started := time.Now()
 	l, err := m.Get(ctx, node)
+	if ctx.Err() == nil {
+		m.applyKnownRead(node, l, err, started)
+	}
 	if errors.Is(err, bucket.ErrNotFound) {
 		return NodeLease{}, false, nil
 	}
@@ -417,4 +425,17 @@ func (m *Manager) SetCachedForTest(leases []NodeLease) {
 	m.mu.Lock()
 	m.cached, m.cachedAt = leases, time.Now()
 	m.mu.Unlock()
+}
+
+// CachedNodeLease returns only an observed lease snapshot. It never performs
+// I/O or invents a new expiry; forwarding may use it as a destination hint.
+func (m *Manager) CachedNodeLease(node string) (NodeLease, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, l := range m.cached {
+		if l.Node == node {
+			return l, true
+		}
+	}
+	return NodeLease{}, false
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -230,7 +231,8 @@ func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, err
 			windows[key] = -1 // legacy unsegmented key
 		}
 	}
-	for logical, window := range windows {
+	logical, err := resolveListedWindows(ctx, windows, func(ctx context.Context, logical string, window int64) (bool, error) {
+		var err error
 		var seg *authoritySegment
 		if pointFenceKey(logical) {
 			_, _, err = b.Get(ctx, logical)
@@ -243,13 +245,18 @@ func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, err
 			}
 		}
 		if errors.Is(err, ErrNotFound) || (seg != nil && seg.deleted) {
-			continue
+			return false, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list authority %s: %w", logical, err)
+			return false, fmt.Errorf("list authority %s: %w", logical, err)
 		}
-		out = append(out, logical)
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	out = append(out, logical...)
+
 	sort.Strings(out)
 	return out, nil
 }
@@ -332,3 +339,56 @@ func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, lim
 
 var _ Bucket = (*ProviderBucket)(nil)
 var _ segmentData = (*S3Bucket)(nil)
+
+// resolveListedWindows bounds discovery I/O and never publishes a partial list.
+func resolveListedWindows(ctx context.Context, windows map[string]int64, resolve func(context.Context, string, int64) (bool, error)) ([]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type item struct {
+		key    string
+		window int64
+	}
+	jobs := make(chan item)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	var out []string
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				live, err := resolve(ctx, job.key, job.window)
+				mu.Lock()
+				if err != nil && firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				if err == nil && live {
+					out = append(out, job.key)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+send:
+	for key, window := range windows {
+		select {
+		case jobs <- item{key, window}:
+		case <-ctx.Done():
+			break send
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

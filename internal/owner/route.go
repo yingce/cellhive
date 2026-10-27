@@ -213,3 +213,28 @@ func (m *Manager) ReadFence(sc cell.Scope) (func() bool, bool) {
 	}
 	return func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.releasing[key] == 0 && m.cacheRev[key] == rev }, true
 }
+
+// ResolveForwardRoute is only a destination hint. A peer's renewed node lease
+// proves that process can receive a request, not that it still owns this cell.
+// The receiver must check ownership and the caller must invalidate/re-resolve
+// on a definitive rejection. Never use this for local reads, capture or claims.
+func (m *Manager) ResolveForwardRoute(ctx context.Context, sc cell.Scope) (cell.Owner, string, error) {
+	if err := ctx.Err(); err != nil {
+		return cell.Owner{}, "", err
+	}
+	if view, ok := m.LeaseView.(interface {
+		CachedNodeLease(string) (lease.NodeLease, bool)
+	}); ok {
+		m.mu.Lock()
+		c, found := m.routes[sc.String()]
+		if found && !c.local && c.owner.Node != m.NodeID && c.owner.Liveness == "node-lease" {
+			l, seen := view.CachedNodeLease(c.owner.Node)
+			if seen && l.Node == c.owner.Node && l.Session == c.owner.Session && l.Live(time.Now()) {
+				m.mu.Unlock()
+				return c.owner, c.etag, nil
+			}
+		}
+		m.mu.Unlock()
+	}
+	return m.ResolveRoute(ctx, sc)
+}

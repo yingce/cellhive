@@ -1,0 +1,70 @@
+TAP version 13
+# Subtest: explicit version lookup fails closed instead of using another cached version
+ok 1 - explicit version lookup fails closed instead of using another cached version
+  ---
+  duration_ms: 3.370119
+  type: 'test'
+  ...
+# Subtest: explicit lookup does not populate active pointer cache
+ok 2 - explicit lookup does not populate active pointer cache
+  ---
+  duration_ms: 1.337978
+  type: 'test'
+  ...
+# Subtest: recreated worker same version cannot reuse old SHA or environment
+ok 3 - recreated worker same version cannot reuse old SHA or environment
+  ---
+  duration_ms: 1.129223
+  type: 'test'
+  ...
+# Subtest: cached immutable old identity remains usable by already-pinned requests
+ok 4 - cached immutable old identity remains usable by already-pinned requests
+  ---
+  duration_ms: 1.099253
+  type: 'test'
+  ...
+# Subtest: returned immutable identity must match version SHA and incarnation
+ok 5 - returned immutable identity must match version SHA and incarnation
+  ---
+  duration_ms: 2.232346
+  type: 'test'
+  ...
+# Subtest: late pinned 404 cannot poison active lookup
+ok 6 - late pinned 404 cannot poison active lookup
+  ---
+  duration_ms: 1.080043
+  type: 'test'
+  ...
+# Subtest: resident version keys include incarnation even for identical code/version
+ok 7 - resident version keys include incarnation even for identical code/version
+  ---
+  duration_ms: 0.989816
+  type: 'test'
+  ...
+# Subtest: host deadline aborts a hung response body and releases the flight
+ok 8 - host deadline aborts a hung response body and releases the flight
+  ---
+  duration_ms: 27.036757
+  type: 'test'
+  ...
+# Subtest: warm host replaces stuck flight and ignores its late response
+ok 9 - warm host replaces stuck flight and ignores its late response
+  ---
+  duration_ms: 2.699055
+  type: 'test'
+  ...
+# Subtest: sampled response and resident release do not wait for telemetry export
+ok 10 - sampled response and resident release do not wait for telemetry export
+  ---
+  duration_ms: 3.036167
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 128.317461

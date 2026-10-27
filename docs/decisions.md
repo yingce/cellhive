@@ -3653,3 +3653,13 @@ Uploader 同时导出 Enqueue 次数/耗时及队列满同步回退次数/耗时
 原生 KV GET/PUT/get-batch 在 scopeAuth 完成原有 token 与 binding 授权、设置 scope context 后，允许先尝试转发远端 owner。只有实际转发路径绕过入口本机 resource fence、旧副本清理与 SQLite gate；目标节点仍经过完整 scopeAuth 与资源 generation 准入。无远端 owner、已转发请求、路由失败或接管走原有本机准入。保留一次转发与不重放不确定写入规则，不推广到 Queue/D1 或其他操作；请求参数由最终执行节点继续校验。
 
 同 scope 的普通 fence 缓存未命中和后台刷新共享有界 in-flight 查询。失败不续期；等待者可独立取消；leader context 取消不传染其他请求；本地删除/重建改变 fenceRev 后旧结果不得返回或回填，新请求重新读取。写侧 readResourceFenceFresh/CAS 不参加合并。保留1秒缓存，不延长权限/删除生效窗口，不改持久化证明。并发去重最多1024个scope，超出时保持原点查路径，不生成额外后台goroutine。
+
+### 远端转发提示复用已刷新的节点租约（2026-10-27，实施中）
+
+新增仅用于HTTP转发和转发预热的ResolveForwardRoute。已有远端node-lease路由提示可配合内存中的同node/session、未过期节点租约继续使用，不因原记录的旧租约截止重新读取cell owner。提示不写回ResolveRoute的权限证据，不能用于本机SQLite读取、capture或接管。自身node、session改变、租约缺失/过期、显式Invalidate仍走原权威查询。最终目标仍完整校验资源/epoch/本机租约；只有明确409或连接未建立才允许既有一次重路由，不重放不确定写。后台节点租约由原有点查更新，不在热路径List，也不延长租约。
+
+同轮观测修复：user-runtime sampled HTTP 的best-effort span上报交给ctx.waitUntil，响应不等待上报HTTP完成。业务写入/持久化屏障不变，span仍在业务结束时闭合；上报失败不改变业务响应。用阻塞上报的回归证明响应与resident release不被遥测阻塞。
+
+节点单点查询成功得到有效租约时，也通过observed时间戳保护的合并逻辑纳入known refresh集合；不再等全量节点发现完成才刷新该owner。仅登记仍有效节点，点查新增路径最多4096条；旧响应不能覆盖新session，失败/取消不更新证据。此处不新增后台List。
+
+节点发现底层补充：ProviderBucket.List 对物理 authority window 的逻辑解析使用最多8个并发读取，保留最新窗口折叠、tombstone隐藏、GC竞争后的重新解析与最终排序。任一读取失败或context取消都不返回部分列表；不改变热路径禁止List的约束。避免历史节点逐个串行解析耗尽后台发现15秒预算。

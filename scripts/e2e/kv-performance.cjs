@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const {performance} = require('node:perf_hooks');
 const value = 'x'.repeat(1024);
 const results = [];
+const rounds = Number(process.env.PERF_ROUNDS || 2);
+if (!Number.isInteger(rounds) || rounds < 1 || rounds > 10) throw new Error('PERF_ROUNDS must be 1..10');
 async function measure(layer, mode, concurrency, n, round, label='warm') {
   const agent = new http.Agent({keepAlive:true, maxSockets:concurrency});
   let index=0, failures=0; const times=[], errors=[];
@@ -60,7 +62,9 @@ async function commitCounts() {
     if(!resolution.owned) throw new Error('initial node did not own KV cell');
     console.log(JSON.stringify({event:'owner-verified',owner:resolution.owner,entry:process.env.PERF_AGENT,peer:process.env.PERF_PEER}));
     let ready=false;
-    for(let i=0;i<90;i++) {
+    // Shared COS buckets can contain many historical test nodes. Keep startup
+    // discovery separate from measured traffic and require a real fleet ACK.
+    for(let i=0;i<180;i++) {
       const before=await commitCounts();
       await measure('direct','put',1,1,0,'peer-warmup');
       const after=await commitCounts();
@@ -71,6 +75,12 @@ async function commitCounts() {
   }
   await measure('direct','put',1,32,0,'preload');
   await measure('worker','get',1,1,0,'first-worker-read');
+  if (process.env.PERF_PRIME_ENTRIES === '1' && process.env.PERF_PEER) {
+    // Owner preloading does not warm a different entry node's routing metadata.
+    // Keep that first access visible, outside the steady-state measurements.
+    await measure('forwarded','put',1,1,0,'first-forwarded-access');
+    await measure('forwarded','get',1,32,0,'forwarded-preload');
+  }
   if(process.env.PERF_TAIL_DIAG) {
     for(let round=1;round<=6;round++) {
       const c=round%2?1:8;
@@ -84,7 +94,7 @@ async function commitCounts() {
     await new Promise(r=>setTimeout(r,6000));
     return;
   }
-  for(let round=1;round<=2;round++) {
+  for(let round=1;round<=rounds;round++) {
     for(const concurrency of [1,8,32]) {
       const n=concurrency===1?60:concurrency===8?200:400;
       for(const layer of (process.env.PERF_PEER?['direct','forwarded','worker']:['direct','worker'])) {

@@ -271,3 +271,43 @@ func TestKnownRefreshDiscoveryOmissionKeepsKnownLease(t *testing.T) {
 		t.Fatalf("partial discovery discarded valid peer or retained ancient peer: %+v", got)
 	}
 }
+
+func TestPointLookupBootstrapsKnownRefresh(t *testing.T) {
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(b, "entry", "e-s1", "", "", time.Second)
+	old := NodeLease{Node: "owner", Session: "s1", Expiry: time.Now().Add(time.Second).UnixMilli()}
+	putKnownTest(t, b, old)
+	if _, ok, err := m.NodeLease(t.Context(), old.Node); err != nil || !ok {
+		t.Fatalf("lookup %v %v", ok, err)
+	}
+	if got, ok := m.CachedNodeLease(old.Node); !ok || got.Session != old.Session {
+		t.Fatal("point lookup not registered")
+	}
+	next := old
+	next.Expiry += 1000
+	putKnownTest(t, b, next)
+	m.refreshKnown(t.Context())
+	if got, ok := m.CachedNodeLease(old.Node); !ok || got.Expiry != next.Expiry {
+		t.Fatalf("known refresh missing: %+v", got)
+	}
+	// An older response cannot replace a newer session observation.
+	started := time.Now().Add(-time.Second)
+	next.Session = "s2"
+	m.applyKnownRead(next.Node, next, nil, time.Now())
+	m.applyKnownRead(old.Node, old, nil, started)
+	if got, _ := m.CachedNodeLease(old.Node); got.Session != "s2" {
+		t.Fatal("stale session resurrected")
+	}
+}
+
+func TestPointLookupRegistrationBounded(t *testing.T) {
+	m := NewManager(nil, "entry", "s", "", "", time.Second)
+	m.cached = make([]NodeLease, 4096)
+	m.applyKnownRead("extra", NodeLease{Node: "extra", Session: "s", Expiry: time.Now().Add(time.Minute).UnixMilli()}, nil, time.Now())
+	if len(m.cached) != 4096 {
+		t.Fatal("unbounded lookup registration")
+	}
+}

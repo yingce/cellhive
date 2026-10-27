@@ -340,13 +340,13 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   try {
     const res = await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
-    await flushSpans(env);
+    ctx.waitUntil(flushSpans(env));
     finish();
     return res;
   } catch (e) {
     finish();
     endSpan(span, { code: 2, message: String(e) });
-    await flushSpans(env);
+    ctx.waitUntil(flushSpans(env));
     return text("worker error: " + e, 500);
   }
 }

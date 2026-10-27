@@ -137,6 +137,16 @@ func (m *Manager) applyKnownRead(node string, l NodeLease, err error, started ti
 		m.observed[node] = started
 		return
 	}
+	// A point lookup may discover the destination before the full fleet scan.
+	// Register live observations so independent refresh can maintain them too.
+	// Bound this bootstrap path; full discovery retains its existing policy.
+	if !missing && l.Live(time.Now()) && len(m.cached) < 4096 {
+		m.cached = append(append([]NodeLease{}, m.cached...), l)
+		if m.observed == nil {
+			m.observed = make(map[string]time.Time)
+		}
+		m.observed[node] = started
+	}
 }
 
 // mergeSampleLocked prevents a slow full scan from overwriting newer point

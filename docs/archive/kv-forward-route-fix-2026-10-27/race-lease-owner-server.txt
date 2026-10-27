@@ -1,0 +1,3 @@
+ok  	cellhive/internal/lease	1.783s
+ok  	cellhive/internal/owner	66.841s
+ok  	cellhive/internal/server	159.871s

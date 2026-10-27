@@ -682,6 +682,8 @@ COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local
 
 ### 双节点转发热写长尾已获trace证据（2026-10-27）
 
-真实HK COS复现835ms PUT，其中794ms位于follower转发前resource fence读取，owner仅5.5ms；1秒fence缓存过期无singleflight，8个请求同时查询。普通入口2秒空闲停止预热，分批切换入口可重新暴露冷元数据。后续已在隔离分支修复KV纯转发前fence准入，并合并同scope查询，HK trace确认入口HTTP资源准入为0；仍有owner路由COS查询导致567ms长尾。Worker并发trace关联仍有缺口。见 [COS trace报告](archive/data-path-cos-trace-2026-10-27.md)。
+真实HK COS复现835ms PUT，其中794ms位于follower转发前resource fence读取，owner仅5.5ms；1秒fence缓存过期无singleflight，8个请求同时查询。普通入口2秒空闲停止预热，分批切换入口可重新暴露冷元数据。后续已在隔离分支修复KV纯转发前fence准入，并合并同scope查询，HK trace确认入口HTTP资源准入为0；随后定位owner路由COS查询导致567ms长尾：远端提示未复用续期租约、点查节点未登记known refresh。隔离分支已修复，最终trace热转发不再出现前台owner读取（首次冷访问除外）。Worker并发trace关联仍有缺口。见 [COS trace报告](archive/data-path-cos-trace-2026-10-27.md)。
 
 修复与验证：[KV转发/fence修复](archive/kv-forward-fence-fix-2026-10-27.md)。全仓build/vet/test、replica/server三轮race、HK双agent153960热请求、强杀/冷恢复100/100、删除同名重建均通过；未发布。
+
+路由长尾后续修复与真实COS验证见 [闭环报告](archive/kv-forward-route-fix-2026-10-27.md)。复用仅限转发提示，不能成为本机读写权限；遥测上报交给waitUntil。历史节点逐个串行解析导致首次发现延迟，已补最多8并发解析；节点发现仍随历史记录数量增长，测试就绪等待与稳定期分开统计。未发布。

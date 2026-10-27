@@ -1,0 +1,8 @@
+HK-REVIEW waiting for exclusive shared-bucket test lock
+HK-REVIEW artifacts=/opt/.hermes/cache/scratch/hk-review-1793085384-fba006-gtw9nylo compute=local storage=HK-COS durability=auto
+START kv-routing-safety.sh ns=hk-review-1793085384-fba006-0
+E2E-KV-ROUTING-SAFETY: PASS (forward GET/PUT/batch, auth rejection, delete, recreate, old data absent)
+HK-CLEANUP ns=hk-review-1793085384-fba006-0 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.MJAj7d
+END kv-routing-safety.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/opt/.hermes/cache/scratch/hk-review-1793085384-fba006-gtw9nylo
