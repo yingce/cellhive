@@ -3641,3 +3641,9 @@ HK COS真实并发请求捕获：首次POST Append(position=0)尚未返回时，
 ### Compaction 新增尾部预检（2026-10-27，实施中）
 
 读取manifest后先读取并校验L0，统计未被manifest水位覆盖的去重逻辑段、字节和对象；旧L1及完全覆盖的残留L0不参与触发阈值。只有达到阈值才下载L1进行完整合并，发布manifest和GC继续遵守原链校验与owner检查。此阶段不省略L0正文校验，不增加新对象格式；无新尾部时不下载L1，不能以此宣称零COS访问或已有L1正文已被重新校验。
+
+### Spool 分段观测补充（2026-10-27，实施中）
+
+保持现有 spool 文件格式、锁范围、fsync 与 ACK 顺序。增加有界累计统计：Append 次数/总耗时、锁等待、编码、文件打开及写入、目录同步耗时。新耗时内部以纳秒累计，导出微秒，包含失败尝试；目录同步同时覆盖 Append 和 Remove。现有 sync_us 保持文件 Sync+Close 成功路径含义，不冒充全部持久化耗时。Append 总耗时包含子阶段，目录同步又包含后台 Remove，不能简单相加或当作单请求延迟。统计无 scope 标签，不记录用户数据。
+
+Uploader 同时导出 Enqueue 次数/耗时及队列满同步回退次数/耗时，失败回退也计数。原有 HTTP spool_sync_seconds_total 是成功文件 Sync+Close 加 Rename，仍不含目录 Sync；新 spool_dir_sync_seconds_total 独立导出。

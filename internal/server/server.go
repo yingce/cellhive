@@ -772,6 +772,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.Uploader != nil {
 		up := s.Uploader.Stats()
+		for _, key := range []string{"enqueue_calls", "sync_fallbacks"} {
+			writeFmt(w, "# TYPE cellhive_upload_%s_total counter\n", key)
+			writeFmt(w, "cellhive_upload_%s_total %d\n", key, up[key])
+		}
+		// Fixed stages only: totals overlap and are not request percentiles.
+		for _, stage := range []string{"enqueue", "sync_fallback", "spool_append", "spool_lock_wait", "spool_encode", "spool_write", "spool_dir_sync"} {
+			if us, ok := up[stage+"_us"]; ok {
+				writeFmt(w, "# TYPE cellhive_upload_%s_seconds_total counter\n", stage)
+				writeFmt(w, "cellhive_upload_%s_seconds_total %g\n", stage, float64(us)/1e6)
+			}
+		}
 		writeFmt(w, "# TYPE cellhive_upload_batches_total counter\n")
 		writeFmt(w, "cellhive_upload_batches_total %d\n", up["batches"])
 		writeFmt(w, "# TYPE cellhive_upload_segments_total counter\n")

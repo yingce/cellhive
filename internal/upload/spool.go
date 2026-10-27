@@ -43,21 +43,33 @@ type Spool struct {
 	parentSynced bool
 
 	// Durability telemetry (see Stats).
-	fileSyncs    atomic.Int64
-	dirSyncs     atomic.Int64
-	syncMicros   atomic.Int64
-	renameMicros atomic.Int64
-	corrupt      atomic.Int64
+	fileSyncs     atomic.Int64
+	dirSyncs      atomic.Int64
+	syncMicros    atomic.Int64
+	renameMicros  atomic.Int64
+	corrupt       atomic.Int64
+	appendCalls   atomic.Int64
+	appendNanos   atomic.Int64
+	lockWaitNanos atomic.Int64
+	encodeNanos   atomic.Int64
+	writeNanos    atomic.Int64
+	dirSyncNanos  atomic.Int64
 }
 
 // Stats reports spool durability telemetry (fsync counts and microseconds).
 func (s *Spool) Stats() map[string]int64 {
 	return map[string]int64{
-		"file_syncs": s.fileSyncs.Load(),
-		"dir_syncs":  s.dirSyncs.Load(),
-		"sync_us":    s.syncMicros.Load(),
-		"rename_us":  s.renameMicros.Load(),
-		"corrupt":    s.corrupt.Load(),
+		"file_syncs":   s.fileSyncs.Load(),
+		"dir_syncs":    s.dirSyncs.Load(),
+		"sync_us":      s.syncMicros.Load(),
+		"rename_us":    s.renameMicros.Load(),
+		"corrupt":      s.corrupt.Load(),
+		"append_calls": s.appendCalls.Load(),
+		"append_us":    s.appendNanos.Load() / 1000,
+		"lock_wait_us": s.lockWaitNanos.Load() / 1000,
+		"encode_us":    s.encodeNanos.Load() / 1000,
+		"write_us":     s.writeNanos.Load() / 1000,
+		"dir_sync_us":  s.dirSyncNanos.Load() / 1000,
 	}
 }
 
@@ -145,23 +157,33 @@ func (s *Spool) path(id uint64) string {
 // the append; the file may still exist, but the caller must not treat the entry
 // as durable (replay is idempotent if it is later found).
 func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, error) {
+	started := time.Now()
+	s.appendCalls.Add(1)
+	defer func() { s.appendNanos.Add(time.Since(started).Nanoseconds()) }()
 	s.mu.Lock()
+	s.lockWaitNanos.Add(time.Since(started).Nanoseconds())
 	defer s.mu.Unlock()
 	if s.max > 0 && s.n >= s.max {
 		return 0, fmt.Errorf("upload: spool full (%d entries)", s.max)
 	}
 	s.seq++
 	id := s.seq
+	encodeStart := time.Now()
 	data := encodeSpoolEntry(id, sc, epoch, segments)
+	s.encodeNanos.Add(time.Since(encodeStart).Nanoseconds())
 	tmp := s.path(id) + ".tmp"
+	writeStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
+		s.writeNanos.Add(time.Since(writeStart).Nanoseconds())
 		return 0, err
 	}
 	if _, err := f.Write(data); err != nil {
+		s.writeNanos.Add(time.Since(writeStart).Nanoseconds())
 		_ = f.Close()
 		return 0, err
 	}
+	s.writeNanos.Add(time.Since(writeStart).Nanoseconds())
 	syncStart := time.Now()
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
@@ -179,13 +201,13 @@ func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, 
 	}
 	s.renameMicros.Add(time.Since(renameStart).Microseconds())
 
-	if err := syncDir(s.dir); err != nil {
+	if err := s.timedSyncDir(s.dir); err != nil {
 		return 0, err
 	}
 	s.dirSyncs.Add(1)
 	if !s.parentSynced {
 		if parent := filepath.Dir(s.dir); parent != s.dir {
-			if err := syncDir(parent); err != nil {
+			if err := s.timedSyncDir(parent); err != nil {
 				return 0, err
 			}
 			s.dirSyncs.Add(1)
@@ -210,7 +232,7 @@ func (s *Spool) Remove(id uint64) error {
 	if s.n > 0 {
 		s.n--
 	}
-	if err := syncDir(s.dir); err != nil {
+	if err := s.timedSyncDir(s.dir); err != nil {
 		return err
 	}
 	s.dirSyncs.Add(1)
@@ -356,4 +378,12 @@ func readBytes(b []byte, p int, limit int) ([]byte, int, bool) {
 		return nil, p, false
 	}
 	return b[np : np+int(n)], np + int(n), true
+}
+
+// timedSyncDir includes failed attempts and background removals. It overlaps
+// append_us and must not be summed with it as a request latency.
+func (s *Spool) timedSyncDir(path string) error {
+	started := time.Now()
+	defer func() { s.dirSyncNanos.Add(time.Since(started).Nanoseconds()) }()
+	return syncDir(path)
 }

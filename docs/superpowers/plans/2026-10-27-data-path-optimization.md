@@ -10,7 +10,7 @@
 
 ## 状态与依据
 
-- 状态：计划，未实施；本文件中的性能指标是验收目标，不是已测结果。
+- 状态：分阶段实施中（详见末尾进度）；本文件中的性能指标是验收目标，不是已测结果。
 - 源码对照：CellHive `056ce86`，celld `/opt/celld` `90b4301`（v0.6.2）。celld 作为实现参考，不作为相同硬件下的性能证明。
 - CellHive 已有 scope/epoch 上传合批、follower fsync 合批、复制流水线、owner 本地读证明、固定版本 binding、恢复并行 GET；不重复实现这些能力。
 - 已确认的代码路径：`internal/compaction/compaction.go` 下载 L1/L0 后才判阈值；阈值字节包含旧 L1。`internal/upload/upload.go` 的 Enqueue 同步写 spool、满队列同步上传；`internal/upload/spool.go` 持全局锁并执行文件与目录 fsync。`internal/sqlcapture/capture.go` 每 capture 默认 2ms 轮询。
@@ -199,7 +199,7 @@ P0–P3分别有：设计契约、最小失败回归、修复、完整测试、H
 
 ## 执行进度：2026-10-27 第一批
 
-- P0：仅建立compaction对象读取回归计数器；完整分段观测/性能矩阵未完成。
+- P0：已建立compaction对象读取回归计数器，补spool/Enqueue分段累计观测及首次HK双节点基线；完整分段观测/性能矩阵未完成。见 [初步基线](../../archive/data-path-baseline-2026-10-27.md)。
 - P1a：已完成“先读L0判阈值、后下载L1”的第一步；无新尾部、残留L0、字节边界、batch段数与损坏拒绝测试通过。真实COS空合并基线GET=0。尚未实现L0元数据预筛，不能将P1a全部勾选。
 - P1b/P2/P3/P4/P5：未实施。
 - 证据：[compaction预检](../../archive/compaction-preflight-2026-10-27.md)。不自动推送或部署。

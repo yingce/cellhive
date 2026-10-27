@@ -289,7 +289,7 @@ func TestBatcherStatsIncludeSpoolDurability(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 	st := b.Stats()
-	for _, k := range []string{"spool_file_syncs", "spool_dir_syncs", "spool_sync_us"} {
+	for _, k := range []string{"spool_file_syncs", "spool_dir_syncs", "spool_sync_us", "spool_append_calls", "spool_append_us", "spool_lock_wait_us", "spool_encode_us", "spool_write_us", "spool_dir_sync_us"} {
 		if _, ok := st[k]; !ok {
 			t.Fatalf("Batcher.Stats missing %q: %v", k, st)
 		}
@@ -320,5 +320,54 @@ func TestSpoolLoadLimitReturnsOldestBounded(t *testing.T) {
 	all, err := sp.Load()
 	if err != nil || len(all) != 3 {
 		t.Fatalf("Load = %d, %v, want 3", len(all), err)
+	}
+}
+
+// A rejected append still contributes latency, but never invents disk work.
+func TestSpoolStageStatsIncludeFullRejection(t *testing.T) {
+	sp, err := OpenSpool(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "a", Class: "__kv__", ID: "m"}
+	if _, err := sp.Append(sc, 1, [][]byte{[]byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	before := sp.Stats()
+	if _, err := sp.Append(sc, 1, [][]byte{[]byte("y")}); err == nil {
+		t.Fatal("expected full spool")
+	}
+	after := sp.Stats()
+	if after["append_calls"] != 2 {
+		t.Fatalf("append calls: %v", after)
+	}
+	for _, key := range []string{"file_syncs", "dir_syncs", "encode_us", "write_us", "dir_sync_us"} {
+		if before[key] != after[key] {
+			t.Fatalf("rejection changed %s: %d -> %d", key, before[key], after[key])
+		}
+	}
+	if after["append_us"] < before["append_us"] || after["append_us"] < after["lock_wait_us"] {
+		t.Fatalf("invalid stage totals: %v", after)
+	}
+}
+
+func TestSpoolStageStatsIncludeFailedOpen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "spool")
+	sp, err := OpenSpool(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.Append(cell.Scope{Namespace: "a", Class: "c", ID: "m"}, 1, [][]byte{[]byte("x")}); err == nil {
+		t.Fatal("expected missing directory error")
+	}
+	st := sp.Stats()
+	if st["append_calls"] != 1 || st["file_syncs"] != 0 || st["dir_syncs"] != 0 {
+		t.Fatalf("invalid failed append stats: %v", st)
+	}
+	if sp.writeNanos.Load() <= 0 || sp.encodeNanos.Load() <= 0 {
+		t.Fatal("failed attempt stage durations missing")
 	}
 }

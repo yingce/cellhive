@@ -87,6 +87,13 @@ func TestBatcherBackpressureOnFull(t *testing.T) {
 	if sink.segments == 0 {
 		t.Fatalf("expected synchronous fallback uploads")
 	}
+	st := b.Stats()
+	if st["sync_fallbacks"] != 5 || st["enqueue_calls"] != uint64(cap(b.shards[0].ch)+5) {
+		t.Fatalf("wrong enqueue/fallback counts: %v", st)
+	}
+	if st["enqueue_us"] < st["sync_fallback_us"] {
+		t.Fatalf("fallback exceeds enclosing total: %v", st)
+	}
 }
 
 // orderSink records the exact order of segments and detects overlapping calls.

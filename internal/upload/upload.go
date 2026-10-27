@@ -64,11 +64,15 @@ type Batcher struct {
 	maxBytes    int
 	interval    time.Duration
 
-	batches   atomic.Uint64
-	segments  atomic.Uint64
-	errors    atomic.Uint64
-	dropped   atomic.Uint64
-	discarded atomic.Uint64
+	batches           atomic.Uint64
+	segments          atomic.Uint64
+	errors            atomic.Uint64
+	dropped           atomic.Uint64
+	discarded         atomic.Uint64
+	enqueueCalls      atomic.Uint64
+	enqueueNanos      atomic.Uint64
+	syncFallbacks     atomic.Uint64
+	syncFallbackNanos atomic.Uint64
 
 	// Durable queue for async (RPO>0) uploads: persisted before enqueue,
 	// removed on success, replayed on start and retried until it drains.
@@ -455,7 +459,9 @@ func (b *Batcher) EnqueueBatchWait(ctx context.Context, s cell.Scope, epoch uint
 func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg []byte) {
 	started := time.Now()
 	synchronous := false
+	b.enqueueCalls.Add(1)
 	defer func() {
+		b.enqueueNanos.Add(uint64(time.Since(started).Nanoseconds()))
 		if elapsed := time.Since(started); elapsed >= 50*time.Millisecond && b.log != nil {
 			b.log.Info("slow upload enqueue", "scope", s.String(), "epoch", epoch, "synchronous", synchronous, "elapsed_ms", float64(elapsed)/float64(time.Millisecond))
 		}
@@ -478,6 +484,9 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 	default:
 		// Queue full: upload synchronously (backpressure, no loss).
 		synchronous = true
+		b.syncFallbacks.Add(1)
+		fallbackStart := time.Now()
+		defer func() { b.syncFallbackNanos.Add(uint64(time.Since(fallbackStart).Nanoseconds())) }()
 		if _, _, err := b.sink.AppendBatch(ctx, s, epoch, [][]byte{seg}); err != nil {
 			b.errors.Add(1)
 			if spoolID != 0 {
@@ -537,6 +546,10 @@ func (b *Batcher) Stop() {
 // Stats returns batcher counters.
 func (b *Batcher) Stats() map[string]uint64 {
 	st := map[string]uint64{
+		"enqueue_calls":     b.enqueueCalls.Load(),
+		"enqueue_us":        b.enqueueNanos.Load() / 1000,
+		"sync_fallbacks":    b.syncFallbacks.Load(),
+		"sync_fallback_us":  b.syncFallbackNanos.Load() / 1000,
 		"batches":           b.batches.Load(),
 		"segments":          b.segments.Load(),
 		"errors":            b.errors.Load(),
@@ -553,6 +566,9 @@ func (b *Batcher) Stats() map[string]uint64 {
 		st["spool_file_syncs"] = uint64(ss["file_syncs"])
 		st["spool_dir_syncs"] = uint64(ss["dir_syncs"])
 		st["spool_sync_us"] = uint64(ss["sync_us"] + ss["rename_us"])
+		for _, key := range []string{"append_calls", "append_us", "lock_wait_us", "encode_us", "write_us", "dir_sync_us"} {
+			st["spool_"+key] = uint64(ss[key])
+		}
 	}
 	return st
 }

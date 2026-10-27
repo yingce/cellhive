@@ -675,3 +675,7 @@ COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local
 源码确认compaction在阈值判定前下载基线/增量且字节阈值包含旧L1；fleet确认后上传Enqueue仍同步写本机spool，队列满时可同步COS；capture默认每cell 2ms轮询。实际线上贡献需按[优化实施计划](superpowers/plans/2026-10-27-data-path-optimization.md)建立基线后验证，不将候选优化描述为已修复。所有阶段保留连续durability屏障与真实HK COS双agent验收。
 
 - compaction预检第一步已在隔离分支实现：空尾部/低于阈值不下载L1，旧L1及完全覆盖的L0不计入触发阈值。相关race与HK COS契约通过；仍读取L0正文，dirty队列及完整性能矩阵尚未实施，未发布。见[验证记录](archive/compaction-preflight-2026-10-27.md)。
+
+### 数据路径观测进度（2026-10-27）
+
+已补 spool/Enqueue 分段累计观测，保持确认顺序。HK 双 agent 初步热采样153960请求无失败、无bucket回退，仍有follower入口686ms长尾，原因待trace定位。完整性能矩阵和观测开销门槛未验收；见 [基线记录](archive/data-path-baseline-2026-10-27.md)。
