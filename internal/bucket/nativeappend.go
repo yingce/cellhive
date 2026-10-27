@@ -16,6 +16,26 @@ import (
 
 type OSSAppender struct{ bucket *oss.Bucket }
 
+// conditionalObjectCreator creates immutable ordinary objects, including
+// empty assets. Native forbid-overwrite is atomic; append-at-zero is not
+// sufficient for an empty object, which still has append position zero.
+type conditionalObjectCreator interface {
+	CreateObject(context.Context, string, []byte) (string, error)
+}
+
+func (o *OSSAppender) CreateObject(ctx context.Context, key string, data []byte) (string, error) {
+	var headers http.Header
+	err := o.bucket.PutObject(key, bytes.NewReader(data), oss.WithContext(ctx), oss.ForbidOverWrite(true), oss.GetResponseHeader(&headers))
+	if err != nil {
+		var svc oss.ServiceError
+		if errors.As(err, &svc) && svc.StatusCode == http.StatusConflict && svc.Code == "FileAlreadyExists" {
+			return "", ErrPrecondition
+		}
+		return "", nativeOSSError(err)
+	}
+	return strings.Trim(headers.Get("ETag"), `"`), nil
+}
+
 func NewOSSAppender(endpoint, name, access, secret string) (*OSSAppender, error) {
 	if !strings.Contains(endpoint, "://") {
 		endpoint = "https://" + endpoint
@@ -62,6 +82,25 @@ func nativeOSSError(err error) error {
 }
 
 type COSAppender struct{ client *cos.Client }
+
+func (c *COSAppender) CreateObject(ctx context.Context, key string, data []byte) (string, error) {
+	headers := http.Header{}
+	headers.Set("x-cos-forbid-overwrite", "true")
+	resp, err := c.client.Object.Put(ctx, key, bytes.NewReader(data), &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{XOptionHeader: &headers},
+	})
+	if err != nil {
+		var svc *cos.ErrorResponse
+		if errors.As(err, &svc) && svc.Response != nil && svc.Response.StatusCode == http.StatusConflict && svc.Code == "FileAlreadyExists" {
+			return "", ErrPrecondition
+		}
+		return "", nativeCOSError(err)
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
 
 func NewCOSAppender(endpoint, access, secret string) (*COSAppender, error) {
 	u, err := url.Parse(endpoint)

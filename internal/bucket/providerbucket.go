@@ -76,6 +76,14 @@ func (b *ProviderBucket) Get(ctx context.Context, key string) ([]byte, string, e
 	return b.S3Bucket.Get(ctx, key)
 }
 func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+	if strings.HasPrefix(key, "assets/") {
+		// Asset tokens identify a manifest, not each object's bytes. A
+		// check-then-Put can overwrite a concurrent upload at the same path.
+		if creator, ok := b.appender.(conditionalObjectCreator); ok {
+			return creator.CreateObject(ctx, key, data)
+		}
+		return "", ErrNotSupported
+	}
 	if pointFenceKey(key) {
 		return b.pointFence.ConditionalCreate(ctx, key, data)
 	}
