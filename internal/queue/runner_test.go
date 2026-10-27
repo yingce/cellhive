@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,6 +147,25 @@ func TestHTTPDispatcherErrorStatus(t *testing.T) {
 	defer srv.Close()
 	if err := queue.NewHTTP(srv.URL, "").Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q"}, nil); err == nil {
 		t.Fatal("expected error on 500")
+	}
+}
+
+func TestHTTPDispatcherRetriesTransient5xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "runtime warming", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	if err := queue.NewHTTP(srv.URL, "").Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q"}, nil); err != nil {
+		t.Fatalf("dispatch after transient 5xx: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls=%d, want 2", got)
 	}
 }
 

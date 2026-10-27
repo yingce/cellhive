@@ -473,22 +473,50 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL+"/v1/queues/dispatch", bytes.NewReader(body))
-	if err != nil {
-		return DispatchResult{}, err
-	}
-	req.Header.Set("content-type", "application/json")
-	if d.Token != "" {
-		req.Header.Set("x-cellhive-internal-token", d.Token)
-	}
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return DispatchResult{}, err
+	// A runtime can briefly return 5xx while its worker isolate is being
+	// loaded or its owner lease is being refreshed. Retry the same batch once
+	// before handing it back to the queue retry/dead-letter machinery. Queue
+	// delivery is at-least-once, so a duplicate is safe and preferable to
+	// turning a transient runtime restart into an application retry.
+	const dispatchAttempts = 2
+	var resp *http.Response
+	for attempt := 0; attempt < dispatchAttempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, d.URL+"/v1/queues/dispatch", bytes.NewReader(body))
+		if reqErr != nil {
+			return DispatchResult{}, reqErr
+		}
+		req.Header.Set("content-type", "application/json")
+		if d.Token != "" {
+			req.Header.Set("x-cellhive-internal-token", d.Token)
+		}
+		resp, err = d.Client.Do(req)
+		if err != nil {
+			if attempt+1 < dispatchAttempts {
+				select {
+				case <-ctx.Done():
+					return DispatchResult{}, ctx.Err()
+				case <-time.After(25 * time.Millisecond):
+				}
+				continue
+			}
+			return DispatchResult{}, err
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			break
+		}
+		if resp.StatusCode < 500 || attempt+1 == dispatchAttempts {
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			return DispatchResult{}, fmt.Errorf("queue dispatch: %s body=%q", resp.Status, string(data))
+		}
+		resp.Body.Close()
+		select {
+		case <-ctx.Done():
+			return DispatchResult{}, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return DispatchResult{}, fmt.Errorf("queue dispatch: %s", resp.Status)
-	}
 	if resp.StatusCode == http.StatusNoContent {
 		return DispatchResult{}, nil
 	}
