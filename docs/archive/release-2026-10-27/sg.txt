@@ -1,0 +1,15 @@
+sg agents helm PASS
+sg both agents new digest Ready
+sg runtimes helm PASS
+POD cellhive-sg-cell-agent-0 ready True restarts 0
+POD cellhive-sg-cell-agent-1 ready True restarts 0
+POD cellhive-sg-do-runtime-gated-0 ready True restarts 0
+POD cellhive-sg-do-runtime-gated-1 ready True restarts 0
+POD cellhive-sg-user-runtime-68dbdfd957-2dcf4 ready True restarts 0
+POD cellhive-sg-user-runtime-68dbdfd957-cz6pp ready True restarts 0
+POD cellhive-sg-user-runtime-68dbdfd957-g5g2p ready True restarts 0
+POD cellhive-sg-user-runtime-68dbdfd957-txl5m ready True restarts 0
+PASS direct KV 20 PUT/GET pairs (10 TTL)
+PASS Worker pinned binding 10 PUT/GET pairs
+cleanup 200
+sg RELEASE PASS

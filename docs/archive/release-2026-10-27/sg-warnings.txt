@@ -1,0 +1,15 @@
+cellhive-sg-cell-agent-0 warning/error lines 0
+cellhive-sg-cell-agent-1 warning/error lines 2
+time=2026-10-27T04:05:14.855Z level=WARN msg="hydrate restore chain failed" scope=ops-workflow299/__workflow__/EVENT epoch=2 elapsed=200.453619ms err="restore: non-contiguous chain: expected txid 2, got 19"
+time=2026-10-27T04:05:14.855Z level=WARN msg="waker ownership check failed" scope=ops-workflow299/__workflow__/EVENT err="cellstore: hydrate ops-workflow299/__workflow__/EVENT: restore: non-contiguous chain: expected txid 2, got 19"
+cellhive-sg-do-runtime-gated-0 warning/error lines 0
+cellhive-sg-do-runtime-gated-1 warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-2dcf4 warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-6hrnv warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-8dgfj warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-9hjff warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-cz6pp warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-g5g2p warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-gshs8 warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-jr6cc warning/error lines 0
+cellhive-sg-user-runtime-68dbdfd957-txl5m warning/error lines 0

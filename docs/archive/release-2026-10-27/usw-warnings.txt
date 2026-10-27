@@ -1,0 +1,10 @@
+cellhive-usw-cell-agent-0 warning/error lines 0
+cellhive-usw-cell-agent-1 warning/error lines 3
+time=2026-10-27T04:08:57.912Z level=WARN msg="waker ownership check failed" scope=vwork-74/__kv__/kvns_2dacf8ed-8eef-4c52-a060-47a9c3ac5b78 err="sqlcapture: snapshot batch commit (1 parts): cell: resource incarnation is deleted"
+time=2026-10-27T04:09:08.246Z level=WARN msg="timer dispatch failed" token=eadcd245456357da71e15edd247d4e2b kind=cron err="dispatch: status 500" attempt=1 retry_at_ms=1793074153108
+time=2026-10-27T04:09:09.984Z level=WARN msg="timer dispatch failed" token=e38231c15535f9f3008e2937cf0a700d kind=cron err="dispatch: status 500" attempt=1 retry_at_ms=1793074154109
+cellhive-usw-do-runtime-gated-0 warning/error lines 0
+cellhive-usw-do-runtime-gated-1 warning/error lines 0
+cellhive-usw-user-runtime-76fbf445bb-kzjk7 warning/error lines 0
+cellhive-usw-user-runtime-76fbf445bb-s2dd5 warning/error lines 0
+cellhive-usw-user-runtime-76fbf445bb-v79rg warning/error lines 0

@@ -1,0 +1,15 @@
+ Container cellhive-cell-agent-1 Recreate
+ Container cellhive-cell-agent-1 Recreated
+ Container cellhive-cell-agent-1 Starting
+ Container cellhive-cell-agent-1 Started
+ Container cellhive-user-runtime-1 Recreate
+ Container cellhive-do-runtime-1 Recreate
+ Container cellhive-do-runtime-1 Recreated
+ Container cellhive-user-runtime-1 Recreated
+ Container cellhive-user-runtime-1 Starting
+ Container cellhive-do-runtime-1 Starting
+ Container cellhive-user-runtime-1 Started
+ Container cellhive-do-runtime-1 Started
+PASS direct KV 20 PUT/GET pairs (10 TTL)
+PASS Worker pinned binding 10 PUT/GET pairs
+cleanup 200

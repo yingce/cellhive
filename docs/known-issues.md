@@ -665,3 +665,7 @@ ADR-296已在源码修复peer握手/Write取消失效、建连持全局锁、异
 本轮全量回归不能判为全绿：冷 cell 并发 Queue/send 与 control/deploy 可返回 `local_invalidation_failed` 503；并发 control 初始化还复现 `duplicate column name: compat_date` 400。DO 并发存储请求复测有 HTTP500（内部 `result_unknown/gate_500`），尚未确定 gate 内部原因，不能据此推断已确认数据丢失。官方 Wrangler 多节点第二次发布在 versions 上传阶段 `invalid_multipart`，阻塞 tail/reconnect/failover/reconciliation 后续断言。文件桶 restart/cold 首次成功约1.8s，超过脚本1s门槛，但该轮数据完整性全部通过。真实HK COS restart/cold首次成功分别约3.1s/4.3s，同样超时；最终140个校验key完整。冷写日志另有已删除历史Workflow scope的后台restore无snapshot警告，待定根因。详细证据和最终执行矩阵见 [全量E2E记录](archive/all-e2e-2026-10-27.md)。本轮未修改业务逻辑、未提交/部署。
 
 后续修复：control 迁移串行化、入请求门前原子失效/claim、Wrangler inherit binding、binding 冷路径主动接管；文件桶 restart/cold 已降至47/89ms并通过完整性校验。DO gate根因为并发读取WAL时瞬时checksum失败，捕获观察有界重读并保留checkpoint，持续损坏仍拒绝确认；两轮60秒压测12262/16900请求均无HTTP错误，真实损坏WAL回归及race通过。Wrangler全部6种模式通过，含重连/Cron接管/部署响应丢失与提交前后强杀。原10个失败入口9个已复测通过；HK COS默认配置仍为1.09/2.38秒，恢复并发16的对照仍未达1秒，不宣称性能门槛全部解决；生产默认配置未改。后续证据见 [修复记录](archive/e2e-fixes-2026-10-27.md)。以上修改尚未提交/部署。
+
+### 2026-10-27 release observation
+
+COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local; direct KV/TTL and Worker binding smoke tests passed on all three. Residual warnings remain recorded: SG deleted test app `ops-workflow299` restore chain; one local queue `database is closed`; USW rolling cron 500 and deleted-resource wake. Final regional agent 60-second window had no WARN/ERROR, but residual cleanup causes and individual cron retry outcomes remain unverified. See [release record](archive/release-2026-10-27.md).
