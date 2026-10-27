@@ -123,38 +123,38 @@
 #34 DONE 0.1s
 image tools: workerd 2026-09-16; esbuild 0.28.2
 == start isolated gated stack ==
- Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating 
- Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating 
- Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating 
- Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating 
- Network cellhive-runtime-baseline-175131-243272_default Creating 
- Network cellhive-runtime-baseline-175131-243272_default Creating 
- Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating 
- Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating 
- Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created 
- Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created 
- Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created 
- Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created 
- Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created 
- Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created 
- Network cellhive-runtime-baseline-175131-243272_default Created 
- Network cellhive-runtime-baseline-175131-243272_default Created 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Creating 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Created 
- Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Creating 
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Creating 
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Created 
- Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Created 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy 
- Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Starting 
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Starting 
- Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Started 
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started 
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating
+ Network cellhive-runtime-baseline-175131-243272_default Creating
+ Network cellhive-runtime-baseline-175131-243272_default Creating
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created
+ Network cellhive-runtime-baseline-175131-243272_default Created
+ Network cellhive-runtime-baseline-175131-243272_default Created
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Creating
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Created
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Creating
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Creating
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Created
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Created
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Starting
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Starting
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Started
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started
 == deploy TypeScript source with in-image CLI/esbuild ==
  cellhive-runtime-baseline-175131-243272-cell-agent-1 Copying /opt/.hermes/cache/scratch/cellhive-runtime-baseline.Yoramd/app/. to cellhive-runtime-baseline-175131-243272-cell-agent-1:/tmp/runtime-baseline-app
  cellhive-runtime-baseline-175131-243272-cell-agent-1 Copied /opt/.hermes/cache/scratch/cellhive-runtime-baseline.Yoramd/app/. to cellhive-runtime-baseline-175131-243272-cell-agent-1:/tmp/runtime-baseline-app
@@ -169,15 +169,15 @@ queue partial-batch delivery after 2458ms (configured max_wait_time_ms=2000)
 == durable Queue/Cron invocation ID, outcomes and console query ==
 == destructive resource cleanup and independent DLQ preservation ==
 == gated DO durability and restart ==
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Restarting 
- Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Restarting
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started
 == secret rotation publishes a live version and rollback restores it ==
 secret rotation: v2=s3cr3t, v3=r0tated, rollback=v2=s3cr3t; no v4
 == queue claim crash, lease expiry, and active-version migration ==
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killing 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killed 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting 
- Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killing
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killed
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started
 uploaded bundle eccc4acad7702408d242b812f1701d1aedecb46e529c6851c5148b1b63ab0be9 ( 7315 bytes )
 uploaded 1 assets under token 18a94a7f91efdf09f5fa91f6942bc8aaa9f5d93ab77ac8ef8826e6069f55b308
 cron after cell-agent SIGKILL/restart: both expressions advanced to a new slot without duplicate

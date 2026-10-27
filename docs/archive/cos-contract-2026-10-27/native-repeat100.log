@@ -1,0 +1,209 @@
+COS contracts: production native-append adapter + S3 data plane; dedicated HK bucket
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.33s)
+=== RUN   TestNativeAppendCloud
+    nativeappend_integration_test.go:45: concurrent create a: append authority: empty object
+--- FAIL: TestNativeAppendCloud (0.26s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.43s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.24s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.57s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.29s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.35s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.38s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.35s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.27s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.26s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.24s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.25s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (1.00s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.24s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (1.08s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.25s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.24s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.26s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.27s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.58s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+FAIL
+FAIL	cellhive/internal/bucket	23.215s
+testing: warning: no tests to run
+PASS
+ok  	cellhive/internal/replica	0.007s [no tests to run]
+FAIL
+COS-CONTRACT: FAIL exit=1 not_passed=[]

@@ -130,39 +130,39 @@
 #34 naming to docker.io/library/cellhive:k3d-e2e done
 #34 unpacking to docker.io/library/cellhive:k3d-e2e done
 #34 DONE 0.1s
-[36mINFO[0m[0000] Prep: Network                                
-[36mINFO[0m[0000] Created network 'k3d-cellhive-e2e-175131-313526' 
-[36mINFO[0m[0000] Created image volume k3d-cellhive-e2e-175131-313526-images 
-[36mINFO[0m[0000] Starting new tools node...                   
-[36mINFO[0m[0001] Creating node 'k3d-cellhive-e2e-175131-313526-server-0' 
-[36mINFO[0m[0001] Pulling image 'ghcr.io/k3d-io/k3d-tools:5.9.0' 
-[36mINFO[0m[0002] Pulling image 'docker.io/rancher/k3s:v1.35.5-k3s1' 
-[36mINFO[0m[0005] Starting node 'k3d-cellhive-e2e-175131-313526-tools' 
-[36mINFO[0m[0012] Creating LoadBalancer 'k3d-cellhive-e2e-175131-313526-serverlb' 
-[36mINFO[0m[0014] Pulling image 'ghcr.io/k3d-io/k3d-proxy:5.9.0' 
-[36mINFO[0m[0022] Using the k3d-tools node to gather environment information 
-[36mINFO[0m[0022] HostIP: using network gateway 192.168.80.1 address 
-[36mINFO[0m[0022] Starting cluster 'cellhive-e2e-175131-313526' 
-[36mINFO[0m[0022] Starting servers...                          
-[36mINFO[0m[0022] Starting node 'k3d-cellhive-e2e-175131-313526-server-0' 
-[36mINFO[0m[0027] All agents already running.                  
-[36mINFO[0m[0027] Starting helpers...                          
-[36mINFO[0m[0028] Starting node 'k3d-cellhive-e2e-175131-313526-serverlb' 
-[36mINFO[0m[0034] Injecting records for hostAliases (incl. host.k3d.internal) and for 2 network members into CoreDNS configmap... 
-[36mINFO[0m[0036] Cluster 'cellhive-e2e-175131-313526' created successfully! 
-[36mINFO[0m[0036] You can now use it like this:                
+[36mINFO[0m[0000] Prep: Network
+[36mINFO[0m[0000] Created network 'k3d-cellhive-e2e-175131-313526'
+[36mINFO[0m[0000] Created image volume k3d-cellhive-e2e-175131-313526-images
+[36mINFO[0m[0000] Starting new tools node...
+[36mINFO[0m[0001] Creating node 'k3d-cellhive-e2e-175131-313526-server-0'
+[36mINFO[0m[0001] Pulling image 'ghcr.io/k3d-io/k3d-tools:5.9.0'
+[36mINFO[0m[0002] Pulling image 'docker.io/rancher/k3s:v1.35.5-k3s1'
+[36mINFO[0m[0005] Starting node 'k3d-cellhive-e2e-175131-313526-tools'
+[36mINFO[0m[0012] Creating LoadBalancer 'k3d-cellhive-e2e-175131-313526-serverlb'
+[36mINFO[0m[0014] Pulling image 'ghcr.io/k3d-io/k3d-proxy:5.9.0'
+[36mINFO[0m[0022] Using the k3d-tools node to gather environment information
+[36mINFO[0m[0022] HostIP: using network gateway 192.168.80.1 address
+[36mINFO[0m[0022] Starting cluster 'cellhive-e2e-175131-313526'
+[36mINFO[0m[0022] Starting servers...
+[36mINFO[0m[0022] Starting node 'k3d-cellhive-e2e-175131-313526-server-0'
+[36mINFO[0m[0027] All agents already running.
+[36mINFO[0m[0027] Starting helpers...
+[36mINFO[0m[0028] Starting node 'k3d-cellhive-e2e-175131-313526-serverlb'
+[36mINFO[0m[0034] Injecting records for hostAliases (incl. host.k3d.internal) and for 2 network members into CoreDNS configmap...
+[36mINFO[0m[0036] Cluster 'cellhive-e2e-175131-313526' created successfully!
+[36mINFO[0m[0036] You can now use it like this:
 export KUBECONFIG=$(k3d kubeconfig write cellhive-e2e-175131-313526)
 kubectl cluster-info
-[36mINFO[0m[0000] Importing image(s) into cluster 'cellhive-e2e-175131-313526' 
-[36mINFO[0m[0000] Starting new tools node...                   
-[36mINFO[0m[0000] Starting node 'k3d-cellhive-e2e-175131-313526-tools' 
-[36mINFO[0m[0000] Saving 2 image(s) from runtime...            
-[36mINFO[0m[0002] Importing images into nodes...               
-[36mINFO[0m[0002] Importing images from tarball '/k3d/images/k3d-cellhive-e2e-175131-313526-images-20261027024414.tar' into node 'k3d-cellhive-e2e-175131-313526-server-0'... 
-[36mINFO[0m[0005] Removing the tarball(s) from image volume... 
-[36mINFO[0m[0006] Removing k3d-tools node...                   
-[36mINFO[0m[0007] Successfully imported image(s)               
-[36mINFO[0m[0007] Successfully imported 2 image(s) into 1 cluster(s) 
+[36mINFO[0m[0000] Importing image(s) into cluster 'cellhive-e2e-175131-313526'
+[36mINFO[0m[0000] Starting new tools node...
+[36mINFO[0m[0000] Starting node 'k3d-cellhive-e2e-175131-313526-tools'
+[36mINFO[0m[0000] Saving 2 image(s) from runtime...
+[36mINFO[0m[0002] Importing images into nodes...
+[36mINFO[0m[0002] Importing images from tarball '/k3d/images/k3d-cellhive-e2e-175131-313526-images-20261027024414.tar' into node 'k3d-cellhive-e2e-175131-313526-server-0'...
+[36mINFO[0m[0005] Removing the tarball(s) from image volume...
+[36mINFO[0m[0006] Removing k3d-tools node...
+[36mINFO[0m[0007] Successfully imported image(s)
+[36mINFO[0m[0007] Successfully imported 2 image(s) into 1 cluster(s)
 namespace/cellhive created
 secret/cellhive-secrets created
 Warning: resource namespaces/cellhive is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.

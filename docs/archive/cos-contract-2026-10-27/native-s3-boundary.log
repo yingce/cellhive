@@ -1,0 +1,22 @@
+=== RUN   TestCOSConditionalDelete
+    cos_conddelete_test.go:58: authority conditional delete: stale rejected, current accepted
+    cos_conddelete_test.go:76: s3 conditional delete: stale rejected, current accepted
+--- PASS: TestCOSConditionalDelete (0.85s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestProviderCloudDiagnose
+--- PASS: TestProviderCloudDiagnose (1.05s)
+=== RUN   TestS3BucketIntegration
+    s3_integration_test.go:40: reject-create err = <nil>, want ErrPrecondition
+--- FAIL: TestS3BucketIntegration (0.08s)
+FAIL
+FAIL	cellhive/internal/bucket	2.215s
+=== RUN   TestCOSLargePagedRestore
+    cos_paged_integration_test.go:101: db=64 MiB
+    cos_paged_integration_test.go:148: pageSize=4096 commit=16408 query_blob=1048576 ranged_calls=5 ranged_bytes=1059160
+--- PASS: TestCOSLargePagedRestore (9.98s)
+=== RUN   TestS3ReplicationRestoreChain
+--- PASS: TestS3ReplicationRestoreChain (0.72s)
+PASS
+ok  	cellhive/internal/replica	10.712s
+FAIL

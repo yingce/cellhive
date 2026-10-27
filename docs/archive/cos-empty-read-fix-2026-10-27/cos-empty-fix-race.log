@@ -1,0 +1,4 @@
+ok  	cellhive/internal/bucket	2.156s
+ok  	cellhive/internal/owner	62.408s
+ok  	cellhive/internal/lease	1.830s
+ok  	cellhive/internal/recovery	4.544s

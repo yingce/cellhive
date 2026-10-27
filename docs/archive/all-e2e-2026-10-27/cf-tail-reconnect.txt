@@ -1,42 +1,42 @@
- Network cellhive-cf-tail-175131-289389_default Creating 
- Network cellhive-cf-tail-175131-289389_default Creating 
- Volume cellhive-cf-tail-175131-289389_bucket Creating 
- Volume cellhive-cf-tail-175131-289389_bucket Creating 
- Volume cellhive-cf-tail-175131-289389_runtime-data Creating 
- Volume cellhive-cf-tail-175131-289389_runtime-data Creating 
- Volume cellhive-cf-tail-175131-289389_agent-a-data Creating 
- Volume cellhive-cf-tail-175131-289389_agent-a-data Creating 
- Volume cellhive-cf-tail-175131-289389_bucket Created 
- Volume cellhive-cf-tail-175131-289389_bucket Created 
- Volume cellhive-cf-tail-175131-289389_runtime-data Created 
- Volume cellhive-cf-tail-175131-289389_runtime-data Created 
- Volume cellhive-cf-tail-175131-289389_agent-a-data Created 
- Volume cellhive-cf-tail-175131-289389_agent-a-data Created 
- Network cellhive-cf-tail-175131-289389_default Created 
- Network cellhive-cf-tail-175131-289389_default Created 
- Container cellhive-cf-tail-175131-289389-user-runtime-1 Creating 
- Container cellhive-cf-tail-175131-289389-agent-a-1 Creating 
- Container cellhive-cf-tail-175131-289389-user-runtime-1 Created 
- Container cellhive-cf-tail-175131-289389-agent-a-1 Created 
- Container cellhive-cf-tail-175131-289389-user-runtime-1 Starting 
- Container cellhive-cf-tail-175131-289389-agent-a-1 Starting 
- Container cellhive-cf-tail-175131-289389-user-runtime-1 Started 
- Container cellhive-cf-tail-175131-289389-agent-a-1 Started 
- Volume cellhive-cf-tail-175131-289389_agent-b-data Creating 
- Volume cellhive-cf-tail-175131-289389_agent-b-data Creating 
- Volume cellhive-cf-tail-175131-289389_agent-b-data Created 
- Volume cellhive-cf-tail-175131-289389_agent-b-data Created 
- Container cellhive-cf-tail-175131-289389-agent-b-1 Creating 
- Container cellhive-cf-tail-175131-289389-agent-b-1 Created 
- Container cellhive-cf-tail-175131-289389-agent-b-1 Starting 
- Container cellhive-cf-tail-175131-289389-agent-b-1 Started 
+ Network cellhive-cf-tail-175131-289389_default Creating
+ Network cellhive-cf-tail-175131-289389_default Creating
+ Volume cellhive-cf-tail-175131-289389_bucket Creating
+ Volume cellhive-cf-tail-175131-289389_bucket Creating
+ Volume cellhive-cf-tail-175131-289389_runtime-data Creating
+ Volume cellhive-cf-tail-175131-289389_runtime-data Creating
+ Volume cellhive-cf-tail-175131-289389_agent-a-data Creating
+ Volume cellhive-cf-tail-175131-289389_agent-a-data Creating
+ Volume cellhive-cf-tail-175131-289389_bucket Created
+ Volume cellhive-cf-tail-175131-289389_bucket Created
+ Volume cellhive-cf-tail-175131-289389_runtime-data Created
+ Volume cellhive-cf-tail-175131-289389_runtime-data Created
+ Volume cellhive-cf-tail-175131-289389_agent-a-data Created
+ Volume cellhive-cf-tail-175131-289389_agent-a-data Created
+ Network cellhive-cf-tail-175131-289389_default Created
+ Network cellhive-cf-tail-175131-289389_default Created
+ Container cellhive-cf-tail-175131-289389-user-runtime-1 Creating
+ Container cellhive-cf-tail-175131-289389-agent-a-1 Creating
+ Container cellhive-cf-tail-175131-289389-user-runtime-1 Created
+ Container cellhive-cf-tail-175131-289389-agent-a-1 Created
+ Container cellhive-cf-tail-175131-289389-user-runtime-1 Starting
+ Container cellhive-cf-tail-175131-289389-agent-a-1 Starting
+ Container cellhive-cf-tail-175131-289389-user-runtime-1 Started
+ Container cellhive-cf-tail-175131-289389-agent-a-1 Started
+ Volume cellhive-cf-tail-175131-289389_agent-b-data Creating
+ Volume cellhive-cf-tail-175131-289389_agent-b-data Creating
+ Volume cellhive-cf-tail-175131-289389_agent-b-data Created
+ Volume cellhive-cf-tail-175131-289389_agent-b-data Created
+ Container cellhive-cf-tail-175131-289389-agent-b-1 Creating
+ Container cellhive-cf-tail-175131-289389-agent-b-1 Created
+ Container cellhive-cf-tail-175131-289389-agent-b-1 Starting
+ Container cellhive-cf-tail-175131-289389-agent-b-1 Started
 
  ⛅️ wrangler 4.133.0 (update available 4.153.0)
 ───────────────────────────────────────────────
 [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe following workflow(s) already exist and belong to different workers:[0m
 
     - "FLOW" (currently belongs to "undefined")
-  
+
   Deploying will reassign these workflows to "web". Workflow names must be unique per account. If this reassignment is unintended, rename the workflow(s) in the Wrangler config.
 
 
@@ -45,9 +45,9 @@ Total Upload: 1.38 KiB / gzip: 0.64 KiB
 
 
 Your Worker has access to the following bindings:
-Binding                   Resource      
-env.FLOW (ProbeFlow)      Workflow      
-env.JOBS (JOBS)           Queue         
+Binding                   Resource
+env.FLOW (ProbeFlow)      Workflow
+env.JOBS (JOBS)           Queue
 
 Uploaded web (0.07 sec)
 Deployed web triggers (0.03 sec)
@@ -62,15 +62,15 @@ Current Version ID: null
 ───────────────────────────────────────────────
 Total Upload: 1.38 KiB / gzip: 0.64 KiB
 Your Worker has access to the following bindings:
-Binding                   Resource      
-env.FLOW (ProbeFlow)      Workflow      
-env.JOBS (inherited)      Queue         
+Binding                   Resource
+env.FLOW (ProbeFlow)      Workflow
+env.JOBS (inherited)      Queue
 
 
 [31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/e2e/workers/scripts/web/versions) failed.[0m
 
   invalid_multipart
-  
+
   If you think this is a bug, please open an issue at: [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
 
 

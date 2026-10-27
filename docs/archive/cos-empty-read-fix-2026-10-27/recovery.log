@@ -1,0 +1,14 @@
+HK-REVIEW waiting for exclusive shared-bucket test lock
+HK-REVIEW artifacts=/opt/.hermes/cache/scratch/hk-review-1793073317-863873-vf4zr4i6 compute=local storage=HK-COS durability=auto
+START kv-batch-recovery.sh ns=hk-review-1793073317-863873-0
+owner SIGKILL: 100/100 acknowledged values recovered
+cold_get_trace=bb710e568c550febf4466d356aae41ac
+value-100
+cold_get_seconds=1.288762
+cold COS restore: 100/100 values verified
+upload delta (last batch may still be pending at crash): {'cellhive_upload_batches_total': 6.0, 'cellhive_upload_segments_total': 84.0, 'cellhive_upload_dropped_total': 0.0, 'cellhive_upload_deferred_total': 0.0, 'cellhive_upload_replayed_total': 0.0, 'cellhive_upload_spool': 16.0, 'cellhive_upload_spool_file_syncs_total': 100.0, 'cellhive_upload_spool_dir_syncs_total': 184.0, 'cellhive_upload_spool_sync_seconds_total': 0.096522}
+E2E-KV-BATCH-RECOVERY: PASS
+HK-CLEANUP ns=hk-review-1793073317-863873-0 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.mdBv5Z
+END kv-batch-recovery.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/opt/.hermes/cache/scratch/hk-review-1793073317-863873-vf4zr4i6

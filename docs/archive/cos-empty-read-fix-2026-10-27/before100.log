@@ -1,0 +1,244 @@
+COS contracts: production native-append adapter + S3 data plane; dedicated HK bucket
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.29s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.39s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.98s)
+=== RUN   TestNativeAppendCloud
+    nativeappend_integration_test.go:64: concurrent create b: append authority: empty object
+    nativeappend_integration_test.go:47: start=104.678µs end=11.298726ms method=GET position= status=404 length=471 next= type= request_id=NmFlMDFmZjZfNl82MzY5MTUxZF8yODI1XzEyMjVhY2Y=
+    nativeappend_integration_test.go:47: start=83.858µs end=37.55756ms method=GET position= status=200 length=0 next= type=appendable request_id=NmFlMDFmZjZfNl9iZDRiYmExY18xNjQzM19mMjAzMjI=
+    nativeappend_integration_test.go:47: start=11.437852ms end=40.340192ms method=POST position=0 status=200 length=0 next=14 type= request_id=NmFlMDFmZjZfNl82MzY5MTUxZF8yODRjXzEyNDU1Nzg=
+    nativeappend_integration_test.go:47: start=40.4497ms end=60.803446ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yN2ExX2Y3MjEzMA==
+    nativeappend_integration_test.go:47: start=60.886515ms end=81.357129ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yNzljXzEwNmI4M2M=
+    nativeappend_integration_test.go:47: start=81.514634ms end=103.239408ms method=POST position=14 status=200 length=0 next=35 type= request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yN2EyXzEwNmJkODc=
+    nativeappend_integration_test.go:47: start=103.328175ms end=117.865913ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yN2Y4XzEwNmRkODk=
+    nativeappend_integration_test.go:47: start=117.945271ms end=137.695392ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yODNiX2YzNTE0MQ==
+    nativeappend_integration_test.go:47: start=137.81574ms end=161.32151ms method=POST position=35 status=200 length=0 next=48 type= request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yODUyXzEzOWY5NTI=
+    nativeappend_integration_test.go:47: start=161.402358ms end=177.187216ms method=GET position= status=200 length=48 next= type=appendable request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yODNiX2YzNTE0Mw==
+    nativeappend_integration_test.go:47: start=177.302863ms end=198.46839ms method=POST position=48 status=200 length=0 next=70 type= request_id=NmFlMDFmZjdfNl82MzY5MTUxZF8yN2JjXzExODY5ODk=
+--- FAIL: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.70s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.72s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.47s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.66s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.26s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.57s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+    nativeappend_integration_test.go:64: concurrent create b: append authority: empty object
+    nativeappend_integration_test.go:47: start=97.708µs end=12.115416ms method=GET position= status=404 length=471 next= type= request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODU5XzEwNGY3N2E=
+    nativeappend_integration_test.go:47: start=79.648µs end=25.226939ms method=GET position= status=200 length=0 next= type=appendable request_id=NmFlMDFmZmZfNl85YzRkZWYxZV8yYTg4MV8xMDQzM2U4
+    nativeappend_integration_test.go:47: start=12.242454ms end=29.042876ms method=POST position=0 status=200 length=0 next=14 type= request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yN2Y1XzEwMmQ5ZWI=
+    nativeappend_integration_test.go:47: start=29.130144ms end=38.222934ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODA2XzEyNDQ0YTY=
+    nativeappend_integration_test.go:47: start=38.291912ms end=47.903819ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yN2FlXzEyODM3NTE=
+    nativeappend_integration_test.go:47: start=48.034036ms end=60.903435ms method=POST position=14 status=200 length=0 next=35 type= request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODEzX2ZmMzlkYg==
+    nativeappend_integration_test.go:47: start=61.000232ms end=77.19959ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODM2X2U5N2M2Yw==
+    nativeappend_integration_test.go:47: start=77.294308ms end=89.422683ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yNzljXzEwNmI4YzY=
+    nativeappend_integration_test.go:47: start=89.54538ms end=104.39625ms method=POST position=35 status=200 length=0 next=48 type= request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yN2U3X2Y5MWNiOA==
+    nativeappend_integration_test.go:47: start=104.467208ms end=116.497527ms method=GET position= status=200 length=48 next= type=appendable request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODI0XzEwZWJmMjk=
+    nativeappend_integration_test.go:47: start=116.609285ms end=131.104872ms method=POST position=48 status=200 length=0 next=70 type= request_id=NmFlMDFmZmZfNl82MzY5MTUxZF8yODAyXzExYzQ3NmY=
+--- FAIL: TestNativeAppendCloud (0.13s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.30s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+    nativeappend_integration_test.go:64: concurrent create b: append authority: empty object
+    nativeappend_integration_test.go:47: start=100.528µs end=9.191577ms method=GET position= status=404 length=471 next= type= request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODRiX2U5NTU0NQ==
+    nativeappend_integration_test.go:47: start=97.428µs end=18.732116ms method=GET position= status=200 length=0 next= type=appendable request_id=NmFlMDIwMDFfNl85YzRkZWYxZV8yYThhNl9mODgzNDI=
+    nativeappend_integration_test.go:47: start=9.336294ms end=30.765435ms method=POST position=0 status=200 length=0 next=14 type= request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yN2I4X2RmYjMyMA==
+    nativeappend_integration_test.go:47: start=30.864102ms end=45.164045ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODVjXzEyNDI4Zjc=
+    nativeappend_integration_test.go:47: start=45.246034ms end=59.0307ms method=GET position= status=200 length=14 next= type=appendable request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODE1X2U1ODgyYw==
+    nativeappend_integration_test.go:47: start=59.159146ms end=75.298215ms method=POST position=14 status=200 length=0 next=35 type= request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODRiX2U5NTU0Ng==
+    nativeappend_integration_test.go:47: start=75.377303ms end=87.646755ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yN2M1X2Y5MjU4YQ==
+    nativeappend_integration_test.go:47: start=87.743854ms end=100.898435ms method=GET position= status=200 length=35 next= type=appendable request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODE5XzEyZmZjYzg=
+    nativeappend_integration_test.go:47: start=100.997912ms end=118.345342ms method=POST position=35 status=200 length=0 next=48 type= request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yODVkXzEyYTIwMjk=
+    nativeappend_integration_test.go:47: start=118.41862ms end=133.478345ms method=GET position= status=200 length=48 next= type=appendable request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yN2QwX2QzZTU4MQ==
+    nativeappend_integration_test.go:47: start=133.608013ms end=154.819818ms method=POST position=48 status=200 length=0 next=70 type= request_id=NmFlMDIwMDFfNl82MzY5MTUxZF8yN2NhXzExMmEzMDI=
+--- FAIL: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.14s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (1.45s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.14s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.42s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.14s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (1.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.88s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.14s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.27s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.14s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.47s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.15s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.16s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+FAIL
+FAIL	cellhive/internal/bucket	24.674s
+testing: warning: no tests to run
+PASS
+ok  	cellhive/internal/replica	0.005s [no tests to run]
+FAIL
+COS-CONTRACT: FAIL exit=1 not_passed=[]

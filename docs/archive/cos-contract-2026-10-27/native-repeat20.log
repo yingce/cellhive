@@ -1,0 +1,47 @@
+COS contracts: production native-append adapter + S3 data plane; dedicated HK bucket
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.29s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.29s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.18s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.31s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.32s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.17s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.23s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.35s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.21s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.22s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.20s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.19s)
+PASS
+ok  	cellhive/internal/bucket	4.538s
+testing: warning: no tests to run
+PASS
+ok  	cellhive/internal/replica	0.005s [no tests to run]
+COS-CONTRACT: PASS 1/1 (no skips)

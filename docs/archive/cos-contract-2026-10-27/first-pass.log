@@ -1,0 +1,23 @@
+COS contracts: production native-append adapter + S3 data plane, dedicated HK bucket
+=== RUN   TestCOSConditionalDelete
+    cos_conddelete_test.go:58: authority conditional delete: stale rejected, current accepted
+    cos_conddelete_test.go:76: s3 conditional delete: stale rejected, current accepted
+--- PASS: TestCOSConditionalDelete (1.73s)
+=== RUN   TestCOSDataContract
+    cos_data_integration_test.go:94: GET, range, signed HTTP GET and 2-item cursor pages verified
+--- PASS: TestCOSDataContract (0.30s)
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.26s)
+=== RUN   TestProviderCloudDiagnose
+--- PASS: TestProviderCloudDiagnose (0.97s)
+PASS
+ok  	cellhive/internal/bucket	3.259s
+=== RUN   TestCOSLargePagedRestore
+    cos_paged_integration_test.go:101: db=64 MiB
+    cos_paged_integration_test.go:148: pageSize=4096 commit=16408 query_blob=1048576 ranged_calls=5 ranged_bytes=1059158
+--- PASS: TestCOSLargePagedRestore (9.29s)
+=== RUN   TestS3ReplicationRestoreChain
+    s3_integration_test.go:95: replication uses production COS provider (native append authority and immutable objects)
+--- PASS: TestS3ReplicationRestoreChain (0.53s)
+PASS
+ok  	cellhive/internal/replica	9.827s
