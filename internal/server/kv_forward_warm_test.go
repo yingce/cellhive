@@ -12,16 +12,16 @@ import (
 	"cellhive/internal/owner"
 )
 
-func TestForwardedKVAccessWarmsIngress(t *testing.T) {
+func TestForwardedKVAccessDoesNotCreateWarmWindow(t *testing.T) {
 	for _, tt := range []struct {
 		name, method, path, body string
 		status                   int
 		hot                      bool
 	}{
-		{"put", "POST", "/v1/kv/put?ns=acme&key=k", "v", 200, true},
-		{"get", "GET", "/v1/kv/get?ns=acme&key=k", "", 200, true},
-		{"get-miss", "GET", "/v1/kv/get?ns=acme&key=k", "", 404, true},
-		{"get-batch", "POST", "/v1/kv/get-batch?ns=acme", `{"keys":["k"]}`, 200, true},
+		{"put", "POST", "/v1/kv/put?ns=acme&key=k", "v", 200, false},
+		{"get", "GET", "/v1/kv/get?ns=acme&key=k", "", 200, false},
+		{"get-miss", "GET", "/v1/kv/get?ns=acme&key=k", "", 404, false},
+		{"get-batch", "POST", "/v1/kv/get-batch?ns=acme", `{"keys":["k"]}`, 200, false},
 		{"put-denied", "POST", "/v1/kv/put?ns=acme&key=k", "v", 403, false},
 		{"put-failed", "POST", "/v1/kv/put?ns=acme&key=k", "v", 503, false},
 		{"get-failed", "GET", "/v1/kv/get?ns=acme&key=k", "", 503, false},
@@ -59,17 +59,6 @@ func TestForwardedKVAccessWarmsIngress(t *testing.T) {
 			s.hotKVAccessMu.Unlock()
 			if active != tt.hot {
 				t.Fatalf("ingress hot=%v want=%v after three forwarded requests", active, tt.hot)
-			}
-			if tt.hot {
-				// Exercise the registered refresh target, including binding and deletion
-				// fence checks, without altering ownership or making the entry a writer.
-				if err := s.refreshHotKVAccess(t.Context(), entry); err != nil {
-					t.Fatal(err)
-				}
-				got, _, err := s.Owner.Resolve(t.Context(), sc)
-				if err != nil || got.Node != "node-2" {
-					t.Fatalf("refresh changed owner: %+v %v", got, err)
-				}
 			}
 		})
 	}

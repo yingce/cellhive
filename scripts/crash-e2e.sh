@@ -86,7 +86,11 @@ start_agent() {
   # must wait for the deploy clients, not for the long-lived server.
   disown "$AGENT" 2>/dev/null || true
   for _ in $(seq 1 200); do
-    curl -sf "http://$REST/healthz" >/dev/null 2>&1 && return 0
+    if curl -sf "http://$REST/healthz" >/dev/null 2>&1 &&
+       curl -sf -H "x-cellhive-admin-token: $TOKEN" \
+         "http://$ADMIN/v1/control/releases?namespace=__startup__&worker=__startup__" >/dev/null 2>&1; then
+      return 0
+    fi
     kill -0 "$AGENT" 2>/dev/null || fail "cell-agent exited at startup"
     sleep 0.1
   done

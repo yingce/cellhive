@@ -9,16 +9,14 @@ import (
 	"cellhive/internal/scopedtoken"
 )
 
-// A bounded active set moves the control/fence refresh and lease-bounded owner lookup off
-// requests that repeatedly access the same resident KV cell. Cache validity and
-// all fail-closed checks still live in their original request paths.
+// The refresh set is retained only for pinned authorization entries. KV data
+// requests must not create a time-based "hot" window or background COS reads:
+// owner leases, control revisions, and the normal fail-closed request checks
+// are the source of truth.
 const (
 	hotKVAccessLimit       = 64
-	hotKVAccessIdle        = 2 * time.Second
-	hotKVAccessRefresh     = 500 * time.Millisecond
-	hotKVAccessFirst       = 500 * time.Millisecond
-	hotKVAccessRetry       = 300 * time.Millisecond
 	hotKVAccessConcurrency = 8
+	pinnedAuthRetry        = 300 * time.Millisecond
 )
 
 type hotKVAccess struct {
@@ -32,40 +30,8 @@ type hotKVAccess struct {
 }
 
 func (s *Server) noteHotKVAccess(sc cell.Scope, ns, name string) {
-	if s.Control == nil || s.Owner == nil || s.resourceReplica() == nil || s.Cfg.BindingCacheTTL <= 0 {
-		return
-	}
-	now := time.Now()
-	key := sc.String()
-	s.hotKVAccessMu.Lock()
-	defer s.hotKVAccessMu.Unlock()
-	if e := s.hotKVAccesses[key]; e != nil {
-		if now.Sub(e.lastAccess) > hotKVAccessIdle {
-			e.active = false
-			e.lastAccess = now
-			return
-		}
-		e.lastAccess = now
-		if !e.active {
-			e.active = true // the second recent access makes this scope hot
-			e.next = now.Add(hotKVAccessFirst)
-		}
-		return
-	}
-	if s.hotKVAccesses == nil {
-		s.hotKVAccesses = make(map[string]*hotKVAccess)
-	}
-	if len(s.hotKVAccesses) >= hotKVAccessLimit {
-		var oldest string
-		var at time.Time
-		for k, e := range s.hotKVAccesses {
-			if oldest == "" || e.lastAccess.Before(at) {
-				oldest, at = k, e.lastAccess
-			}
-		}
-		delete(s.hotKVAccesses, oldest)
-	}
-	s.hotKVAccesses[key] = &hotKVAccess{scope: sc, ns: ns, name: name, lastAccess: now}
+	// Kept as a compatibility seam for callers while the old KV warm path is
+	// removed. KV access no longer starts a timer, refresh, or cache entry.
 }
 
 func (s *Server) runKVReadWarmLoop(ctx context.Context) {
@@ -83,10 +49,13 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 		now := time.Now()
 		s.hotKVAccessMu.Lock()
 		for key, e := range s.hotKVAccesses {
-			idle := hotKVAccessIdle
-			if e.pinned != nil {
-				idle = time.Minute
+			// Non-pinned entries were created by the removed KV warm path (or by
+			// an old process) and must not be refreshed anymore.
+			if e.pinned == nil {
+				delete(s.hotKVAccesses, key)
+				continue
 			}
+			idle := time.Minute
 			if now.Sub(e.lastAccess) > idle {
 				delete(s.hotKVAccesses, key)
 				continue
@@ -112,13 +81,9 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 					if s.hotKVAccesses[key] == e {
 						e.refreshing = false
 						if err == nil {
-							interval := hotKVAccessRefresh
-							if e.pinned != nil {
-								interval = s.pinnedRefreshInterval()
-							}
-							e.next = time.Now().Add(interval)
+							e.next = time.Now().Add(s.pinnedRefreshInterval())
 						} else {
-							e.next = time.Now().Add(hotKVAccessRetry)
+							e.next = time.Now().Add(pinnedAuthRetry)
 						}
 					}
 					s.hotKVAccessMu.Unlock()

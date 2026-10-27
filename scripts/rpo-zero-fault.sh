@@ -21,19 +21,23 @@ N=${N:-2000}
 KILL_AT=${KILL_AT:-1200}
 LEASE_TTL=${LEASE_TTL:-3s}
 OUT=${OUT:-docs/archive/bench/rpo-zero-fault.txt}
-A_URL=http://127.0.0.1:7001
-A_ADMIN=http://127.0.0.1:8082
-B_URL=http://127.0.0.1:7011
-B_ADMIN=http://127.0.0.1:8092
+A_PORT=${A_PORT:-17001}
+A_ADMIN_PORT=${A_ADMIN_PORT:-17802}
+B_PORT=${B_PORT:-17011}
+B_ADMIN_PORT=${B_ADMIN_PORT:-17812}
+A_URL="http://127.0.0.1:$A_PORT"
+A_ADMIN="http://127.0.0.1:$A_ADMIN_PORT"
+B_URL="http://127.0.0.1:$B_PORT"
+B_ADMIN="http://127.0.0.1:$B_ADMIN_PORT"
 # Root-derived credentials (ADR-137): the dev root is used when ALLOW_INSECURE
 # is set, and the same derivation is applied by cell-agent.
 INTERNAL=${INTERNAL:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds internal)}
 ADMIN_TOKEN=${ADMIN_TOKEN:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds admin)}
 
 # Never send the fault test to an unrelated service already using these ports.
-python3 - <<'PY' || exit 1
+python3 - <<PY || exit 1
 import socket
-for port in (7001, 7011, 8082, 8092):
+for port in (int("$A_PORT"), int("$B_PORT"), int("$A_ADMIN_PORT"), int("$B_ADMIN_PORT")):
     with socket.socket() as sock:
         try:
             sock.bind(("127.0.0.1", port))
@@ -64,7 +68,7 @@ start_node() { # name data_dir rest admin
 claim() { curl -s -o /dev/null -w "%{http_code}" -H "x-cellhive-internal-token: $INTERNAL" -X POST "$1/v1/internal/claim" -d "{\"scope\":\"$2\"}"; }
 wait_claim() { for _ in $(seq 1 60); do [[ "$(claim "$1" __platform__/__control__/main)" == "200" ]] && return 0; sleep 0.25; done; return 1; }
 
-A=$(start_node a "$D1" :7001 :8082)
+A=$(start_node a "$D1" ":$A_PORT" ":$A_ADMIN_PORT")
 wait_claim "$A_URL" || { echo "node A not ready"; exit 1; }
 for sc in capA/__control__/main capA/__kv__/default; do claim "$A_URL" "$sc" >/dev/null; done
 curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$A_ADMIN/v1/control/app" -d '{"namespace":"capA"}'
@@ -90,7 +94,7 @@ echo "acked keys before crash: $ACKN (SIGKILL at $KILL_AT)" | tee -a "$OUT"
 rm -rf "$D1"
 sleep 4   # owner lease expires
 
-B=$(start_node b "$D2" :7011 :8092)
+B=$(start_node b "$D2" ":$B_PORT" ":$B_ADMIN_PORT")
 wait_claim "$B_URL" || { echo "node B not ready"; exit 1; }
 for sc in capA/__control__/main capA/__kv__/default; do
   echo "takeover $sc -> $(claim "$B_URL" "$sc")" | tee -a "$OUT"

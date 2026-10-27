@@ -36,10 +36,12 @@ if [[ $((N - PARALLEL)) -gt 0 ]]; then
   e2e_log "sequential send: $SEND2"
 fi
 consumed=0
+missing=1
 for i in $(seq 1 120); do
   stats=$(call /stats 2>/dev/null || true)
   consumed=$(jq -r '.count // 0' <<<"$stats" 2>/dev/null || echo 0)
-  [[ "$consumed" -ge "$N" ]] && break
+  missing=$(jq -r '.missing_end // 1' <<<"$stats" 2>/dev/null || echo 1)
+  [[ "$consumed" -ge "$N" && "$missing" = "0" ]] && break
   sleep .5
 done
 [[ "$consumed" -ge "$N" ]] || e2e_fail "consumed $consumed/$N"

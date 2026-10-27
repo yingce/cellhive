@@ -504,7 +504,7 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			break
 		}
-		if resp.StatusCode < 500 || attempt+1 == dispatchAttempts {
+		if !retryableDispatchStatus(resp.StatusCode) || attempt+1 == dispatchAttempts {
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			return DispatchResult{}, fmt.Errorf("queue dispatch: %s body=%q", resp.Status, string(data))
@@ -539,4 +539,14 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 		return DispatchResult{}, fmt.Errorf("queue dispatch response missing success confirmation")
 	}
 	return envelope.DispatchResult, nil
+}
+
+// Only statuses that normally mean the dispatching runtime or an upstream
+// gateway is temporarily unavailable are safe to retry automatically. A 500
+// is commonly a tenant handler failure; retrying it can repeat a side effect
+// without improving the outcome.
+func retryableDispatchStatus(status int) bool {
+	return status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
 }

@@ -2,78 +2,42 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"cellhive/internal/cell"
-	"cellhive/internal/control"
 	"cellhive/internal/lease"
-	"cellhive/internal/owner"
 )
 
-func TestHotKVAccessRefreshesBeforeCacheExpiry(t *testing.T) {
+func TestKVAccessDoesNotCreateWarmEntry(t *testing.T) {
 	s := newScopeServer(t)
-	s.Cfg.BindingCacheTTL = time.Second
-	s.Owner = &owner.Manager{B: s.Bucket, NodeID: s.Cfg.NodeID, Session: "warm-test", Role: cell.RoleCellAgent, OwnerTTL: 10 * time.Second}
-	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}
-	ctx := t.Context()
-	if _, err := s.Control.CreateApp(ctx, "acme", "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Control.CreateResource(ctx, "acme", "kv", "KV", "main", "test"); err != nil {
-		t.Fatal(err)
-	}
-	for _, scope := range []cell.Scope{control.Scope(), sc} {
-		if _, err := s.Owner.Claim(ctx, scope, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := s.refreshHotKVAccess(ctx, &hotKVAccess{scope: sc, ns: "acme", name: "KV"}); err != nil {
-		t.Fatal(err)
-	}
-	s.bindMu.Lock()
-	first := s.bindCache["acme|kv|KV"].exp
-	s.bindMu.Unlock()
-	s.noteHotKVAccess(sc, "acme", "KV")
-	s.noteHotKVAccess(sc, "acme", "KV")
-	loopCtx, stop := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { s.runKVReadWarmLoop(loopCtx); close(done) }()
-	defer func() { stop(); <-done }()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s.bindMu.Lock()
-		next := s.bindCache["acme|kv|KV"].exp
-		s.bindMu.Unlock()
-		if next.After(first.Add(250 * time.Millisecond)) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("hot KV binding cache was not refreshed ahead of expiry")
-}
-
-func TestHotKVAccessSetIsBounded(t *testing.T) {
-	s := newScopeServer(t)
-	s.Cfg.BindingCacheTTL = time.Second
-	s.Owner = &owner.Manager{}
-	for i := 0; i < hotKVAccessLimit+5; i++ {
-		s.noteHotKVAccess(cell.Scope{Namespace: "acme", Class: "__kv__", ID: fmt.Sprintf("c%d", i)}, "acme", "KV")
-	}
+	s.noteHotKVAccess(cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}, "acme", "KV")
 	s.hotKVAccessMu.Lock()
 	defer s.hotKVAccessMu.Unlock()
-	if len(s.hotKVAccesses) != hotKVAccessLimit {
-		t.Fatalf("hot KV access set = %d, want %d", len(s.hotKVAccesses), hotKVAccessLimit)
-	}
-	if s.hotKVAccesses["acme/__kv__/c0"] != nil {
-		t.Fatal("oldest hot KV scope was not evicted")
+	if len(s.hotKVAccesses) != 0 {
+		t.Fatalf("KV access created warm entries: %d", len(s.hotKVAccesses))
 	}
 }
 
-func TestSuccessfulPutsActivateKVCacheRefresh(t *testing.T) {
+func TestKVWarmLoopDropsLegacyEntries(t *testing.T) {
+	s := newScopeServer(t)
+	s.hotKVAccesses = map[string]*hotKVAccess{"legacy": {scope: cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.runKVReadWarmLoop(ctx); close(done) }()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+	s.hotKVAccessMu.Lock()
+	defer s.hotKVAccessMu.Unlock()
+	if len(s.hotKVAccesses) != 0 {
+		t.Fatalf("legacy KV warm entries remain: %d", len(s.hotKVAccesses))
+	}
+}
+
+func TestSuccessfulPutsDoNotActivateKVCacheRefresh(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.Cfg.BindingCacheTTL = time.Second
 	if err := registerTestBinding(s, "acme", "kv", "KV", "main"); err != nil {
@@ -88,8 +52,8 @@ func TestSuccessfulPutsActivateKVCacheRefresh(t *testing.T) {
 	s.hotKVAccessMu.Lock()
 	entry := s.hotKVAccesses["acme/__kv__/main"]
 	s.hotKVAccessMu.Unlock()
-	if entry == nil || !entry.active {
-		t.Fatal("two successful PUTs did not activate background cache refresh")
+	if entry != nil {
+		t.Fatal("successful PUTs activated removed background cache refresh")
 	}
 }
 

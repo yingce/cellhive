@@ -154,7 +154,7 @@ func TestHTTPDispatcherRetriesTransient5xx(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) == 1 {
-			http.Error(w, "runtime warming", http.StatusInternalServerError)
+			http.Error(w, "runtime warming", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("content-type", "application/json")
@@ -166,6 +166,21 @@ func TestHTTPDispatcherRetriesTransient5xx(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("calls=%d, want 2", got)
+	}
+}
+
+func TestHTTPDispatcherDoesNotRetryHandler500(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "handler failed", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := queue.NewHTTP(srv.URL, "").Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q"}, nil); err == nil {
+		t.Fatal("expected error on handler 500")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls=%d, want 1", got)
 	}
 }
 
