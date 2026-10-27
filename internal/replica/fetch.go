@@ -16,12 +16,12 @@ import (
 // construction). It never downloads the whole L1 snapshot to answer a page, so a
 // cold start can materialize only the pages it needs.
 type PageFetcher struct {
-	m        *Manager
-	scope    cell.Scope
-	epoch    uint64
-	idx      PageIndex
-	entryOf  map[uint32]int
-	l0       map[uint32][]byte
+	m         *Manager
+	scope     cell.Scope
+	epoch     uint64
+	idx       PageIndex
+	entryOf   map[uint32]int
+	l0        map[uint32][]byte
 	commit    uint32
 	pageSize  uint32
 	watermark uint64 // highest txid included in the index/L0 cut
