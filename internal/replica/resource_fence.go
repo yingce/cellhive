@@ -54,34 +54,77 @@ func (m *Manager) readResourceFence(ctx context.Context, sc cell.Scope) (resourc
 	if sc.Class != "__kv__" && sc.Class != "__queue__" {
 		return resourceFence{}, "", nil
 	}
-	key := sc.String()
-	m.fenceMu.Lock()
-	rev := m.fenceRev
-	if e, ok := m.fenceCache[key]; ok && time.Since(e.at) < resourceFenceCacheTTL {
-		m.fenceMu.Unlock()
-		return e.f, e.etag, nil
-	}
-	m.fenceMu.Unlock()
-	f, etag, err := m.readResourceFenceFresh(ctx, sc)
-	if err != nil {
-		return f, etag, err
-	}
-	m.cacheReadFence(key, f, etag, rev)
-	return f, etag, nil
+	return m.readResourceFenceShared(ctx, sc, false)
 }
 
-// RefreshResourceSnapshot refreshes the ordinary one-second read cache ahead
-// of a hot KV request. It never treats a failed bucket read as fresh.
+// RefreshResourceSnapshot shares in-flight reads with foreground misses.
 func (m *Manager) RefreshResourceSnapshot(ctx context.Context, sc cell.Scope) error {
-	m.fenceMu.Lock()
-	rev := m.fenceRev
-	m.fenceMu.Unlock()
-	f, etag, err := m.readResourceFenceFresh(ctx, sc)
-	if err != nil {
-		return err
+	_, _, err := m.readResourceFenceShared(ctx, sc, true)
+	return err
+}
+
+type fenceFlight struct {
+	done chan struct{}
+	rev  uint64
+	f    resourceFence
+	etag string
+	err  error
+}
+
+func (m *Manager) readResourceFenceShared(ctx context.Context, sc cell.Scope, refresh bool) (resourceFence, string, error) {
+	key := sc.String()
+	for {
+		if err := ctx.Err(); err != nil {
+			return resourceFence{}, "", err
+		}
+		m.fenceMu.Lock()
+		rev := m.fenceRev
+		if !refresh {
+			if e, ok := m.fenceCache[key]; ok && time.Since(e.at) < resourceFenceCacheTTL {
+				m.fenceMu.Unlock()
+				return e.f, e.etag, nil
+			}
+		}
+		if f := m.fenceFlights[key]; f != nil && f.rev == rev {
+			m.fenceMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return resourceFence{}, "", ctx.Err()
+			case <-f.done:
+			}
+			m.fenceMu.Lock()
+			current := m.fenceRev == f.rev
+			m.fenceMu.Unlock()
+			if !current || errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded) {
+				continue
+			}
+			return f.f, f.etag, f.err
+		}
+		f := &fenceFlight{done: make(chan struct{}), rev: rev}
+		if m.fenceFlights == nil {
+			m.fenceFlights = make(map[string]*fenceFlight)
+		}
+		// Bound coordination memory. Overflow retains safe ordinary reads.
+		if len(m.fenceFlights) < 1024 {
+			m.fenceFlights[key] = f
+		}
+		m.fenceMu.Unlock()
+		f.f, f.etag, f.err = m.readResourceFenceFresh(ctx, sc)
+		if f.err == nil {
+			m.cacheReadFence(key, f.f, f.etag, rev)
+		}
+		m.fenceMu.Lock()
+		current := m.fenceRev == rev
+		if m.fenceFlights[key] == f {
+			delete(m.fenceFlights, key)
+		}
+		close(f.done)
+		m.fenceMu.Unlock()
+		if !current {
+			continue
+		}
+		return f.f, f.etag, f.err
 	}
-	m.cacheReadFence(sc.String(), f, etag, rev)
-	return nil
 }
 
 func (m *Manager) cacheReadFence(key string, f resourceFence, etag string, rev uint64) {

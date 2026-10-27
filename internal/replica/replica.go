@@ -31,9 +31,10 @@ type Manager struct {
 	RestoreParallel int
 	resourceLocks   [64]sync.RWMutex
 
-	fenceMu    sync.Mutex
-	fenceCache map[string]fenceCacheEntry
-	fenceRev   uint64
+	fenceMu      sync.Mutex
+	fenceCache   map[string]fenceCacheEntry
+	fenceRev     uint64
+	fenceFlights map[string]*fenceFlight
 }
 
 // New creates a Manager.

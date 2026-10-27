@@ -203,3 +203,5 @@ P0–P3分别有：设计契约、最小失败回归、修复、完整测试、H
 - P1a：已完成“先读L0判阈值、后下载L1”的第一步；无新尾部、残留L0、字节边界、batch段数与损坏拒绝测试通过。真实COS空合并基线GET=0。尚未实现L0元数据预筛，不能将P1a全部勾选。
 - P1b/P2/P3/P4/P5：未实施。
 - 证据：[compaction预检](../../archive/compaction-preflight-2026-10-27.md)。不自动推送或部署。
+
+- P0 trace跟进：定位并修复纯转发入口fence阻塞和同scope查询放大；真实COS验收见 [修复报告](../../archive/kv-forward-fence-fix-2026-10-27.md)。owner路由查询长尾仍未解决，不将P0–P3整体标为完成。

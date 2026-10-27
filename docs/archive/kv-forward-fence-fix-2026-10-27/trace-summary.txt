@@ -1,0 +1,53 @@
+requests 153960 failures 0
+commit {'fleet': 835, 'bucket-batch': 0}
+peer resource_prepare parent HTTP 0 peer total fence including background Counter({'all': 50})
+PUT 1 1 direct 7.117 11.389 11.389
+PUT 1 1 forwarded 7.051 329.225 329.225
+PUT 1 1 worker 8.977 13.458 13.458
+PUT 1 8 direct 6.883 11.022 11.501
+PUT 1 8 forwarded 7.385 96.806 98.244
+PUT 1 8 worker 11.329 20.852 21.732
+PUT 1 32 direct 11.601 22.975 23.889
+PUT 1 32 forwarded 24.197 121.055 125.544
+PUT 1 32 worker 37.618 139.72 151.237
+PUT 2 1 direct 9.465 17.948 17.948
+PUT 2 1 forwarded 6.887 83.702 83.702
+PUT 2 1 worker 9.728 21.09 21.09
+PUT 2 8 direct 7.21 15.454 16.196
+PUT 2 8 forwarded 9.092 566.196 567.026
+PUT 2 8 worker 18.477 37.883 38.951
+PUT 2 32 direct 14.55 26.953 27.458
+PUT 2 32 forwarded 32.109 112.934 114.913
+PUT 2 32 worker 44.681 107.001 108.58
+SLOW {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 0, 'concurrency': 8, 'ms': 567.0264310000057, 'trace': '54d70e93b7dd1922cf7f22af3ad5c1f3', 'time': '2026-10-27T06:36:14.251Z'}
+http.server 563.772 hk-review-1793082797-232f51-0-peer
+cell.binding_lookup 34.861 hk-review-1793082797-232f51-0-peer
+cell.binding_refresh 34.854 hk-review-1793082797-232f51-0-peer
+cell.owner_bucket_read 19.116 hk-review-1793082797-232f51-0-peer
+cell.owner_bucket_read 403.85 hk-review-1793082797-232f51-0-peer
+http.server 18.601 hk-review-1793082797-232f51-0-perf
+cell.durability_proof 18.145 hk-review-1793082797-232f51-0-perf
+SLOW {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 2, 'concurrency': 8, 'ms': 566.2599979999941, 'trace': '361130514b8236ae4fe0324bcf95b5ce', 'time': '2026-10-27T06:36:14.251Z'}
+http.server 563.048 hk-review-1793082797-232f51-0-peer
+cell.binding_lookup 34.345 hk-review-1793082797-232f51-0-peer
+cell.binding_refresh 34.342 hk-review-1793082797-232f51-0-peer
+http.server 17.698 hk-review-1793082797-232f51-0-perf
+cell.durability_proof 17.445 hk-review-1793082797-232f51-0-perf
+SLOW {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 1, 'concurrency': 8, 'ms': 566.195750999992, 'trace': '1b30e414bd609f151b9940917e6a5ebc', 'time': '2026-10-27T06:36:14.251Z'}
+http.server 563.601 hk-review-1793082797-232f51-0-peer
+cell.binding_lookup 34.985 hk-review-1793082797-232f51-0-peer
+cell.binding_refresh 34.979 hk-review-1793082797-232f51-0-peer
+http.server 17.846 hk-review-1793082797-232f51-0-perf
+cell.durability_proof 17.598 hk-review-1793082797-232f51-0-perf
+SLOW {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 6, 'concurrency': 8, 'ms': 566.0838539999968, 'trace': 'c3731d186cf84a5aa3a11de7bf867913', 'time': '2026-10-27T06:36:14.251Z'}
+http.server 563.202 hk-review-1793082797-232f51-0-peer
+cell.binding_lookup 34.452 hk-review-1793082797-232f51-0-peer
+cell.binding_refresh 34.449 hk-review-1793082797-232f51-0-peer
+http.server 17.89 hk-review-1793082797-232f51-0-perf
+cell.durability_proof 17.617 hk-review-1793082797-232f51-0-perf
+SLOW {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 4, 'concurrency': 8, 'ms': 565.6391339999973, 'trace': 'd23ad10d821101789ceb384b5078d2b9', 'time': '2026-10-27T06:36:14.251Z'}
+http.server 562.965 hk-review-1793082797-232f51-0-peer
+cell.binding_lookup 34.425 hk-review-1793082797-232f51-0-peer
+cell.binding_refresh 34.419 hk-review-1793082797-232f51-0-peer
+http.server 18.148 hk-review-1793082797-232f51-0-perf
+cell.durability_proof 17.911 hk-review-1793082797-232f51-0-perf

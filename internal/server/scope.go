@@ -64,13 +64,11 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			if claims.Resource != "" {
 				r = r.WithContext(context.WithValue(r.Context(), ctxPinnedKV, claims))
 			}
-			preInvalidated, release, ok := s.beginBindingAccess(w, r, kind, claims)
-			if !ok {
-				return
-			}
-			if release != nil {
-				defer release()
-			}
+			// Pure forwarding needs no local SQLite admission or resource fence.
+			// The target repeats authorization and performs full resource gating.
+			ctx := context.WithValue(r.Context(), ctxScopeNS, claims.Namespace)
+			ctx = context.WithValue(ctx, ctxScopeName, claims.Name)
+			r = r.WithContext(ctx)
 			nsForMetrics = claims.Namespace
 			// Attribute the in-flight http.server span to the tenant so traces
 			// are namespaced like the ADR-179 metrics (no-op when tracing is off).
@@ -80,8 +78,21 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 					attribute.String("cellhive.binding", kind),
 				)
 			}
-			ctx := context.WithValue(r.Context(), ctxScopeNS, claims.Namespace)
-			ctx = context.WithValue(ctx, ctxScopeName, claims.Name)
+			if kind == "kv" && earlyKVForward(r) {
+				if sc, resolved := s.gateScope(ctx, kind, claims.Namespace, claims.Name, r.URL.Query()); resolved && s.forwardIfNonOwner(w, r, sc, nil) {
+					return
+				}
+			}
+			preInvalidated, release, ok := s.beginBindingAccess(w, r, kind, claims)
+			if !ok {
+				return
+			}
+			if release != nil {
+				defer release()
+			}
+			nsForMetrics = claims.Namespace
+
+			ctx = r.Context()
 			if preInvalidated != "" {
 				ctx = context.WithValue(ctx, ctxScopePreInvalidated, preInvalidated)
 			}
@@ -330,4 +341,18 @@ func (s *Server) scopeNS(r *http.Request) string {
 func (s *Server) scopeName(r *http.Request) string {
 	v, _ := r.Context().Value(ctxScopeName).(string)
 	return v
+}
+
+// Keep early forwarding restricted to native KV operations with owner-side
+// authorization and admission. Administrative and other binding routes retain
+// their existing ordering.
+func earlyKVForward(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/v1/kv/put", "/v1/kv/get-batch":
+		return r.Method == http.MethodPost
+	case "/v1/kv/get":
+		return r.Method == http.MethodGet
+	default:
+		return false
+	}
 }

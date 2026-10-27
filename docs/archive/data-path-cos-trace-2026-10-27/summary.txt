@@ -1,0 +1,63 @@
+requests/errors 153960 0 warm slow 1376 Counter({('worker', 'get'): 1253, ('forwarded', 'put'): 82, ('worker', 'put'): 41})
+commit {'fleet': 842, 'bucket-batch': 0}
+
+ {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 1, 'index': 3, 'concurrency': 8, 'ms': 834.7021040000036, 'trace': '12f7e529c4eded2e9e423d25b35368b8', 'time': '2026-10-27T06:19:55.090Z'}
+http.server 832.97 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_lookup 33.505 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_refresh 33.502 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.resource_prepare 793.573 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.fence_bucket_read 793.54 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+http.server 5.515 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+cell.durability_proof 5.065 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 1, 'index': 1, 'concurrency': 8, 'ms': 582.5022729999982, 'trace': '98dfe27818a75992ec3b141bc1edf892', 'time': '2026-10-27T06:19:54.837Z'}
+http.server 580.519 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_lookup 33.379 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_refresh 33.371 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.resource_prepare 540.881 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.fence_bucket_read 540.846 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+http.server 5.891 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+cell.durability_proof 5.502 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 1, 'index': 2, 'concurrency': 32, 'ms': 286.25236199999927, 'trace': '6138252b153a54057e2f58b4c70cc00a', 'time': '2026-10-27T06:20:10.535Z'}
+http.server 281.144 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_lookup 41.308 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_refresh 41.304 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.resource_prepare 229.51 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.fence_bucket_read 229.487 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+http.server 8.781 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+cell.durability_proof 8.512 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 1, 'index': 22, 'concurrency': 32, 'ms': 277.298606999997, 'trace': '835aea69c610b09c44c63f9a3352e972', 'time': '2026-10-27T06:20:10.527Z'}
+http.server 271.92 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_lookup 42.082 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_refresh 42.079 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.resource_prepare 220.877 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.fence_bucket_read 220.86 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+http.server 7.561 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+cell.durability_proof 7.38 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'forwarded', 'mode': 'put', 'round': 2, 'index': 12, 'concurrency': 32, 'ms': 201.5088939999987, 'trace': 'e64469338bbb9be41807200e82cafdbb', 'time': '2026-10-27T06:20:58.255Z'}
+http.server 196.304 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_lookup 37.993 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.binding_refresh 37.99 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.resource_prepare 140.753 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+cell.fence_bucket_read 140.645 cellhive-cell-agent hk-review-1793081926-86d9bd-0-peer
+http.server 16.979 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+cell.durability_proof 16.739 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'worker', 'mode': 'get', 'round': 1, 'index': 8323, 'concurrency': 32, 'ms': 159.54986400000053, 'trace': '1dabf945336bc5d56249379d7f9d9ba5', 'time': '2026-10-27T06:20:23.005Z'}
+http.server 135 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'worker', 'mode': 'get', 'round': 1, 'index': 8327, 'concurrency': 32, 'ms': 159.38913799999864, 'trace': '8c475254780dc1a788e9311b7576d261', 'time': '2026-10-27T06:20:23.005Z'}
+http.server 135 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'worker', 'mode': 'get', 'round': 1, 'index': 8326, 'concurrency': 32, 'ms': 159.0960649999979, 'trace': '8d526cc9e89a9c2b9034c587a51cd4c2', 'time': '2026-10-27T06:20:23.005Z'}
+http.server 135 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'worker', 'mode': 'get', 'round': 1, 'index': 8325, 'concurrency': 32, 'ms': 159.02671700000064, 'trace': '29c262db57144985e1b1ec8ea9567d3b', 'time': '2026-10-27T06:20:23.004Z'}
+http.server 134 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+
+ {'event': 'slow-request', 'layer': 'worker', 'mode': 'get', 'round': 1, 'index': 8324, 'concurrency': 32, 'ms': 158.76240400000097, 'trace': '1b8402c299c1486f484a1a2901147704', 'time': '2026-10-27T06:20:23.004Z'}
+http.server 134 cellhive-cell-agent hk-review-1793081926-86d9bd-0-perf
+span counts Counter({'cell.binding_lookup': 844441, 'http.server': 303928, 'cell.resource_prepare': 200957, 'cell.resource_gate': 200913, 'cell.durability_proof': 4012, 'cell.capture_preflight': 4007, 'cell.capture_ensure': 4007, 'cell.sqlite_write': 4007, 'peer.append': 877, 'cell.fence_bucket_read': 683, 'cell.binding_refresh': 311, 'cell.version_authorization_refresh': 261, 'cell.owner_bucket_read': 192, 'replica.download_object': 37, 'cell.restore_slot_wait': 10, 'replica.latest_epoch': 10, 'replica.restore_fence': 6, 'replica.restore_manifest': 6, 'replica.download_objects': 6, 'replica.decode_objects': 6, 'replica.restore_epoch': 6, 'cell.restore_paged_probe': 5, 'cell.restore_full': 5, 'cell.open_uncached': 5, 'replica.list_chain': 4, 'replica.restore_chain': 4, 'cell.restore_apply_sqlite': 4, 'cell.open_sqlite': 4, 'replica.validate_chain': 3, 'cell.wait_existing_open': 2, 'cell.register_pending_timers': 2, 'replica.list_watermark_chain': 2})

@@ -1,0 +1,11 @@
+--- FAIL: TestFenceReadRetriesAfterDeleteDuringFetch (0.00s)
+    fence_flight_test.go:143: returned pre-delete fence: {JobID: Deleted:false Epoch:0}
+FAIL
+FAIL	cellhive/internal/replica	0.020s
+--- FAIL: TestKVForwardSkipsOnlyEntryResourceAdmission (0.04s)
+    kv_early_forward_test.go:66: {"error":"revocation_check_failed","message":"context deadline exceeded"}
+        
+    kv_early_forward_test.go:71: forward=503
+FAIL
+FAIL	cellhive/internal/server	0.056s
+FAIL

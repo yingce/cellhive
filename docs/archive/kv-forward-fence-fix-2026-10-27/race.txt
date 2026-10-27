@@ -1,0 +1,2 @@
+ok  	cellhive/internal/replica	6.320s
+ok  	cellhive/internal/server	164.947s

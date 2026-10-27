@@ -679,3 +679,9 @@ COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local
 ### 数据路径观测进度（2026-10-27）
 
 已补 spool/Enqueue 分段累计观测，保持确认顺序。HK 双 agent 初步热采样153960请求无失败、无bucket回退，仍有follower入口686ms长尾，原因待trace定位。完整性能矩阵和观测开销门槛未验收；见 [基线记录](archive/data-path-baseline-2026-10-27.md)。
+
+### 双节点转发热写长尾已获trace证据（2026-10-27）
+
+真实HK COS复现835ms PUT，其中794ms位于follower转发前resource fence读取，owner仅5.5ms；1秒fence缓存过期无singleflight，8个请求同时查询。普通入口2秒空闲停止预热，分批切换入口可重新暴露冷元数据。后续已在隔离分支修复KV纯转发前fence准入，并合并同scope查询，HK trace确认入口HTTP资源准入为0；仍有owner路由COS查询导致567ms长尾。Worker并发trace关联仍有缺口。见 [COS trace报告](archive/data-path-cos-trace-2026-10-27.md)。
+
+修复与验证：[KV转发/fence修复](archive/kv-forward-fence-fix-2026-10-27.md)。全仓build/vet/test、replica/server三轮race、HK双agent153960热请求、强杀/冷恢复100/100、删除同名重建均通过；未发布。

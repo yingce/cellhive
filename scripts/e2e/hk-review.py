@@ -16,7 +16,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--credentials', required=True)
 parser.add_argument('--port-base', type=int, default=26500)
 parser.add_argument('--trace-endpoint', default='')
-parser.add_argument('--suite', choices=('review', 'workflow', 'performance', 'performance-dual', 'performance-tail', 'batch-recovery'), default='review')
+parser.add_argument('--suite', choices=('review', 'workflow', 'performance', 'performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety'), default='review')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 # All suites share the bucket's platform control cells, even with unique app
@@ -42,7 +42,7 @@ env.update(CELLHIVE_BUCKET='cos://vwork-e2e-hk-1376795072',
            NO_PROXY='*', no_proxy='*', CELLHIVE_DURABILITY='bucket',
            CELLHIVE_WORKERD='/opt/cellhive/deploy/workerd-fork/workerd', E2E_KEEP='1',
            HK_REVIEW_ROOT=str(root))
-if args.suite in ('performance-dual', 'performance-tail', 'batch-recovery'):
+if args.suite in ('performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety'):
     env.update(CELLHIVE_DURABILITY='auto', E2E_DUAL_AGENT='1')
 if args.suite == 'performance-tail':
     env['PERF_TAIL_DIAG']='1'
@@ -55,6 +55,7 @@ print(f'HK-REVIEW artifacts={artifacts} compute=local storage=HK-COS durability=
 failed = []
 suites = {
     'batch-recovery': [('kv-batch-recovery.sh', 'e2ebatch')],
+    'routing-safety': [('kv-routing-safety.sh', 'e2eroute')],
     'performance': [('kv-performance.sh', 'e2eperf')],
     'performance-dual': [('kv-performance.sh', 'e2eperf')],
     'performance-tail': [('kv-performance.sh', 'e2eperf')],

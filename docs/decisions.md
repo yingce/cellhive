@@ -3647,3 +3647,9 @@ HK COS真实并发请求捕获：首次POST Append(position=0)尚未返回时，
 保持现有 spool 文件格式、锁范围、fsync 与 ACK 顺序。增加有界累计统计：Append 次数/总耗时、锁等待、编码、文件打开及写入、目录同步耗时。新耗时内部以纳秒累计，导出微秒，包含失败尝试；目录同步同时覆盖 Append 和 Remove。现有 sync_us 保持文件 Sync+Close 成功路径含义，不冒充全部持久化耗时。Append 总耗时包含子阶段，目录同步又包含后台 Remove，不能简单相加或当作单请求延迟。统计无 scope 标签，不记录用户数据。
 
 Uploader 同时导出 Enqueue 次数/耗时及队列满同步回退次数/耗时，失败回退也计数。原有 HTTP spool_sync_seconds_total 是成功文件 Sync+Close 加 Rename，仍不含目录 Sync；新 spool_dir_sync_seconds_total 独立导出。
+
+### KV 纯转发准入与 fence 查询合并（2026-10-27，实施中）
+
+原生 KV GET/PUT/get-batch 在 scopeAuth 完成原有 token 与 binding 授权、设置 scope context 后，允许先尝试转发远端 owner。只有实际转发路径绕过入口本机 resource fence、旧副本清理与 SQLite gate；目标节点仍经过完整 scopeAuth 与资源 generation 准入。无远端 owner、已转发请求、路由失败或接管走原有本机准入。保留一次转发与不重放不确定写入规则，不推广到 Queue/D1 或其他操作；请求参数由最终执行节点继续校验。
+
+同 scope 的普通 fence 缓存未命中和后台刷新共享有界 in-flight 查询。失败不续期；等待者可独立取消；leader context 取消不传染其他请求；本地删除/重建改变 fenceRev 后旧结果不得返回或回填，新请求重新读取。写侧 readResourceFenceFresh/CAS 不参加合并。保留1秒缓存，不延长权限/删除生效窗口，不改持久化证明。并发去重最多1024个scope，超出时保持原点查路径，不生成额外后台goroutine。
