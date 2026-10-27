@@ -1,0 +1,106 @@
+ Network cellhive-all-do-rps-e47f6155_default Creating 
+ Network cellhive-all-do-rps-e47f6155_default Creating 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Creating 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Created 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Created 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Created 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Created 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Created 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Created 
+ Network cellhive-all-do-rps-e47f6155_default Created 
+ Network cellhive-all-do-rps-e47f6155_default Created 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Creating 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Created 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Creating 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Creating 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Created 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Created 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Starting 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Started 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Starting 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Starting 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Started 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Started 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Waiting 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Waiting 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Healthy 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Healthy 
+== storage: shards=1 wrk -s /opt/.hermes/cache/scratch/cellhive-do-rps.rZyKN9/error-probe.lua -t4 -c64 -d60s /inc ==
+Running 1m test @ http://127.0.0.1:32975/inc
+  4 threads and 64 connections
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   238.82ms  120.67ms 971.19ms   81.38%
+    Req/Sec    75.26     42.90   190.00     59.42%
+  Latency Distribution
+     50%  193.25ms
+     75%  269.08ms
+     90%  409.87ms
+     99%  655.92ms
+  16498 requests in 1.00m, 1.28MB read
+  Non-2xx or 3xx responses: 10
+Requests/sec:    274.52
+Transfer/sec:     21.85KB
+
+== websocket: shards=1 sockets=32 for 8s ==
+{
+  "sockets": 32,
+  "connected": 32,
+  "closed": 0,
+  "errors": 0,
+  "messages": 90088,
+  "seconds": 8.011,
+  "messages_per_sec": 11245.537386094122
+}
+
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Stopping 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Stopping 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Stopped 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Removing 
+ Container cellhive-all-do-rps-e47f6155-do-runtime-gated-1 Removed 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Stopped 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Removing 
+ Container cellhive-all-do-rps-e47f6155-user-runtime-1 Removed 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Stopping 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Stopped 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Removing 
+ Container cellhive-all-do-rps-e47f6155-cell-agent-1 Removed 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Removing 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Removing 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Removing 
+ Network cellhive-all-do-rps-e47f6155_default Removing 
+ Volume cellhive-all-do-rps-e47f6155_gated-runtime-data Removed 
+ Volume cellhive-all-do-rps-e47f6155_user-runtime-data Removed 
+ Volume cellhive-all-do-rps-e47f6155_cell-agent-data Removed 
+ Network cellhive-all-do-rps-e47f6155_default Removed 
+DO RPS artifacts /opt/.hermes/cache/scratch/cellhive-isolated-do-rps-dejuet8y

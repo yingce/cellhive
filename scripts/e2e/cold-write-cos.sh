@@ -112,6 +112,8 @@ def put_retry(a, name, key, v, timeout, t0=None):
         if 200 <= code < 300:
             ack(a, name, key, v)
             return True, n, ms, (time.time() - start) * 1000, code
+        if n == 1:
+            sys.stderr.write("first put rejected key=%s status=%d detail=%r\n" % (key, code, data[:240]))
         if time.time() - start > timeout:
             sys.stderr.write("put timeout key=%s attempts=%d status=%d detail=%r\n" % (key, n, code, data[:160]))
             return False, n, ms, (time.time() - start) * 1000, code

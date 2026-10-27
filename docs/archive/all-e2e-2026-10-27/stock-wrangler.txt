@@ -1,0 +1,6 @@
+=== RUN   TestStockWranglerControlE2E
+--- PASS: TestStockWranglerControlE2E (9.47s)
+=== RUN   TestStockWranglerVectorizeE2E
+--- PASS: TestStockWranglerVectorizeE2E (3.71s)
+PASS
+ok  	cellhive/internal/server	13.195s

@@ -1,0 +1,3 @@
+elapsed=1s http=503 body={"ready":false,"reason":"cell_unreachable","failure_kind":"timeout","elapsed_ms":802,"error_name":"AbortError"}
+elapsed=2s http=200 body={"ready":true,"projection_age_ms":0,"cell":"ok"}
+PASS: DO and log polling recovered across 192.168.80.2 -> 192.168.80.3 without restart; evidence=/tmp/cellhive-do-network.Xtmfqm

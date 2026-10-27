@@ -1,0 +1,5 @@
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.jSg2D1 messages=100 max_concurrency=4
+[e2e] parallel send: {"sent":20,"send_ms":38,"parallel":true}
+[e2e] sequential send: {"sent":80,"send_ms":575}
+[e2e] stats: {"count":100,"max_concurrent":40,"missing_end":0}
+E2E-QUEUE-CONCURRENCY: PASS (messages=100 max_concurrent=40 batches=4 batch_size=10)

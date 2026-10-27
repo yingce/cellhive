@@ -53,6 +53,7 @@ import (
 	"cellhive/internal/recovery"
 	"cellhive/internal/replica"
 	"cellhive/internal/restore"
+	"cellhive/internal/scopedtoken"
 	"cellhive/internal/telemetry"
 	"cellhive/internal/timer"
 	"cellhive/internal/upload"
@@ -203,6 +204,7 @@ type Server struct {
 	bindMu               sync.Mutex
 	bindCache            map[string]bindingEntry
 	bindRev              uint64
+	bindFlights          map[string]*bindingFlight
 	hotKVAccessMu        sync.Mutex
 	hotKVAccesses        map[string]*hotKVAccess
 	hotKVRefreshes       atomic.Uint64
@@ -1096,6 +1098,9 @@ func (s *Server) WaitBackground() { s.timerRegWG.Wait() }
 // pending timer (e.g. a cell this node just claimed). It is only called from the
 // asynchronous enqueue path.
 func (s *Server) registerPendingTimers(ctx context.Context, sc cell.Scope) {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.register_pending_timers")
+	defer span.End()
+	span.SetAttributes(attribute.String("cell.scope", sc.String()))
 	if s.Timers == nil || s.OpenTimer == nil {
 		return
 	}
@@ -1269,14 +1274,29 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) error 
 			return nil
 		}
 	}
-	ok, err := s.Store.TryInvalidate(ctx, sc, nil)
-	if err != nil {
-		return err
+	if s.overloaded() {
+		return errors.New("node is above its disk high watermark")
 	}
-	if !ok {
-		return errors.New("stale local cell is busy; retry ownership acquisition")
+	// Reset and claim share the owner's per-scope gate with background claims.
+	// Publish ownership before BeginRequest can admit this request; otherwise
+	// concurrent cold requests invalidate each other's newly admitted cells.
+	_, err = s.Owner.ClaimWithReset(ctx, sc, time.Now(), func(ctx context.Context, sc cell.Scope) error {
+		ok, err := s.Store.TryInvalidate(ctx, sc, nil)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("stale local cell is busy; retry ownership acquisition")
+		}
+		return nil
+	})
+	if errors.Is(err, owner.ErrOwnerLive) {
+		return nil // The handler resolves and forwards to the winning peer.
 	}
-	return nil
+	if err == nil {
+		s.enqueuePendingTimers(sc)
+	}
+	return err
 }
 
 // gateScope returns the cell scope a binding request touches, mirroring gateKey.
@@ -2232,18 +2252,27 @@ func (s *Server) kvScopeFor(ctx context.Context, ns, name string) (cell.Scope, e
 	if s.Control == nil {
 		return cell.Scope{}, errKVIDRequired
 	}
-	_, ref, err := s.bindingInfo(ctx, ns, "kv", name)
-	if err != nil {
-		return cell.Scope{}, err
+	ref := ""
+	if pinned, ok := ctx.Value(ctxPinnedKV).(scopedtoken.Claims); ok && pinned.Namespace == ns && pinned.Name == name {
+		ref = pinned.Resource
+	} else {
+		_, resolved, err := s.bindingInfo(ctx, ns, "kv", name)
+		if err != nil {
+			return cell.Scope{}, err
+		}
+		ref = resolved
 	}
 	if ref == "" {
 		return cell.Scope{}, errKVIDRequired
 	}
 	if sc, perr := cell.ParseScope(ref); perr == nil {
-		if sc.Namespace != ns {
+		if sc.Namespace != ns || sc.Class != "__kv__" {
 			return cell.Scope{}, errKVIDRequired
 		}
 		return sc, nil
+	}
+	if strings.Contains(ref, "/") {
+		return cell.Scope{}, errKVIDRequired
 	}
 	return cell.Scope{Namespace: ns, Class: "__kv__", ID: ref}, nil
 }

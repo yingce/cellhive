@@ -1,0 +1,26 @@
+[
+  {
+    "name": "cf-tail",
+    "exit": 0
+  },
+  {
+    "name": "cf-tail-reconnect",
+    "exit": 0
+  },
+  {
+    "name": "cf-cron-failover",
+    "exit": 0
+  },
+  {
+    "name": "cf-deploy-reconcile",
+    "exit": 0
+  },
+  {
+    "name": "cf-deploy-kill",
+    "exit": 0
+  },
+  {
+    "name": "cf-deploy-precommit",
+    "exit": 0
+  }
+]

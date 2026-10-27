@@ -1,0 +1,14 @@
+COLD-E2E: bucket=fs ns=e2e-cold-1793043702-fdcfeb lease_ttl=10s steady=20s preload=3145728B p99_limit=1000ms bin=/opt/cellhive/bin/cell-agent
+preload: keys=48 failed=0 (3145728B in 65536B values)
+RESULT scenario=steady puts=3094 p50_ms=4.9 p99_ms=10.0 max_ms=26.5 list_ops=13 get_ops=3151 put_ops=0 epoch_changes=0 acked=80 missing=0 wrong=0 client="puts=3094 errs=0 getbad=0"
+READ_RESULT scenario=steady puts=3094 p50_ms=0.9 p99_ms=3.1 max_ms=7.2
+TARGET_OWNER scenario=steady epoch_before=1 epoch_after=1
+eviction: evicted_delta=11 open_cells=1 (cap 3)
+RESULT scenario=eviction puts=1 p50_ms=12.1 p99_ms=12.1 max_ms=12.1 list_ops=1 get_ops=3 put_ops=0 epoch_changes=0 acked=87 missing=0 wrong=0 single_op_ms=11.9 ok=1 ttfs_ms=12.1 attempts=1 put_ms=11.9 last_code=200
+RESULT scenario=restart puts=1 p50_ms=47.2 p99_ms=47.2 max_ms=47.2 list_ops=3 get_ops=35 put_ops=2 epoch_changes=2 acked=88 missing=0 wrong=0 single_op_ms=47.0 ok=1 ttfs_ms=47.2 attempts=1 put_ms=47.0 last_code=200
+first put rejected key=takeover-probe status=500 detail=b'{"error":"scope_check_failed","message":"Get \\"http://127.0.0.1:27211/v1/control/binding?kind=kv\\u0026name=KV\\u0026ns=e2e-cold-1793043702-fdcfeb\\": dial tcp 127.0.0.1:27211: connect: connection refused"}\n'
+RESULT scenario=takeover_first puts=1 p50_ms=9114.8 p99_ms=9114.8 max_ms=9114.8 list_ops=12 get_ops=1711 put_ops=2 epoch_changes=2 acked=109 missing=0 wrong=0 single_op_ms=66.1 ok=1 ttfs_ms=9114.8 attempts=407 put_ms=66.1 last_code=200 lease_ttl_ms=10000
+RESULT scenario=takeover_next50 puts=50 p50_ms=4.6 p99_ms=6.4 max_ms=6.4 list_ops=0 get_ops=50 put_ops=0 epoch_changes=0 acked=139 missing=0 wrong=0 client="puts=50 errs=0"
+RESULT scenario=cold puts=1 p50_ms=89.2 p99_ms=89.2 max_ms=89.2 list_ops=6 get_ops=95 put_ops=2 epoch_changes=2 acked=140 missing=0 wrong=0 single_op_ms=88.8 ok=1 ttfs_ms=89.2 attempts=1 put_ms=88.8 last_code=200
+integrity_check: ok (cells/e2e-cold-1793043702-fdcfeb/__kv__/main.db)
+COLD-E2E: PASS

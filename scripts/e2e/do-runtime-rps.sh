@@ -61,6 +61,16 @@ for shards in ${SHARDS//,/ }; do
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
       -H "Host: $HOST" "http://127.0.0.1:8081/inc" | tee "$TMP/storage-$shards.log"
   fi
+  # wrk exits zero even when requests fail. Do not let a successful benchmark
+  # process hide failed durability gates or socket/time-out errors.
+  python3 - "$TMP/storage-$shards.log" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+bad = re.search(r"Non-2xx or 3xx responses:\s*(\d+)", text)
+sockets = re.search(r"Socket errors:\s*(.*)", text)
+if (bad and int(bad[1])) or (sockets and any(int(n) for n in re.findall(r"\d+", sockets[1]))):
+    sys.exit("DO-RPS: FAIL: HTTP or socket errors; see benchmark output")
+PY
   echo
 done
 for shards in ${WS_SHARDS//,/ }; do

@@ -38,11 +38,24 @@ e2e_fail() { printf '[e2e] FAIL: %s\n' "$*" >&2; exit 1; }
 e2e_need() { [ "$1" = "$2" ] || e2e_fail "${3:-expected '$2', got '$1'}"; }
 
 e2e_cleanup() {
-  local pid
-  for f in "$E2E_BASE"/*.pid; do
+  local pid f i
+  # Stop runtimes before agents. A normal agent exit drains uploads and seals
+  # its node-log; SIGKILL here strands the next HK run's recovery coordinates.
+  for f in "$E2E_BASE"/rt*.pid "$E2E_BASE"/perf.pid "$E2E_BASE"/*.pid; do
     [[ -f "$f" ]] || continue
     pid=$(cat "$f" 2>/dev/null || true)
-    [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null || true
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      for i in $(seq 1 90); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        e2e_log "cleanup failed: process $pid did not drain; retained for recovery"
+        return 1
+      fi
+    fi
   done
   pkill -9 -f "workerd serve --experimental $E2E_BASE" 2>/dev/null || true
   if [[ "$E2E_KEEP" != "1" ]]; then

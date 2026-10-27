@@ -1,0 +1,6 @@
+=== RUN   TestSessionRecoveryProcesses
+    session_e2e_test.go:303: PASS: both addresses changed; interrupted recovery restarted; empty replacement disk refused; original follower disk restored; 80 acknowledged values restored; stale pinned control registrations restored; both old sessions sealed
+    session_e2e_test.go:365: PASS: SIGSTOP owner past TTL; peer recovered and advanced epoch; SIGCONT old owner exited 1; new session recovered and read acknowledged value
+--- PASS: TestSessionRecoveryProcesses (11.72s)
+PASS
+ok  	cellhive/cmd/cell-agent	11.729s

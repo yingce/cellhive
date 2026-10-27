@@ -1,0 +1,67 @@
+--- FAIL: TestConcurrentColdSchema (0.10s)
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate audit.on_behalf_of: duplicate column name: on_behalf_of
+    migration_concurrency_test.go:26: control: migrate versions.log_policy: duplicate column name: log_policy
+    migration_concurrency_test.go:26: control: migrate audit.request_id: duplicate column name: request_id
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.compat_date: duplicate column name: compat_date
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+--- FAIL: TestConcurrentColdSchema (0.07s)
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate versions.compat_date: duplicate column name: compat_date
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate versions.compat_date: duplicate column name: compat_date
+    migration_concurrency_test.go:26: control: migrate deploy_idempotency.fingerprint: duplicate column name: fingerprint
+    migration_concurrency_test.go:26: control: migrate versions.log_policy: duplicate column name: log_policy
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.log_policy: duplicate column name: log_policy
+    migration_concurrency_test.go:26: control: migrate versions.log_policy: duplicate column name: log_policy
+    migration_concurrency_test.go:26: control: migrate versions.compat_date: duplicate column name: compat_date
+    migration_concurrency_test.go:26: control: migrate audit.actor_kind: duplicate column name: actor_kind
+    migration_concurrency_test.go:26: control: migrate audit.on_behalf_of: duplicate column name: on_behalf_of
+    migration_concurrency_test.go:26: control: migrate audit.on_behalf_of: duplicate column name: on_behalf_of
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate audit.actor_kind: duplicate column name: actor_kind
+    migration_concurrency_test.go:26: control: migrate audit.request_id: duplicate column name: request_id
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate audit.on_behalf_of: duplicate column name: on_behalf_of
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+--- FAIL: TestConcurrentColdSchema (0.07s)
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.log_policy: duplicate column name: log_policy
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate audit.on_behalf_of: duplicate column name: on_behalf_of
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate audit.request_id: duplicate column name: request_id
+    migration_concurrency_test.go:26: control: migrate apps.deleted_ms: duplicate column name: deleted_ms
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+    migration_concurrency_test.go:26: control: migrate deploy_idempotency.fingerprint: duplicate column name: fingerprint
+    migration_concurrency_test.go:26: control: migrate versions.compat_flags: duplicate column name: compat_flags
+    migration_concurrency_test.go:26: control: migrate versions.secret_snapshot: duplicate column name: secret_snapshot
+FAIL
+FAIL	cellhive/internal/control	0.270s
+--- FAIL: TestColdPreparationBeforeRequestAdmission (0.00s)
+    takeover_test.go:242: second cold request rejected while first is admitted: stale local cell is busy; retry ownership acquisition
+--- FAIL: TestColdPreparationBeforeRequestAdmission (0.00s)
+    takeover_test.go:242: second cold request rejected while first is admitted: stale local cell is busy; retry ownership acquisition
+--- FAIL: TestColdPreparationBeforeRequestAdmission (0.00s)
+    takeover_test.go:242: second cold request rejected while first is admitted: stale local cell is busy; retry ownership acquisition
+FAIL
+FAIL	cellhive/internal/server	0.036s
+FAIL

@@ -1,0 +1,6 @@
+== building cell-agent ==
+== upload bundle ==
+== phase 1: 40 parallel deploys ==
+CRASH-E2E: FAIL: phase 1 acked 39/40
+time=2026-10-27T02:36:20.232+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:36:20.246+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:18182

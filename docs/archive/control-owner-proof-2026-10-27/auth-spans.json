@@ -1,0 +1,14 @@
+{
+  "cell.binding_refresh": {
+    "n": 363,
+    "p50_ms": 0.191976,
+    "p99_ms": 368.727508,
+    "max_ms": 369.05918
+  },
+  "cell.version_authorization_refresh": {
+    "n": 290,
+    "p50_ms": 0.185875,
+    "p99_ms": 2.146397,
+    "max_ms": 2.828071
+  }
+}

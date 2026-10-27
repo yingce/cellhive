@@ -1,0 +1,402 @@
+[
+  {
+    "name": "bindings",
+    "cmd": [
+      "bash",
+      "scripts/e2e/bindings.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "bindings-d1-id",
+    "cmd": [
+      "bash",
+      "scripts/e2e/bindings-d1-id.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "workflow",
+    "cmd": [
+      "bash",
+      "scripts/e2e/workflow.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "workflow-recovery",
+    "cmd": [
+      "bash",
+      "scripts/e2e/workflow-recovery.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "queue",
+    "cmd": [
+      "bash",
+      "scripts/e2e/queue.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "queue-multinode",
+    "cmd": [
+      "bash",
+      "scripts/e2e/queue-multinode.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "queue-concurrency",
+    "cmd": [
+      "bash",
+      "scripts/e2e/queue-concurrency.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "service-headers",
+    "cmd": [
+      "bash",
+      "scripts/e2e/service-headers.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "review-fixes",
+    "cmd": [
+      "bash",
+      "scripts/e2e/review-fixes.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "owner-lease",
+    "cmd": [
+      "bash",
+      "scripts/e2e/owner-lease.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "owner-takeover",
+    "cmd": [
+      "bash",
+      "scripts/e2e/owner-takeover.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "session-recovery",
+    "cmd": [
+      "bash",
+      "scripts/e2e/session-recovery.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "cold-write-cos",
+    "cmd": [
+      "bash",
+      "scripts/e2e/cold-write-cos.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "kv-performance",
+    "cmd": [
+      "bash",
+      "scripts/e2e/kv-performance.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "deploy-e2e",
+    "cmd": [
+      "bash",
+      "scripts/deploy-e2e.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "crash-e2e",
+    "cmd": [
+      "bash",
+      "scripts/crash-e2e.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "js-test",
+    "cmd": [
+      "make",
+      "js-test"
+    ],
+    "env": {}
+  },
+  {
+    "name": "cli-test",
+    "cmd": [
+      "make",
+      "cli-test"
+    ],
+    "env": {}
+  },
+  {
+    "name": "rpo-test",
+    "cmd": [
+      "make",
+      "rpo-test"
+    ],
+    "env": {}
+  },
+  {
+    "name": "s3-test",
+    "cmd": [
+      "make",
+      "s3-test"
+    ],
+    "env": {}
+  },
+  {
+    "name": "runtime-baseline",
+    "cmd": [
+      "bash",
+      "scripts/runtime-baseline-e2e.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "do-network-recovery",
+    "cmd": [
+      "bash",
+      "scripts/e2e/do-network-recovery.sh"
+    ],
+    "env": {
+      "CELLHIVE_E2E_IMAGE": "cellhive:runtime-baseline"
+    }
+  },
+  {
+    "name": "mysql-bundle",
+    "cmd": [
+      "bash",
+      "scripts/e2e/mysql/build-bundle.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mysql-auto",
+    "cmd": [
+      "bash",
+      "scripts/e2e/mysql-auto.sh"
+    ],
+    "env": {
+      "E2E_MYSQL_PORT_BASE": "30200"
+    }
+  },
+  {
+    "name": "cf-tail",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1"
+    }
+  },
+  {
+    "name": "cf-tail-reconnect",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1",
+      "CELLHIVE_CF_TAIL_RECONNECT": "1"
+    }
+  },
+  {
+    "name": "cf-cron-failover",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1",
+      "CELLHIVE_CF_CRON_FAILOVER": "1"
+    }
+  },
+  {
+    "name": "cf-deploy-reconcile",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1",
+      "CELLHIVE_CF_DEPLOY_RECONCILE": "1"
+    }
+  },
+  {
+    "name": "cf-deploy-kill",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1",
+      "CELLHIVE_CF_DEPLOY_RECONCILE": "1",
+      "CELLHIVE_CF_DEPLOY_KILL_OWNER": "1"
+    }
+  },
+  {
+    "name": "cf-deploy-precommit",
+    "cmd": [
+      "bash",
+      "scripts/cf-tail-multinode-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_CF_TAIL_SKIP_BUILD": "1",
+      "CELLHIVE_CF_DEPLOY_PRECOMMIT_KILL": "1"
+    }
+  },
+  {
+    "name": "openobserve",
+    "cmd": [
+      "bash",
+      "scripts/openobserve-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_OBS_REST_PORT": "30300",
+      "CELLHIVE_OBS_ADMIN_PORT": "30301",
+      "CELLHIVE_OBS_PUBLIC_PORT": "30302",
+      "CELLHIVE_OBS_INTERNAL_PORT": "30303",
+      "CELLHIVE_OBS_BACKEND_PORT": "30304",
+      "CELLHIVE_OBS_COLLECTOR_PORT": "30305"
+    }
+  },
+  {
+    "name": "k3d",
+    "cmd": [
+      "bash",
+      "scripts/k3d-runtime-e2e.sh"
+    ],
+    "env": {}
+  },
+  {
+    "name": "k3d-fleet",
+    "cmd": [
+      "bash",
+      "scripts/k3d-runtime-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_K3D_FLEET": "1"
+    }
+  },
+  {
+    "name": "k3d-fleet-fault",
+    "cmd": [
+      "bash",
+      "scripts/k3d-runtime-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_K3D_FLEET": "1",
+      "CELLHIVE_K3D_FLEET_FAULT": "1"
+    }
+  },
+  {
+    "name": "k3d-abc",
+    "cmd": [
+      "bash",
+      "scripts/k3d-runtime-e2e.sh"
+    ],
+    "env": {
+      "CELLHIVE_K3D_FLEET": "1",
+      "CELLHIVE_K3D_ABC": "1"
+    }
+  },
+  {
+    "name": "hk-review",
+    "cmd": [
+      "python3",
+      "scripts/e2e/hk-review.py",
+      "--credentials",
+      "/opt/.secrets/s3",
+      "--suite",
+      "review",
+      "--port-base",
+      "30400"
+    ],
+    "env": {}
+  },
+  {
+    "name": "hk-workflow",
+    "cmd": [
+      "python3",
+      "scripts/e2e/hk-review.py",
+      "--credentials",
+      "/opt/.secrets/s3",
+      "--suite",
+      "workflow",
+      "--port-base",
+      "30400"
+    ],
+    "env": {}
+  },
+  {
+    "name": "hk-performance",
+    "cmd": [
+      "python3",
+      "scripts/e2e/hk-review.py",
+      "--credentials",
+      "/opt/.secrets/s3",
+      "--suite",
+      "performance",
+      "--port-base",
+      "30400"
+    ],
+    "env": {}
+  },
+  {
+    "name": "hk-performance-dual",
+    "cmd": [
+      "python3",
+      "scripts/e2e/hk-review.py",
+      "--credentials",
+      "/opt/.secrets/s3",
+      "--suite",
+      "performance-dual",
+      "--port-base",
+      "30400"
+    ],
+    "env": {}
+  },
+  {
+    "name": "hk-performance-tail",
+    "cmd": [
+      "python3",
+      "scripts/e2e/hk-review.py",
+      "--credentials",
+      "/opt/.secrets/s3",
+      "--suite",
+      "performance-tail",
+      "--port-base",
+      "30400"
+    ],
+    "env": {}
+  },
+  {
+    "name": "hk-cold-write",
+    "cmd": [
+      "bash",
+      "scripts/e2e/cold-write-cos.sh"
+    ],
+    "env": {
+      "CELLHIVE_E2E_BUCKET": "cos",
+      "CELLHIVE_COS_ENV_FILE": "/opt/.secrets/s3",
+      "BIN": "/opt/cellhive/bin/cell-agent",
+      "PORT_BASE": "30500"
+    }
+  }
+]

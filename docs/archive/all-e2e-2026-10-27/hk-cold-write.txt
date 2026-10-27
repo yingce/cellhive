@@ -1,0 +1,64 @@
+COLD-E2E: bucket=cos ns=e2e-cold-1793041436-c1afea lease_ttl=10s steady=20s preload=3145728B p99_limit=1000ms bin=/opt/cellhive/bin/cell-agent
+preload: keys=48 failed=0 (3145728B in 65536B values)
+RESULT scenario=steady puts=318 p50_ms=45.4 p99_ms=383.2 max_ms=1055.3 list_ops=489 get_ops=1659 put_ops=63 epoch_changes=22 acked=80 missing=0 wrong=0 client="puts=318 errs=0 getbad=0"
+READ_RESULT scenario=steady puts=318 p50_ms=0.7 p99_ms=1.1 max_ms=2.6
+TARGET_OWNER scenario=steady epoch_before=1 epoch_after=1
+eviction: evicted_delta=12 open_cells=1 (cap 3)
+RESULT scenario=eviction puts=1 p50_ms=92.1 p99_ms=92.1 max_ms=92.1 list_ops=2 get_ops=8 put_ops=0 epoch_changes=0 acked=87 missing=0 wrong=0 single_op_ms=92.0 ok=1 ttfs_ms=92.1 attempts=1 put_ms=92.0 last_code=200
+RESULT scenario=restart puts=1 p50_ms=3104.2 p99_ms=3104.2 max_ms=3104.2 list_ops=6 get_ops=169 put_ops=2 epoch_changes=2 acked=88 missing=0 wrong=0 single_op_ms=605.4 ok=1 ttfs_ms=3104.2 attempts=28 put_ms=605.4 last_code=200
+COLD-E2E: FAIL: restart: p99 3104.2ms > limit 1000ms
+--- tail agent-a.log ---
+time=2026-10-27T03:04:57.053+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=2 mode=bucket-batch reason=no_eligible_follower total_ms=71.098275 owner_ms=0.018691 select_ms=0.00661 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=71.068864 followers=0 lease_snapshot=[] err=<nil> start_txid=368 end_txid=368
+time=2026-10-27T03:04:57.234+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=__platform__/__control__/main epoch=169 cut=716 bytes=434176
+time=2026-10-27T03:04:57.234+08:00 level=INFO msg="capture continues durable chain" scope=__platform__/__control__/main txid=716
+time=2026-10-27T03:04:57.315+08:00 level=INFO msg="slow cell commit" scope=__platform__/__control__/main epoch=169 mode=bucket-batch reason=no_eligible_follower total_ms=70.684946 owner_ms=0.01979 select_ms=0.00096 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=70.660795 followers=0 lease_snapshot=[] err=<nil> start_txid=717 end_txid=717
+time=2026-10-27T03:05:00.134+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/fill3 epoch=1 mode=bucket-batch reason=no_eligible_follower total_ms=63.507758 owner_ms=0.020449 select_ms=0.000929 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=63.483269 followers=0 lease_snapshot=[] err=<nil> start_txid=2 end_txid=2
+time=2026-10-27T03:05:01.036+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/fill4 epoch=1 mode=bucket-batch reason=no_eligible_follower total_ms=56.721704 owner_ms=0.023971 select_ms=0.000939 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=56.693784 followers=0 lease_snapshot=[] err=<nil> start_txid=2 end_txid=2
+time=2026-10-27T03:05:01.655+08:00 level=INFO msg="slow cell commit" scope=__platform__/__control__/main epoch=169 mode=bucket-batch reason=no_eligible_follower total_ms=594.078225 owner_ms=0.019599 select_ms=0.001169 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=594.054095 followers=0 lease_snapshot=[] err=<nil> start_txid=721 end_txid=721
+time=2026-10-27T03:05:03.312+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/fill5 epoch=1 mode=bucket-batch reason=no_eligible_follower total_ms=71.195542 owner_ms=0.02327 select_ms=0.00088 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=71.168823 followers=0 lease_snapshot=[] err=<nil> start_txid=2 end_txid=2
+time=2026-10-27T03:05:07.573+08:00 level=WARN msg="waker ownership check failed" scope=hk-review-1793040888-725318-0/__workflow__/WF_R2 err="cellstore: hydrate hk-review-1793040888-725318-0/__workflow__/WF_R2: restore: no snapshot in chain"
+time=2026-10-27T03:05:08.478+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=368
+time=2026-10-27T03:05:09.617+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T03:05:22.759+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:30501
+time=2026-10-27T03:05:23.757+08:00 level=INFO msg="wake index repaired" examined=28 repaired=28
+time=2026-10-27T03:05:25.908+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 cut=369 bytes=3387392
+time=2026-10-27T03:05:25.908+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=369
+RESULT scenario=takeover_first puts=1 p50_ms=16605.5 p99_ms=16605.5 max_ms=16605.5 list_ops=12 get_ops=145 put_ops=2 epoch_changes=2 acked=109 missing=0 wrong=0 single_op_ms=1857.4 ok=1 ttfs_ms=16605.5 attempts=11 put_ms=1857.4 last_code=200 lease_ttl_ms=10000
+RESULT scenario=takeover_next50 puts=50 p50_ms=42.1 p99_ms=134.4 max_ms=134.4 list_ops=34 get_ops=150 put_ops=0 epoch_changes=0 acked=139 missing=0 wrong=0 client="puts=50 errs=0"
+RESULT scenario=cold puts=1 p50_ms=4266.9 p99_ms=4266.9 max_ms=4266.9 list_ops=8 get_ops=167 put_ops=2 epoch_changes=2 acked=140 missing=0 wrong=0 single_op_ms=2066.6 ok=1 ttfs_ms=4266.9 attempts=19 put_ms=2066.6 last_code=200
+COLD-E2E: FAIL: cold: p99 4266.9ms > limit 1000ms
+--- tail agent-a.log ---
+time=2026-10-27T03:05:03.312+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/fill5 epoch=1 mode=bucket-batch reason=no_eligible_follower total_ms=71.195542 owner_ms=0.02327 select_ms=0.00088 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=71.168823 followers=0 lease_snapshot=[] err=<nil> start_txid=2 end_txid=2
+time=2026-10-27T03:05:07.573+08:00 level=WARN msg="waker ownership check failed" scope=hk-review-1793040888-725318-0/__workflow__/WF_R2 err="cellstore: hydrate hk-review-1793040888-725318-0/__workflow__/WF_R2: restore: no snapshot in chain"
+time=2026-10-27T03:05:08.478+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=368
+time=2026-10-27T03:05:09.617+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T03:05:22.759+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:30501
+time=2026-10-27T03:05:23.757+08:00 level=INFO msg="wake index repaired" examined=28 repaired=28
+time=2026-10-27T03:05:25.908+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 cut=369 bytes=3387392
+time=2026-10-27T03:05:25.908+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=369
+time=2026-10-27T03:05:29.685+08:00 level=WARN msg="waker ownership check failed" scope=hk-review-1793040888-725318-0/__workflow__/WF_R2 err="cellstore: hydrate hk-review-1793040888-725318-0/__workflow__/WF_R2: restore: no snapshot in chain"
+time=2026-10-27T03:05:29.799+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=65.349255 owner_ms=0.00636 select_ms=0.0008 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=65.339085 followers=0 lease_snapshot=[] err=<nil> start_txid=372 end_txid=372
+time=2026-10-27T03:05:30.016+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=60.549881 owner_ms=0.00957 select_ms=0.00093 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=60.536351 followers=0 lease_snapshot=[] err=<nil> start_txid=377 end_txid=377
+time=2026-10-27T03:05:30.224+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=67.412635 owner_ms=0.00634 select_ms=0.00082 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=67.401844 followers=0 lease_snapshot=[] err=<nil> start_txid=381 end_txid=381
+time=2026-10-27T03:05:30.289+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=60.454833 owner_ms=0.00504 select_ms=0.00078 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=60.433233 followers=0 lease_snapshot=[] err=<nil> start_txid=382 end_txid=382
+time=2026-10-27T03:05:30.487+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=110.094837 owner_ms=0.004839 select_ms=0.000809 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=110.08584 followers=0 lease_snapshot=[] err=<nil> start_txid=385 end_txid=385
+time=2026-10-27T03:05:30.716+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=3 mode=bucket-batch reason=no_eligible_follower total_ms=54.216814 owner_ms=0.00558 select_ms=0.00081 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=54.207505 followers=0 lease_snapshot=[] err=<nil> start_txid=390 end_txid=390
+--- tail agent-b.log ---
+time=2026-10-27T03:05:42.639+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+time=2026-10-27T03:05:47.310+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=4 cut=390 bytes=3481600
+time=2026-10-27T03:05:47.310+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=390
+time=2026-10-27T03:05:48.334+08:00 level=WARN msg="waker ownership check failed" scope=hk-review-1793040888-725318-0/__workflow__/WF_R2 err="cellstore: hydrate hk-review-1793040888-725318-0/__workflow__/WF_R2: restore: no snapshot in chain"
+time=2026-10-27T03:05:53.311+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=4 mode=bucket-batch reason=no_eligible_follower total_ms=62.001926 owner_ms=0.00629 select_ms=0.00114 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=61.991706 followers=0 lease_snapshot=[] err=<nil> start_txid=414 end_txid=414
+time=2026-10-27T03:05:53.487+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=4 mode=bucket-batch reason=no_eligible_follower total_ms=129.068517 owner_ms=0.0063 select_ms=0.00107 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=129.058248 followers=0 lease_snapshot=[] err=<nil> start_txid=416 end_txid=416
+time=2026-10-27T03:05:53.680+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=4 mode=bucket-batch reason=no_eligible_follower total_ms=66.637463 owner_ms=0.00892 select_ms=0.000989 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=66.624703 followers=0 lease_snapshot=[] err=<nil> start_txid=420 end_txid=420
+time=2026-10-27T03:05:54.530+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=4 mode=bucket-batch reason=no_eligible_follower total_ms=73.494847 owner_ms=0.00516 select_ms=0.00084 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=73.486427 followers=0 lease_snapshot=[] err=<nil> start_txid=438 end_txid=438
+time=2026-10-27T03:05:55.760+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T03:06:08.545+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:30503
+time=2026-10-27T03:06:08.574+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+time=2026-10-27T03:06:12.915+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=5 cut=441 bytes=3624960
+time=2026-10-27T03:06:12.915+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793041436-c1afea/__kv__/main txid=441
+time=2026-10-27T03:06:12.986+08:00 level=INFO msg="slow cell commit" scope=e2e-cold-1793041436-c1afea/__kv__/main epoch=5 mode=bucket-batch reason=no_eligible_follower total_ms=52.147706 owner_ms=0.01846 select_ms=0.00733 session_ms=0 replicate_ms=0 enqueue_ms=0 bucket_ms=52.118655 followers=0 lease_snapshot=[] err=<nil> start_txid=442 end_txid=442
+time=2026-10-27T03:06:14.892+08:00 level=WARN msg="waker ownership check failed" scope=hk-review-1793040888-725318-0/__workflow__/WF_R2 err="cellstore: hydrate hk-review-1793040888-725318-0/__workflow__/WF_R2: restore: no snapshot in chain"
+integrity_check: ok (cells/e2e-cold-1793041436-c1afea/__kv__/main.db)
+COLD-E2E: FAIL
+cleanup: delete app e2e-cold-1793041436-c1afea http=200 {"deleted":{"segments":498},"namespace":"e2e-cold-1793041436-c1afea","ok":true,"workflows_dropped":0}

@@ -1,0 +1,722 @@
+[
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 6.215,
+    "p95_ms": 8.281,
+    "p99_ms": 8.394,
+    "max_ms": 8.394,
+    "rps": 154.62,
+    "elapsed_ms": 388.04,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 0.386,
+    "p95_ms": 0.56,
+    "p99_ms": 0.911,
+    "max_ms": 3.099,
+    "rps": 2307.54,
+    "elapsed_ms": 2166.81,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 6.54,
+    "p95_ms": 9.214,
+    "p99_ms": 81.968,
+    "max_ms": 81.968,
+    "rps": 124.18,
+    "elapsed_ms": 483.19,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 0.606,
+    "p95_ms": 0.952,
+    "p99_ms": 1.72,
+    "max_ms": 8.933,
+    "rps": 1458.15,
+    "elapsed_ms": 3429,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 8.549,
+    "p95_ms": 9.975,
+    "p99_ms": 11.29,
+    "max_ms": 11.29,
+    "rps": 115.34,
+    "elapsed_ms": 520.2,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 2.02,
+    "p95_ms": 4.005,
+    "p99_ms": 6.976,
+    "max_ms": 23.591,
+    "rps": 423.72,
+    "elapsed_ms": 11800.29,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 7.211,
+    "p95_ms": 11.593,
+    "p99_ms": 13.3,
+    "max_ms": 14.035,
+    "rps": 1023.99,
+    "elapsed_ms": 195.31,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 27,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 1.312,
+    "p95_ms": 3.388,
+    "p99_ms": 5.832,
+    "max_ms": 22.056,
+    "rps": 4941.84,
+    "elapsed_ms": 2023.54,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 7.605,
+    "p95_ms": 11.604,
+    "p99_ms": 108.958,
+    "max_ms": 109.194,
+    "rps": 673.64,
+    "elapsed_ms": 296.9,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 26,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 1.755,
+    "p95_ms": 4.36,
+    "p99_ms": 7.216,
+    "max_ms": 16.196,
+    "rps": 3819.01,
+    "elapsed_ms": 2618.48,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 12.92,
+    "p95_ms": 19.649,
+    "p99_ms": 24.267,
+    "max_ms": 24.675,
+    "rps": 594.76,
+    "elapsed_ms": 336.27,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 9.689,
+    "p95_ms": 18.552,
+    "p99_ms": 30.975,
+    "max_ms": 134.441,
+    "rps": 713.35,
+    "elapsed_ms": 14018.41,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 14.557,
+    "p95_ms": 25.733,
+    "p99_ms": 35.069,
+    "max_ms": 35.988,
+    "rps": 2026.2,
+    "elapsed_ms": 197.41,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 23,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 6.813,
+    "p95_ms": 18.543,
+    "p99_ms": 30.685,
+    "max_ms": 55.103,
+    "rps": 3806.51,
+    "elapsed_ms": 2627.08,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 23.335,
+    "p95_ms": 499.937,
+    "p99_ms": 505.004,
+    "max_ms": 510.386,
+    "rps": 512.48,
+    "elapsed_ms": 780.52,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 29,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 8.078,
+    "p95_ms": 19.074,
+    "p99_ms": 26.815,
+    "max_ms": 50.662,
+    "rps": 3438.35,
+    "elapsed_ms": 2908.37,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 51.183,
+    "p95_ms": 101.114,
+    "p99_ms": 127.789,
+    "max_ms": 127.951,
+    "rps": 561.96,
+    "elapsed_ms": 711.79,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 74,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 1,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 39.287,
+    "p95_ms": 65.165,
+    "p99_ms": 104.884,
+    "max_ms": 162.661,
+    "rps": 755.61,
+    "elapsed_ms": 13234.4,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 6.522,
+    "p95_ms": 8.304,
+    "p99_ms": 9.541,
+    "max_ms": 9.541,
+    "rps": 149.53,
+    "elapsed_ms": 401.25,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 0.327,
+    "p95_ms": 0.431,
+    "p99_ms": 0.774,
+    "max_ms": 2.346,
+    "rps": 2762.19,
+    "elapsed_ms": 1810.16,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 6.587,
+    "p95_ms": 8.378,
+    "p99_ms": 142.39,
+    "max_ms": 142.39,
+    "rps": 111.49,
+    "elapsed_ms": 538.14,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 0.589,
+    "p95_ms": 0.826,
+    "p99_ms": 1.351,
+    "max_ms": 3.558,
+    "rps": 1551.7,
+    "elapsed_ms": 3222.28,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 60,
+    "failures": 0,
+    "p50_ms": 8.313,
+    "p95_ms": 9.938,
+    "p99_ms": 10.171,
+    "max_ms": 10.171,
+    "rps": 117.74,
+    "elapsed_ms": 509.59,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 1,
+    "n": 5000,
+    "failures": 0,
+    "p50_ms": 1.731,
+    "p95_ms": 2.345,
+    "p99_ms": 2.94,
+    "max_ms": 75.214,
+    "rps": 527.63,
+    "elapsed_ms": 9476.37,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 6.986,
+    "p95_ms": 9.741,
+    "p99_ms": 11.017,
+    "max_ms": 11.592,
+    "rps": 1092.7,
+    "elapsed_ms": 183.03,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 26,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 1,
+    "p95_ms": 2.275,
+    "p99_ms": 3.231,
+    "max_ms": 9.993,
+    "rps": 6459.39,
+    "elapsed_ms": 1548.13,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 7.373,
+    "p95_ms": 10.096,
+    "p99_ms": 84.088,
+    "max_ms": 169.635,
+    "rps": 723.87,
+    "elapsed_ms": 276.29,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 28,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 1.468,
+    "p95_ms": 3.197,
+    "p99_ms": 4.429,
+    "max_ms": 9.128,
+    "rps": 4782.1,
+    "elapsed_ms": 2091.13,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 200,
+    "failures": 0,
+    "p50_ms": 11.993,
+    "p95_ms": 19.401,
+    "p99_ms": 58.04,
+    "max_ms": 68.582,
+    "rps": 553.33,
+    "elapsed_ms": 361.45,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 60,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 8,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 8.757,
+    "p95_ms": 12.194,
+    "p99_ms": 22.78,
+    "max_ms": 135.776,
+    "rps": 827.92,
+    "elapsed_ms": 12078.45,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 12.669,
+    "p95_ms": 20.715,
+    "p99_ms": 27.424,
+    "max_ms": 29.704,
+    "rps": 2383.24,
+    "elapsed_ms": 167.84,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 24,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "direct",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 4.302,
+    "p95_ms": 8.281,
+    "p99_ms": 9.791,
+    "max_ms": 12.691,
+    "rps": 6799.43,
+    "elapsed_ms": 1470.71,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 13.707,
+    "p95_ms": 108.164,
+    "p99_ms": 112.894,
+    "max_ms": 114.265,
+    "rps": 1473.5,
+    "elapsed_ms": 271.46,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 24,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "forwarded",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 5.259,
+    "p95_ms": 11.502,
+    "p99_ms": 15.642,
+    "max_ms": 33.499,
+    "rps": 5188.65,
+    "elapsed_ms": 1927.28,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "put",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 400,
+    "failures": 0,
+    "p50_ms": 34.898,
+    "p95_ms": 52.976,
+    "p99_ms": 61.612,
+    "max_ms": 63.319,
+    "rps": 854.61,
+    "elapsed_ms": 468.05,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 73,
+      "bucket-batch": 0
+    }
+  },
+  {
+    "layer": "worker",
+    "mode": "get",
+    "label": "warm",
+    "round": 2,
+    "concurrency": 32,
+    "n": 10000,
+    "failures": 0,
+    "p50_ms": 34.579,
+    "p95_ms": 53.671,
+    "p99_ms": 104.42,
+    "max_ms": 168.493,
+    "rps": 854.64,
+    "elapsed_ms": 11700.81,
+    "errors": [],
+    "commit_delta": {
+      "fleet": 0,
+      "bucket-batch": 0
+    }
+  }
+]

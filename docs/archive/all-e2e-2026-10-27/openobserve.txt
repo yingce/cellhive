@@ -1,0 +1,118 @@
+Unable to find image 'public.ecr.aws/zinclabs/openobserve:latest' locally
+latest: Pulling from zinclabs/openobserve
+b84bc69f1cbd: Pulling fs layer
+68e4cd60e60f: Pulling fs layer
+9d2753d762cc: Pulling fs layer
+fe8c21ab8f9b: Pulling fs layer
+799f0e3f433d: Pulling fs layer
+d82bc7a76a83: Pulling fs layer
+bb321349f641: Pulling fs layer
+5b3013706a46: Pulling fs layer
+efae86a3fb38: Pulling fs layer
+7e7bfd057be8: Pulling fs layer
+0f8b424aa0b9: Pulling fs layer
+29e9d2040d07: Pulling fs layer
+4e5696bf43df: Pulling fs layer
+a3d06b7cc005: Pulling fs layer
+411e1c946a02: Pulling fs layer
+80a6d6970a05: Pulling fs layer
+0783a66ae749: Pulling fs layer
+78269c9827a3: Pulling fs layer
+bf8083c5c1ec: Pulling fs layer
+d557676654e5: Pulling fs layer
+b62c759db193: Pulling fs layer
+40e2b9db7182: Pulling fs layer
+eca3138d0e67: Pulling fs layer
+6c174cbb5f6c: Pulling fs layer
+29a3e8b7d0b6: Pulling fs layer
+68f04394073c: Pulling fs layer
+d557676654e5: Already exists
+0f8b424aa0b9: Already exists
+b84bc69f1cbd: Download complete
+b84bc69f1cbd: Pull complete
+fe8c21ab8f9b: Download complete
+68e4cd60e60f: Download complete
+9d2753d762cc: Download complete
+799f0e3f433d: Download complete
+efae86a3fb38: Download complete
+bb321349f641: Download complete
+d82bc7a76a83: Download complete
+7e7bfd057be8: Download complete
+80a6d6970a05: Download complete
+29e9d2040d07: Download complete
+5b3013706a46: Download complete
+7e7bfd057be8: Pull complete
+5b3013706a46: Pull complete
+0783a66ae749: Download complete
+4e5696bf43df: Download complete
+bf8083c5c1ec: Download complete
+bf8083c5c1ec: Pull complete
+411e1c946a02: Download complete
+d557676654e5: Pull complete
+0f8b424aa0b9: Pull complete
+68e4cd60e60f: Pull complete
+9d2753d762cc: Pull complete
+efae86a3fb38: Pull complete
+d82bc7a76a83: Pull complete
+0783a66ae749: Pull complete
+411e1c946a02: Pull complete
+78269c9827a3: Download complete
+799f0e3f433d: Pull complete
+40e2b9db7182: Download complete
+68f04394073c: Download complete
+eca3138d0e67: Download complete
+eca3138d0e67: Pull complete
+6c174cbb5f6c: Download complete
+b62c759db193: Download complete
+29a3e8b7d0b6: Download complete
+6c174cbb5f6c: Pull complete
+b62c759db193: Pull complete
+29a3e8b7d0b6: Pull complete
+80a6d6970a05: Pull complete
+29e9d2040d07: Pull complete
+78269c9827a3: Pull complete
+68f04394073c: Pull complete
+a3d06b7cc005: Download complete
+a3d06b7cc005: Pull complete
+fe8c21ab8f9b: Pull complete
+bb321349f641: Pull complete
+4e5696bf43df: Pull complete
+40e2b9db7182: Pull complete
+Digest: sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392
+Status: Downloaded newer image for public.ecr.aws/zinclabs/openobserve:latest
+openobserve up on :30304
+Unable to find image 'otel/opentelemetry-collector-contrib:latest' locally
+latest: Pulling from otel/opentelemetry-collector-contrib
+6fe766146ef5: Pulling fs layer
+f205ace7c119: Pulling fs layer
+aeb94af15112: Pulling fs layer
+f205ace7c119: Download complete
+f205ace7c119: Pull complete
+6fe766146ef5: Download complete
+aeb94af15112: Download complete
+6fe766146ef5: Pull complete
+aeb94af15112: Pull complete
+Digest: sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849
+Status: Downloaded newer image for otel/opentelemetry-collector-contrib:latest
+collector up on :30305 -> openobserve/default
+uploaded bundle 9c827e2bb91c18998c609c4340aa9d0bd8cb87cc2b46600ce2211561ad790113 ( 1689 bytes )
+fast response: kv:v-1793040162137
+slow response: kv:v-1793040162169
+async response: {"queue":"yes","cron":"yes","workflow":"yes"}
+waiting for tail_sampling(10s)+batch(5s) ...
+=== streams ===
+   default logs
+   default traces
+   trace_time_index_default metadata
+=== logs: tenant namespace + trace id ===
+  ok: 2 log row(s), structured args/version/request id/trace id matched
+  sample: {"_timestamp": 1793040162169000, "body": "openobserve-e2e {\"path\":\"/slow\",\"structured\":true,\"tenantTrace\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\"}", "cellhive_event_type": "fetch", "cellhive_message_args": "[\"openobserve-e2e\",{\"path\":\"/slow\",\"structured\":true,\"tenantTrace\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\"}]", "cellhive_namespace": "obs", "cellhive_node_id": "n1", "cellhive_outcome":
+  ok: queue invocation request id and trace id matched; sample: {"_timestamp": 1793040165201000, "body": "invocation", "cellhive_duration_ms": 1225, "cellhive_event_type": "queue", "cellhive_finished_ms": 1793040165201, "cellhive_invocation": true, "cellhive_namespace": "obs", "cellhive_node_id": "n1", "cellhive_outcome": "success", "cellhive_producer_links": "[{\"message_id\":\"6554a277e10f6ada667c495f38e5c614
+  ok: one Queue batch linked two producer traces; consumer trace: 164c68ac2d9d14c2e75d10244a617ed5
+  ok: cron invocation request id and trace id matched; sample: {"_timestamp": 1793040191982000, "body": "invocation", "cellhive_duration_ms": 11, "cellhive_event_type": "cron", "cellhive_finished_ms": 1793040191982, "cellhive_invocation": true, "cellhive_namespace": "obs", "cellhive_node_id": "n1", "cellhive_outcome": "success", "cellhive_request_id": "a6bdc650-e480-4394-a097-b0b7b7441546", "cellhive_span_id":
+  ok: workflow invocation request id and trace id matched; sample: {"_timestamp": 1793040163792000, "body": "invocation", "cellhive_duration_ms": 52, "cellhive_event_type": "workflow", "cellhive_finished_ms": 1793040163792, "cellhive_invocation": true, "cellhive_namespace": "obs", "cellhive_node_id": "n1", "cellhive_outcome": "success", "cellhive_request_id": "c7e8bb7a-2ca8-4b8b-b64d-e4b3d63e591f", "cellhive_span_
+=== traces: same trace retained by tail_sampling ===
+  ok: 20 span(s) in trace 4bf92f3577b34da6a3ce929d0e0e4736; names=['cell.resource_gate', 'cell.resource_prepare', 'http.server', 'cell.durability_proof', 'cell.sqlite_write', 'cell.capture_ensure', 'cell.capture_preflight', 'cell.resource_gate', 'cell.resource_prepare', 'http.server', 'http.server', 'cell.resource_gate', 'cell.resource_prepare', 'http.server', 'cell.durability_proof', 'cell.sqlite_write', 'cell.capture_ensure', 'cell.owner_bucket_read', 'cell.capture_preflight', 'cell.owner_bucket_read']
+  sample: {"_o2_ingest_ts": 1793040181465552, "_timestamp": 1793040163677135, "duration": 3, "end_time": 1793040163677139078, "events": "[]", "flags": 1, "links": "[]", "operation_name": "cell.resource_gate", "reference_parent_span_id": "a3c9d91eef7e484f", "reference_pa
+  ok: Queue consumer span has two per-message OTLP links and no parent: {"_o2_ingest_ts": 1793040181467792, "_timestamp": 1793040163976000, "cellhive_namespace": "obs", "cellhive_outcome": "success", "cellhive_worker": "obsprobe", "duration": 1225000, "end_time": 1793040165201000000, "events": "[]", "flags": 1, "links": "[{\"context\":{\"traceId\":\"11111111111111111111111111111111\",\"spanId\":\"2222222222222222\",\"traceFlags\":769,\"traceState\":\"\"},\"messaging.message.id\":\"6554a277e10f6ada667c495f38e5c614\",\"cellhive.producer_request_id\":\"obs-queue-producer\",\"droppedAttributesCount\":0},{\"context\":{\"traceId\":\"33333333333333333333333333333333\",\"spanId\":\"4444444444444444\",\"traceFlags\":769,\"traceState\":\"\"},\"cellhive.producer_request_id\":\"obs-queue-producer-2\",\"messaging.message.id\":\"fca684c71eab810fb187accc9e506848\",\"droppedAttributesCount\":0}]", "messaging_destination_name": "JOBS", "operation_name": "queue.consume", "service_cellhive_node_id": "n1", "service_name": "cellhive-cell-agent", "service_service_instance_id": "n1", "service_service_version": "v1", "span_id": "ca0e4c40e3445408", "span_kind": "5", "span_status": "UNSET", "start_time": 1793040163976000000, "status_code": 0, "status_message": "", "trace_id": "164c68ac2d9d14c2e75d10244a617ed5"}
+OPENOBSERVE-E2E: PASS

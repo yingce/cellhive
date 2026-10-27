@@ -1,0 +1,6 @@
+{"layer": "wrangler", "mode": "versions-upload", "round": 1, "elapsed_ms": 1273.51, "version": "2", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 1, "elapsed_ms": 1095.03, "version": "2", "active_verified": true}
+{"layer": "wrangler", "mode": "versions-upload", "round": 2, "elapsed_ms": 1120.72, "version": "3", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 2, "elapsed_ms": 1350.5, "version": "3", "active_verified": true}
+{"layer": "wrangler", "mode": "versions-upload", "round": 3, "elapsed_ms": 1155.73, "version": "4", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 3, "elapsed_ms": 1045.35, "version": "4", "active_verified": true}

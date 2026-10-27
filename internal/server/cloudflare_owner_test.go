@@ -169,7 +169,7 @@ func TestCloudflarePublishSeesNamespaceCreatedThroughFollower(t *testing.T) {
 	if err := mw.Close(); err != nil {
 		t.Fatalf("multipart: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions", &body)
+	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
 	req.Header.Set("Authorization", "Bearer admin-tok")
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	rr := httptest.NewRecorder()

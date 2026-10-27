@@ -90,6 +90,8 @@ type AssetsConfig struct {
 
 // DeploySpec is the immutable configuration captured in a new version.
 type DeploySpec struct {
+	// StageOnly persists a version without activating it.
+	StageOnly bool `json:",omitempty"`
 	BundleSHA string
 	// IdempotencyKey, when set, makes a repeated deploy return the version
 	// created by the first call instead of allocating a new one.

@@ -2,7 +2,9 @@ package cron
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -150,6 +152,19 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 		if err != nil {
 			return upserts, err
 		}
+		// Preserve the legacy minute token for one deterministically chosen
+		// matching expression, including during rolling upgrades.
+		primary := map[string]string{}
+		for _, tg := range wfs {
+			sch, ok := s.schedule(tg.Cron)
+			if !ok || !sch.Matches(slot) {
+				continue
+			}
+			key := tg.Namespace + "\x00" + tg.Workflow
+			if cur, exists := primary[key]; !exists || tg.Cron < cur {
+				primary[key] = tg.Cron
+			}
+		}
 		for _, tg := range wfs {
 			sch, ok := s.schedule(tg.Cron)
 			if !ok || !sch.Matches(slot) {
@@ -175,7 +190,11 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 				s.log().Warn("workflow schedule open failed", "scope", sc.String(), "err", err)
 				continue
 			}
-			t := timer.New(slot.UnixMilli(), timer.KindWorkflowSchedule, sc.String(), strconv.FormatInt(slot.Unix()/60, 10))
+			occurrence := strconv.FormatInt(slot.Unix()/60, 10)
+			if tg.Cron != primary[tg.Namespace+"\x00"+tg.Workflow] {
+				occurrence += fmt.Sprintf("-%x", sha256.Sum256([]byte(tg.Cron)))
+			}
+			t := timer.New(slot.UnixMilli(), timer.KindWorkflowSchedule, sc.String(), occurrence)
 			write := func() error { return st.Upsert(ctx, t) }
 			if s.Commit != nil {
 				err = s.Commit(ctx, sc, write)

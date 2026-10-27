@@ -1,0 +1,92 @@
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Creating 
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Creating 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Creating 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Creating 
+ Network cellhive-all-do-rps-e8e103e3_default Creating 
+ Network cellhive-all-do-rps-e8e103e3_default Creating 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Creating 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Creating 
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Created 
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Created 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Created 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Created 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Created 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Created 
+ Network cellhive-all-do-rps-e8e103e3_default Created 
+ Network cellhive-all-do-rps-e8e103e3_default Created 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Creating 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Created 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Creating 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Creating 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Created 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Created 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Starting 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Started 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Starting 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Starting 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Started 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Started 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Waiting 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Waiting 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Waiting 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Healthy 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Healthy 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Healthy 
+== storage: shards=1 wrk -s /opt/.hermes/cache/scratch/cellhive-do-rps.DpGPDy/error-probe.lua -t4 -c64 -d10s /inc ==
+Running 10s test @ http://127.0.0.1:32955/inc
+  4 threads and 64 connections
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+HTTP_ERROR 500 worker error: Error: do: 409 {"error":"result_unknown","reason":"gate_500"}
+
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   173.31ms   42.14ms 385.87ms   79.09%
+    Req/Sec    92.78     44.14   170.00     61.04%
+  Latency Distribution
+     50%  163.41ms
+     75%  190.77ms
+     90%  223.74ms
+     99%  317.83ms
+  3658 requests in 10.02s, 287.53KB read
+  Non-2xx or 3xx responses: 3
+Requests/sec:    365.18
+Transfer/sec:     28.70KB
+
+== websocket: shards=1 sockets=32 for 8s ==
+{
+  "sockets": 32,
+  "connected": 32,
+  "closed": 0,
+  "errors": 0,
+  "messages": 66372,
+  "seconds": 8.015,
+  "messages_per_sec": 8280.973175296318
+}
+
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Stopping 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Stopping 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Stopped 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Removing 
+ Container cellhive-all-do-rps-e8e103e3-do-runtime-gated-1 Removed 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Stopped 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Removing 
+ Container cellhive-all-do-rps-e8e103e3-user-runtime-1 Removed 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Stopping 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Stopped 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Removing 
+ Container cellhive-all-do-rps-e8e103e3-cell-agent-1 Removed 
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Removing 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Removing 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Removing 
+ Network cellhive-all-do-rps-e8e103e3_default Removing 
+ Volume cellhive-all-do-rps-e8e103e3_user-runtime-data Removed 
+ Volume cellhive-all-do-rps-e8e103e3_gated-runtime-data Removed 
+ Volume cellhive-all-do-rps-e8e103e3_cell-agent-data Removed 
+ Network cellhive-all-do-rps-e8e103e3_default Removed 
+DO RPS artifacts /opt/.hermes/cache/scratch/cellhive-isolated-do-rps-9ap54d_a

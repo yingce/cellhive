@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/control"
 	"cellhive/internal/scopedtoken"
@@ -18,6 +19,9 @@ import (
 // auth, target resolution from the projection, and dispatch to user-runtime.
 func TestServiceFetchProxy(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if _, err := srv.Owner.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	srv.Control = control.New(srv.Store, nil)
 	ctx := context.Background()
 	if _, err := srv.Control.CreateApp(ctx, "acme", "ops"); err != nil {
@@ -150,6 +154,9 @@ func TestServiceBindingACLDeployGate(t *testing.T) {
 // a grant blocks new calls even for an already-deployed binding.
 func TestServiceFetchCrossNamespaceACL(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if _, err := srv.Owner.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	srv.Control = control.New(srv.Store, nil)
 	ctx := context.Background()
 	for _, ns := range []string{"acme", "team"} {
@@ -201,6 +208,9 @@ func TestServiceFetchCrossNamespaceACL(t *testing.T) {
 // trace context onto its own dispatch to user-runtime (ADR-146).
 func TestServiceFetchPropagatesTraceparent(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if _, err := srv.Owner.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	srv.Control = control.New(srv.Store, nil)
 	ctx := context.Background()
 	if _, err := srv.Control.CreateApp(ctx, "acme", "ops"); err != nil {

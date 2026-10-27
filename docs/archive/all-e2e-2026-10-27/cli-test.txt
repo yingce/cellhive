@@ -1,0 +1,37 @@
+cd cli && bun test
+bun test v1.4.0 (34cbb9a40)
+
+test/dev-runtime-e2e.test.ts:
+(pass) Miniflare 5 runs module fetch plus KV, D1, and R2 through translated config [578.12ms]
+(pass) Miniflare 5 materialises wrangler text module rules [107.88ms]
+  assets: serving /opt/.hermes/cache/scratch/cellhive-dev-hot-assets-VMd5Qh/public with _headers/_redirects + not_found_handling and worker fallback on asset misses (ADR-069/071 parity)
+  assets: serving /opt/.hermes/cache/scratch/cellhive-dev-hot-assets-VMd5Qh/public with _headers/_redirects + not_found_handling and worker fallback on asset misses (ADR-069/071 parity)
+(pass) setOptions hot reload keeps the dev-only asset router topology [286.39ms]
+
+test/runtime-version.test.ts:
+(pass) dev runtime is pinned to the approved same-date pair [0.60ms]
+
+test/assets.test.ts:
+(pass) native assets config delegates worker ordering to the entry router [0.05ms]
+(pass) run_worker_first paths do not leak into Miniflare's incompatible router [0.02ms]
+(pass) run_worker_first true is also owned by the entry router [0.01ms]
+(pass) binding and not_found_handling pass through [0.02ms]
+(pass) no assets config returns undefined
+(pass) Miniflare 5 assets use an in-process entry router and two service bindings [0.63ms]
+(pass) a configured assets binding is exposed to user code through the native asset service [0.08ms]
+
+test/dev-assets-e2e.test.ts:
+(pass) dev assets pipeline matches the production loader [185.51ms]
+(pass) asset miss falls back to the user worker when not_found_handling is none [167.58ms]
+(pass) single-page-application serves index instead of falling back to the worker [166.27ms]
+(pass) run_worker_first true runs the worker before an existing asset [168.06ms]
+
+test/bindings-parity.test.ts:
+(pass) workflows and ai are parsed for dev [0.36ms]
+(pass) workflows/ai are absent by default [0.17ms]
+(pass) vectorize is a dev-unsupported binding [0.53ms]
+
+ 18 pass
+ 0 fail
+ 49 expect() calls
+Ran 18 tests across 5 files. [2.09s]

@@ -1,0 +1,42 @@
+ Network cellhive-cf-tail-853072-853075_default Creating 
+ Network cellhive-cf-tail-853072-853075_default Creating 
+ Volume cellhive-cf-tail-853072-853075_agent-a-data Creating 
+ Volume cellhive-cf-tail-853072-853075_agent-a-data Creating 
+ Volume cellhive-cf-tail-853072-853075_bucket Creating 
+ Volume cellhive-cf-tail-853072-853075_bucket Creating 
+ Volume cellhive-cf-tail-853072-853075_agent-a-data Created 
+ Volume cellhive-cf-tail-853072-853075_agent-a-data Created 
+ Volume cellhive-cf-tail-853072-853075_bucket Created 
+ Volume cellhive-cf-tail-853072-853075_bucket Created 
+ Network cellhive-cf-tail-853072-853075_default Created 
+ Network cellhive-cf-tail-853072-853075_default Created 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Creating 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Created 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Starting 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Started 
+ Volume cellhive-cf-tail-853072-853075_agent-b-data Creating 
+ Volume cellhive-cf-tail-853072-853075_agent-b-data Creating 
+ Volume cellhive-cf-tail-853072-853075_agent-b-data Created 
+ Volume cellhive-cf-tail-853072-853075_agent-b-data Created 
+ Container cellhive-cf-tail-853072-853075-agent-b-1 Creating 
+ Container cellhive-cf-tail-853072-853075-agent-b-1 Created 
+ Container cellhive-cf-tail-853072-853075-agent-b-1 Starting 
+ Container cellhive-cf-tail-853072-853075-agent-b-1 Started 
+ Volume cellhive-cf-tail-853072-853075_runtime-data Creating 
+ Volume cellhive-cf-tail-853072-853075_runtime-data Creating 
+ Volume cellhive-cf-tail-853072-853075_runtime-data Created 
+ Volume cellhive-cf-tail-853072-853075_runtime-data Created 
+ Container cellhive-cf-tail-853072-853075-user-runtime-1 Creating 
+ Container cellhive-cf-tail-853072-853075-user-runtime-1 Created 
+ Container cellhive-cf-tail-853072-853075-user-runtime-1 Starting 
+ Container cellhive-cf-tail-853072-853075-user-runtime-1 Started 
+raw Tail payloads: queue=1 cron=3
+Wrangler Tail payloads: Queue and Cron CF fields present
+== Cron UTC minute while control owner A is stopped ==
+cron normal owner: unique successful slots 3
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Stopping 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Stopped 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Starting 
+ Container cellhive-cf-tail-853072-853075-agent-a-1 Started 
+cron failover: {"slot_ms": 1793044560000, "attempts": 1, "successes": 1, "logical_ids": ["cron:1c7b3c4f9890c299c01893b57885f3d4b94b0a526e2d8b348b3ac1798b00e479"]}
+CF-TAIL-MULTINODE-E2E: PASS: original Wrangler on B received A fetch, Queue, Cron and Workflow Tail events

@@ -1,0 +1,12 @@
+=== RUN   TestNativeAppendCloud
+--- PASS: TestNativeAppendCloud (0.50s)
+=== RUN   TestProviderCloudDiagnose
+--- PASS: TestProviderCloudDiagnose (1.96s)
+PASS
+ok  	cellhive/internal/bucket	2.468s
+=== RUN   TestCOSLargePagedRestore
+    cos_paged_integration_test.go:101: db=64 MiB
+    cos_paged_integration_test.go:148: pageSize=4096 commit=16408 query_blob=1048576 ranged_calls=5 ranged_bytes=1059158
+--- PASS: TestCOSLargePagedRestore (10.96s)
+PASS
+ok  	cellhive/internal/replica	10.970s

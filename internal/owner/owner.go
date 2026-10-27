@@ -121,6 +121,7 @@ type Manager struct {
 	cacheRev       map[string]uint64
 	routes         map[string]ownerRoute
 	routeFlights   map[string]*routeFlight
+	releasing      map[string]int
 
 	claimMu sync.Mutex
 	claims  map[string]chan struct{}
@@ -189,14 +190,17 @@ func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Dura
 // Invalidate drops a cached owner record (after claim/release).
 func (m *Manager) Invalidate(s cell.Scope) {
 	m.mu.Lock()
-	key := s.String()
+	m.invalidateLocked(s.String())
+	m.mu.Unlock()
+}
+
+func (m *Manager) invalidateLocked(key string) {
 	delete(m.cache, key)
 	delete(m.routes, key)
 	if m.cacheRev == nil {
 		m.cacheRev = make(map[string]uint64)
 	}
 	m.cacheRev[key]++
-	m.mu.Unlock()
 }
 
 // Resolve returns the current owner record and its etag, or ErrUnowned.
@@ -348,7 +352,7 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 	if err != nil {
 		return cell.Owner{}, err
 	}
-	if cur.Node != m.NodeID || cur.Epoch != epoch {
+	if cur.Node != m.NodeID || cur.Session != m.Session || cur.Epoch != epoch {
 		m.Invalidate(s)
 		return cell.Owner{}, ErrEpochMismatch
 	}
@@ -377,11 +381,28 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 
 // Release removes the owner record if this node still owns the given epoch.
 func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error {
+	key := s.String()
+	m.mu.Lock()
+	if m.releasing == nil {
+		m.releasing = make(map[string]int)
+	}
+	m.releasing[key]++
+	m.invalidateLocked(key)
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.releasing[key]--
+		if m.releasing[key] == 0 {
+			delete(m.releasing, key)
+		}
+		m.invalidateLocked(key)
+		m.mu.Unlock()
+	}()
 	cur, e, err := m.Resolve(ctx, s)
 	if err != nil {
 		return err
 	}
-	if cur.Node != m.NodeID || cur.Epoch != epoch {
+	if cur.Node != m.NodeID || cur.Session != m.Session || cur.Epoch != epoch {
 		m.Invalidate(s)
 		return ErrEpochMismatch
 	}

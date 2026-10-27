@@ -1,0 +1,6 @@
+bash scripts/s3-integration.sh
+Unable to find image 'quay.io/minio/minio:RELEASE.2025-02-18T16-25-55Z' locally
+docker: Error response from daemon: unknown: failed to resolve reference "quay.io/minio/minio:RELEASE.2025-02-18T16-25-55Z": unexpected status from HEAD request to https://quay.io/v2/minio/minio/manifests/RELEASE.2025-02-18T16-25-55Z: 401 UNAUTHORIZED
+
+Run 'docker run --help' for more information
+make: *** [Makefile:129: s3-test] Error 125

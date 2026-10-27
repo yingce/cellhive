@@ -664,15 +664,16 @@ func (s *Supervisor) RestoreAll(ctx context.Context, outDir string) (int, error)
 }
 
 type fileState struct {
-	mu              sync.Mutex
-	path            string
-	scope           cell.Scope
-	cursor          *wal.Cursor
-	seq             uint64
-	baseline        bool
-	pending         [][]byte
-	pendingEnd      uint64
-	pendingSnapshot bool
+	mu                sync.Mutex
+	path              string
+	scope             cell.Scope
+	cursor            *wal.Cursor
+	seq               uint64
+	baseline          bool
+	checkpointPending bool
+	pending           [][]byte
+	pendingEnd        uint64
+	pendingSnapshot   bool
 }
 
 func (s *Supervisor) logf(format string, args ...any) {
@@ -981,6 +982,32 @@ func (s *Supervisor) rawKey(rel string) string {
 	return objectstore.PrefixSupervisor + prefix + "/raw/" + scopeID(rel)
 }
 
+func pollStableWAL(ctx context.Context, poll func() (wal.PollResult, error)) (wal.PollResult, error) {
+	// workerd can be appending a frame while we read it. Retry the capture
+	// observation only, never the user request. Persistent corruption fails
+	// closed. Retain checkpoint detection if a failed poll already rotated the
+	// cursor, so a successful retry cannot omit the required full snapshot.
+	checkpoint := false
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return wal.PollResult{Checkpoint: checkpoint}, err
+		}
+		res, err := poll()
+		checkpoint = checkpoint || res.Checkpoint
+		res.Checkpoint = checkpoint
+		if !errors.Is(err, wal.ErrChecksum) || attempt == 4 {
+			return res, err
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return wal.PollResult{Checkpoint: checkpoint}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // syncFile captures one file exactly once (per-file lock).
 func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 	fs := s.fileFor(path)
@@ -1002,14 +1029,16 @@ func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 		}
 		fs.baseline = true
 	}
-	res, err := fs.cursor.Poll(path + "-wal")
+	res, err := pollStableWAL(ctx, func() (wal.PollResult, error) { return fs.cursor.Poll(path + "-wal") })
+	fs.checkpointPending = fs.checkpointPending || res.Checkpoint
 	if err != nil && err != wal.ErrNoWAL {
 		return fmt.Errorf("dosupervisor: wal poll %s: %w", path, err)
 	}
-	if res.Checkpoint {
+	if fs.checkpointPending {
 		if err := s.snapshot(ctx, fs, "checkpoint"); err != nil {
 			return err
 		}
+		fs.checkpointPending = false
 	} else if len(res.Transactions) > 0 {
 		if err := s.delta(ctx, fs, res); err != nil {
 			return err
@@ -1183,6 +1212,7 @@ func (s *Supervisor) flushPending(ctx context.Context, fs *fileState) error {
 	if fs.pendingSnapshot {
 		fs.cursor.Reset()
 		fs.baseline = true
+		fs.checkpointPending = false
 	}
 	fs.pendingSnapshot = false
 	return nil
@@ -1236,6 +1266,7 @@ func (s *Supervisor) Handler() http.Handler {
 		telemetry.End(span, err)
 		if err != nil {
 			s.gateErrors.Add(1)
+			s.logf("gate sync failed host=%s files=%d: %v", req.HostID, n, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "files": n})
 			return
 		}

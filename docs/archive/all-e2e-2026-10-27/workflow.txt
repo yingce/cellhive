@@ -1,0 +1,7 @@
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.g7RWDh agent=30100 runtime=30102
+[e2e] sleep: waiting -> complete
+[e2e] timeout: waiting -> errored
+[e2e] retry: failed twice -> complete on attempt 3
+[e2e] r2 workflow metadata: text/x-workflow
+E2E-WORKFLOW: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.g7RWDh

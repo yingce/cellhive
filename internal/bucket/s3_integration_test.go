@@ -22,9 +22,10 @@ func TestS3BucketIntegration(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewS3Bucket(ctx, S3Options{
 		Endpoint: ep, Region: envOr("CELLHIVE_S3_TEST_REGION", "us-east-1"),
-		AccessKey: envOr("CELLHIVE_S3_TEST_ACCESS", "minioadmin"),
-		SecretKey: envOr("CELLHIVE_S3_TEST_SECRET", "minioadmin"),
-		Bucket:    envOr("CELLHIVE_S3_TEST_BUCKET", "cellhive"), PathStyle: os.Getenv("CELLHIVE_S3_TEST_PATH_STYLE") != "false",
+		AccessKey:                envOr("CELLHIVE_S3_TEST_ACCESS", "minioadmin"),
+		SecretKey:                envOr("CELLHIVE_S3_TEST_SECRET", "minioadmin"),
+		DisableOptionalChecksums: os.Getenv("CELLHIVE_S3_TEST_DISABLE_CHECKSUMS") == "true",
+		Bucket:                   envOr("CELLHIVE_S3_TEST_BUCKET", "cellhive"), PathStyle: os.Getenv("CELLHIVE_S3_TEST_PATH_STYLE") != "false",
 	})
 	if err != nil {
 		t.Fatalf("s3: %v", err)

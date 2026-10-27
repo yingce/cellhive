@@ -35,9 +35,13 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 	}
 	spec := map[string]any{}
 	for _, b := range v.Bindings {
-		token, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{
-			Namespace: ns, Kind: b.Type, Name: b.Name,
-		})
+		claims := scopedtoken.Claims{Namespace: ns, Kind: b.Type, Name: b.Name}
+		if b.Type == "kv" && b.ID != "" {
+			claims.Worker = worker
+			claims.Version = v.Version
+			claims.Resource = b.ID
+		}
+		token, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), claims)
 		if err != nil {
 			continue
 		}

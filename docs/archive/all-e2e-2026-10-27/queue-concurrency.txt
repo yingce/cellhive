@@ -1,0 +1,5 @@
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.Ej1wNX messages=100 max_concurrency=4
+[e2e] parallel send: worker error: QueueError: local_invalidation_failed: stale local cell is busy; retry ownership acquisition
+[e2e] sequential send: {"sent":80,"send_ms":373}
+[e2e] FAIL: consumed 80/100
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.Ej1wNX

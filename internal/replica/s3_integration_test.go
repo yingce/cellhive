@@ -2,9 +2,11 @@ package replica_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -25,13 +27,30 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	}
 	ctx := context.Background()
 	b, err := bucket.NewS3Bucket(ctx, bucket.S3Options{
-		Endpoint: ep, Region: "us-east-1", AccessKey: "minioadmin", SecretKey: "minioadmin",
-		Bucket: "cellhive", PathStyle: true,
+		Endpoint: ep, Region: s3TestEnv("CELLHIVE_S3_TEST_REGION", "us-east-1"),
+		AccessKey: s3TestEnv("CELLHIVE_S3_TEST_ACCESS", "minioadmin"), SecretKey: s3TestEnv("CELLHIVE_S3_TEST_SECRET", "minioadmin"),
+		Bucket: s3TestEnv("CELLHIVE_S3_TEST_BUCKET", "cellhive"), PathStyle: os.Getenv("CELLHIVE_S3_TEST_PATH_STYLE") != "false",
+		DisableOptionalChecksums: os.Getenv("CELLHIVE_S3_TEST_DISABLE_CHECKSUMS") == "true",
 	})
 	if err != nil {
 		t.Fatalf("s3: %v", err)
 	}
-	scope := cell.Scope{Namespace: "itest", Class: "__cell__", ID: t.Name()}
+	scope := cell.Scope{Namespace: "itest", Class: "__cell__", ID: fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())}
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		keys, err := b.List(cleanupCtx, scope.Key()+"/")
+		if err != nil {
+			t.Errorf("cleanup list: %v", err)
+			return
+		}
+		for _, key := range keys {
+			if err := b.Delete(cleanupCtx, key); err != nil {
+				t.Errorf("cleanup delete: %v", err)
+			}
+		}
+	})
 
 	// Build a multi-page SQLite DB.
 	dir := t.TempDir()
@@ -66,7 +85,16 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	rep := replica.New(b)
+	var store bucket.Bucket = b
+	if os.Getenv("CELLHIVE_S3_TEST_PROVIDER") == "cos" {
+		appender, err := bucket.NewCOSAppender(os.Getenv("COS_ENDPOINT"), os.Getenv("CELLHIVE_S3_TEST_ACCESS"), os.Getenv("CELLHIVE_S3_TEST_SECRET"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store = bucket.NewProviderBucket(b, appender)
+		t.Log("replication uses production COS provider (native append authority and immutable objects)")
+	}
+	rep := replica.New(store)
 	for _, seg := range parts {
 		if _, _, err := rep.Append(ctx, scope, 1, seg); err != nil {
 			t.Fatalf("append: %v", err)
@@ -119,4 +147,11 @@ func countRows(t *testing.T, path string) int {
 		t.Fatalf("count: %v", err)
 	}
 	return n
+}
+
+func s3TestEnv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

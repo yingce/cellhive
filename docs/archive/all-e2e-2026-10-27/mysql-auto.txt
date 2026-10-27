@@ -1,0 +1,16 @@
+{
+  "created_ms": 1793040050705,
+  "kind": "hyperdrive",
+  "name": "hd1",
+  "scope": "mysqlauto/__hyperdrive__/hd1"
+}
+proxysql servers=35202	127.0.0.1	13306 users=hd_1c1d6c9ad738abb03a4a
+hd_1c1d6c9ad738abb03a4a origin_roles=hd_1c1d6c9ad738abb03a4a
+worker=[{"ok":1,"db":"app","v":"8.0.46"}]
+health down=503 hyperdrive_proxy_unavailable
+health up=200
+proxysql cleanup=ok role cleanup=ok
+E2E-MYSQL: PASS
+scripts/e2e/mysql-auto.sh: line 21: 284992 Killed                  CELLHIVE_NODE_ID=mysql-auto CELLHIVE_ADVERTISE="127.0.0.1:$PORT" CELLHIVE_PEER_URL="http://127.0.0.1:$PORT" CELLHIVE_REST_ADDR="127.0.0.1:$PORT" CELLHIVE_ADMIN_ADDR="127.0.0.1:$ADMIN_PORT" CELLHIVE_DATA_DIR="$BASE/agent" CELLHIVE_BUCKET_DIR="$BASE/bucket" CELLHIVE_DISPATCH_URL="http://127.0.0.1:$INT_PORT" CELLHIVE_HYPERDRIVE_MODE=proxy CELLHIVE_HYPERDRIVE_PROXY='postgres://127.0.0.1:6133,mysql://127.0.0.1:6033' CELLHIVE_PROXYSQL_ADMIN='admin:admin@tcp(127.0.0.1:6032)/' CELLHIVE_HYPERDRIVE_MANAGED_USERS=1 setsid nohup "$BIN/cell-agent" > "$BASE/agent.log" 2>&1 < /dev/null
+scripts/e2e/mysql-auto.sh: line 21: 285039 Killed                  env CELLHIVE_CELL_URL="http://127.0.0.1:$PORT" CELLHIVE_USER_RUNTIME_PORT="$RT_PORT" CELLHIVE_USER_RUNTIME_INTERNAL_PORT="$INT_PORT" CELLHIVE_RUNTIME_DIR="$BASE/runtime" CELLHIVE_USER_RUNTIME_JS="$ROOT/workerd/user-runtime" CELLHIVE_FACADES_JS="$ROOT/workerd/platform/facades.js" CELLHIVE_WORKERD="${CELLHIVE_WORKERD:-$ROOT/cli/node_modules/.bin/workerd}" CELLHIVE_TENANT_OUTBOUND=public,private,local setsid nohup "$BIN/user-runtime" > "$BASE/runtime.log" 2>&1 < /dev/null
+kept /opt/.hermes/cache/scratch/cellhive-mysql-e2e.VuJr6O

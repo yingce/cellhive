@@ -137,19 +137,51 @@ func (r *Runner) Pass(ctx context.Context) (dispatched int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, ref := range refs {
-		if r.Filter != nil {
-			ok, ferr := r.Filter(ctx, ref)
-			if ferr != nil {
-				r.log().Warn("queue filter failed", "ns", ref.Namespace, "queue", ref.Name, "err", ferr)
-				continue
+	// Bound cross-queue fan-out independently of each queue's batch limit.
+	jobs := make(chan Ref)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := 0; i < min(len(refs), 8); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ref := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				if r.Filter != nil {
+					ok, err := r.Filter(ctx, ref)
+					if err != nil {
+						r.log().Warn("queue filter failed", "ns", ref.Namespace, "queue", ref.Name, "err", err)
+						continue
+					}
+					if !ok {
+						continue
+					}
+				}
+				n := r.dispatchRef(ctx, ref)
+				mu.Lock()
+				dispatched += n
+				mu.Unlock()
 			}
-			if !ok {
-				continue
-			}
-		}
-		dispatched += r.dispatchRef(ctx, ref)
+		}()
 	}
+	seen := map[[2]string]bool{}
+submit:
+	for _, ref := range refs {
+		key := [2]string{ref.Namespace, ref.Name}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		select {
+		case <-ctx.Done():
+			break submit
+		case jobs <- ref:
+		}
+	}
+	close(jobs)
+	wg.Wait()
 	return dispatched, nil
 }
 
@@ -457,12 +489,26 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return DispatchResult{}, fmt.Errorf("queue dispatch: %s", resp.Status)
 	}
-	var res DispatchResult
-	// The response is an envelope ({ok, result, ack, retry}); a body we cannot
-	// decode still counts as a successful whole-batch ack.
-	data, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if rerr == nil && len(data) > 0 {
-		_ = json.Unmarshal(data, &res)
+	if resp.StatusCode == http.StatusNoContent {
+		return DispatchResult{}, nil
 	}
-	return res, nil
+	const maxResponse = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	if err != nil {
+		return DispatchResult{}, fmt.Errorf("queue dispatch response: %w", err)
+	}
+	if len(data) > maxResponse {
+		return DispatchResult{}, fmt.Errorf("queue dispatch response exceeds %d bytes", maxResponse)
+	}
+	var envelope struct {
+		OK bool `json:"ok"`
+		DispatchResult
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return DispatchResult{}, fmt.Errorf("queue dispatch response: %w", err)
+	}
+	if !envelope.OK {
+		return DispatchResult{}, fmt.Errorf("queue dispatch response missing success confirmation")
+	}
+	return envelope.DispatchResult, nil
 }

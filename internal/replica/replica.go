@@ -21,6 +21,8 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 	"cellhive/internal/restore"
+	"cellhive/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Manager reads and writes replication segments for cells.
@@ -350,7 +352,10 @@ func (m *Manager) spansForEpoch(ctx context.Context, s cell.Scope, epoch uint64)
 // a long-lived scope (many owner epochs) made the first write after a restart
 // take tens of seconds.
 func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEpoch uint64) (uint64, error) {
-	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
+	listCtx, listSpan := telemetry.Tracer().Start(ctx, "replica.list_watermark_chain")
+	keys, err := m.B.List(listCtx, s.Key()+"/ltx/")
+	listSpan.SetAttributes(attribute.Int("restore.listed_objects", len(keys)))
+	listSpan.End()
 	if err != nil {
 		return 0, err
 	}
@@ -562,9 +567,15 @@ func lastBase(epochs []uint64, hasBase map[uint64]bool) int {
 // predecessor's snapshot. Cold path; the caller's restore planner selects the
 // newest complete snapshot and validates delta contiguity.
 func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]Segment, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "replica.restore_chain")
+	defer span.End()
+	span.SetAttributes(attribute.String("cell.scope", s.String()))
 	// One listing for the whole chain: cold hydrate used to list once for
 	// Epochs and once per epoch for L0. restoreOnceKeys below never lists.
-	keys, err := m.B.List(ctx, s.Key()+"/ltx/")
+	listCtx, listSpan := telemetry.Tracer().Start(ctx, "replica.list_chain")
+	keys, err := m.B.List(listCtx, s.Key()+"/ltx/")
+	listSpan.SetAttributes(attribute.Int("restore.listed_objects", len(keys)))
+	listSpan.End()
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +661,10 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		for i, seg := range out {
 			raws[i] = seg.Raw
 		}
-		if err := restore.ValidateChain(raws); err == nil {
+		_, validateSpan := telemetry.Tracer().Start(ctx, "replica.validate_chain")
+		validateErr := restore.ValidateChain(raws)
+		validateSpan.End()
+		if err := validateErr; err == nil {
 			return out, nil
 		} else if firstErr == nil {
 			firstErr = err
@@ -762,6 +776,9 @@ func parseSegmentRange(base string) (segmentSpan, bool) {
 // scope has no replica objects. It lists the bucket, so it is a cold-path
 // operation for restore/takeover only.
 func (m *Manager) LatestEpoch(ctx context.Context, s cell.Scope, maxEpoch uint64) (uint64, bool, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "replica.latest_epoch")
+	defer span.End()
+	span.SetAttributes(attribute.String("cell.scope", s.String()))
 	epochs, err := m.epochDirs(ctx, s, maxEpoch)
 	if err != nil || len(epochs) == 0 {
 		return 0, false, err
@@ -1028,14 +1045,21 @@ func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) (
 }
 
 func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint64, l0 []string) ([]Segment, error) {
-	fence, _, ferr := m.readResourceFence(ctx, s)
+	ctx, span := telemetry.Tracer().Start(ctx, "replica.restore_epoch")
+	defer span.End()
+	span.SetAttributes(attribute.String("cell.scope", s.String()))
+	fctx, fspan := telemetry.Tracer().Start(ctx, "replica.restore_fence")
+	fence, _, ferr := m.readResourceFence(fctx, s)
+	fspan.End()
 	if ferr != nil {
 		return nil, ferr
 	}
 	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
 		return nil, nil
 	}
-	man, ok, err := m.ReadManifest(ctx, s, epoch)
+	mctx, mspan := telemetry.Tracer().Start(ctx, "replica.restore_manifest")
+	man, ok, err := m.ReadManifest(mctx, s, epoch)
+	mspan.End()
 	if err != nil {
 		return nil, err
 	}
@@ -1079,6 +1103,8 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 	if parallel > len(keys) {
 		parallel = len(keys)
 	}
+	fetchCtx, fetchSpan := telemetry.Tracer().Start(ctx, "replica.download_objects")
+	fetchSpan.SetAttributes(attribute.Int("restore.objects", len(keys)), attribute.Int("restore.parallel", parallel))
 	raws := make([][]byte, len(keys))
 	var wg sync.WaitGroup
 	var fetchErr error
@@ -1089,7 +1115,13 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				raw, err := m.ReadSegment(ctx, keys[i])
+				objCtx, objSpan := telemetry.Tracer().Start(fetchCtx, "replica.download_object")
+				raw, err := m.ReadSegment(objCtx, keys[i])
+				objSpan.SetAttributes(attribute.Int("restore.bytes", len(raw)))
+				if err != nil {
+					objSpan.RecordError(err)
+				}
+				objSpan.End()
 				if err != nil {
 					fetchMu.Lock()
 					if fetchErr == nil {
@@ -1108,14 +1140,22 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			fetchSpan.End()
 			return nil, ctx.Err()
 		}
 	}
 	close(jobs)
 	wg.Wait()
+	fetchSpan.End()
 	if fetchErr != nil {
 		return nil, fetchErr
 	}
+	ctx, decodeSpan := telemetry.Tracer().Start(ctx, "replica.decode_objects")
+	decodedParts, duplicateParts := 0, 0
+	defer func() {
+		decodeSpan.SetAttributes(attribute.Int("restore.decoded_segments", decodedParts), attribute.Int("restore.duplicate_segments", duplicateParts))
+		decodeSpan.End()
+	}()
 	segs := make([]Segment, 0, len(keys))
 	seen := map[string]bool{}
 	partialSnapshots := map[uint64]bool{}
@@ -1125,6 +1165,7 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 		if err != nil {
 			return nil, fmt.Errorf("replica: corrupt object %s: %w", k, err)
 		}
+		decodedParts += len(parts)
 		for i, part := range parts {
 			h, _, err := ltx.Decode(part)
 			if err != nil {
@@ -1142,6 +1183,7 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 			// Recovery re-uploads a follower's single segments, which may also be
 			// present inside an owner-uploaded batch. Keep one logical copy.
 			if id := h.ID(); seen[id] {
+				duplicateParts++
 				continue
 			} else {
 				seen[id] = true

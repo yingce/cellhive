@@ -1,0 +1,3 @@
+ok  	cellhive/internal/control	1.507s
+ok  	cellhive/internal/server	2.996s
+ok  	cellhive/internal/dosupervisor	1.226s

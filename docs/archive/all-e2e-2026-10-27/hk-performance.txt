@@ -1,0 +1,38 @@
+HK-REVIEW artifacts=/opt/.hermes/cache/scratch/hk-review-1793041068-49375b-pgxtldrw compute=local storage=HK-COS durability=bucket
+START kv-performance.sh ns=hk-review-1793041068-49375b-0
+{"layer":"direct","mode":"put","label":"first-write","round":0,"concurrency":1,"n":1,"failures":0,"p50_ms":1236.429,"p95_ms":1236.429,"p99_ms":1236.429,"max_ms":1236.429,"rps":0.81,"elapsed_ms":1236.76,"errors":[]}
+{"layer":"direct","mode":"put","label":"preload","round":0,"concurrency":1,"n":32,"failures":0,"p50_ms":44.054,"p95_ms":157.972,"p99_ms":362.72,"max_ms":362.72,"rps":15.67,"elapsed_ms":2042.69,"errors":[]}
+{"layer":"worker","mode":"get","label":"first-worker-read","round":0,"concurrency":1,"n":1,"failures":0,"p50_ms":8.962,"p95_ms":8.962,"p99_ms":8.962,"max_ms":8.962,"rps":110.66,"elapsed_ms":9.04,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":1,"n":60,"failures":0,"p50_ms":36.908,"p95_ms":80.962,"p99_ms":811.69,"max_ms":811.69,"rps":17.32,"elapsed_ms":3463.71,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":1,"n":5000,"failures":0,"p50_ms":0.336,"p95_ms":0.474,"p99_ms":0.675,"max_ms":1.918,"rps":2695.84,"elapsed_ms":1854.71,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":1,"n":60,"failures":0,"p50_ms":42.798,"p95_ms":81.705,"p99_ms":1002.493,"max_ms":1002.493,"rps":16.08,"elapsed_ms":3732.37,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":1,"n":5000,"failures":0,"p50_ms":1.26,"p95_ms":1.843,"p99_ms":3.005,"max_ms":13.169,"rps":716.31,"elapsed_ms":6980.22,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":8,"n":200,"failures":0,"p50_ms":41.001,"p95_ms":65.454,"p99_ms":89.145,"max_ms":89.23,"rps":172.45,"elapsed_ms":1159.72,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":8,"n":10000,"failures":0,"p50_ms":0.865,"p95_ms":1.848,"p99_ms":2.411,"max_ms":4.825,"rps":7842.23,"elapsed_ms":1275.15,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":8,"n":200,"failures":0,"p50_ms":88.387,"p95_ms":117.906,"p99_ms":131.095,"max_ms":131.709,"rps":88.25,"elapsed_ms":2266.4,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":8,"n":10000,"failures":0,"p50_ms":5.551,"p95_ms":9.293,"p99_ms":18.54,"max_ms":112.952,"rps":1262.23,"elapsed_ms":7922.5,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":32,"n":400,"failures":0,"p50_ms":84.894,"p95_ms":122.973,"p99_ms":130.928,"max_ms":131.967,"rps":365.2,"elapsed_ms":1095.28,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":32,"n":10000,"failures":0,"p50_ms":3.651,"p95_ms":6.682,"p99_ms":8.117,"max_ms":11.756,"rps":8152.62,"elapsed_ms":1226.6,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":32,"n":400,"failures":0,"p50_ms":106.621,"p95_ms":167.023,"p99_ms":175.48,"max_ms":194.667,"rps":294.18,"elapsed_ms":1359.71,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":32,"n":10000,"failures":0,"p50_ms":23.319,"p95_ms":36.037,"p99_ms":72.509,"max_ms":146.735,"rps":1271.51,"elapsed_ms":7864.63,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":1,"n":60,"failures":0,"p50_ms":46.244,"p95_ms":129.556,"p99_ms":613.643,"max_ms":613.643,"rps":14.31,"elapsed_ms":4192.41,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":1,"n":5000,"failures":0,"p50_ms":0.28,"p95_ms":0.363,"p99_ms":0.531,"max_ms":2.378,"rps":3271.82,"elapsed_ms":1528.2,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":1,"n":60,"failures":0,"p50_ms":45.592,"p95_ms":81.076,"p99_ms":613.355,"max_ms":613.355,"rps":15.81,"elapsed_ms":3795.52,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":1,"n":5000,"failures":0,"p50_ms":1.226,"p95_ms":1.696,"p99_ms":2.139,"max_ms":130.039,"rps":719.14,"elapsed_ms":6952.77,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":8,"n":200,"failures":0,"p50_ms":54.907,"p95_ms":95.258,"p99_ms":125.788,"max_ms":136.784,"rps":126.45,"elapsed_ms":1581.68,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":8,"n":10000,"failures":0,"p50_ms":0.843,"p95_ms":1.867,"p99_ms":2.691,"max_ms":6.353,"rps":7816.87,"elapsed_ms":1279.28,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":8,"n":200,"failures":0,"p50_ms":87.086,"p95_ms":211.348,"p99_ms":329.456,"max_ms":340.896,"rps":75.95,"elapsed_ms":2633.14,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":8,"n":10000,"failures":0,"p50_ms":5.686,"p95_ms":8.419,"p99_ms":17.11,"max_ms":144.449,"rps":1255.92,"elapsed_ms":7962.28,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":32,"n":400,"failures":0,"p50_ms":79.227,"p95_ms":656.086,"p99_ms":699.927,"max_ms":701.025,"rps":262.6,"elapsed_ms":1523.26,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":32,"n":10000,"failures":0,"p50_ms":3.527,"p95_ms":6.508,"p99_ms":7.69,"max_ms":10.317,"rps":8502.08,"elapsed_ms":1176.18,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":32,"n":400,"failures":0,"p50_ms":83.089,"p95_ms":96.359,"p99_ms":100.852,"max_ms":101.272,"rps":368.48,"elapsed_ms":1085.54,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":32,"n":10000,"failures":0,"p50_ms":23.278,"p95_ms":34.343,"p99_ms":67.653,"max_ms":136.488,"rps":1276.81,"elapsed_ms":7832.02,"errors":[]}
+    PID %CPU   RSS     ELAPSED COMMAND
+ 448396 55.4 63048       01:37 /opt/cellhive/bin/cell-agent
+ 449794  0.0 17936       01:26 /opt/cellhive/bin/user-runtime
+WRANGLER-PERFORMANCE: SKIP (set WRANGLER_CLI_PATH)
+E2E-KV-PERFORMANCE: PASS
+HK-CLEANUP ns=hk-review-1793041068-49375b-0 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.QbK0ZU
+END kv-performance.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/opt/.hermes/cache/scratch/hk-review-1793041068-49375b-pgxtldrw

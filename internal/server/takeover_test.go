@@ -229,3 +229,18 @@ func TestBusyPinnedStaleCellCannotBeClaimed(t *testing.T) {
 		t.Fatalf("stale pinned file remains: %v", err)
 	}
 }
+
+// Preparation must publish ownership before admitting the first request;
+// otherwise a second cold request treats the first one's busy cell as stale.
+func TestColdPreparationBeforeRequestAdmission(t *testing.T) {
+	srv, _ := newTestServer(t)
+	sc := cell.Scope{Namespace: "cold", Class: "__queue__", ID: "jobs"}
+	if err := srv.invalidateStaleLocal(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	end := srv.Store.BeginRequest(sc.String())
+	defer end()
+	if err := srv.invalidateStaleLocal(t.Context(), sc); err != nil {
+		t.Fatalf("second cold request rejected while first is admitted: %v", err)
+	}
+}

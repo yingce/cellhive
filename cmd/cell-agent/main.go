@@ -209,9 +209,11 @@ func main() {
 	if placementWeight <= 0 {
 		placementWeight = runtime.NumCPU()
 	}
+	leaseCtx, stopLease := context.WithCancel(context.Background())
+	defer stopLease()
 	publishLoad := func() error {
 		owned := len(om.OwnedScopes())
-		if err := lm.Publish(ctx, lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
+		if err := lm.Publish(leaseCtx, lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
 			log.Warn("lease publish failed", "err", err)
 			return err
 		}
@@ -237,19 +239,8 @@ func main() {
 	}()
 	defer func() { stopKnown(); <-knownDone }()
 
-	// Renew node lease at TTL/3.
-	go func() {
-		t := time.NewTicker(cfg.LeaseTTL / 3)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				_ = publishLoad()
-			}
-		}
-	}()
+	// Keep renewing through shutdown drains; the watchdog remains active.
+	go runNodeLeaseRenewal(leaseCtx, cfg.LeaseTTL, publishLoad)
 
 	// Keep the upload/ship loops alive through graceful handoff: the signal
 	// context is already cancelled when performHandoff runs, and a cancelled
@@ -263,7 +254,9 @@ func main() {
 			shards = 8
 		}
 	}
-	uploader := upload.NewSharded(rep, log, 64, 1<<20, 20*time.Millisecond, shards)
+	// Fleet-acked writes can coalesce in the background. Bucket waiters wake
+	// the uploader immediately; follower fsync retains its separate 2ms window.
+	uploader := upload.NewSharded(rep, log, 64, 1<<20, 200*time.Millisecond, shards)
 	// Durable queue for the asynchronous bucket copy: a failed upload (or a
 	// restart) defers the segment instead of dropping it (ADR-143).
 	if sp, serr := upload.OpenSpool(filepath.Join(cfg.DataDir, "upload-spool"), 200000); serr != nil {
@@ -330,6 +323,8 @@ func main() {
 	// chain. Small or uncompacted cells fall through to the full hydrate below.
 	if cfg.PagedRestore {
 		store.Paged = func(pctx context.Context, sc cell.Scope, dest string) (pagedvfs.Source, bool, error) {
+			pctx, span := telemetry.Tracer().Start(pctx, "cell.restore_paged_probe")
+			defer span.End()
 			ep, ok, perr := rep.LatestEpoch(pctx, sc, 0)
 			if perr != nil || !ok {
 				return nil, false, nil
@@ -359,6 +354,8 @@ func main() {
 	// Cold restore (ADR-092): a fresh owner hydrates a cell from its bucket
 	// replica before serving, so acked backend-A writes survive crash/takeover.
 	store.Hydrate = func(hctx context.Context, sc cell.Scope, dest string) error {
+		hctx, span := telemetry.Tracer().Start(hctx, "cell.restore_full")
+		defer span.End()
 		hydrateStart := time.Now()
 		ep, ok, herr := rep.LatestEpoch(hctx, sc, 0)
 		if herr != nil {
@@ -383,7 +380,12 @@ func main() {
 		for _, sg := range segs {
 			raw = append(raw, sg.Raw)
 		}
+		_, applySpan := telemetry.Tracer().Start(hctx, "cell.restore_apply_sqlite")
 		_, herr = restore.ApplyFile(dest, raw)
+		if herr != nil {
+			applySpan.RecordError(herr)
+		}
+		applySpan.End()
 		return herr
 	}
 

@@ -1,0 +1,58 @@
+COLD-E2E: bucket=fs ns=e2e-cold-1793039662-d5c42b lease_ttl=10s steady=20s preload=3145728B p99_limit=1000ms bin=/opt/cellhive/bin/cell-agent-cold
+preload: keys=48 failed=0 (3145728B in 65536B values)
+RESULT scenario=steady puts=4191 p50_ms=4.0 p99_ms=5.4 max_ms=24.6 list_ops=13 get_ops=4248 put_ops=0 epoch_changes=0 acked=80 missing=0 wrong=0 client="puts=4191 errs=0 getbad=0"
+READ_RESULT scenario=steady puts=4191 p50_ms=0.5 p99_ms=1.1 max_ms=5.5
+TARGET_OWNER scenario=steady epoch_before=1 epoch_after=1
+eviction: evicted_delta=11 open_cells=1 (cap 3)
+RESULT scenario=eviction puts=1 p50_ms=9.2 p99_ms=9.2 max_ms=9.2 list_ops=1 get_ops=4 put_ops=0 epoch_changes=0 acked=87 missing=0 wrong=0 single_op_ms=9.1 ok=1 ttfs_ms=9.2 attempts=1 put_ms=9.1 last_code=200
+RESULT scenario=restart puts=1 p50_ms=1770.6 p99_ms=1770.6 max_ms=1770.6 list_ops=3 get_ops=363 put_ops=2 epoch_changes=2 acked=88 missing=0 wrong=0 single_op_ms=37.4 ok=1 ttfs_ms=1770.6 attempts=84 put_ms=37.4 last_code=200
+COLD-E2E: FAIL: restart: p99 1770.6ms > limit 1000ms
+--- tail agent-a.log ---
+time=2026-10-27T02:34:46.839+08:00 level=INFO msg="handoff complete" released=2
+time=2026-10-27T02:34:46.854+08:00 level=INFO msg="cell-agent stopped"
+time=2026-10-27T02:34:46.958+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:34:46.964+08:00 level=INFO msg="wake index repaired" examined=2 repaired=2
+time=2026-10-27T02:34:46.966+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17212
+time=2026-10-27T02:34:49.201+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=2 cut=4240 bytes=3375104
+time=2026-10-27T02:34:49.201+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4240
+time=2026-10-27T02:34:49.253+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=__platform__/__control__/main epoch=2 cut=3 bytes=315392
+time=2026-10-27T02:34:49.253+08:00 level=INFO msg="capture continues durable chain" scope=__platform__/__control__/main txid=3
+time=2026-10-27T02:34:55.714+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4241
+time=2026-10-27T02:34:55.994+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:34:56.001+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17212
+time=2026-10-27T02:34:56.004+08:00 level=INFO msg="wake index repaired" examined=7 repaired=7
+time=2026-10-27T02:34:58.029+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=3 cut=4242 bytes=3387392
+time=2026-10-27T02:34:58.029+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4242
+RESULT scenario=takeover_first puts=1 p50_ms=8104.1 p99_ms=8104.1 max_ms=8104.1 list_ops=12 get_ops=1599 put_ops=2 epoch_changes=2 acked=109 missing=0 wrong=0 single_op_ms=65.5 ok=1 ttfs_ms=8104.1 attempts=366 put_ms=65.5 last_code=200 lease_ttl_ms=10000
+RESULT scenario=takeover_next50 puts=50 p50_ms=4.3 p99_ms=5.6 max_ms=5.6 list_ops=0 get_ops=50 put_ops=0 epoch_changes=0 acked=139 missing=0 wrong=0 client="puts=50 errs=0"
+RESULT scenario=cold puts=1 p50_ms=1817.5 p99_ms=1817.5 max_ms=1817.5 list_ops=6 get_ops=424 put_ops=2 epoch_changes=2 acked=140 missing=0 wrong=0 single_op_ms=69.9 ok=1 ttfs_ms=1817.5 attempts=85 put_ms=69.9 last_code=200
+COLD-E2E: FAIL: cold: p99 1817.5ms > limit 1000ms
+--- tail agent-a.log ---
+time=2026-10-27T02:34:46.839+08:00 level=INFO msg="handoff complete" released=2
+time=2026-10-27T02:34:46.854+08:00 level=INFO msg="cell-agent stopped"
+time=2026-10-27T02:34:46.958+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:34:46.964+08:00 level=INFO msg="wake index repaired" examined=2 repaired=2
+time=2026-10-27T02:34:46.966+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17212
+time=2026-10-27T02:34:49.201+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=2 cut=4240 bytes=3375104
+time=2026-10-27T02:34:49.201+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4240
+time=2026-10-27T02:34:49.253+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=__platform__/__control__/main epoch=2 cut=3 bytes=315392
+time=2026-10-27T02:34:49.253+08:00 level=INFO msg="capture continues durable chain" scope=__platform__/__control__/main txid=3
+time=2026-10-27T02:34:55.714+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4241
+time=2026-10-27T02:34:55.994+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:34:56.001+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17212
+time=2026-10-27T02:34:56.004+08:00 level=INFO msg="wake index repaired" examined=7 repaired=7
+time=2026-10-27T02:34:58.029+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=3 cut=4242 bytes=3387392
+time=2026-10-27T02:34:58.029+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4242
+--- tail agent-b.log ---
+time=2026-10-27T02:34:58.565+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:34:58.574+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+time=2026-10-27T02:34:58.576+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17214
+time=2026-10-27T02:35:06.631+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=4 cut=4263 bytes=3481600
+time=2026-10-27T02:35:06.631+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4263
+time=2026-10-27T02:35:07.540+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:35:07.550+08:00 level=INFO msg="wake index repaired" examined=1 repaired=1
+time=2026-10-27T02:35:07.552+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:17214
+time=2026-10-27T02:35:09.625+08:00 level=INFO msg="capture continues cross-epoch chain with marker" scope=e2e-cold-1793039662-d5c42b/__kv__/main epoch=5 cut=4314 bytes=3624960
+time=2026-10-27T02:35:09.625+08:00 level=INFO msg="capture continues durable chain" scope=e2e-cold-1793039662-d5c42b/__kv__/main txid=4314
+integrity_check: ok (cells/e2e-cold-1793039662-d5c42b/__kv__/main.db)
+COLD-E2E: FAIL

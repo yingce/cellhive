@@ -1,0 +1,12 @@
+KV load omitted: this supplemental run tests Wrangler staging only
+    PID %CPU   RSS     ELAPSED COMMAND
+ 354389 14.7 41588       00:00 /opt/cellhive/bin/cell-agent
+ 354460  0.0 18092       00:00 /opt/cellhive/bin/user-runtime
+{"layer": "wrangler", "mode": "versions-upload", "round": 1, "elapsed_ms": 1304.4, "version": "2", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 1, "elapsed_ms": 1409.69, "version": "2", "active_verified": true}
+{"layer": "wrangler", "mode": "versions-upload", "round": 2, "elapsed_ms": 1227.03, "version": "3", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 2, "elapsed_ms": 1112.95, "version": "3", "active_verified": true}
+{"layer": "wrangler", "mode": "versions-upload", "round": 3, "elapsed_ms": 1187.61, "version": "4", "active_unchanged": true}
+{"layer": "wrangler", "mode": "versions-deploy", "round": 3, "elapsed_ms": 1152.85, "version": "4", "active_verified": true}
+E2E-WRANGLER-STAGING: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.urS1a7

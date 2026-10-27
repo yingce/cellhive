@@ -1,0 +1,33 @@
+{"layer":"direct","mode":"put","label":"first-write","round":0,"concurrency":1,"n":1,"failures":0,"p50_ms":24.091,"p95_ms":24.091,"p99_ms":24.091,"max_ms":24.091,"rps":40.96,"elapsed_ms":24.41,"errors":[]}
+{"layer":"direct","mode":"put","label":"preload","round":0,"concurrency":1,"n":32,"failures":0,"p50_ms":3.494,"p95_ms":4.451,"p99_ms":5.107,"max_ms":5.107,"rps":277.15,"elapsed_ms":115.46,"errors":[]}
+{"layer":"worker","mode":"get","label":"first-worker-read","round":0,"concurrency":1,"n":1,"failures":0,"p50_ms":7.293,"p95_ms":7.293,"p99_ms":7.293,"max_ms":7.293,"rps":136.19,"elapsed_ms":7.34,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":1,"n":60,"failures":0,"p50_ms":3.396,"p95_ms":4.608,"p99_ms":5.168,"max_ms":5.168,"rps":271.49,"elapsed_ms":221.01,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":1,"n":5000,"failures":0,"p50_ms":0.326,"p95_ms":0.459,"p99_ms":0.567,"max_ms":1.472,"rps":2777.2,"elapsed_ms":1800.37,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":1,"n":60,"failures":0,"p50_ms":4.869,"p95_ms":5.842,"p99_ms":7.484,"max_ms":7.484,"rps":204.15,"elapsed_ms":293.9,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":1,"n":5000,"failures":0,"p50_ms":1.262,"p95_ms":1.811,"p99_ms":2.934,"max_ms":11.087,"rps":721.38,"elapsed_ms":6931.13,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":8,"n":200,"failures":0,"p50_ms":3.85,"p95_ms":5.601,"p99_ms":7.644,"max_ms":8.128,"rps":1996.86,"elapsed_ms":100.16,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":8,"n":10000,"failures":0,"p50_ms":0.89,"p95_ms":1.881,"p99_ms":2.462,"max_ms":5.048,"rps":7626.64,"elapsed_ms":1311.19,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":8,"n":200,"failures":0,"p50_ms":7.832,"p95_ms":12.644,"p99_ms":19.81,"max_ms":20.562,"rps":922.05,"elapsed_ms":216.91,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":8,"n":10000,"failures":0,"p50_ms":5.451,"p95_ms":8.517,"p99_ms":20.857,"max_ms":93.168,"rps":1290.8,"elapsed_ms":7747.15,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":1,"concurrency":32,"n":400,"failures":0,"p50_ms":5.582,"p95_ms":11.13,"p99_ms":15.207,"max_ms":16.675,"rps":4983.16,"elapsed_ms":80.27,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":1,"concurrency":32,"n":10000,"failures":0,"p50_ms":3.448,"p95_ms":6.221,"p99_ms":7.816,"max_ms":12.116,"rps":8714.97,"elapsed_ms":1147.45,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":1,"concurrency":32,"n":400,"failures":0,"p50_ms":25.283,"p95_ms":40.335,"p99_ms":45.643,"max_ms":48.924,"rps":1208.17,"elapsed_ms":331.08,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":1,"concurrency":32,"n":10000,"failures":0,"p50_ms":22.203,"p95_ms":34.369,"p99_ms":67.178,"max_ms":119.091,"rps":1337.26,"elapsed_ms":7477.97,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":1,"n":60,"failures":0,"p50_ms":2.891,"p95_ms":4.007,"p99_ms":5.98,"max_ms":5.98,"rps":309.14,"elapsed_ms":194.09,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":1,"n":5000,"failures":0,"p50_ms":0.259,"p95_ms":0.337,"p99_ms":0.465,"max_ms":1.405,"rps":3520.01,"elapsed_ms":1420.45,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":1,"n":60,"failures":0,"p50_ms":4.613,"p95_ms":5.465,"p99_ms":6.174,"max_ms":6.174,"rps":219.77,"elapsed_ms":273.01,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":1,"n":5000,"failures":0,"p50_ms":1.181,"p95_ms":1.672,"p99_ms":2.154,"max_ms":110.221,"rps":743.11,"elapsed_ms":6728.52,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":8,"n":200,"failures":0,"p50_ms":3.934,"p95_ms":5.274,"p99_ms":5.505,"max_ms":5.693,"rps":1983.06,"elapsed_ms":100.85,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":8,"n":10000,"failures":0,"p50_ms":0.806,"p95_ms":1.67,"p99_ms":2.135,"max_ms":3.52,"rps":8483.65,"elapsed_ms":1178.74,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":8,"n":200,"failures":0,"p50_ms":7.913,"p95_ms":12.597,"p99_ms":49.226,"max_ms":49.926,"rps":830.63,"elapsed_ms":240.78,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":8,"n":10000,"failures":0,"p50_ms":5.403,"p95_ms":8.442,"p99_ms":17.863,"max_ms":114.994,"rps":1314.86,"elapsed_ms":7605.37,"errors":[]}
+{"layer":"direct","mode":"put","label":"warm","round":2,"concurrency":32,"n":400,"failures":0,"p50_ms":6.413,"p95_ms":12.257,"p99_ms":13.761,"max_ms":15.251,"rps":4523.97,"elapsed_ms":88.42,"errors":[]}
+{"layer":"direct","mode":"get","label":"warm","round":2,"concurrency":32,"n":10000,"failures":0,"p50_ms":3.584,"p95_ms":6.746,"p99_ms":8.322,"max_ms":14.844,"rps":8255.4,"elapsed_ms":1211.33,"errors":[]}
+{"layer":"worker","mode":"put","label":"warm","round":2,"concurrency":32,"n":400,"failures":0,"p50_ms":23.544,"p95_ms":62.947,"p99_ms":69.603,"max_ms":71.005,"rps":1113.15,"elapsed_ms":359.34,"errors":[]}
+{"layer":"worker","mode":"get","label":"warm","round":2,"concurrency":32,"n":10000,"failures":0,"p50_ms":23.168,"p95_ms":35.017,"p99_ms":73.054,"max_ms":153.245,"rps":1272.67,"elapsed_ms":7857.49,"errors":[]}
+    PID %CPU   RSS     ELAPSED COMMAND
+ 224081 60.2 47720       00:55 /opt/cellhive/bin/cell-agent
+ 224127  0.0 18032       00:55 /opt/cellhive/bin/user-runtime
+WRANGLER-PERFORMANCE: SKIP (set WRANGLER_CLI_PATH)
+E2E-KV-PERFORMANCE: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.prPqwg

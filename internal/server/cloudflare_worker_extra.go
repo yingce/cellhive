@@ -165,30 +165,12 @@ func (s *Server) handleCloudflareWorkerVersionGet(w http.ResponseWriter, r *http
 				writeErr(w, 500, "version_failed", "version environment unavailable")
 				return
 			}
-			bindings := make([]map[string]any, 0, len(view.Bindings))
-			for _, binding := range view.Bindings {
-				item := map[string]any{"name": binding.Name}
-				switch binding.Type {
-				case "kv":
-					item["type"], item["namespace_id"] = "kv_namespace", binding.ID
-				case "d1":
-					item["type"], item["id"] = "d1", binding.ID
-				case "r2":
-					item["type"], item["bucket_name"] = "r2_bucket", binding.ID
-				case "queue":
-					item["type"], item["queue_name"] = "queue", binding.ID
-				case "service":
-					item["type"], item["service"] = "service", binding.ID
-					if binding.Entrypoint != "" {
-						item["entrypoint"] = binding.Entrypoint
-					}
-				case "workflow":
-					item["type"], item["workflow_name"] = "workflow", binding.ID
-				default:
-					continue
-				}
-				bindings = append(bindings, item)
+			bindings, err := s.cloudflareVersionBindings(r.Context(), view)
+			if err != nil {
+				writeErr(w, 500, "version_failed", "version bindings unavailable")
+				return
 			}
+
 			runtime := map[string]any{"compatibility_date": view.CompatDate, "compatibility_flags": view.CompatFlags}
 			if view.Limits != nil {
 				limits := map[string]any{}

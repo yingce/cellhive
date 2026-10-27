@@ -23,6 +23,8 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/pagedvfs"
+	"cellhive/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ErrNotFound is returned when a key does not exist.
@@ -273,10 +275,21 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	_, interactive := ctx.Deadline()
 	interactive = interactive || ctx.Value(interactiveHydrationKey{}) == true
 	s.mu.Lock()
-	if err := s.waitLocked(ctx, func() bool { return s.evicting[key] || s.opening[key] }); err != nil {
-		s.mu.Unlock()
-		return nil, err
+	waitCtx := ctx
+	endWait := func() {}
+	if s.evicting[key] || s.opening[key] {
+		tracedCtx, waitSpan := telemetry.Tracer().Start(ctx, "cell.wait_existing_open")
+		waitSpan.SetAttributes(attribute.String("cell.scope", key), attribute.Bool("cell.opening", s.opening[key]), attribute.Bool("cell.evicting", s.evicting[key]))
+		waitCtx = tracedCtx
+		endWait = func() { waitSpan.End() }
 	}
+	waitErr := s.waitLocked(waitCtx, func() bool { return s.evicting[key] || s.opening[key] })
+	endWait()
+	if waitErr != nil {
+		s.mu.Unlock()
+		return nil, waitErr
+	}
+
 	if c, ok := s.cells[p]; ok && !c.Closed() {
 		s.touchLocked(p)
 		s.mu.Unlock()
@@ -300,6 +313,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		s.mu.Unlock()
 	}()
 
+	ctx, openSpan := telemetry.Tracer().Start(ctx, "cell.open_uncached")
+	defer openSpan.End()
+	openSpan.SetAttributes(attribute.String("cell.scope", sc.String()))
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
 	markerPS, markerCommit, markerTx, markerClean, markerExists, markerValid := readPagedMarker(p)
@@ -315,7 +331,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	paged := false
 	if cold && (missing || markerValid) && s.Paged != nil {
 		hctx, cancel := s.hydrateContext(ctx)
-		release, rerr := s.hydrateSlot(hctx, interactive)
+		slotCtx, slotSpan := telemetry.Tracer().Start(hctx, "cell.restore_slot_wait")
+		release, rerr := s.hydrateSlot(slotCtx, interactive)
+		slotSpan.End()
 		if rerr != nil {
 			cancel()
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, rerr)
@@ -383,7 +401,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	}
 	if missing && s.Hydrate != nil {
 		hctx, cancel := s.hydrateContext(ctx)
-		release, rerr := s.hydrateSlot(hctx, interactive)
+		slotCtx, slotSpan := telemetry.Tracer().Start(hctx, "cell.restore_slot_wait")
+		release, rerr := s.hydrateSlot(slotCtx, interactive)
+		slotSpan.End()
 		if rerr != nil {
 			cancel()
 			return nil, fmt.Errorf("cellstore: hydrate %s: %w", sc, rerr)
@@ -400,7 +420,12 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
-	c, err := openCell(ctx, sc, p, paged)
+	sqliteCtx, sqliteSpan := telemetry.Tracer().Start(ctx, "cell.open_sqlite")
+	c, err := openCell(sqliteCtx, sc, p, paged)
+	if err != nil {
+		sqliteSpan.RecordError(err)
+	}
+	sqliteSpan.End()
 	if err != nil {
 		if paged {
 			pagedvfs.Release(p)

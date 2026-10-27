@@ -1,0 +1,5 @@
+--- FAIL: TestCloudflareUploadInheritsActiveBinding (0.02s)
+    cloudflare_inherit_test.go:16: upload 400: {"error":"invalid_multipart","message":"unsupported binding type \"inherit\" for \"JOBS\""}
+FAIL
+FAIL	cellhive/internal/server	0.024s
+FAIL

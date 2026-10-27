@@ -1,0 +1,4 @@
+Unable to find image 'minio/minio:RELEASE.2025-02-18T16-25-55Z' locally
+docker: Error response from daemon: pull access denied for minio/minio, repository does not exist or may require 'docker login'
+
+Run 'docker run --help' for more information

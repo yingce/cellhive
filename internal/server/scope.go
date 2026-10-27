@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cellhive/internal/scopedtoken"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,13 +9,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"strings"
 	"time"
 
 	"cellhive/internal/control"
-	"cellhive/internal/replica"
-	"cellhive/internal/scopedtoken"
+	"cellhive/internal/owner"
 	"cellhive/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -26,6 +27,7 @@ const (
 	ctxScopeNS ctxKey = iota
 	ctxScopeName
 	ctxScopePreInvalidated
+	ctxPinnedKV
 )
 
 // scopeSecret is the HMAC key for binding scoped tokens (ADR-074). Required.
@@ -55,113 +57,19 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			// namespace (empty until then, which maps to ns="platform").
 			nsForMetrics := ""
 			defer func() { s.recordBindingCall(nsForMetrics, kind, rec.code()) }()
-			tok := r.Header.Get("x-cellhive-scope-token")
-			if tok == "" {
-				writeErr(w, http.StatusForbidden, "scope_required", "a scoped token is required for binding calls")
+			claims, ok := s.authenticateBindingToken(w, r)
+			if !ok || !s.authorizeBinding(w, r, kind, claims) {
 				return
 			}
-			claims, err := scopedtoken.VerifyIssuer(s.scopeSecret(), tok, time.Now())
-			if err != nil {
-				writeErr(w, http.StatusForbidden, "scope_invalid", err.Error())
+			if claims.Resource != "" {
+				r = r.WithContext(context.WithValue(r.Context(), ctxPinnedKV, claims))
+			}
+			preInvalidated, release, ok := s.beginBindingAccess(w, r, kind, claims)
+			if !ok {
 				return
 			}
-			delegated := claims.Iss != ""
-			// A delegated (external) token must expire: without an expiry it
-			// cannot be bounded by the issuer's own lifetime (ADR-181).
-			if delegated && claims.ExpiresMs == 0 {
-				writeErr(w, http.StatusForbidden, "scope_exp_required", "a delegated token must carry an expiry")
-				return
-			}
-			if !scopedtoken.MatchKind(claims, kind) {
-				writeErr(w, http.StatusForbidden, "scope_kind", "token is not valid for a "+kind+" binding")
-				return
-			}
-			// The namespace is exact and authoritative (isolation boundary).
-			if q := r.URL.Query().Get("ns"); q != "" && q != claims.Namespace {
-				writeErr(w, http.StatusForbidden, "scope_mismatch", "request namespace does not match the token")
-				return
-			}
-			if param, ok := scopeResourceParam[kind]; ok {
-				// The resource name comes from the request; a glob token matches it.
-				got := r.URL.Query().Get(param)
-				if got == "" || !scopedtoken.MatchName(claims, got) {
-					writeErr(w, http.StatusForbidden, "scope_resource_mismatch", "request resource does not match the token")
-					return
-				}
-			} else if scopedtoken.HasWildcard(claims.Name) {
-				// Token-derived resources (kv/vectorize/service/do) need a
-				// concrete name to resolve a cell; a wildcard cannot resolve.
-				writeErr(w, http.StatusForbidden, "scope_name_required", "this binding kind requires a concrete resource name")
-				return
-			}
-			if !delegated && s.Control != nil {
-				// Internal tokens are bounded by the registered-binding ACL;
-				// delegated tokens are authorized by their ns/scope (ADR-181).
-				ok, _, cerr := s.bindingInfo(r.Context(), claims.Namespace, kind, claims.Name)
-				if cerr != nil {
-					writeErr(w, http.StatusInternalServerError, "scope_check_failed", cerr.Error())
-					return
-				}
-				if !ok {
-					writeErr(w, http.StatusForbidden, "binding_not_registered", "binding is not declared for this namespace")
-					return
-				}
-			}
-			preparedGeneration := ""
-			if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
-				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
-					var err error
-					preparedGeneration, err = s.prepareResourceAccessSnapshot(r.Context(), sc)
-					if err != nil {
-						if errors.Is(err, replica.ErrResourceDeleted) {
-							writeErr(w, 403, "resource_deleted", "resource has been deleted")
-							return
-						}
-						writeErr(w, 503, "revocation_check_failed", err.Error())
-						return
-					}
-				}
-			}
-			telemetry.SpanFromContext(r.Context()).SetAttributes(
-				telemetry.ScopeAttrs(claims.Namespace, kind, claims.Name, "")...)
-			preInvalidated := ""
-			if s.Store != nil {
-				// Before gating in-flight requests, drop a local cell this node
-				// does not own (a stale foreign lineage after a restart or
-				// takeover). Done here, outside BeginRequest, so Forget never
-				// waits on this request's own eviction gate.
-				if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
-					if err := s.invalidateStaleLocal(r.Context(), sc); err != nil {
-						writeErr(w, 503, "local_invalidation_failed", err.Error())
-						return
-					}
-					preInvalidated = sc.String()
-				}
-				var end func()
-				if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
-					sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query())
-					if ok {
-						var err error
-						end, err = s.beginPreparedResourceRequest(r.Context(), sc, preparedGeneration)
-						if err != nil {
-							if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-								s.captureErr(w, err, "request_gate_failed")
-								return
-							}
-							writeErr(w, 403, "resource_generation_changed", err.Error())
-							return
-						}
-					}
-				}
-				if end == nil {
-					var err error
-					end, err = s.Store.BeginRequestContext(r.Context(), s.gateKey(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()))
-					if err != nil {
-						s.captureErr(w, err, "request_gate_failed")
-						return
-					}
-				}
-				defer end()
+			if release != nil {
+				defer release()
 			}
 			nsForMetrics = claims.Namespace
 			// Attribute the in-flight http.server span to the tenant so traces
@@ -225,35 +133,81 @@ func (s *Server) refreshBindingInfo(ctx context.Context, ns, kind, name string) 
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.binding_refresh")
 	defer span.End()
 	key := ns + "|" + kind + "|" + name
-	s.bindMu.Lock()
-	rev := s.bindRev
-	s.bindMu.Unlock()
-	id, ok, err := s.bindingFromOwner(ctx, ns, kind, name)
-	if err != nil {
-		return false, "", err
-	}
-	s.bindMu.Lock()
-	if s.bindRev == rev && s.Cfg.BindingCacheTTL > 0 {
-		if s.bindCache == nil || len(s.bindCache) > 100000 {
-			s.bindCache = map[string]bindingEntry{}
-		}
-		s.bindCache[key] = bindingEntry{ok: ok, id: id, exp: time.Now().Add(s.Cfg.BindingCacheTTL)}
-	}
-	s.bindMu.Unlock()
-	return ok, id, nil
+	return s.refreshBinding(ctx, key, func() (string, bool, error) { return s.bindingFromOwner(ctx, ns, kind, name) })
 }
 
-func (s *Server) bindingFromOwner(ctx context.Context, ns, kind, name string) (string, bool, error) {
-	if s.Owner != nil {
-		// Authorization must see the current control owner after a handoff;
-		// a stale owner hint can otherwise return an old negative declaration.
-		s.Owner.Invalidate(control.Scope())
+func (s *Server) refreshBinding(ctx context.Context, key string, read func() (string, bool, error)) (bool, string, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, "", err
+		}
+		s.bindMu.Lock()
+		rev := s.bindRev
+		if f := s.bindFlights[key]; f != nil && f.rev == rev {
+			s.bindMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return false, "", ctx.Err()
+			case <-f.done:
+			}
+			s.bindMu.Lock()
+			current := s.bindRev == f.rev
+			s.bindMu.Unlock()
+			if !current || errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded) {
+				continue
+			}
+			return f.ok, f.id, f.err
+		}
+		f := &bindingFlight{rev: rev, done: make(chan struct{})}
+		if s.bindFlights == nil {
+			s.bindFlights = make(map[string]*bindingFlight)
+		}
+		s.bindFlights[key] = f
+		s.bindMu.Unlock()
+		issued := time.Now()
+		f.id, f.ok, f.err = read()
+		s.bindMu.Lock()
+		current := s.bindRev == rev
+		if current && f.err == nil && s.Cfg.BindingCacheTTL > 0 {
+			if s.bindCache == nil || len(s.bindCache) > 100000 {
+				s.bindCache = map[string]bindingEntry{}
+			}
+			s.bindCache[key] = bindingEntry{ok: f.ok, id: f.id, exp: issued.Add(s.Cfg.BindingCacheTTL)}
+		}
+		if s.bindFlights[key] == f {
+			delete(s.bindFlights, key)
+		}
+		close(f.done)
+		s.bindMu.Unlock()
+		return f.ok, f.id, f.err
 	}
+}
+
+type bindingFlight struct {
+	done chan struct{}
+	rev  uint64
+	id   string
+	ok   bool
+	err  error
+}
+
+func (s *Server) bindingFromOwner(ctx context.Context, ns, kind, name string, pinned ...scopedtoken.Claims) (string, bool, error) {
+	return s.bindingFromOwnerAttempt(ctx, ns, kind, name, true, pinned...)
+}
+
+func (s *Server) bindingFromOwnerAttempt(ctx context.Context, ns, kind, name string, mayClaim bool, pinned ...scopedtoken.Claims) (string, bool, error) {
 	q := url.Values{"ns": {ns}, "kind": {kind}, "name": {name}}
+	if len(pinned) > 0 {
+		p := pinned[0]
+		q.Set("worker", p.Worker)
+		q.Set("version", strconv.Itoa(p.Version))
+		q.Set("resource", p.Resource)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://cellhive.internal/v1/control/binding?"+q.Encode(), http.NoBody)
 	if err != nil {
 		return "", false, err
 	}
+	telemetry.Inject(ctx, req.Header)
 	resp, forwarded, err := s.forwardTo(req, control.Scope(), []byte{})
 	if err != nil {
 		return "", false, err
@@ -271,6 +225,68 @@ func (s *Server) bindingFromOwner(ctx context.Context, ns, kind, name string) (s
 			return "", false, err
 		}
 		return answer.ID, answer.OK, nil
+	}
+	id, allowed, err := s.localBinding(ctx, ns, kind, name, pinned...)
+	if mayClaim && (errors.Is(err, owner.ErrUnowned) || errors.Is(err, owner.ErrNotOwner)) {
+		// After restart the control cell may still name the previous session.
+		// Use normal fenced recovery now, instead of waiting for a timer loop
+		// to claim it. Re-route once because a peer can win the claim.
+		if err := s.claimForRead(ctx, control.Scope()); err != nil {
+			return "", false, err
+		}
+		return s.bindingFromOwnerAttempt(ctx, ns, kind, name, false, pinned...)
+	}
+	return id, allowed, err
+}
+
+func (s *Server) localBinding(ctx context.Context, ns, kind, name string, pinned ...scopedtoken.Claims) (id string, allowed bool, readErr error) {
+	if s.Owner != nil {
+		fence, ok := s.Owner.ReadFence(control.Scope())
+		if !ok {
+			return "", false, owner.ErrNotOwner
+		}
+		defer func() {
+			if !fence() {
+				id = ""
+				allowed = false
+				readErr = owner.ErrNotOwner
+			}
+		}()
+		if check, ok := s.Owner.LocalReadGuard(control.Scope()); ok {
+			defer func() {
+				if !check() {
+					id = ""
+					allowed = false
+					readErr = owner.ErrNotOwner
+				}
+			}()
+			return s.readLocalBinding(ctx, ns, kind, name, pinned...)
+		}
+	}
+
+	// forwardTo is only a routing helper: errors/unowned routes may fall through.
+	// Before reading local authorization state, require authoritative ownership.
+	if s.Owner != nil {
+		o, _, err := s.Owner.Resolve(ctx, control.Scope())
+		if err != nil {
+			return "", false, err
+		}
+		if o.Node != s.Cfg.NodeID || o.Session != s.Owner.Session || !s.ownerLive(ctx, o, time.Now()) {
+			s.Owner.Invalidate(control.Scope())
+			return "", false, owner.ErrNotOwner
+		}
+	}
+	return s.readLocalBinding(ctx, ns, kind, name, pinned...)
+}
+
+func (s *Server) readLocalBinding(ctx context.Context, ns, kind, name string, pinned ...scopedtoken.Claims) (string, bool, error) {
+	if len(pinned) > 0 {
+		p := pinned[0]
+		if !p.Valid() || p.Kind != "kv" || p.Resource == "" {
+			return "", false, scopedtoken.ErrIncomplete
+		}
+		ok, err := s.Control.PinnedBindingAllowed(ctx, ns, p.Worker, p.Version, name, p.Resource)
+		return p.Resource, ok, err
 	}
 	return s.Control.Binding(ctx, ns, kind, name)
 }

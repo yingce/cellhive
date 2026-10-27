@@ -4,6 +4,7 @@ Local compute, real remote storage. Credentials never printed or persisted.
 Usage: python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3
 """
 import argparse
+import fcntl
 import os
 from pathlib import Path
 import secrets
@@ -14,9 +15,15 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--credentials', required=True)
 parser.add_argument('--port-base', type=int, default=26500)
-parser.add_argument('--suite', choices=('review', 'workflow'), default='review')
+parser.add_argument('--trace-endpoint', default='')
+parser.add_argument('--suite', choices=('review', 'workflow', 'performance', 'performance-dual', 'performance-tail', 'batch-recovery'), default='review')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
+# All suites share the bucket's platform control cells, even with unique app
+# namespaces. Different per-run root keys cannot safely run concurrently.
+run_lock = open('/tmp/cellhive-hk-review.lock', 'a')
+print('HK-REVIEW waiting for exclusive shared-bucket test lock', flush=True)
+fcntl.flock(run_lock, fcntl.LOCK_EX)
 creds = {}
 for line in Path(args.credentials).read_text().splitlines():
     line = line.strip().removeprefix('export ')
@@ -35,11 +42,22 @@ env.update(CELLHIVE_BUCKET='cos://vwork-e2e-hk-1376795072',
            NO_PROXY='*', no_proxy='*', CELLHIVE_DURABILITY='bucket',
            CELLHIVE_WORKERD='/opt/cellhive/deploy/workerd-fork/workerd', E2E_KEEP='1',
            HK_REVIEW_ROOT=str(root))
+if args.suite in ('performance-dual', 'performance-tail', 'batch-recovery'):
+    env.update(CELLHIVE_DURABILITY='auto', E2E_DUAL_AGENT='1')
+if args.suite == 'performance-tail':
+    env['PERF_TAIL_DIAG']='1'
+if args.trace_endpoint:
+    env['PERF_TRACE']='1'
+    env.update(CELLHIVE_OTLP_ENDPOINT=args.trace_endpoint, CELLHIVE_TRACES_SAMPLE_RATIO='1')
 run = 'hk-review-' + str(int(time.time())) + '-' + secrets.token_hex(3)
 artifacts = Path(tempfile.mkdtemp(prefix=run + '-'))
-print(f'HK-REVIEW artifacts={artifacts} compute=local storage=HK-COS durability=bucket', flush=True)
+print(f'HK-REVIEW artifacts={artifacts} compute=local storage=HK-COS durability={env["CELLHIVE_DURABILITY"]}', flush=True)
 failed = []
 suites = {
+    'batch-recovery': [('kv-batch-recovery.sh', 'e2ebatch')],
+    'performance': [('kv-performance.sh', 'e2eperf')],
+    'performance-dual': [('kv-performance.sh', 'e2eperf')],
+    'performance-tail': [('kv-performance.sh', 'e2eperf')],
     'review': [('review-fixes.sh', 'review'), ('queue.sh', 'e2eq'), ('queue-multinode.sh', 'e2emn')],
     'workflow': [('workflow.sh', 'e2ewf'), ('workflow-recovery.sh', 'e2ewfr')],
 }

@@ -103,6 +103,7 @@ func (m *Manager) collectSealed(ctx context.Context, rec nodelog.Record, nl *nod
 			if len(fragments) == 0 {
 				return total, covered, fmt.Errorf("recovery: follower %s tail ended at %d want %d", follower, after, final)
 			}
+			batch := recoveryBatch{rep: m.Replica}
 			for _, fragment := range fragments {
 				want := after + 1
 				if fragment.Sequence != want || fragment.Sequence > final {
@@ -113,19 +114,16 @@ func (m *Manager) collectSealed(ctx context.Context, rec nodelog.Record, nl *nod
 					return total, covered, err
 				}
 				for _, segment := range fragment.Segments {
-					if _, _, err := m.Replica.Append(ctx, sc, fragment.Epoch, segment); err != nil {
-						// A durable resource-delete fence intentionally supersedes
-						// these old payloads. Advance the session sequence without
-						// resurrecting them or blocking unrelated live cells.
-						if errors.Is(err, replica.ErrResourceDeleted) {
-							continue
-						}
-						return total, covered, fmt.Errorf("recovery: append %s: %w", fragment.Scope, err)
+					if err := batch.add(ctx, sc, fragment.Epoch, segment); err != nil {
+						return total + batch.uploaded, covered, fmt.Errorf("recovery: append batch %s: %w", fragment.Scope, err)
 					}
-					total++
 				}
 				after = fragment.Sequence
 			}
+			if err := batch.flush(ctx); err != nil {
+				return total + batch.uploaded, covered, fmt.Errorf("recovery: flush batch: %w", err)
+			}
+			total += batch.uploaded
 			if err := nl.Checkpoint(ctx, rec.Node, rec.Session, follower, after); err != nil {
 				return total, covered, err
 			}

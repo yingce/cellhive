@@ -1,0 +1,5 @@
+--- FAIL: TestBindingColdReadClaimsControlWithoutBackgroundTick (0.00s)
+    binding_refresh_test.go:99: cold authorization: allowed=false err=owner: unowned
+FAIL
+FAIL	cellhive/internal/server	0.009s
+FAIL

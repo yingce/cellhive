@@ -1,0 +1,6 @@
+== upload bundle ==
+== phase 1: 40 parallel deploys ==
+CRASH-E2E: FAIL: phase 1 acked 36/40
+time=2026-10-27T02:36:40.748+08:00 level=INFO msg="storage diagnose ok"
+time=2026-10-27T02:36:40.763+08:00 level=INFO msg="cell-agent admin listening" addr=127.0.0.1:30701
+CRASH-E2E: kept /tmp/cellhive-crash-crash.C1gu02

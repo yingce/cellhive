@@ -1,0 +1,15 @@
+== building cell-agent + user-runtime into /opt/cellhive/bin ==
+== deploy-e2e[e2e] starting cell-agent + user-runtime ==
+== deploy-e2e[e2e] publishing ==
+  old control epoch e1 objects: 0 (want 0 after background baseline + GC)
+RESULT[e2e]
+  deploy v1 (fresh ns):  0.026294s  proof_delta=1
+  deploy v2:             0.006471s  proof_delta=1
+  rollback v2->v1:       0.004937s  proof_delta=1
+  invoke v2:             v2
+  invoke after rollback: v1
+  app.create audits:     1
+  deploy v3 (restart):   0.016993s  proof_delta=1  ensure_snapshot=0->0 ensure_resume=0->1 (marker cross-epoch resume)
+  invoke v3:             v3
+  active version:        3
+DEPLOY-E2E: PASS

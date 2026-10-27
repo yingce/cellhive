@@ -1,0 +1,244 @@
+# TYPE cellhive_commit_total counter
+cellhive_commit_total{mode="fleet"} 814
+cellhive_commit_total{mode="bucket-batch"} 26
+# TYPE cellhive_live_followers gauge
+cellhive_live_followers 1
+# TYPE cellhive_requests_total counter
+cellhive_requests_total 154964
+# TYPE cellhive_claims_total counter
+cellhive_claims_total 0
+# TYPE cellhive_hot_kv_access_refreshes_total counter
+cellhive_hot_kv_access_refreshes_total 155
+# TYPE cellhive_hot_kv_access_refresh_failures_total counter
+cellhive_hot_kv_access_refresh_failures_total 0
+# TYPE cellhive_append_total counter
+cellhive_append_total 0
+# TYPE cellhive_segments_read_total counter
+cellhive_segments_read_total 0
+# TYPE cellhive_cellstore_open_cells gauge
+cellhive_cellstore_open_cells 19
+# TYPE cellhive_resident_cells gauge
+cellhive_resident_cells 19
+# TYPE cellhive_cellstore_evicted_total counter
+cellhive_cellstore_evicted_total 19
+# TYPE cellhive_cellstore_sweeps_total counter
+cellhive_cellstore_sweeps_total 3
+# TYPE cellhive_cellstore_disk_files gauge
+cellhive_cellstore_disk_files 19
+# TYPE cellhive_cellstore_disk_bytes gauge
+cellhive_cellstore_disk_bytes 35622912
+# TYPE cellhive_cellstore_max_open_cells gauge
+cellhive_cellstore_max_open_cells 32
+# TYPE cellhive_cellstore_idle_ttl_seconds gauge
+cellhive_cellstore_idle_ttl_seconds 300
+# TYPE cellhive_restore_files_total counter
+cellhive_restore_files_total 19
+# TYPE cellhive_restore_image_bytes_total counter
+cellhive_restore_image_bytes_total 1802240
+# TYPE cellhive_restore_pages_total counter
+cellhive_restore_pages_total 440
+# TYPE cellhive_restore_last_image_bytes gauge
+cellhive_restore_last_image_bytes 57344
+# TYPE cellhive_restore_max_image_bytes gauge
+cellhive_restore_max_image_bytes 413696
+# TYPE cellhive_go_heap_alloc_bytes gauge
+cellhive_go_heap_alloc_bytes 8623128
+# TYPE cellhive_go_heap_inuse_bytes gauge
+cellhive_go_heap_inuse_bytes 13639680
+# TYPE cellhive_go_heap_sys_bytes gauge
+cellhive_go_heap_sys_bytes 47284224
+# TYPE cellhive_go_total_alloc_bytes counter
+cellhive_go_total_alloc_bytes 7739332848
+# TYPE cellhive_go_gc_total counter
+cellhive_go_gc_total 1393
+# TYPE cellhive_process_rss_bytes gauge
+cellhive_process_rss_bytes 64925696
+# TYPE cellhive_bucket_ops_total counter
+# TYPE cellhive_list_calls_total counter
+cellhive_list_calls_total 1907
+cellhive_bucket_ops_total{op="cas"} 0
+cellhive_bucket_ops_total{op="conditional_create"} 0
+cellhive_bucket_ops_total{op="delete"} 608
+cellhive_bucket_ops_total{op="get"} 7692
+cellhive_bucket_ops_total{op="list"} 1907
+cellhive_bucket_ops_total{op="put"} 62
+# TYPE cellhive_paged_cells gauge
+cellhive_paged_cells 0
+# TYPE cellhive_paged_faults_total counter
+cellhive_paged_faults_total 0
+# TYPE cellhive_paged_runs_total counter
+cellhive_paged_runs_total 0
+# TYPE cellhive_paged_prefetch_hits_total counter
+cellhive_paged_prefetch_hits_total 0
+# TYPE cellhive_paged_hydrated_pages gauge
+cellhive_paged_hydrated_pages 0
+# TYPE cellhive_paged_total_pages gauge
+cellhive_paged_total_pages 0
+# TYPE cellhive_owned_cells gauge
+cellhive_owned_cells 19
+# TYPE cellhive_upload_batches_total counter
+cellhive_upload_batches_total 258
+# TYPE cellhive_upload_segments_total counter
+cellhive_upload_segments_total 937
+# TYPE cellhive_upload_dropped_total counter
+cellhive_upload_dropped_total 0
+# TYPE cellhive_upload_deferred_total counter
+cellhive_upload_deferred_total 0
+# TYPE cellhive_upload_replayed_total counter
+cellhive_upload_replayed_total 78
+# TYPE cellhive_upload_spool gauge
+cellhive_upload_spool 0
+# TYPE cellhive_upload_spool_file_syncs_total counter
+cellhive_upload_spool_file_syncs_total 814
+# TYPE cellhive_upload_spool_dir_syncs_total counter
+cellhive_upload_spool_dir_syncs_total 1629
+# TYPE cellhive_upload_spool_sync_seconds_total counter
+cellhive_upload_spool_sync_seconds_total 0.850478
+# TYPE cellhive_binding_calls_total counter
+cellhive_binding_calls_total{ns="hk-review-1793033012-da39b8-0",kind="kv",outcome="ok"} 154015
+# TYPE cellhive_durability_proof_seconds histogram
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="0.005"} 0
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="0.025"} 1
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="0.1"} 3
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="0.5"} 4
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="1"} 4
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="5"} 4
+cellhive_durability_proof_seconds_bucket{ns="__platform__",le="+Inf"} 4
+cellhive_durability_proof_seconds_sum{ns="__platform__"} 0.267699
+cellhive_durability_proof_seconds_count{ns="__platform__"} 4
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.005"} 583
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.025"} 3992
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.1"} 4010
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.5"} 4014
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="1"} 4014
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="5"} 4014
+cellhive_durability_proof_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="+Inf"} 4014
+cellhive_durability_proof_seconds_sum{ns="hk-review-1793033012-da39b8-0"} 30.955028
+cellhive_durability_proof_seconds_count{ns="hk-review-1793033012-da39b8-0"} 4014
+# TYPE cellhive_capture_ensure_seconds histogram
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="0.005"} 3
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="0.025"} 3
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="0.1"} 3
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="0.5"} 4
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="1"} 4
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="5"} 4
+cellhive_capture_ensure_seconds_bucket{ns="__platform__",le="+Inf"} 4
+cellhive_capture_ensure_seconds_sum{ns="__platform__"} 0.294246
+cellhive_capture_ensure_seconds_count{ns="__platform__"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="0.005"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="0.025"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="0.1"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="0.5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-0",le="+Inf"} 2
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955126-62e783-0"} 0.225962
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955126-62e783-0"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="0.005"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="0.025"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="0.1"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="0.5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955126-62e783-1",le="+Inf"} 2
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955126-62e783-1"} 0.228436
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955126-62e783-1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="0.005"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="0.025"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="0.1"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="0.5"} 7
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="1"} 7
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="5"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-0",le="+Inf"} 8
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955280-e22eb5-0"} 1.744275
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955280-e22eb5-0"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="0.005"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="0.025"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="0.1"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="0.5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955280-e22eb5-1",le="+Inf"} 2
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955280-e22eb5-1"} 0.242712
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955280-e22eb5-1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="0.005"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="0.025"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="0.1"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="0.5"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="1"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="5"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-0",le="+Inf"} 8
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955455-193ca9-0"} 0.949085
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955455-193ca9-0"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="0.005"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="0.025"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="0.1"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="0.5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955455-193ca9-1",le="+Inf"} 2
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955455-193ca9-1"} 0.225741
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955455-193ca9-1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="0.005"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="0.025"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="0.1"} 4
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="0.5"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="1"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="5"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-0",le="+Inf"} 8
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955684-83bde0-0"} 0.852386
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955684-83bde0-0"} 8
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="0.005"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="0.025"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="0.1"} 1
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="0.5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="5"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1792955684-83bde0-1",le="+Inf"} 2
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1792955684-83bde0-1"} 0.23237
+cellhive_capture_ensure_seconds_count{ns="hk-review-1792955684-83bde0-1"} 2
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.005"} 8027
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.025"} 8027
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.1"} 8027
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="0.5"} 8028
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="1"} 8028
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="5"} 8028
+cellhive_capture_ensure_seconds_bucket{ns="hk-review-1793033012-da39b8-0",le="+Inf"} 8028
+cellhive_capture_ensure_seconds_sum{ns="hk-review-1793033012-da39b8-0"} 1.060999
+cellhive_capture_ensure_seconds_count{ns="hk-review-1793033012-da39b8-0"} 8028
+# TYPE cellhive_capture_ensure_total counter
+cellhive_capture_ensure_total{ns="__platform__",mode="snapshot"} 1
+cellhive_capture_ensure_total{ns="__platform__",mode="warm"} 3
+cellhive_capture_ensure_total{ns="hk-review-1792955126-62e783-0",mode="resume"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955126-62e783-0",mode="warm"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955126-62e783-1",mode="resume"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955126-62e783-1",mode="warm"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955280-e22eb5-0",mode="resume"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955280-e22eb5-0",mode="warm"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955280-e22eb5-1",mode="resume"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955280-e22eb5-1",mode="warm"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955455-193ca9-0",mode="resume"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955455-193ca9-0",mode="warm"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955455-193ca9-1",mode="resume"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955455-193ca9-1",mode="warm"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955684-83bde0-0",mode="resume"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955684-83bde0-0",mode="warm"} 4
+cellhive_capture_ensure_total{ns="hk-review-1792955684-83bde0-1",mode="snapshot"} 1
+cellhive_capture_ensure_total{ns="hk-review-1792955684-83bde0-1",mode="warm"} 1
+cellhive_capture_ensure_total{ns="hk-review-1793033012-da39b8-0",mode="snapshot"} 1
+cellhive_capture_ensure_total{ns="hk-review-1793033012-da39b8-0",mode="warm"} 8027
+# TYPE cellhive_owner_epoch_changes_total counter
+cellhive_owner_epoch_changes_total{role="owner"} 19
+# TYPE cellhive_takeover_total counter
+cellhive_takeover_total{outcome="success"} 18
+cellhive_takeover_total{outcome="failed"} 0
+cellhive_takeover_total{outcome="blocked"} 0
+# TYPE cellhive_route_projection_version gauge
+cellhive_route_projection_version 567
+# TYPE cellhive_peer_hedge_fired_total counter
+cellhive_peer_hedge_fired_total 0
+# TYPE cellhive_peer_hedge_won_total counter
+cellhive_peer_hedge_won_total 0
+# TYPE cellhive_replication_bytes_total counter
+cellhive_replication_bytes_total{kind="shipped"} 332983
+cellhive_replication_bytes_total{kind="received"} 0

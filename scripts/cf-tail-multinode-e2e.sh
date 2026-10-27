@@ -51,7 +51,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ ${CELLHIVE_CF_TAIL_SKIP_BUILD:-0} != 1 ]]; then
-  docker build -f "$ROOT/deploy/Dockerfile" -t "$IMAGE" "$ROOT"
+  docker build --build-context "workerd-fork=$ROOT/deploy/workerd-fork" -f "$ROOT/deploy/Dockerfile" -t "$IMAGE" "$ROOT"
 fi
 [[ $(docker run --rm --entrypoint workerd "$IMAGE" --version) == 'workerd 2026-09-16' ]]
 
@@ -66,6 +66,7 @@ services:
       CELLHIVE_BASE_DOMAIN: cell.test
       CELLHIVE_NODE_ID: cf-tail-a
       CELLHIVE_ADVERTISE: agent-a:7001
+      CELLHIVE_PEER_URL: http://agent-a:7001
       CELLHIVE_REST_ADDR: ':7001'
       CELLHIVE_ADMIN_ADDR: ':8082'
       CELLHIVE_DATA_DIR: /data/state
@@ -87,6 +88,7 @@ services:
       CELLHIVE_BASE_DOMAIN: cell.test
       CELLHIVE_NODE_ID: cf-tail-b
       CELLHIVE_ADVERTISE: agent-b:7001
+      CELLHIVE_PEER_URL: http://agent-b:7001
       CELLHIVE_REST_ADDR: ':7001'
       CELLHIVE_ADMIN_ADDR: ':8082'
       CELLHIVE_DATA_DIR: /data/state
@@ -212,10 +214,14 @@ socket.addEventListener('error', event => { console.error('raw Tail WebSocket er
 socket.addEventListener('open', () => fs.writeFileSync(ready, 'ready'));
 process.on('SIGTERM', () => socket.close());
 JS
-node "$TMP/tail-payload-ws.mjs" "http://127.0.0.1:$B_PORT" "$CLOUDFLARE_API_TOKEN" "$TMP/tail-raw.jsonl" "$TMP/tail-raw.ready" >"$TMP/tail-raw.log" 2>&1 &
-RAW_TAIL_PID=$!
-for _ in $(seq 1 50); do [[ -f "$TMP/tail-raw.ready" ]] && break; kill -0 "$RAW_TAIL_PID" 2>/dev/null || break; sleep 0.1; done
-[[ -f "$TMP/tail-raw.ready" ]] || fail "raw Tail WebSocket did not open: $(cat "$TMP/tail-raw.log")"
+start_raw_tail() {
+  rm -f "$TMP/tail-raw.ready"
+  node "$TMP/tail-payload-ws.mjs" "http://127.0.0.1:$B_PORT" "$CLOUDFLARE_API_TOKEN" "$TMP/tail-raw.jsonl" "$TMP/tail-raw.ready" >>"$TMP/tail-raw.log" 2>&1 &
+  RAW_TAIL_PID=$!
+  for _ in $(seq 1 50); do [[ -f "$TMP/tail-raw.ready" ]] && break; kill -0 "$RAW_TAIL_PID" 2>/dev/null || break; sleep 0.1; done
+  [[ -f "$TMP/tail-raw.ready" ]] || fail "raw Tail WebSocket did not open: $(cat "$TMP/tail-raw.log")"
+}
+start_raw_tail
 sleep 7
 for i in $(seq 1 5); do
   curl -fsS -H 'Host: e2e-web.cell.test' -H "x-request-id: peer-tail-$i" "http://127.0.0.1:$RUNTIME_PORT/" >"$TMP/response.txt"
@@ -231,6 +237,11 @@ if [[ ${CELLHIVE_CF_TAIL_RECONNECT:-0} == 1 ]]; then
     sleep 1
   done
   compose exec -T agent-b curl -fsS http://127.0.0.1:7001/readyz >/dev/null
+  # The raw protocol probe has no reconnect implementation. Re-open it for
+  # payload assertions; Wrangler itself must reconnect without our help.
+  kill "$RAW_TAIL_PID" 2>/dev/null || true
+  wait "$RAW_TAIL_PID" 2>/dev/null || true
+  start_raw_tail
   for i in $(seq 1 20); do
     curl -fsS -H 'Host: e2e-web.cell.test' -H "x-request-id: peer-tail-after-reconnect-$i" "http://127.0.0.1:$RUNTIME_PORT/" >"$TMP/response.txt"
     grep -qx 'peer-tail-ok' "$TMP/response.txt"

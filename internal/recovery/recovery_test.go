@@ -308,12 +308,30 @@ func TestRecoverSessionTailAcrossPages(t *testing.T) {
 	}
 	transport := peer.NewHTTPTransport("tok", nil).WithSession("paged-session")
 	rep := replica.New(shared)
+	// The crashed owner may already have published an overlapping batch.
+	// Recovery must preserve immutable bytes and restore each logical tx once.
+	var ownerBatch [][]byte
+	for i := uint64(10); i <= 20; i++ {
+		ownerBatch = append(ownerBatch, ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)}))
+	}
+	if _, _, err := rep.AppendBatch(ctx, sc, 1, ownerBatch); err != nil {
+		t.Fatal(err)
+	}
 	rec := recovery.New(rep, transport)
 	if n, err := rec.Recover(ctx, nl, "node-1", "paged-session"); err != nil || n != 300 {
 		t.Fatalf("paged recover = %d, %v; want 300", n, err)
 	}
-	if keys, _ := rep.ListSegments(ctx, sc, 1); len(keys) != 300 {
-		t.Fatalf("paged recovered keys = %d, want 300", len(keys))
+	if keys, _ := rep.ListSegments(ctx, sc, 1); len(keys) > 8 {
+		t.Fatalf("paged recovered objects = %d, want <=8 for 300 segments", len(keys))
+	}
+	segs, err := rep.Restore(ctx, sc, 1)
+	if err != nil || len(segs) != 300 {
+		t.Fatalf("restored segments=%d err=%v", len(segs), err)
+	}
+	for i, seg := range segs {
+		if seg.Header.StartTxID != uint64(i+1) {
+			t.Fatalf("missing/out of order txid at %d: %d", i, seg.Header.StartTxID)
+		}
 	}
 }
 

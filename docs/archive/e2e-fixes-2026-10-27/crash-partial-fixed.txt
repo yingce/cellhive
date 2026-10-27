@@ -1,0 +1,11 @@
+== upload bundle ==
+== phase 1: 80 parallel deploys ==
+phase 1: 80/80 acked
+== phase 2: 80 parallel deploys, SIGKILL after 100ms ==
+phase 2: acked=31 failed=49 (SIGKILL)
+== phase 3: wipe local cells, restart, hydrate from bucket ==
+phase 3: every acked deploy survived the local wipe
+== phase 4: retry failed phase-2 requests with the same key ==
+phase 4: retried 49 failed request(s), exactly one version each
+CRASH-E2E: PASS (N=80, phase1_acked=80, phase2_acked=31, retried=49)
+CRASH-E2E: kept /tmp/cellhive-crash-crash.JLKN7N

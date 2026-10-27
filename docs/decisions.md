@@ -1,5 +1,13 @@
 # 决策记录（ADR）
 
+## ADR-300 Queue 响应确认、跨队列隔离与 Workflow schedule 去重（2026-10-26）
+
+Queue HTTP 派发只有完整、有效且 ok=true 的 JSON envelope 才能确认消息；仅显式 HTTP 204 保留无正文 ACK 兼容。读取失败、超出 1 MiB、解析失败或无成功标记均走既有失败重试/DLQ 策略，不得默认为成功。租户返回值不构成消息确认凭据。
+
+单次 Queue Pass 使用最多 8 个队列任务并发；每队列仍受 max_concurrency 限制，同一队列在一次 Pass 中只派发一次。等待所有任务完成再开启下一轮，取消后停止领取新队列。全局上限限制队列级并发，不取消每批持久证明。
+
+Workflow 每分钟按命中的不同表达式生成独立任务。按表达式字典序选出的首条保留历史分钟 occurrence，其余使用分钟与表达式 SHA-256；因此旧版该分钟已生成/完成的任务可作为首条保留，重复 Pass 和表达式重排不重建任务。同一分钟修改表达式集合可能改变首条映射，不保证跨配置修改逐表达式去重；普通 Cron 不变。
+
 ## ADR-299 Workflow 回调事务栅栏与事件步骤原子提交（2026-10-26）
 
 携带 run token 的回调必须在实际写事务内校验当前 token；前置 HTTP 校验仅用于快速拒绝，不能替代事务栅栏。步骤、重试记录、等待记录删除和终态更新均遵守此约束，失效回调返回 409。暂停/终止的状态和 lease 清理必须原子提交。保留无 token 的可信内部兼容操作，运行时回调始终携带 token。
@@ -3572,3 +3580,56 @@ _最后更新：2026-10-22_
 - owner 转发连接复用补全（2026-10-25）：数据面与admin转发共用默认HTTP client，保留原30s超时和重试规则，idle pool总上限256、每目标128。Go默认每目标仅2条idle连接会在并发流量下频繁关闭连接，SG连续GET已实际触发临时端口耗尽/502；不通过修改系统端口或降低安全检查规避。显式注入的 `ForwardClient` 保持优先。
 
 - SG KV 尾延迟观测（2026-10-25）：请求分段span与后台commit用scope/epoch/txid区间关联；>=50ms提交记录mode、fallback原因和选择时lease快照。实际确认follower缓存过期导致桶回退；本次不改变ADR-293的发现/采样实现和既有RPO=0规则。上传队列满仍可能同步回压，单独记录enqueue耗时；本次555ms样本明确是no_eligible_follower桶等待。见 `archive/sg-kv-performance-2026-10-25.md`。
+
+- 内部 binding 鉴权结构整理（2026-10-26，ADR-074/181 语义不变）：`scopeAuth` 依次调用 `authenticateBindingToken`（签名与有效期）、`authorizeBinding`（namespace/资源范围及签发者授权策略）、`beginBindingAccess`（删除快照、旧副本失效、请求保护）。保持原检查顺序、错误码、缓存策略、平台 token 无过期与委托 token 必须过期的规则；请求保护由外层 defer 释放，覆盖整个 handler。此变更不减少控制面查询次数，不改变 owner 转发验权。
+
+- Wrangler API 临时安全边界（2026-10-26，暂存 501 部分已被 ADR-301 替代）：官方 `versions upload` 和版本化 Secret 修改暂不支持 upload-only，必须返回 501 Cloudflare 错误结构，禁止转成原子发布；普通 PUT script 发布不变。未知/未实现 binding 必须拒绝，禁止静默忽略。settings 和 version detail 返回对应真实版本配置及 Secret 名称（不含值）；settings PATCH 未实现时明确拒绝。原生 CLI 的原子发布别名不等同官方 staging 语义。
+
+## ADR-301 Wrangler staged versions（2026-10-26）
+
+官方 POST versions 创建不可变暂存版本，保留 bundle 引用、binding 记录、当前 Secret 密文快照与 durability proof；不改变 active/previous、部署事件、Secret 基线、DO 实例或内置路由。首次上传 active=0，只有显式 promote/100% deployment 才上线。普通 PUT script/原生 deploy 仍原子发布。上传待发布版本不得复活已删除 Worker/app，也不得执行 DO migrations；携带 migrations 的暂存请求明确拒绝，使用原子发布路径。
+
+PATCH workers/:worker/versions/latest 的 env Secret merge patch 在单一事务中复制最新版本及其 Secret 密文快照，仅对新版本增删 Secret，禁止改动当前基线或 active。激活恢复该版本的 Secret 基线。多版本流量分配仍不支持。所有写入沿用 owner 转发、namespace 授权及 capturedWrite 确认。替代先前暂存 API 501 的临时安全边界，settings PATCH 仍明确拒绝。
+
+- Binding 刷新合并（2026-10-27）：同一 binding、同一失效 revision 的前台与后台刷新共享在途查询；失效后的请求不得复用旧查询，旧结果不得回填缓存，等待者取消不取消其他请求。复用远端 control owner 路由，但所有本地 binding 读取保留权威 owner/session/liveness 检查，防止 routing fallthrough 读到旧控制副本。缓存 TTL、资源 fence、token 语义不变；不宣称移除全部 COS 查询。验证结果待本次测试记录。
+
+## ADR-302 Worker KV binding 固定映射（2026-10-27）
+
+Worker 版本中的 KV binding ID 由受信 loader/cell-agent 签入 scoped token，附 worker/version；接收端验证平台签名后以该 ID 解析 cell，不以当前 namespace binding 映射重定向旧版本。只接受完整、精确的 KV 固定声明，委托 token 不得携带此声明；跨 namespace 或非 KV class 的 scope 拒绝。原 token 保持兼容。D1/R2/Queue 已按运行时资源名寻址，不引入第二种通用映射协议。
+
+本阶段保留 registered-binding ACL 的短 TTL 查询以及 resource fence；固定映射不等于永久授权，资源撤销/删除不得被绕过。故本阶段解决版本漂移，但不能宣称消除每秒授权查询；要移除该查询须另建独立的撤销分发与版本生命周期契约。DO/service/vectorize 等原有策略不变。
+
+- ADR-302 授权拆分（2026-10-27）：固定 KV token 使用独立的版本授权检查（app/worker 存活、指定版本 binding 一致、资源未撤销），不再查询当前 active binding 的映射。授权结果仍有最多原 BindingCacheTTL 的有效期；后台有界刷新，活跃固定版本保留 60s，刷新失败不得延长有效期，过期同步校验或拒绝。保留 cold miss 与故障情况下的等待，不以无限缓存换取可用性。资源 fence 独立保留。不是撤销推送协议，也不声称移除后台 COS 查询。
+
+## ADR-303 本地控制读证明与退出续租（2026-10-27）
+
+只对当前manager同node/session的node-lease本地route复用已完成权威点查的证明。读取控制SQLite前取得route revision与健康截止时间，读取后再确认revision/session/lease、原截止时间未过；foreign/legacy/冷route仍走权威查询。Release开始即标记releasing并失效缓存，结束（包括CAS失败）再次失效；释放期间不能取得本地读证明，旧在途读必须丢弃结果。无需改变桶owner协议或延长授权TTL。
+
+SIGTERM关闭HTTP/后台任务后，独立node lease续期继续运行至capture drain、上传flush、node-log seal、owner release完成。watchdog始终有效；真正lease失效仍退出，不以停止watchdog伪造handoff成功。续期上下文只在退出末尾取消。
+
+- ADR-303 验收发现的节点发现饥饿修复：后台Sample逐个GET历史node会耗尽15s预算并发布前缀部分结果，导致新节点长期不可见。改为最多8路点读、保持结果顺序；上下文取消/超时返回错误，不替换已有完整快照。仅后台发现/诊断List路径改变，数据热路径不新增List。
+
+### 全量 E2E 后续修复（2026-10-27）
+
+- 冷 cell 请求在进入 BeginRequest 前，使用 Owner.ClaimWithReset 的同 scope 串行门完成失效旧副本和发布 ownership；后台 claim 使用同一门。busy 旧副本仍拒绝接管，不等待持有自身请求门的请求，不放宽 epoch/lease fence。
+- control schema 的 migrated 检查、DDL 与完成标记串行，防止 PRAGMA/ALTER 竞争。binding 鉴权发现无 owner/旧 session 时主动使用现有 claimForRead 恢复并重新路由一次，不等待后台调度，也不直接读取未获 ownership 的副本。
+- Wrangler `inherit` 元数据从同 Worker 当前 active 不可变版本复制支持的 binding/普通变量；不存在的名称或无 active 明确拒绝，资源仍走发布验证，暂存上传不改变 active。暂不支持通过 inherit 引入 Secret/JSON 变量等原本未支持的类型。
+- DO 持久化 gate 失败继续返回 result_unknown，不自动重放；supervisor 记录底层错误。压测须将 HTTP/socket 错误判为失败，不以 wrk 退出码零代替请求成功。
+
+DO gate 捕获发现 WAL checksum mismatch 时可进行最多5次观察（重读间隔1/2/4/8ms），仅处理并发写造成的瞬时不完整读取；持续错误仍拒绝确认。失败 poll 已发现的 checkpoint 在重试及后续 gate 间保留，直到快照成功持久化后清除。不得忽略校验或重放业务请求。
+
+### COS 后台合批窗口（2026-10-27）
+
+cell-agent 的 COS 上传周期从20ms调整为200ms，保留64项/1MiB阈值、scope+epoch隔离、磁盘spool及handoff Flush。只有无需等待COS的写入利用较长窗口；bucket同步确认仍主动唤醒上传，消费等待项后再次唤醒，避免独立channel选择顺序造成丢失唤醒。follower spool的2ms窗口不变。确认条件与epoch fence不变；单节点顺序bucket确认不能合并尚未到达的后续请求。200ms是空闲调度周期，并非包含COS请求/重试的完成上限。合批对象包含多个逻辑LTX段，恢复日志中的segments不代表GET数量。
+
+- 冷恢复分段观测（2026-10-27）：沿用既有OTLP采样，补充冷open等待、分页探测、epoch发现、恢复对象列表、fence/manifest、并行下载、解码去重、链校验、SQLite应用及打开span。记录对象数量/字节和解码重复段数，不记录对象正文或凭据。后台timer注册保留独立上下文；前台等待其同scope冷open单独记录，不把跨trace时间关联伪造成父子调用。不改变恢复顺序、并发度、所有权或确认条件。
+
+### Follower sealed recovery 合批（2026-10-27）
+
+封存session的Tail恢复按返回页遍历，连续同scope/epoch且txid相邻的delta可合为一个既有LTX batch对象，最多64段/1MiB（单段本身超限则单独上传）。遇scope/epoch切换、非连续txid、快照或marker即flush；非delta保留独立对象以保持恢复基线/epoch标记发现。每页所有对象成功持久化或被权威删除fence明确替代后，才更新该follower的node-log checkpoint；任何失败不得封存或reclaim，重试仍使用immutable对象语义。此次不改legacy Held及active DO live-tail恢复路径，不跳过与owner batch重叠但未单独证明覆盖的内容；重复逻辑段仍在restore按ID去重，只减少其物理对象数。
+
+- COS发布验收补全（2026-10-27）：专用HK COS真实存储契约入口为 `scripts/e2e/cos-contract.py`，不依赖MinIO/Docker，要求6项实际执行通过。使用生产native-append适配层验证authority CAS和不可变LTX写入，普通对象经S3数据面验证读取/range/签名HTTP下载/分页，复制恢复测试支持相同COS provider。原生COS S3重复条件创建未拒绝的实测作为能力边界保留，不修改严格S3测试断言或将该失败当成通过；不得将cos://生产provider替换为裸S3条件写。
+
+### Append authority首次创建空对象观察（2026-10-27）
+
+HK COS真实并发请求捕获：首次POST Append(position=0)尚未返回时，GET可返回200、Content-Length=0、X-Cos-Object-Type=appendable；之后GET读到完整CHL1记录。AppendAuthority对成功但零字节的读做最多5次观察（等待5/10/20/40ms），覆盖Get及ConditionalCreate，CAS/ConditionalDelete通过Get复用。仅重读，不重试Append、不将空对象转换成NotFound、不使用空内容构造token。持续为空仍失败，非空截断/CRC/格式错误立即失败；等待响应context取消。每次网络请求继续使用调用者context，75ms仅是额外退避上限，不是总网络时限。既有位置条件写、单winner、删除/epoch fence保持不变。

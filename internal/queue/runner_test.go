@@ -114,7 +114,7 @@ func TestHTTPDispatcherPayload(t *testing.T) {
 			t.Errorf("missing token header")
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 

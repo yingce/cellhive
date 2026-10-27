@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
+	"cellhive/internal/scopedtoken"
 )
 
 // A bounded active set moves the control/fence refresh and lease-bounded owner lookup off
@@ -21,6 +22,7 @@ const (
 )
 
 type hotKVAccess struct {
+	pinned     *scopedtoken.Claims
 	scope      cell.Scope
 	ns, name   string
 	lastAccess time.Time
@@ -81,7 +83,11 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 		now := time.Now()
 		s.hotKVAccessMu.Lock()
 		for key, e := range s.hotKVAccesses {
-			if now.Sub(e.lastAccess) > hotKVAccessIdle {
+			idle := hotKVAccessIdle
+			if e.pinned != nil {
+				idle = time.Minute
+			}
+			if now.Sub(e.lastAccess) > idle {
 				delete(s.hotKVAccesses, key)
 				continue
 			}
@@ -106,7 +112,11 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 					if s.hotKVAccesses[key] == e {
 						e.refreshing = false
 						if err == nil {
-							e.next = time.Now().Add(hotKVAccessRefresh)
+							interval := hotKVAccessRefresh
+							if e.pinned != nil {
+								interval = s.pinnedRefreshInterval()
+							}
+							e.next = time.Now().Add(interval)
 						} else {
 							e.next = time.Now().Add(hotKVAccessRetry)
 						}
@@ -123,12 +133,23 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 }
 
 func (s *Server) refreshHotKVAccess(ctx context.Context, e *hotKVAccess) error {
-	ok, ref, err := s.refreshBindingInfo(ctx, e.ns, "kv", e.name)
+	var ok bool
+	var ref string
+	var err error
+	if e.pinned != nil {
+		ok, err = s.pinnedBindingAllowed(ctx, *e.pinned, true)
+		ref = e.pinned.Resource
+	} else {
+		ok, ref, err = s.refreshBindingInfo(ctx, e.ns, "kv", e.name)
+	}
 	if err != nil || !ok {
 		return err
 	}
 	// A binding that changed scope is not allowed to prewarm the old cell.
 	if ref != e.scope.ID && ref != e.scope.String() {
+		return nil
+	}
+	if s.resourceReplica() == nil || s.Owner == nil {
 		return nil
 	}
 	// Refresh the resource fence independently of the lease-bounded route.

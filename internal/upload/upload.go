@@ -268,6 +268,14 @@ func (b *Batcher) loop(ctx context.Context, sh *shard) {
 			}
 			pending = append(pending, it)
 			pendingBytes += itemBytes(it)
+			// The producer wake may win select before this item arrives here.
+			// Re-arm it after dequeue so waiters never depend on the async timer.
+			if it.done != nil {
+				select {
+				case sh.wake <- struct{}{}:
+				default:
+				}
+			}
 			if len(pending) >= b.maxSegments || pendingBytes >= b.maxBytes {
 				flush()
 			}

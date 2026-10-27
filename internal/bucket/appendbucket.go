@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"strconv"
+	"time"
 )
 
 // PositionAppender atomically appends only when the object's byte length matches
@@ -84,8 +85,33 @@ func frameCRC(frame []byte) uint32 {
 	return h.Sum32()
 }
 
+// readRecord handles COS exposing the zero-length appendable object while its
+// first position-zero append is still in flight. Empty is never absence: only
+// observe again, and fail closed if no complete record becomes visible.
+func (b *AppendAuthority) readRecord(ctx context.Context, key string) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw, err := b.raw.Read(ctx, key)
+		if err != nil || len(raw) != 0 {
+			return raw, err
+		}
+		if attempt == 4 {
+			return nil, fmt.Errorf("append authority: empty object after %d reads", attempt+1)
+		}
+		timer := time.NewTimer((5 * time.Millisecond) << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (b *AppendAuthority) Get(ctx context.Context, key string) ([]byte, string, error) {
-	raw, err := b.raw.Read(ctx, key)
+	raw, err := b.readRecord(ctx, key)
 	if err != nil {
 		return nil, "", err
 	}
@@ -100,7 +126,7 @@ func (b *AppendAuthority) Get(ctx context.Context, key string) ([]byte, string, 
 }
 
 func (b *AppendAuthority) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
-	raw, err := b.raw.Read(ctx, key)
+	raw, err := b.readRecord(ctx, key)
 	pos := int64(0)
 	if err == nil {
 		_, deleted, parseErr := decodeFrames(raw)

@@ -334,17 +334,39 @@ func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]NodeLease, 0, len(keys))
-	for _, k := range keys {
+	// Bound discovery I/O so historical nodes cannot starve later live nodes
+	// within refresh's deadline. A cancelled pass must never publish a partial list.
+	results := make([]NodeLease, len(keys))
+	valid := make([]bool, len(keys))
+	slots := make(chan struct{}, 8)
+	var workers sync.WaitGroup
+scan:
+	for i, k := range keys {
 		if strings.Contains(strings.TrimPrefix(k, "nodes/"), "/") || !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		data, _, err := m.B.Get(ctx, k)
-		if err != nil {
-			continue
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break scan
 		}
-		var l NodeLease
-		if json.Unmarshal(data, &l) == nil {
+		workers.Add(1)
+		go func(i int, k string) {
+			defer workers.Done()
+			defer func() { <-slots }()
+			data, _, err := m.B.Get(ctx, k)
+			if err == nil && json.Unmarshal(data, &results[i]) == nil {
+				valid[i] = true
+			}
+		}(i, k)
+	}
+	workers.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]NodeLease, 0, len(keys))
+	for i, l := range results {
+		if valid[i] {
 			out = append(out, l)
 		}
 	}

@@ -82,7 +82,7 @@
 **项目初始化**：`cellhive init <worker-name> [--yes]` 创建 `wrangler.jsonc` 与 `src/index.js`，不安装依赖，也不覆盖现有目录；`cellhive wrangler init` 同样可用。原版 `wrangler init` 继续执行它自己的本地向导，不需要平台 API。
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
-- **原版 Wrangler API 兼容**：管理员端提供 Cloudflare API 形状的 `PUT/POST /client/v4/accounts/:account_id/workers/scripts/:script_name/{content,versions}`，并兼容 **legacy `PUT .../workers/scripts/{script_name}`**（Wrangler 在存在 migrations/DO/containers 等条件时走旧上传路径）。上传接受原版 Wrangler 的 Bearer token 与 multipart（`metadata` + 主模块）；`migrations` 同时接受 array 和 `{new_tag, steps}` 两种形状，`assets.config.run_worker_first` 同时接受 bool 和路径数组（数组不再被误判为 `invalid_multipart`）。`versions upload` 响应包含 `metadata.has_preview`。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name`、`/versions` 和 `/deployments` 已提供真实查询/激活语义。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>`。
+- **原版 Wrangler API 兼容**：管理员端提供 Cloudflare API 形状的 `PUT /client/v4/accounts/:account_id/workers/scripts/:script_name/content`，并兼容 **legacy `PUT .../workers/scripts/{script_name}`**（Wrangler 在存在 migrations/DO/containers 等条件时走旧上传路径）。上传接受原版 Wrangler 的 Bearer token 与 multipart（`metadata` + 主模块）；`migrations` 同时接受 array 和 `{new_tag, steps}` 两种形状，`assets.config.run_worker_first` 同时接受 bool 和路径数组（数组不再被误判为 `invalid_multipart`）。官方 `versions upload` / `versions secret put` 支持 upload-only，显式 deployment 才切换 active；普通 PUT script 仍执行原子发布。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name`、`/versions` 和 `/deployments` 已提供真实查询/激活语义。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>`。
 - **原版 Wrangler API 资源语义**：管理员兼容端点同时提供 KV/D1/R2/Queues 的 create/list/delete（分别映射到 `storage/kv/namespaces`、`d1/database`、`r2/buckets`、`queues`），以及 Workflow 的 create/list/get/delete。Worker 版本 list/get、Cron schedules、secret get 也已覆盖。Workflow 的 `concurrency.limit`、`schedules`、`default_retention.success_retention/error_retention` 会持久化并执行；`limits` 仍显式拒绝。Assets 使用 Wrangler 的 `assets-upload-session` + JWT 单文件或 multipart bulk 上传协议，上传内容进入版本资产 token。资源端点只登记 CellHive 资源，不改变“资源先创建、部署引用 ID”的控制面约束；绑定 ID 与资源登记名均可用于部署校验。Secrets 和 Workers routes 也提供 Cloudflare 形状的 CRUD。
 - **兼容边界**：复杂多模块上传、官方 Wrangler 的本地 dev/login 及未列出的 Cloudflare 专有资源 API 不属于当前兼容端点；`wrangler deploy` 已可返回发布成功，但 CLI 显示的 `Current Version ID` 仍可能为 `null`（`versions list` 有真实版本）。账号发现、Worker 删除、版本查询与按版本发布已提供；tail 有短期 session 和 WebSocket 日志推送。Workflow/Queue/Vectorize/Hyperdrive 的命令级边界见上文和兼容矩阵。
 
@@ -168,3 +168,13 @@ _最后更新：2026-09-18_
 | 形状错误 | ❌ `invalid_migration` | 如 `{from}` 缺 `to` |
 
 代码变更（同名 class、新 bundle）**不需要 migration**：由 facet 级惰性重启生效（`doStorageId` 保证存储不变）。
+
+### 官方客户端安全边界（2026-10-26）
+
+- `versions upload`、`versions secret put/delete/bulk` 创建暂存版本，`versions deploy` 只支持单版本 100% 激活。普通 `wrangler deploy` 可通过上传后激活完成发布。暂存要求已有有效 namespace；DO migrations 只允许原子发布路径，暂存时拒绝。Secret patch 以最新上传版本为基线，激活前不改变正在运行的 Secret。
+- multipart 支持 AI、Hyperdrive、Vectorize binding 转换；`json`、内嵌 `secret_text` 及其他未实现类型明确拒绝。Secret 更新使用独立 secret API。
+- 重复上传的 `type: "inherit"` 从同 Worker 的 active 版本复制已支持的 binding 或普通变量；缺失名称、无 active、Secret/JSON 继承明确拒绝。暂存继承不改变 active，资源仍执行发布校验。
+- GET settings / version detail 返回真实版本的 bindings、vars 和 Secret 名称；不读取或返回 Secret 明文。PATCH script-settings 未实现时返回 501。
+- 验证范围见 `archive/wrangler-safety-2026-10-26.md`。
+
+- Wrangler 4.133.0 真实 CLI 已验证上传、Secret 修改、激活与普通 deploy；环境标签 PATCH 未实现，普通 deploy 会提示标签同步警告，CLI 的 UUID 格式解析会把数字版本号显示为 null。服务器 active readback 已验证正确。

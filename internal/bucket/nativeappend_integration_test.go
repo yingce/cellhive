@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	cos "github.com/tencentyun/cos-go-sdk-v5"
+	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"testing"
@@ -29,6 +32,22 @@ func TestNativeAppendCloud(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	if provider == "cos" && os.Getenv("CELLHIVE_COS_APPEND_DIAG") == "1" {
+		u, err := url.Parse(os.Getenv("COS_ENDPOINT"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		trace := &appendHTTPTrace{start: time.Now()}
+		auth := &cos.AuthorizationTransport{SecretID: os.Getenv("COS_SECRET_ID"), SecretKey: os.Getenv("COS_SECRET_KEY"), Transport: trace}
+		raw = &COSAppender{client: cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: auth})}
+		t.Cleanup(func() {
+			if t.Failed() || os.Getenv("CELLHIVE_COS_APPEND_DIAG_ALL") == "1" {
+				for _, e := range trace.events {
+					t.Log(e)
+				}
+			}
+		})
 	}
 	b := NewAppendAuthority(raw)
 	key := fmt.Sprintf("itest/cellhive-%s-%d/owner.json", provider, time.Now().UnixNano())
@@ -75,4 +94,22 @@ func TestNativeAppendCloud(t *testing.T) {
 	if _, err := b.ConditionalCreate(ctx, key, []byte("reclaimed")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Record only response metadata; never signed URLs, credentials or bodies.
+type appendHTTPTrace struct {
+	mu     sync.Mutex
+	start  time.Time
+	events []string
+}
+
+func (d *appendHTTPTrace) RoundTrip(r *http.Request) (*http.Response, error) {
+	start := time.Since(d.start)
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if resp != nil {
+		d.mu.Lock()
+		d.events = append(d.events, fmt.Sprintf("start=%s end=%s method=%s position=%s status=%d length=%d next=%s type=%s request_id=%s", start, time.Since(d.start), r.Method, r.URL.Query().Get("position"), resp.StatusCode, resp.ContentLength, resp.Header.Get("X-Cos-Next-Append-Position"), resp.Header.Get("X-Cos-Object-Type"), resp.Header.Get("X-Cos-Request-Id")))
+		d.mu.Unlock()
+	}
+	return resp, err
 }

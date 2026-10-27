@@ -1,0 +1,4 @@
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.jG0kki agent=30100 runtime=30102 db=store-inspection-248e4119
+response={"n":1}
+E2E-BINDINGS-D1-ID: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.jG0kki

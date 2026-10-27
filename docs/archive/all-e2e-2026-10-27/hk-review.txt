@@ -1,0 +1,31 @@
+HK-REVIEW artifacts=/opt/.hermes/cache/scratch/hk-review-1793040739-919e2a-cd8bht_y compute=local storage=HK-COS durability=bucket
+START review-fixes.sh ns=hk-review-1793040739-919e2a-0
+[e2e] R2 different/same-body overwrite, HEAD/GET/range PASS
+[e2e] D1 rows=20000 sample=1 HTTP_total_s=0.086382 binding_ms=83
+[e2e] D1 rows=20000 sample=2 HTTP_total_s=0.073668 binding_ms=72
+[e2e] D1 rows=20000 sample=3 HTTP_total_s=0.089436 binding_ms=88
+[e2e] D1 rows=20000 sample=4 HTTP_total_s=0.088282 binding_ms=87
+[e2e] D1 rows=20000 sample=5 HTTP_total_s=0.084057 binding_ms=80
+E2E-REVIEW-FIXES: PASS
+HK-CLEANUP ns=hk-review-1793040739-919e2a-0 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.rfo3ni
+END review-fixes.sh exit=0 cleanup=True
+START queue.sh ns=hk-review-1793040739-919e2a-1
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.EXfIXz agent=30420 runtime=30422
+[e2e] queue R2 metadata: text/x-queue
+[e2e] retry exhausted -> DLQ depth=1
+E2E-QUEUE: PASS
+HK-CLEANUP ns=hk-review-1793040739-919e2a-1 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.EXfIXz
+END queue.sh exit=0 cleanup=True
+START queue-multinode.sh ns=hk-review-1793040739-919e2a-2
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.ZI9KYl n1=30440 n2=30444
+[e2e] consumed after 5: 5
+[e2e] DLQ depth=1
+[e2e] killed n1; waiting lease
+[e2e] consumed after failover: 8
+E2E-QUEUE-MULTINODE: PASS
+HK-CLEANUP ns=hk-review-1793040739-919e2a-2 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.ZI9KYl
+END queue-multinode.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/opt/.hermes/cache/scratch/hk-review-1793040739-919e2a-cd8bht_y

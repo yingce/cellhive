@@ -20,6 +20,8 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
+	"cellhive/internal/owner"
+	"cellhive/internal/scopedtoken"
 	"cellhive/internal/workerbudget"
 	"cellhive/internal/wranglercompat"
 )
@@ -101,7 +103,21 @@ func (s *Server) handleControlBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	id, ok, err := s.Control.Binding(r.Context(), q.Get("ns"), q.Get("kind"), q.Get("name"))
+	var pin []scopedtoken.Claims
+	if q.Has("worker") || q.Has("version") || q.Has("resource") {
+		version, _ := strconv.Atoi(q.Get("version"))
+		p := scopedtoken.Claims{Namespace: q.Get("ns"), Kind: q.Get("kind"), Name: q.Get("name"), Worker: q.Get("worker"), Version: version, Resource: q.Get("resource")}
+		if !p.Valid() || p.Resource == "" {
+			writeErr(w, 400, "bad_request", "invalid fixed binding")
+			return
+		}
+		pin = append(pin, p)
+	}
+	id, ok, err := s.localBinding(r.Context(), q.Get("ns"), q.Get("kind"), q.Get("name"), pin...)
+	if errors.Is(err, owner.ErrNotOwner) || errors.Is(err, owner.ErrUnowned) {
+		writeErr(w, http.StatusConflict, "not_owner", "control ownership changed")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "binding_failed", err.Error())
 		return
@@ -728,6 +744,7 @@ func (s *Server) handleControlResource(w http.ResponseWriter, r *http.Request) {
 }
 
 type deployReq struct {
+	StageOnly          bool                  `json:"stage_only,omitempty"`
 	Namespace          string                `json:"namespace"`
 	Worker             string                `json:"worker"`
 	BundleSHA          string                `json:"bundle_sha"`
@@ -985,6 +1002,17 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dry_run": true, "worker": req.Worker, "namespace": req.Namespace})
 		return
 	}
+	if req.StageOnly {
+		live, err := s.Control.AppActive(r.Context(), req.Namespace)
+		if err != nil || !live {
+			writeErr(w, http.StatusBadRequest, "app_not_active", "staged upload requires an existing active namespace")
+			return
+		}
+	}
+	if req.StageOnly && len(req.Migrations) > 0 {
+		writeErr(w, http.StatusBadRequest, "staged_migration_unsupported", "DO migrations require an atomic deployment")
+		return
+	}
 	// DO class migrations (ADR-082), the optional app auto-create (ADR-131) and
 	// the version commit run inside ONE capturedWrite: a single Ensure covers
 	// them and a single durability proof gates the response (ADR-271). Each step
@@ -997,7 +1025,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 		if err := s.applyDOMigrations(r.Context(), req); err != nil {
 			return err
 		}
-		if s.Cfg.AutoCreateApp {
+		if s.Cfg.AutoCreateApp && !req.StageOnly {
 			// A deploy may bring its own namespace so a fresh install can deploy
 			// straight into it (e.g. "root"). CreateApp is idempotent, but it
 			// always writes an audit row; skip that write (and its transaction)
@@ -1016,6 +1044,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 		stage = "deploy"
 		var e error
 		v, e = s.Control.Deploy(r.Context(), req.Namespace, req.Worker, control.DeploySpec{
+			StageOnly: req.StageOnly,
 			BundleSHA: req.BundleSHA, AssetsSHA: req.AssetsSHA, Assets: req.Assets,
 			Bindings: req.Bindings, Vars: req.Vars, Consumers: req.Consumers, Crons: req.Crons,
 			IdempotencyKey: req.IdempotencyKey,
@@ -1024,7 +1053,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 			CompatFlags:    req.CompatibilityFlags,
 			Limits:         req.Limits,
 		}, "admin")
-		if e == nil {
+		if e == nil && !req.StageOnly {
 			// The built-in worker domain is part of the deploy. Keep it in the
 			// capture section so the one proof covers it: a post-ack write would
 			// leave the local cell ahead of the durable watermark and force the
@@ -1051,7 +1080,7 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	// Durable Object restart policy (ADR-107): "restart" forces an eager
 	// abort/restart, "preserve" keeps resident objects until they idle out;
 	// empty honors CELLHIVE_DO_EAGER_RESTART (default false = lazy restart).
-	if deployRestartPolicy(s.Cfg.DoEagerRestart, req.SessionPolicy) && v.StorageID != "" {
+	if !req.StageOnly && deployRestartPolicy(s.Cfg.DoEagerRestart, req.SessionPolicy) && v.StorageID != "" {
 		s.restartDurableObjects(r.Context(), v.StorageID)
 	}
 	writeJSON(w, http.StatusOK, v)

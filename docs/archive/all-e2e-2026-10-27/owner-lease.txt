@@ -1,0 +1,7 @@
+first deploy: 0.045487 200
+continuous: 8s calls=38 failures=0 epochs_before=1 epochs_after=1
+restart first deploy: 0.024982 200
+cold hydrate first deploy: 0.019700 200 list_delta=3
+control integrity_check: ok
+OWNER-E2E: PASS
+scripts/e2e/owner-lease.sh: line 30: 215519 Killed                  "$BIN" > "$TMP/agent.log" 2>&1

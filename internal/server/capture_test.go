@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/owner"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -192,6 +194,15 @@ func TestCaptureWaitTxIDDoesNotWaitForLaterWrite(t *testing.T) {
 // registerTestBinding wires a control plane on the test server and registers an
 // app resource so binding-scoped endpoints resolve a binding (and its cell id).
 func registerTestBinding(srv *Server, ns, kind, name, scope string) error {
+	if srv.Owner != nil {
+		if _, _, err := srv.Owner.Resolve(context.Background(), control.Scope()); errors.Is(err, owner.ErrUnowned) {
+			if _, err := srv.Owner.Claim(context.Background(), control.Scope(), time.Now()); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+	}
 	env, err := control.NewEnvelope(bytes.Repeat([]byte{0x3}, 32))
 	if err != nil {
 		return err

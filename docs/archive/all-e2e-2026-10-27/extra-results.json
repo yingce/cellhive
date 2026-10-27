@@ -1,0 +1,56 @@
+[
+  {
+    "name": "stock-wrangler",
+    "exit": 0,
+    "log": "/tmp/cellhive-all-e2e-20261027/stock-wrangler.log"
+  },
+  {
+    "name": "cos-contract",
+    "exit": 0,
+    "log": "/tmp/cellhive-all-e2e-20261027/cos-contract.log"
+  },
+  {
+    "name": "queue-concurrency-retry",
+    "exit": 0,
+    "log": "/tmp/cellhive-all-e2e-20261027/queue-concurrency-retry.log",
+    "note": "initial run failed; retry does not erase failure"
+  },
+  {
+    "name": "do-rps",
+    "exit": 0,
+    "acceptance": "FAIL",
+    "log": "/tmp/cellhive-all-e2e-20261027/do-rps.log",
+    "note": "wrk 3705 requests, 2 non-2xx/3xx; WS 77501 messages, errors=0"
+  },
+  {
+    "name": "rpo-isolated",
+    "exit": 0,
+    "note": "1200 acknowledged keys restored after SIGKILL and local wipe; independent ports",
+    "log": "/tmp/cellhive-all-e2e-20261027/rpo-retry.log"
+  },
+  {
+    "name": "s3-mirror-retry",
+    "exit": 125,
+    "acceptance": "BLOCKED",
+    "note": "same MinIO release unavailable from Docker Hub as well as quay.io"
+  },
+  {
+    "name": "crash-e2e-retry",
+    "exit": 1,
+    "note": "36/40 initial deploy ack; 503 local_invalidation_failed and 400 duplicate column compat_date",
+    "log": "/tmp/cellhive-all-e2e-20261027/crash-e2e-retry.log"
+  },
+  {
+    "name": "do-rps-retry",
+    "exit": 0,
+    "acceptance": "FAIL",
+    "note": "3 HTTP500 result_unknown gate_500; WebSocket errors=0",
+    "log": "/tmp/cellhive-all-e2e-20261027/do-rps-retry.log"
+  },
+  {
+    "name": "wrangler-staging",
+    "exit": 0,
+    "log": "/tmp/cellhive-all-e2e-20261027/wrangler-staging.log",
+    "note": "three stock versions upload/deploy pairs; active unchanged until deploy; filesystem bucket"
+  }
+]

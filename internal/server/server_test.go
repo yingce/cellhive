@@ -1071,6 +1071,9 @@ func TestReadForwardingAndRetry(t *testing.T) {
 	srvB, _, _ := newControlForwardServer(t, dir, "node-2")
 	omA.Advertise = hsA.URL
 
+	if _, err := omA.Claim(ctx, control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	// A owns the KV cell; B must forward reads to it.
 	kvScope := cell.Scope{Namespace: "app", Class: "__kv__", ID: "kv"}
 	for _, srv := range []*Server{srvA, srvB} {
@@ -1244,6 +1247,9 @@ func TestOverloadedRefusesClaims(t *testing.T) {
 		t.Fatal("node claimed a cell while overloaded")
 	}
 
+	if _, err := srvB.Owner.Claim(ctx, control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	// A write that would claim is refused rather than claiming locally.
 	if _, err := srvB.Control.CreateResource(ctx, "app", "kv", "KV", sc.String(), "t"); err != nil {
 		t.Fatalf("resource: %v", err)

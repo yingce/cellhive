@@ -433,6 +433,10 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 
 // cell returns the single control cell, creating/migrating it on first use.
 func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
+	// Keep the migration check, DDL, and publication indivisible. SQLite
+	// serializes statements, not the PRAGMA/ALTER sequence across callers.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// A cellstore eviction can close the cell between Cell() and our lazy
 	// migration (the control cell used to be evictable). Re-fetch and retry
 	// once; a pinned control cell makes this a rare fallback (ADR-272).
@@ -441,9 +445,7 @@ func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.mu.Lock()
 		done := s.migrated[c]
-		s.mu.Unlock()
 		if done {
 			if !c.Closed() {
 				return c, nil
@@ -462,9 +464,7 @@ func (s *Store) cell(ctx context.Context) (*cellstore.Cell, error) {
 		if c.Closed() {
 			continue
 		}
-		s.mu.Lock()
 		s.migrated[c] = true
-		s.mu.Unlock()
 		return c, nil
 	}
 	return nil, fmt.Errorf("control: cell closed while migrating")
@@ -1114,8 +1114,8 @@ func newStorageID() string {
 	return "ds_" + hex.EncodeToString(b[:])
 }
 
-// Deploy allocates the next immutable version and makes it active in one
-// transaction.
+// Deploy allocates the next immutable version in one transaction. Unless
+// StageOnly is set, it also activates that version and records a deployment.
 func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, actor string) (Version, error) {
 	fingerprint := ""
 	if spec.IdempotencyKey != "" {
@@ -1183,6 +1183,22 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if spec.StageOnly {
+			var appLive int
+			if err := t.QueryRowContext(ctx, `SELECT COUNT(*) FROM apps WHERE ns=? AND deleted_ms=0`, ns).Scan(&appLive); err != nil {
+				return err
+			}
+			if appLive != 1 {
+				return ErrNotFound
+			}
+			var deleted int
+			if err := t.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM apps WHERE ns=? AND deleted_ms>0) + (SELECT COUNT(*) FROM workers WHERE ns=? AND name=? AND deleted_ms>0)`, ns, ns, worker).Scan(&deleted); err != nil {
+				return err
+			}
+			if deleted != 0 {
+				return fmt.Errorf("control: cannot stage a deleted worker or app")
+			}
+		}
 		var active, previous int
 		var storageID string
 		err = t.QueryRowContext(ctx, `SELECT active, previous, storage_id FROM workers WHERE ns=? AND name=?`, ns, worker).
@@ -1225,14 +1241,20 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			jsonOr(v.Crons, "[]"), assets, v.CompatDate, jsonOr(v.CompatFlags, "[]"), limits, v.CreatedMs, v.Actor); err != nil {
 			return err
 		}
+		nextActive, nextPrevious := next, active
+		if spec.StageOnly {
+			nextActive, nextPrevious = active, previous
+		}
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO workers(ns, name, active, previous, storage_id) VALUES (?,?,?,?,?)
 			 ON CONFLICT(ns, name) DO UPDATE SET active=excluded.active, previous=excluded.previous, storage_id=excluded.storage_id`,
-			ns, worker, next, active, storageID); err != nil {
+			ns, worker, nextActive, nextPrevious, storageID); err != nil {
 			return err
 		}
-		if err := appendDeploymentEvent(ctx, t, ns, worker, next, actor, v.CreatedMs); err != nil {
-			return err
+		if !spec.StageOnly {
+			if err := appendDeploymentEvent(ctx, t, ns, worker, next, actor, v.CreatedMs); err != nil {
+				return err
+			}
 		}
 		// Bundle refs: the version's own sha plus any pinned service targets.
 		refs := map[string]bool{v.BundleSHA: true}
@@ -1261,22 +1283,27 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 		if err := snapshotCurrentSecretsTx(ctx, t, ns, worker, next); err != nil {
 			return err
 		}
-		// A deploy resurrects a soft-deleted worker AND its app: the projection
-		// filters soft-deleted apps, so without this the fresh version would be
-		// invisible; and a pending purge job would delete it later (ADR-134
-		// follow-up).
-		if _, err := t.ExecContext(ctx, `UPDATE workers SET deleted_ms=0 WHERE ns=? AND name=?`, ns, worker); err != nil {
-			return err
-		}
-		if _, err := t.ExecContext(ctx, `UPDATE apps SET deleted_ms=0 WHERE ns=?`, ns); err != nil {
-			return err
-		}
-		if _, err := t.ExecContext(ctx, `DELETE FROM purges WHERE ns=? AND (worker=? OR worker='')`, ns, worker); err != nil {
-			return err
+		if !spec.StageOnly {
+			// A deploy resurrects a soft-deleted worker AND its app: the projection
+			// filters soft-deleted apps, so without this the fresh version would be
+			// invisible; and a pending purge job would delete it later (ADR-134
+			// follow-up).
+			if _, err := t.ExecContext(ctx, `UPDATE workers SET deleted_ms=0 WHERE ns=? AND name=?`, ns, worker); err != nil {
+				return err
+			}
+			if _, err := t.ExecContext(ctx, `UPDATE apps SET deleted_ms=0 WHERE ns=?`, ns); err != nil {
+				return err
+			}
+			if _, err := t.ExecContext(ctx, `DELETE FROM purges WHERE ns=? AND (worker=? OR worker='')`, ns, worker); err != nil {
+				return err
+			}
 		}
 		out = v
-		_ = previous
-		if err := txAudit(ctx, t, ns, actor, "deploy", fmt.Sprintf("%s/%s@%d", ns, worker, next)); err != nil {
+		action := "deploy"
+		if spec.StageOnly {
+			action = "version.upload"
+		}
+		if err := txAudit(ctx, t, ns, actor, action, fmt.Sprintf("%s/%s@%d", ns, worker, next)); err != nil {
 			return err
 		}
 		if s.onDeployBeforeCommit != nil {

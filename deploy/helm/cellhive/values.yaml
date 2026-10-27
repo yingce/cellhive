@@ -70,6 +70,8 @@ config:
   cosSecretKey: ""
 
 cellAgent:
+  # Optional image fields merged over global image for agent-first upgrades.
+  image: {}
   replicas: 2
   storage: 20Gi
   # Bound cached SQLite cell handles and close idle handles. 0 disables

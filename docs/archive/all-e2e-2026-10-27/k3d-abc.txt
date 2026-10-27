@@ -1,0 +1,215 @@
+== build and load image ==
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.05kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.7s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e 0.0s done
+#3 CACHED
+
+#4 [context workerd-fork] load .dockerignore
+#4 transferring workerd-fork: 2B done
+#4 DONE 0.0s
+
+#5 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#5 DONE 0.7s
+
+#6 [internal] load metadata for docker.io/library/ubuntu:24.04
+#6 DONE 0.7s
+
+#7 [internal] load metadata for docker.io/library/golang:1.27-bookworm
+#7 DONE 0.7s
+
+#8 [internal] load .dockerignore
+#8 transferring context: 160B done
+#8 DONE 0.0s
+
+#9 [internal] load build context
+#9 DONE 0.0s
+
+#10 [context workerd-fork] load from client
+#10 DONE 0.0s
+
+#11 [runtime-tools 1/3] FROM docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+#11 resolve docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 0.0s done
+#11 DONE 0.0s
+
+#12 [build 1/8] FROM docker.io/library/golang:1.27-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
+#12 resolve docker.io/library/golang:1.27-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 0.0s done
+#12 DONE 0.0s
+
+#13 [stage-2  1/12] FROM docker.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+#13 resolve docker.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac 0.0s done
+#13 DONE 0.0s
+
+#10 [context workerd-fork] load from client
+#10 transferring workerd-fork: 31B done
+#10 DONE 0.0s
+
+#9 [internal] load build context
+#9 transferring context: 19.45kB 0.0s done
+#9 DONE 0.0s
+
+#14 [build 5/8] RUN go mod download
+#14 CACHED
+
+#15 [stage-2  6/12] COPY third_party/workerd/LICENSE /usr/share/licenses/cellhive/workerd/LICENSE
+#15 CACHED
+
+#16 [build 7/8] COPY internal ./internal
+#16 CACHED
+
+#17 [stage-2  4/12] COPY --from=build /out/ /usr/local/bin/
+#17 CACHED
+
+#18 [stage-2  5/12] COPY --from=workerd-fork /workerd /usr/local/bin/workerd
+#18 CACHED
+
+#19 [stage-2  7/12] COPY third_party/esbuild/LICENSE /usr/share/licenses/cellhive/esbuild/LICENSE
+#19 CACHED
+
+#20 [stage-2 10/12] COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+#20 CACHED
+
+#21 [runtime-tools 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl  && rm -rf /var/lib/apt/lists/*
+#21 CACHED
+
+#22 [build 3/8] RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev  && rm -rf /var/lib/apt/lists/*
+#22 CACHED
+
+#23 [stage-2  2/12] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6  && rm -rf /var/lib/apt/lists/*  && groupadd -g 65532 cellhive  && useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin cellhive  && mkdir -p /data/state /data/runtime /data/bucket  && chown -R 65532:65532 /data
+#23 CACHED
+
+#24 [runtime-tools 3/3] RUN curl -fsSL "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz" -o /tmp/esbuild.tgz  && echo "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d  /tmp/esbuild.tgz" | sha512sum -c -  && mkdir -p /out /tmp/esbuild  && tar -xzf /tmp/esbuild.tgz -C /tmp/esbuild --strip-components=1  && install -m 0755 /tmp/esbuild/bin/esbuild /out/esbuild  && test "$(/out/esbuild --version)" = "0.28.2"  && /out/esbuild --version
+#24 CACHED
+
+#25 [stage-2  3/12] COPY --from=runtime-tools /out/esbuild /usr/local/bin/esbuild
+#25 CACHED
+
+#26 [stage-2  8/12] COPY THIRD_PARTY_NOTICES.md /usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md
+#26 CACHED
+
+#27 [stage-2 11/12] COPY deploy/do-runtime-gated.sh /usr/local/bin/do-runtime-gated.sh
+#27 CACHED
+
+#28 [build 2/8] WORKDIR /src
+#28 CACHED
+
+#29 [build 8/8] RUN CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"       -trimpath -ldflags="-s -w" -o "/out/cell-agent" ./cmd/cell-agent  && for svc in cellhive user-runtime do-runtime do-supervisor; do       CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"         -trimpath -ldflags="-s -w" -o "/out/$svc" "./cmd/$svc" || exit 1;     done
+#29 CACHED
+
+#30 [stage-2  9/12] COPY workerd/ /app/workerd/
+#30 CACHED
+
+#31 [build 4/8] COPY go.mod go.sum ./
+#31 CACHED
+
+#32 [build 6/8] COPY cmd ./cmd
+#32 CACHED
+
+#33 [stage-2 12/12] RUN chmod 0755 /usr/local/bin/workerd /usr/local/bin/entrypoint.sh /usr/local/bin/do-runtime-gated.sh  && chown -R 65532:65532 /app
+#33 CACHED
+
+#34 exporting to image
+#34 exporting layers done
+#34 exporting manifest sha256:9e9fa9c690e478b2d9f8e75315df36c4b442a5701869cb9beefd9612d4722c89 done
+#34 exporting config sha256:c088c23c71edfa3e3c1f48754655f5946e357e6ede52b2f4b9ab9c9378545f6e done
+#34 exporting attestation manifest sha256:b2bc40b641111e95013c6ce9e8e6739fdafd3e186fb6bddbb756f7e247894936 done
+#34 exporting manifest list sha256:96cb0d0acff4c8632299d05570f800143721f329d808733f2f4f88bccd82e05e done
+#34 naming to docker.io/library/cellhive:k3d-e2e done
+#34 unpacking to docker.io/library/cellhive:k3d-e2e done
+#34 DONE 0.1s
+[36mINFO[0m[0000] Prep: Network                                
+[36mINFO[0m[0000] Created network 'k3d-cellhive-e2e-175131-394238' 
+[36mINFO[0m[0000] Created image volume k3d-cellhive-e2e-175131-394238-images 
+[36mINFO[0m[0000] Starting new tools node...                   
+[36mINFO[0m[0000] Starting node 'k3d-cellhive-e2e-175131-394238-tools' 
+[36mINFO[0m[0001] Creating node 'k3d-cellhive-e2e-175131-394238-server-0' 
+[36mINFO[0m[0001] Creating LoadBalancer 'k3d-cellhive-e2e-175131-394238-serverlb' 
+[36mINFO[0m[0001] Using the k3d-tools node to gather environment information 
+[36mINFO[0m[0001] HostIP: using network gateway 192.168.80.1 address 
+[36mINFO[0m[0001] Starting cluster 'cellhive-e2e-175131-394238' 
+[36mINFO[0m[0001] Starting servers...                          
+[36mINFO[0m[0001] Starting node 'k3d-cellhive-e2e-175131-394238-server-0' 
+[36mINFO[0m[0006] All agents already running.                  
+[36mINFO[0m[0006] Starting helpers...                          
+[36mINFO[0m[0006] Starting node 'k3d-cellhive-e2e-175131-394238-serverlb' 
+[36mINFO[0m[0013] Injecting records for hostAliases (incl. host.k3d.internal) and for 2 network members into CoreDNS configmap... 
+[36mINFO[0m[0015] Cluster 'cellhive-e2e-175131-394238' created successfully! 
+[36mINFO[0m[0015] You can now use it like this:                
+export KUBECONFIG=$(k3d kubeconfig write cellhive-e2e-175131-394238)
+kubectl cluster-info
+[36mINFO[0m[0000] Importing image(s) into cluster 'cellhive-e2e-175131-394238' 
+[36mINFO[0m[0000] Starting new tools node...                   
+[36mINFO[0m[0000] Starting node 'k3d-cellhive-e2e-175131-394238-tools' 
+[36mINFO[0m[0000] Saving 2 image(s) from runtime...            
+[36mINFO[0m[0002] Importing images into nodes...               
+[36mINFO[0m[0002] Importing images from tarball '/k3d/images/k3d-cellhive-e2e-175131-394238-images-20261027025101.tar' into node 'k3d-cellhive-e2e-175131-394238-server-0'... 
+[36mINFO[0m[0005] Removing the tarball(s) from image volume... 
+[36mINFO[0m[0006] Removing k3d-tools node...                   
+[36mINFO[0m[0007] Successfully imported image(s)               
+[36mINFO[0m[0007] Successfully imported 2 image(s) into 1 cluster(s) 
+namespace/cellhive created
+secret/cellhive-secrets created
+Warning: resource namespaces/cellhive is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+namespace/cellhive configured
+serviceaccount/cellhive created
+configmap/cellhive-config created
+service/cell-agent created
+service/do-runtime created
+service/do-runtime-gated created
+service/user-runtime created
+deployment.apps/user-runtime created
+statefulset.apps/cell-agent created
+statefulset.apps/do-runtime created
+statefulset.apps/do-runtime-gated created
+poddisruptionbudget.policy/cell-agent created
+poddisruptionbudget.policy/do-runtime created
+poddisruptionbudget.policy/do-runtime-gated created
+poddisruptionbudget.policy/user-runtime created
+horizontalpodautoscaler.autoscaling/user-runtime created
+networkpolicy.networking.k8s.io/cell-agent created
+networkpolicy.networking.k8s.io/do-runtime created
+networkpolicy.networking.k8s.io/do-runtime-gated created
+networkpolicy.networking.k8s.io/user-runtime created
+statefulset.apps/do-runtime-gated patched
+statefulset.apps/cell-agent patched
+statefulset.apps/cell-agent image updated
+deployment.apps/user-runtime image updated
+statefulset.apps/do-runtime-gated image updated
+Waiting for 2 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for partitioned roll out to finish: 1 out of 2 new pods have been updated...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 2 new pods have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "user-runtime" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "user-runtime" rollout to finish: 1 old replicas are pending termination...
+deployment "user-runtime" successfully rolled out
+Waiting for 2 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+statefulset rolling update complete 3 pods at revision do-runtime-gated-6bbc79ffbc...
+uploaded bundle 40afca2107e839c5e60cec2bcb2ffbc86a75f181c4c71d13df080f8079bd0221 ( 789 bytes )
+curl: (22) The requested URL returned error: 503
+command terminated with exit code 22
+== owner routing and cold takeover ==
+pod "do-runtime-gated-0" deleted from cellhive namespace
+Waiting for 1 pods to be ready...
+statefulset rolling update complete 3 pods at revision do-runtime-gated-6bbc79ffbc...
+== A -> B -> C with B's follower-only write ==
+Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.
+Waiting for 1 pods to be ready...
+statefulset rolling update complete 3 pods at revision do-runtime-gated-6bbc79ffbc...
+K3D-RUNTIME-E2E: PASS owners=do-runtime-gated-0,do-runtime-gated-1,do-runtime-gated-2 counts=1,2,3,4 follower_only=B pvc_A=pvc-493b8ab8-31bb-4da8-8978-e870aacc9d6f

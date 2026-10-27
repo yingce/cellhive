@@ -49,10 +49,20 @@ type Claims struct {
 	// binding registration (HasBinding) and secret rotation (ADR-074). Delegated
 	// (Iss != "") tokens must set it: the server rejects an expiry-less token.
 	ExpiresMs int64 `json:"exp_ms,omitempty"`
+	// Worker/Version/Resource pin a platform KV capability to its immutable
+	// version mapping. They do not bypass registration or resource fences.
+	Worker   string `json:"worker,omitempty"`
+	Version  int    `json:"version,omitempty"`
+	Resource string `json:"resource,omitempty"`
 }
 
 // Valid reports whether the claims are structurally complete.
 func (c Claims) Valid() bool {
+	if c.Worker != "" || c.Version != 0 || c.Resource != "" {
+		if c.Iss != "" || c.Kind != "kv" || c.Worker == "" || c.Version <= 0 || c.Resource == "" || HasWildcard(c.Name) {
+			return false
+		}
+	}
 	return c.Namespace != "" && c.Kind != "" && c.Name != "" && c.ExpiresMs >= 0
 }
 

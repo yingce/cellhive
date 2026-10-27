@@ -1,0 +1,9 @@
+--- FAIL: TestPollStableWALRetainsCheckpoint (0.00s)
+    wal_retry_test.go:17: result={Header:{Magic:0 Version:0 PageSize:0 CheckpointSeq:0 Salt1:0 Salt2:0 Checksum1:0 Checksum2:0} NewCommitted:[] Transactions:[] Checkpoint:true} calls=1 err=wal: checksum mismatch
+--- FAIL: TestPollStableWALPersistentCorruptionFailsClosed (0.00s)
+    wal_retry_test.go:23: calls=1 err=wal: checksum mismatch
+--- FAIL: TestPollStableWALCancellation (0.00s)
+    wal_retry_test.go:29: wal: checksum mismatch
+FAIL
+FAIL	cellhive/internal/dosupervisor	0.005s
+FAIL

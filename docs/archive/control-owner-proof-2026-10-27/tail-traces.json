@@ -1,0 +1,2193 @@
+{
+  "requests": [
+    {
+      "event": "slow-request",
+      "layer": "forwarded",
+      "mode": "put",
+      "round": 1,
+      "index": 8,
+      "concurrency": 32,
+      "ms": 510.3863399999973,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0",
+      "time": "2026-10-26T18:20:01.803Z"
+    },
+    {
+      "event": "slow-request",
+      "layer": "forwarded",
+      "mode": "put",
+      "round": 1,
+      "index": 18,
+      "concurrency": 32,
+      "ms": 509.4904899999965,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0",
+      "time": "2026-10-26T18:20:01.804Z"
+    },
+    {
+      "event": "slow-request",
+      "layer": "forwarded",
+      "mode": "put",
+      "round": 1,
+      "index": 30,
+      "concurrency": 32,
+      "ms": 507.82150000000547,
+      "trace": "093470f2de70ba968846a3361ae9772b",
+      "time": "2026-10-26T18:20:01.803Z"
+    },
+    {
+      "event": "slow-request",
+      "layer": "forwarded",
+      "mode": "put",
+      "round": 1,
+      "index": 6,
+      "concurrency": 32,
+      "ms": 507.1253080000024,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e",
+      "time": "2026-10-26T18:20:01.800Z"
+    },
+    {
+      "event": "slow-request",
+      "layer": "forwarded",
+      "mode": "put",
+      "round": 1,
+      "index": 1,
+      "concurrency": 32,
+      "ms": 505.0036400000099,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa",
+      "time": "2026-10-26T18:20:01.797Z"
+    }
+  ],
+  "spans": [
+    {
+      "attrs": {
+        "http.status_code": 200
+      },
+      "ms": 0.218655,
+      "name": "http.server",
+      "parent": "815e62d4cb3c5596",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c81506e0a42af0d8",
+      "start_ns": 1793038801668901919,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00065,
+      "name": "cell.binding_lookup",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4c68a8a5e74fc960",
+      "start_ns": 1793038801766857561,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00084,
+      "name": "cell.binding_lookup",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3acfeade6ac8b99e",
+      "start_ns": 1793038801766876611,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00952,
+      "name": "cell.resource_prepare",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "bf7691ec552582a5",
+      "start_ns": 1793038801766879961,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00064,
+      "name": "cell.binding_lookup",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4c8f195b58a92ca6",
+      "start_ns": 1793038801766892370,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00074,
+      "name": "cell.binding_lookup",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3a1922d7a6e89e34",
+      "start_ns": 1793038801766897031,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000911,
+      "name": "cell.resource_gate",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "73912f1523f44df6",
+      "start_ns": 1793038801766899610,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000551,
+      "name": "cell.binding_lookup",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3b4b5809fb99350a",
+      "start_ns": 1793038801766904000,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00105,
+      "name": "cell.binding_lookup",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "9ab9f3a4a5a1e38c",
+      "start_ns": 1793038801767886287,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000621,
+      "name": "cell.binding_lookup",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "ba73c7b6c0a19d40",
+      "start_ns": 1793038801767898115,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.007119,
+      "name": "cell.resource_prepare",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "6f5dc9d69120ab89",
+      "start_ns": 1793038801767900936,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.0008,
+      "name": "cell.binding_lookup",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "9566803ef0a662d3",
+      "start_ns": 1793038801767911025,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000469,
+      "name": "cell.binding_lookup",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "adce886c1a9dfef0",
+      "start_ns": 1793038801767916015,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00226,
+      "name": "cell.resource_gate",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "66b6209af1755ffe",
+      "start_ns": 1793038801767918465,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00059,
+      "name": "cell.binding_lookup",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "14386fd6fb449f3e",
+      "start_ns": 1793038801767924385,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00063,
+      "name": "cell.binding_lookup",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "727b8c3e6c6f51a6",
+      "start_ns": 1793038801768351735,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00095,
+      "name": "cell.binding_lookup",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3bd9c14788ce8afb",
+      "start_ns": 1793038801768352315,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000779,
+      "name": "cell.binding_lookup",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "5d8e3185a4ebafd2",
+      "start_ns": 1793038801768363254,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.005759,
+      "name": "cell.resource_prepare",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c556015ca027e5c9",
+      "start_ns": 1793038801768365845,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000469,
+      "name": "cell.binding_lookup",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "5d54680a9e1e86fb",
+      "start_ns": 1793038801768375364,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00176,
+      "name": "cell.binding_lookup",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "15b429232bbf3e07",
+      "start_ns": 1793038801768377624,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000609,
+      "name": "cell.binding_lookup",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a7ffd1b18bd49009",
+      "start_ns": 1793038801768379164,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001651,
+      "name": "cell.resource_gate",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3747e410bc2a5945",
+      "start_ns": 1793038801768381715,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00059,
+      "name": "cell.binding_lookup",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "d04f5150d2269d83",
+      "start_ns": 1793038801768387504,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.011359,
+      "name": "cell.resource_prepare",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "8fa9c204e5dafab7",
+      "start_ns": 1793038801768382124,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00072,
+      "name": "cell.binding_lookup",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "61506ae17001a2b9",
+      "start_ns": 1793038801768397274,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00056,
+      "name": "cell.binding_lookup",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "36750520527eef60",
+      "start_ns": 1793038801768402374,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00141,
+      "name": "cell.resource_gate",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "eabe39f2cd03a1bc",
+      "start_ns": 1793038801768404784,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00048,
+      "name": "cell.binding_lookup",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "cff098fcc0f7575a",
+      "start_ns": 1793038801768411154,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000609,
+      "name": "cell.binding_lookup",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "91bee9d78ef04d6f",
+      "start_ns": 1793038801768522850,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000619,
+      "name": "cell.binding_lookup",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "6194bb49eed648d4",
+      "start_ns": 1793038801768535520,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00739,
+      "name": "cell.resource_prepare",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a77b4df087cfca29",
+      "start_ns": 1793038801768538220,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00063,
+      "name": "cell.binding_lookup",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "57d3c65a7856a44e",
+      "start_ns": 1793038801768548900,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.0005,
+      "name": "cell.binding_lookup",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "167e89f6bd8b3e3c",
+      "start_ns": 1793038801768554680,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00122,
+      "name": "cell.resource_gate",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a5c80147ae99eac8",
+      "start_ns": 1793038801768557270,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.0012,
+      "name": "cell.binding_lookup",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b0feaa9196b551f1",
+      "start_ns": 1793038801768562070,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00047,
+      "name": "cell.binding_lookup",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7baca8520f544a5a",
+      "start_ns": 1793038801768568730,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00074,
+      "name": "cell.binding_lookup",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f2740af7e9875e4b",
+      "start_ns": 1793038801768581259,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.006839,
+      "name": "cell.resource_prepare",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "08c273f7c38b94cd",
+      "start_ns": 1793038801768584080,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00063,
+      "name": "cell.binding_lookup",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "8a572411a58b1e3a",
+      "start_ns": 1793038801768593709,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000811,
+      "name": "cell.binding_lookup",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "e56db6d4e12fd64c",
+      "start_ns": 1793038801768597749,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001099,
+      "name": "cell.resource_gate",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a738de424feb6a93",
+      "start_ns": 1793038801768600399,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000461,
+      "name": "cell.binding_lookup",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c6ed32cc7a06d2f1",
+      "start_ns": 1793038801768605738,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 1.540972,
+      "name": "cell.capture_preflight",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "9a9085e5758a98f3",
+      "start_ns": 1793038801767930825,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.01115,
+      "name": "cell.capture_ensure",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "87e0d52c58911ea0",
+      "start_ns": 1793038801769504116,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1242"
+      },
+      "ms": 0.074678,
+      "name": "cell.sqlite_write",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "52927127baae8633",
+      "start_ns": 1793038801769517167,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 1.864046,
+      "name": "cell.capture_preflight",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "0a4fe5cd3969f5bb",
+      "start_ns": 1793038801768569630,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 1.837334,
+      "name": "cell.capture_preflight",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "642f300b0c0bc62d",
+      "start_ns": 1793038801768613269,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 3.625172,
+      "name": "cell.capture_preflight",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b77450be7a14b8ce",
+      "start_ns": 1793038801766911031,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 2.269317,
+      "name": "cell.capture_preflight",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "e796cbeddbd2a99d",
+      "start_ns": 1793038801768420142,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.02338,
+      "name": "cell.capture_ensure",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3ee37d419c6f2d95",
+      "start_ns": 1793038801770699987,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 2.369833,
+      "name": "cell.capture_preflight",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4e11df6e224a11fb",
+      "start_ns": 1793038801768393874,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1249"
+      },
+      "ms": 0.125057,
+      "name": "cell.sqlite_write",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f66df60fe0d57fe9",
+      "start_ns": 1793038801770725387,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 1.420306,
+      "name": "cell.capture_ensure",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "bd10d86d0b117ff4",
+      "start_ns": 1793038801770441973,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1257"
+      },
+      "ms": 0.057599,
+      "name": "cell.sqlite_write",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c0d1b0cd97548f74",
+      "start_ns": 1793038801771865019,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 1.477185,
+      "name": "cell.capture_ensure",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f1346bb6c7079cc1",
+      "start_ns": 1793038801770460944,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1258"
+      },
+      "ms": 0.04751,
+      "name": "cell.sqlite_write",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "57e7be3169f017d7",
+      "start_ns": 1793038801771940588,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 1.491065,
+      "name": "cell.capture_ensure",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a0163a1e3d493fbe",
+      "start_ns": 1793038801770773406,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 1.787297,
+      "name": "cell.capture_ensure",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b3556cbff106cd58",
+      "start_ns": 1793038801770547222,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1261"
+      },
+      "ms": 0.163906,
+      "name": "cell.sqlite_write",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f3ef9f010c8eec66",
+      "start_ns": 1793038801772273050,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1264"
+      },
+      "ms": 0.361471,
+      "name": "cell.sqlite_write",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "0c126f17eb3c96e3",
+      "start_ns": 1793038801772337388,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1249",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 14.83293,
+      "name": "cell.durability_proof",
+      "parent": "226547ba1f6f115d",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "903c2f79e2abb945",
+      "start_ns": 1793038801770858055,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1264",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 13.025534,
+      "name": "cell.durability_proof",
+      "parent": "342148af8c63afcb",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7ed8baa6ea5acbf3",
+      "start_ns": 1793038801772710050,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 17.413708,
+      "name": "http.server",
+      "parent": "7eeb4aeda9d6f19e",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "226547ba1f6f115d",
+      "start_ns": 1793038801768334915,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 18.908091,
+      "name": "http.server",
+      "parent": "0f9604f13c17540b",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "342148af8c63afcb",
+      "start_ns": 1793038801766844031,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1257",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 13.985381,
+      "name": "cell.durability_proof",
+      "parent": "5b36f0dc9d0403a8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3ece43883c42c0ba",
+      "start_ns": 1793038801771928918,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 17.412458,
+      "name": "http.server",
+      "parent": "669278816a0ccc3c",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "5b36f0dc9d0403a8",
+      "start_ns": 1793038801768513060,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1258",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 14.011899,
+      "name": "cell.durability_proof",
+      "parent": "31714dcd4f38f802",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7bbc80b384a991e3",
+      "start_ns": 1793038801771994117,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 17.454796,
+      "name": "http.server",
+      "parent": "e2c1fea1c2ba8258",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "31714dcd4f38f802",
+      "start_ns": 1793038801768560730,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 343.671336,
+      "name": "cell.owner_bucket_read",
+      "parent": "815e62d4cb3c5596",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b05ea6058d5d8edc",
+      "start_ns": 1793038801301256205,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 368.323118,
+      "name": "cell.binding_refresh",
+      "parent": "b67344384687e792",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "815e62d4cb3c5596",
+      "start_ns": 1793038801300939802,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 368.330719,
+      "name": "cell.binding_lookup",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b67344384687e792",
+      "start_ns": 1793038801300936682,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.003039,
+      "name": "cell.binding_lookup",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7786cfd9846e144a",
+      "start_ns": 1793038801669280740,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 367.630354,
+      "name": "cell.binding_refresh",
+      "parent": "57280a872b1c1a54",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "08698c05c3313774",
+      "start_ns": 1793038801301863161,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 367.633875,
+      "name": "cell.binding_lookup",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "57280a872b1c1a54",
+      "start_ns": 1793038801301860940,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000911,
+      "name": "cell.binding_lookup",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7075ac0242d7a285",
+      "start_ns": 1793038801669509365,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 368.395937,
+      "name": "cell.binding_refresh",
+      "parent": "e2b56429f2718669",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4cb975ff4ff8deab",
+      "start_ns": 1793038801301202106,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 368.398587,
+      "name": "cell.binding_lookup",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "e2b56429f2718669",
+      "start_ns": 1793038801301200296,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00072,
+      "name": "cell.binding_lookup",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "ca7a74b44c407806",
+      "start_ns": 1793038801669610502,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 368.744048,
+      "name": "cell.binding_refresh",
+      "parent": "b96dca0308834994",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "0d5eeb66820d5cbb",
+      "start_ns": 1793038801301064489,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 368.746857,
+      "name": "cell.binding_lookup",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b96dca0308834994",
+      "start_ns": 1793038801301062969,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00097,
+      "name": "cell.binding_lookup",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "9d781c53d29ab8bd",
+      "start_ns": 1793038801669823616,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 368.494795,
+      "name": "cell.binding_refresh",
+      "parent": "d857e69238683d37",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "bca3124cfaac8413",
+      "start_ns": 1793038801301370092,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 368.497883,
+      "name": "cell.binding_lookup",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "d857e69238683d37",
+      "start_ns": 1793038801301368143,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00111,
+      "name": "cell.binding_lookup",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4ea08194193800dc",
+      "start_ns": 1793038801669878786,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 368.770668,
+      "name": "cell.binding_refresh",
+      "parent": "b6267e373b67ea60",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "1c98991aabc264a2",
+      "start_ns": 1793038801301137447,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 368.773437,
+      "name": "cell.binding_lookup",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b6267e373b67ea60",
+      "start_ns": 1793038801301135548,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00098,
+      "name": "cell.binding_lookup",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "3bdc77b76ee542c8",
+      "start_ns": 1793038801669921505,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 22.013745,
+      "name": "cell.fence_bucket_read",
+      "parent": "e49015c42a9333de",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "4abc4d7ed0056bd5",
+      "start_ns": 1793038801669514205,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 22.046265,
+      "name": "cell.resource_prepare",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "e49015c42a9333de",
+      "start_ns": 1793038801669512664,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.004319,
+      "name": "cell.binding_lookup",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7cd09c6d888299a0",
+      "start_ns": 1793038801691579379,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 22.089563,
+      "name": "cell.fence_bucket_read",
+      "parent": "bce9f4d188eaea42",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "db7dca40dde3ef2b",
+      "start_ns": 1793038801669613812,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 22.102483,
+      "name": "cell.resource_prepare",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "bce9f4d188eaea42",
+      "start_ns": 1793038801669612612,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00157,
+      "name": "cell.binding_lookup",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "eb56b3b5f90fb0a4",
+      "start_ns": 1793038801691722035,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 27.474763,
+      "name": "cell.fence_bucket_read",
+      "parent": "7603f433ab913f34",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "765c5b9938ba1930",
+      "start_ns": 1793038801669926854,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 27.490493,
+      "name": "cell.resource_prepare",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "7603f433ab913f34",
+      "start_ns": 1793038801669925444,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00151,
+      "name": "cell.binding_lookup",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b006d6f44a4d9b21",
+      "start_ns": 1793038801697424817,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 29.106873,
+      "name": "cell.fence_bucket_read",
+      "parent": "55526e0c49d1ec1a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "dbea33ea944341e9",
+      "start_ns": 1793038801669829646,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 29.125513,
+      "name": "cell.resource_prepare",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "55526e0c49d1ec1a",
+      "start_ns": 1793038801669826627,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00174,
+      "name": "cell.binding_lookup",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "209bd30cc18c4946",
+      "start_ns": 1793038801698961999,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 30.965809,
+      "name": "cell.fence_bucket_read",
+      "parent": "d74df76ceb5775c9",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a191479ed21859c3",
+      "start_ns": 1793038801669290509,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 30.989087,
+      "name": "cell.resource_prepare",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "d74df76ceb5775c9",
+      "start_ns": 1793038801669287330,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00214,
+      "name": "cell.binding_lookup",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "af2bead87e8649a5",
+      "start_ns": 1793038801700287377,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 48.399225,
+      "name": "cell.fence_bucket_read",
+      "parent": "df9bfb39eb146cd6",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "19b02183714c9c46",
+      "start_ns": 1793038801669884786,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 48.421224,
+      "name": "cell.resource_prepare",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "df9bfb39eb146cd6",
+      "start_ns": 1793038801669882596,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00316,
+      "name": "cell.binding_lookup",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "2effac41a3352d13",
+      "start_ns": 1793038801718318479,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00092,
+      "name": "cell.binding_lookup",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f5cf3b3062ea0b01",
+      "start_ns": 1793038801766372273,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00194,
+      "name": "cell.resource_gate",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a8bbdc9fb1de93a8",
+      "start_ns": 1793038801766375273,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00055,
+      "name": "cell.binding_lookup",
+      "parent": "a57faf65b7bd2ab8",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "286117a8f1273ae0",
+      "start_ns": 1793038801766381653,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00062,
+      "name": "cell.binding_lookup",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "1b03973fe21afedf",
+      "start_ns": 1793038801766479851,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000979,
+      "name": "cell.resource_gate",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "bc0664789021ac48",
+      "start_ns": 1793038801766482340,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.000461,
+      "name": "cell.binding_lookup",
+      "parent": "ee3326bc3385514a",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "e7717c4469b455c3",
+      "start_ns": 1793038801766486760,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001109,
+      "name": "cell.binding_lookup",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b33a605fd0565db2",
+      "start_ns": 1793038801766863121,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001231,
+      "name": "cell.resource_gate",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a24cb722c67dbf88",
+      "start_ns": 1793038801766866711,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00071,
+      "name": "cell.binding_lookup",
+      "parent": "a7d88f7fcdb864f5",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "9003e3b6cc6c9621",
+      "start_ns": 1793038801766872020,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00109,
+      "name": "cell.binding_lookup",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "716c13906048cbf0",
+      "start_ns": 1793038801766974178,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001209,
+      "name": "cell.resource_gate",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a8789f1957c24b5b",
+      "start_ns": 1793038801766977198,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.0006,
+      "name": "cell.binding_lookup",
+      "parent": "125d26c6d6f9f625",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "1d86e33e20352de3",
+      "start_ns": 1793038801766983629,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00131,
+      "name": "cell.binding_lookup",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "73c1153d5808d44f",
+      "start_ns": 1793038801767316570,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00225,
+      "name": "cell.resource_gate",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "30acc8b547828db9",
+      "start_ns": 1793038801767321050,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.0008,
+      "name": "cell.binding_lookup",
+      "parent": "23ceac60f6e607ed",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a3df24e50f4d277b",
+      "start_ns": 1793038801767328060,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {},
+      "ms": 0.00151,
+      "name": "cell.binding_lookup",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f9704d85527f3c91",
+      "start_ns": 1793038801767430068,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001261,
+      "name": "cell.resource_gate",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "b0a7d0a5c69275af",
+      "start_ns": 1793038801767433938,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {},
+      "ms": 0.001329,
+      "name": "cell.binding_lookup",
+      "parent": "c726ef2d00c5b3c2",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "d824ed7aa9cc9d4a",
+      "start_ns": 1793038801767439507,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 492.58829,
+      "name": "http.server",
+      "parent": "427413f62e3b6966",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "125d26c6d6f9f625",
+      "start_ns": 1793038801300884714,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 495.203318,
+      "name": "http.server",
+      "parent": "e2c1fea1c2ba8258",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a7d88f7fcdb864f5",
+      "start_ns": 1793038801301359402,
+      "trace": "f504d8686caf76d3eeb2da54a7cbcaaa"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 495.455641,
+      "name": "http.server",
+      "parent": "7eeb4aeda9d6f19e",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "23ceac60f6e607ed",
+      "start_ns": 1793038801301191137,
+      "trace": "991bdfd034bcdbd477a1701a4cd27e0e"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 494.837818,
+      "name": "http.server",
+      "parent": "669278816a0ccc3c",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c726ef2d00c5b3c2",
+      "start_ns": 1793038801301838980,
+      "trace": "093470f2de70ba968846a3361ae9772b"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 496.352839,
+      "name": "http.server",
+      "parent": "6161955698fb1211",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "ee3326bc3385514a",
+      "start_ns": 1793038801301126308,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 496.71636,
+      "name": "http.server",
+      "parent": "0f9604f13c17540b",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-peer",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-peer",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "a57faf65b7bd2ab8",
+      "start_ns": 1793038801301054460,
+      "trace": "bc745b58431f4661b0b702cc030bc7b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1242",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 16.726024,
+      "name": "cell.durability_proof",
+      "parent": "c451e08443eb41d4",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "fa362cc99a1c7b2f",
+      "start_ns": 1793038801769598714,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 18.459791,
+      "name": "http.server",
+      "parent": "6161955698fb1211",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "c451e08443eb41d4",
+      "start_ns": 1793038801767873607,
+      "trace": "891fce9a0d52afdc6b78c63e94a095b0"
+    },
+    {
+      "attrs": {
+        "cell.txid": "1261",
+        "cellhive.kind": "__kv__",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "cellhive.scope": "hk-review-1793038713-e551d1-0/__kv__/KV"
+      },
+      "ms": 14.025749,
+      "name": "cell.durability_proof",
+      "parent": "f825772b48e58381",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f823afc45d92528f",
+      "start_ns": 1793038801772694900,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    },
+    {
+      "attrs": {
+        "cellhive.binding": "kv",
+        "cellhive.kind": "kv",
+        "cellhive.name": "KV",
+        "cellhive.namespace": "hk-review-1793038713-e551d1-0",
+        "http.status_code": 200
+      },
+      "ms": 18.390114,
+      "name": "http.server",
+      "parent": "427413f62e3b6966",
+      "resource": {
+        "cellhive.node_id": "hk-review-1793038713-e551d1-0-perf",
+        "service.instance.id": "hk-review-1793038713-e551d1-0-perf",
+        "service.name": "cellhive-cell-agent",
+        "service.version": "v1"
+      },
+      "span": "f825772b48e58381",
+      "start_ns": 1793038801768343904,
+      "trace": "c43baa6bc2d2f8dd5a2dff83d2fa2a5c"
+    }
+  ]
+}

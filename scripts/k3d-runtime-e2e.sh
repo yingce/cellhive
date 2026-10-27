@@ -68,15 +68,15 @@ public_get() {
 }
 
 echo "== build and load image =="
-docker build -f deploy/Dockerfile -t "$IMAGE" .
+docker build --build-context workerd-fork=deploy/workerd-fork -f deploy/Dockerfile -t "$IMAGE" .
 docker tag "$IMAGE" cellhive:dev
 if [[ $K3D_FLEET == 1 ]]; then
   mkdir -p "$TMP/shared-bucket"
   chmod 0777 "$TMP/shared-bucket"
-  k3d cluster create "$CLUSTER" --servers 1 --agents "$K3D_AGENTS" \
+  k3d cluster create "$CLUSTER" --kubeconfig-update-default=false --kubeconfig-switch-context=false --servers 1 --agents "$K3D_AGENTS" \
     --volume "$TMP/shared-bucket:/var/lib/cellhive-e2e-bucket@server:0" --wait
 else
-  k3d cluster create "$CLUSTER" --servers 1 --agents "$K3D_AGENTS" --wait
+  k3d cluster create "$CLUSTER" --kubeconfig-update-default=false --kubeconfig-switch-context=false --servers 1 --agents "$K3D_AGENTS" --wait
 fi
 # Keep every kubectl call pinned to this test cluster even if another process
 # changes the machine-wide current context while the test is running.

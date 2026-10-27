@@ -1317,7 +1317,7 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
       kind: b.type,
       ns: app.namespace,
       name: resource,
-      token: await scopedToken(env.SCOPE_SECRET, app.namespace, b.type, resource),
+      token: await scopedToken(env.SCOPE_SECRET, app.namespace, b.type, resource, b.type === "kv" && b.id ? {worker, version: version.version, resource: b.id} : null),
     };
   }
   return spec;
@@ -1325,10 +1325,13 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
 
 // scopedToken computes the binding capability token locally from the shared
 // secret (ADR-074): HMAC-SHA256 over canonical JSON {ns,kind,name} (no expiry).
+// KV adds signed {worker,version,resource} for the immutable mapping (ADR-302).
 // The platform loader holds the secret; only the computed token reaches a
 // loaded worker. Byte-identical to Go scopedtoken.Mint (verified by tests).
-async function scopedToken(secret, ns, kind, name) {
-  const payload = `{"ns":${JSON.stringify(ns)},"kind":${JSON.stringify(kind)},"name":${JSON.stringify(name)}}`;
+async function scopedToken(secret, ns, kind, name, pinned = null) {
+  const claims = {ns, kind, name};
+  if (pinned) Object.assign(claims, pinned);
+  const payload = JSON.stringify(claims);
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret || ""),

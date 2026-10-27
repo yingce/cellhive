@@ -1,0 +1,35 @@
+ Network cellhive-cf-tail-780978-781007_default Creating 
+ Network cellhive-cf-tail-780978-781007_default Creating 
+ Volume cellhive-cf-tail-780978-781007_agent-a-data Creating 
+ Volume cellhive-cf-tail-780978-781007_agent-a-data Creating 
+ Volume cellhive-cf-tail-780978-781007_runtime-data Creating 
+ Volume cellhive-cf-tail-780978-781007_runtime-data Creating 
+ Volume cellhive-cf-tail-780978-781007_bucket Creating 
+ Volume cellhive-cf-tail-780978-781007_bucket Creating 
+ Volume cellhive-cf-tail-780978-781007_agent-a-data Created 
+ Volume cellhive-cf-tail-780978-781007_agent-a-data Created 
+ Volume cellhive-cf-tail-780978-781007_runtime-data Created 
+ Volume cellhive-cf-tail-780978-781007_runtime-data Created 
+ Volume cellhive-cf-tail-780978-781007_bucket Created 
+ Volume cellhive-cf-tail-780978-781007_bucket Created 
+ Network cellhive-cf-tail-780978-781007_default Created 
+ Network cellhive-cf-tail-780978-781007_default Created 
+ Container cellhive-cf-tail-780978-781007-user-runtime-1 Creating 
+ Container cellhive-cf-tail-780978-781007-agent-a-1 Creating 
+ Container cellhive-cf-tail-780978-781007-user-runtime-1 Created 
+ Container cellhive-cf-tail-780978-781007-agent-a-1 Created 
+ Container cellhive-cf-tail-780978-781007-user-runtime-1 Starting 
+ Container cellhive-cf-tail-780978-781007-agent-a-1 Starting 
+ Container cellhive-cf-tail-780978-781007-user-runtime-1 Started 
+ Container cellhive-cf-tail-780978-781007-agent-a-1 Started 
+ Volume cellhive-cf-tail-780978-781007_agent-b-data Creating 
+ Volume cellhive-cf-tail-780978-781007_agent-b-data Creating 
+ Volume cellhive-cf-tail-780978-781007_agent-b-data Created 
+ Volume cellhive-cf-tail-780978-781007_agent-b-data Created 
+ Container cellhive-cf-tail-780978-781007-agent-b-1 Creating 
+ Container cellhive-cf-tail-780978-781007-agent-b-1 Created 
+ Container cellhive-cf-tail-780978-781007-agent-b-1 Starting 
+ Container cellhive-cf-tail-780978-781007-agent-b-1 Started 
+raw Tail payloads: queue=1 cron=1
+Wrangler Tail payloads: Queue and Cron CF fields present
+CF-TAIL-MULTINODE-E2E: PASS: original Wrangler on B received A fetch, Queue, Cron and Workflow Tail events

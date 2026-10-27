@@ -1,0 +1,291 @@
+== build pinned runtime image ==
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.05kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 1.0s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e 0.0s done
+#3 CACHED
+
+#4 [context workerd-fork] load .dockerignore
+#4 transferring workerd-fork: 2B done
+#4 DONE 0.0s
+
+#5 [internal] load metadata for docker.io/library/golang:1.27-bookworm
+#5 ...
+
+#6 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#6 DONE 1.0s
+
+#5 [internal] load metadata for docker.io/library/golang:1.27-bookworm
+#5 DONE 1.0s
+
+#7 [internal] load metadata for docker.io/library/ubuntu:24.04
+#7 DONE 1.0s
+
+#8 [internal] load .dockerignore
+#8 transferring context: 160B done
+#8 DONE 0.0s
+
+#9 [build 1/8] FROM docker.io/library/golang:1.27-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
+#9 resolve docker.io/library/golang:1.27-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 0.0s done
+#9 DONE 0.0s
+
+#10 [runtime-tools 1/3] FROM docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+#10 resolve docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 0.0s done
+#10 DONE 0.0s
+
+#11 [stage-2  1/12] FROM docker.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+#11 resolve docker.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac 0.0s done
+#11 DONE 0.0s
+
+#12 [context workerd-fork] load from client
+#12 transferring workerd-fork: 31B done
+#12 DONE 0.0s
+
+#13 [internal] load build context
+#13 transferring context: 19.45kB 0.0s done
+#13 DONE 0.0s
+
+#14 [stage-2  5/12] COPY --from=workerd-fork /workerd /usr/local/bin/workerd
+#14 CACHED
+
+#15 [stage-2  7/12] COPY third_party/esbuild/LICENSE /usr/share/licenses/cellhive/esbuild/LICENSE
+#15 CACHED
+
+#16 [build 5/8] RUN go mod download
+#16 CACHED
+
+#17 [stage-2  3/12] COPY --from=runtime-tools /out/esbuild /usr/local/bin/esbuild
+#17 CACHED
+
+#18 [stage-2  8/12] COPY THIRD_PARTY_NOTICES.md /usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md
+#18 CACHED
+
+#19 [build 4/8] COPY go.mod go.sum ./
+#19 CACHED
+
+#20 [stage-2 11/12] COPY deploy/do-runtime-gated.sh /usr/local/bin/do-runtime-gated.sh
+#20 CACHED
+
+#21 [build 6/8] COPY cmd ./cmd
+#21 CACHED
+
+#22 [stage-2  9/12] COPY workerd/ /app/workerd/
+#22 CACHED
+
+#23 [stage-2  4/12] COPY --from=build /out/ /usr/local/bin/
+#23 CACHED
+
+#24 [build 7/8] COPY internal ./internal
+#24 CACHED
+
+#25 [runtime-tools 3/3] RUN curl -fsSL "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz" -o /tmp/esbuild.tgz  && echo "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d  /tmp/esbuild.tgz" | sha512sum -c -  && mkdir -p /out /tmp/esbuild  && tar -xzf /tmp/esbuild.tgz -C /tmp/esbuild --strip-components=1  && install -m 0755 /tmp/esbuild/bin/esbuild /out/esbuild  && test "$(/out/esbuild --version)" = "0.28.2"  && /out/esbuild --version
+#25 CACHED
+
+#26 [build 8/8] RUN CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"       -trimpath -ldflags="-s -w" -o "/out/cell-agent" ./cmd/cell-agent  && for svc in cellhive user-runtime do-runtime do-supervisor; do       CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook"         -trimpath -ldflags="-s -w" -o "/out/$svc" "./cmd/$svc" || exit 1;     done
+#26 CACHED
+
+#27 [runtime-tools 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl  && rm -rf /var/lib/apt/lists/*
+#27 CACHED
+
+#28 [stage-2  6/12] COPY third_party/workerd/LICENSE /usr/share/licenses/cellhive/workerd/LICENSE
+#28 CACHED
+
+#29 [stage-2 10/12] COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+#29 CACHED
+
+#30 [stage-2  2/12] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6  && rm -rf /var/lib/apt/lists/*  && groupadd -g 65532 cellhive  && useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin cellhive  && mkdir -p /data/state /data/runtime /data/bucket  && chown -R 65532:65532 /data
+#30 CACHED
+
+#31 [build 2/8] WORKDIR /src
+#31 CACHED
+
+#32 [build 3/8] RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev  && rm -rf /var/lib/apt/lists/*
+#32 CACHED
+
+#33 [stage-2 12/12] RUN chmod 0755 /usr/local/bin/workerd /usr/local/bin/entrypoint.sh /usr/local/bin/do-runtime-gated.sh  && chown -R 65532:65532 /app
+#33 CACHED
+
+#34 exporting to image
+#34 exporting layers done
+#34 exporting manifest sha256:9e9fa9c690e478b2d9f8e75315df36c4b442a5701869cb9beefd9612d4722c89 done
+#34 exporting config sha256:c088c23c71edfa3e3c1f48754655f5946e357e6ede52b2f4b9ab9c9378545f6e done
+#34 exporting attestation manifest sha256:7773913cd7d8615b6abaa1f94062edb338771010fe69950784cb6ce2ede0b129 done
+#34 exporting manifest list sha256:ee3c1e236ace0c688977929634bf3b0135efcc905843ed5580825d52efa8fe8e done
+#34 naming to docker.io/library/cellhive:runtime-baseline done
+#34 unpacking to docker.io/library/cellhive:runtime-baseline done
+#34 DONE 0.1s
+image tools: workerd 2026-09-16; esbuild 0.28.2
+== start isolated gated stack ==
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating 
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Creating 
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating 
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Creating 
+ Network cellhive-runtime-baseline-175131-243272_default Creating 
+ Network cellhive-runtime-baseline-175131-243272_default Creating 
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating 
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Creating 
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created 
+ Volume cellhive-runtime-baseline-175131-243272_user-runtime-data Created 
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created 
+ Volume cellhive-runtime-baseline-175131-243272_cell-agent-data Created 
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created 
+ Volume cellhive-runtime-baseline-175131-243272_gated-runtime-data Created 
+ Network cellhive-runtime-baseline-175131-243272_default Created 
+ Network cellhive-runtime-baseline-175131-243272_default Created 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Creating 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Created 
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Creating 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Creating 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Created 
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Created 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Waiting 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Healthy 
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Starting 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Starting 
+ Container cellhive-runtime-baseline-175131-243272-user-runtime-1 Started 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started 
+== deploy TypeScript source with in-image CLI/esbuild ==
+ cellhive-runtime-baseline-175131-243272-cell-agent-1 Copying /opt/.hermes/cache/scratch/cellhive-runtime-baseline.Yoramd/app/. to cellhive-runtime-baseline-175131-243272-cell-agent-1:/tmp/runtime-baseline-app
+ cellhive-runtime-baseline-175131-243272-cell-agent-1 Copied /opt/.hermes/cache/scratch/cellhive-runtime-baseline.Yoramd/app/. to cellhive-runtime-baseline-175131-243272-cell-agent-1:/tmp/runtime-baseline-app
+== tenant env isolation and real KV ==
+== assets, queue, cron, and workflow user journeys ==
+queue partial-batch delivery after 2458ms (configured max_wait_time_ms=2000)
+== queue DLQ and operator replay ==
+== read-only DLQ preview and selected idempotent ack ==
+== workflow event wait without timeout and durable resume ==
+== DO alarm timer delivery, failure retry, rearm and consumption ==
+== native short TTL and queue idempotency/metadata ==
+== durable Queue/Cron invocation ID, outcomes and console query ==
+== destructive resource cleanup and independent DLQ preservation ==
+== gated DO durability and restart ==
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Restarting 
+ Container cellhive-runtime-baseline-175131-243272-do-runtime-gated-1 Started 
+== secret rotation publishes a live version and rollback restores it ==
+secret rotation: v2=s3cr3t, v3=r0tated, rollback=v2=s3cr3t; no v4
+== queue claim crash, lease expiry, and active-version migration ==
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killing 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Killed 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Starting 
+ Container cellhive-runtime-baseline-175131-243272-cell-agent-1 Started 
+uploaded bundle eccc4acad7702408d242b812f1701d1aedecb46e529c6851c5148b1b63ab0be9 ( 7315 bytes )
+uploaded 1 assets under token 18a94a7f91efdf09f5fa91f6942bc8aaa9f5d93ab77ac8ef8826e6069f55b308
+cron after cell-agent SIGKILL/restart: both expressions advanced to a new slot without duplicate
+== worker deletion ==
+== rendered config and live boundary scans ==
+== captured WorkerCode, near-limit, and compatibility probes ==
+=== RUN   TestCheckCodeBoundary
+=== RUN   TestCheckCodeBoundary/limit_minus_one
+=== RUN   TestCheckCodeBoundary/limit
+=== RUN   TestCheckCodeBoundary/limit_plus_one
+--- PASS: TestCheckCodeBoundary (0.00s)
+    --- PASS: TestCheckCodeBoundary/limit_minus_one (0.00s)
+    --- PASS: TestCheckCodeBoundary/limit (0.00s)
+    --- PASS: TestCheckCodeBoundary/limit_plus_one (0.00s)
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/empty_object
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/ASCII
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/mixed_Latin_and_non-Latin-1
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/Chinese
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/emoji
+=== RUN   TestEstimateEnvChargesJSONAndTwoByteStrings/mixed_ASCII_and_emoji
+--- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/empty_object (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/ASCII (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/mixed_Latin_and_non-Latin-1 (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/Chinese (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/emoji (0.00s)
+    --- PASS: TestEstimateEnvChargesJSONAndTwoByteStrings/mixed_ASCII_and_emoji (0.00s)
+PASS
+ok  	cellhive/internal/workerbudget	0.002s
+=== RUN   TestDeployBudgetExactBoundaries
+=== RUN   TestDeployBudgetExactBoundaries/code_exact_limit_accepted
+=== RUN   TestDeployBudgetExactBoundaries/code_limit_plus_one_rejected_in_dry_run
+=== RUN   TestDeployBudgetExactBoundaries/env_exact_limit_accepted
+--- PASS: TestDeployBudgetExactBoundaries (0.45s)
+    --- PASS: TestDeployBudgetExactBoundaries/code_exact_limit_accepted (0.24s)
+    --- PASS: TestDeployBudgetExactBoundaries/code_limit_plus_one_rejected_in_dry_run (0.19s)
+    --- PASS: TestDeployBudgetExactBoundaries/env_exact_limit_accepted (0.03s)
+PASS
+ok  	cellhive/internal/server	0.473s
+=== RUN   TestDynamicWorkerCodeContainsNoPlatformCredential
+--- PASS: TestDynamicWorkerCodeContainsNoPlatformCredential (0.00s)
+=== RUN   TestRuntimeRejectsUserEnvOverBudget
+--- PASS: TestRuntimeRejectsUserEnvOverBudget (0.23s)
+=== RUN   TestTenantEnvHasNoPlatformCredentials
+    userruntime_test.go:1498: empty tenant env response: {"keys":[],"importedKeys":[],"doType":"undefined","handler":{"chPlatform":"undefined","cellToken":"absent","cellUrl":"absent","platform":"absent"},"imported":{"chPlatform":"undefined","cellToken":"absent","cellUrl":"absent","platform":"absent"},"globalLeak":"absent","logToken":"absent"}
+--- PASS: TestTenantEnvHasNoPlatformCredentials (0.22s)
+PASS
+ok  	cellhive/internal/userruntime	0.458s
+=== RUN   TestDynamicWorkerCodeContainsNoPlatformCredential
+--- PASS: TestDynamicWorkerCodeContainsNoPlatformCredential (0.00s)
+=== RUN   TestDoRuntimeEnvUserOwned
+--- PASS: TestDoRuntimeEnvUserOwned (0.23s)
+=== RUN   TestRuntimeRejectsDOEnvOverBudget
+--- PASS: TestRuntimeRejectsDOEnvOverBudget (0.23s)
+PASS
+ok  	cellhive/internal/doruntime	0.471s
+TAP version 13
+# Subtest: shared env vectors match Go estimates byte for byte
+ok 1 - shared env vectors match Go estimates byte for byte
+  ---
+  duration_ms: 121.284356
+  type: 'test'
+  ...
+# Subtest: shared code vectors match Go estimates and boundaries
+ok 2 - shared code vectors match Go estimates and boundaries
+  ---
+  duration_ms: 0.611325
+  type: 'test'
+  ...
+# Subtest: env rejects unsupported and cyclic values
+ok 3 - env rejects unsupported and cyclic values
+  ---
+  duration_ms: 0.249714
+  type: 'test'
+  ...
+# Subtest: binding env estimate preserves user names and complete props
+ok 4 - binding env estimate preserves user names and complete props
+  ---
+  duration_ms: 0.809961
+  type: 'test'
+  ...
+# Subtest: checkedWorkerGet never invokes loader after a code or env budget failure
+ok 5 - checkedWorkerGet never invokes loader after a code or env budget failure
+  ---
+  duration_ms: 22.181552
+  type: 'test'
+  ...
+# Subtest: budget errors expose only bounded aggregate fields
+ok 6 - budget errors expose only bounded aggregate fields
+  ---
+  duration_ms: 0.42774
+  type: 'test'
+  ...
+# Subtest: worker limits translate positive subrequest values
+ok 7 - worker limits translate positive subrequest values
+  ---
+  duration_ms: 0.289913
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 217.385395
+workerd compatibility probe passed: workerd 2026-09-16 max=2026-09-23 probe_date=2026-09-23 allowed_flags=288
+RUNTIME-BASELINE-E2E: PASS

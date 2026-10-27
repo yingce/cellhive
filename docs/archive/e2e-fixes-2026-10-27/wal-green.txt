@@ -1,0 +1,2 @@
+ok  	cellhive/internal/dosupervisor	0.479s
+ok  	cellhive/internal/wal	0.108s

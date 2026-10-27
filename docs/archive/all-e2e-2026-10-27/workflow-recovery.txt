@@ -1,0 +1,6 @@
+PASS stale step/finish callbacks return 409; new execution output=7
+PASS real workerd 16 concurrent waits consume 16 distinct events
+INJECT SIGKILL runtime + agent after durable consume, before response; fresh local data directory
+PASS fresh agent restores all three results from object storage; lost response event output=42
+E2E-WORKFLOW-RECOVERY: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.fEqzYD

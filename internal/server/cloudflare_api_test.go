@@ -31,7 +31,7 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	part, _ = w.CreateFormFile("worker.js", "worker.js")
 	_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
 	_ = w.Close()
-	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions", &body)
+	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
 	req.Header.Set("Authorization", "Bearer admin-tok")
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	rr := httptest.NewRecorder()
@@ -88,7 +88,7 @@ func TestCloudflareRepeatUploadPreservesSeparateTriggers(t *testing.T) {
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/versions", &body)
+		req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
 		req.Header.Set("Authorization", "Bearer admin-tok")
 		req.Header.Set("Content-Type", w.FormDataContentType())
 		rr := httptest.NewRecorder()

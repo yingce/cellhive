@@ -1,3 +1,4 @@
+{{- $agentImage := mergeOverwrite (deepCopy .Values.image) (default dict .Values.cellAgent.image) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,8 +47,8 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: cell-agent
-          image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "cellhive.image" (dict "image" $agentImage) | quote }}
+          imagePullPolicy: {{ $agentImage.pullPolicy }}
           command: ["cell-agent"]
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}

@@ -44,6 +44,7 @@ func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("PUT "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/content", compat(s.handleCloudflareWorkerUpload))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerUpload))
+		mux.HandleFunc("PATCH "+prefix+"/accounts/{account_id}/workers/workers/{worker_id}/versions/{version_id}", compat(s.handleCloudflareVersionSecretPatch))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions", compat(s.handleCloudflareWorkerVersions))
 		mux.HandleFunc("GET "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions/{version_id}", compat(s.handleCloudflareWorkerVersionGet))
 		mux.HandleFunc("POST "+prefix+"/accounts/{account_id}/workers/scripts/{script_name}/versions/{version_id}/deploy", compat(s.handleCloudflareWorkerVersionDeploy))
@@ -205,10 +206,32 @@ func (s *Server) handleCloudflareWorkerDeploymentCreate(w http.ResponseWriter, r
 }
 
 func (s *Server) handleCloudflareWorkerSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": map[string]any{
-		"bindings": []any{}, "compatibility_date": "2026-09-23", "compatibility_flags": []string{},
-		"observability": map[string]any{"enabled": false}, "tail_consumers": []any{},
-	}})
+	if r.Method != http.MethodGet {
+		cloudflareUnsupported(w, "Worker settings PATCH is unsupported; deploy the full configuration instead")
+		return
+	}
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
+	view, ok, err := s.Control.WorkerEnv(r.Context(), r.PathValue("account_id"), r.PathValue("script_name"))
+	if err != nil {
+		writeErr(w, 500, "settings_failed", "worker configuration unavailable")
+		return
+	}
+	if !ok {
+		writeErr(w, 404, "worker_not_found", "worker does not exist")
+		return
+	}
+	bindings, err := s.cloudflareVersionBindings(r.Context(), view)
+	if err != nil {
+		writeErr(w, 500, "settings_failed", "version bindings unavailable")
+		return
+	}
+	flags := view.CompatFlags
+	if flags == nil {
+		flags = []string{}
+	}
+	cloudflareResult(w, map[string]any{"bindings": bindings, "compatibility_date": view.CompatDate, "compatibility_flags": flags})
 }
 
 // cloudflareAuth accepts the bearer token used by Wrangler and translates it to
@@ -323,6 +346,24 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	// calls. Its code-upload metadata commonly omits both on a repeat deploy;
 	// omission must not disable existing triggers while those calls run.
 	if active, err := s.activeCloudflareVersionForWorker(r.Context(), ns, worker); err == nil {
+		for _, name := range metadata.Inherit {
+			found := false
+			for _, binding := range active.Bindings {
+				if binding.Name == name {
+					metadata.Bindings = append(metadata.Bindings, binding)
+					found = true
+					break
+				}
+			}
+			if value, ok := active.Vars[name]; ok {
+				metadata.Vars[name] = value
+				found = true
+			}
+			if !found {
+				writeErr(w, http.StatusBadRequest, "invalid_inherit", "active worker has no supported binding named "+name)
+				return
+			}
+		}
 		if metadata.Crons == nil {
 			metadata.Crons = active.Crons
 		}
@@ -330,9 +371,13 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	} else if !errors.Is(err, control.ErrNotFound) {
 		writeErr(w, http.StatusInternalServerError, "active_version_failed", err.Error())
 		return
+	} else if len(metadata.Inherit) > 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_inherit", "binding inheritance requires an active worker")
+		return
 	}
 
 	req := deployReq{
+		StageOnly: r.Method == http.MethodPost,
 		Namespace: ns, Worker: worker, BundleSHA: sha,
 		AssetsSHA: metadata.AssetsToken, Assets: metadata.Assets,
 		Vars: metadata.Vars, Bindings: metadata.Bindings,
@@ -368,6 +413,10 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusInternalServerError, "deploy_response_invalid", err.Error())
 		return
 	}
+	if req.StageOnly {
+		cloudflareResult(w, map[string]any{"id": strconv.Itoa(version.Number), "number": version.Number, "metadata": map[string]any{"has_preview": false}, "resources": map[string]any{"script": map[string]any{"etag": version.BundleSHA}}})
+		return
+	}
 	active, ok, err := s.Control.WorkerEnv(r.Context(), ns, worker)
 	if err != nil || !ok || active.Version != version.Number || active.BundleSHA != version.BundleSHA {
 		writeErr(w, http.StatusInternalServerError, "deployment_readback_failed", "active worker version differs from committed deployment")
@@ -401,6 +450,7 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 }
 
 type cloudflareWorkerMetadata struct {
+	Inherit            []string
 	Vars               map[string]string
 	Bindings           []control.Binding
 	CompatibilityDate  string
@@ -577,6 +627,17 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 	for _, b := range raw.Bindings {
 		name, typ := stringValue(b["name"]), stringValue(b["type"])
 		switch typ {
+		case "inherit":
+			if name == "" {
+				return fmt.Errorf("inherited binding name is required")
+			}
+			out.Inherit = append(out.Inherit, name)
+		case "ai":
+			out.Bindings = append(out.Bindings, control.Binding{Type: "ai", Name: name})
+		case "hyperdrive":
+			out.Bindings = append(out.Bindings, control.Binding{Type: "hyperdrive", Name: name, ID: stringValue(b["id"])})
+		case "vectorize":
+			out.Bindings = append(out.Bindings, control.Binding{Type: "vectorize", Name: name, ID: stringValue(b["index_name"])})
 		case "plain_text":
 			out.Vars[name] = stringValue(b["text"])
 		case "kv_namespace":
@@ -597,6 +658,8 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 			out.Bindings = append(out.Bindings, control.Binding{Type: "service", Name: name, ID: stringValue(b["service"]), Entrypoint: stringValue(b["entrypoint"])})
 		case "workflow":
 			out.Bindings = append(out.Bindings, control.Binding{Type: "workflow", Name: name, ID: stringValue(b["workflow_name"]), ClassName: stringValue(b["class_name"])})
+		default:
+			return fmt.Errorf("unsupported binding type %q for %q", typ, name)
 		}
 	}
 	return nil
@@ -643,10 +706,11 @@ func (s *Server) handleCloudflareWorkerSecrets(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusInternalServerError, "secret_list_failed", err.Error())
 		return
 	}
-	if metas == nil {
-		metas = []control.SecretMeta{}
+	out := make([]map[string]string, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, map[string]string{"name": m.Key, "type": "secret_text"})
 	}
-	cloudflareResult(w, metas)
+	cloudflareResult(w, out)
 }
 
 func (s *Server) handleCloudflareWorkerSecretDelete(w http.ResponseWriter, r *http.Request) {
@@ -1099,4 +1163,8 @@ func (s *Server) handleCloudflareQueuePurge(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleCloudflareQueuePurgeStatus(w http.ResponseWriter, r *http.Request) {
 	cloudflareResult(w, map[string]any{"queue_id": r.PathValue("resource_id"), "status": "complete"})
+}
+
+func cloudflareUnsupported(w http.ResponseWriter, message string) {
+	writeJSON(w, http.StatusNotImplemented, map[string]any{"success": false, "errors": []any{map[string]any{"code": 10000, "message": message}}, "messages": []any{}, "result": nil})
 }

@@ -1,0 +1,4 @@
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.qivNGQ agent=30100 runtime=30102
+response={"kv":"v","d1":1,"r2":"text/x-r2"}
+E2E-BINDINGS: PASS
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.qivNGQ

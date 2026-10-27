@@ -174,3 +174,42 @@ func (m *Manager) LiveRoute(ctx context.Context, s cell.Scope, o cell.Owner, now
 	}
 	return m.Live(ctx, o, now)
 }
+
+// LocalReadGuard proves a read is covered by an authoritative local route and
+// the same healthy process lease. Call the returned check AFTER the read too:
+// a release or lease boundary during SQLite access invalidates its result.
+// No manager lock is held across caller I/O.
+func (m *Manager) LocalReadGuard(sc cell.Scope) (func() bool, bool) {
+	key := sc.String()
+	m.mu.Lock()
+	c, ok := m.routes[key]
+	rev := m.cacheRev[key]
+	lm := m.localLease(c.owner)
+	now := time.Now()
+	valid := ok && c.local && lm != nil && m.releasing[key] == 0 && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+	m.mu.Unlock()
+	if !valid {
+		return nil, false
+	}
+	return func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		current, exists := m.routes[key]
+		now := time.Now()
+		return exists && current.owner == c.owner && m.cacheRev[key] == rev && m.releasing[key] == 0 && m.localLease(c.owner) == lm && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+	}, true
+}
+
+// ReadFence detects local ownership transitions while a caller obtains fresh
+// evidence and reads SQLite. It is not, by itself, proof of ownership.
+func (m *Manager) ReadFence(sc cell.Scope) (func() bool, bool) {
+	key := sc.String()
+	m.mu.Lock()
+	rev := m.cacheRev[key]
+	busy := m.releasing[key] > 0
+	m.mu.Unlock()
+	if busy {
+		return nil, false
+	}
+	return func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.releasing[key] == 0 && m.cacheRev[key] == rev }, true
+}

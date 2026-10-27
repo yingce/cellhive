@@ -1,0 +1,2 @@
+ok  	cellhive/internal/control	0.151s
+ok  	cellhive/internal/server	0.266s

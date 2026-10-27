@@ -1,0 +1,21 @@
+HK-REVIEW artifacts=/opt/.hermes/cache/scratch/hk-review-1793040888-725318-vtyzavg6 compute=local storage=HK-COS durability=bucket
+START workflow.sh ns=hk-review-1793040888-725318-0
+[e2e] base=/opt/.hermes/cache/scratch/cellhive-e2e.CcknJ5 agent=30400 runtime=30402
+[e2e] sleep: waiting -> complete
+[e2e] timeout: waiting -> errored
+[e2e] retry: failed twice -> complete on attempt 3
+[e2e] r2 workflow metadata: text/x-workflow
+E2E-WORKFLOW: PASS
+HK-CLEANUP ns=hk-review-1793040888-725318-0 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.CcknJ5
+END workflow.sh exit=0 cleanup=True
+START workflow-recovery.sh ns=hk-review-1793040888-725318-1
+PASS stale step/finish callbacks return 409; new execution output=7
+PASS real workerd 16 concurrent waits consume 16 distinct events
+INJECT SIGKILL runtime + agent after durable consume, before response; fresh local data directory
+PASS fresh agent restores all three results from object storage; lost response event output=42
+E2E-WORKFLOW-RECOVERY: PASS
+HK-CLEANUP ns=hk-review-1793040888-725318-1 success=1 http=200
+[e2e] kept /opt/.hermes/cache/scratch/cellhive-e2e.iGY73W
+END workflow-recovery.sh exit=0 cleanup=True
+HK-REVIEW: PASS artifacts=/opt/.hermes/cache/scratch/hk-review-1793040888-725318-vtyzavg6
