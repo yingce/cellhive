@@ -14,7 +14,20 @@ jobs:
           go-version: "1.27"
       - run: test -z "$(gofmt -l .)"
       - run: make vet
-      - run: make test
+      - name: Run make test
+        id: go-tests
+        shell: bash
+        run: make test 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+      - name: Annotate Go test failures
+        if: failure() && steps.go-tests.outcome == 'failure'
+        shell: python
+        run: |
+          import os, pathlib, re
+          lines = pathlib.Path(os.environ["RUNNER_TEMP"], "go-test.log").read_text().splitlines()
+          failures = [line for line in lines if re.search(r"^--- FAIL:|^FAIL(?:\s|$)|^\s+\S+\.go:\d+:|^panic:|^fatal error:", line)]
+          for line in (failures or lines[-30:])[:100]:
+              escaped = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Go test failure::{escaped}")
       - run: make build
       - run: make perf-test
       - run: make rpo-test
