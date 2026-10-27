@@ -12,6 +12,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"
+      # Go tests include real user-runtime/do-runtime process checks.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm i -g @cloudflare/workerd-linux-64@1.20260916.1
+      - run: ln -sf "$(npm root -g)/@cloudflare/workerd-linux-64/bin/workerd" /usr/local/bin/workerd
+      - run: workerd --version
       - run: test -z "$(gofmt -l .)"
       - run: make vet
       - name: Run make test
