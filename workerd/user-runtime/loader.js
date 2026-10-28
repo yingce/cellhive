@@ -1325,9 +1325,9 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
         b.type,
         resource,
         b.type === "kv" && b.id ? {
-        resource,
           worker,
           version: version.version,
+          resource: b.id,
         } : null,
       ),
     };

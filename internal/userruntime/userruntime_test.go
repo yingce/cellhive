@@ -2228,7 +2228,7 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JS-minted token did not verify: %v (token=%q)", err, kvScope)
 	}
-	if claims.Namespace != "acme" || claims.Kind != "kv" || claims.Name != "KV" || claims.ExpiresMs != 0 {
+	if claims.Namespace != "acme" || claims.Kind != "kv" || claims.Name != "KV" || claims.Resource != "acme/__kv__/main" || claims.ExpiresMs != 0 {
 		t.Fatalf("claims = %+v", claims)
 	}
 	// The broad internal token must not be sent from the tenant-adjacent worker.

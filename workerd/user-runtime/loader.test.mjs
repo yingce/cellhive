@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -11,6 +12,15 @@ function harness(fetch) {
 }
 const ok = v => ({ok:true,status:200,json:async()=>v});
 const version = (number, sha, storage, vars={}) => ({version:number,bundle_sha:sha,storage_id:storage,vars});
+test('kv pinned token signs the binding id, not the env key',async()=>{
+  const c=vm.createContext({crypto:webcrypto,TextEncoder,JSON,btoa:s=>Buffer.from(s,'binary').toString('base64')});
+  vm.runInContext(extract('async function bindingSpec(', '// scopedToken computes'),c);
+  vm.runInContext(extract('async function scopedToken(', 'function text('),c);
+  const spec=await c.bindingSpec({SCOPE_SECRET:'secret'},{namespace:'acme'},'web',{version:3,bundle_sha:'sha',bindings:[{type:'kv',name:'KV',id:'acme/__kv__/main'}]});
+  assert.equal(spec.KV.name,'KV');
+  const claims=JSON.parse(Buffer.from(spec.KV.token.split('.')[0],'base64url').toString());
+  assert.deepEqual(claims,{ns:'acme',kind:'kv',name:'KV',worker:'web',version:3,resource:'acme/__kv__/main'});
+});
 test('explicit version lookup fails closed instead of using another cached version', async()=>{
   let fail=false;const load=harness(async()=>{if(fail)throw Error('offline');return ok(version(1,'same','one'));});
   await load(1);fail=true;await assert.rejects(load(2));

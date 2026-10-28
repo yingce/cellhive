@@ -52,6 +52,8 @@ type Claims struct {
 	// Worker/Version/Resource pin a platform capability to its immutable
 	// resource mapping. Resource may also be carried by an ordinary platform
 	// token as a routing hint; name remains the binding authorization key.
+	// Only the platform scope key (Iss == "") may set Resource, and only for
+	// KV: delegated issuers must not carry the pinned mapping (ADR-302).
 	Worker   string `json:"worker,omitempty"`
 	Version  int    `json:"version,omitempty"`
 	Resource string `json:"resource,omitempty"`
@@ -60,16 +62,13 @@ type Claims struct {
 // Valid reports whether the claims are structurally complete.
 func (c Claims) Valid() bool {
 	if c.Worker != "" || c.Version != 0 || c.Resource != "" {
-		if c.Resource == "" || HasWildcard(c.Name) {
+		if c.Resource == "" || c.Iss != "" || c.Kind != "kv" || HasWildcard(c.Name) {
 			return false
 		}
 		if c.Worker != "" || c.Version != 0 {
-			if c.Iss != "" || c.Kind != "kv" || c.Worker == "" || c.Version <= 0 {
+			if c.Worker == "" || c.Version <= 0 {
 				return false
 			}
-		}
-		if c.Kind == "" {
-			return false
 		}
 	}
 	return c.Namespace != "" && c.Kind != "" && c.Name != "" && c.ExpiresMs >= 0
