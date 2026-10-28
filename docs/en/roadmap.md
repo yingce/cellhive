@@ -1,99 +1,50 @@
-# Roadmap
+# Roadmap and remaining work
 
-Goal: proceed with **minimum closed loop first**, validate the two fundamental assumptions first, then fill in layer by layer.
+_Last updated: 2026-10-28_
 
-## Two Fundamental Assumptions (Risks Throughout)
+The historical roadmap (2026-09, P0–P5 exit criteria) is archived at
+[roadmap-2026-09](archive/roadmap-2026-09.en.md). P0–P5 are delivered; this page
+tracks current status and remaining work only.
 
-1. **Observability of DO/WAL in stock workerd**: actor SQLite is WAL, can be externally read-only, checkpointing can be aligned, and the DO file layout can be replicated.
-2. **Correctness of the self-developed cell replication protocol**: owner conditional writes, epoch fence, ensemble, node-log recovery, RPO=0.
+## Current status
 
-If assumption 1 fails → fall back to FUSE (self-managed) or periodic snapshots (lower RPO).
+- Compute: the `cellhive-workerd` fork (ADR-264); CellHive integrates through
+  `workerLoader`, bindings and capnp and does not patch workerd in this repo.
+- State: SQLite plus object storage are authoritative; owner/epoch/lease,
+  RPO=0 and fleet replication are live.
+- Production: SG Helm revision 79, USW 63 (source `49133b1`); see
+  [release notes](release-notes.md).
+- Functional and compatibility boundaries: [compatibility matrix](compatibility-matrix.md),
+  [bindings](bindings.md), [known issues](known-issues.md).
 
----
+## Remaining work (by risk)
 
-## P0 — Feasibility Spike (Do First)
+1. **Cold-recovery latency**: real HK COS cold GET is still ~1.1–3.1s. Control
+   cell cold authorization, owner/claim waits and COS tail latency are not fully
+   separated. Re-measure in-region fleet, public entry and different spool sizes.
+2. **Fleet read/write tail**: binding/lease/resource-fence refreshes still cause
+   periodic 58–150ms tails; the SIGTERM lease-watchdog handoff race is unfixed.
+3. **Cross-host / multi-AZ failure**: k3d A→B→A and A-B-C pass; real cross-host
+   RTT, cross-AZ COS, concurrent epoch fences and backup restore lack production
+   acceptance.
+4. **Object-store matrix**: COS/OSS must pass native append and conditional
+   delete per bucket; the pinned MinIO image is not an owner/lease authority.
+   Other providers are unverified.
+5. **Durable Objects**: rare connection/address recovery after rolling updates
+   and recovery-pointer CAS warnings need root cause and automatic-recovery
+   verification; no real-COS failure-window drill.
+6. **Workflow / Queue boundaries**: Workflows still lack cross-Worker support and
+   step history/progress; Queue still has cross-batch ordering and some retry/DLQ
+   boundaries.
+7. **Hyperdrive remainder**: per-resource proxy/direct override, multi-replica
+   config distribution, built-in `pg` CJS shim, and ProxySQL HA drills.
+8. **Observability and docs**: Tail token renewal beyond 10 minutes is unverified;
+   English/Chinese mirrors need continuous sync and historical data has not been
+   fully audited.
 
-**Deliverables**
-- Minimal Go `cell-agent`: single-cell SQLite + bucket conditional-write owner/lease + epoch + `diagnose`;
-- Minimal workerd host adapter: `workerLoader` loads one sample worker, bindings go through cell-agent;
-- **WAL capture spike**: supervisor reads workerd actor SQLite in read-only mode, captures and reports;
-- Minimal closed loop for a two-node fleet (owner + 1 follower ensemble).
+## Verification principles
 
-**Exit Criteria (Performance Gates)**
-- Conclusion on workerd WAL/checkpoint/file-layout validation;
-- `kill -9` takeover with RPO=0, ≤5s;
-- Two-node write p50/p99 ≤ 30/100ms; single-node degraded mode ~90ms;
-- Cross-node "capture → cell-agent → proof" p50/p99;
-- Hot path LIST=0; number of ack PUTs ≪ 1;
-- Bucket provider conditional writes/presigned pass.
-
-## P1 — Complete cell-agent + Security/Routing
-
-**Deliverables**
-- Complete cell replication: LTX/snapshots/compaction/paging;
-- **node-log + recovery** (complete implementation);
-- Lease/takeover/handoff/drain token;
-- Timers (unified timer abstraction) + dispatch + single waker;
-- Owner resolution library + endpoints;
-- Control-plane skeleton (apps/versions/routes/secrets, sharded by app);
-- **security.md implemented**: tenant network isolation, scope declarations;
-- **routing.md implemented**: routing projection (pull-only, 5–10s).
-
-**Exit Criteria**: stable single-/dual-node fault injection; closed loop for control-plane release/rollback; multi-tenant isolation validated.
-
-## P2 — Bindings + Wrangler Compatibility + Assets
-
-**Deliverables**
-- Binding facade for KV/D1/R2/Queue/Cron + `cell-agent` API: ✅ (KV/D1/R2/Queue ADR-063; Cron ADR-070/076 + deploy validation `invalid_cron`); **Workflows ✅ Partial (ADR-086)**.
-- Go+esbuild packaging + jsonc/toml parsing + strict rejection + contract tests;
-- **Complete asset pipeline** (upload/versioning/_headers/_redirects/worker-first/ETag): ✅ read side (ADR-069/071) + **write side** (Go CLI `asset put`/`bundle put`/`deploy --assets-*` + `/v1/control/asset|bundle`; ADR-062).
-- CLI: deploy/dev/tail/secret + resource create commands;
-- `cellhive dev` (built-in file storage + single node + hot reload).
-
-**Exit Criteria**: CF compatibility suite passes; framework/Vite prebuilt artifacts can be deployed.
-
-## P3 — Complete DO
-
-**Deliverables**
-- do-runtime (native facet + supervisor): **facet ✅ (ADR-077); supervisor/capture/gates ✅ (ADR-083)**;
-- DO claim (cell-agent driven) + cold activation **paged lazy loading**: ✅ claim (ADR-078/080) + cold activation/recovery/on-demand paging/per-object cold start (ADR-084);
-- **alarm**: ✅ functionality (ADR-079, mechanism changed to shim + unified timer/waker);
-- **WebSocket CF compatibility**: ✅ connection+1012 (ADR-080) + **cross-node forwarding/1012 passthrough (ADR-084)**;
-- in-flight migration `result_unknown`: ✅ (ADR-080);
-- **output gate + RPO=0 cross-node**: ✅ gate (ADR-083) + cross-node cold activation/takeover (ADR-084, object granularity); ◐ real multi-host/cloud validation not done (Class C environment).
-
-**P3 Closure (2026-09-15 All Complete) ✅**
-- HTTPCommitter proof relaxed to `fleet`/`bucket`/`bucket-batch` (reject `bucket-async`) ✅;
-- **WS cross-node forwarding** ✅ (`proxyConnect`, 1012 passthrough);
-- **`transferred_classes` within same worker** ✅ (= rename alias; cross-worker `script_name` rejected);
-- **Runtime VFS lazy reads** ✅ implemented on the cell-agent side (ADR-160, `internal/pagedvfs`, enabled by default); not feasible on the DO side (ADR-085), substitute = per-object/per-page materialization on cold start ✅;
-- `refreshFacets` incremental cache ✅; `deleteAll()` shim (KV+SQL) ✅.
-- Remaining work is only **Class C environment validation** (real cross-host RTT, cloud object-storage conditional writes, multi-host takeover), blocked by lack of environment and recorded as such.
-
-**Exit Criteria**: DO compatibility suite (synchronous SQL/transactions/alarm/WS/migration/eviction): ✅ **`TestDOCompatSuite` unified entry point, all 19 subtests PASS** (ADR-084).
-
-## P4 — Multi-Tenancy + Scaling
-
-**Deliverables**
-- Complete control plane (audit, release logs, idempotency): ✅ audit (ADR-062) + release log `Releases` + idempotent deploy `idempotency_key` (ADR-087);
-- Full CLI command surface; admin console: ✅ Go CLI covers all admin endpoints (+`status`/`capacity`/`releases`/`workflow create`); admin console = `GET /admin` single-page console (stdlib, no dependencies) + admin JSON API (ADR-036);
-- autoscaler (read-node lease signals): ✅ `internal/autoscaler.Advisor` + `/v1/control/capacity` (**signals**; actual orchestration belongs to external systems, Class C environment);
-- **Quota/admission (ADR-035)**: ✅ per-namespace token bucket + 429 on write endpoints (ADR-087);
-- publish/rollback: ✅ (ADR-060, already available).
-
-**Exit Criteria**: multi-tenant end-to-end; scale-out/scale-in and migration with no data loss.
-
-## P5 — Operations and Hardening
-
-**Deliverables**
-- `diagnose`, observability, upgrade/rollback procedures: ✅ enhanced `/v1/diagnose` (proto/admission/capacity/counters) + `/metrics`;
-- Protocol versioning implemented (reader-before-writer): ✅ `cell.SupportedProtoVersion` + claim handshake fail-closed (ADR-088);
-- Chaos testing, load testing, provider matrix regression: ✅ recovery chaos tests (ADR-057/066) + `cmd/*bench` load tests + `TestVendorMatrixContract` (ADR-088); real multi-host/cloud matrix requires an environment (Class C);
-- Documentation completion and release: ✅ glossary exists + `docs/release-notes.md`.
-
-## Ongoing Items
-
-- Track pinned workerd / Wrangler semantic baseline upgrades (explicit action + contract tests);
-- Unverified items in `known-issues.md` converge along with P0/P1.
-
-_Last updated: 2026-09-16_
+- Design changes update `docs/decisions.md` first and `docs/known-issues.md` for
+  status.
+- Anything not verified in a real environment stays Partial/unverified; local
+  reasoning is not acceptance.

@@ -65,7 +65,7 @@
 
 ## Implemented
 
-- capnp `globalOutbound`/network: `workerd/user-runtime/userruntime.go` rendering + `CELLHIVE_TENANT_OUTBOUND` (ADR-130);
+- capnp `globalOutbound`/network: runtime capnp rendering in `internal/userruntime` + `CELLHIVE_TENANT_OUTBOUND` (ADR-130);
 - Control-plane authentication middleware (role tokens + OIDC/JWT) and audit logs (including actor/on_behalf_of/request_id, ADR-131);
 - Scoped token revocation: `HasBinding` (platform tokens) on every request + `SCOPE_SECRET` rotation (ADR-074); delegated tokens rely on a mandatory short `exp` + issuer-key rotation (ADR-181).
 

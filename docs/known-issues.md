@@ -1,24 +1,24 @@
-# 设计决议（评审问题闭环）
+# 评审问题与发布状态（Known Issues / Review Closure）
 
 本文件记录系统评审发现的全部问题，以及**每条问题的解决决议**。原始分级见文末附录。设计文档（architecture / cell-protocol / durable-objects / networking / decisions）已按此同步。
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-26_
+_最后更新：2026-10-28_
 
-## 2026-10-27 COS并发创建空读（已本地修复，未发布）
+## 2026-10-27 COS并发创建空读（已随 48216e7 发布：SG rev71 / USW rev56）
 
 此前COS并发创建偶发 `append authority: empty object`；HTTP证据确认首次Append仍在途时GET可返回200/length=0/appendable。现仅对成功空读最多5次观察（5/10/20/40ms退避），不重试写、不视为空缺，持续空/损坏仍拒绝。修复前100轮3失败；修复后300轮全通过，仍实际遇到10次空响应且正确处理。COS契约6/6、真实双agent强杀和清缓存恢复100/100、全Go测试及相关race通过。详见 [修复验收](archive/cos-empty-read-fix-2026-10-27.md)。原生COS裸S3条件创建不兼容仍是能力边界，生产继续依赖native-append adapter。
 
-## 2026-10-27 sealed follower恢复合批（本地未发布）
+## 2026-10-27 sealed follower恢复合批（已随 48216e7 发布：SG rev71 / USW rev56）
 
 sealed session恢复改为同scope/epoch连续delta最多64段/1MiB合批，快照/marker独立，整页持久化后才checkpoint。失败重试、删除fence、分页及重叠batch回归通过。HK两轮强杀/清缓存恢复100/100正确；KV下载对象119→18–22，KV cold open712ms→200–256ms。完整冷GET仍1.10/1.61s；控制cell冷鉴权、owner/claim未细分等待及COS尾延迟未解决。旧对象不自动重写，legacy/active DO恢复不变。详见 [恢复合批验收](archive/recovery-batching-2026-10-27.md)。
 
-## 2026-10-27 冷恢复trace（本地未发布）
+## 2026-10-27 冷恢复trace（诊断记录，非发布项）
 
 两轮HK真实COS强杀/清缓存后100/100数据正确，冷GET为2.78/2.95s。确认两个独立成本：冷binding等待控制cell恢复（第2轮1.60s等待）；KV下载119对象耗583ms，206段中93段重复，来自follower接管逐段补传与owner batch重叠。SQLite应用仅约5ms；第1轮单COS GET达到1.01s。恢复合批、重复元数据查询与控制cell冷启动仍待优化，详见 [冷恢复trace](archive/cold-restore-trace-2026-10-27.md)。
 
-## 2026-10-27 COS 后台合批（本地未发布）
+## 2026-10-27 COS 后台合批（已随 48216e7 发布：SG rev71 / USW rev56）
 
 上传周期20ms→200ms，只扩大无需同步等待COS的写入合批窗口；同步确认继续立即唤醒，follower fsync保留2ms。修复等待项可能错过wake的竞态。HK双agent对照成功上传批数213→114，平均每批4.19→7.78段；热owner PUT中位约5.5ms。强杀时尚有4项spool，100次fleet确认写在接管及清空缓存后均完整读回。冷GET仍1815ms，未解决全部冷恢复/转发长尾。见 [合批验收](archive/cos-batching-2026-10-27.md)。
 
@@ -27,28 +27,28 @@ sealed session恢复改为同scope/epoch连续delta最多64段/1MiB合批，快�
 
 153,960请求全量trace确认：759ms转发PUT有660ms在binding刷新，owner实际处理6.4ms；447ms Worker GET有439ms在版本授权刷新，同期后台control owner COS点查达到1s超时。后台预热仍会因授权有效期耗尽而阻塞前台，前次短测不能外推。另有Worker外层耗时未完整关联的trace缺口，以及退出watchdog抢断handoff再次发生。详见 [完整trace诊断](archive/kv-full-trace-2026-10-27.md)。
 
-## 2026-10-27 固定版本授权后台续期（本地未发布）
+## 2026-10-27 固定版本授权后台续期（已随 48216e7 发布：SG rev71 / USW rev56）
 
 固定 KV token 不再查询当前 active binding；独立验证版本与撤销状态，默认1s授权有效期由有界后台任务提前刷新，空闲60s移出。失效/刷新失败不延长授权，冷请求与容量不足仍可能同步校验。1920次HK双agent正式请求零失败，采集到的请求内版本授权刷新只有首次加载一次，其余78次均后台。此优化不消除直接HTTP旧token长尾和后台COS查询。见 [验收记录](archive/version-authorization-2026-10-27.md)。
 
-## 2026-10-27 Worker KV 固定映射（ADR-302，本地未发布）
+## 2026-10-27 Worker KV 固定映射（ADR-302；已随 48216e7 引入，resource-id 修复随 49133b1 发布：SG rev79 / USW rev63）
 
 Worker KV token 携带平台签名的 worker/version/resource；解析实际 cell 使用版本固定 ID，避免同名 binding 改动把旧版本重定向到新资源。Go binding spec 与 user-runtime loader 同步。registered-binding ACL、资源删除 fence、owner 校验仍保留，所以没有消除 1s 授权刷新。D1/R2/Queue 原本使用运行时资源名，其他 binding 策略不变。发布必须先升级全部 cell-agent 再升级运行时；混合旧 agent 不能保证固定映射。验收见 [固定映射记录](archive/binding-pinned-2026-10-27.md)。
 
 ## 2026-10-27 双 agent 长尾与退出竞态（部分优化）
 
-HK COS 请求级 trace 确认：fleet 确认正常时，binding 过期刷新、control owner 强制失效查询及 resource fence GET 仍阻塞请求，产生 58–150ms 长尾；此前 400–744ms 极值尚未完成归因。另在 SIGTERM 后观察到 lease watchdog 抢断 owner handoff；进程退出不能作为 session 正常封存证明。诊断、证据与验证边界见 [长尾诊断](archive/hk-tail-diagnosis-2026-10-27.md)。已在本地合并 binding 刷新并复用远端 control 路由，保留本地权威检查；HK 双 agent 1152 请求无错误，但仍有约 120ms 长尾，未提交/部署。退出竞态未修复。见 [第一阶段记录](archive/binding-refresh-2026-10-27.md)。
+HK COS 请求级 trace 确认：fleet 确认正常时，binding 过期刷新、control owner 强制失效查询及 resource fence GET 仍阻塞请求，产生 58–150ms 长尾；此前 400–744ms 极值尚未完成归因。另在 SIGTERM 后观察到 lease watchdog 抢断 owner handoff；进程退出不能作为 session 正常封存证明。诊断、证据与验证边界见 [长尾诊断](archive/hk-tail-diagnosis-2026-10-27.md)。已在本地合并 binding 刷新并复用远端 control 路由，保留本地权威检查；HK 双 agent 1152 请求无错误，但仍有约 120ms 长尾。binding 刷新部分已随 49133b1 发布；退出竞态仍未修复。见 [第一阶段记录](archive/binding-refresh-2026-10-27.md)。
 
 
 ## 2026-10-26 内部 binding 鉴权结构整理
 
-`scopeAuth` 拆分为凭据验证、binding 授权、资源生命周期保护三个步骤。只调整代码职责，保留原有校验顺序、错误响应、撤销策略及请求保护生命周期；未调整缓存与 token 格式，不作为性能优化验收。`internal/server`、`internal/scopedtoken` 全量单测、鉴权/接管/恢复相关 race 回归及 `make build vet` 均通过。尚未发布。
+`scopeAuth` 拆分为凭据验证、binding 授权、资源生命周期保护三个步骤。只调整代码职责，保留原有校验顺序、错误响应、撤销策略及请求保护生命周期；未调整缓存与 token 格式，不作为性能优化验收。`internal/server`、`internal/scopedtoken` 全量单测、鉴权/接管/恢复相关 race 回归及 `make build vet` 均通过。已随 49133b1 发布（SG rev79 / USW rev63）。
 
 ## 2026-10-26 Queue 响应安全与调度隔离（ADR-300）
 
 已修复 Queue 在 HTTP 200 响应截断、无效 JSON 或超过读取上限时误 ACK 的问题；失败响应进入原有重试/DLQ 策略，重试耗尽且未配置 DLQ 仍按原有策略丢弃告警。不同队列单轮最多 8 路并发，每队列原有并发限制不变；所有任务结束才启动下一轮，因此这是有界隔离，不保证任意数量慢队列下的调度延迟。
 
-Workflow 同分钟多表达式不再合并为一条任务，首条按字典序确定并保留旧分钟标识，其余带表达式 hash；同分钟变更表达式集合的跨配置去重不作保证。本地修复与测试见 [验收记录](archive/queue-schedule-safety-2026-10-26.md)，尚未发布。
+Workflow 同分钟多表达式不再合并为一条任务，首条按字典序确定并保留旧分钟标识，其余带表达式 hash；同分钟变更表达式集合的跨配置去重不作保证。本地修复与测试见 [验收记录](archive/queue-schedule-safety-2026-10-26.md)，已随 48216e7 发布（SG rev71 / USW rev56）。
 
 ## 2026-10-26 Workflow 事务栅栏与事件恢复（ADR-299）
 
@@ -650,21 +650,21 @@ v3 follower 身份、启动恢复门和按 session 退避重试已实现。真�
 
 ## 2026-10-26 稳定性复查与修复状态
 
-ADR-296已在源码修复peer握手/Write取消失效、建连持全局锁、异步ACK无限占槽；增加5秒连接/写入/ACK停滞边界、按lane合并建连及共享失败，保留调用取消与整条lane退役的区别。DO readiness已增加限频分类诊断和恢复日志。真实HTTP桶回退→fleet恢复、workerd后端故障恢复、race和session恢复验证见 [稳定性与性能review及修复记录](archive/stability-performance-review-2026-10-26.md)。尚未发布；后续ADR-297已复现并修复DO后台日志配置GET无超时导致共享HTTP客户端保留旧地址的问题，同样修复user-runtime两入口，见 [DO地址恢复实验](archive/do-address-recovery-2026-10-26.md)。这证明了可导致USW同症状的机制，但不是历史事件唯一归因。headless业务入口包含未就绪节点及fleet上传队列满同步等桶仍为剩余边界。
+ADR-296已在源码修复peer握手/Write取消失效、建连持全局锁、异步ACK无限占槽；增加5秒连接/写入/ACK停滞边界、按lane合并建连及共享失败，保留调用取消与整条lane退役的区别。DO readiness已增加限频分类诊断和恢复日志。真实HTTP桶回退→fleet恢复、workerd后端故障恢复、race和session恢复验证见 [稳定性与性能review及修复记录](archive/stability-performance-review-2026-10-26.md)。后续ADR-297已复现并修复DO后台日志配置GET无超时导致共享HTTP客户端保留旧地址的问题，同样修复user-runtime两入口，见 [DO地址恢复实验](archive/do-address-recovery-2026-10-26.md)。已发布（见上方 ADR-296/297 条目）；这证明了可导致USW同症状的机制，但不是历史事件唯一归因。headless业务入口包含未就绪节点及fleet上传队列满同步等桶仍为剩余边界。
 
 - Wrangler 暂存版本（ADR-301，2026-10-26）：官方 versions upload、versions secret put/delete/bulk 和单版本 100% deployment 已实现暂存/激活分离；暂存要求已存在且有效的 namespace，拒绝 DO migrations。settings PATCH、JSON vars 和内嵌 secret_text binding 尚不支持，明确报错。Wrangler 4.133.0 普通 deploy 实测成功，但环境标签同步会警告且版本号输出为 null（内部数字版本 ID 与 CLI UUID 格式不一致）；以 versions API/active readback 为准。
 
 ## 2026-10-27 授权刷新及退出续租（ADR-303）
 
-本地 control owner 的授权刷新重复 COS 点查已改为同 session 健康租约下的读前/读后证明；Release 并发及失败均失效。退出期间保持续租直至 drain/seal/release；旧 session Renew/Release 拒绝。节点发现增加有界并发，取消不发布残缺快照。相关测试/race/vet及真实双 agent HK COS 153960 次请求通过，两个进程均完成 handoff。尚未提交/部署。
+本地 control owner 的授权刷新重复 COS 点查已改为同 session 健康租约下的读前/读后证明；Release 并发及失败均失效。退出期间保持续租直至 drain/seal/release；旧 session Renew/Release 拒绝。节点发现增加有界并发，取消不发布残缺快照。相关测试/race/vet及真实双 agent HK COS 153960 次请求通过，两个进程均完成 handoff。已随 49133b1 发布。
 
 剩余：远端 control owner route 到期仍需 COS 查询，真实转发 PUT 出现510ms尾延迟（owner处理18ms，binding等待369ms）；高并发Worker GET仍有168ms尾延迟。本次没有移除权威查询或放宽撤销/租约边界。见 [验证记录](archive/control-owner-proof-2026-10-27.md)。
 
 ## 2026-10-27 全量 E2E 新发现及修复进度
 
-本轮全量回归不能判为全绿：冷 cell 并发 Queue/send 与 control/deploy 可返回 `local_invalidation_failed` 503；并发 control 初始化还复现 `duplicate column name: compat_date` 400。DO 并发存储请求复测有 HTTP500（内部 `result_unknown/gate_500`），尚未确定 gate 内部原因，不能据此推断已确认数据丢失。官方 Wrangler 多节点第二次发布在 versions 上传阶段 `invalid_multipart`，阻塞 tail/reconnect/failover/reconciliation 后续断言。文件桶 restart/cold 首次成功约1.8s，超过脚本1s门槛，但该轮数据完整性全部通过。真实HK COS restart/cold首次成功分别约3.1s/4.3s，同样超时；最终140个校验key完整。冷写日志另有已删除历史Workflow scope的后台restore无snapshot警告，待定根因。详细证据和最终执行矩阵见 [全量E2E记录](archive/all-e2e-2026-10-27.md)。本轮未修改业务逻辑、未提交/部署。
+本轮全量回归不能判为全绿：冷 cell 并发 Queue/send 与 control/deploy 可返回 `local_invalidation_failed` 503；并发 control 初始化还复现 `duplicate column name: compat_date` 400。DO 并发存储请求复测有 HTTP500（内部 `result_unknown/gate_500`），尚未确定 gate 内部原因，不能据此推断已确认数据丢失。官方 Wrangler 多节点第二次发布在 versions 上传阶段 `invalid_multipart`，阻塞 tail/reconnect/failover/reconciliation 后续断言。文件桶 restart/cold 首次成功约1.8s，超过脚本1s门槛，但该轮数据完整性全部通过。真实HK COS restart/cold首次成功分别约3.1s/4.3s，同样超时；最终140个校验key完整。冷写日志另有已删除历史Workflow scope的后台restore无snapshot警告，待定根因。详细证据和最终执行矩阵见 [全量E2E记录](archive/all-e2e-2026-10-27.md)。本轮为诊断记录；相关修复随后续提交发布。
 
-后续修复：control 迁移串行化、入请求门前原子失效/claim、Wrangler inherit binding、binding 冷路径主动接管；文件桶 restart/cold 已降至47/89ms并通过完整性校验。DO gate根因为并发读取WAL时瞬时checksum失败，捕获观察有界重读并保留checkpoint，持续损坏仍拒绝确认；两轮60秒压测12262/16900请求均无HTTP错误，真实损坏WAL回归及race通过。Wrangler全部6种模式通过，含重连/Cron接管/部署响应丢失与提交前后强杀。原10个失败入口9个已复测通过；HK COS默认配置仍为1.09/2.38秒，恢复并发16的对照仍未达1秒，不宣称性能门槛全部解决；生产默认配置未改。后续证据见 [修复记录](archive/e2e-fixes-2026-10-27.md)。以上修改尚未提交/部署。
+后续修复：control 迁移串行化、入请求门前原子失效/claim、Wrangler inherit binding、binding 冷路径主动接管；文件桶 restart/cold 已降至47/89ms并通过完整性校验。DO gate根因为并发读取WAL时瞬时checksum失败，捕获观察有界重读并保留checkpoint，持续损坏仍拒绝确认；两轮60秒压测12262/16900请求均无HTTP错误，真实损坏WAL回归及race通过。Wrangler全部6种模式通过，含重连/Cron接管/部署响应丢失与提交前后强杀。原10个失败入口9个已复测通过；HK COS默认配置仍为1.09/2.38秒，恢复并发16的对照仍未达1秒，不宣称性能门槛全部解决；生产默认配置未改。后续证据见 [修复记录](archive/e2e-fixes-2026-10-27.md)。以上修复已随 48216e7 发布。
 
 ### 2026-10-27 release observation
 
@@ -674,7 +674,7 @@ COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local
 
 源码确认compaction在阈值判定前下载基线/增量且字节阈值包含旧L1；fleet确认后上传Enqueue仍同步写本机spool，队列满时可同步COS；capture默认每cell 2ms轮询。实际线上贡献需按[优化实施计划](superpowers/plans/2026-10-27-data-path-optimization.md)建立基线后验证，不将候选优化描述为已修复。所有阶段保留连续durability屏障与真实HK COS双agent验收。
 
-- compaction预检第一步已在隔离分支实现：空尾部/低于阈值不下载L1，旧L1及完全覆盖的L0不计入触发阈值。相关race与HK COS契约通过；仍读取L0正文，dirty队列及完整性能矩阵尚未实施，未发布。见[验证记录](archive/compaction-preflight-2026-10-27.md)。
+- compaction预检第一步已在隔离分支实现：空尾部/低于阈值不下载L1，旧L1及完全覆盖的L0不计入触发阈值。相关race与HK COS契约通过；仍读取L0正文，dirty队列及完整性能矩阵尚未实施；已完成部分已随 49133b1 发布。见[验证记录](archive/compaction-preflight-2026-10-27.md)。
 
 ### 数据路径观测进度（2026-10-27）
 
@@ -684,6 +684,6 @@ COS/binding/recovery fixes deployed to SG revision 71, USW revision 56 and local
 
 真实HK COS复现835ms PUT，其中794ms位于follower转发前resource fence读取，owner仅5.5ms；1秒fence缓存过期无singleflight，8个请求同时查询。普通入口2秒空闲停止预热，分批切换入口可重新暴露冷元数据。后续已在隔离分支修复KV纯转发前fence准入，并合并同scope查询，HK trace确认入口HTTP资源准入为0；随后定位owner路由COS查询导致567ms长尾：远端提示未复用续期租约、点查节点未登记known refresh。隔离分支已修复，最终trace热转发不再出现前台owner读取（首次冷访问除外）。Worker并发trace关联仍有缺口。见 [COS trace报告](archive/data-path-cos-trace-2026-10-27.md)。
 
-修复与验证：[KV转发/fence修复](archive/kv-forward-fence-fix-2026-10-27.md)。全仓build/vet/test、replica/server三轮race、HK双agent153960热请求、强杀/冷恢复100/100、删除同名重建均通过；未发布。
+修复与验证：[KV转发/fence修复](archive/kv-forward-fence-fix-2026-10-27.md)。全仓build/vet/test、replica/server三轮race、HK双agent153960热请求、强杀/冷恢复100/100、删除同名重建均通过；已随 49133b1 发布。
 
-路由长尾后续修复与真实COS验证见 [闭环报告](archive/kv-forward-route-fix-2026-10-27.md)。复用仅限转发提示，不能成为本机读写权限；遥测上报交给waitUntil。历史节点逐个串行解析导致首次发现延迟，已补最多8并发解析；节点发现仍随历史记录数量增长，测试就绪等待与稳定期分开统计。未发布。
+路由长尾后续修复与真实COS验证见 [闭环报告](archive/kv-forward-route-fix-2026-10-27.md)。复用仅限转发提示，不能成为本机读写权限；遥测上报交给waitUntil。历史节点逐个串行解析导致首次发现延迟，已补最多8并发解析；节点发现仍随历史记录数量增长，测试就绪等待与稳定期分开统计。已随 49133b1 发布。

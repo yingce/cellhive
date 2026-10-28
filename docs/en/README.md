@@ -100,10 +100,12 @@ For a more complete description, see [`architecture.md`](architecture.md).
 
 | Document | Contents |
 |---|---|
-| [`roadmap.md`](roadmap.md) | Roadmap and exit criteria |
+| [`roadmap.md`](roadmap.md) | Current status and remaining work |
 | [`known-issues.md`](known-issues.md) | All review issues and resolution closure + unverified/to-be-implemented list |
-| [`release-notes.md`](release-notes.md) | Release notes |
-| [`archive/`](../archive) | Historical documents (such as `p0-tasks.md`, `p0-report.md`) |
+| [`release-notes.md`](release-notes.md) | Recent releases and production versions |
+| [`../todo.md`](../todo.md) | Paused items and remaining TODOs |
+| [`../superpowers/README.md`](../superpowers/README.md) | Historical implementation plans/specs (not current contracts) |
+| [`archive/`](../archive) | Historical documents (release records, P0 reports, research notes) |
 
 ## Find Documents by Change Type
 

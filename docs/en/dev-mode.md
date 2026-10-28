@@ -1,5 +1,8 @@
 # `cellhive dev` (Local Development Mode)
 
+> **Mirror notice:** this English page may lag the Chinese source. The current dev CLI is Bun/Miniflare only; administrative commands live in the Go CLI. See [`../dev-mode.md`](../dev-mode.md).
+
+
 > Status: **M1/M2 implemented** (`cli/` Bun dev + `internal/wranglercompat` server-side interception, 2026-09-15); for a summary of key points, see [`known-issues.md`](known-issues.md) M-08; remaining items are listed in that section.
 > Related: [`wrangler-compat.md`](wrangler-compat.md) (bundling/config/assets), [`bindings.md`](bindings.md) (binding mapping), [`control-plane.md`](control-plane.md) (deploy and server-side interception), [`routing.md`](routing.md), [`deployment.md`](deployment.md), [`observability.md`](observability.md).
 
@@ -225,7 +228,7 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 - Add `cli/` (Bun/TS project, replacing/running in parallel with `cmd/cellhive`):
   - `cli/src/dev.ts`: translate wrangler → Miniflare options, start Miniflare, print banner/URL, watch prompts;
   - `cli/src/config.ts`: jsonc/toml parsing + **client-side call/replica** of the shared validation library;
-  - `cli/src/deploy.ts`, etc.: HTTP client calls admin API;
+  - Deploy/resource management is not in `cli/`; it lives in the Go CLI `cmd/cellhive`.
   - `cli/package.json`: exactly depends on `miniflare@5.20260916.0-alpha` and **pins workerd to 1.20260916.1**; can use `bun build --compile` to produce a single file.
 - **Do not do**: Do not implement local startup for the Go backend; do not replicate cell-agent in dev.
 - **Need to add** (Go side, for §8/§9): a shared **compatibility validation library** (`internal/wranglercompat`) for CLI preflight and the `deploy` endpoint to share; and a golden set for binding contract differential testing.

@@ -65,7 +65,7 @@
 
 ## 已实现
 
-- capnp `globalOutbound`/network：`workerd/user-runtime/userruntime.go` 渲染 + `CELLHIVE_TENANT_OUTBOUND`（ADR-130）；
+- capnp `globalOutbound`/network：`internal/userruntime` 运行期渲染 capnp + `CELLHIVE_TENANT_OUTBOUND`（ADR-130）；
 - 控制面鉴权中间件（角色令牌 + OIDC/JWT）与审计日志（含 actor/on_behalf_of/request_id，ADR-131）；
 - scoped token 撤销：`HasBinding`（平台令牌）每请求校验 + `SCOPE_SECRET` 轮换（ADR-074）；委派令牌靠强制短 `exp` + issuer key 轮换（ADR-181）。
 

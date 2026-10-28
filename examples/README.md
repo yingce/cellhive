@@ -2,7 +2,7 @@
 
 The default examples route is English. The scenario-oriented feature table is below; the Chinese companion also has the code navigation map.
 
-Each directory is a small Cloudflare Workers project with `index.js` and `wrangler.jsonc`. Examples cover KV, D1, R2, Queues, Cron, Durable Objects, Workflows, service bindings, assets, AI, Hyperdrive, and Vectorize.
+Most directories are a single Worker project (`index.js` + `wrangler.jsonc`); `assets` and `react-static` are assets-only, and `services` / `worker-rpc` contain multiple Worker subdirectories. Examples cover KV, D1, R2, Queues, Cron, Durable Objects, Workflows, service bindings, assets, AI, Hyperdrive, and Vectorize.
 
 ## Run an example locally
 
@@ -32,7 +32,7 @@ The development CLI uses Miniflare and does not need a cell-agent. For the produ
 | Workflows | [`workflows`](./workflows) | Multi-step long jobs, `step.do`/`step.sleep`, status lookup | `workflow create report-builder` | `GET /create?seed=1` -> `GET /status?id=ID` |
 | Service binding | [`services`](./services) | Internal API split, caller -> api | Deploy `services/api`, then `services/caller` | Call caller's fetch |
 | Worker-to-worker RPC | [`worker-rpc`](./worker-rpc) | Native JSRPC, structured-clone boundaries | Deploy `worker-rpc/api`, then `worker-rpc/caller` | Call caller's RPC |
-| Static assets | [`assets`](./assets) | Static site, SPA fallback, `_headers`/`_redirects` | — | `GET /` (asset); `GET /api` (Worker) |
+| Static assets | [`assets`](./assets), [`react-static`](./react-static) | Static site, React/Vite build, SPA fallback, `_headers`/`_redirects` | — | `GET /` (asset); `GET /api` (Worker) |
 | Vars / Secrets | [`vars-secrets`](./vars-secrets) | Config, API tokens, secret injection | `cellhive secret put ...` for secrets | `GET /` |
 | AI (bring your own endpoint) | [`ai`](./ai) | Call your own model/gateway, add AI features | Set `CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY` | `GET /?prompt=hi` |
 | Hyperdrive | [`hyperdrive`](./hyperdrive) | Connect an existing PostgreSQL/MySQL database without migrating to D1 | `hyperdrive HYDR` | `GET /` |

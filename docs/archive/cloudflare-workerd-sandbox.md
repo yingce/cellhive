@@ -1,3 +1,5 @@
+> **Archived research note** (moved from the repository root). This records a 2026 sandbox-capability investigation; it is not a current product contract. CellHive compute now uses the `cellhive-workerd` fork (ADR-264).
+
 # workerd / Cloudflare 的 sandbox 能力 —— 分层的答案
 
 结论先给：**支持，但必须分成三层说**，混在一起会得到错误结论。

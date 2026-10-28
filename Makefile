@@ -115,6 +115,8 @@ js-test:
 	node --test workerd/platform/queue-codec.test.mjs
 	node --test workerd/platform/do-http.test.mjs workerd/do-runtime/renew.test.mjs
 	node --test workerd/user-runtime/loader.test.mjs workerd/user-runtime/internal-identity.test.mjs workerd/user-runtime/workflow-wrapper.test.mjs
+	# AI docs catalog/manifest and example routes must stay in sync with docs/ai.
+	node --test scripts/test/ai-docs-contract.test.mjs
 	# -p 1: userruntime and doruntime each spawn real workerd processes on
 	# freePort() ports; running the two packages in parallel races those ports
 	# (Address already in use). Serialize the packages.

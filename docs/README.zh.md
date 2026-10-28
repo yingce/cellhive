@@ -100,10 +100,12 @@ CellHive 是一套**自托管、Cloudflare Workers 兼容**的运行时：**计�
 
 | 文档 | 内容 |
 |---|---|
-| [`roadmap.md`](./roadmap.md) | 路线图与退出标准 |
+| [`roadmap.md`](./roadmap.md) | 当前状态与剩余工作 |
 | [`known-issues.md`](./known-issues.md) | 全部评审问题与决议闭环 + 未验证/待实现清单 |
-| [`release-notes.md`](./release-notes.md) | 发布说明 |
-| [`archive/`](./archive/) | 历史文档（如 `p0-tasks.md`、`p0-report.md`） |
+| [`release-notes.md`](./release-notes.md) | 最近发布与线上版本 |
+| [`todo.md`](./todo.md) | 暂停项与剩余待办 |
+| [`superpowers/README.md`](./superpowers/README.md) | 历史实施计划与设计稿（非当前契约） |
+| [`archive/`](./archive/) | 历史文档（发布记录、p0 报告、研究笔记等） |
 
 ## 按改动类型找文档
 

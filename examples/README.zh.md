@@ -1,6 +1,6 @@
 # CellHive 示例
 
-每个目录是一个可运行的 Cloudflare Workers 小项目（`index.js` + `wrangler.jsonc`），覆盖一项平台能力。示例既是**用法文档**，也是**兼容性对拍**：都能通过 CellHive 的生产部署链路，也能用开发 CLI（Miniflare）本地跑。`services` 展示 service binding 的 fetch + 入口类 RPC；`worker-rpc` 专门展示 native JSRPC 的结构化克隆边界。
+大多数目录是单 Worker 小项目（`index.js` + `wrangler.jsonc`）；`assets` 与 `react-static` 是 assets-only，`services` 与 `worker-rpc` 包含多个 Worker 子目录。示例既是**用法文档**，也是**兼容性对拍**：都能通过 CellHive 的生产部署链路，也能用开发 CLI（Miniflare）本地跑。`services` 展示 service binding 的 fetch + 入口类 RPC；`worker-rpc` 专门展示 native JSRPC 的结构化克隆边界。
 
 > 示例是演示，不是生产产物。配置里的 `compatibility_date` 取 `2026-01-01`（≤ 平台上限）。
 
@@ -63,7 +63,7 @@ cellhive route add demo kv.example.test kv
 | Workflows | [`workflows`](./workflows) | 多步骤长任务、`step.do`/`step.sleep`、状态查询 | `workflow create report-builder` | `GET /create?seed=1` → `GET /status?id=ID` |
 | Service binding | [`services`](./services) | 内部 API 拆分、caller → api 调用 | 先部署 `services/api`，再部署 `services/caller` | 调用 caller 的 fetch |
 | Worker ↔ Worker RPC | [`worker-rpc`](./worker-rpc) | 原生 JSRPC、结构化克隆边界 | 先部署 `worker-rpc/api`，再部署 `worker-rpc/caller` | 调用 caller 的 RPC |
-| 静态资产 | [`assets`](./assets) | 静态站点、SPA 回退、`_headers`/`_redirects` | — | `GET /`（资产）；`GET /api`（Worker） |
+| 静态资产 | [`assets`](./assets)、[`react-static`](./react-static) | 静态站点、React/Vite 构建、SPA 回退、`_headers`/`_redirects` | — | `GET /`（资产）；`GET /api`（Worker） |
 | Vars / Secrets | [`vars-secrets`](./vars-secrets) | 普通配置、API token、密钥注入 | secret 用 `cellhive secret put ...` | `GET /` |
 | AI（BYO 端点） | [`ai`](./ai) | 调用自有模型/网关、AI 功能 | 平台配置 `CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY` | `GET /?prompt=hi` |
 | Hyperdrive | [`hyperdrive`](./hyperdrive) | 连接现有 PostgreSQL/MySQL，不迁移数据库 | `hyperdrive HYDR` | `GET /` |

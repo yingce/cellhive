@@ -18,8 +18,8 @@ cellhive skills status
 cellhive skills update
 ```
 
-The online AI router is [`docs/ai/index.md`](ai/index.md); the machine-readable
-catalog is [`docs/ai/catalog.json`](ai/catalog.json).
+The online AI router is [`docs/ai/index.md`](../ai/index.md); the machine-readable
+catalog is [`docs/ai/catalog.json`](../ai/catalog.json).
 
 ## Login profiles
 

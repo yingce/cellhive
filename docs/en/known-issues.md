@@ -1,4 +1,7 @@
-# Design Decisions (Review Issue Closure)
+# Known Issues and Release Status (Review Closure)
+
+> **Mirror notice:** this English mirror may lag the Chinese source. For the latest release status and entries, see [`../known-issues.md`](../known-issues.md).
+
 
 This document records all issues found during the system review, as well as **the resolution decision for each issue**. See the appendix at the end for the original severity levels. The design documents (architecture / cell-protocol / durable-objects / networking / decisions) have been synchronized accordingly.
 

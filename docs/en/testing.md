@@ -1,5 +1,8 @@
 # Test Strategy
 
+> **Mirror notice:** this English page may lag the Chinese source. See [`../testing.md`](../testing.md) for the latest gates and evidence.
+
+
 ## Stock Wrangler 4.133.0 Admin Protocol Acceptance
 
 Install pinned Wrangler and point `CELLHIVE_WRANGLER_BIN` to its `bin/wrangler.js`, for example:

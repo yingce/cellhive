@@ -220,12 +220,14 @@ warning:  binding "IMAGES" is not supported by the CellHive platform; deploy wil
 | `compatibility_date` 超上限 | CLI 预检 + 服务端拒绝（当前 ≤ 2026-09-23） |
 | 端口占用 | 明确报错 + 占用 PID |
 
-## 14. 实现计划（Bun 工程；不碰 Go 平台）
+## 14. 实现记录（Bun 工程；不碰 Go 平台）
+
+> 以下是 2026-09 的实现记录。当前 `cli/` 只保留开发工具（`dev`），部署/资源/密钥等管理命令由 Go CLI `cmd/cellhive` 提供。
 
 - 新增 `cli/`（Bun/TS 工程，替代/并行于 `cmd/cellhive`）：
   - `cli/src/dev.ts`：翻译 wrangler → Miniflare options、起 Miniflare、打印横幅/URL、watch 提示；
   - `cli/src/config.ts`：jsonc/toml 解析 + 共享校验库的**客户端调用/复刻**；
-  - `cli/src/deploy.ts` 等：HTTP 客户端调 admin API；
+  - 部署/资源等管理命令不在 `cli/`；由 Go CLI `cmd/cellhive` 提供。
   - `cli/package.json`：精确依赖 `miniflare@5.20260916.0-alpha`，**pin workerd 到 1.20260916.1**；可用 `bun build --compile` 出单文件。
 - **不做**：不实现 Go 后端本地启动；不在 dev 复刻 cell-agent。
 - **需要补**（Go 侧，供 §8/§9）：一个共享的**兼容性校验库**（`internal/wranglercompat`），CLI preflight 与 `deploy` 端点共用；以及 binding 契约对拍的 golden 集。
