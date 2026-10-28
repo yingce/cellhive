@@ -42,6 +42,10 @@ spec:
         app: do-runtime
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      {{- with .Values.runtimeHostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

@@ -86,6 +86,11 @@ cellAgent:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {memory: 2Gi}
 
+# Optional /etc/hosts entries for the CellHive Function workloads. VWork Regions
+# set this to the private Runtime capability ingress so Function capability
+# calls stay on the cluster network instead of hairpinning through the public CDN.
+runtimeHostAliases: []
+
 userRuntime:
   replicas: 2
   minReplicas: 2
@@ -103,6 +108,13 @@ userRuntime:
     # Container-wide quota, including Go host and workerd. CPU throttles usage;
     # this is not an invocation CPU timer or a per-isolate memory limit.
     limits: {cpu: "1", memory: 2Gi}
+  dns:
+    # Opt-in resolver override for user-runtime Pods. nameservers must be IPs:
+    # Kubernetes cannot resolve a Service name in dnsConfig.nameservers.
+    enabled: false
+    nameservers: []
+    searches: []
+    options: []
 
 doRuntime:
   # Set false when this installation has no Durable Object workloads.

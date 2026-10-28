@@ -32,6 +32,24 @@ spec:
         app: user-runtime
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      {{- with .Values.runtimeHostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.userRuntime.dns.enabled }}
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          {{- toYaml .Values.userRuntime.dns.nameservers | nindent 10 }}
+        {{- with .Values.userRuntime.dns.searches }}
+        searches:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.userRuntime.dns.options }}
+        options:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
