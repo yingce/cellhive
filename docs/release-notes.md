@@ -4,13 +4,13 @@ _最后更新：2026-10-28_
 
 当前线上版本与最近两次发布的摘要。完整发布记录（镜像、Helm revision、验收证据、残余告警）在 `docs/archive/release-*.md`。
 
-## 2026-10-28 — KV pinned resource-id 修复
+## 2026-10-28 — KV pinned resource-id 修复与清理
 
-- 源码 `49133b1`；镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:c65a26b74296ecd78a127bc0a12fc8c03938dd7485da677f559716786d5175eb`（tag `49133b1`）。
-  - 精确 digest 与部署记录见 [release-2026-10-28](archive/release-2026-10-28.md)。
-- SG Helm revision **79**，USW **63**；所有业务 Pod 使用新 imageID、Ready、`restartCount=0`。
-- 修复：loader 对 pinned KV binding 签 `b.id` 而不是绑定键（ADR-302）；`scopedtoken` 拒绝 delegated/non-KV claims 携带 `Resource`。
-- 验收：每区 20 组 direct KV PUT/GET + 10 组 `name=KV,id=main` 的 Worker binding PUT/GET；临时 app 删除 200。
+- 首次发布：源码 `49133b1`，镜像 tag `49133b1`，SG rev **79** / USW **63**。
+- 同日清理重建：源码 `b8e01fa`，镜像 tag `20261028-01`（digest `sha256:627b935015f0c28cfdce6960ae7575cfc1ad541b7f7696d49350d203d260c8a2`），SG rev **80** / USW **64**；本地 Compose 同步更新。所有业务 Pod/容器 Ready，`restartCount=0`。
+- 修复：loader 对 pinned KV binding 签 `b.id` 而不是绑定键（ADR-302）；`scopedtoken` 拒绝 delegated/non-KV claims 携带 `Resource`。清理提交移除无调用死代码并刷新文档。
+- 验收：每区及本地 20 组 direct KV PUT/GET + 10 组 `name=KV,id=main` 的 Worker binding PUT/GET；临时 app 删除 200。
+- 精确 digest、Helm revision 与残余告警见 [release-2026-10-28](archive/release-2026-10-28.md)。
 
 ## 2026-10-27 — COS 恢复、绑定与队列加固
 
