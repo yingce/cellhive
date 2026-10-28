@@ -12,6 +12,26 @@ function harness(fetch) {
 }
 const ok = v => ({ok:true,status:200,json:async()=>v});
 const version = (number, sha, storage, vars={}) => ({version:number,bundle_sha:sha,storage_id:storage,vars});
+test('blank host returns 404 without a control-plane lookup',async()=>{
+  let lookups=0;
+  const c=vm.createContext({URL,Response,Number,JSON,text:(m,s)=>({status:s,body:m}),hostView:()=>{lookups++;return undefined;},maybePollRoutes(){},maybePollLogCapture(){}});
+  vm.runInContext(extract('function normalizeHost(', '// hostView returns'),c);
+  const start=source.indexOf('async fetch(req, env, ctx) {');
+  const end=source.indexOf('\n  },\n};',start);
+  vm.runInContext(source.slice(start,end).replace('async fetch(','async function routeFetch(')+'\n}',c);
+  for(const header of ['   ','.','\t']){
+    const req={method:'GET',url:'http://example.test/',headers:{get:()=>header}};
+    const res=await c.routeFetch(req,{CH_POOL_MODE:''},{});
+    assert.equal(res.status,404);
+    assert.equal(res.body,'no route for host');
+  }
+  assert.equal(lookups,0);
+  const req={method:'GET',url:'http://example.test/',headers:{get:()=>'app.test'}};
+  const res=await c.routeFetch(req,{CH_POOL_MODE:''},{});
+  assert.equal(res.status,404);
+  assert.equal(res.body,'no route for host app.test');
+  assert.equal(lookups,1);
+});
 test('kv pinned token signs the binding id, not the env key',async()=>{
   const c=vm.createContext({crypto:webcrypto,TextEncoder,JSON,btoa:s=>Buffer.from(s,'binary').toString('base64')});
   vm.runInContext(extract('async function bindingSpec(', '// scopedToken computes'),c);

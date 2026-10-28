@@ -197,6 +197,10 @@ export default {
     maybePollRoutes(env, ctx);
     maybePollLogCapture(env, ctx);
     const host = normalizeHost(req.headers.get("host") || url.host);
+    // A missing/blank Host has no route to resolve. Treat it as a miss instead
+    // of querying the control plane with an empty host (which returns 400 and
+    // would surface as a 503).
+    if (!host) return text("no route for host", 404);
 
     let view;
     try {
