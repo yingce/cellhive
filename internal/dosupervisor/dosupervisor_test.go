@@ -320,12 +320,6 @@ func (c *countingBucket) RangedGet(ctx context.Context, key string, off, length 
 	return c.Bucket.RangedGet(ctx, key, off, length)
 }
 
-func (c *countingBucket) counts() (gets, ranged, puts int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.gets, c.ranged, c.puts
-}
-
 // TestParseFacets decodes real workerd ".facets" bytes (from the facet probe in
 // /tmp: two facets named actor-1 and actor-2).
 func TestParseFacets(t *testing.T) {

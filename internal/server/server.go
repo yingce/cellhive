@@ -1606,18 +1606,6 @@ func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc ce
 	}
 	defer resp.Body.Close()
 	copyForwardResponse(w, resp)
-	// Forwarded KV requests return before the local handlers register hot
-	// access. Keep the entry node's binding/fence caches warm too; their
-	// ordinary validity checks still run before every forwarded request.
-	if sc.Class == "__kv__" && s.scopeNS(r) == sc.Namespace && s.scopeName(r) != "" {
-		path := r.URL.Path
-		kvAccess := path == "/v1/kv/put" || path == "/v1/kv/get" || path == "/v1/kv/get-batch"
-		ok := resp.StatusCode >= 200 && resp.StatusCode < 300
-		miss := path == "/v1/kv/get" && resp.StatusCode == http.StatusNotFound
-		if kvAccess && (ok || miss) {
-			s.noteHotKVAccess(sc, sc.Namespace, s.scopeName(r))
-		}
-	}
 	return true
 }
 
@@ -2157,12 +2145,6 @@ func (s *Server) handlePeerSessionDelete(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "reclaimed"})
 }
 
-// kvCell returns the default KV cell scope for a namespace.
-// kvCell builds the KV cell scope for an explicit KV namespace id.
-func kvCell(ns, id string) cell.Scope {
-	return cell.Scope{Namespace: ns, Class: "__kv__", ID: id}
-}
-
 type timerUpsertReq struct {
 	Scope      string `json:"scope"`
 	DueAtMs    int64  `json:"due_ms"`
@@ -2585,7 +2567,6 @@ func (s *Server) handleKVPut(w http.ResponseWriter, r *http.Request) {
 	if expiresMs > 0 {
 		s.syncKVExpiry(r.Context(), scope)
 	}
-	s.noteHotKVAccess(scope, ns, s.scopeName(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": true, "txid": txid})
 }
 
@@ -2864,7 +2845,6 @@ func (s *Server) handleKVGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
-	s.noteHotKVAccess(scope, s.scopeNS(r), s.scopeName(r))
 	v, meta, gerr := c.Get(r.Context(), key)
 	if errors.Is(gerr, cellstore.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "key not found")
@@ -2931,7 +2911,6 @@ func (s *Server) handleKVGetBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
 		return
 	}
-	s.noteHotKVAccess(scope, s.scopeNS(r), s.scopeName(r))
 	got, err := c.GetMany(r.Context(), req.Keys)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "get_failed", err.Error())

@@ -35,13 +35,6 @@ func (d *KVExpireDispatcher) client() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second}
 }
 
-func (d *KVExpireDispatcher) log() *slog.Logger {
-	if d.Log != nil {
-		return d.Log
-	}
-	return slog.Default()
-}
-
 // Dispatch delivers a KV expiry cleanup to the owning cell-agent.
 func (d *KVExpireDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	if t.Kind != timer.KindKVExpire {

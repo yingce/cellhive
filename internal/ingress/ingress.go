@@ -142,12 +142,6 @@ func New(listen string, table *Table, dynamicUpstream string, log *slog.Logger) 
 	return s, nil
 }
 
-// Table returns the current routing table.
-func (s *Server) Table() *Table { return s.table.Load() }
-
-// SetTable atomically publishes a new routing table.
-func (s *Server) SetTable(t *Table) { s.table.Store(t) }
-
 // ReloadFrom loads path and atomically publishes it. A failed load keeps the
 // previous table so routing never goes empty due to a partial write.
 func (s *Server) ReloadFrom(path string) error {

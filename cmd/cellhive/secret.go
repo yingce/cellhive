@@ -161,8 +161,3 @@ func secretBulk(namespace, worker, file string) error {
 	printJSON(out)
 	return nil
 }
-
-// cmdSecret keeps the pre-cobra entry point for in-process callers.
-func cmdSecret(args []string) error {
-	return dispatch(append([]string{"secret"}, args...))
-}

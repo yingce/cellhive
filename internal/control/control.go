@@ -9,7 +9,6 @@ package control
 
 import (
 	"strings"
-	"time"
 )
 
 // Binding freezes a worker's resource binding to a physical id at deploy time.
@@ -308,8 +307,6 @@ type Projection struct {
 	AtMs int64           `json:"at_ms"`
 }
 
-func nowMs() int64 { return time.Now().UnixMilli() }
-
 // QueueTarget is a queue's consuming worker resolved from a projection.
 type QueueTarget struct {
 	Namespace string
@@ -368,10 +365,6 @@ func (p Projection) CronTargets() []CronTarget {
 	}
 	return out
 }
-
-// CronScopeID is the convention for a cron timer's cell-scope id: the worker
-// name, with class "__cron__". Scope = <namespace>/__cron__/<worker>.
-func CronScopeID(worker string) string { return worker }
 
 // WorkflowTarget resolves one workflow binding to its owning worker and the
 // exported WorkflowEntrypoint class (ADR-084/P2 workflows).

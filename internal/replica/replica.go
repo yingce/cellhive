@@ -293,56 +293,6 @@ func (m *Manager) epochDirs(ctx context.Context, s cell.Scope, maxEpoch uint64) 
 	return out, nil
 }
 
-// spansForEpoch returns the base/delta spans of one epoch. A compacted L1
-// manifest is a complete baseline at its MaxTxID; L0 names are parsed, and a
-// group-committed batch is decoded because its name cannot tell snapshots from
-// deltas.
-func (m *Manager) spansForEpoch(ctx context.Context, s cell.Scope, epoch uint64) ([]segmentSpan, error) {
-	spans := make([]segmentSpan, 0, 16)
-	man, ok, err := m.ReadManifest(ctx, s, epoch)
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		spans = append(spans, segmentSpan{start: 1, end: man.MaxTxID, snapshot: true})
-	}
-	keys, err := m.ListL0Segments(ctx, s, epoch)
-	if err != nil {
-		return nil, err
-	}
-	for _, key := range keys {
-		name := key
-		if i := strings.LastIndexByte(name, '/'); i >= 0 {
-			name = name[i+1:]
-		}
-		if strings.HasSuffix(name, ".batch") && !batchSpanKnown(name) {
-			raw, err := m.ReadSegment(ctx, key)
-			if err != nil {
-				return nil, err
-			}
-			parts, err := ltx.Split(raw)
-			if err != nil {
-				return nil, fmt.Errorf("replica: durable watermark split %s: %w", key, err)
-			}
-			for _, part := range parts {
-				h, _, derr := ltx.Decode(part)
-				if derr != nil {
-					return nil, fmt.Errorf("replica: durable watermark decode %s: %w", key, derr)
-				}
-				if h.Kind == ltx.KindSnapshot || h.Kind == ltx.KindDelta {
-					spans = append(spans, segmentSpan{start: h.StartTxID, end: h.EndTxID, snapshot: h.Kind == ltx.KindSnapshot})
-				}
-			}
-			continue
-		}
-		sp, ok := parseSegmentSpan(name)
-		if ok {
-			spans = append(spans, sp)
-		}
-	}
-	return spans, nil
-}
-
 // DurableWatermarkChain returns the durable contiguous watermark across the
 // epoch chain up to maxEpoch. A restarted owner gets a new epoch; the previous
 // epoch's snapshot/deltas are its baseline, and the new epoch's deltas continue
@@ -955,15 +905,6 @@ func (m *Manager) DeleteObject(ctx context.Context, key string) error {
 func (m *Manager) ReadSegment(ctx context.Context, key string) ([]byte, error) {
 	data, _, err := m.B.Get(ctx, key)
 	return data, err
-}
-
-// SegmentKind extracts the LTX kind for a raw segment (used by restore).
-func SegmentKind(segment []byte) (ltx.Kind, error) {
-	h, _, err := ltx.Decode(segment)
-	if err != nil {
-		return 0, err
-	}
-	return h.Kind, nil
 }
 
 // ValidateKey rejects keys that escape the expected prefix (defense in depth).

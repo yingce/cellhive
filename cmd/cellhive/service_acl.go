@@ -72,8 +72,3 @@ func serviceACLRemove(namespace, worker, caller string) error {
 	printJSON(data)
 	return nil
 }
-
-// cmdServiceACL keeps the pre-cobra entry point for in-process callers.
-func cmdServiceACL(args []string) error {
-	return dispatch(append([]string{"service-acl"}, args...))
-}

@@ -126,11 +126,6 @@ func (s *Server) activeCloudflareVersion(r *http.Request) (control.Version, erro
 	return control.Version{}, control.ErrNotFound
 }
 
-func cloudflareVersionResult(v control.Version) map[string]any {
-	id := strconv.Itoa(v.Number)
-	return map[string]any{"id": id, "number": v.Number, "etag": v.BundleSHA, "created_on": v.CreatedMs, "modified_on": v.CreatedMs, "resources": map[string]any{"script": map[string]any{"etag": v.BundleSHA}}}
-}
-
 func (s *Server) handleCloudflareWorkerVersions(w http.ResponseWriter, r *http.Request) {
 	if s.forwardRead(w, r, control.Scope(), nil) {
 		return

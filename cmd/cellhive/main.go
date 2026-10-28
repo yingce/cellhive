@@ -693,8 +693,6 @@ func printWorkerCrons(ns, worker string) error {
 	return nil
 }
 
-// cmdServiceACL manages the target-side allowlist for cross-namespace service
-// bindings (ADR-144).
 // cmdCreds prints the role credentials derived from CELLHIVE_ROOT_KEY, so
 // scripts and operators never hand-copy per-role secrets (ADR-137).
 // mintScopeToken mints a scoped binding token from one place (ADR-181). keyB64
@@ -736,8 +734,6 @@ func mintScopeToken(ns, kind, name, iss string, ttl time.Duration, keyB64 string
 	})
 }
 
-// cmdToken is the single issuance entry point: platform or delegated issuer key,
-// ns/kind/name (kind and name may be globs), printed to stdout.
 func diagnose() error {
 	req, err := http.NewRequest(http.MethodGet, internalURL()+"/v1/diagnose", nil)
 	if err != nil {

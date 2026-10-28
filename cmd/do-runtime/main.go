@@ -231,19 +231,6 @@ func getenv(k, def string) string {
 // outboundAllow parses CELLHIVE_TENANT_OUTBOUND (comma-separated workerd network
 // categories: public|private|local). Empty = public only (ADR-130).
 // envList parses a comma-separated environment variable into a list.
-func envList(name string) []string {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return nil
-	}
-	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		if p := strings.TrimSpace(part); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
 
 func outboundAllow() []string {
 	raw := strings.TrimSpace(os.Getenv("CELLHIVE_TENANT_OUTBOUND"))

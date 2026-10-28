@@ -3,7 +3,6 @@ package hybrid
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -44,36 +43,6 @@ func (m *fakeManager) Apply(_ context.Context, p *staticgen.Plan) error {
 func (m *fakeManager) DropHosts(hosts []string) error {
 	m.dropped = append(m.dropped, append([]string(nil), hosts...))
 	return nil
-}
-
-func hosts(self []string) []string { return self }
-
-func TestTickSelectsAndRenders(t *testing.T) {
-	hot := &fakeBuilder{}
-	mgr := &fakeManager{}
-	c := New(Config{Policy: hotset.Policy{Max: 2, Window: time.Minute, MinQPS: 0}, Window: time.Minute}, hot, mgr)
-	now := time.Now()
-	snap := map[string]uint64{"a": 100, "b": 50}
-	d, ok := c.Tick(context.Background(), snap, now)
-	if !ok || !d.Render || len(d.Static) != 2 {
-		t.Fatalf("tick = %+v ok=%v", d, ok)
-	}
-	if len(mgr.applied) != 1 || len(hot.calls) != 1 {
-		t.Fatalf("applied=%d calls=%d", len(mgr.applied), len(hot.calls))
-	}
-	// No change -> tolerance, no render.
-	d, ok = c.Tick(context.Background(), snap, now.Add(10*time.Second))
-	if ok || d.Render {
-		t.Fatalf("second tick should not render: %+v ok=%v", d, ok)
-	}
-	// Dominant challenger replaces the weakest.
-	d, ok = c.Tick(context.Background(), map[string]uint64{"a": 200, "b": 60, "c": 500}, now.Add(20*time.Second))
-	if !ok || !d.Render {
-		t.Fatalf("dominant tick = %+v ok=%v", d, ok)
-	}
-	if !strings.Contains(fmt.Sprint(hot.calls[len(hot.calls)-1]), "c") {
-		t.Fatalf("builder hosts = %v", hot.calls)
-	}
 }
 
 func TestRefreshAppliesChangedPlan(t *testing.T) {

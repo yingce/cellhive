@@ -11,16 +11,6 @@ import (
 	"cellhive/internal/lease"
 )
 
-func TestKVAccessDoesNotCreateWarmEntry(t *testing.T) {
-	s := newScopeServer(t)
-	s.noteHotKVAccess(cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}, "acme", "KV")
-	s.hotKVAccessMu.Lock()
-	defer s.hotKVAccessMu.Unlock()
-	if len(s.hotKVAccesses) != 0 {
-		t.Fatalf("KV access created warm entries: %d", len(s.hotKVAccesses))
-	}
-}
-
 func TestKVWarmLoopDropsLegacyEntries(t *testing.T) {
 	s := newScopeServer(t)
 	s.hotKVAccesses = map[string]*hotKVAccess{"legacy": {scope: cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}}}

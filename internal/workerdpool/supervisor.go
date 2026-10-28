@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"sync"
 	"time"
 )
@@ -31,28 +30,6 @@ type Launcher interface {
 type LauncherFunc func(context.Context, Slot) (*Handle, error)
 
 func (f LauncherFunc) Start(ctx context.Context, s Slot) (*Handle, error) { return f(ctx, s) }
-
-type ExecLauncher struct {
-	Binary string
-	Args   func(Slot) []string
-}
-
-func (l ExecLauncher) Start(ctx context.Context, s Slot) (*Handle, error) {
-	if l.Binary == "" {
-		return nil, fmt.Errorf("workerdpool: binary is required")
-	}
-	var args []string
-	if l.Args != nil {
-		args = l.Args(s)
-	}
-	cmd := exec.CommandContext(ctx, l.Binary, args...)
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait(); close(done) }()
-	return &Handle{PID: cmd.Process.Pid, Done: done, Kill: cmd.Process.Kill}, nil
-}
 
 type WatchdogConfig struct {
 	Interval, ProbeTimeout time.Duration

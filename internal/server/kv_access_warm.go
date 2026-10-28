@@ -29,11 +29,6 @@ type hotKVAccess struct {
 	refreshing bool
 }
 
-func (s *Server) noteHotKVAccess(sc cell.Scope, ns, name string) {
-	// Kept as a compatibility seam for callers while the old KV warm path is
-	// removed. KV access no longer starts a timer, refresh, or cache entry.
-}
-
 func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()

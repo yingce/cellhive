@@ -94,12 +94,6 @@ func (c *Coordinator) Refresh(ctx context.Context) (bool, error) {
 	return c.render(ctx)
 }
 
-// Static returns the currently rendered host set.
-func (c *Coordinator) Static() []string { return append([]string(nil), c.static...) }
-
-// StaticHosts returns the published host set from the last applied plan.
-func (c *Coordinator) StaticHosts() []string { return append([]string(nil), c.static...) }
-
 func (c *Coordinator) accumulate(snapshot map[string]uint64, now time.Time) map[string]hotset.Stats {
 	for host, total := range snapshot {
 		prev := c.lastSnapshot[host]

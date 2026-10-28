@@ -10,12 +10,6 @@ import (
 	"cellhive/internal/scopedtoken"
 )
 
-// doBindingSpec builds the tenant binding spec and vars for a worker's active
-// version (see bindingSpecFor).
-func (s *Server) doBindingSpec(ctx context.Context, ns, worker string) (map[string]any, map[string]string) {
-	return s.bindingSpecFor(ctx, ns, worker, 0)
-}
-
 // bindingSpecFor builds the tenant binding spec (SCOPE_SPEC) and vars a loaded
 // worker needs so its `env` exposes the worker's bindings, mirroring
 // user-runtime loader.js bindingSpec. cell-agent is authoritative for the scoped

@@ -1116,15 +1116,6 @@ func scopeID(rel string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(rel))
 }
 
-// scopePath reverses scopeID.
-func scopePath(id string) (string, error) {
-	b, err := base64.RawURLEncoding.DecodeString(id)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
 func (s *Supervisor) ensureClaim(ctx context.Context, scope cell.Scope) error {
 	s.mu.Lock()
 	if s.claims == nil {

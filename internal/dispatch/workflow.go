@@ -49,13 +49,6 @@ func (d *WorkflowDispatcher) client() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-func (d *WorkflowDispatcher) log() *slog.Logger {
-	if d.Log != nil {
-		return d.Log
-	}
-	return slog.Default()
-}
-
 // Run dispatches one attempt of a workflow instance.
 func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken string) error {
 	if d.URL == "" || d.Target == nil {

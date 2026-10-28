@@ -126,31 +126,3 @@ func EncodeSnapshotPart(h Header, pageSize, commit uint32, pages []WALPage, part
 	}
 	return Encode(ph, payload), nil
 }
-
-// SnapshotPartCount returns the part index and total parts among a set of paged
-// snapshot headers that share one txid watermark. ok is false when the headers
-// are an unpaged snapshot or are inconsistent.
-func SnapshotPartCount(headers []Header) (idx, total int, ok bool) {
-	const none = -1
-	idx = none
-	total = none
-	for _, h := range headers {
-		if h.Kind != KindSnapshot {
-			continue
-		}
-		part, paged := SnapshotPart(h)
-		if !paged {
-			return 0, 1, false
-		}
-		if idx == none || part < idx {
-			idx = part
-		}
-		if total == none || part+1 > total {
-			total = part + 1
-		}
-	}
-	if total == none {
-		return 0, 0, false
-	}
-	return idx, total, true
-}

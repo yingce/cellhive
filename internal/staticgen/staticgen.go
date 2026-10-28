@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -628,16 +627,6 @@ var netDial = func(ctx context.Context, addr string) (netConn, error) {
 
 type netConn interface {
 	Close() error
-}
-
-// SortedHosts returns plan route hosts in a stable order (diagnostics/tests).
-func SortedHosts(p *Plan) []string {
-	hosts := make([]string, 0, len(p.Routes))
-	for host := range p.Routes {
-		hosts = append(hosts, host)
-	}
-	sort.Strings(hosts)
-	return hosts
 }
 
 // sameRuntime reports whether two plans describe the same workerd services,

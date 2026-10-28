@@ -70,15 +70,3 @@ func (w *Writer) Current() uint64 {
 	defer w.mu.Unlock()
 	return w.ticket
 }
-
-// Close releases the prepared statement.
-func (w *Writer) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.stmt == nil {
-		return nil
-	}
-	err := w.stmt.Close()
-	w.stmt = nil
-	return err
-}

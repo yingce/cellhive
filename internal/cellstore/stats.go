@@ -56,13 +56,6 @@ func (c *Cell) DiskStats(ctx context.Context) (DiskStats, error) {
 	return st, nil
 }
 
-// ErrNotInline is returned when a stats probe needs a page scan the caller did
-// not ask for (too large / exactness not requested). Callers surface it as a
-// skipped field rather than failing the whole request.
-type ErrNotInline struct{ Reason string }
-
-func (e ErrNotInline) Error() string { return "cellstore: not inline: " + e.Reason }
-
 // KVStatsOptions tunes a KV stats read.
 type KVStatsOptions struct {
 	// Prefix restricts the count-style fields (Keys, Expired, NextExpiryMs) to

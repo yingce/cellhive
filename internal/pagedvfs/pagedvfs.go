@@ -230,22 +230,6 @@ func IsPaged(path string) bool {
 	return false
 }
 
-// Runs returns how many source fetch calls (windows/pages) path has made.
-func Runs(path string) uint64 {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return 0
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, r := range regs {
-		if r.path == abs {
-			return r.runs
-		}
-	}
-	return 0
-}
-
 // Prefetch returns (served from prefetch, prefetched pages) for path.
 func Prefetch(path string) (hits, prefetched uint64) {
 	abs, err := filepath.Abs(path)
@@ -941,16 +925,4 @@ func HydratedPages(path string) int {
 		}
 	}
 	return n
-}
-
-// sortedPaths is used by tests/diagnostics.
-func sortedPaths() []string {
-	mu.Lock()
-	defer mu.Unlock()
-	out := make([]string, 0, len(regs))
-	for _, r := range regs {
-		out = append(out, r.path)
-	}
-	sort.Strings(out)
-	return out
 }

@@ -540,8 +540,6 @@ func (s *Store) Rev(ctx context.Context) (int64, error) {
 	return v, nil
 }
 
-func marshal(v any) ([]byte, error) { return json.Marshal(v) }
-
 func unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 
 func jsonOr(v any, def string) string {
@@ -2303,9 +2301,6 @@ func (r GCRefs) SetMark(ctx context.Context, id string, ms int64) error {
 func (r GCRefs) ClearMark(ctx context.Context, id string) error {
 	return r.S.ClearGCMark(ctx, r.Kind, id)
 }
-
-// sortStrings is a small helper kept for deterministic outputs.
-func sortStrings(v []string) { sort.Strings(v) }
 
 // SecretMeta is a secret key without its value (list API).
 type SecretMeta struct {

@@ -288,12 +288,3 @@ func newRollbackCommand() *cobra.Command {
 func cmdDeploy(args []string) error {
 	return dispatch(append([]string{"deploy"}, args...))
 }
-
-// cmdPromote/cmdRollback keep compatibility for in-process callers.
-func cmdPromote(args []string) error {
-	return dispatch(append([]string{"promote"}, args...))
-}
-
-func cmdRollback(args []string) error {
-	return dispatch(append([]string{"rollback"}, args...))
-}

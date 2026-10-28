@@ -92,10 +92,6 @@ func newSkillsUpdateCommand() *cobra.Command {
 	return cmd
 }
 
-// cmdSkills keeps the pre-cobra entry point for in-process callers.
-func cmdSkills(args []string) error {
-	return dispatch(append([]string{"skills"}, args...))
-}
 func updateCellhiveSkill(root string, force bool) error {
 	base := strings.TrimRight(os.Getenv("CELLHIVE_SKILL_BASE_URL"), "/")
 	if base == "" {

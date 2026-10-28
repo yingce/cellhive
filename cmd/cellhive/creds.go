@@ -97,11 +97,7 @@ func newTokenCommand() *cobra.Command {
 	return cmd
 }
 
-// cmdCreds/cmdToken keep the pre-cobra entry points used by in-process tests.
+// cmdCreds keeps the pre-cobra entry point used by in-process tests.
 func cmdCreds(args []string) error {
 	return dispatch(append([]string{"creds"}, args...))
-}
-
-func cmdToken(args []string) error {
-	return dispatch(append([]string{"token"}, args...))
 }

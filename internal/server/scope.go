@@ -317,12 +317,6 @@ func (s *Server) bindingAllowed(ctx context.Context, ns, kind, name string) (boo
 	return ok, err
 }
 
-// bindingID returns the binding's resolved resource id (cached).
-func (s *Server) bindingID(ctx context.Context, ns, kind, name string) (string, error) {
-	_, id, err := s.bindingInfo(ctx, ns, kind, name)
-	return id, err
-}
-
 // invalidateBindings drops cached declarations for a namespace after a
 // control-plane change so a new binding is visible immediately.
 func (s *Server) invalidateBindings(ns string) {

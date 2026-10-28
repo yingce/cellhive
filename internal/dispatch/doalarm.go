@@ -37,13 +37,6 @@ func (d *DoAlarmDispatcher) client() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second}
 }
 
-func (d *DoAlarmDispatcher) log() *slog.Logger {
-	if d.Log != nil {
-		return d.Log
-	}
-	return slog.Default()
-}
-
 // Dispatch delivers an alarm to the owning do-runtime.
 func (d *DoAlarmDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	if t.Kind != timer.KindDOAlarm {

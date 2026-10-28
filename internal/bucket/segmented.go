@@ -99,8 +99,6 @@ func NewSegmentedAuthority(raw PositionAppender, data segmentData, opts Authorit
 	return &SegmentedAuthority{raw: raw, data: data, segment: segment, max: max, now: now}
 }
 
-func (s *SegmentedAuthority) rawAppender() PositionAppender { return s.raw }
-
 func (s *SegmentedAuthority) window() int64 {
 	return s.now().UnixNano() / int64(s.segment)
 }

@@ -285,36 +285,6 @@ func decodeSessionFragment(seq uint64, b []byte) (SessionFragment, error) {
 	return SessionFragment{Sequence: seq, Scope: string(b[2 : 2+n]), Epoch: binary.BigEndian.Uint64(b[2+n:]), Segments: segments}, nil
 }
 
-// parseSessionLog decodes complete length-prefixed records and ignores a torn
-// final record. The sequence is stored inside each record so recovery can
-// detect gaps independently of directory entries.
-func parseSessionLog(path string) ([]SessionFragment, int64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, 0, nil
-		}
-		return nil, 0, err
-	}
-	var out []SessionFragment
-	var consumed int64
-	for len(data) >= 4 {
-		n := int(binary.BigEndian.Uint32(data))
-		if n < 8 || n > len(data)-4 {
-			break
-		}
-		seq := binary.BigEndian.Uint64(data[4:12])
-		fragment, err := decodeSessionFragment(seq, data[12:4+n])
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, fragment)
-		consumed += int64(4 + n)
-		data = data[4+n:]
-	}
-	return out, consumed, nil
-}
-
 // scanSessionState loads only the cursor of a potentially very large shared
 // follower log. Payloads remain on disk until a scoped recovery reads them.
 func scanSessionState(path string) (uint64, int64, error) {
