@@ -2264,7 +2264,9 @@ func (s *Server) kvScopeFor(ctx context.Context, ns, name string) (cell.Scope, e
 		return cell.Scope{}, errKVIDRequired
 	}
 	ref := ""
-	if pinned, ok := ctx.Value(ctxPinnedKV).(scopedtoken.Claims); ok && pinned.Namespace == ns && pinned.Name == name {
+	if resolved, ok := ctx.Value(ctxResolvedResource).(string); ok && resolved != "" {
+		ref = resolved
+	} else if pinned, ok := ctx.Value(ctxPinnedKV).(scopedtoken.Claims); ok && pinned.Namespace == ns && pinned.Name == name {
 		ref = pinned.Resource
 	} else {
 		_, resolved, err := s.bindingInfo(ctx, ns, "kv", name)

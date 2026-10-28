@@ -33,50 +33,63 @@ func (s *Server) authenticateBindingToken(w http.ResponseWriter, r *http.Request
 // authorizeBinding checks the requested resource and the existing issuer policy.
 // Platform tokens require a registered binding; delegated tokens retain ADR-181
 // scope authorization. Neither policy grants ownership of a cell.
-func (s *Server) authorizeBinding(w http.ResponseWriter, r *http.Request, kind string, claims scopedtoken.Claims) bool {
+func (s *Server) authorizeBinding(w http.ResponseWriter, r *http.Request, kind string, claims scopedtoken.Claims) (string, bool) {
 	if !scopedtoken.MatchKind(claims, kind) {
 		writeErr(w, http.StatusForbidden, "scope_kind", "token is not valid for a "+kind+" binding")
-		return false
+		return "", false
 	}
 	// The namespace is exact and authoritative (isolation boundary).
 	if q := r.URL.Query().Get("ns"); q != "" && q != claims.Namespace {
 		writeErr(w, http.StatusForbidden, "scope_mismatch", "request namespace does not match the token")
-		return false
+		return "", false
 	}
 	if param, ok := scopeResourceParam[kind]; ok {
 		// The resource name comes from the request; a glob token matches it.
 		got := r.URL.Query().Get(param)
-		if got == "" || !scopedtoken.MatchName(claims, got) {
+		match := claims.Name
+		if claims.Resource != "" {
+			match = claims.Resource
+		}
+		if got == "" || !scopedtoken.MatchName(scopedtoken.Claims{Name: match}, got) {
 			writeErr(w, http.StatusForbidden, "scope_resource_mismatch", "request resource does not match the token")
-			return false
+			return "", false
 		}
 	} else if scopedtoken.HasWildcard(claims.Name) {
 		// Token-derived resources (kv/vectorize/service/do) need a
 		// concrete name to resolve a cell; a wildcard cannot resolve.
 		writeErr(w, http.StatusForbidden, "scope_name_required", "this binding kind requires a concrete resource name")
-		return false
+		return "", false
 	}
+	resolved := claims.Resource
 	if claims.Iss == "" && s.Control != nil {
 		// Internal tokens are bounded by the registered-binding ACL;
 		// delegated tokens are authorized by their ns/scope (ADR-181).
 		var ok bool
 		var cerr error
-		if claims.Resource != "" {
+		if claims.Worker != "" || claims.Version != 0 {
 			ok, cerr = s.pinnedBindingAllowed(r.Context(), claims, false)
+		} else if claims.Resource != "" {
+			// Resource is a signed, immutable routing claim. The loader issued
+			// it after resolving the binding; avoid a control-cell lookup on
+			// every data request. Pinned KV tokens retain their revocation check
+			// above because worker/version authorization is time bounded.
+			ok = true
 		} else {
-			ok, _, cerr = s.bindingInfo(r.Context(), claims.Namespace, kind, claims.Name)
+			var id string
+			ok, id, cerr = s.bindingInfo(r.Context(), claims.Namespace, kind, claims.Name)
+			resolved = id
 		}
 		if cerr != nil {
 			writeErr(w, http.StatusInternalServerError, "scope_check_failed", cerr.Error())
-			return false
+			return "", false
 		}
 		if !ok {
 			writeErr(w, http.StatusForbidden, "binding_not_registered", "binding is not declared for this namespace")
-			return false
+			return "", false
 		}
 	}
-	if claims.Resource != "" {
+	if claims.Worker != "" || claims.Version != 0 {
 		s.notePinnedAuth(claims)
 	}
-	return true
+	return resolved, true
 }

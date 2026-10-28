@@ -28,14 +28,18 @@ const (
 	ctxScopeName
 	ctxScopePreInvalidated
 	ctxPinnedKV
+	// ctxResolvedResource carries the binding lookup result through the
+	// remainder of one request. Authorization still performs the control-plane
+	// check once; scope/owner routing must not repeat that lookup.
+	ctxResolvedResource
 )
 
 // scopeSecret is the HMAC key for binding scoped tokens (ADR-074). Required.
 func (s *Server) scopeSecret() []byte { return []byte(s.Cfg.ScopeSecret) }
 
 // scopeResourceParam maps a binding kind to the query parameter that carries
-// the resource name. The middleware compares it against the token's Name so a
-// scoped token can only touch its own resource, even within one namespace.
+// the resource name. The middleware compares it against the token's Resource
+// when present (otherwise Name), so binding names and backend IDs can differ.
 var scopeResourceParam = map[string]string{
 	"d1":       "db",
 	"r2":       "bucket",
@@ -58,15 +62,20 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			nsForMetrics := ""
 			defer func() { s.recordBindingCall(nsForMetrics, kind, rec.code()) }()
 			claims, ok := s.authenticateBindingToken(w, r)
-			if !ok || !s.authorizeBinding(w, r, kind, claims) {
+			resolved, ok := s.authorizeBinding(w, r, kind, claims)
+			if !ok {
 				return
 			}
+			ctx := r.Context()
+			if resolved != "" {
+				ctx = context.WithValue(ctx, ctxResolvedResource, resolved)
+			}
 			if claims.Resource != "" {
-				r = r.WithContext(context.WithValue(r.Context(), ctxPinnedKV, claims))
+				ctx = context.WithValue(ctx, ctxPinnedKV, claims)
 			}
 			// Pure forwarding needs no local SQLite admission or resource fence.
 			// The target repeats authorization and performs full resource gating.
-			ctx := context.WithValue(r.Context(), ctxScopeNS, claims.Namespace)
+			ctx = context.WithValue(ctx, ctxScopeNS, claims.Namespace)
 			ctx = context.WithValue(ctx, ctxScopeName, claims.Name)
 			r = r.WithContext(ctx)
 			nsForMetrics = claims.Namespace

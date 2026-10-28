@@ -1316,16 +1316,28 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
     spec[b.name] = {
       kind: b.type,
       ns: app.namespace,
-      name: resource,
-      token: await scopedToken(env.SCOPE_SECRET, app.namespace, b.type, resource, b.type === "kv" && b.id ? {worker, version: version.version, resource: b.id} : null),
+      // KV keeps the declared binding key in name for the control ACL;
+      // resource is the resolved cell identifier used for data routing.
+      name: b.type === "kv" ? b.name : resource,
+      token: await scopedToken(
+        env.SCOPE_SECRET,
+        app.namespace,
+        b.type,
+        resource,
+        b.type === "kv" && b.id ? {
+        resource,
+          worker,
+          version: version.version,
+        } : null,
+      ),
     };
   }
   return spec;
 }
 
 // scopedToken computes the binding capability token locally from the shared
-// secret (ADR-074): HMAC-SHA256 over canonical JSON {ns,kind,name} (no expiry).
-// KV adds signed {worker,version,resource} for the immutable mapping (ADR-302).
+// secret (ADR-074): HMAC-SHA256 over canonical JSON {ns,kind,name[,resource]} (no expiry).
+// Resource is the resolved cell ID used for routing; name remains the binding key.
 // The platform loader holds the secret; only the computed token reaches a
 // loaded worker. Byte-identical to Go scopedtoken.Mint (verified by tests).
 async function scopedToken(secret, ns, kind, name, pinned = null) {
