@@ -1,0 +1,21 @@
+---
+const renderedAt = new Date().toISOString();
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Astro SSR on CellHive</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1 id="title">Astro SSR on CellHive</h1>
+      <p>Rendered at <code id="rendered-at">{renderedAt}</code></p>
+      <p><a href="/about">About this example</a></p>
+    </main>
+    <script>
+      document.getElementById('title')?.setAttribute('data-client', 'loaded');
+    </script>
+  </body>
+</html>

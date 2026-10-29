@@ -33,11 +33,16 @@ The development CLI uses Miniflare and does not need a cell-agent. For the produ
 | Service binding | [`services`](./services) | Internal API split, caller -> api | Deploy `services/api`, then `services/caller` | Call caller's fetch |
 | Worker-to-worker RPC | [`worker-rpc`](./worker-rpc) | Native JSRPC, structured-clone boundaries | Deploy `worker-rpc/api`, then `worker-rpc/caller` | Call caller's RPC |
 | Static assets | [`assets`](./assets), [`react-static`](./react-static) | Static site, React/Vite build, SPA fallback, `_headers`/`_redirects` | — | `GET /` (asset); `GET /api` (Worker) |
+| Astro SSR | [`astro`](./astro) | Server-rendered Astro via `@astrojs/cloudflare` | — | `GET /` (per-request HTML); `GET /about` |
 | Vars / Secrets | [`vars-secrets`](./vars-secrets) | Config, API tokens, secret injection | `cellhive secret put ...` for secrets | `GET /` |
 | AI (bring your own endpoint) | [`ai`](./ai) | Call your own model/gateway, add AI features | Set `CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY` | `GET /?prompt=hi` |
 | Hyperdrive | [`hyperdrive`](./hyperdrive) | Connect an existing PostgreSQL/MySQL database without migrating to D1 | `hyperdrive HYDR` | `GET /` |
 | Vectorize | [`vectorize`](./vectorize) | Semantic search, RAG, similarity queries | `vectorize VEC --dimensions 3 --metric cosine` | `GET /seed`, `GET /?v=1,0,0` |
 | Async execution | [`async`](./async) | `waitUntil`, background writes, non-blocking responses | — | `GET /` |
+
+## Framework notes
+
+- **Astro SSR** uses `@astrojs/cloudflare` with `imageService: "passthrough"`. The default `compile` mode pulls sharp/Node built-ins into the Worker bundle and fails CellHive bundling. Adapter 12 writes assets next to `_worker.js`, so the example's build step copies everything except `_worker.js`/`_routes.json` into `dist/client`; never point `assets.directory` at `dist`. See [`astro/README.md`](./astro/README.md).
 
 ## Composite scenarios
 

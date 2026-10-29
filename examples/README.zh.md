@@ -64,11 +64,16 @@ cellhive route add demo kv.example.test kv
 | Service binding | [`services`](./services) | 内部 API 拆分、caller → api 调用 | 先部署 `services/api`，再部署 `services/caller` | 调用 caller 的 fetch |
 | Worker ↔ Worker RPC | [`worker-rpc`](./worker-rpc) | 原生 JSRPC、结构化克隆边界 | 先部署 `worker-rpc/api`，再部署 `worker-rpc/caller` | 调用 caller 的 RPC |
 | 静态资产 | [`assets`](./assets)、[`react-static`](./react-static) | 静态站点、React/Vite 构建、SPA 回退、`_headers`/`_redirects` | — | `GET /`（资产）；`GET /api`（Worker） |
+| Astro SSR | [`astro`](./astro) | 通过 `@astrojs/cloudflare` 服务端渲染的 Astro | — | `GET /`（每请求 HTML）；`GET /about` |
 | Vars / Secrets | [`vars-secrets`](./vars-secrets) | 普通配置、API token、密钥注入 | secret 用 `cellhive secret put ...` | `GET /` |
 | AI（BYO 端点） | [`ai`](./ai) | 调用自有模型/网关、AI 功能 | 平台配置 `CELLHIVE_AI_URL`/`CELLHIVE_AI_KEY` | `GET /?prompt=hi` |
 | Hyperdrive | [`hyperdrive`](./hyperdrive) | 连接现有 PostgreSQL/MySQL，不迁移数据库 | `hyperdrive HYDR` | `GET /` |
 | Vectorize | [`vectorize`](./vectorize) | 语义检索、RAG、相似度查询 | `vectorize VEC --dimensions 3 --metric cosine` | `GET /seed`、`GET /?v=1,0,0` |
 | 异步执行 | [`async`](./async) | `waitUntil`、后台写、非阻塞响应 | — | `GET /` |
+
+## 框架注意事项
+
+- **Astro SSR** 使用 `@astrojs/cloudflare`，并设置 `imageService: "passthrough"`。默认 `compile` 会把 sharp/Node 内置模块带进 Worker bundle，CellHive 打包会失败。adapter 12 把静态资产写在 `_worker.js` 旁边，所以示例的 build 会把除 `_worker.js`/`_routes.json` 外的内容复制到 `dist/client`；不要把 `assets.directory` 指向 `dist`。详见 [`astro/README.md`](./astro/README.md)。
 
 ## 组合场景
 

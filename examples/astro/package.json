@@ -1,0 +1,15 @@
+{
+  "name": "cellhive-astro-ssr",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "astro build && node scripts/prepare-assets.mjs"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "12.6.10",
+    "astro": "5.16.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
