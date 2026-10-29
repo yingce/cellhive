@@ -3,8 +3,11 @@ package bucket
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestConditionalWritesAndCAS(t *testing.T) {
@@ -145,5 +148,107 @@ func TestFSListPageArbitraryPrefix(t *testing.T) {
 	}
 	if len(objs) != 1 || objs[0].Key != "r2/ns/b/xmeta.txt" {
 		t.Fatalf("dot-prefix objects = %v", objs)
+	}
+}
+
+// TestFSBucketLocksArePerKey guards the fix for node-lease starvation: a slow
+// write on one key must not hold up a different key (the lease key).
+func TestFSBucketLocksArePerKey(t *testing.T) {
+	b, err := NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlockA := b.acquire("a")
+	done := make(chan struct{})
+	go func() {
+		unlockB := b.acquire("b")
+		unlockB()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		unlockA()
+		t.Fatal("different key was blocked")
+	}
+	unlockA()
+
+	unlockA = b.acquire("a")
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		close(started)
+		unlock := b.acquire("a")
+		unlock()
+		close(finished)
+	}()
+	<-started
+	select {
+	case <-finished:
+		unlockA()
+		t.Fatal("same key was not serialized")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlockA()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("same key stayed blocked after release")
+	}
+}
+
+// TestFSBucketConcurrentKeys checks that independent keys can be written and
+// read concurrently without corrupting each other.
+func TestFSBucketConcurrentKeys(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			key := "k/" + string(rune('a'+i%26)) + "-" + string(rune('a'+i/26))
+			want := []byte(key)
+			if _, err := b.Put(ctx, key, want); err != nil {
+				t.Errorf("put %s: %v", key, err)
+				return
+			}
+			got, _, err := b.Get(ctx, key)
+			if err != nil || string(got) != string(want) {
+				t.Errorf("get %s = %q, %v", key, got, err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestFSBucketListSkipsTemp verifies that incomplete temp files are not exposed
+// as objects while another key is being written.
+func TestFSBucketListSkipsTemp(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Put(ctx, "p/real", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	tmp := b.path("p/inflight.tmp")
+	if err := os.MkdirAll(b.path("p"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := b.List(ctx, "p/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "p/real" {
+		t.Fatalf("List = %v, want only p/real", keys)
 	}
 }

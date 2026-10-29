@@ -31,14 +31,18 @@ func (b *FSBucket) Stats() map[string]uint64 {
 //
 // Semantics:
 //   - etag = hex(sha256(value)).
-//   - conditional create uses O_EXCL.
+//   - conditional create publishes a complete temp file with an atomic link.
 //   - CAS reads the current file, compares etag, then atomically renames.
 //
-// A process-local mutex serialises writes. It is NOT safe for multiple
-// processes; production uses an S3-compatible bucket.
+// A process-local per-key lock serialises operations on the same object.
+// Different keys proceed independently, so a large cell write cannot delay the
+// node lease CAS. It is NOT safe for multiple processes; production uses an
+// S3-compatible bucket.
 type FSBucket struct {
 	root string
-	mu   sync.Mutex
+
+	locksMu sync.Mutex
+	locks   map[string]*fsKeyLock
 
 	puts    atomic.Uint64
 	gets    atomic.Uint64
@@ -53,7 +57,35 @@ func NewFSBucket(dir string) (*FSBucket, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &FSBucket{root: dir}, nil
+	return &FSBucket{root: dir, locks: make(map[string]*fsKeyLock)}, nil
+}
+
+type fsKeyLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquire serialises operations on one key. It returns the release function.
+func (b *FSBucket) acquire(key string) func() {
+	b.locksMu.Lock()
+	l := b.locks[key]
+	if l == nil {
+		l = &fsKeyLock{}
+		b.locks[key] = l
+	}
+	l.refs++
+	b.locksMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		b.locksMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(b.locks, key)
+		}
+		b.locksMu.Unlock()
+	}
 }
 
 func (b *FSBucket) path(key string) string {
@@ -69,8 +101,8 @@ func etag(data []byte) string {
 // Get implements Bucket.
 func (b *FSBucket) Get(_ context.Context, key string) ([]byte, string, error) {
 	b.gets.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	return b.getLocked(key)
 }
 
@@ -88,8 +120,8 @@ func (b *FSBucket) getLocked(key string) ([]byte, string, error) {
 // Stat implements Statter: size from stat, etag from the content-addressed
 // body (the local backend has no cheap content hash).
 func (b *FSBucket) Stat(_ context.Context, key string) (int64, string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	info, err := os.Stat(b.path(key))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -123,8 +155,8 @@ func (b *FSBucket) RangedGet(ctx context.Context, key string, off, length int64)
 // Put implements Bucket.
 func (b *FSBucket) Put(_ context.Context, key string, data []byte) (string, error) {
 	b.puts.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	return b.putLocked(key, data)
 }
 
@@ -146,8 +178,8 @@ func (b *FSBucket) putLocked(key string, data []byte) (string, error) {
 // ConditionalCreate implements Bucket.
 func (b *FSBucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
 	b.creates.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	p := b.path(key)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return "", err
@@ -155,25 +187,28 @@ func (b *FSBucket) ConditionalCreate(ctx context.Context, key string, data []byt
 	if _, err := os.Stat(p); err == nil {
 		return "", ErrPrecondition
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
+	// Write the complete value first, then publish it with an atomic hard link
+	// so a concurrent reader/list never sees a partial object.
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return "", err
+	}
+	if err := os.Link(tmp, p); err != nil {
+		_ = os.Remove(tmp)
 		if os.IsExist(err) {
 			return "", ErrPrecondition
 		}
 		return "", err
 	}
-	defer f.Close()
-	if _, err := f.Write(data); err != nil {
-		return "", err
-	}
+	_ = os.Remove(tmp)
 	return etag(data), nil
 }
 
 // CAS implements Bucket.
 func (b *FSBucket) CAS(ctx context.Context, key string, data []byte, expectEtag string) (string, error) {
 	b.casOps.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	cur, curEtag, err := b.getLocked(key)
 	if err != nil {
 		return "", err
@@ -189,8 +224,8 @@ func (b *FSBucket) CAS(ctx context.Context, key string, data []byte, expectEtag 
 // ConditionalDelete implements Bucket: the etag is re-read under the lock, so a
 // concurrent writer that replaced the record makes this fail with ErrPrecondition.
 func (b *FSBucket) ConditionalDelete(_ context.Context, key, expectEtag string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	_, curEtag, err := b.getLocked(key)
 	if err != nil {
 		if err == ErrNotFound {
@@ -250,11 +285,12 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 		}
 		base = b.path(dir)
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	var kept []string // ascending, len <= limit+1
 	err := filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {
@@ -265,7 +301,7 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 			return rerr
 		}
 		key := filepath.ToSlash(rel)
-		if !strings.HasPrefix(key, prefix) {
+		if !strings.HasPrefix(key, prefix) || strings.HasSuffix(key, ".tmp") {
 			return nil
 		}
 		if key <= after {
@@ -311,8 +347,8 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 
 func (b *FSBucket) Delete(_ context.Context, key string) error {
 	b.deletes.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	unlock := b.acquire(key)
+	defer unlock()
 	err := os.Remove(b.path(key))
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -323,12 +359,13 @@ func (b *FSBucket) Delete(_ context.Context, key string) error {
 // List implements Bucket (operator/diagnostic use only).
 func (b *FSBucket) List(_ context.Context, prefix string) ([]string, error) {
 	b.lists.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	base := b.path(prefix)
 	var keys []string
 	err := filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {
@@ -338,7 +375,11 @@ func (b *FSBucket) List(_ context.Context, prefix string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		keys = append(keys, filepath.ToSlash(rel))
+		key := filepath.ToSlash(rel)
+		if strings.HasSuffix(key, ".tmp") {
+			return nil
+		}
+		keys = append(keys, key)
 		return nil
 	})
 	if err != nil {
@@ -357,8 +398,6 @@ func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string)
 		delimiter = "/"
 	}
 	b.lists.Add(1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	entries, err := os.ReadDir(b.path(prefix))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -390,8 +429,11 @@ func dirHasFile(dir string) bool {
 			return filepath.SkipAll
 		}
 		if !d.IsDir() {
-			found = true
-			return filepath.SkipAll
+			if !strings.HasSuffix(d.Name(), ".tmp") {
+				found = true
+				return filepath.SkipAll
+			}
+			return nil
 		}
 		return nil
 	})
