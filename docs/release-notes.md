@@ -1,8 +1,20 @@
 # 发布说明
 
-_最后更新：2026-10-28_
+_最后更新：2026-10-31_
 
 当前线上版本与最近两次发布的摘要。完整发布记录（镜像、Helm revision、验收证据、残余告警）在 `docs/archive/release-*.md`。
+
+## 2026-10-31 — 退休控制 RPC 不再计入函数错误
+
+- 源码 `bd2c5d7`，镜像 tag `20261031-01`（digest `sha256:b437c8ce1aa59bcb70133dde34fa0bfc9c270bbfc386872d65286695564d2ea2`），SG rev **84** / USW **68**。
+- 修复：`CellHiveLifecycle.status/retire` 是平台控制 RPC，fork 会把执行 abort 的 `retire` 调用标记为异常，Tail 因此把它导出成 `function_request`，Vector 再归类为 `CELLHIVE_WORKER_RETIRED`。`workerd/platform/log-tail.js` 现在在写 ring 和读取时都过滤 `CellHiveLifecycle` 记录；真实 `CellHiveManagedFetch` 的中止仍会上报。
+- 背景数据：48h 内 19 条 RETIRED，18 条 `event_type=""`（退休 RPC）；`vwork-80/keeper-authority` 同窗口 768 条真实 fetch 全部 `ok`，APISIX 24h 无 5xx。
+- 验收：两区业务 Pod 全部新 digest、Ready、`restartCount=0`；`/readyz`、user-runtime `/ready`、gated do-runtime `/ready` 均正常；上线后 SLS 无新增 RETIRED。详见 [release-2026-10-31](archive/release-2026-10-31.md)。
+
+## 2026-10-30 — 运行时退休竞态与序列化加固
+
+- `20261030-01`（源码 `951ee79`）与 `20261030-02`（源码 `251725a`）两个镜像先后发布，SG rev **82/83**、USW **66/67**。
+- 内容包括上传 spool/eviction/staticgen/session 的锁粒度收敛、未使用代码清理，以及运行时退休与 ownership 恢复竞态修复；两区业务 Pod 均新 digest、Ready、`restartCount=0`。
 
 ## 2026-10-28 — KV pinned resource-id 修复与清理
 
