@@ -190,6 +190,7 @@ type Server struct {
 	proxyHealthChecked bool
 
 	sessionMu        sync.Mutex
+	sessionOpening   chan struct{}
 	sessionOpen      bool
 	sessionFollowers []string
 	sessionRefs      map[cell.PeerIdentity]bool
@@ -3592,69 +3593,121 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 // individual cells can have different epochs, which are stored per fragment.
 // Changing followers without sealing and starting a new session would leave
 // the node-log unable to name every follower with acknowledged data.
+//
+// Only the first opener performs peer prepare/node-log I/O. Other callers wait
+// on a per-session opening channel instead of holding sessionMu across the
+// network.
 func (s *Server) openFleetSession(ctx context.Context, epoch uint64, followers []string) bool {
 	if s.NodeLog == nil {
 		return false
 	}
 	followers = append([]string(nil), followers...)
 	sort.Strings(followers)
-	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-	if s.sessionOpen && (s.PeerTargets == nil || s.Lease == nil) {
+	for {
+		s.sessionMu.Lock()
+		if s.sessionOpen {
+			ok := s.sessionMatchesLocked(ctx, followers)
+			s.sessionMu.Unlock()
+			return ok
+		}
+		if ch := s.sessionOpening; ch != nil {
+			s.sessionMu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return false
+			}
+		}
+		ch := make(chan struct{})
+		s.sessionOpening = ch
+		s.sessionMu.Unlock()
+
+		ok, refs := s.openFleetSessionSlow(ctx, epoch, followers)
+
+		s.sessionMu.Lock()
+		if ok {
+			s.sessionOpen = true
+			s.sessionFollowers = followers
+			s.sessionRefs = refs
+		}
+		s.sessionOpening = nil
+		close(ch)
+		s.sessionMu.Unlock()
+		return ok
+	}
+}
+
+// sessionMatchesLocked validates an already-open session without network I/O.
+func (s *Server) sessionMatchesLocked(ctx context.Context, followers []string) bool {
+	if s.PeerTargets == nil || s.Lease == nil {
 		return slicesEqual(s.sessionFollowers, followers)
 	}
-	var err error
-	if s.PeerTargets != nil && s.Lease != nil {
-		refs := make(map[string]cell.PeerIdentity, len(followers))
-		for _, addr := range followers {
-			for _, l := range s.Lease.SampleCached(ctx, s.followerSampleTTL()) {
-				if l.PeerURL == addr && l.Live(time.Now()) && l.Instance != "" {
-					refs[addr] = cell.PeerIdentity{Node: l.Node, Instance: l.Instance}
-					break
-				}
-			}
-			if _, ok := refs[addr]; !ok {
-				return false
+	refs := make(map[string]cell.PeerIdentity, len(followers))
+	for _, addr := range followers {
+		for _, l := range s.Lease.SampleCached(ctx, s.followerSampleTTL()) {
+			if l.PeerURL == addr && l.Live(time.Now()) && l.Instance != "" {
+				refs[addr] = cell.PeerIdentity{Node: l.Node, Instance: l.Instance}
+				break
 			}
 		}
-		if s.sessionOpen {
-			if len(refs) != len(s.sessionRefs) {
-				return false
-			}
-			for _, id := range refs {
-				if !s.sessionRefs[id] {
-					return false
-				}
-			}
-			return s.PeerTargets.Bind(refs) == nil
+		if _, ok := refs[addr]; !ok {
+			return false
 		}
-		if err = s.PeerTargets.Bind(refs); err == nil {
-			tr := peer.NewHTTPTransport(s.Cfg.TokenPeer, nil)
-			tr.Targets = s.PeerTargets
-			for addr := range refs {
-				if err = tr.Prepare(ctx, addr, s.Cfg.SessionID); err != nil {
-					s.Log.Warn("prepare follower failed", "err", err)
-					return false
-				}
-			}
-			_, err = s.NodeLog.OpenIdentified(ctx, s.Cfg.SessionID, epoch, refs)
-			if err == nil {
-				s.sessionRefs = map[cell.PeerIdentity]bool{}
-				for _, id := range refs {
-					s.sessionRefs[id] = true
-				}
-			}
-		}
-	} else {
-		_, err = s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers)
 	}
-	if err != nil {
-		s.Log.Warn("node-log open failed", "err", err)
+	if len(refs) != len(s.sessionRefs) {
 		return false
 	}
-	s.sessionOpen = true
-	s.sessionFollowers = followers
-	return true
+	for _, id := range refs {
+		if !s.sessionRefs[id] {
+			return false
+		}
+	}
+	return s.PeerTargets.Bind(refs) == nil
+}
+
+// openFleetSessionSlow performs the one-time peer prepare and node-log open.
+// It must not be called while holding sessionMu.
+func (s *Server) openFleetSessionSlow(ctx context.Context, epoch uint64, followers []string) (bool, map[cell.PeerIdentity]bool) {
+	if s.PeerTargets == nil || s.Lease == nil {
+		if _, err := s.NodeLog.Open(ctx, s.Cfg.SessionID, epoch, followers); err != nil {
+			s.Log.Warn("node-log open failed", "err", err)
+			return false, nil
+		}
+		return true, nil
+	}
+	refs := make(map[string]cell.PeerIdentity, len(followers))
+	for _, addr := range followers {
+		for _, l := range s.Lease.SampleCached(ctx, s.followerSampleTTL()) {
+			if l.PeerURL == addr && l.Live(time.Now()) && l.Instance != "" {
+				refs[addr] = cell.PeerIdentity{Node: l.Node, Instance: l.Instance}
+				break
+			}
+		}
+		if _, ok := refs[addr]; !ok {
+			return false, nil
+		}
+	}
+	if err := s.PeerTargets.Bind(refs); err != nil {
+		return false, nil
+	}
+	tr := peer.NewHTTPTransport(s.Cfg.TokenPeer, nil)
+	tr.Targets = s.PeerTargets
+	for addr := range refs {
+		if err := tr.Prepare(ctx, addr, s.Cfg.SessionID); err != nil {
+			s.Log.Warn("prepare follower failed", "err", err)
+			return false, nil
+		}
+	}
+	if _, err := s.NodeLog.OpenIdentified(ctx, s.Cfg.SessionID, epoch, refs); err != nil {
+		s.Log.Warn("node-log open failed", "err", err)
+		return false, nil
+	}
+	set := make(map[cell.PeerIdentity]bool, len(refs))
+	for _, id := range refs {
+		set[id] = true
+	}
+	return true, set
 }
 
 func slicesEqual(a, b []string) bool {

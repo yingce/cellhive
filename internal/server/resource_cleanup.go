@@ -180,7 +180,11 @@ func (s *Server) RunResourceCleanupLoop(ctx context.Context) {
 	}
 }
 func (s *Server) ResourceCleanupPass(ctx context.Context) error {
-	s.resourceCleanupMu.Lock()
+	// A pass can wait on control/cleanup I/O; do not queue another one behind it.
+	// The periodic caller simply skips this tick and retries later.
+	if !s.resourceCleanupMu.TryLock() {
+		return nil
+	}
 	defer s.resourceCleanupMu.Unlock()
 	if s.Control == nil || s.Store == nil || s.resourceReplica() == nil {
 		return nil

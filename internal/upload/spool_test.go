@@ -3,8 +3,10 @@ package upload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -369,5 +371,85 @@ func TestSpoolStageStatsIncludeFailedOpen(t *testing.T) {
 	}
 	if sp.writeNanos.Load() <= 0 || sp.encodeNanos.Load() <= 0 {
 		t.Fatal("failed attempt stage durations missing")
+	}
+}
+
+// TestSpoolConcurrentAppends guards the per-entry I/O fix: independent appends
+// must not be serialised by one global lock, and all published ids must be
+// unique and replayable.
+func TestSpoolConcurrentAppends(t *testing.T) {
+	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 32
+	ids := make(map[uint64]bool, n)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := sp.Append(cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}, 1, [][]byte{[]byte(fmt.Sprintf("seg-%d", i))})
+			if err != nil {
+				t.Errorf("append %d: %v", i, err)
+				return
+			}
+			mu.Lock()
+			ids[id] = true
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if len(ids) != n {
+		t.Fatalf("unique ids = %d, want %d", len(ids), n)
+	}
+	if got := sp.Count(); got != n {
+		t.Fatalf("Count = %d, want %d", got, n)
+	}
+	entries, err := sp.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != n {
+		t.Fatalf("Load = %d entries, want %d", len(entries), n)
+	}
+}
+
+// TestSpoolMaxUnderConcurrency verifies that the queue cap is enforced while
+// appends run in parallel (the slot is reserved before disk I/O).
+func TestSpoolMaxUnderConcurrency(t *testing.T) {
+	const max = 8
+	sp, err := OpenSpool(filepath.Join(t.TempDir(), "spool"), max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var ok, full int
+	var mu sync.Mutex
+	for i := 0; i < 32; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := sp.Append(cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}, 1, [][]byte{[]byte(fmt.Sprintf("seg-%d", i))})
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				ok++
+			} else if strings.Contains(err.Error(), "spool full") {
+				full++
+			} else {
+				t.Errorf("unexpected append error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if ok != max || full != 32-max {
+		t.Fatalf("ok=%d full=%d, want ok=%d full=%d", ok, full, max, 32-max)
+	}
+	if got := sp.Count(); got != max {
+		t.Fatalf("Count = %d, want %d", got, max)
 	}
 }

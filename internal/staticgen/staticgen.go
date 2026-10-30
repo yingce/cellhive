@@ -99,6 +99,9 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
+	// applyMu serialises rollouts without blocking readers of the currently
+	// published generation while a new workerd starts and waits for sockets.
+	applyMu sync.Mutex
 	mu      sync.Mutex
 	gen     int
 	current *generation
@@ -213,20 +216,25 @@ func (m *Manager) Apply(ctx context.Context, plan *Plan) error {
 	if err != nil {
 		return err
 	}
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if len(validated.Services) == 0 {
 		if m.cfg.TablePath != "" {
 			if err := writeTable(m.cfg.TablePath, &ingress.Table{Routes: map[string]string{}, Version: "empty"}); err != nil {
+				m.mu.Unlock()
 				return fmt.Errorf("staticgen: publish empty table: %w", err)
 			}
 		}
-		if m.current != nil {
-			retire(m.current, m.cfg.DrainGrace)
-			m.current = nil
-		}
+		old := m.current
+		m.current = nil
 		m.gen++
-		m.cfg.Logger("staticgen: empty plan published; static generation drained")
+		gen := m.gen
+		m.mu.Unlock()
+		if old != nil {
+			retire(old, m.cfg.DrainGrace)
+		}
+		m.cfg.Logger("staticgen: empty plan published (generation %d); static generation drained", gen)
 		return nil
 	}
 	// Hot-set changes often only add/remove host routes while every service
@@ -237,22 +245,30 @@ func (m *Manager) Apply(ctx context.Context, plan *Plan) error {
 		for host, service := range validated.Routes {
 			addr, ok := m.current.routeBy[service]
 			if !ok {
+				m.mu.Unlock()
 				return fmt.Errorf("staticgen: service %q has no socket", service)
 			}
 			table.Routes[host] = "http://" + addr
 		}
 		if m.cfg.TablePath != "" {
 			if err := writeTable(m.cfg.TablePath, table); err != nil {
+				m.mu.Unlock()
 				return fmt.Errorf("staticgen: publish routes: %w", err)
 			}
 		}
 		m.gen++
 		m.current.table = table
 		m.current.plan = validated
-		m.cfg.Logger("staticgen: routes updated without restart (version %d)", m.gen)
+		gen := m.gen
+		m.mu.Unlock()
+		m.cfg.Logger("staticgen: routes updated without restart (version %d)", gen)
 		return nil
 	}
 	gen := m.gen + 1
+	m.mu.Unlock()
+
+	// Rendering, process start and socket readiness do not hold m.mu: readers
+	// keep seeing the previous generation until the new one is published.
 	dir := filepath.Join(m.cfg.Root, fmt.Sprintf("gen-%d", gen))
 	ports := allocatePorts(m.cfg.PortBase, gen, len(validated.Sockets))
 	conf, routeBy, err := render(validated, dir, ports)
@@ -292,9 +308,11 @@ func (m *Manager) Apply(ctx context.Context, plan *Plan) error {
 		}
 	}
 	next.table = table
+	m.mu.Lock()
 	old := m.current
 	m.current = next
 	m.gen = gen
+	m.mu.Unlock()
 	m.cfg.Logger("staticgen: generation %d published (%d services, %d routes)", gen, len(validated.Services), len(table.Routes))
 	if old != nil {
 		m.cfg.Logger("staticgen: draining generation (keep-alive grace %s)", m.cfg.DrainGrace)
@@ -305,6 +323,8 @@ func (m *Manager) Apply(ctx context.Context, plan *Plan) error {
 
 // Close drains the current generation.
 func (m *Manager) Close() {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {

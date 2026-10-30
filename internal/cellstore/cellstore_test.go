@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/wal"
@@ -458,5 +459,55 @@ func TestForgetDoesNotHoldOpenWhileWaiting(t *testing.T) {
 	}
 	if _, err := s.Open(ctx, sc); err != nil {
 		t.Fatalf("reopen after forget: %v", err)
+	}
+}
+
+// TestEvictionsDoNotBlockOtherScopes guards the removal of the global eviction
+// lock: a slow Drop/Close for one cell must not block invalidating another.
+func TestEvictionsDoNotBlockOtherScopes(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "a"}
+	b := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "b"}
+	if _, err := s.Cell(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Cell(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.Drop = func(_ context.Context, sc cell.Scope) error {
+		if sc.ID == "a" {
+			close(started)
+			<-release
+		}
+		return nil
+	}
+	aDone := make(chan error, 1)
+	go func() { aDone <- s.Invalidate(ctx, a) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scope a eviction never reached Drop")
+	}
+	bDone := make(chan error, 1)
+	go func() { bDone <- s.Invalidate(ctx, b) }()
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Fatalf("scope b eviction: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("scope b eviction blocked by scope a")
+	}
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("scope a eviction: %v", err)
 	}
 }

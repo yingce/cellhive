@@ -85,21 +85,17 @@ func (s *Spool) quarantine(name string) {
 	if err := os.Rename(src, dst); err != nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// The corrupt file may or may not have been present/counted at OpenSpool
-	// time, so recount the live .spool namespace instead of guessing.
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
+	// Only live entries counted at OpenSpool/Append (id <= seq) affect the
+	// queue count; an externally planted corrupt file with a newer id does not.
+	id, ok := parseSpoolID(name)
+	if !ok {
 		return
 	}
-	n := 0
-	for _, e := range entries {
-		if _, ok := parseSpoolID(e.Name()); ok {
-			n++
-		}
+	s.mu.Lock()
+	if id <= s.seq && s.n > 0 {
+		s.n--
 	}
-	s.n = n
+	s.mu.Unlock()
 }
 
 // syncDir fsyncs a directory so a rename/creation inside it is durable.
@@ -160,14 +156,34 @@ func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, 
 	started := time.Now()
 	s.appendCalls.Add(1)
 	defer func() { s.appendNanos.Add(time.Since(started).Nanoseconds()) }()
+
+	// Reserve the sequence number and queue slot under a short lock; the
+	// durable file write/fsync/rename happens outside it so one slow disk write
+	// cannot serialise every scope.
 	s.mu.Lock()
 	s.lockWaitNanos.Add(time.Since(started).Nanoseconds())
-	defer s.mu.Unlock()
 	if s.max > 0 && s.n >= s.max {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("upload: spool full (%d entries)", s.max)
 	}
 	s.seq++
 	id := s.seq
+	s.n++
+	needParent := !s.parentSynced
+	s.mu.Unlock()
+
+	durable := false
+	defer func() {
+		if durable {
+			return
+		}
+		s.mu.Lock()
+		if s.n > 0 {
+			s.n--
+		}
+		s.mu.Unlock()
+	}()
+
 	encodeStart := time.Now()
 	data := encodeSpoolEntry(id, sc, epoch, segments)
 	s.encodeNanos.Add(time.Since(encodeStart).Nanoseconds())
@@ -205,23 +221,23 @@ func (s *Spool) Append(sc cell.Scope, epoch uint64, segments [][]byte) (uint64, 
 		return 0, err
 	}
 	s.dirSyncs.Add(1)
-	if !s.parentSynced {
+	if needParent {
 		if parent := filepath.Dir(s.dir); parent != s.dir {
 			if err := s.timedSyncDir(parent); err != nil {
 				return 0, err
 			}
 			s.dirSyncs.Add(1)
 		}
+		s.mu.Lock()
 		s.parentSynced = true
+		s.mu.Unlock()
 	}
-	s.n++
+	durable = true
 	return id, nil
 }
 
 // Remove drops a completed entry (missing is not an error).
 func (s *Spool) Remove(id uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	err := os.Remove(s.path(id))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -229,9 +245,11 @@ func (s *Spool) Remove(id uint64) error {
 		}
 		return err
 	}
+	s.mu.Lock()
 	if s.n > 0 {
 		s.n--
 	}
+	s.mu.Unlock()
 	if err := s.timedSyncDir(s.dir); err != nil {
 		return err
 	}

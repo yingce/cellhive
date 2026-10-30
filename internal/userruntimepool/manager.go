@@ -14,22 +14,25 @@ import (
 const poolDrainGrace = 35 * time.Second
 
 // Manager owns a runtime-lifetime context. Incoming request cancellation must
-// never cancel a shared child process. Launches are serialized, leases aren't.
+// never cancel a shared child process. Shared launches are serialized; a
+// dedicated launch for one function no longer blocks unrelated functions.
 type Manager struct {
-	Supervisor *workerdpool.Supervisor
-	ctx        context.Context
-	cancel     context.CancelFunc
-	launch     sync.Mutex
-	mu         sync.Mutex
-	counts     map[workerdpool.FunctionKey]int
-	last       map[workerdpool.FunctionKey]time.Time
-	closed     bool
-	done       chan struct{}
+	Supervisor   *workerdpool.Supervisor
+	ctx          context.Context
+	cancel       context.CancelFunc
+	launchShared sync.Mutex
+	launchMu     sync.Mutex
+	launches     map[workerdpool.FunctionKey]*sync.Mutex
+	mu           sync.Mutex
+	counts       map[workerdpool.FunctionKey]int
+	last         map[workerdpool.FunctionKey]time.Time
+	closed       bool
+	done         chan struct{}
 }
 
 func NewManager(parent context.Context, bin, dir string, cfg userruntime.Config, poolCfg workerdpool.Config) (*Manager, error) {
 	ctx, cancel := context.WithCancel(parent)
-	m := &Manager{ctx: ctx, cancel: cancel, counts: map[workerdpool.FunctionKey]int{}, last: map[workerdpool.FunctionKey]time.Time{}, done: make(chan struct{})}
+	m := &Manager{ctx: ctx, cancel: cancel, counts: map[workerdpool.FunctionKey]int{}, last: map[workerdpool.FunctionKey]time.Time{}, launches: map[workerdpool.FunctionKey]*sync.Mutex{}, done: make(chan struct{})}
 	p := &workerdpool.Pool{Config: poolCfg}
 	if resources, err := (workerdpool.ResourceReader{}).Read(); err == nil {
 		p.UpdateResources(resources)
@@ -73,8 +76,8 @@ func (m *Manager) Acquire(ctx context.Context, key workerdpool.FunctionKey) (wor
 	if slot, ok := m.Supervisor.Pool.Select(key, time.Now()); ok {
 		return slot, nil
 	}
-	m.launch.Lock()
-	defer m.launch.Unlock()
+	m.launchShared.Lock()
+	defer m.launchShared.Unlock()
 	if err := ctx.Err(); err != nil {
 		return workerdpool.Slot{}, err
 	}
@@ -93,6 +96,17 @@ func (m *Manager) Acquire(ctx context.Context, key workerdpool.FunctionKey) (wor
 		return slot, nil
 	}
 	return workerdpool.Slot{}, workerdpool.ErrCapacity
+}
+
+func (m *Manager) keyLaunch(key workerdpool.FunctionKey) *sync.Mutex {
+	m.launchMu.Lock()
+	defer m.launchMu.Unlock()
+	launch := m.launches[key]
+	if launch == nil {
+		launch = &sync.Mutex{}
+		m.launches[key] = launch
+	}
+	return launch
 }
 
 func (m *Manager) control() {
@@ -149,9 +163,10 @@ func (m *Manager) reconcile() {
 		}
 		cap := m.Supervisor.Pool.TargetSlots()
 		if mode == workerdpool.Dedicated && !hasDedicated && sharedCount > 0 && dedicatedCount < cap/2 {
-			m.launch.Lock()
+			launch := m.keyLaunch(key)
+			launch.Lock()
 			_, _ = m.Supervisor.Start(m.ctx, key, now)
-			m.launch.Unlock()
+			launch.Unlock()
 		}
 		if mode == workerdpool.Shared {
 			for _, slot := range slots {
