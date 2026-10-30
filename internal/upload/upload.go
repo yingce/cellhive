@@ -378,13 +378,6 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 	}
 }
 
-type pendingGroup struct {
-	scope    cell.Scope
-	epoch    uint64
-	segments [][]byte
-	items    []item
-}
-
 // EnqueueWait submits a segment and blocks until the covering batch is durable.
 // This preserves RPO=0 while batching concurrent writers into one upload.
 func (b *Batcher) EnqueueWait(ctx context.Context, s cell.Scope, epoch uint64, seg []byte) error {

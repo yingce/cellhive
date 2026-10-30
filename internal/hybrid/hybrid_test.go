@@ -12,10 +12,8 @@ import (
 )
 
 type fakeBuilder struct {
-	calls  [][]string
-	plans  map[string]*staticgen.Plan
-	last   func(hosts []string) *staticgen.Plan
-	bumped map[string]int
+	calls [][]string
+	last  func(hosts []string) *staticgen.Plan
 }
 
 func (f *fakeBuilder) Build(_ context.Context, hosts []string) (*staticgen.Plan, []plangen.Skipped, error) {

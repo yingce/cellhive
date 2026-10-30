@@ -114,7 +114,6 @@ type Server struct {
 	listen string
 	table  atomic.Pointer[Table]
 
-	mu        sync.Mutex
 	requests  atomic.Uint64
 	errors    atomic.Uint64
 	dynamic   atomic.Uint64

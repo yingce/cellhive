@@ -44,11 +44,10 @@ const (
 )
 
 type logState struct {
-	mu       sync.Mutex
-	mode     string
-	logger   otellog.Logger
-	provider *sdklog.LoggerProvider
-	subs     map[string]time.Time // "ns/worker" -> expiry
+	mu     sync.Mutex
+	mode   string
+	logger otellog.Logger
+	subs   map[string]time.Time // "ns/worker" -> expiry
 }
 
 var logs = &logState{mode: LogsOff}
