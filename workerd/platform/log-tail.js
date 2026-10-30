@@ -92,8 +92,19 @@ function eventKind(info) {
   return "";
 }
 
+// Platform lifecycle RPCs (status/retire) are control-plane calls into the
+// dynamic worker, not tenant invocations. workerd marks the aborting retire
+// call as an exception, which would otherwise be exported as a failed
+// function_request (CELLHIVE_WORKER_RETIRED) even though retirement only runs
+// once the child reports idle and no tenant request was interrupted.
+export function platformLifecycleEvent(item) {
+  if (item?.entrypoint === "CellHiveLifecycle") return true;
+  return !item?.entrypoint &&
+    (item?.event?.rpcMethod === "status" || item?.event?.rpcMethod === "retire");
+}
+
 function eventRecords(events, props) {
-  return (events || []).map((item) => {
+  return (events || []).filter((item) => !platformLifecycleEvent(item)).map((item) => {
     const dispatch = dispatchMetadata(item, props.tailKey);
     const info = eventInfo(dispatch?.event || item.event);
     const headers = info?.request?.headers || {};
@@ -210,6 +221,7 @@ export class TenantTail extends WorkerEntrypoint {
   tail(events) {
     const props = this.ctx.props || {};
     if (!props.namespace || !props.worker) return;
-    if (events?.length) storeRecords(props.namespace, props.worker, events, props);
+    const kept = (events || []).filter((item) => !platformLifecycleEvent(item));
+    if (kept.length) storeRecords(props.namespace, props.worker, kept, props);
   }
 }
