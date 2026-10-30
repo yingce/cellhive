@@ -104,10 +104,13 @@ async function sweepResidents(env,ctx) {
         const ctl=managedStub(env,ctx,e).getEntrypoint('CellHiveLifecycle');
         const status=await ctl.status();
         if(status.pinned){e.pinned=true;return;}
-        if(status.nonce!==e.nonce||!status.idle||!e.life.idle())return;
+        // The host lease is taken in residentWorker(), not here. Re-check it
+        // after the async status() round trip: a request may have acquired the
+        // entry while we were waiting, and retiring it would abort that request.
+        if(!e.retiring||status.nonce!==e.nonce||!status.idle||!e.life.idle())return;
         try{if(await ctl.retire(e.nonce)===false)return;}
         catch(err){if(!/internal error; reference =|execution.*abort|disconnected/i.test(String(err)))throw err;}
-        residents.delete(key);isolateCapacity(env).release(key);
+        if(residents.get(key)===e){residents.delete(key);isolateCapacity(env).release(key);}
         if(![...residents.values()].some(o=>o.versionKey===e.versionKey))preparedCache.delete(e.versionKey);
       }catch(err){console.error('worker retirement failed:',String(err));}
     })();
@@ -159,7 +162,9 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
     }
     residents.set(key,e);
   }
-  e.retiring=false;
+  // Do not clear e.retiring here: a request for an older version must not
+  // revive an isolate that another request already selected for retirement.
+  // The sweep skips entries with an active lease and retires them when idle.
   // Moving the descriptor refreshes the eviction order.
   residents.delete(key);residents.set(key,e);
   const release=e.life.hold();

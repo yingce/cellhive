@@ -60,6 +60,13 @@ CellHive logs ────────────────► SLS Kafka (top
   - `event_id` is deterministic from namespace/worker/request/category/span/
     message/observed time. If VWork's Wrangler tail relay already writes the
     same invocation, choose one path or dedupe by `event_id`.
+  - Failed invocations carry the OTLP `cellhive.exceptions` attribute on the
+    invocation row itself: `error_message` gets the first exception's
+    `name: message`, `error_code` is `CELLHIVE_INVOCATION_FAILED` (or
+    `CELLHIVE_WORKER_RETIRED` when CellHive aborted a retired isolate), and
+    `payload.exceptions` keeps the bounded exception array. Without this, the
+    exception is only on a separate `user_console` line that function-error
+    queries never read.
 - Vector 0.57+ disables `${ENV}` interpolation by default; start with
   `VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`.
 - Compose: `docker compose --profile vector up vector` (do not also enable the

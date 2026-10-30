@@ -3,6 +3,7 @@ import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Lifetime } from '../platform/lifecycle.js';
 const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 function harness(fetch) {
@@ -106,4 +107,49 @@ test('sampled response and resident release do not wait for telemetry export',as
   try {assert.equal(settled,true);assert.equal(released,1);assert.equal(background.length,1);assert.equal((await result).status,failed?500:200);}
   finally {finishExport();await result;}
  }
+});
+
+
+test('non-fetch entrypoints keep the isolate alive until the handler settles', async () => {
+  const wrapper = readFileSync(new URL('./queue-wrapper.js', import.meta.url), 'utf8')
+    .replace('import { WorkerEntrypoint, env as __env } from "cloudflare:workers";', 'const WorkerEntrypoint = class {}; const __env = {};')
+    .replace('import { loggedInvocation, dispatchDebug } from "__cellhive-invocation.js";', 'const loggedInvocation=(fn)=>fn(); const dispatchDebug=()=>{};')
+    .replace('import * as tenantMod from "tenant.js";', 'const tenantMod={default:{}};')
+    .replace('import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";', 'const buildBindings=()=>({}); const wrapR2Metadata=x=>x; const makeKVFromStub=x=>x; const makeD1FromStub=x=>x; const makeDOFromStub=x=>x; const makeQueueFromStub=x=>x;')
+    .replace('import { runInvocation } from "__cellhive-quota.js";', 'const runInvocation=(fn)=>fn();')
+    .replace('export class CellHiveHost', 'class CellHiveHost')
+    .replace('export function withR2Metadata', 'function withR2Metadata')
+    .replace('export async function handleFetch', 'async function handleFetch')
+    .replace(/export default \{[\s\S]*?\n\};/, 'const defaultExport={};')
+    + '\nglobalThis.CellHiveHost=CellHiveHost;globalThis.tenantMod=tenantMod;';
+  const life = new Lifetime();
+  const c = vm.createContext({
+    Response, globalThis: null, __cellhivePlatform:{kvBindings:[],d1Bindings:[],r2Bindings:[],queueBindings:[],doBindings:[]}, __cellhiveTailKey:'', __cellhiveLife:life,
+  });
+  c.globalThis = c;
+  vm.runInContext(wrapper, c);
+  const host = new c.CellHiveHost();
+  host.env = {};
+  host.ctx = { waitUntil(){} };
+
+  let resolveQueue;
+  c.tenantMod.default.queue = () => new Promise(r => { resolveQueue=r; });
+  const queued = host.handleQueue({ queue:'q', messages:[] });
+  await Promise.resolve();
+  assert.equal(life.idle(), false);
+  resolveQueue({ ok:true });
+  await queued;
+  assert.equal(life.idle(), true);
+
+  let resolveRPC;
+  c.tenantMod.default.slow = () => new Promise(r => { resolveRPC=r; });
+  const rpc = host.callMethod('', 'slow', [], undefined);
+  await Promise.resolve();
+  assert.equal(life.idle(), false);
+  resolveRPC('ok');
+  assert.equal(await rpc, 'ok');
+  assert.equal(life.idle(), true);
+
+  c.tenantMod.default.nullValue = () => null;
+  assert.equal(await host.callMethod('', 'nullValue', [], undefined), null);
 });

@@ -244,3 +244,19 @@ func TestColdPreparationBeforeRequestAdmission(t *testing.T) {
 		t.Fatalf("second cold request rejected while first is admitted: %v", err)
 	}
 }
+
+func TestStaleLocalCellBusyRetriesUntilRequestDrains(t *testing.T) {
+	srv, _ := newTestServer(t)
+	sc := cell.Scope{Namespace: "busy", Class: "__queue__", ID: "jobs"}
+	if _, err := srv.Store.Cell(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	end := srv.Store.BeginRequest(sc.String())
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		end()
+	}()
+	if err := srv.invalidateStaleLocal(t.Context(), sc); err != nil {
+		t.Fatalf("busy stale cell did not retry: %v", err)
+	}
+}

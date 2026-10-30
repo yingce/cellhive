@@ -22,6 +22,26 @@ function setTraceContext(tp) {
   else delete globalThis.__cellhiveTraceparent;
 }
 
+// Non-fetch entrypoints (queue/scheduled/service RPC) do not go through
+// CellHiveManagedFetch. Without this hold, the loader can retire the isolate
+// while one of those handlers is still running and abort the invocation.
+// Static-generation wrappers have no __cellhive-state module; these helpers
+// are no-ops there.
+function lifecycleHold() {
+  const life = globalThis.__cellhiveLife;
+  return life && typeof life.hold === "function" ? life.hold() : () => {};
+}
+function lifecycleContext(ctx) {
+  const life = globalThis.__cellhiveLife;
+  return life && typeof life.context === "function" ? life.context(ctx) : ctx;
+}
+function lifecycleResponse(res) {
+  const life = globalThis.__cellhiveLife;
+  // callMethod may return any structured-clone value (including null); only
+  // fetch-shaped Responses have a body lifetime that needs tracking.
+  return life && typeof life.response === "function" && res instanceof Response ? life.response(res) : res;
+}
+
 const tenant = tenantMod.default;
 import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
@@ -89,21 +109,29 @@ export class CellHiveHost extends WorkerEntrypoint {
   }
 
   async handleFetch(req) {
-    return this.fetch(req);
+    const release=lifecycleHold();
+    try {
+      lifecycleContext(this.ctx);
+      return lifecycleResponse(await this.fetch(req));
+    } finally { release(); }
   }
 
   async handleQueue(payload) {
-    // The native Trace for this RPC exposes only rpcMethod. Emit the trusted
-    // dispatch payload before tenant code runs; TenantTail consumes this one
-    // record from the same invocation and removes it from public logs.
-    if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
-      queue: typeof payload?.queue === "string" ? payload.queue : "",
-      batchSize: Array.isArray(payload?.messages) ? payload.messages.length : 0,
-    });
-    return loggedInvocation(() => this.handleQueueBody(payload), this.ctx);
+    const release=lifecycleHold();
+    try {
+      const ctx=lifecycleContext(this.ctx);
+      // The native Trace for this RPC exposes only rpcMethod. Emit the trusted
+      // dispatch payload before tenant code runs; TenantTail consumes this one
+      // record from the same invocation and removes it from public logs.
+      if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
+        queue: typeof payload?.queue === "string" ? payload.queue : "",
+        batchSize: Array.isArray(payload?.messages) ? payload.messages.length : 0,
+      });
+      return await loggedInvocation(() => this.handleQueueBody(payload, ctx), ctx);
+    } finally { release(); }
   }
 
-  async handleQueueBody(payload) {
+  async handleQueueBody(payload, ctx=this.ctx) {
     if (typeof tenant.queue !== "function") throw new Error("worker has no queue() handler");
     // CF MessageBatch parity (ADR-154): the batch is array-like (length/index,
     // what the platform has always passed) and also exposes .messages/.queue/
@@ -145,7 +173,7 @@ export class CellHiveHost extends WorkerEntrypoint {
     setTraceContext(traceparent || traceOf(batch));
     globalThis.__cellhiveRequestId = (payload && payload.request_id) || "";
     try {
-      const result = await runInvocation(() => tenant.queue(batch, withR2Metadata(this.#bindings()), this.ctx));
+      const result = await runInvocation(() => tenant.queue(batch, withR2Metadata(this.#bindings()), ctx));
       return { result, ack: outcomes.ack, retry: outcomes.retry };
     } finally {
       setTraceContext(undefined);
@@ -154,21 +182,25 @@ export class CellHiveHost extends WorkerEntrypoint {
   }
 
   async handleScheduled(event) {
-    if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
-      cron: typeof event?.cron === "string" ? event.cron : "",
-      scheduledTime: Number(event?.scheduledTime) || 0,
-    });
-    return loggedInvocation(() => this.handleScheduledBody(event), this.ctx);
+    const release=lifecycleHold();
+    try {
+      const ctx=lifecycleContext(this.ctx);
+      if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
+        cron: typeof event?.cron === "string" ? event.cron : "",
+        scheduledTime: Number(event?.scheduledTime) || 0,
+      });
+      return await loggedInvocation(() => this.handleScheduledBody(event, ctx), ctx);
+    } finally { release(); }
   }
 
-  async handleScheduledBody(event) {
+  async handleScheduledBody(event, ctx=this.ctx) {
     if (typeof tenant.scheduled !== "function") throw new Error("worker has no scheduled() handler");
     let noRetry = false;
     const controller = { scheduledTime: event.scheduledTime, cron: event.cron, noRetry() { noRetry = true; } };
     setTraceContext(traceOf(event));
     globalThis.__cellhiveRequestId = event.request_id || "";
     try {
-      const result = await runInvocation(() => tenant.scheduled(controller, withR2Metadata(this.#bindings()), this.ctx));
+      const result = await runInvocation(() => tenant.scheduled(controller, withR2Metadata(this.#bindings()), ctx));
       return { ok: true, no_retry: noRetry, result: result === undefined ? null : result };
     } catch (e) {
       if (noRetry) return { ok: false, no_retry: true, error: String(e), error_stack: typeof e?.stack === "string" ? e.stack.slice(0,4096) : "" };
@@ -183,19 +215,22 @@ export class CellHiveHost extends WorkerEntrypoint {
   // A class entrypoint is constructed with (ctx, env); a plain object is used
   // as-is. Empty entrypoint targets the default export.
   async callMethod(entrypoint, method, args, traceparent) {
-    const exp = entrypoint ? tenantMod[entrypoint] : tenantMod.default;
-    if (exp === undefined) throw new Error("no entrypoint " + entrypoint);
-    let inst = exp;
-    if (typeof exp === "function") {
-      inst = new exp(this.ctx, withR2Metadata(this.#bindings()));
-    }
-    if (typeof inst[method] !== "function") throw new Error("entrypoint has no method " + method);
-    setTraceContext(traceparent);
+    const release=lifecycleHold();
     try {
-      return await runInvocation(() => inst[method](...(args || [])));
-    } finally {
-      setTraceContext(undefined);
-    }
+      const exp = entrypoint ? tenantMod[entrypoint] : tenantMod.default;
+      if (exp === undefined) throw new Error("no entrypoint " + entrypoint);
+      let inst = exp;
+      if (typeof exp === "function") {
+        inst = new exp(lifecycleContext(this.ctx), withR2Metadata(this.#bindings()));
+      }
+      if (typeof inst[method] !== "function") throw new Error("entrypoint has no method " + method);
+      setTraceContext(traceparent);
+      try {
+        return lifecycleResponse(await runInvocation(() => inst[method](...(args || []))));
+      } finally {
+        setTraceContext(undefined);
+      }
+    } finally { release(); }
   }
 }
 

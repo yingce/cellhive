@@ -1292,15 +1292,36 @@ func (s *Server) invalidateStaleLocal(ctx context.Context, sc cell.Scope) error 
 	// Reset and claim share the owner's per-scope gate with background claims.
 	// Publish ownership before BeginRequest can admit this request; otherwise
 	// concurrent cold requests invalidate each other's newly admitted cells.
+	// A stale cell can still be draining a request or finishing hydration when
+	// ownership acquisition reaches the reset hook. Retry briefly here instead
+	// of surfacing a transient 503 to the caller. The reset remains nonblocking
+	// so it can never wait on the request that is performing this acquisition.
+	const maxAttempts = 8
+	backoff := 10 * time.Millisecond
 	_, err = s.Owner.ClaimWithReset(ctx, sc, time.Now(), func(ctx context.Context, sc cell.Scope) error {
-		ok, err := s.Store.TryInvalidate(ctx, sc, nil)
-		if err != nil {
-			return err
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			ok, err := s.Store.TryInvalidate(ctx, sc, nil)
+			if err != nil {
+				return err
+			}
+			if ok {
+				return nil
+			}
+			if attempt+1 == maxAttempts {
+				return errors.New("stale local cell is busy; retry ownership acquisition")
+			}
+			t := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return ctx.Err()
+			case <-t.C:
+			}
+			if backoff < 200*time.Millisecond {
+				backoff *= 2
+			}
 		}
-		if !ok {
-			return errors.New("stale local cell is busy; retry ownership acquisition")
-		}
-		return nil
+		return errors.New("stale local cell is busy; retry ownership acquisition")
 	})
 	if errors.Is(err, owner.ErrOwnerLive) {
 		return nil // The handler resolves and forwards to the winning peer.

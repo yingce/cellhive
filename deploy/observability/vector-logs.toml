@@ -69,8 +69,32 @@ if app_err == null { .app_id = parsed_app.app_id }
 .status = null
 .severity = string(.severity_text) ?? "info"
 .message = message
+exceptions_raw = get(attrs, ["cellhive.exceptions"]) ?? null
+parsed_exceptions = if is_string(exceptions_raw) { parse_json(exceptions_raw) ?? null } else { null }
+exceptions = if is_array(parsed_exceptions) { parsed_exceptions } else { null }
+first_exception = if is_array(exceptions) { get(exceptions, [0]) ?? null } else { null }
+exc_name = if is_object(first_exception) { to_string!(get(first_exception, ["name"]) ?? "") } else { "" }
+exc_message = if is_object(first_exception) { to_string!(get(first_exception, ["message"]) ?? "") } else { "" }
+detail = if exc_name != "" && exc_message != "" {
+  exc_name + ": " + exc_message
+} else if exc_message != "" {
+  exc_message
+} else {
+  exc_name
+}
+invocation_failed = invocation == true && (outcome == "exception" || is_object(first_exception))
 .error_code = null
 .error_message = null
+if invocation_failed {
+  # The exception is otherwise only visible on a separate category=user_console
+  # line, which function_error queries never read. Copy it onto the invocation
+  # row so the error digest can classify and show the real cause.
+  .error_code = "CELLHIVE_INVOCATION_FAILED"
+  if detail != "" {
+    .error_message = truncate(detail, 2048, "")
+    if contains(detail, "cellhive: retired") { .error_code = "CELLHIVE_WORKER_RETIRED" }
+  }
+}
 trace_id = if exists(.trace_id) { string!(.trace_id) } else { "" }
 span_id = if exists(.span_id) { string!(.span_id) } else { "" }
 .trace_id = if trace_id == "" { null } else { trace_id }
@@ -81,7 +105,8 @@ span_id = if exists(.span_id) { string!(.span_id) } else { "" }
   "script_version": script_version,
   "namespace": ns,
   "worker": worker,
-  "args": get(attrs, ["cellhive.message_args"]) ?? null
+  "args": get(attrs, ["cellhive.message_args"]) ?? null,
+  "exceptions": exceptions
 }
 del(.attributes)
 del(.resources)

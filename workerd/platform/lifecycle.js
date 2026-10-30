@@ -98,7 +98,7 @@ export class RuntimeCapacity {
 export function managedModules(code, target, nonce, specs = {}){
   const main=code.mainModule;
   return {
-    '__cellhive-state.js': `export ${Lifetime.toString()}; export const life=new Lifetime();`,
+    '__cellhive-state.js': `export ${Lifetime.toString()}; export const life=new Lifetime(); globalThis.__cellhiveLife=life;`,
     '__cellhive-quota.js': quotaSource(code.limits?.subRequests, specs),
     '__cellhive-workers.js': `export * from 'cloudflare:workers'; import {waitUntil as original} from 'cloudflare:workers'; import {life} from '__cellhive-state.js'; export const waitUntil=p=>original(life.background(p));`,
     '__cellhive-managed.js': `
