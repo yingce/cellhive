@@ -227,3 +227,80 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		t.Fatalf("second worker did not persist its invocation: %+v %v", quietRecords, err)
 	}
 }
+
+// A successful scheduled() run must not become a retryable 500 just because
+// invocation logging could not be persisted afterwards.
+func TestCronSuccessSurvivesInvocationPersistenceFailure(t *testing.T) {
+	bin, err := FindWorkerd()
+	if err != nil {
+		t.Skip(err)
+	}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/bundle":
+			io.WriteString(w, `export default {scheduled(){ return "ok"; }}`)
+		case "/v1/internal/worker/bindings":
+			io.WriteString(w, `{"bindings":{},"vars":{}}`)
+		case "/v1/internal/invocations":
+			var record invocation.Record
+			if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			if record.Status != "running" {
+				http.Error(w, "invocation store unavailable", 503)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"invocation": record})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer agent.Close()
+	internal, public := freePort(t), freePort(t)
+	path, err := Render(t.TempDir(), Config{
+		CellURL: agent.URL, CellToken: "tok", DispatchToken: "tok",
+		InternalPort: internal, PublicPort: public,
+		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
+		InvocationLogging: true, DisableTenantLogs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, bin, path) }()
+	defer func() { cancel(); <-done }()
+	client := noProxyClient()
+	defer client.CloseIdleConnections()
+	base := fmt.Sprintf("http://127.0.0.1:%d", internal)
+	for deadline := time.Now().Add(20 * time.Second); ; {
+		res, err := client.Get(base + "/healthz")
+		if err == nil {
+			res.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"namespace": "acme", "worker": "web", "bundle_sha": "sha", "version": 1,
+		"cron": "* * * * *", "scheduled_time_ms": int64(1000),
+	})
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/timers/dispatch", bytes.NewReader(body))
+	req.Header.Set("x-cellhive-internal-token", "tok")
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("dispatch = %d %s; want 200 (handler succeeded, only logging failed)", res.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte(`"ok":true`)) {
+		t.Fatalf("dispatch body = %s; want ok", raw)
+	}
+}

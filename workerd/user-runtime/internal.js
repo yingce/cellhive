@@ -79,7 +79,7 @@ async function dispatchQueues(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    await finishInvocation(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
   const batch = messages.map((m) => ({
@@ -98,7 +98,7 @@ async function dispatchQueues(req, env, ctx) {
   const payload = { messages: batch, queue, traceparent: body.traceparent, request_id: body.request_id };
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleQueue(payload);
-    await finishInvocation(env, invocation, execution);
+    await finishInvocationBestEffort(env, invocation, execution);
     if (execution.error) return json({ error:"handler_failed", message:execution.error, invocation_id:invocation.invocation_id },500);
     const out = execution.value;
     // The wrapper returns {result, ack, retry}; older returns are the raw value.
@@ -111,7 +111,7 @@ async function dispatchQueues(req, env, ctx) {
       invocation_id: invocation.invocation_id,
     });
   } catch (e) {
-    await finishInvocation(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e)});
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
 }
@@ -128,18 +128,30 @@ async function dispatchTimers(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    await finishInvocation(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e)});
     return workerLoadFailure(e);
   }
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, traceparent: body.traceparent, request_id: body.request_id };
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
-    await finishInvocation(env, invocation, execution);
+    await finishInvocationBestEffort(env, invocation, execution);
     if (execution.error) return json({error:"handler_failed",message:execution.error,invocation_id:invocation.invocation_id},500);
     return json({ ...execution.value,result:publicInvocationResult(execution.value?.result), kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime,invocation_id:invocation.invocation_id });
   } catch (e) {
-    await finishInvocation(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e)});
     return json({ error: "handler_failed", message: String(e) }, 500);
+  }
+}
+
+// Invocation logging is observability, not part of the handler's result. A
+// persistence failure (503/ownership/capture) must not turn a successful
+// handler into a retryable 500: timers would re-run side effects forever and
+// queue/workflow dispatches would repeat already-committed work.
+async function finishInvocationBestEffort(env, invocation, execution) {
+  try {
+    await finishInvocation(env, invocation, execution);
+  } catch (e) {
+    console.error("cellhive: invocation persistence failed", String(e));
   }
 }
 
@@ -293,7 +305,7 @@ async function dispatchWorkflows(req, env, ctx) {
   try {
     stub = await loadWorkflowWorker(env, ctx, body);
   } catch (e) {
-    await finishInvocation(env, invocation, { error: String(e) });
+    await finishInvocationBestEffort(env, invocation, { error: String(e) });
     return workerLoadFailure(e);
   }
   try {
@@ -311,10 +323,10 @@ async function dispatchWorkflows(req, env, ctx) {
       traceparent: body.traceparent,
       request_id: body.request_id,
     }, bridge);
-    await finishInvocation(env, invocation, { value: { result: out }, error: out?.status === "errored" ? out.error || "workflow errored" : "" });
+    await finishInvocationBestEffort(env, invocation, { value: { result: out }, error: out?.status === "errored" ? out.error || "workflow errored" : "" });
     return json({ ok: true, workflow, id, ...(out || {}) });
   } catch (e) {
-    await finishInvocation(env, invocation, { error: String(e) });
+    await finishInvocationBestEffort(env, invocation, { error: String(e) });
     return json({ error: "workflow_failed", message: String(e) }, 500);
   }
 }
