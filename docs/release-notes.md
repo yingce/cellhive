@@ -4,6 +4,13 @@ _最后更新：2026-10-31_
 
 当前线上版本与最近两次发布的摘要。完整发布记录（镜像、Helm revision、验收证据、残余告警）在 `docs/archive/release-*.md`。
 
+## 2026-10-31 — dispatch 日志失败不再触发重试（hotfix）
+
+- 源码 `c9ba0fd`，镜像 `20261031-03`（digest `sha256:f3a7cf6b1e515e8a94e205f9dc89fa70f2d9d615b7e28d536e885d07b6022159`），SG rev **86** / USW **70**。
+- 修复：handler 已成功时，`finishInvocation` 写日志失败不再返回 500 并触发重试；`startInvocation` 仍负责 queue 去重，真实 handler 错误仍返回 500。
+- 验证：`make test`、`make vet`、`make js-test`、全量 e2e 通过；两区 Pod 新 digest、Ready、`restartCount=0`。
+- 注意：`vwork-40/vlog-daily-report` 的 cron 500 仍是租户函数错误（手动 dispatch 返回 `Feishu send failed with HTTP 200`），本次 hotfix 不修复该函数；详见 [release-2026-10-31-03](archive/release-2026-10-31-03.md)。
+
 ## 2026-10-31 — 恢复/保留期加固与热路径优化
 
 - 当前版本：源码 `7be1102`，镜像 `20261031-02`（digest `sha256:ee6df63604fb0e0c9551037a39a43511b4b7a26440cb6cf62b423260e39745ae`），SG rev **85** / USW **69**。
