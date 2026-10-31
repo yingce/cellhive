@@ -4,12 +4,13 @@ _最后更新：2026-10-31_
 
 当前线上版本与最近两次发布的摘要。完整发布记录（镜像、Helm revision、验收证据、残余告警）在 `docs/archive/release-*.md`。
 
-## 2026-10-31 — 退休控制 RPC 不再计入函数错误
+## 2026-10-31 — 恢复/保留期加固与热路径优化
 
-- 源码 `bd2c5d7`，镜像 tag `20261031-01`（digest `sha256:b437c8ce1aa59bcb70133dde34fa0bfc9c270bbfc386872d65286695564d2ea2`），SG rev **84** / USW **68**。
-- 修复：`CellHiveLifecycle.status/retire` 是平台控制 RPC，fork 会把执行 abort 的 `retire` 调用标记为异常，Tail 因此把它导出成 `function_request`，Vector 再归类为 `CELLHIVE_WORKER_RETIRED`。`workerd/platform/log-tail.js` 现在在写 ring 和读取时都过滤 `CellHiveLifecycle` 记录；真实 `CellHiveManagedFetch` 的中止仍会上报。
-- 背景数据：48h 内 19 条 RETIRED，18 条 `event_type=""`（退休 RPC）；`vwork-80/keeper-authority` 同窗口 768 条真实 fetch 全部 `ok`，APISIX 24h 无 5xx。
-- 验收：两区业务 Pod 全部新 digest、Ready、`restartCount=0`；`/readyz`、user-runtime `/ready`、gated do-runtime `/ready` 均正常；上线后 SLS 无新增 RETIRED。详见 [release-2026-10-31](archive/release-2026-10-31.md)。
+- 当前版本：源码 `7be1102`，镜像 `20261031-02`（digest `sha256:ee6df63604fb0e0c9551037a39a43511b4b7a26440cb6cf62b423260e39745ae`），SG rev **85** / USW **69**。
+- 数据面：restore 改为 temp+fsync+rename 原子落盘；paged cache 对 dirty/无 source 情况 fail closed 并传播探测错误；workflow prune 单事务 + retention 分批；objgc 删除前复核引用；owner 在 `owner-gen` 缺失时保持 epoch 高于被替换记录；invocation 只删除被清理记录的 membership。
+- 热路径：queue ack 批量化并新增 claim 排序索引；R2 conditional PUT 用 HEAD/Stat、multipart marker 保留到 part 清完；server mux 缓存、projection singleflight、KV TTL 锁外快速路径；loader 仅在新版本出现时扫描 residents；ingress/hybrid host map 有界；segmented authority 回看前两个窗口并增加 node-lease Touch。
+- 验证：`make test`、`make vet`、`make js-test`、race、全量 in-repo e2e（bindings/workflow/queue/queue-multinode/queue-concurrency/service-headers）全部通过；两区 Pod 新 digest、Ready、`restartCount=0`，`/readyz`、user-runtime `/ready`、do-runtime `/ready` 正常。
+- 同日早先的 `20261031-01`（源码 `bd2c5d7`，digest `sha256:b437c8ce...`，SG rev 84 / USW 68）只包含 Tail 过滤 `CellHiveLifecycle` 控制 RPC 的修复。详见 [release-2026-10-31](archive/release-2026-10-31.md)。
 
 ## 2026-10-30 — 运行时退休竞态与序列化加固
 
