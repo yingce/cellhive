@@ -468,3 +468,37 @@ func TestAuthorityKeyRoutesResourceFence(t *testing.T) {
 		t.Fatal("LTX segment must not be treated as authority")
 	}
 }
+
+func TestSegmentedTouchMovesNodeLeaseWithoutList(t *testing.T) {
+	ctx := context.Background()
+	auth, mem, clock := newTestSegmented(t)
+	key := "nodes/node-1/owner.json"
+	if _, err := auth.ConditionalCreate(ctx, key, []byte("v0")); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	mem.mu.Lock()
+	mem.lists = 0
+	mem.mu.Unlock()
+
+	if err := auth.Touch(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	// Touch may deep-GC the old single-key prefix on the rollover; the
+	// steady-state read after that must not List.
+	mem.mu.Lock()
+	mem.lists = 0
+	mem.mu.Unlock()
+	if got, _, err := auth.Get(ctx, key); err != nil || string(got) != "v0" {
+		t.Fatalf("value after touch = %q, %v", got, err)
+	}
+	mem.mu.Lock()
+	lists := mem.lists
+	mem.mu.Unlock()
+	if lists != 0 {
+		t.Fatalf("Get after touch used %d bucket List calls, want 0", lists)
+	}
+	if _, ok := mem.objects[auth.physical(key, auth.window())]; !ok {
+		t.Fatal("record was not moved into the current window")
+	}
+}

@@ -140,10 +140,11 @@ type Deps struct {
 // Server wires the HTTP surface for a cell-agent node.
 type Server struct {
 	Deps
-	doPointers        sync.Map // capture scope -> persisted doRecoveryPointer
-	resourceRep       *replica.Manager
-	resourceCleanupMu sync.Mutex
-	retirementAfter   string
+	doPointers              sync.Map // capture scope -> persisted doRecoveryPointer
+	resourceRep             *replica.Manager
+	resourceCleanupMu       sync.Mutex
+	resourceCleanupPrunedAt time.Time
+	retirementAfter         string
 
 	// timerRegPending dedupes asynchronous pending-timer registration for a
 	// scope. A claim must not block the data plane on a cold timer-cell hydrate.
@@ -159,6 +160,16 @@ type Server struct {
 	claims   atomic.Uint64
 	appends  atomic.Uint64
 	segments atomic.Uint64
+
+	// The route table is static; build it once. The Cloudflare-compatible
+	// bridge calls Handler() per request, so rebuilding ~230 routes there is
+	// pure per-call overhead.
+	handlerOnce   sync.Once
+	handler       http.Handler
+	handlerBuilds atomic.Int32 // test-visible build count; mux is built once
+	adminOnce     sync.Once
+	adminHandler  http.Handler
+	adminBuilds   atomic.Int32
 
 	// Observability (ADR-165).
 	proofByNS     sync.Map // ns -> *proofHist (ADR-179)
@@ -228,6 +239,7 @@ type Server struct {
 	projCache    *control.Projection
 	projBuiltRev int64
 	projAt       time.Time
+	projBuilding chan struct{} // non-nil while one rebuild is in flight
 }
 
 type bindingEntry struct {
@@ -268,8 +280,14 @@ func New(d Deps) *Server {
 // SetReady marks the node ready.
 func (s *Server) SetReady(v bool) { s.readyFlag.Store(v) }
 
-// Handler returns the HTTP mux.
+// Handler returns the cached HTTP mux.
 func (s *Server) Handler() http.Handler {
+	s.handlerOnce.Do(func() { s.handler = s.buildHandler() })
+	return s.handler
+}
+
+func (s *Server) buildHandler() http.Handler {
+	s.handlerBuilds.Add(1)
 	mux := http.NewServeMux()
 	// Owner forwarding uses the internal listener. Keep the Wrangler paths
 	// available there under their own admin-token check so multipart publishes
@@ -2389,11 +2407,40 @@ func kvExpiry(q url.Values, now time.Time) (int64, error) {
 	return 0, nil
 }
 
+// kvExpiryCovered reports whether an existing durable timer already fires at
+// or before the cell's next KV expiry. It reads SQLite only; callers may take
+// this fast path without the striped reconcile lock, so a slow timer/index
+// update for one scope does not serialize unrelated TTL writes that hash to
+// the same stripe.
+func (s *Server) kvExpiryCovered(ctx context.Context, scope cell.Scope) (int64, bool) {
+	c, err := s.Store.Cell(ctx, scope)
+	if err != nil {
+		return 0, false
+	}
+	next, err := c.NextExpiry(ctx)
+	if err != nil || next == 0 {
+		return 0, false
+	}
+	current, err := timer.NewStore(ctx, c)
+	if err != nil {
+		return 0, false
+	}
+	due, exists, err := current.KVExpiryDue(ctx)
+	if err != nil || !exists || due <= 0 || due <= time.Now().UnixMilli() || due > next {
+		return 0, false
+	}
+	return due, true
+}
+
 // syncKVExpiry reconciles the cell's durable timer with the earliest KV expiry.
 // A persisted timer that is already early enough needs no bucket wake-index
 // writes: firing early merely rechecks the cell and arms the next deadline.
 func (s *Server) syncKVExpiry(ctx context.Context, scope cell.Scope) {
 	if s.OpenTimer == nil || s.Timers == nil {
+		return
+	}
+	if due, ok := s.kvExpiryCovered(ctx, scope); ok {
+		s.Timers.Arm(scope.String(), due)
 		return
 	}
 	h := fnv.New32a()

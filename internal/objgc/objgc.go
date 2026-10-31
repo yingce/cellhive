@@ -32,6 +32,13 @@ type Refs interface {
 	ClearMark(ctx context.Context, id string) error
 }
 
+// refChecker is an optional extension of Refs. Pass rechecks a single id right
+// before deleting it, closing the window where a deploy references a marked
+// object after the Pass snapshot was taken.
+type refChecker interface {
+	IsReferenced(ctx context.Context, id string) (bool, error)
+}
+
 // GC runs garbage-collection passes over one kind of object.
 type GC struct {
 	Items Items
@@ -91,6 +98,19 @@ func (g *GC) Pass(ctx context.Context) (Result, error) {
 		}
 		if nowMs-marked < graceMs {
 			continue
+		}
+		if rc, ok := g.Refs.(refChecker); ok {
+			referenced, err := rc.IsReferenced(ctx, id)
+			if err != nil {
+				return res, err
+			}
+			if referenced {
+				if err := g.Refs.ClearMark(ctx, id); err != nil {
+					return res, err
+				}
+				res.Referenced++
+				continue
+			}
 		}
 		if err := g.Items.Delete(ctx, id); err != nil {
 			return res, err

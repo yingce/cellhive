@@ -129,3 +129,34 @@ func TestPassMarksNewlyUnreferenced(t *testing.T) {
 		t.Fatalf("pass 2 = %+v, deleted %v", res, it.deleted)
 	}
 }
+
+type recheckRefs struct {
+	*fakeRefs
+	referenced bool
+}
+
+func (r *recheckRefs) IsReferenced(context.Context, string) (bool, error) {
+	return r.referenced, nil
+}
+
+// TestPassRechecksReferenceBeforeDelete covers a deploy that references a
+// marked, grace-expired object after the Pass snapshot was taken.
+func TestPassRechecksReferenceBeforeDelete(t *testing.T) {
+	ctx := context.Background()
+	it := &fakeItems{ids: []string{"bundle-1"}}
+	r := &recheckRefs{
+		fakeRefs:   &fakeRefs{refs: map[string]bool{}, marks: map[string]int64{"bundle-1": 1}},
+		referenced: true,
+	}
+	g := &GC{Items: it, Refs: r, Grace: 0, Now: func() time.Time { return time.Unix(1_700_000_000, 0) }}
+	res, err := g.Pass(ctx)
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if res.Deleted != 0 || res.Referenced != 1 || len(it.deleted) != 0 {
+		t.Fatalf("res = %+v, deleted %v", res, it.deleted)
+	}
+	if _, ok := r.marks["bundle-1"]; ok {
+		t.Fatal("mark not cleared for re-referenced object")
+	}
+}

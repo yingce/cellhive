@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -254,14 +255,48 @@ func (s *Store) Start(ctx context.Context, r Record) (Record, error) {
 func (s *Store) pruneTx(ctx context.Context, tx *sql.Tx) error {
 	// Keep at most 10,000 attempts per namespace and seven days of history.
 	// Cleanup is bounded per mutation so retention cannot stall a busy namespace.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM invocations WHERE id IN (SELECT id FROM invocations WHERE started_ms<? ORDER BY started_ms,id LIMIT 100)`, s.now().Add(-7*24*time.Hour).UnixMilli()); err != nil {
+	cutoff := s.now().Add(-7 * 24 * time.Hour).UnixMilli()
+	if err := pruneInvocations(ctx, tx, `SELECT id FROM invocations WHERE started_ms<? ORDER BY started_ms,id LIMIT 100`, cutoff); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM invocations WHERE id IN (SELECT id FROM invocations ORDER BY started_ms DESC,id DESC LIMIT 100 OFFSET 10000)`)
+	return pruneInvocations(ctx, tx, `SELECT id FROM invocations ORDER BY started_ms DESC,id DESC LIMIT 100 OFFSET 10000`)
+}
+
+// pruneInvocations deletes the selected invocations and only their message
+// memberships. The old implementation ran a NOT IN anti-join over every
+// invocation_messages row on every Put/Start, which grows with the whole
+// 10,000-invocation retention window.
+func pruneInvocations(ctx context.Context, tx *sql.Tx, query string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM invocation_messages WHERE invocation_id NOT IN (SELECT id FROM invocations)`)
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	values := make([]any, len(ids))
+	for i, id := range ids {
+		values[i] = id
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM invocation_messages WHERE invocation_id IN (`+ph+`)`, values...); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM invocations WHERE id IN (`+ph+`)`, values...)
 	return err
 }
 func (s *Store) List(ctx context.Context, f Filter) ([]Record, error) {

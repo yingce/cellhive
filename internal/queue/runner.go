@@ -313,7 +313,10 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 	for _, rs := range res.Retry {
 		retryDelay[rs.ID] = int64(rs.DelaySeconds) * 1000
 	}
-	acked := 0
+	// A successful dispatch implicitly acks every non-retried message. Batch
+	// them into one durable commit: one resource-gate read + capture proof per
+	// batch instead of one per message.
+	acks := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		if delayMs, retry := retryDelay[m.ID]; retry {
 			if m.Attempts > retriesFor(ref) {
@@ -327,15 +330,20 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 			}
 			continue
 		}
-		if aerr := r.commit(ctx, ref.Namespace, ref.Name, func() error {
-			return r.Store.Ack(ctx, ref.Namespace, ref.Name, m.ID)
-		}); aerr != nil {
-			r.log().Warn("queue ack failed", "ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "err", aerr)
-			continue
-		}
-		acked++
+		acks = append(acks, m.ID)
 	}
-	return acked
+	if len(acks) == 0 {
+		return 0
+	}
+	if aerr := r.commit(ctx, ref.Namespace, ref.Name, func() error {
+		return r.Store.AckMany(ctx, ref.Namespace, ref.Name, acks)
+	}); aerr != nil {
+		// AckMany is atomic: a failure leaves the whole batch unacked and
+		// eligible for redelivery (at-least-once).
+		r.log().Warn("queue ack failed", "ns", ref.Namespace, "queue", ref.Name, "ids", len(acks), "err", aerr)
+		return 0
+	}
+	return len(acks)
 }
 
 // deadLetter moves a message that exhausted its retries to the configured

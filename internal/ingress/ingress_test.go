@@ -372,3 +372,16 @@ func TestReadLineLimitedBoundsAWritableHeaderLine(t *testing.T) {
 		t.Fatalf("normal line = %q, %v", line, err)
 	}
 }
+
+func TestHostCountersAreBounded(t *testing.T) {
+	srv, err := New("127.0.0.1:0", nil, "http://127.0.0.1:1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxIngressHosts+64; i++ {
+		srv.noteHost(fmt.Sprintf("host-%d.example", i))
+	}
+	if got := len(srv.HostSnapshot()); got > maxIngressHosts {
+		t.Fatalf("host counters = %d, want <= %d", got, maxIngressHosts)
+	}
+}

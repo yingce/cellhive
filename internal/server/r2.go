@@ -219,7 +219,7 @@ func (s *Server) handleR2Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("etag", etag)
-	if stored, gerr := s.R2.GetMeta(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key")); gerr == nil {
+	if stored, gerr := s.R2.GetMetaForVersion(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"), int64(len(body)), etag); gerr == nil && stored != nil {
 		md = stored
 	}
 	writeR2MetaHeader(w, md)

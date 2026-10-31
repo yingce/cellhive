@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS instances (
   target_version INTEGER NOT NULL DEFAULT 0,
   target_class   TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS instances_retention ON instances(status, updated_ms);
 CREATE TABLE IF NOT EXISTS steps (
   instance_id TEXT NOT NULL,
   name        TEXT NOT NULL,
@@ -345,59 +346,91 @@ func (s *Store) Prune(ctx context.Context, ns, name string, beforeMs int64) (int
 	if err != nil {
 		return 0, err
 	}
-	rows, err := c.DB.QueryContext(ctx,
-		`SELECT id FROM instances WHERE status IN (?,?,?) AND updated_ms < ?`,
-		string(StatusComplete), string(StatusErrored), string(StatusTerminated), beforeMs)
-	if err != nil {
-		return 0, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, err
+	removed := 0
+	// Select and delete in one write transaction. Selecting first outside the
+	// transaction (and then deleting by id) could remove an instance that a
+	// concurrent Resume/Restart had just moved back to queued.
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT id FROM instances WHERE status IN (?,?,?) AND updated_ms < ?`,
+			string(StatusComplete), string(StatusErrored), string(StatusTerminated), beforeMs)
+		if err != nil {
+			return err
 		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	for _, id := range ids {
-		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, id := range ids {
 			for _, tbl := range []string{"steps", "step_attempts", "events", "waits"} {
 				if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE instance_id = ?", id); err != nil {
 					return err
 				}
 			}
-			_, err := tx.ExecContext(ctx, `DELETE FROM instances WHERE id = ?`, id)
-			return err
-		}); err != nil {
-			return 0, err
+			res, err := tx.ExecContext(ctx,
+				`DELETE FROM instances WHERE id=? AND status IN (?,?,?) AND updated_ms < ?`,
+				id, string(StatusComplete), string(StatusErrored), string(StatusTerminated), beforeMs)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				removed++
+			}
 		}
-	}
-	return len(ids), nil
+		return nil
+	})
+	return removed, err
 }
 
 // PruneRetention applies separate success/error retention windows. A zero
-// window leaves that terminal status untouched.
+// window leaves that terminal status untouched. Deletes are batched so one
+// large backlog cannot hold the definition's write lock for an unbounded time.
 func (s *Store) PruneRetention(ctx context.Context, ns, name string, successBefore, errorBefore int64) (int, error) {
+	const (
+		batchSize  = 500
+		maxBatches = 20
+	)
+	total := 0
+	for i := 0; i < maxBatches; i++ {
+		n, err := s.pruneRetentionBatch(ctx, ns, name, successBefore, errorBefore, batchSize)
+		total += n
+		if err != nil || n < batchSize {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func (s *Store) pruneRetentionBatch(ctx context.Context, ns, name string, successBefore, errorBefore int64, limit int) (int, error) {
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
 		return 0, err
 	}
 	removed := 0
 	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT id,status FROM instances WHERE (status=? AND ? > 0 AND updated_ms < ?) OR (status=? AND ? > 0 AND updated_ms < ?)`, string(StatusComplete), successBefore, successBefore, string(StatusErrored), errorBefore, errorBefore)
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM instances WHERE (status=? AND ? > 0 AND updated_ms < ?) OR (status=? AND ? > 0 AND updated_ms < ?) LIMIT ?`, string(StatusComplete), successBefore, successBefore, string(StatusErrored), errorBefore, errorBefore, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		var ids []string
 		for rows.Next() {
-			var id, st string
-			if err := rows.Scan(&id, &st); err != nil {
+			var id string
+			if err := rows.Scan(&id); err != nil {
 				return err
 			}
 			ids = append(ids, id)
@@ -405,13 +438,14 @@ func (s *Store) PruneRetention(ctx context.Context, ns, name string, successBefo
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		rows.Close()
 		for _, id := range ids {
 			for _, tbl := range []string{"steps", "step_attempts", "events", "waits"} {
 				if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE instance_id = ?", id); err != nil {
 					return err
 				}
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM instances WHERE id = ?", id); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM instances WHERE id = ?`, id); err != nil {
 				return err
 			}
 			removed++

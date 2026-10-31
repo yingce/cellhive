@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS messages (
   source_created_ms INTEGER NOT NULL DEFAULT 0,
   created_ms      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS messages_visible ON messages(visible_at_ms);
+CREATE INDEX IF NOT EXISTS messages_claim ON messages(visible_at_ms, id);
+DROP INDEX IF EXISTS messages_visible;
 CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, message_id TEXT NOT NULL, fingerprint TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idempotency_expiry ON idempotency(expires_ms);
 CREATE TABLE IF NOT EXISTS queue_meta (key TEXT PRIMARY KEY);

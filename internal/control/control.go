@@ -217,24 +217,41 @@ func (p Projection) HostView(host string) HostView {
 	h := NormalizeHost(host)
 	view := HostView{Host: h, Workers: map[string]HostWorkerPtr{}}
 	paths := map[string]int{} // path -> distinct namespaces
-	for _, app := range p.Apps {
-		for _, rt := range app.Routes {
-			if NormalizeHost(rt.Host) != h {
-				continue
-			}
-			view.Routes = append(view.Routes, HostRoute{Namespace: app.Namespace, Path: rt.Path, Worker: rt.Worker})
-			paths[rt.Path]++
-			key := app.Namespace + "/" + rt.Worker
-			if _, ok := view.Workers[key]; ok {
-				continue
-			}
-			for _, w := range app.Workers {
-				if w.Worker != rt.Worker {
+	add := func(ns string, rt Route) {
+		view.Routes = append(view.Routes, HostRoute{Namespace: ns, Path: rt.Path, Worker: rt.Worker})
+		paths[rt.Path]++
+		key := ns + "/" + rt.Worker
+		if _, ok := view.Workers[key]; ok {
+			return
+		}
+		if w, ok := p.workerIndex[key]; ok {
+			view.Workers[key] = w
+		}
+	}
+	if p.hostIndex != nil {
+		for _, ref := range p.hostIndex[h] {
+			app := p.Apps[ref.app]
+			add(app.Namespace, app.Routes[ref.route])
+		}
+	} else {
+		for _, app := range p.Apps {
+			for _, rt := range app.Routes {
+				if NormalizeHost(rt.Host) != h {
 					continue
 				}
-				view.Workers[key] = HostWorkerPtr{
-					Active: w.Active, Version: w.Version.Number, StorageID: w.Version.StorageID,
-					BundleSHA: w.Version.BundleSHA, AssetsSHA: w.Version.AssetsSHA,
+				add(app.Namespace, rt)
+				key := app.Namespace + "/" + rt.Worker
+				if _, ok := view.Workers[key]; ok {
+					continue
+				}
+				for _, w := range app.Workers {
+					if w.Worker != rt.Worker {
+						continue
+					}
+					view.Workers[key] = HostWorkerPtr{
+						Active: w.Active, Version: w.Version.Number, StorageID: w.Version.StorageID,
+						BundleSHA: w.Version.BundleSHA, AssetsSHA: w.Version.AssetsSHA,
+					}
 				}
 			}
 		}
@@ -305,6 +322,36 @@ type Projection struct {
 	Apps []ProjectionApp `json:"apps"`
 	ETag string          `json:"etag"`
 	AtMs int64           `json:"at_ms"`
+
+	// hostIndex/workerIndex are derived (unexported, not marshalled) to make
+	// HostView O(routes for one host) instead of O(all apps x routes). They are
+	// nil for projections built outside Store.Projection, which falls back to
+	// the scan.
+	hostIndex   map[string][]hostRef
+	workerIndex map[string]HostWorkerPtr
+}
+
+type hostRef struct {
+	app, route int
+}
+
+func (p *Projection) buildHostIndex() {
+	idx := make(map[string][]hostRef)
+	workers := make(map[string]HostWorkerPtr)
+	for ai, app := range p.Apps {
+		for _, w := range app.Workers {
+			workers[app.Namespace+"/"+w.Worker] = HostWorkerPtr{
+				Active: w.Active, Version: w.Version.Number, StorageID: w.Version.StorageID,
+				BundleSHA: w.Version.BundleSHA, AssetsSHA: w.Version.AssetsSHA,
+			}
+		}
+		for ri, rt := range app.Routes {
+			h := NormalizeHost(rt.Host)
+			idx[h] = append(idx[h], hostRef{app: ai, route: ri})
+		}
+	}
+	p.hostIndex = idx
+	p.workerIndex = workers
 }
 
 // QueueTarget is a queue's consuming worker resolved from a projection.

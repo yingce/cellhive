@@ -469,3 +469,96 @@ func TestAbortMultipartContinuesOnError(t *testing.T) {
 		t.Fatalf("abort left keys: %v %v", keys, err)
 	}
 }
+
+type failPartDeleteBucket struct{ bucket.Bucket }
+
+func (b failPartDeleteBucket) Delete(ctx context.Context, k string) error {
+	if !isCreateMarker(k) {
+		return errors.New("part delete failed")
+	}
+	return b.Bucket.Delete(ctx, k)
+}
+
+func TestAbortMultipartKeepsMarkerOnPartFailure(t *testing.T) {
+	ctx := context.Background()
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(failPartDeleteBucket{Bucket: base})
+	id, err := s.CreateMultipart(ctx, "acme", "files", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UploadPart(ctx, "acme", "files", "k", id, 1, []byte("part")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AbortMultipart(ctx, "acme", "files", "k", id); err == nil {
+		t.Fatal("abort succeeded despite part delete failure")
+	}
+	p, err := multipartPrefix("acme", "files", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.B.Get(ctx, createMarkerKey(p)); err != nil {
+		t.Fatalf("creation marker removed while parts remain: %v", err)
+	}
+}
+
+type etagOnlyBucket struct {
+	bucket.Bucket
+	st        bucket.Statter
+	objectKey string
+	mu        sync.Mutex
+	gets      int
+	stats     int
+}
+
+func (b *etagOnlyBucket) Get(ctx context.Context, k string) ([]byte, string, error) {
+	if k == b.objectKey {
+		b.mu.Lock()
+		b.gets++
+		b.mu.Unlock()
+	}
+	return b.Bucket.Get(ctx, k)
+}
+
+func (b *etagOnlyBucket) Stat(ctx context.Context, k string) (int64, string, error) {
+	if k == b.objectKey {
+		b.mu.Lock()
+		b.stats++
+		b.mu.Unlock()
+	}
+	return b.st.Stat(ctx, k)
+}
+
+func TestConditionalPutUsesStatNotObjectGet(t *testing.T) {
+	ctx := context.Background()
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &etagOnlyBucket{Bucket: base, st: base}
+	s := New(b)
+	if _, err := s.Put(ctx, "acme", "files", "k", []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	k, err := Key("acme", "files", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.objectKey = k
+	b.mu.Lock()
+	b.gets, b.stats = 0, 0
+	b.mu.Unlock()
+	yes := true
+	if _, matched, err := s.PutConditional(ctx, "acme", "files", "k", []byte("new"), nil, &Condition{Exists: &yes}); err != nil || !matched {
+		t.Fatalf("conditional put: matched=%v err=%v", matched, err)
+	}
+	b.mu.Lock()
+	gets, stats := b.gets, b.stats
+	b.mu.Unlock()
+	if gets != 0 || stats == 0 {
+		t.Fatalf("object get=%d stat=%d; conditional ETag must use HEAD/Stat", gets, stats)
+	}
+}

@@ -84,6 +84,11 @@ func TestInvocationRetryIdentityAndHistoryBounds(t *testing.T) {
 	if _, err := c.Tx(t.Context(), func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(t.Context(), `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10005)
  INSERT INTO invocations(id,worker,kind,started_ms,record) SELECT 'seed-'||x,'web','queue',?,json_object('invocation_id','seed-'||x,'logical_id','seed-'||x,'namespace','acme','worker','web','kind','queue','attempt',1,'started_ms',?,'status','success','logs',json_array()) FROM n`, now.UnixMilli(), now.UnixMilli())
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(t.Context(), `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10005)
+ INSERT INTO invocation_messages(invocation_id,message_id,logical_id,attempt) SELECT 'seed-'||x,'m-'||x,'seed-'||x,1 FROM n`)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -97,5 +102,9 @@ func TestInvocationRetryIdentityAndHistoryBounds(t *testing.T) {
 	var count int
 	if err := c.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invocations`).Scan(&count); err != nil || count != 10000 {
 		t.Fatalf("unbounded history: %d %v", count, err)
+	}
+	var orphans int
+	if err := c.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invocation_messages WHERE invocation_id NOT IN (SELECT id FROM invocations)`).Scan(&orphans); err != nil || orphans != 0 {
+		t.Fatalf("orphan invocation messages = %d, %v", orphans, err)
 	}
 }

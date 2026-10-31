@@ -129,6 +129,12 @@ type Manager struct {
 	ownedMu sync.Mutex
 	owned   map[string]OwnedScope
 
+	// Node-lease records are not rewritten by Renew. Touch them at most once
+	// per interval so they stay in the current segmented-authority window and
+	// readers do not fall back to a bucket List after a rollover.
+	touchMu   sync.Mutex
+	lastTouch map[string]time.Time
+
 	// Metrics (ADR-165): epoch bumps and takeover outcomes, read by
 	// cell-agent's /metrics.
 	epochBumps      atomic.Int64
@@ -244,7 +250,7 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
-		epoch, gerr := m.nextEpoch(ctx, s)
+		epoch, gerr := m.nextEpoch(ctx, s, 0)
 		if gerr != nil {
 			return cell.Owner{}, gerr
 		}
@@ -271,6 +277,7 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 	// churn (ADR-273).
 	if cur.Node == m.NodeID && cur.Session == m.Session {
 		m.rememberOwned(s, cur.Epoch)
+		m.touchOwnerSegment(ctx, s, now)
 		return cur, nil
 	}
 	live, lerr := m.liveFresh(ctx, cur, now)
@@ -294,7 +301,7 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 			return cur, err
 		}
 	}
-	epoch, gerr := m.nextEpoch(ctx, s)
+	epoch, gerr := m.nextEpoch(ctx, s, cur.Epoch)
 	if gerr != nil {
 		return cell.Owner{}, gerr
 	}
@@ -365,6 +372,7 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 			}
 		}
 		m.rememberOwned(s, cur.Epoch)
+		m.touchOwnerSegment(ctx, s, now)
 		return cur, nil
 	}
 	cur.Expiry = now.Add(m.OwnerTTL).UnixMilli()
@@ -420,6 +428,32 @@ func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error
 	return nil
 }
 
+// touchOwnerSegment moves a node-lease owner record into the current authority
+// window at most once per ownerSegmentTouchInterval. The write is best-effort:
+// a failure only means a later read may fall back to the bounded List.
+func (m *Manager) touchOwnerSegment(ctx context.Context, s cell.Scope, now time.Time) {
+	toucher, ok := m.B.(interface {
+		Touch(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	key := s.String()
+	m.touchMu.Lock()
+	last, seen := m.lastTouch[key]
+	due := !seen || now.Sub(last) >= 30*time.Minute
+	if due {
+		if m.lastTouch == nil {
+			m.lastTouch = map[string]time.Time{}
+		}
+		m.lastTouch[key] = now
+	}
+	m.touchMu.Unlock()
+	if due {
+		_ = toucher.Touch(ctx, Key(s))
+	}
+}
+
 func (m *Manager) rememberOwned(s cell.Scope, epoch uint64) {
 	m.ownedMu.Lock()
 	if m.owned == nil {
@@ -433,6 +467,9 @@ func (m *Manager) forgetOwned(s cell.Scope) {
 	m.ownedMu.Lock()
 	delete(m.owned, s.String())
 	m.ownedMu.Unlock()
+	m.touchMu.Lock()
+	delete(m.lastTouch, s.String())
+	m.touchMu.Unlock()
 }
 
 // OwnedScopes returns a snapshot of the scopes this node currently claims.

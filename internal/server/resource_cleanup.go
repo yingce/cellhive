@@ -204,6 +204,16 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 			return nil
 		}
 	}
+	// Completed jobs are kept for idempotent retries, but not forever: prune
+	// them hourly so the due-job scan stays bounded.
+	if s.resourceCleanupPrunedAt.IsZero() || time.Since(s.resourceCleanupPrunedAt) >= time.Hour {
+		if n, perr := s.Control.PruneCompletedResourceCleanups(ctx, time.Now().Add(-7*24*time.Hour).UnixMilli(), 100); perr == nil {
+			s.resourceCleanupPrunedAt = time.Now()
+			if n > 0 {
+				s.Log.Info("resource cleanups pruned", "removed", n)
+			}
+		}
+	}
 	jobs, err := s.Control.PendingResourceCleanups(ctx, 20)
 	if err != nil {
 		return err

@@ -28,7 +28,9 @@ func genKey(s cell.Scope) string { return s.Key() + "/owner-gen" }
 
 // nextEpoch bumps and returns the scope's monotonic generation. Bumping happens
 // before the owner write, so a lost race only skips epochs (never reuses one).
-func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope) (uint64, error) {
+// floor is the epoch of the record being replaced (or 0 when unowned); if the
+// generation key is missing, the new epoch still has to exceed it.
+func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope, floor uint64) (uint64, error) {
 	key := genKey(s)
 	for attempt := 0; attempt < 8; attempt++ {
 		data, e, err := m.B.Get(ctx, key)
@@ -46,6 +48,9 @@ func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope) (uint64, error) {
 			return 0, err
 		}
 		next := g + 1
+		if next <= floor {
+			next = floor + 1
+		}
 		nb := []byte(strconv.FormatUint(next, 10))
 		if errors.Is(err, bucket.ErrNotFound) {
 			if _, cerr := m.B.ConditionalCreate(ctx, key, nb); cerr == nil {
@@ -74,7 +79,7 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
-		epoch, gerr := m.nextEpoch(ctx, s)
+		epoch, gerr := m.nextEpoch(ctx, s, 0)
 		if gerr != nil {
 			return cell.Owner{}, gerr
 		}
@@ -93,7 +98,7 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 		return cur, ErrOwnerLive
 	}
 	takeover := cur.Node != node
-	epoch, gerr := m.nextEpoch(ctx, s)
+	epoch, gerr := m.nextEpoch(ctx, s, cur.Epoch)
 	if gerr != nil {
 		return cell.Owner{}, gerr
 	}

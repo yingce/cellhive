@@ -245,10 +245,20 @@ func (s *Store) AbortMultipart(ctx context.Context, ns, bucketName, key, uploadI
 		return err
 	}
 	// Delete everything we can: a single failure must not leave the rest behind,
-	// so a retry sees a smaller, still-abortable set. Return the last real error.
+	// so a retry sees a smaller, still-abortable set. Keep the creation marker
+	// until every part is gone; GC skips uploads without a marker, so removing it
+	// early would orphan the surviving parts forever.
 	var lastErr error
 	for _, k := range keys {
+		if isCreateMarker(k) {
+			continue
+		}
 		if err := s.B.Delete(ctx, k); err != nil && !errors.Is(err, bucket.ErrNotFound) {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		if err := s.B.Delete(ctx, createMarkerKey(p)); err != nil && !errors.Is(err, bucket.ErrNotFound) {
 			lastErr = err
 		}
 	}

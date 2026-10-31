@@ -90,3 +90,16 @@ func TestWindowPrunesOldTraffic(t *testing.T) {
 		t.Fatalf("expected empty plan, got %+v", last.Routes)
 	}
 }
+
+func TestAccumulateDropsInactiveHosts(t *testing.T) {
+	c := New(Config{Window: time.Minute}, &fakeBuilder{}, nil)
+	now := time.Unix(1_700_000_000, 0)
+	c.accumulate(map[string]uint64{"gone.example": 1}, now)
+	if _, ok := c.lastSnapshot["gone.example"]; !ok {
+		t.Fatal("host was not tracked")
+	}
+	c.accumulate(map[string]uint64{}, now.Add(2*time.Minute))
+	if _, ok := c.lastSnapshot["gone.example"]; ok {
+		t.Fatal("inactive host retained in lastSnapshot")
+	}
+}

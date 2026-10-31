@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"hash/fnv"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -273,5 +274,47 @@ func TestKVValidationLimits(t *testing.T) {
 	okMeta := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("m"), 1024))
 	if rr := do("/v1/kv/put?ns=acme&key=m&metadata="+url.QueryEscape(okMeta), []byte("v")); rr.Code != http.StatusOK {
 		t.Fatalf("1KiB metadata = %d %s, want 200", rr.Code, rr.Body.String())
+	}
+}
+
+func TestKVExpiryFastPathDoesNotTakeStripeLock(t *testing.T) {
+	ctx := t.Context()
+	s := newScopeServer(t)
+	s.Timers = timer.NewRegistry()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "fastpath"}
+	c, err := s.Store.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.OpenTimer = func(ctx context.Context, scope cell.Scope) (*timer.Store, error) {
+		return timer.NewStore(ctx, c)
+	}
+	due := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := c.PutTxOpts(ctx, "k", []byte("v"), nil, due); err != nil {
+		t.Fatal(err)
+	}
+	s.syncKVExpiry(ctx, sc)
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, exists, err := st.KVExpiryDue(ctx); err != nil || !exists || got != due {
+		t.Fatalf("timer = %d/%t/%v, want %d", got, exists, err, due)
+	}
+
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sc.String()))
+	mu := &s.kvExpiryMu[h.Sum32()%uint32(len(s.kvExpiryMu))]
+	mu.Lock()
+	defer mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		s.syncKVExpiry(ctx, sc)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("covered expiry blocked on the striped reconcile lock")
 	}
 }

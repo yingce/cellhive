@@ -62,6 +62,15 @@ const preparedCache = new ByteLRU(2000, 64*1024*1024, jsonWeight); // conservati
 const preparedInflight = new Map();
 
 const residents = new Map(); // plain descriptors only, never WorkerStub/Fetcher
+// latestVersionByFamily lets the steady-state fetch path skip an O(residents)
+// scan: only a request for a newer version needs to mark older entries.
+const latestVersionByFamily = new Map();
+let retiringCount = 0; // entries with retiring=true and !pinned
+function markRetiring(e){
+  if(e.retiring)return;
+  e.retiring=true;
+  if(!e.pinned)retiringCount++;
+}
 // Warm-isolate bounds are deployment-configurable (CH_ISOLATE_MAX/BYTES); the
 // Go supervisor derives defaults from the node/cgroup memory limit.
 const DEFAULT_ISOLATE_MAX = 128;
@@ -103,15 +112,22 @@ async function sweepResidents(env,ctx) {
       try{
         const ctl=managedStub(env,ctx,e).getEntrypoint('CellHiveLifecycle');
         const status=await ctl.status();
-        if(status.pinned){e.pinned=true;return;}
+        if(status.pinned){if(e.retiring&&!e.pinned)retiringCount--;e.pinned=true;return;}
         // The host lease is taken in residentWorker(), not here. Re-check it
         // after the async status() round trip: a request may have acquired the
         // entry while we were waiting, and retiring it would abort that request.
         if(!e.retiring||status.nonce!==e.nonce||!status.idle||!e.life.idle())return;
         try{if(await ctl.retire(e.nonce)===false)return;}
         catch(err){if(!/internal error; reference =|execution.*abort|disconnected/i.test(String(err)))throw err;}
-        if(residents.get(key)===e){residents.delete(key);isolateCapacity(env).release(key);}
-        if(![...residents.values()].some(o=>o.versionKey===e.versionKey))preparedCache.delete(e.versionKey);
+        if(residents.get(key)===e){
+          residents.delete(key);
+          if(e.retiring&&!e.pinned)retiringCount--;
+          latestVersionByFamily.delete(e.family);
+          isolateCapacity(env).release(key);
+        }
+        let sameVersion=false;
+        for(const o of residents.values())if(o.versionKey===e.versionKey){sameVersion=true;break;}
+        if(!sameVersion)preparedCache.delete(e.versionKey);
       }catch(err){console.error('worker retirement failed:',String(err));}
     })();
     await e.cleaning;
@@ -119,12 +135,12 @@ async function sweepResidents(env,ctx) {
   }
 }
 function scheduleSweep(env,ctx){
-  if(![...residents.values()].some(e=>e.retiring&&!e.pinned))return;
+  if(retiringCount<=0)return;
   ctx.waitUntil((async()=>{
     // Bounded retry for waitUntil/stream teardown; later requests also sweep.
     for(let i=0;i<100;i++){
       await sweepResidents(env,ctx);
-      if(![...residents.values()].some(e=>e.retiring&&!e.pinned))return;
+      if(retiringCount<=0)return;
       await new Promise(resolve=>setTimeout(resolve,50));
     }
   })());
@@ -133,18 +149,21 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
   const capacity = isolateCapacity(env);
   const versionKey=workerVersionKey(app,worker,version),family=app.namespace+'/'+worker;
   const key=residentVariantKey(versionKey,tailOn);
-  let retiring=false;
-  for(const e of residents.values()){
-    if(e.family===family&&Number(e.version.version)<Number(version.version))e.retiring=true;
-    // Tail-on/off variants use different worker ids (same bundle). Do not
-    // abort the old variant on this switch: abortIsolate makes workerd emit
-    // "script terminated for unknown reasons" while the new variant is being
-    // loaded. Keep both resident; the capacity sweep can reclaim them later.
-    if(e.retiring)retiring=true;
+  const versionNumber=Number(version.version);
+  const latest=latestVersionByFamily.get(family);
+  if(latest===undefined||versionNumber>latest){
+    latestVersionByFamily.set(family,versionNumber);
+    for(const e of residents.values()){
+      if(e.family===family&&Number(e.version.version)<versionNumber)markRetiring(e);
+      // Tail-on/off variants use different worker ids (same bundle). Do not
+      // abort the old variant on this switch: abortIsolate makes workerd emit
+      // "script terminated for unknown reasons" while the new variant is being
+      // loaded. Keep both resident; the capacity sweep can reclaim them later.
+    }
   }
   // Avoid an async suspension on the steady-state fetch path. Existing
   // retirement candidates still get swept before a new resident is used.
-  if(retiring)await sweepResidents(env,ctx);
+  if(retiringCount>0)await sweepResidents(env,ctx);
   let e=residents.get(key);
   if(e?.cleaning){await e.cleaning;e=residents.get(key);}
   if(!e){
@@ -155,7 +174,7 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
     checkWorkerBudgets(e.code,version.vars,plan.spec,'user');
     const weight=3*estimateWorkerCode(e.code)+2*1024*1024+jsonWeight(version)+jsonWeight(plan.spec);
     if(!capacity.reserve(key,weight)){
-      for(const old of residents.values())if(old.life.idle())old.retiring=true;
+      for(const old of residents.values())if(old.life.idle())markRetiring(old);
       await sweepResidents(env,ctx);
       if(!capacity.reserve(key,weight))throw new Error('runtime_capacity');
       e=residents.get(key)||e;

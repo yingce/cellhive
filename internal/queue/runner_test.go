@@ -465,8 +465,8 @@ func TestRunnerCommitWrapsMutations(t *testing.T) {
 	mu.Lock()
 	got := wrapped
 	mu.Unlock()
-	if got != 3 { // one claim + one ack per message (2 messages)
-		t.Fatalf("commit wrapped %d mutations, want 3 (claim + 2 acks)", got)
+	if got != 2 { // one claim + one batched ack
+		t.Fatalf("commit wrapped %d mutations, want 2 (claim + batched ack)", got)
 	}
 	if depth, _ := st.Depth(ctx, "demo", "q"); depth != 0 {
 		t.Fatalf("depth = %d, want 0", depth)

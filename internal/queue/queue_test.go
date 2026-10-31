@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -400,5 +401,41 @@ func TestSendIdempotencyConcurrent(t *testing.T) {
 	}
 	if depth != 1 {
 		t.Fatalf("depth = %d, want 1", depth)
+	}
+}
+
+func TestClaimQueryUsesOrderIndex(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	c, err := st.cell(ctx, "demo", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN
+		SELECT id FROM messages
+		WHERE visible_at_ms <= ? AND lease_until_ms <= ?
+		ORDER BY visible_at_ms, id LIMIT ?`, 1, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "messages_claim") {
+		t.Fatalf("claim query does not use messages_claim:\n%s", plan.String())
+	}
+	if strings.Contains(plan.String(), "TEMP B-TREE") {
+		t.Fatalf("claim query still sorts:\n%s", plan.String())
 	}
 }

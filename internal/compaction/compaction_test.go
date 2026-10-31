@@ -598,3 +598,49 @@ func TestCompactFoldsLegacyV1AndGCsCompressedL1(t *testing.T) {
 		t.Fatalf("restored image wrong after GC: p1=%x p3=%x p5=%x", got[0], got[2*int(pageSize)], got[4*int(pageSize)])
 	}
 }
+
+func TestPageFetcherDeduplicatesRecoveredDelta(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	rep := replica.New(b)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "fetch-dedup"}
+	const epoch = uint64(1)
+	const pageSize = uint32(4096)
+	mk := func(fill byte) []byte {
+		p := make([]byte, pageSize)
+		for i := range p {
+			p[i] = fill
+		}
+		return p
+	}
+	snap := map[uint32][]byte{1: mk(1), 2: mk(2), 3: mk(3), 4: mk(4), 5: mk(5)}
+	if _, _, err := rep.Append(ctx, sc, epoch, snapshotSegment(t, epoch, pageSize, 5, snap)); err != nil {
+		t.Fatalf("append snapshot: %v", err)
+	}
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 1, map[uint32][]byte{3: mk(0x31)})); err != nil {
+		t.Fatalf("append delta1: %v", err)
+	}
+	if _, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	// Owner uploads the delta as a batch; recovery re-uploads the same single
+	// segment. PageFetcher must keep one logical copy.
+	dup := deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)})
+	if _, _, err := rep.AppendBatch(ctx, sc, epoch, [][]byte{dup}); err != nil {
+		t.Fatalf("append batch: %v", err)
+	}
+	if _, _, err := rep.Append(ctx, sc, epoch, dup); err != nil {
+		t.Fatalf("append single: %v", err)
+	}
+	pf, err := rep.NewPageFetcher(ctx, sc, epoch)
+	if err != nil {
+		t.Fatalf("new fetcher: %v", err)
+	}
+	if got, err := pf.Page(ctx, 5); err != nil || got[0] != 0x52 {
+		t.Fatalf("page 5 = %x, %v", got, err)
+	}
+}

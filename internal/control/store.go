@@ -331,6 +331,8 @@ CREATE TABLE IF NOT EXISTS resource_cleanups (
   lease_token TEXT NOT NULL DEFAULT '', lease_until_ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(ns,kind,name)
 );
+CREATE INDEX IF NOT EXISTS resource_cleanups_retry ON resource_cleanups(state, next_retry_ms);
+CREATE INDEX IF NOT EXISTS resource_cleanups_lease ON resource_cleanups(state, lease_until_ms);
 CREATE TABLE IF NOT EXISTS queue_transfer_destinations (
   ns TEXT NOT NULL, source_queue TEXT NOT NULL, source_generation TEXT NOT NULL,
   destination_queue TEXT NOT NULL, PRIMARY KEY(ns,source_queue,source_generation,destination_queue)
@@ -744,6 +746,7 @@ func (s *Store) PurgeAppRows(ctx context.Context, ns string) error {
 			`DELETE FROM queue_transfer_destinations WHERE ns=?`,
 			`DELETE FROM secrets WHERE ns=?`,
 			`DELETE FROM version_secrets WHERE ns=?`,
+			`DELETE FROM deployment_events WHERE ns=?`,
 			`DELETE FROM do_classes WHERE ns=?`,
 			`DELETE FROM delete_locks WHERE ns=?`,
 			`DELETE FROM deploy_idempotency WHERE ns=?`,
@@ -1582,6 +1585,7 @@ func (s *Store) PurgeWorkerRows(ctx context.Context, ns, worker string) error {
 		for _, stmt := range []string{
 			`DELETE FROM versions WHERE ns=? AND worker=?`,
 			`DELETE FROM version_secrets WHERE ns=? AND worker=?`,
+			`DELETE FROM deployment_events WHERE ns=? AND worker=?`,
 			`DELETE FROM bindings WHERE ns=? AND worker=?`,
 			`DELETE FROM version_bundle_refs WHERE ns=? AND worker=?`,
 			`DELETE FROM workers WHERE ns=? AND name=?`,
@@ -2080,6 +2084,7 @@ func (s *Store) Projection(ctx context.Context) (Projection, error) {
 	}
 	proj.ETag = fmt.Sprintf(`"r%d"`, rev)
 	proj.AtMs = s.now().UnixMilli()
+	proj.buildHostIndex()
 	return proj, nil
 }
 
@@ -2206,6 +2211,38 @@ func (s *Store) AssetRefs(ctx context.Context) (map[string]bool, error) {
 		refs[ns+"/"+worker+"/"+sha] = true
 	}
 	return refs, rows.Err()
+}
+
+// IsReferenced rechecks one id right before objgc deletes it. The GC pass
+// snapshots the reference set once; a deploy that references a marked object
+// after that snapshot must still be visible here.
+func (r GCRefs) IsReferenced(ctx context.Context, id string) (bool, error) {
+	if err := gcMarkKey(r.Kind, id); err != nil {
+		return false, err
+	}
+	c, err := r.S.cell(ctx)
+	if err != nil {
+		return false, err
+	}
+	var one int
+	switch r.Kind {
+	case "bundle":
+		err = c.DB.QueryRowContext(ctx, `SELECT 1 FROM version_bundle_refs WHERE sha=? LIMIT 1`, id).Scan(&one)
+	case "asset":
+		parts := strings.Split(id, "/")
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return false, fmt.Errorf("control: bad asset id %q", id)
+		}
+		err = c.DB.QueryRowContext(ctx, `SELECT 1 FROM versions WHERE ns=? AND worker=? AND assets_sha=? LIMIT 1`, parts[0], parts[1], parts[2]).Scan(&one)
+	}
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return true, nil
+	}
 }
 
 // gcMarkKey validates a GC mark's kind and id.

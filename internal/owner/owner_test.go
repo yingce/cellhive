@@ -3,6 +3,7 @@ package owner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -376,7 +377,7 @@ func TestNextEpochRejectsCorruptGeneration(t *testing.T) {
 	if _, err := m.B.Put(ctx, genKey(sc), []byte("not-a-number")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := m.nextEpoch(ctx, sc); !errors.Is(err, ErrGenCorrupt) {
+	if _, err := m.nextEpoch(ctx, sc, 0); !errors.Is(err, ErrGenCorrupt) {
 		t.Fatalf("nextEpoch = %v, want ErrGenCorrupt", err)
 	}
 	// The fence must fail closed rather than reuse epoch 1.
@@ -572,5 +573,74 @@ func TestTakeoverConfirmsDeadVerdictWithFreshRead(t *testing.T) {
 	o2, err := m2.Claim(ctx, sc, now)
 	if err != nil || o2.Epoch <= o1.Epoch || o2.Node != "node-2" {
 		t.Fatalf("dead owner takeover = %+v err=%v", o2, err)
+	}
+}
+
+func TestNextEpochKeepsFloorWhenGenMissing(t *testing.T) {
+	ctx := context.Background()
+	m, raw := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "legacy-epoch"}
+	o := m.newOwner(42, time.Now())
+	data, err := cell.MarshalOwner(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Put(ctx, Key(sc), data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.nextEpoch(ctx, sc, o.Epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 43 {
+		t.Fatalf("epoch = %d, want 43 (must exceed the existing owner epoch)", got)
+	}
+	gen, _, err := raw.Get(ctx, genKey(sc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(gen)) != "43" {
+		t.Fatalf("owner-gen = %q, want 43", gen)
+	}
+}
+
+type touchBucket struct {
+	bucket.Bucket
+	mu    sync.Mutex
+	calls int
+}
+
+func (b *touchBucket) Touch(context.Context, string) error {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	return nil
+}
+
+func TestRenewTouchesNodeLeaseSegmentAtMostPerInterval(t *testing.T) {
+	ctx := context.Background()
+	m, raw := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__node__", ID: "node-1"}
+	now := time.Unix(1_700_000_000, 0)
+	o, err := m.Claim(ctx, sc, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := &touchBucket{Bucket: raw}
+	m.B = tb
+	if _, err := m.Renew(ctx, sc, o.Epoch, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Renew(ctx, sc, o.Epoch, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Renew(ctx, sc, o.Epoch, now.Add(31*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	tb.mu.Lock()
+	calls := tb.calls
+	tb.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("touch calls = %d, want 2", calls)
 	}
 }

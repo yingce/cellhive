@@ -84,11 +84,17 @@ func persistPagedTxID(path string, txid uint64, clean bool) {
 // removeCellFileSet removes a cell's database, its WAL/SHM sidecars and the
 // paged-cache marker (if any).
 func removeCellFileSet(p string) error {
-	var firstErr error
-	for _, path := range []string{p, p + "-wal", p + "-shm", pagedMarkerPath(p)} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
-		}
+	// Remove the data file first and stop if that fails: the marker must stay so
+	// the next open fails closed instead of reading a sparse file with the base
+	// VFS. WAL/SHM are best-effort; the marker goes last.
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	return firstErr
+	for _, path := range []string{p + "-wal", p + "-shm"} {
+		_ = os.Remove(path)
+	}
+	if err := os.Remove(pagedMarkerPath(p)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

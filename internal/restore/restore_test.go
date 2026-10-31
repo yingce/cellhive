@@ -2,6 +2,8 @@ package restore
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -403,5 +405,34 @@ func TestApplyFileStats(t *testing.T) {
 	}
 	if after.LastSize != uint64(ps)*uint64(commit) || after.MaxSize < after.LastSize {
 		t.Fatalf("restore sizes last=%d max=%d", after.LastSize, after.MaxSize)
+	}
+}
+
+func TestApplyFileKeepsDestinationOnSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "x.db")
+	if err := os.WriteFile(dest, []byte("old-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seg := snapshotSegment(t, 4096, 2, map[uint32][]byte{
+		1: make([]byte, 4096),
+		2: make([]byte, 4096),
+	})
+	oldSync := syncFile
+	syncFile = func(*os.File) error { return errors.New("injected sync failure") }
+	defer func() { syncFile = oldSync }()
+
+	if _, err := ApplyFile(dest, [][]byte{seg}); err == nil {
+		t.Fatal("ApplyFile succeeded despite sync failure")
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "old-image" {
+		t.Fatalf("destination was modified on failure: %q", got)
+	}
+	if leftovers, _ := filepath.Glob(dest + ".tmp-*"); len(leftovers) != 0 {
+		t.Fatalf("temporary files left behind: %v", leftovers)
 	}
 }

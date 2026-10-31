@@ -164,6 +164,34 @@ func (s *Store) FinishResourceCleanup(ctx context.Context, j ResourceCleanup, ca
 		return nil
 	})
 }
+
+// PruneCompletedResourceCleanups removes completed jobs older than beforeMs.
+// A completed row is kept so repeated deletes stay idempotent; after a long
+// grace period it is safe to retire it and keep the periodic scan bounded.
+func (s *Store) PruneCompletedResourceCleanups(ctx context.Context, beforeMs int64, limit int) (int, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	c, err := s.cell(ctx)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	_, err = c.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM resource_cleanups WHERE rowid IN (SELECT rowid FROM resource_cleanups WHERE state='complete' AND updated_ms<? LIMIT ?)`, beforeMs, limit)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		removed = int(n)
+		return nil
+	})
+	return removed, err
+}
+
 func (s *Store) RetryResourceCleanup(ctx context.Context, ns, kind, name string) error {
 	c, err := s.cell(ctx)
 	if err != nil {

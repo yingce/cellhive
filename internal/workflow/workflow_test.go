@@ -476,3 +476,54 @@ func TestMigrationFailureNotCached(t *testing.T) {
 		t.Fatal("a failed migration must not be cached as done")
 	}
 }
+
+// A terminal instance that is resumed must not be pruned: the retention sweep
+// re-checks status inside the same write transaction that deletes.
+func TestPruneKeepsResumedInstance(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	in, err := s.Create(ctx, "acme", "wf", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOutput(ctx, "acme", "wf", in.ID, []byte(`done`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Resume(ctx, "acme", "wf", in.ID); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if n, err := s.Prune(ctx, "acme", "wf", future); err != nil || n != 0 {
+		t.Fatalf("prune resumed = %d, %v", n, err)
+	}
+	got, err := s.Get(ctx, "acme", "wf", in.ID)
+	if err != nil {
+		t.Fatalf("resumed instance was pruned: %v", err)
+	}
+	if got.Status != StatusQueued {
+		t.Fatalf("status = %s, want queued", got.Status)
+	}
+}
+
+func TestPruneRetentionBatches(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		in, err := s.Create(ctx, "acme", "wf", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetOutput(ctx, "acme", "wf", in.ID, []byte(`done`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	future := time.Now().Add(time.Hour).UnixMilli()
+	n, err := s.pruneRetentionBatch(ctx, "acme", "wf", future, 0, 2)
+	if err != nil || n != 2 {
+		t.Fatalf("first batch = %d, %v; want 2", n, err)
+	}
+	n, err = s.pruneRetentionBatch(ctx, "acme", "wf", future, 0, 2)
+	if err != nil || n != 1 {
+		t.Fatalf("second batch = %d, %v; want 1", n, err)
+	}
+}

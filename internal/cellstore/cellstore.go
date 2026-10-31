@@ -323,6 +323,14 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		markerExists = false
 		markerValid = false
 	}
+	// A dirty marker means the previous process died with this paged cache
+	// open. Its last durable txid is unknown, so rebuilding from the bucket
+	// could silently drop locally acked pages. Fail closed before probing the
+	// bucket: a transient probe error or a config change must not turn into a
+	// cache discard.
+	if markerExists && markerValid && !markerClean {
+		return nil, fmt.Errorf("%w: dirty paged cache %s (crash before clean close)", ErrPagedCacheUnusable, p)
+	}
 	// A sparse paged cache is not a database: it must be served by the paged VFS,
 	// never by the base VFS. Treat it like a cold cell and re-register it.
 	cold := missing || markerExists
@@ -343,13 +351,6 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			return nil, fmt.Errorf("cellstore: paged %s: %w", sc, perr)
 		}
 		if ok {
-			if markerExists && markerValid && !markerClean {
-				// A previous process died with this paged cache open. Its last
-				// durable txid is unknown, so rebuilding from the bucket could
-				// silently drop locally acked pages. Fail closed; an operator can
-				// delete the cache after verifying the bucket.
-				return nil, fmt.Errorf("%w: dirty paged cache %s (crash before clean close)", ErrPagedCacheUnusable, p)
-			}
 			srcTx := uint64(0)
 			if ts, ok := src.(interface{ TxID() uint64 }); ok {
 				srcTx = ts.TxID()
@@ -377,12 +378,17 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 				if err := pagedvfs.Register(p, src); err != nil {
 					// Never leave a sparse file without its marker: a later open
 					// could mistake it for a complete database. Drop the whole
-					// file set and let the next open rebuild from the bucket.
-					_ = removeCellFileSet(p)
+					// file set; if cleanup fails, surface it so the caller does
+					// not treat the cache as usable.
+					if rerr := removeCellFileSet(p); rerr != nil {
+						return nil, fmt.Errorf("cellstore: paged register %s: %v (cleanup: %w)", sc, err, rerr)
+					}
 					return nil, fmt.Errorf("cellstore: paged register %s: %w", sc, err)
 				}
 			} else if err := pagedvfs.Prepare(p, src); err != nil {
-				_ = removeCellFileSet(p)
+				if rerr := removeCellFileSet(p); rerr != nil {
+					return nil, fmt.Errorf("cellstore: paged prepare %s: %v (cleanup: %w)", sc, err, rerr)
+				}
 				return nil, fmt.Errorf("cellstore: paged prepare %s: %w", sc, err)
 			}
 			paged = true
@@ -390,8 +396,16 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if cold && markerExists && !paged {
-		// A partial cache we cannot serve: discard it and rebuild the file from
-		// the durable replica rather than reading zeros.
+		if markerValid {
+			// The marker records a durable local txid. Without a paged source we
+			// cannot prove the bucket cut covers it, so discarding could roll
+			// back locally acked pages (dirty marker) or pages the bucket has not
+			// observed yet (clean marker). Fail closed, same as the older-cut
+			// case above.
+			return nil, fmt.Errorf("%w: paged source unavailable for existing cache %s", ErrPagedCacheUnusable, p)
+		}
+		// A malformed marker has no trustworthy txid: discard the junk and
+		// rebuild from the durable replica rather than reading zeros.
 		if err := removeCellFileSet(p); err != nil {
 			return nil, fmt.Errorf("cellstore: discard paged cache %s: %w", sc, err)
 		}

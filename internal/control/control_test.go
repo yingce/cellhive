@@ -888,6 +888,9 @@ func TestPurgeSkipsResurrectedApp(t *testing.T) {
 	if _, err := s.GetApp(ctx, "acme"); err == nil {
 		t.Fatal("deleted app survived its purge")
 	}
+	if events, err := s.DeploymentEvents(ctx, "acme", "web", 10); err != nil || len(events) != 0 {
+		t.Fatalf("deployment events survived purge: %+v %v", events, err)
+	}
 }
 
 // TestRunPurgeLoopResumableHook: a hook that reports partial progress keeps the

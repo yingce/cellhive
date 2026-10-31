@@ -135,6 +135,12 @@ func decodeControl(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // AdminHandler builds the admin mux (mounted on the admin listener only).
 func (s *Server) AdminHandler() http.Handler {
+	s.adminOnce.Do(func() { s.adminHandler = s.buildAdminHandler() })
+	return s.adminHandler
+}
+
+func (s *Server) buildAdminHandler() http.Handler {
+	s.adminBuilds.Add(1)
 	mux := http.NewServeMux()
 	// Cloudflare API shaped routes used by the stock Wrangler client. These
 	// translate into the native CellHive control plane; account_id is the
@@ -527,27 +533,52 @@ func (s *Server) projectionCached(ctx context.Context) (control.Projection, erro
 		return control.Projection{}, errors.New("control plane not configured")
 	}
 	rev, rerr := s.Control.Rev(ctx)
-	s.projMu.Lock()
-	cached, builtRev, at := s.projCache, s.projBuiltRev, s.projAt
-	fresh := cached != nil && rerr == nil && rev == builtRev && time.Since(at) < projectionTTL
-	s.projMu.Unlock()
-	if fresh {
-		return *cached, nil
-	}
-	p, err := s.Control.Projection(ctx)
-	if err != nil {
-		if cached != nil {
-			return *cached, nil // serve stale on error
+	for {
+		s.projMu.Lock()
+		cached, builtRev, at := s.projCache, s.projBuiltRev, s.projAt
+		fresh := cached != nil && rerr == nil && rev == builtRev && time.Since(at) < projectionTTL
+		if fresh {
+			s.projMu.Unlock()
+			return *cached, nil
 		}
-		return control.Projection{}, err
+		if s.projBuilding != nil {
+			// Another request is already rebuilding; wait instead of stampeding
+			// the control cell with the same projection query.
+			wait := s.projBuilding
+			s.projMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				if cached != nil {
+					return *cached, nil
+				}
+				return control.Projection{}, ctx.Err()
+			}
+		}
+		s.projBuilding = make(chan struct{})
+		s.projMu.Unlock()
+
+		p, err := s.Control.Projection(ctx)
+
+		s.projMu.Lock()
+		if err == nil {
+			s.projCache = &p
+			s.projBuiltRev = rev
+			s.projAt = time.Now()
+		}
+		close(s.projBuilding)
+		s.projBuilding = nil
+		s.projMu.Unlock()
+		if err != nil {
+			if cached != nil {
+				return *cached, nil // serve stale on error
+			}
+			return control.Projection{}, err
+		}
+		s.projRev.Store(rev)
+		return p, nil
 	}
-	s.projMu.Lock()
-	s.projCache = &p
-	s.projBuiltRev = rev
-	s.projAt = time.Now()
-	s.projMu.Unlock()
-	s.projRev.Store(rev)
-	return p, nil
 }
 
 // controlEtag hashes a canonical view body. Callers store it opaquely and send

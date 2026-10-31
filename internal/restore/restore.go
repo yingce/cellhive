@@ -22,6 +22,10 @@ var (
 	restoreMaxSize  atomic.Uint64
 )
 
+// syncFile is a test seam for exercising the failure path after all pages have
+// been written. Production always calls (*os.File).Sync.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
 // Stats is a process-wide snapshot of restore work. Sizes are SQLite image
 // bytes (commit*pageSize), not the total bucket bytes read.
 type Stats struct {
@@ -56,18 +60,23 @@ func ApplyFile(dest string, segments [][]byte) (uint32, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return 0, err
 	}
-	// Remove any stale WAL/SHM so SQLite starts from the applied image.
-	for _, suffix := range []string{"-wal", "-shm"} {
-		_ = os.Remove(dest + suffix)
-	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	// Build the image in a sibling temp file and rename it into place. A failed
+	// restore must never leave a truncated/partial database at dest: the next
+	// cell open treats an existing file as authoritative, so a half-written
+	// image would silently serve zero/old pages.
+	tmp, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".tmp-*")
 	if err != nil {
 		return 0, err
 	}
+	tmpName := tmp.Name()
+	discard := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
 	// Write pages at their offsets instead of allocating a commit*pageSize
 	// buffer. Truncate first so missing pages stay zero-filled (sparse file).
-	if err := f.Truncate(imageBytes); err != nil {
-		_ = f.Close()
+	if err := tmp.Truncate(imageBytes); err != nil {
+		discard()
 		return 0, err
 	}
 	// Coalesce contiguous pages into bounded write runs. A per-page WriteAt
@@ -80,7 +89,7 @@ func ApplyFile(dest string, segments [][]byte) (uint32, error) {
 		if len(run) == 0 {
 			return nil
 		}
-		_, err := f.WriteAt(run, runOff)
+		_, err := tmp.WriteAt(run, runOff)
 		run = run[:0]
 		runOff = -1
 		return err
@@ -92,7 +101,7 @@ func ApplyFile(dest string, segments [][]byte) (uint32, error) {
 		}
 		if off != runOff+int64(len(run)) || len(run)+len(p.Data) > cap(run) {
 			if err := flush(); err != nil {
-				_ = f.Close()
+				discard()
 				return 0, err
 			}
 			runOff = off
@@ -100,15 +109,36 @@ func ApplyFile(dest string, segments [][]byte) (uint32, error) {
 		run = append(run, p.Data...)
 	}
 	if err := flush(); err != nil {
-		_ = f.Close()
+		discard()
 		return 0, err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
+	if err := syncFile(tmp); err != nil {
+		discard()
 		return 0, err
 	}
-	if err := f.Close(); err != nil {
+	if err := tmp.Chmod(0o644); err != nil {
+		discard()
 		return 0, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return 0, err
+	}
+	// The old WAL/SHM belong to the file being replaced. Remove them after the
+	// replacement is durable but before the rename, so a crash can never pair a
+	// stale WAL with the new image.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Remove(dest + suffix)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		_ = os.Remove(tmpName)
+		return 0, err
+	}
+	// Make the rename durable; failure here is not fatal because the image bytes
+	// themselves are already synced and the caller only needs the file readable.
+	if d, derr := os.Open(filepath.Dir(dest)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	restoreTotal.Add(1)
 	restoreBytes.Add(uint64(imageBytes))

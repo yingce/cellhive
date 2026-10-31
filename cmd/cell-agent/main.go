@@ -326,13 +326,19 @@ func main() {
 			pctx, span := telemetry.Tracer().Start(pctx, "cell.restore_paged_probe")
 			defer span.End()
 			ep, ok, perr := rep.LatestEpoch(pctx, sc, 0)
-			if perr != nil || !ok {
+			if perr != nil {
+				return nil, false, perr
+			}
+			if !ok {
 				return nil, false, nil
 			}
 			pf, perr := rep.NewPageFetcher(pctx, sc, ep)
-			if perr != nil {
+			if errors.Is(perr, replica.ErrNoPageIndex) {
 				// No compacted L1 page index yet: clone the chain whole.
 				return nil, false, nil
+			}
+			if perr != nil {
+				return nil, false, perr
 			}
 			imageBytes := int64(pf.PageSize()) * int64(pf.Commit())
 			if imageBytes < cfg.PagedMinBytes {
@@ -1643,6 +1649,10 @@ func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *contr
 						}
 						var p workflow.Policy
 						if json.Unmarshal(raw, &p) != nil {
+							continue
+						}
+						if p.SuccessRetentionMs <= 0 && p.ErrorRetentionMs <= 0 {
+							// No retention for this binding: skip the scan entirely.
 							continue
 						}
 						var sb, eb int64

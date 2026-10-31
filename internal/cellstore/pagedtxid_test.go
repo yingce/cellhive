@@ -276,3 +276,72 @@ func TestPagedCellProcessKillFailsClosed(t *testing.T) {
 		t.Fatalf("process crash cache accepted: %v", err)
 	}
 }
+
+// A valid marker records a local txid the bucket may not cover yet. If the
+// paged probe cannot provide a source, discarding the cache could roll back
+// locally acked pages, so both dirty and clean caches must fail closed.
+func TestPagedCacheFailsClosedWithoutSource(t *testing.T) {
+	for _, clean := range []bool{false, true} {
+		t.Run(map[bool]string{false: "dirty", true: "clean"}[clean], func(t *testing.T) {
+			ctx := context.Background()
+			s, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sc := cell.Scope{Namespace: "n", Class: "__kv__", ID: "paged-nosource"}
+			p, err := s.Path(sc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("sparse"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := writePagedMarker(p, 4096, 10, 100, clean); err != nil {
+				t.Fatal(err)
+			}
+			s.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+				return nil, false, nil
+			}
+			if _, err := s.Cell(ctx, sc); !errors.Is(err, ErrPagedCacheUnusable) {
+				t.Fatalf("cache accepted without a paged source: %v", err)
+			}
+			if _, err := os.Stat(p); err != nil {
+				t.Fatalf("cache file was removed: %v", err)
+			}
+			if _, _, _, _, exists, _ := readPagedMarker(p); !exists {
+				t.Fatal("paged marker was removed")
+			}
+		})
+	}
+}
+
+// A transient probe error must propagate and must not be treated as "no paged
+// source" (which would discard the cache).
+func TestPagedProbeErrorKeepsCache(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "n", Class: "__kv__", ID: "paged-probe-error"}
+	p, err := s.Path(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("sparse"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePagedMarker(p, 4096, 10, 100, true); err != nil {
+		t.Fatal(err)
+	}
+	probeErr := errors.New("bucket unavailable")
+	s.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+		return nil, false, probeErr
+	}
+	if _, err := s.Cell(ctx, sc); !errors.Is(err, probeErr) {
+		t.Fatalf("probe error not propagated: %v", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("cache file was removed on probe error: %v", err)
+	}
+}

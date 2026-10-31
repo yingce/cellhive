@@ -114,11 +114,12 @@ type Server struct {
 	listen string
 	table  atomic.Pointer[Table]
 
-	requests  atomic.Uint64
-	errors    atomic.Uint64
-	dynamic   atomic.Uint64
-	hostCount sync.Map // normalized host -> *atomic.Uint64
-	log       *slog.Logger
+	requests   atomic.Uint64
+	errors     atomic.Uint64
+	dynamic    atomic.Uint64
+	hostCount  sync.Map // normalized host -> *atomic.Uint64
+	hostCountN atomic.Int64
+	log        *slog.Logger
 }
 
 // New builds a server listening on listen. table may be nil (dynamic only);
@@ -183,9 +184,22 @@ func (s *Server) WatchTable(ctx context.Context, path string, interval time.Dura
 	}
 }
 
+// maxIngressHosts bounds the per-host counters used for hot-set selection.
+// A host-scanning client must not grow this map without limit.
+const maxIngressHosts = 4096
+
 // noteHost records one request per normalized host for hot-set selection.
 func (s *Server) noteHost(host string) {
-	counter, _ := s.hostCount.LoadOrStore(host, new(atomic.Uint64))
+	if s.hostCountN.Load() >= maxIngressHosts {
+		if counter, ok := s.hostCount.Load(host); ok {
+			counter.(*atomic.Uint64).Add(1)
+		}
+		return
+	}
+	counter, loaded := s.hostCount.LoadOrStore(host, new(atomic.Uint64))
+	if !loaded {
+		s.hostCountN.Add(1)
+	}
 	counter.(*atomic.Uint64).Add(1)
 }
 

@@ -2,6 +2,7 @@ package replica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -9,6 +10,11 @@ import (
 	"cellhive/internal/ltx"
 	"cellhive/internal/restore"
 )
+
+// ErrNoPageIndex reports that a scope has no compacted L1 page index yet; the
+// caller should fall back to a whole-chain restore rather than treating it as a
+// failure.
+var ErrNoPageIndex = errors.New("replica: no page index")
 
 // PageFetcher resolves pages of a scope/epoch on demand. Pages folded into the
 // persisted L1 page index are fetched one at a time with a ranged read; pages
@@ -36,7 +42,7 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("replica: no page index for %s (cell not compacted)", s.String())
+		return nil, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
 	}
 	pf := &PageFetcher{
 		m: m, scope: s, epoch: epoch, idx: idx, watermark: idx.Watermark,
@@ -73,6 +79,7 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 		pages      []ltx.WALPage
 	}
 	var deltas []l0delta
+	seen := map[string]bool{}
 	for _, k := range l0keys {
 		raw, err := m.ReadSegment(ctx, k)
 		if err != nil {
@@ -86,6 +93,14 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 			h, payload, err := ltx.Decode(part)
 			if err != nil {
 				return nil, err
+			}
+			// Recovery re-uploads a follower's single segments, which may also be
+			// present inside an owner-uploaded batch. Keep one logical copy so the
+			// contiguity check below does not reject an otherwise valid chain.
+			if id := h.ID(); seen[id] {
+				continue
+			} else {
+				seen[id] = true
 			}
 			if h.Kind != ltx.KindDelta || h.StartTxID <= idx.Watermark {
 				continue

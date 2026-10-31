@@ -382,9 +382,26 @@ func (s *SegmentedAuthority) newestWindow(ctx context.Context, logical string) (
 	if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	// The record was not written in the current window. One bounded lookup of
-	// this single logical key recovers the previous/future window or a segment
-	// left behind by a long idle period; active paths never reach it.
+	// A clock-ahead peer may already have written the next window near the
+	// boundary even though the local current window is absent.
+	if s.nearBoundary() {
+		if future, ferr := s.readSegmentAt(ctx, logical, h+1); ferr == nil {
+			return future, nil
+		} else if !errors.Is(ferr, ErrNotFound) {
+			return nil, ferr
+		}
+	}
+	// Node-lease owner records are not rewritten by Renew, so the record often
+	// lives one or two windows back. Point-read those before falling back to a
+	// bucket List; this keeps the steady-state read path List-free.
+	for back := int64(1); back <= 2; back++ {
+		if prev, perr := s.readSegmentAt(ctx, logical, h-back); perr == nil {
+			return prev, nil
+		} else if !errors.Is(perr, ErrNotFound) {
+			return nil, perr
+		}
+	}
+	// Long idle/legacy fallback: one bounded lookup of this single logical key.
 	keys, lerr := s.data.List(ctx, logical+".w")
 	if lerr != nil {
 		return nil, lerr
@@ -489,6 +506,24 @@ func (s *SegmentedAuthority) Get(ctx context.Context, key string) ([]byte, strin
 
 // ConditionalCreate atomically creates the record when it is logically absent
 // (or recreates it after a tombstone). It never grows the legacy key.
+// Touch moves a logical record into the current window without changing its
+// value. Node-lease owner records are renewed without writing, so this keeps
+// them in the hot window and avoids the List fallback after a rollover.
+func (s *SegmentedAuthority) Touch(ctx context.Context, key string) error {
+	seg, err := s.latest(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if seg.deleted || seg.window >= s.window() {
+		return nil
+	}
+	_, err = s.CAS(ctx, key, seg.value, seg.token())
+	return err
+}
+
 func (s *SegmentedAuthority) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
 	seg, err := s.latest(ctx, key)
 	if err != nil && !errors.Is(err, ErrNotFound) {

@@ -133,6 +133,30 @@ func (s *Store) PutWithMeta(ctx context.Context, ns, bucketName, key string, dat
 	return etag, err
 }
 
+// objectETag returns an object's etag without downloading its body when the
+// backend supports HEAD (Statter). Conditional writes only need the etag, so a
+// large R2 object must not be transferred just to evaluate onlyIf.
+func (s *Store) objectETag(ctx context.Context, key string) (string, bool, error) {
+	if st, ok := s.B.(bucket.Statter); ok {
+		_, etag, err := st.Stat(ctx, key)
+		if errors.Is(err, bucket.ErrNotFound) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		return etag, true, nil
+	}
+	_, etag, err := s.B.Get(ctx, key)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return etag, true, nil
+}
+
 // PutConditional returns matched=false when onlyIf fails. A condition always
 // uses the bucket's atomic create/CAS, so a concurrent writer cannot slip
 // between the check and the write.
@@ -158,11 +182,10 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 	var old string
 	var exists bool
 	if condition != nil {
-		var getErr error
-		_, old, getErr = s.B.Get(ctx, k)
-		exists = getErr == nil
-		if getErr != nil && !errors.Is(getErr, bucket.ErrNotFound) {
-			return "", false, getErr
+		var condErr error
+		old, exists, condErr = s.objectETag(ctx, k)
+		if condErr != nil {
+			return "", false, condErr
 		}
 		if !condition.matches(exists, old) {
 			return "", false, nil

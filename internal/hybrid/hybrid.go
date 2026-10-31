@@ -95,7 +95,9 @@ func (c *Coordinator) Refresh(ctx context.Context) (bool, error) {
 }
 
 func (c *Coordinator) accumulate(snapshot map[string]uint64, now time.Time) map[string]hotset.Stats {
+	seen := make(map[string]bool, len(snapshot))
 	for host, total := range snapshot {
+		seen[host] = true
 		prev := c.lastSnapshot[host]
 		if total < prev {
 			prev = 0
@@ -126,7 +128,14 @@ func (c *Coordinator) accumulate(snapshot map[string]uint64, now time.Time) map[
 		stats[host] = hotset.Stats{Requests: sum}
 	}
 	// Hosts that produced no new delta but are still inside the window retain
-	// their accumulated score via c.buckets above.
+	// their accumulated score via c.buckets above. Drop lastSnapshot entries
+	// that are neither in the current snapshot nor in the active window; the
+	// ingress side caps the snapshot size, so this keeps the coordinator bounded.
+	for host := range c.lastSnapshot {
+		if _, active := c.buckets[host]; !active && !seen[host] {
+			delete(c.lastSnapshot, host)
+		}
+	}
 	return stats
 }
 

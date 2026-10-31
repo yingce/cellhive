@@ -130,3 +130,43 @@ func TestDeleteScopeSnapshotSerializesAliasAndScopeUpdates(t *testing.T) {
 		})
 	}
 }
+
+func TestPruneCompletedResourceCleanups(t *testing.T) {
+	s := newStore(t, false)
+	ctx := t.Context()
+	now := time.Unix(200000, 0)
+	s.now = func() time.Time { return now }
+	if _, err := s.CreateResource(ctx, "acme", "kv", "DONE", "acme/__kv__/done", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateResource(ctx, "acme", "kv", "PENDING", "acme/__kv__/pending", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteResource(ctx, "acme", "kv", "DONE", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteResource(ctx, "acme", "kv", "PENDING", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.ResourceCleanup(ctx, "acme", "kv", "DONE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimResourceCleanup(ctx, job)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if err := s.FinishResourceCleanup(ctx, claimed, nil); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.PruneCompletedResourceCleanups(ctx, now.Add(time.Hour).UnixMilli(), 10)
+	if err != nil || n != 1 {
+		t.Fatalf("pruned = %d, %v; want 1", n, err)
+	}
+	if _, err := s.ResourceCleanup(ctx, "acme", "kv", "DONE"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("completed job survived prune: %v", err)
+	}
+	if _, err := s.ResourceCleanup(ctx, "acme", "kv", "PENDING"); err != nil {
+		t.Fatalf("pending job was pruned: %v", err)
+	}
+}
