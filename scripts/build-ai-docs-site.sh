@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/docs-site/dist}"
 
 rm -rf "$OUT"
-mkdir -p "$OUT/ai" "$OUT/skills/cellhive/agents" "$OUT/examples"
+mkdir -p "$OUT/ai" "$OUT/skills/cellhive/agents" "$OUT/skills/cellhive/references" "$OUT/examples"
 
 # The docs Worker has its own host, so /ai/catalog.json and /skills/* are
 # served directly at the site root. Keep this path stable for Skill clients.
@@ -17,6 +17,7 @@ cp "$ROOT/skills/manifest.json" "$OUT/skills/manifest.json"
 cp "$ROOT/skills/cellhive/manifest.json" "$OUT/skills/cellhive/manifest.json"
 cp "$ROOT/skills/cellhive/SKILL.md" "$OUT/skills/cellhive/SKILL.md"
 cp "$ROOT/skills/cellhive/agents/openai.yaml" "$OUT/skills/cellhive/agents/openai.yaml"
+cp "$ROOT/skills/cellhive/references/catalog.json" "$OUT/skills/cellhive/references/catalog.json"
 
 # Skill routes example/scenario requests to /examples/README.md; ship the
 # runnable example tree so its feature/table links resolve on the docs host.

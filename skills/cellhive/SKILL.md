@@ -14,6 +14,8 @@ Read the current catalog before implementation:
 - CLI reference: `https://cellhive.example.com/cli.md`
 - Runnable examples: `https://cellhive.example.com/examples/README.md` (English default; `README.zh.md` for Chinese)
 
+The installer rewrites `https://cellhive.example.com` to the configured docs base URL (`CELLHIVE_SKILL_BASE_URL` / `cellhive skills update --url`). When the docs host is unreachable or the agent is air-gapped, use the bundled `references/catalog.json` next to this file. If that is also unavailable, use the checked-in `docs/ai/catalog.json` in the source tree and say that online routing was unavailable.
+
 The catalog is routing metadata, not a substitute for live inspection. Match the request against `id`, `keywords`, and `status`; follow its `reference` and `verification` fields. Do not invent unsupported Cloudflare behavior.
 
 ## Mandatory context gate
@@ -73,4 +75,4 @@ Report the exact command and result. Suitable evidence includes:
 - `cell-agent`/user-runtime readiness and projection output;
 - object/resource/version inspection after a change.
 
-If a capability is `partial` or `rejected`, say so and link the boundary. If a required online URL is unavailable, use the checked-in `docs/ai/catalog.json` and local docs as fallback, then report the fallback.
+If a capability is `partial` or `rejected`, say so and link the boundary. If a required online URL is unavailable, use `references/catalog.json` (bundled with this Skill) or the checked-in `docs/ai/catalog.json` as fallback, then report the fallback.

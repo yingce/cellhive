@@ -10,12 +10,16 @@ CellHive CLI 使用 Wrangler 配置，但通过 CellHive Admin API 发布。开�
 AI Skill bundle 可通过仓库内的静态 manifest 安装或更新：
 
 ```bash
-CELLHIVE_SKILL_BASE_URL=https://cellhive.example.com \
+CELLHIVE_SKILL_BASE_URL=https://docs.example.com \
   bash scripts/install-cellhive-skill.sh
 
-cellhive skills status
-cellhive skills update
+cellhive skills status --dir ~/.agents/skills
+cellhive skills update --url https://docs.example.com --dir ~/.agents/skills
 ```
+
+`--url`（或 `CELLHIVE_SKILL_BASE_URL`）是必填的；没有内置生产默认地址。安装器会校验
+manifest 里的 `sha256`，并在写入前把 Skill 中的 `https://cellhive.example.com` 占位符
+替换为实际 base URL。
 
 在线 AI 路由目录是 [`docs/ai/index.md`](ai/index.md)，机器可读能力目录是 [`docs/ai/catalog.json`](ai/catalog.json)。
 

@@ -11,12 +11,17 @@ The AI Skill bundle is published from the static manifest and can be installed
 or refreshed with:
 
 ```bash
-CELLHIVE_SKILL_BASE_URL=https://cellhive.example.com \
+CELLHIVE_SKILL_BASE_URL=https://docs.example.com \
   bash scripts/install-cellhive-skill.sh
 
-cellhive skills status
-cellhive skills update
+cellhive skills status --dir ~/.agents/skills
+cellhive skills update --url https://docs.example.com --dir ~/.agents/skills
 ```
+
+`--url` (or `CELLHIVE_SKILL_BASE_URL`) is required; there is no built-in
+production default. The installer verifies the manifest `sha256` entries and
+rewrites the `https://cellhive.example.com` placeholder to the configured base
+URL before installing.
 
 The online AI router is [`docs/ai/index.md`](../ai/index.md); the machine-readable
 catalog is [`docs/ai/catalog.json`](../ai/catalog.json).
