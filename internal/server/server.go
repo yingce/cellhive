@@ -690,7 +690,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("content-type", "text/plain; version=0.0.4")
 	writeFmt(w, "# TYPE cellhive_commit_total counter\n")
 	s.commitModes.Range(func(k, v any) bool {
-		writeFmt(w, "cellhive_commit_total{mode=%q} %d\n", k.(string), v.(*atomic.Uint64).Load())
+		writeFmt(w, "cellhive_commit_total{mode=\"%s\"} %d\n", escapeLabel(k.(string)), v.(*atomic.Uint64).Load())
 		return true
 	})
 	writeFmt(w, "# TYPE cellhive_live_followers gauge\ncellhive_live_followers %d\n", s.followerCount.Load())
@@ -758,16 +758,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	if bs, ok := s.Bucket.(bucket.Statser); ok {
 		ops := bs.Stats()
-		writeFmt(w, "# TYPE cellhive_bucket_ops_total counter\n")
 		writeFmt(w, "# TYPE cellhive_list_calls_total counter\n")
 		writeFmt(w, "cellhive_list_calls_total %d\n", ops["list"])
+		writeFmt(w, "# TYPE cellhive_bucket_ops_total counter\n")
 		names := make([]string, 0, len(ops))
 		for op := range ops {
 			names = append(names, op)
 		}
 		sort.Strings(names)
 		for _, op := range names {
-			writeFmt(w, "cellhive_bucket_ops_total{op=%q} %d\n", op, ops[op])
+			writeFmt(w, "cellhive_bucket_ops_total{op=\"%s\"} %d\n", escapeLabel(op), ops[op])
 		}
 	}
 	{
@@ -838,7 +838,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 				ns, rest, _ := strings.Cut(k, "|")
 				kind, outcome, _ := strings.Cut(rest, "|")
 				v, _ := s.bindingCalls.Load(k)
-				writeFmt(w, "cellhive_binding_calls_total{ns=%q,kind=%q,outcome=%q} %d\n", ns, kind, outcome, v.(*atomic.Int64).Load())
+				writeFmt(w, "cellhive_binding_calls_total{ns=\"%s\",kind=\"%s\",outcome=\"%s\"} %d\n", escapeLabel(ns), escapeLabel(kind), escapeLabel(outcome), v.(*atomic.Int64).Load())
 			}
 		}
 	}
@@ -856,11 +856,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			}
 			h := v.(*proofHist)
 			for i, b := range proofBucketBounds {
-				writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=%q,le=%q} %d\n", ns, strconv.FormatFloat(b, 'g', -1, 64), h.buckets[i].Load())
+				writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=\"%s\",le=\"%s\"} %d\n", escapeLabel(ns), escapeLabel(strconv.FormatFloat(b, 'g', -1, 64)), h.buckets[i].Load())
 			}
-			writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=%q,le=\"+Inf\"} %d\n", ns, h.count.Load())
-			writeFmt(w, "cellhive_durability_proof_seconds_sum{ns=%q} %g\n", ns, float64(h.micros.Load())/1e6)
-			writeFmt(w, "cellhive_durability_proof_seconds_count{ns=%q} %d\n", ns, h.count.Load())
+			writeFmt(w, "cellhive_durability_proof_seconds_bucket{ns=\"%s\",le=\"+Inf\"} %d\n", escapeLabel(ns), h.count.Load())
+			writeFmt(w, "cellhive_durability_proof_seconds_sum{ns=\"%s\"} %g\n", escapeLabel(ns), float64(h.micros.Load())/1e6)
+			writeFmt(w, "cellhive_durability_proof_seconds_count{ns=\"%s\"} %d\n", escapeLabel(ns), h.count.Load())
 		}
 	}
 	// Capture Ensure latency/outcomes per namespace (ADR-272). This is where the
@@ -878,11 +878,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			}
 			h := v.(*proofHist)
 			for i, b := range proofBucketBounds {
-				writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=%q,le=%q} %d\n", ns, strconv.FormatFloat(b, 'g', -1, 64), h.buckets[i].Load())
+				writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=\"%s\",le=\"%s\"} %d\n", escapeLabel(ns), escapeLabel(strconv.FormatFloat(b, 'g', -1, 64)), h.buckets[i].Load())
 			}
-			writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=%q,le=\"+Inf\"} %d\n", ns, h.count.Load())
-			writeFmt(w, "cellhive_capture_ensure_seconds_sum{ns=%q} %g\n", ns, float64(h.micros.Load())/1e6)
-			writeFmt(w, "cellhive_capture_ensure_seconds_count{ns=%q} %d\n", ns, h.count.Load())
+			writeFmt(w, "cellhive_capture_ensure_seconds_bucket{ns=\"%s\",le=\"+Inf\"} %d\n", escapeLabel(ns), h.count.Load())
+			writeFmt(w, "cellhive_capture_ensure_seconds_sum{ns=\"%s\"} %g\n", escapeLabel(ns), float64(h.micros.Load())/1e6)
+			writeFmt(w, "cellhive_capture_ensure_seconds_count{ns=\"%s\"} %d\n", escapeLabel(ns), h.count.Load())
 		}
 	}
 	{
@@ -893,7 +893,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		for _, k := range keys {
 			ns, mode, _ := strings.Cut(k, "|")
 			v, _ := s.ensureModes.Load(k)
-			writeFmt(w, "cellhive_capture_ensure_total{ns=%q,mode=%q} %d\n", ns, mode, v.(*atomic.Int64).Load())
+			writeFmt(w, "cellhive_capture_ensure_total{ns=\"%s\",mode=\"%s\"} %d\n", escapeLabel(ns), escapeLabel(mode), v.(*atomic.Int64).Load())
 		}
 	}
 	// Owner lifecycle (ADR-165).
@@ -912,7 +912,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			case "blocked":
 				v = st["takeover_blocked"]
 			}
-			writeFmt(w, "cellhive_takeover_total{outcome=%q} %d\n", o, v)
+			writeFmt(w, "cellhive_takeover_total{outcome=\"%s\"} %d\n", escapeLabel(o), v)
 		}
 	}
 	writeFmt(w, "# TYPE cellhive_route_projection_version gauge\n")
@@ -942,7 +942,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		writeFmt(w, "# TYPE cellhive_waker_fires_total counter\n")
 		for _, k := range keys {
 			kind, outcome, _ := strings.Cut(k, "|")
-			writeFmt(w, "cellhive_waker_fires_total{kind=%q,outcome=%q} %d\n", kind, outcome, fs[k])
+			writeFmt(w, "cellhive_waker_fires_total{kind=\"%s\",outcome=\"%s\"} %d\n", escapeLabel(kind), escapeLabel(outcome), fs[k])
 		}
 	}
 }

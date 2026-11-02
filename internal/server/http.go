@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -20,6 +21,30 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 
 func writeFmt(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
+}
+
+// escapeLabel escapes a Prometheus text-format label value. The format only
+// defines \\, \" and \n; Go's %q additionally emits \t/\xNN/\uNNNN, which a
+// scraper rejects, so label values must go through this instead.
+func escapeLabel(v string) string {
+	if !strings.ContainsAny(v, "\\\"\n") {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v) + 8)
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteByte(v[i])
+		}
+	}
+	return b.String()
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {

@@ -2,6 +2,15 @@
 
 ## 指标（Prometheus 文本；各服务独立暴露）
 
+> 格式：Prometheus text exposition **0.0.4**（`content-type: text/plain; version=0.0.4`），手写渲染。标签值只按规范转义 `\`、`"`、换行（`escapeLabel`）；**不要**用 Go `%q`（会产出 `\t`/`\xNN`/`\uNNNN`，抓取端拒绝）。histogram 用累计桶 + `le="+Inf"` + `_sum`/`_count`。新增指标先在此登记名称与数据源。
+
+**查询指标名与标签键**
+
+- 直接抓取：`curl -s http://127.0.0.1:7001/metrics`（cell-agent；do-supervisor 用 `:18901`，user-runtime ingress 用 `CELLHIVE_INGRESS_ADMIN_PORT`）。每行形如 `cellhive_binding_calls_total{ns="acme",kind="kv",outcome="ok"} 1`。
+- 只列指标名：`curl -s http://127.0.0.1:7001/metrics | sed -n 's/^\([a-zA-Z_:][a-zA-Z0-9_:]*\).*/\1/p' | sort -u`
+- 列某个 family 的标签组合：Prometheus `GET /api/v1/series?match[]=cellhive_binding_calls_total`，或 PromQL `count by (__name__) ({__name__=~"cellhive_.*"})`。
+- **代码内部的聚合键**不是暴露格式：`bindingCalls` 为 `ns|kind|outcome`，`ensureModes` 为 `ns|mode`，waker 为 `kind|outcome`；只在渲染时拆成标签。
+
 ### cell-agent `/metrics`（**代码实况**，ADR-157 对齐）
 
 | 指标 | 类型 | 说明 |
@@ -106,4 +115,4 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - `cellhive_do_restore_seconds` p99（`rate(_sum)/rate(_count)`）持续升高；
 - `cellhive_list_calls_total` > 0（回归热路径禁 List）。
 
-_最后更新：2026-09-23_
+_最后更新：2026-11-02_

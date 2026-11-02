@@ -2,6 +2,15 @@
 
 ## Metrics (Prometheus text; exposed independently by each service)
 
+> Format: Prometheus text exposition **0.0.4** (`content-type: text/plain; version=0.0.4`), rendered by hand. Label values escape only `\`, `"`, and newline (`escapeLabel`); do **not** use Go `%q` (it emits `\t`/`\xNN`/`\uNNNN`, which scrapers reject). Histograms use cumulative buckets + `le="+Inf"` + `_sum`/`_count`. Register new metric names and data sources here first.
+
+**Querying metric names and label keys**
+
+- Scrape directly: `curl -s http://127.0.0.1:7001/metrics` (cell-agent; do-supervisor uses `:18901`, the user-runtime ingress uses `CELLHIVE_INGRESS_ADMIN_PORT`). Each sample looks like `cellhive_binding_calls_total{ns="acme",kind="kv",outcome="ok"} 1`.
+- List names only: `curl -s http://127.0.0.1:7001/metrics | sed -n 's/^\([a-zA-Z_:][a-zA-Z0-9_:]*\).*/\1/p' | sort -u`
+- List a family's label sets: Prometheus `GET /api/v1/series?match[]=cellhive_binding_calls_total`, or PromQL `count by (__name__) ({__name__=~"cellhive_.*"})`.
+- **Internal aggregation keys** are not the exposed format: `bindingCalls` is `ns|kind|outcome`, `ensureModes` is `ns|mode`, the waker is `kind|outcome`; they are split into labels only when rendered.
+
 ### cell-agent `/metrics` (**current code state**, aligned with ADR-157)
 
 | Metric | Type | Description |
@@ -105,4 +114,4 @@ Overview: aligned with standard **OpenTelemetry OTLP/HTTP**: CellHive does not s
 - `cellhive_do_restore_seconds` p99 (`rate(_sum)/rate(_count)`) continuously increasing;
 - `cellhive_list_calls_total` > 0 (regression of the hot-path List prohibition).
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-11-02_
