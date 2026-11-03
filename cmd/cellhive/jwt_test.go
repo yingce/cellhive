@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -54,14 +53,17 @@ func TestJWTAdminRequests(t *testing.T) {
 
 func TestJWTTokenCLI(t *testing.T) {
 	jwtCLIEnv(t)
-	id := "00112233445566778899aabbccddeeff"
+	id := "acme*"
+	t.Setenv("CELLHIVE_ROOT_KEY", "")
+	t.Setenv("CELLHIVE_ALLOW_INSECURE_DEFAULTS", "")
+	t.Setenv("CELLHIVE_ADMIN_URL", "://no-server")
 	key := make([]byte, 32)
 	encoded := base64.RawURLEncoding.EncodeToString(key)
 	for _, tc := range []struct {
 		args []string
 		typ  string
 	}{
-		{[]string{"--ns", "acme,team-*"}, "namespace"},
+		{[]string{"--ns", "acme,acme-team*"}, "namespace"},
 		{[]string{"--ns", "acme", "--kind", "kv", "--name", "cache"}, "binding"},
 	} {
 		args := append([]string{"token", "--issuer", id, "--key", encoded, "--ttl", "5m"}, tc.args...)
@@ -80,6 +82,13 @@ func TestJWTTokenCLI(t *testing.T) {
 		{"--issuer", id, "--key", "YQ"},
 		{"--issuer", id, "--key", encoded + "="},
 		{"--issuer", id, "--key", encoded, "--ttl", "0s"},
+		{"--issuer", id, "--key", encoded, "--ttl", "24h1s"},
+		{"--issuer", id, "--key", encoded, "--ttl", "1.5s"},
+		{"--issuer", id, "--key", encoded, "--ns", "*"},
+		{"--issuer", id, "--key", encoded, "--ns", "ac*"},
+		{"--issuer", id, "--key", encoded, "--ns", "acme,other"},
+		{"--issuer", "acme", "--key", encoded, "--ns", "acme*"},
+		{"--issuer", "ac**", "--key", encoded},
 		{"--issuer", id, "--key", encoded, "--kind", "kv"},
 		{"--issuer", id, "--key", encoded, "--kind", "kv", "--name", "cache", "--ns", "acme*"},
 	} {
@@ -92,52 +101,52 @@ func TestJWTTokenCLI(t *testing.T) {
 func TestJWTBindingMintRequiresExactResource(t *testing.T) {
 	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	for _, scope := range [][2]string{{"*", "CACHE"}, {"kv", "*"}, {"kv", "CACHE*"}} {
-		if _, err := mintScopeToken("vwork-42", scope[0], scope[1], "00112233445566778899aabbccddeeff", time.Minute, key); err == nil {
+		if _, err := mintScopeToken("vwork-42", scope[0], scope[1], "vwork-*", time.Minute, key); err == nil {
 			t.Fatalf("wildcard binding %v accepted; use namespace token for all-business access", scope)
 		}
 	}
 }
 
-func TestJWTIssuerCommands(t *testing.T) {
+func TestJWTIssuerCredentialsOffline(t *testing.T) {
 	jwtCLIEnv(t)
-	id := "00112233445566778899aabbccddeeff"
-	var method, path string
-	var body map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		method, path = r.Method, r.URL.Path
-		body = nil
-		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&body)
-		}
-		w.Write([]byte(`{"issuer":{"id":"` + id + `"},"key":"secret"}`))
-	}))
-	defer srv.Close()
-	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	for _, tc := range []struct {
-		args         []string
-		method, path string
-	}{
-		{[]string{"issuer", "create", "vwork", "--ns", "vwork-*,shared", "--max-token-ttl", "1h"}, "POST", "/v1/control/issuers"},
-		{[]string{"issuer", "list"}, "GET", "/v1/control/issuers"},
-		{[]string{"issuer", "get", id}, "GET", "/v1/control/issuers/" + id},
-		{[]string{"issuer", "disable", id}, "PATCH", "/v1/control/issuers/" + id},
-		{[]string{"issuer", "delete", id}, "DELETE", "/v1/control/issuers/" + id},
-	} {
-		if _, _, err := executeRoot(t, tc.args...); err != nil {
+	t.Setenv("CELLHIVE_ADMIN_URL", "://no-server")
+	for _, pattern := range []string{"acme", "acme*", "*"} {
+		out, _, err := executeRoot(t, "creds", "issuer", pattern)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if method != tc.method || path != tc.path {
-			t.Fatalf("request = %s %s", method, path)
+		key, err := (config.Config{RootKey: config.LoadRootKey()}).JWTKey("issuer/" + pattern)
+		if err != nil || strings.TrimSpace(out) != base64.RawURLEncoding.EncodeToString(key) {
+			t.Fatalf("issuer key = %q, error %v", out, err)
 		}
-		if method == "POST" && (body["name"] != "vwork" || body["max_token_ttl_seconds"] != float64(3600) || len(body["namespaces"].([]any)) != 2) {
-			t.Fatalf("create body = %#v", body)
+		token, _, err := executeRoot(t, "token", "--issuer", pattern, "--key", strings.TrimSpace(out), "--ns", "acme", "--ttl", "24h")
+		if err != nil {
+			t.Fatal(err)
 		}
-		if method == "PATCH" && body["enabled"] != false {
-			t.Fatalf("disable body = %#v", body)
+		kid, claims, err := bearertoken.Verify(key, strings.TrimSpace(token), time.Now())
+		if err != nil || kid != "issuer/"+pattern || claims.ExpiresAt-claims.IssuedAt != 86400 {
+			t.Fatalf("offline JWT = %s %+v %v", kid, claims, err)
 		}
 	}
-	if _, _, err := executeRoot(t, "creds", "issuer", "vwork"); err == nil {
-		t.Fatal("unregistered name-derived issuer allowed")
+	for _, pattern := range []string{"", "a*b", "a**", "__system", "a/b", "a,b", "a b", ".."} {
+		if _, _, err := executeRoot(t, "creds", "issuer", pattern); err == nil {
+			t.Errorf("accepted invalid issuer %q", pattern)
+		}
+	}
+	t.Setenv("CELLHIVE_ROOT_KEY", "")
+	t.Setenv("CELLHIVE_ALLOW_INSECURE_DEFAULTS", "")
+	if _, _, err := executeRoot(t, "creds", "issuer", "acme"); err == nil {
+		t.Fatal("issuer key issued without root")
+	}
+}
+
+func TestJWTIssuerCRUDRemoved(t *testing.T) {
+	jwtCLIEnv(t)
+	t.Setenv("CELLHIVE_ADMIN_URL", "://no-server")
+	for _, verb := range []string{"create", "list", "get", "disable", "delete"} {
+		if _, _, err := executeRoot(t, "issuer", verb); err == nil || !strings.Contains(err.Error(), "creds issuer") {
+			t.Errorf("issuer %s must direct users to local credentials, got %v", verb, err)
+		}
 	}
 }
 
@@ -173,7 +182,7 @@ func TestJWTExplicitCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issuerToken, err := mintScopeToken("acme", "", "", "00112233445566778899aabbccddeeff", time.Minute, base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	issuerToken, err := mintScopeToken("acme", "", "", "acme", time.Minute, base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
 		t.Fatal(err)
 	}

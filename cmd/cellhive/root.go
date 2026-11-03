@@ -59,7 +59,12 @@ func newRoot() *cobra.Command {
 		newTailCommand(),
 
 		newCredsCommand(),
-		newIssuerCommand(),
+		&cobra.Command{
+			Use: "issuer", Hidden: true, DisableFlagParsing: true,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return fmt.Errorf("issuer CRUD is removed; use cellhive creds issuer <namespace-pattern> for local key derivation and cellhive token --issuer <namespace-pattern> --key <key> --ns <namespaces>; see docs/decisions.md")
+			},
+		},
 		newTokenCommand(),
 		newStatusCommand(),
 		newCapacityCommand(),

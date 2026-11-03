@@ -83,7 +83,7 @@
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
 - **原版 Wrangler API 兼容**：管理员端提供 Cloudflare API 形状的 `PUT /client/v4/accounts/:account_id/workers/scripts/:script_name/content`，并兼容 **legacy `PUT .../workers/scripts/{script_name}`**（Wrangler 在存在 migrations/DO/containers 等条件时走旧上传路径）。上传接受原版 Wrangler 传递的 CellHive Bearer JWT 与 multipart（`metadata` + 主模块）；`migrations` 同时接受 array 和 `{new_tag, steps}` 两种形状，`assets.config.run_worker_first` 同时接受 bool 和路径数组（数组不再被误判为 `invalid_multipart`）。官方 `versions upload` / `versions secret put` 支持 upload-only，显式 deployment 才切换 active；普通 PUT script 仍执行原子发布。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name`、`/versions` 和 `/deployments` 已提供真实查询/激活语义。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<namespaceJWT 或 bootstrapadminJWT>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>`。
-- **Wrangler 接入（管理员监听 :8082）**：Cloudflare 兼容路由（`/client/v4/**`）与原生控制面共用 `CELLHIVE_ADMIN_ADDR`，不单独开端口。ADR-304 使用已注册且启用的 issuer 签发的 HS256 JWT，`type=namespace`、`ns` 为授权 namespace 模式数组、`aud=cellhive`；服务端校验 issuer 上限、有效期及撤销状态。可信运维也可使用短期 bootstrap admin JWT：
+- **Wrangler 接入（管理员监听 :8082）**：Cloudflare 兼容路由（`/client/v4/**`）与原生控制面共用 `CELLHIVE_ADMIN_ADDR`。ADR-304 无状态修订使用 `kid=issuer/<pattern>` HS256 JWT，`type=namespace`、`ns` 模式数组、`aud=cellhive`；校验精确/前缀 `*`/`*` 上限、固定最大86400秒和有效期，无 issuer/namespaces 注册表授权。恰好32位十六进制旧 ID 拒绝且无回退，无即时 issuer 撤销。修订实施与验收中，未部署，旧有状态测试不证明本次通过。可信运维也可使用短期全局 bootstrap admin JWT：
   ```
   CLOUDFLARE_API_BASE_URL=https://<admin-host>/client/v4
   CLOUDFLARE_API_TOKEN=<namespaceJWT 或 bootstrapadminJWT>

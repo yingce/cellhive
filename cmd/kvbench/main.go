@@ -46,6 +46,8 @@ func main() {
 	bytesz := flag.Int("bytes", 64, "PUT value bytes")
 	verifyGet := flag.Bool("verify-get", false, "validate every GET body equals -bytes copies of x")
 	scopeToken := flag.String("scope-token", "", "binding JWT sent as Authorization Bearer")
+	issuer := flag.String("issuer", "", "issuer namespace pattern; mint a fresh binding JWT per request")
+	issuerKey := flag.String("issuer-key", "", "canonical raw base64url 32-byte issuer signing key; requires -issuer")
 	scopeSecret := flag.String("scope-secret", config.DeriveCredentials(config.LoadRootKey()).Binding, "canonical base64url token/scope signing key; mint a fresh JWT per request")
 	warm := flag.Int("warm", 100, "warmup requests")
 	printToken := flag.Bool("print-token", false, "mint a scoped token for -ns and print it, then exit")
@@ -74,6 +76,19 @@ func main() {
 		tokens[i] = *scopeToken
 	}
 	cfg := conf{addr: *addr, nsList: nsList, tokens: tokens, mode: *mode, keys: *keys, signingKey: *scopeSecret, kind: kind, name: name}
+	if *issuer != "" || *issuerKey != "" {
+		if *issuer == "" || *issuerKey == "" || *scopeToken != "" {
+			fmt.Fprintln(os.Stderr, "-issuer and -issuer-key are required together and cannot use -scope-token")
+			os.Exit(2)
+		}
+		cfg.issuer, cfg.signingKey = *issuer, *issuerKey
+		for i := range nsList {
+			if _, err := cfg.authorization(i); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+		}
+	}
 	if *printToken {
 		token, err := cfg.authorization(0)
 		if err != nil {
@@ -109,6 +124,7 @@ func main() {
 }
 
 type conf struct {
+	issuer                             string
 	addr, mode, signingKey, kind, name string
 	nsList                             []string
 	tokens                             []string
@@ -118,6 +134,13 @@ type conf struct {
 }
 
 func (c conf) authorization(idx int) (string, error) {
+	kid := "token/scope"
+	if c.issuer != "" {
+		if c.tokens[idx] != "" || !bearertoken.Allows([]string{c.issuer}, c.nsList[idx]) {
+			return "", fmt.Errorf("issuer mode requires a fresh JWT and an exact namespace within its ceiling")
+		}
+		kid = "issuer/" + c.issuer
+	}
 	if c.tokens[idx] != "" {
 		return c.tokens[idx], nil
 	}
@@ -126,7 +149,7 @@ func (c conf) authorization(idx int) (string, error) {
 		return "", err
 	}
 	now := time.Now().Unix()
-	return bearertoken.Mint(key, "token/scope", bearertoken.Claims{Ver: 1, Type: "binding", Subject: "kvbench", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 300, Namespace: c.nsList[idx], Kind: c.kind, Name: c.name})
+	return bearertoken.Mint(key, kid, bearertoken.Claims{Ver: 1, Type: "binding", Subject: "kvbench", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 300, Namespace: c.nsList[idx], Kind: c.kind, Name: c.name})
 }
 
 func run(client *http.Client, cfg conf, conc, n int, dur time.Duration) result {

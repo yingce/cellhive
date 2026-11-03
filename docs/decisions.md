@@ -760,6 +760,8 @@ stock workerd Tail 事件入站后，cell-agent 除保留有界 Tail 事件外�
 
 ## ADR-214 Wrangler Tail 使用限定范围的短期流凭据（2026-10-19）
 
+> 历史记录：会话签名域与父授权契约现由 ADR-304 无状态修订替代；用途 key 隔离，绑定父 pattern/namespace/exp，Tail 每500ms检查到期，无 issuer 记录查询。下文保留当时实现说明。
+
 Tail session 创建仍用管理员鉴权；返回的 WebSocket URL 仅包含 10 分钟有效、按 namespace/worker/session 限定的 HMAC 凭据，不再包含 AdminToken。凭据用共享 `ScopeSecret` 派生独立 issuer key，内含搜索条件，因此任一 cell-agent 均可校验，不依赖创建节点的内存 session 表；过期、错 namespace/worker/session 拒绝。DELETE 是幂等的客户端生命周期结束信号，已签发凭据在到期前不会跨节点即时吊销。Tail 日志 ring 仍在各 cell-agent 本地，跨节点凭据校验不等于全节点日志聚合。
 
 ## ADR-213 Worker CPU 参数先兼容、执行限额后置（2026-10-19）
@@ -3390,6 +3392,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 ## ADR-181 凭据收敛与能力令牌委派（a+b 已实现，收敛设计）✅部分实现
 
+> 历史记录：旧 scoped token/`iss` 与注册表建议已由 ADR-304 替代。现行无状态 issuer 使用 namespace pattern kid 和独立 JWT key 域，明确接受 root 轮换作为泄露 key 的止损方式，不实现 per-issuer kill switch。下文保留原始决策及当时测试，不作为本次修订验收证据。
+
 > 状态：**凭据收敛的 (a)+(b) 已实现（2026-09-20）；8 凭据收敛/非对称（档 1–3）仍为设计，
 > 未实现**。本 ADR 记录收敛设计与已落地部分。
 
@@ -3664,38 +3668,43 @@ Uploader 同时导出 Enqueue 次数/耗时及队列满同步回退次数/耗时
 
 节点发现底层补充：ProviderBucket.List 对物理 authority window 的逻辑解析使用最多8个并发读取，保留最新窗口折叠、tombstone隐藏、GC竞争后的重新解析与最终排序。任一读取失败或context取消都不返回部分列表；不改变热路径禁止List的约束。避免历史节点逐个串行解析耗尽后台发现15秒预算。
 
-## ADR-304 Bearer JWT 与持久化 issuer 授权（2026-11-03，已实现并通过本地验收，未部署）
+## ADR-304 Bearer JWT 与无状态 issuer 授权（2026-11-03，无状态修订实施与验收中，未部署）
 
-本决策已在 CellHive 与 VWork 源码实现并通过本地验收，尚未部署，不表示线上旧凭据已切换。替代 ADR-074/075/131/137/181 中的客户端静态 token、自定义鉴权 header、OIDC/JWKS 验签及无记录 delegated issuer 规则；保留角色密钥域隔离、控制 cell 所有权、RPO=0、ADR-302 的固定 binding 映射与生命周期撤销语义。
+本次无状态修订实施与验收中，未部署；此前有状态 issuer 的测试不证明本次修订通过。替代 ADR-074/075/131/137/181 中的客户端静态 token、自定义鉴权 header、OIDC/JWKS 验签及有状态 issuer 规则；保留角色密钥域隔离、控制 cell 所有权、RPO=0、ADR-302 的固定 binding 映射与生命周期撤销语义。issuer 授权无状态，不访问 control cell 或 namespaces 注册表。
+
+本次修订的新增验证证据（2026-11-03）：`make build`、`make vet`、`make test` 通过；bearertoken/server/CLI 完整 race 复跑通过（server 58.395 秒），覆盖 Control 不可用时验签、namespace 上限、旧 ID 拒绝和无状态会话。四项真实 Wrangler 4.133.0 本地兼容测试通过（26.345 秒）。VWork Platform 1707 通过/19 门控跳过、Runtime 370 通过/1 忽略、preflight 30 通过、TypeScript 检查通过。独立审查未发现阻断问题；本次未执行 VWork Docker 联调、未更新运行实例，不能沿用此前有状态镜像的部署或联调结果。
 
 ### 凭据和授权
 
 - 普通 HTTP 凭据统一为 `Authorization: Bearer <JWT>`；固定 HS256，JWT header 必须是 `alg=HS256, typ=JWT, kid=<key-id>`。拒绝未知算法、未知 token 类型、缺失/无效有效期、歧义 header 和签名不匹配；不保留旧静态 token 或旧 admin/scope header 回退。OIDC 不再是 CellHive 的认证路径；vwork 自身登录不变。
 - token 公共 claims 为 `ver=1, type, sub, aud=cellhive, iat, exp`，时间为 Unix 秒。namespace token 的 `ns` 为非空字符串数组；binding token 使用具体 namespace 和 kind/name，并保留平台签发的 worker/version/resource 固定映射字段。类型/字段不能通过 HS256 验签即越权：不同 key 域允许签发的类型由服务端固定。
-- `namespace` token 拥有授权 namespace 的全部业务权限，包括原生发布、CF API、资源数据、secret、日志和 namespace 监控；不引入 actions、control/metrics-reader 角色。`binding` token 是进一步收窄的能力，只允许具体 binding；不得用于部署或 issuer 管理。namespace token 调 binding 时仍须明确目标 namespace/资源并经过注册表解析和 resource fence。
+- `namespace` token 拥有授权 namespace 的全部业务权限，包括原生发布、CF API、资源数据、secret、日志和 namespace 监控；不引入 actions、control/metrics-reader 角色。`binding` token 是进一步收窄的能力，只允许具体 binding，不得用于部署。namespace token 调 binding 时仍须明确目标 namespace/资源并经过资源注册表解析和 resource fence。
 - namespace 范围仅支持精确值、末尾 `*` 前缀和单独 `*`。key 上限、token 范围、本次请求范围依次收窄；越过上限整张 token 拒绝，不静默截断。列表、日志、指标和跨资源引用执行同样限制，平台级指标不能按无 ns 标签假装归属某租户。
 - 一个 `vwork-*` issuer key 可以签整个前缀、单 App 或受限 binding token，不强制 Platform/runtime 使用两把 key。签名 key 不随业务请求发送；只有平台能派生独立 issuer key，持有 JWT 不能再签发。
 
-### Issuer 状态与撤销（无 key_version）
+### Issuer 标识与撤销（无 key_version）
 
-- issuer 元数据保存在既有 `__platform__/__control__/main` SQLite cell，不新增控制分片或服务。记录包含随机不可复用 ID、显示名称、namespace 上限、enabled、max token TTL、创建/更新时间和 deleted 时间；不存明文 key。不做 `key_version`，不记录每张 JWT，不做 jti 撤销名单。
-- `kid=issuer/<immutable-id>` 按不可变 ID 查记录。显示名称（例如 vwork-*）不作为重新创建时复用的签名身份。派生 key 使用独立 JWT 域标签和不可变 ID；同名重建必须分配新 ID，旧 token 不得恢复有效。
-- 创建、禁用、删除记录都是控制面捕获写，成功必须满足现有持久化确认条件。删除为不可恢复的软删除；重新创建是新身份。管理接口不得允许调用者扩大自身 namespace 上限；初版由平台 bootstrap 管理凭据管理 issuer。
-- 每个 issuer JWT 必须验证记录存在且启用、未删除、有效期不超过记录 TTL、claims 不超过记录上限。禁止未知 issuer 回退为按名称派生 key。读取必须具有 owner 权威性，不直接信任非 owner 本地 SQLite。
-- 如实现正缓存，其权限有效期最多 5 秒，从权威读取开始计时；错误不得续期，过期失败必须拒绝。本地管理写失效缓存并阻止旧在途读回填；跨节点撤销最多为该缓存窗口。不得宣称即时全局撤销。没有缓存的路径直接权威点读。
+- issuer key 不依赖持久化记录。`kid=issuer/<pattern>` 是公开的、规范化的权限上限标识；允许精确 namespace、末尾 `*` 前缀和单独 `*`。派生 key 使用独立 JWT 域标签和完整 `kid`，`kid` 不是密钥本身。
+- 验签只需 root 派生 key、token claims 和 namespace 规则，不访问 control cell。token 的 `ns` 必须是 `kid` 上限的子集；未知格式、前缀越界或签名不匹配直接拒绝。
+- 删除 issuer CRUD 与内部 issuer-info 接口，不做 enabled/deleted 记录、`key_version`、每张 JWT 记录或 jti 撤销名单。无即时单 issuer 撤销；已签 JWT 靠 exp 到期，泄露 key 可持续签发新 JWT，必须轮换 root 并重新分发派生 key 才能止损。
+- 历史 issuer 表数据可保留但不参与认证，不做破坏性迁移；namespaces 注册表也不决定 issuer 授权。资源注册、生命周期和持久化契约不变。
+- 每个 issuer JWT 必须验证 `kid` 格式、固定 `0 < exp-iat <= 86400` 秒上限、claims 不超过 `kid` 上限；恰好 32 位十六进制旧 issuer ID 拒绝，无兼容回退。无 issuer 缓存、owner 查询或持久化检查。
+- key = `HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)`；`cellhive creds issuer 'vwork-*'` 本地从 root 派生原始 32 字节 key 的无填充 base64url。可信签发方运行 `cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m`；同一 key 可签精确 binding，默认 TTL 5m。secret 加密与 Hyperdrive 非 HTTP ScopeSecret 派生不变。
 
 ### Bootstrap、内部调用与协议会话
 
-- root_key 只在受信任的平台派生环境中使用。bootstrap 使用 root 派生的 `token/admin` key 签短期 `admin` JWT，不把 key 本身当 Bearer；该固定系统身份用于首次创建 issuer 和故障恢复，不伪造一个可删除的业务 issuer。业务 issuer 无记录即拒绝的规则无例外。
-- internal/peer/dispatch/log 保留独立派生 key，用途由已验签 kid 限定，不配置多份长期密钥、不重复 role claim。只向调用组件交付所需 JWT，不扩散 root_key。内部权威 issuer 点查使用独立内部认证，不能递归依赖业务 issuer 查询。
+- root_key 只在受信任的平台派生环境中使用。bootstrap 使用 root 派生的 `token/admin` key 签短期全局 `admin` JWT，不把 key 本身当 Bearer；无需创建 issuer 记录。
+- internal/peer/dispatch/log 保留独立派生 key，用途由已验签 kid 限定，不配置多份长期密钥、不重复 role claim。只向调用组件交付所需 JWT，不扩散 root_key；无内部 issuer 查询。
 - namespace/CF 操作仍走 admin 监听（默认 :8082），owner 转发保留原始授权并在目标重新验证。CF 数据代理或进程内 bridge 不能替换成全权静态凭据后丢失 namespace 上限。原生 :7001 内部控制镜像仅允许指定内部身份。
-- assets/Tail 等会话保留客户端协议所需的响应和传输形式；签名密钥与旧 AdminToken 解耦，使用用途隔离的派生 key。会话授权不能扩大原始权限，issuer 撤销后的派生会话也必须失效或明确受同一有界撤销窗口约束。固定版本 binding 继续执行 ADR-302 授权和 resource fence，不因换 JWT 绕过。
-- 不做旧 header 双接受过渡；必须同步迁移 Go、JS facades、CLI、vwork TS/Rust 和部署/采集配置。运行中长期组件必须能更新 JWT，不能把短期 token 当永久启动密码。真实 Wrangler、owner 转发、禁用/重建、namespace 越权和监控过滤验证完成前不宣称切换完成。
+- assets/Tail 等会话保留客户端协议所需的响应和传输形式；使用用途隔离派生 key，无状态绑定父 issuer pattern、目标 namespace 与父有效期，不扩大权限或超过父 exp。固定版本 binding 继续执行 ADR-302 授权和 resource fence。
+- 不做旧 header 双接受过渡；必须同步迁移 Go、JS facades、CLI、vwork TS/Rust 和部署/采集配置。长期组件必须更新 JWT。真实 Wrangler、owner 转发、无注册表认证、旧 ID 拒绝、namespace 越权和监控过滤验证完成前不宣称切换完成。
 
-实施边界补充：精确声明 `ns=["*"]` 的 namespace token 允许既有全局运行状态、容量、全量监控与 GC 操作；具体 namespace/前缀不能借查询参数升级这些权限。issuer 注册表管理仍仅允许 bootstrap admin，防止租户自行扩权。私网 :7001 `/metrics` 保留 ADR-178 免凭据抓取例外（不对外暴露）；业务监控 API `/v1/control/metrics` 必须 Bearer 授权并过滤 namespace，且排除 `platform`、`other` 等无法归属租户的聚合序列。不要求 Prometheus/Vector 持有签名 key 或新增刷新代理。新 issuer 发起原生部署时，上传的 bundle SHA 需持久记录 namespace 授权关联；物理对象仍全局内容寻址去重，已知其他 namespace 的 SHA 不等于有权引用。
+实施边界补充：`issuer/*` 签发且显式声明 `ns=["*"]` 的 namespace token 允许全部全局业务，包括既有全局运行状态、容量、全量监控与 GC；具体 namespace/前缀不能借查询参数升级。`token/admin` 保留全局 bootstrap 权限；issuer CRUD 已移除。私网 :7001 `/metrics` 保留 ADR-178 免凭据抓取例外；业务监控 API `/v1/control/metrics` 必须 Bearer 授权并过滤 namespace，排除 `platform`、`other` 等无法归属租户的序列。不要求 Prometheus/Vector 持有签名 key 或新增刷新代理。原生部署上传的 bundle SHA 仍需持久记录 namespace 授权关联；物理对象全局去重，已知 SHA 不等于有权引用。
 
-DO 直连票据使用 `token/do-ticket` 用途隔离的 JWT，除 namespace/worker/storage-class/shard 外，还签入 class、bundle SHA、storage incarnation、版本及执行 limits。host 在任何对象索引副作用或转发前校验这些身份，不接受票据调用 alarm 或覆盖兼容配置；limits 以签名内容为准。票据最长 30 秒且不超过父调用 JWT 的剩余有效期，签发时重新验证父 issuer；host 不逐请求回查 issuer，因此撤销对已发出的直连能力有最多 30 秒窗口，不能宣称即时取消。普通 issuer API 仍逐请求权威点读，无正授权缓存；Tail 流每 500ms 重检父 issuer，assets 上传在读完请求体后再次检查。
+DO 直连票据使用 `token/do-ticket` 用途隔离的 JWT，除 namespace/worker/storage-class/shard 外，还签入 class、bundle SHA、storage incarnation、版本及执行 limits。host 在任何对象索引副作用或转发前校验这些身份，不接受票据调用 alarm 或覆盖兼容配置；limits 以签名内容为准。票据最长 30 秒且不超过父调用 JWT 的剩余有效期，签发时无状态重新验证父 JWT 的签名、pattern 与有效期；已发票据不承诺即时取消。Tail 流每 500ms 检查有效期而非 issuer 记录；assets 上传读完请求体后再次检查有效期与权限。
 
-Issuer 元数据上限：显示名称最多 256 UTF-8 字节，namespace 模式 1–64 项且每项最多 128 字节，按最长时间字段预留后的记录序列化最多 8192 字节，低于 owner 点查 16384 字节响应上限。验证错误返回 400、名称冲突 409、存储或捕获失败 503；本地提交但持久化确认失败返回 `outcome_unknown` 和 issuer ID，不交付 key、不宣称成功。bootstrap 操作者先权威查询；创建结果不明且没有拿到 key 时，确认删除成功后重新创建新 ID/key，不增加 key 恢复接口。
+本次验收须覆盖精确/前缀/全局 pattern、固定 86400 秒上限、旧 32 位十六进制 ID 拒绝、无 issuer/namespaces 注册表依赖、CLI 本地派生与跨语言签发、会话父上限及到期、全局业务和受限监控隔离。旧 metadata/CRUD/持久化确认测试不再是 issuer 授权验收门。
+
+以下保留历史有状态版本验收记录，不作为本次无状态修订的通过证据：
 
 本地验收：`make build`、`make vet`、全量 `make test`、`make js-test` 通过（后者包含 111 项 JS 测试与真实 workerd runtime 套件）；DO 票据收紧后重建镜像的完整 `runtime-baseline-e2e.sh` 输出 PASS，无跳过。真实 Wrangler 4.133.0 assets/control/vectorize 三项通过；VWork Docker publication/assets/issuer lifecycle 三项通过且无跳过。另通过 issuer/control/server race、元数据大小跨节点一致性及持久化确认失败注入。云 COS、k3d、MySQL 等外部环境脚本仅完成格式迁移与语法检查，未执行；不宣称已部署或完成生产切换。

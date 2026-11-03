@@ -16,7 +16,7 @@ import (
 var testKey = []byte("0123456789abcdef0123456789abcdef")
 var testNow = time.Unix(1700000000, 0)
 
-const issuerID = "issuer/0123456789abcdef0123456789abcdef"
+const issuerID = "issuer/*"
 
 func baseClaims() Claims {
 	return Claims{Ver: 1, Type: "admin", Subject: "bootstrap", Audience: "cellhive", IssuedAt: 1700000000, ExpiresAt: 1700000600}
@@ -116,7 +116,7 @@ func TestClaimsAndKeyDomains(t *testing.T) {
 	if _, err := Mint(testKey, "token/scope", c); err == nil {
 		t.Fatal("partial pin")
 	}
-	for _, kid := range []string{"", "token/../admin", "token/unknown", "issuer/name", "issuer/0123456789ABCDEF0123456789abcdef", issuerID + "/x"} {
+	for _, kid := range []string{"", "token/../admin", "token/unknown", "issuer/name/**", "issuer/0123456789ABCDEF0123456789abcdef", issuerID + "/x"} {
 		if _, err := DeriveKey(testKey, kid); err == nil {
 			t.Fatal(kid)
 		}
@@ -177,15 +177,19 @@ func TestStrictNamespaceJSON(t *testing.T) {
 
 func TestCrossClientBindingGolden(t *testing.T) {
 	// Node crypto vector shared with the TypeScript/Rust issuer implementations.
-	const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Imlzc3Vlci8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiJ9.eyJ2ZXIiOjEsInR5cGUiOiJiaW5kaW5nIiwic3ViIjoiZ29sZGVuIiwiYXVkIjoiY2VsbGhpdmUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MCwibnMiOiJ2d29yay00MiIsImtpbmQiOiJrdiIsIm5hbWUiOiJDQUNIRSJ9.u4LalcrCTsL_xfWoXcvxoWZYkpSdiCnILnT5QPUaWh8"
+	const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Imlzc3Vlci92d29yay0qIn0.eyJ2ZXIiOjEsInR5cGUiOiJiaW5kaW5nIiwic3ViIjoiZ29sZGVuIiwiYXVkIjoiY2VsbGhpdmUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MCwibnMiOiJ2d29yay00MiIsImtpbmQiOiJrdiIsIm5hbWUiOiJDQUNIRSJ9.9YpKF7yHSe8El1b-RNhajiIo2a1lR6b7MdQ7q54cqXk"
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
 	}
 	kid, c, err := Verify(key, token, testNow)
 	want := Claims{Ver: 1, Type: "binding", Subject: "golden", Audience: "cellhive", IssuedAt: 1700000000, ExpiresAt: 1700000060, Namespace: "vwork-42", Kind: "kv", Name: "CACHE"}
-	if err != nil || kid != "issuer/00112233445566778899aabbccddeeff" || !reflect.DeepEqual(c, want) {
+	if err != nil || kid != "issuer/vwork-*" || !reflect.DeepEqual(c, want) {
 		t.Fatalf("%s %+v %v", kid, c, err)
+	}
+	const retired = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Imlzc3Vlci8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiJ9.eyJ2ZXIiOjEsInR5cGUiOiJiaW5kaW5nIiwic3ViIjoiZ29sZGVuIiwiYXVkIjoiY2VsbGhpdmUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MCwibnMiOiJ2d29yay00MiIsImtpbmQiOiJrdiIsIm5hbWUiOiJDQUNIRSJ9.u4LalcrCTsL_xfWoXcvxoWZYkpSdiCnILnT5QPUaWh8"
+	if _, _, err := Verify(key, retired, testNow); err == nil {
+		t.Fatal("retired random-ID golden accepted")
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"cellhive/internal/control"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,14 +67,11 @@ func testRoleJWT(t *testing.T, role string) string {
 
 func testNamespaceJWT(t *testing.T, s *Server, sub string, ns ...string) string {
 	t.Helper()
-	if s.Control == nil {
-		s.Control = control.New(s.Store, nil)
+	ceiling := "*"
+	if len(ns) == 1 {
+		ceiling = ns[0]
 	}
-	issuer, err := s.Control.CreateIssuer(t.Context(), sub, ns, 3600, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Subject: sub, Namespaces: ns})
+	return jwtTestToken(t, s, "issuer/"+ceiling, bearertoken.Claims{Type: "namespace", Subject: sub, Namespaces: ns})
 }
 
 type jwtTraceTransport struct{ t *testing.T }
@@ -113,7 +109,7 @@ func TestJWTStatsOwnerPreservesCaller(t *testing.T) {
 	}
 }
 
-func TestJWTIssuerAuthoritativeOwnerAndRevocation(t *testing.T) {
+func TestJWTIssuerDoesNotDependOnControlOwner(t *testing.T) {
 	dir := t.TempDir()
 	a, om, hs := newControlForwardServer(t, dir, "issuer-a")
 	b, _, _ := newControlForwardServer(t, dir, "issuer-b")
@@ -121,50 +117,22 @@ func TestJWTIssuerAuthoritativeOwnerAndRevocation(t *testing.T) {
 	if _, err := om.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	issuer, err := a.Control.CreateIssuer(t.Context(), "client", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := jwtTestToken(t, a, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"acme"}})
+	token := jwtTestToken(t, a, "issuer/acme", bearertoken.Claims{Type: "namespace", Namespaces: []string{"acme"}})
 	request := httptest.NewRequest("GET", "/v1/control/apps", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
 	if _, ok := b.adminPrincipal(request); !ok {
-		t.Fatal("owner issuer not used")
-	}
-	if err := a.Control.SetIssuerEnabled(t.Context(), issuer.ID, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := b.adminPrincipal(request); ok {
-		t.Fatal("remote disable ignored")
-	}
-	if err := a.Control.DeleteIssuer(t.Context(), issuer.ID, "test"); err != nil {
-		t.Fatal(err)
-	}
-	recreated, err := a.Control.CreateIssuer(t.Context(), "client", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recreated.ID == issuer.ID {
-		t.Fatal("issuer identity reused")
-	}
-	if _, ok := b.adminPrincipal(request); ok {
-		t.Fatal("same name recreated old authority")
-	}
-	fresh := jwtTestToken(t, a, "issuer/"+recreated.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"acme"}})
-	request.Header.Set("Authorization", "Bearer "+fresh)
-	if _, ok := b.adminPrincipal(request); !ok {
-		t.Fatal("recreated issuer rejected")
+		t.Fatal("stateless issuer rejected")
 	}
 	hs.Close()
-	if _, ok := b.adminPrincipal(request); ok {
-		t.Fatal("owner failure accepted")
+	b.Control = nil
+	if _, ok := b.adminPrincipal(request); !ok {
+		t.Fatal("owner failure affected stateless authorization")
 	}
 }
 
-func TestJWTCloudflareBindingBridgeRetainsRevocation(t *testing.T) {
+func TestJWTCloudflareBindingBridgeRetainsSignatureBoundary(t *testing.T) {
 	s := newScopeServer(t)
 	token := testNamespaceJWT(t, s, "client", "acme")
-	kid, _ := bearertoken.PeekKeyID(token)
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -185,11 +153,9 @@ func TestJWTCloudflareBindingBridgeRetainsRevocation(t *testing.T) {
 	if w := call("GET", "/client/v4/accounts/other/storage/kv/namespaces/CACHE/values/key", ""); w.Code != 403 {
 		t.Fatalf("foreign bridge %d", w.Code)
 	}
-	if err := s.Control.SetIssuerEnabled(t.Context(), strings.TrimPrefix(kid, "issuer/"), false, "test"); err != nil {
-		t.Fatal(err)
-	}
+	token += "x"
 	if w := call("GET", base+"/CACHE/values/key", ""); w.Code != 401 {
-		t.Fatalf("revoked bridge %d", w.Code)
+		t.Fatalf("tampered bridge %d", w.Code)
 	}
 }
 
@@ -228,11 +194,7 @@ func TestJWTServiceBindingCannotChangeTarget(t *testing.T) {
 	if _, err := s.Control.Deploy(t.Context(), "acme", "web", control.DeploySpec{BundleSHA: "sha", Bindings: []control.Binding{{Type: "service", Name: "SVC", ID: "api"}}}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	issuer, err := s.Control.CreateIssuer(t.Context(), "binding", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kid := range []string{"token/scope", "issuer/" + issuer.ID} {
+	for _, kid := range []string{"token/scope", "issuer/acme"} {
 		token := jwtTestToken(t, s, kid, bearertoken.Claims{Type: "binding", Namespace: "acme", Kind: "service", Name: "SVC"})
 		for _, target := range []string{"api", "private"} {
 			r := httptest.NewRequest("POST", "/v1/service/fetch?ns=acme&worker="+target, nil)
@@ -266,92 +228,43 @@ func TestJWTNamespaceCannotReferenceForeignService(t *testing.T) {
 	}
 }
 
-func TestJWTIssuerRevocationAndCeiling(t *testing.T) {
+func TestJWTIssuerCeilingAndTTL(t *testing.T) {
 	s := newControlServer(t)
-	issuer, err := s.Control.CreateIssuer(t.Context(), "vwork", []string{"vwork-*"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"vwork-42"}})
+	token := jwtTestToken(t, s, "issuer/vwork-*", bearertoken.Claims{Type: "namespace", Namespaces: []string{"vwork-42"}})
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Authorization", "Bearer "+token)
 	if _, ok := s.adminPrincipal(r); !ok {
 		t.Fatal("active issuer rejected")
 	}
-	if err = s.Control.SetIssuerEnabled(t.Context(), issuer.ID, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := s.adminPrincipal(r); ok {
-		t.Fatal("disabled issuer accepted")
-	}
-	if err = s.Control.SetIssuerEnabled(t.Context(), issuer.ID, true, "test"); err != nil {
-		t.Fatal(err)
-	}
-	token = jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"*"}})
+	token = jwtTestToken(t, s, "issuer/vwork-*", bearertoken.Claims{Type: "namespace", Namespaces: []string{"*"}})
 	r.Header.Set("Authorization", "Bearer "+token)
 	if _, ok := s.adminPrincipal(r); ok {
 		t.Fatal("issuer ceiling bypassed")
 	}
-	token = jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"vwork-*"}, ExpiresAt: time.Now().Unix() + 121})
+	token = rawIssuerJWT(t, s, "issuer/vwork-*", "issuer/vwork-*", bearertoken.Claims{Type: "namespace", Namespaces: []string{"vwork-*"}, ExpiresAt: time.Now().Unix() + 86402})
 	r.Header.Set("Authorization", "Bearer "+token)
 	if _, ok := s.adminPrincipal(r); ok {
 		t.Fatal("issuer TTL bypassed")
 	}
 }
 
-func TestJWTIssuerRoutesBootstrapOnly(t *testing.T) {
+func TestJWTIssuerRoutesRemoved(t *testing.T) {
 	s := newControlServer(t)
-	token := jwtTestToken(t, s, "token/admin", bearertoken.Claims{Type: "admin"})
-	r := httptest.NewRequest("POST", "/v1/control/issuers", bytes.NewBufferString(`{"name":"vwork","namespaces":["vwork-*"],"max_token_ttl_seconds":120}`))
-	r.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	s.AdminHandler().ServeHTTP(w, r)
-	if w.Code != 201 {
-		t.Fatalf("create %d %s", w.Code, w.Body.String())
-	}
-	var created struct {
-		Issuer struct {
-			ID string `json:"id"`
-		} `json:"issuer"`
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.Key == "" || created.Issuer.ID == "" {
-		t.Fatalf("create response %s", w.Body.String())
-	}
-	for _, method := range []string{"GET", "PATCH", "DELETE", "GET"} {
-		body := ""
-		if method == "PATCH" {
-			body = `{"enabled":false}`
+	for _, token := range []string{testRoleJWT(t, "admin"), testNamespaceJWT(t, s, "global", "*")} {
+		for _, path := range []string{"/v1/control/issuers", "/v1/control/issuers/acme", "/v1/control/issuer-info?id=acme"} {
+			for _, method := range []string{"GET", "POST", "PATCH", "DELETE"} {
+				w := adminDo(t, s.AdminHandler(), method, path, token, `{}`)
+				if w.Code != 404 {
+					t.Fatalf("%s %s = %d %s", method, path, w.Code, w.Body.String())
+				}
+			}
 		}
-		r = httptest.NewRequest(method, "/v1/control/issuers/"+created.Issuer.ID, strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer "+token)
-		w = httptest.NewRecorder()
-		s.AdminHandler().ServeHTTP(w, r)
-		if w.Code != 200 || strings.Contains(w.Body.String(), `"key":`) {
-			t.Fatalf("%s %d %s", method, w.Code, w.Body.String())
-		}
-	}
-	issuer, err := s.Control.CreateIssuer(t.Context(), "all", []string{"*"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tenant := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"*"}})
-	r = httptest.NewRequest("GET", "/v1/control/issuers", nil)
-	r.Header.Set("Authorization", "Bearer "+tenant)
-	w = httptest.NewRecorder()
-	s.AdminHandler().ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatalf("namespace * managed issuer %d", w.Code)
 	}
 }
 
 func TestJWTHyperdrivePlatformStatusCannotUseNamespaceQuery(t *testing.T) {
 	s := newControlServer(t)
-	issuer, err := s.Control.CreateIssuer(t.Context(), "client", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"acme"}})
+	token := testNamespaceJWT(t, s, "client", "acme")
 	r := httptest.NewRequest("GET", "/v1/control/hyperdrive/proxy?namespace=acme", nil)
 	r.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -363,11 +276,7 @@ func TestJWTHyperdrivePlatformStatusCannotUseNamespaceQuery(t *testing.T) {
 
 func TestJWTNamespaceMetricsDoNotLeakPlatform(t *testing.T) {
 	s := newControlServer(t)
-	issuer, err := s.Control.CreateIssuer(t.Context(), "vwork", []string{"vwork-*"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"vwork-*"}})
+	token := testNamespaceJWT(t, s, "vwork", "vwork-*")
 	s.recordBindingCall("vwork-42", "kv", 200)
 	s.recordBindingCall("other", "kv", 200)
 	r := httptest.NewRequest("GET", "/v1/control/metrics", nil)
@@ -381,11 +290,7 @@ func TestJWTNamespaceMetricsDoNotLeakPlatform(t *testing.T) {
 
 func TestJWTNamespaceBindingRequiresRegistry(t *testing.T) {
 	s := newControlServer(t)
-	issuer, err := s.Control.CreateIssuer(t.Context(), "client", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Namespaces: []string{"acme"}})
+	token := testNamespaceJWT(t, s, "client", "acme")
 	check := func(ns string) int {
 		r := httptest.NewRequest("GET", "/v1/kv/get?ns="+ns+"&name=CACHE&key=k", nil)
 		r.Header.Set("Authorization", "Bearer "+token)

@@ -1,6 +1,6 @@
 # 配置与环境变量
 
-配置实现见 `internal/config/config.go`、runtime/CLI 入口。**ADR-304 已实现，本地验收通过，未部署**；DO ticket 授权收紧与完整 baseline 已通过，生产切换未完成。部署必须同步迁移，不提供旧 header 双接受过渡。
+配置实现见 `internal/config/config.go`、runtime/CLI 入口。**ADR-304 无状态 issuer 修订实施与验收中，未部署**；此前有状态测试不证明本次修订通过。部署必须同步迁移，不提供旧 header 双接受过渡。
 
 ## 解析规则
 
@@ -17,10 +17,10 @@
 
 ```
 JWT key = HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)
-kid = issuer/<immutable-id> or token/<purpose>
+kid = issuer/<pattern> or token/<purpose>
 ```
 
-普通 HTTP 仅 `Authorization: Bearer <HS256 JWT>`，默认 audience `cellhive`。`token/admin` 签 bootstrap admin JWT，不直接传 key；业务 issuer 必须有有效持久化记录。旧 `ScopeSecret` 派生保留给 Hyperdrive 非 HTTP 凭据，不用于 JWT；不要顺带重派生存量 secret 加密 key。长期组件必须刷新 JWT。
+普通 HTTP 仅 `Authorization: Bearer <HS256 JWT>`，默认 audience `cellhive`。`token/admin` 签全局 bootstrap admin JWT，不直接传 key；业务 issuer 无状态，以 kid pattern 为上限。旧 `ScopeSecret` 派生保留给 Hyperdrive 非 HTTP 凭据，不用于 JWT；不要顺带重派生存量 secret 加密 key。长期组件必须刷新 JWT。
 
 **迁移提醒**：ADR-136/137 删除或改名的变量（如 `CELLHIVE_TOKEN_*`、`CELLHIVE_S3_*`、`CELLHIVE_NS_RPS`、`CELLHIVE_*_MS`/`_S`）如果仍被设置，各组件启动时会打印 WARN 并给出替代名（`config.LegacyEnvWarnings`），不会静默生效。
 
@@ -62,7 +62,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_ROOT_KEY_FILE` | 空 | 根密钥**文件**路径（Docker/K8s secret 挂载；读取后 trim）。优先于 dev 回退、低于内联 `CELLHIVE_ROOT_KEY`；文件不可读/为空则**失败关闭**（ADR-150） |
 | `CELLHIVE_ALLOW_INSECURE_DEFAULTS` | `false` | 允许本地开发根（`DevRootKey`）。生产必须 false |
 
-`CELLHIVE_ADMIN_TOKEN` 静态覆盖与 `CELLHIVE_OIDC_*` 认证已从目标契约移除，不是兼容配置。issuer 上限和 `max token TTL <= 86400` 存控制 cell，不靠客户端环境声明；禁用/软删除 fail closed，同名重建新 ID。若有授权缓存最多 5 秒，也可初版不缓存。
+`CELLHIVE_ADMIN_TOKEN` 静态覆盖与 `CELLHIVE_OIDC_*` 认证已移除。issuer pattern 为精确/前缀 `*`/`*`，固定最大 TTL 86400 秒；恰好32位十六进制旧 ID 拒绝且无回退。无 issuer CRUD、owner/持久化检查或 namespaces 注册表授权，历史 issuer 表可保留惰性数据而不破坏性迁移。无即时单 issuer 撤销，只有 exp 到期/root 轮换；泄露 key 仍可持续签发，必须轮换 root 止损。
 
 ## 对象存储
 
@@ -290,9 +290,9 @@ CELLHIVE_CELL_IDLE=5m
 
 ## 测试 / CI（非运行时）
 
-ADR-304 已实现，本地验收含 DO ticket/完整 baseline 已通过，未部署。CLI 不读取 `CELLHIVE_ADMIN_JWT`；`CELLHIVE_ADMIN_TOKEN` 仅为 CLI JWT 输入别名，不是服务端静态覆盖或旧 header 回退。issuer create 的 `--max-token-ttl` 必填、无默认、最大24h；token `--ttl` 默认5m，见 [控制面示例](control-plane.md)。当前 issuer owner 权威点读无缓存；未来缓存上限5秒不是当前撤销延迟。
+ADR-304 无状态修订实施与验收中，未部署。CLI 不读取 `CELLHIVE_ADMIN_JWT`；`CELLHIVE_ADMIN_TOKEN` 仅为 CLI JWT 输入别名，不是服务端静态覆盖或旧 header 回退。`creds issuer 'vwork-*'` 本地从 root 派生原始32字节 key 的无填充 base64url；`token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m` 本地签发。TTL 默认5m、固定最大86400秒，无记录 TTL 配置，见 [控制面示例](control-plane.md)。
 
-显式 `ns=["*"]` 允许全局运维读/GC/全量指标，不允许 issuer CRUD。私网免鉴权 `:7001/metrics` 与鉴权过滤的 `:8082/v1/control/metrics` 分离。
+`issuer/*` 且显式 `ns=["*"]` 允许全部全局业务及运维读/GC/全量指标；issuer CRUD 已移除。私网免鉴权 `:7001/metrics` 与鉴权过滤的 `:8082/v1/control/metrics` 分离。
 
 | 变量 | 默认 | 作用 |
 |---|---|---|

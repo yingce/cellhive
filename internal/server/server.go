@@ -369,7 +369,6 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /v1/control/host", s.auth(s.handleControlHost))
 	mux.HandleFunc("GET /v1/control/worker", s.auth(s.handleControlWorker))
 	mux.HandleFunc("GET /v1/control/binding", s.auth(s.handleControlBinding))
-	mux.HandleFunc("GET /v1/control/issuer-info", s.auth(s.handleIssuerInfo))
 	// Admin reads are mirrored here so a non-owner node can forward them to the
 	// control-cell owner (ADR-118 applies to reads too). The owner serves them
 	// under the internal token, which is the trusted plane.

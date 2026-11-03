@@ -1,5 +1,5 @@
-// Package bearertoken implements the ADR-304 JWT wire format. Verification here
-// does not replace authoritative issuer status, TTL, and namespace ceiling checks.
+// Package bearertoken implements the JWT wire format. Verification here does not
+// replace endpoint authorization, TTL policy, or namespace ceiling checks.
 package bearertoken
 
 import (
@@ -8,6 +8,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,12 +210,13 @@ type header struct {
 
 func validKeyID(kid string) bool {
 	if strings.HasPrefix(kid, "issuer/") {
-		id := strings.TrimPrefix(kid, "issuer/")
-		if len(id) != 32 {
+		pattern := strings.TrimPrefix(kid, "issuer/")
+		if ValidatePattern(pattern) != nil {
 			return false
 		}
-		for _, c := range id {
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		// Retired random issuer identities must not become exact namespace keys.
+		if len(pattern) == 32 {
+			if _, err := hex.DecodeString(pattern); err == nil {
 				return false
 			}
 		}
@@ -273,7 +275,7 @@ func validate(kid string, c Claims) error {
 	session := c.Type == "assets" || c.Type == "tail"
 	ticket := kid == "token/do-ticket"
 	if session {
-		if !exact(c.Namespace) || !pathComponent(c.Worker) || !pathComponent(c.Session) || !(c.ParentIssuer == "token/admin" || validKeyID("issuer/"+c.ParentIssuer)) {
+		if !exact(c.Namespace) || !pathComponent(c.Worker) || !pathComponent(c.Session) || !(c.ParentIssuer == "token/admin" || validKeyID("issuer/"+c.ParentIssuer) && Allows([]string{c.ParentIssuer}, c.Namespace)) {
 			return errors.New("invalid session claims")
 		}
 		if c.Kind != "" || c.Name != "" || c.Version != 0 || c.Resource != "" || c.StorageClass != "" || c.Shard != nil {

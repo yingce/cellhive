@@ -17,7 +17,7 @@ import (
 
 type principalCtxKey struct{}
 
-// adminPrincipal accepts bootstrap admin or active issuer namespace JWTs only.
+// adminPrincipal accepts bootstrap admin or stateless issuer namespace JWTs only.
 func (s *Server) adminPrincipal(r *http.Request) (auth.Principal, bool) {
 	_, c, err := s.verifyBearer(r)
 	if err != nil || (c.Type != "admin" && c.Type != "namespace") {

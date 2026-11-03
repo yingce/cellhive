@@ -1,6 +1,6 @@
 # Security Model
 
-> ADR-304 **implemented, local acceptance passed, not deployed**. Go/JS/CLI/vwork, DO ticket hardening and the full runtime baseline passed local acceptance. Production cutover is not complete; legacy implementation is not a compatibility promise.
+> ADR-304 **stateless issuer amendment is in implementation and acceptance, not deployed**. Earlier stateful Go/JS/CLI/vwork, DO ticket and runtime baseline results do not validate this amendment. No legacy credential compatibility is promised.
 
 ## Trust Boundaries
 
@@ -25,7 +25,7 @@
 
 - Single admin backend (no separate Web UI, = admin API), with tenant identity (ns/app) carried by the request;
 - Ordinary HTTP accepts only `Authorization: Bearer <JWT>`, fixed HS256. No static credentials, legacy admin/scope headers or OIDC/JWKS fallback. Vwork's own login is unchanged.
-- Namespace JWTs authorize all business operations in scope, including deployment, CF resource data, secrets, logs and namespace-filtered monitoring. No actions or metrics-reader role. When permitted by the issuer ceiling, a token explicitly granting `ns=["*"]` also permits full-platform operational reads and GC, including full `/metrics` on the admin listener; exact or prefix namespace grants do not. **Issuer registry create, read, list, update and delete remain bootstrap-admin-JWT-only, including for wildcard issuers**.
+- Namespace JWTs authorize all scoped business operations including deployment, CF data, secrets, logs and monitoring, without actions or metrics-reader. `issuer/*` with explicit `ns=["*"]` permits all global business operations, including operational reads, GC and full admin `/metrics`; exact/prefix grants do not. `token/admin` retains global bootstrap authority; issuer CRUD is removed.
 - Operators restrict the admin host's exposure; TLS/JWT business access is separate from private internal listeners;
 - All control write operations keep **audit logs** (recording actor/sub).
 
@@ -55,24 +55,24 @@
 - **Secure defaults**: `Validate()` rejects missing/dev root keys unless `CELLHIVE_ALLOW_INSECURE_DEFAULTS=1` is set (otherwise the admin plane could be accessed with known credentials, ADR-134/137).
 - **Honest note**: Without PKI, role isolation = independent secrets, not cryptographic identity; mTLS/internal CA is a stronger future option (not implemented).
 
-## JWT and Persisted Issuers (ADR-304, In Progress)
+## JWT and Stateless Issuers (ADR-304 Amendment, In Progress)
 
 - Required header: `alg=HS256, typ=JWT, kid=<key-id>`. Common claims: `ver=1,type,sub,aud,iat,exp`; default audience `cellhive`, Unix seconds. Reject unknown algorithms/types, ambiguous headers, invalid times, audience or signatures.
 - A `namespace` token has a nonempty `ns` string array, supporting exact names, trailing `*` prefixes and standalone `*` only. Issuer ceiling, token scope and request scope narrow successively; exceeding the ceiling rejects the whole token rather than clipping it. Lists, logs, metrics and cross-resource references obey the same ceiling.
-- A `binding` token has an exact `ns` string and exact `kind/name`; it cannot deploy or manage issuers. Pinned `worker/version/resource` fields are platform-only. Namespace JWT binding calls still name the target explicitly and perform registry resolution and resource fencing.
+- A `binding` token has an exact `ns` string and exact `kind/name`; it cannot deploy. Pinned `worker/version/resource` fields are platform-only. Namespace JWT binding calls still name the target explicitly and perform resource-registry resolution and resource fencing.
 - One vwork issuer key may sign the `vwork-*` prefix, a single App namespace, or restricted binding JWTs; two keys are not required. No `actions` or `key_version`. Signing keys never travel with requests; possessing a JWT does not permit minting another.
-- Issuer metadata lives in `__platform__/__control__/main` SQLite: random nonreusable ID, display name, namespace ceiling, enabled, maximum TTL (`0 < TTL <= 86400` seconds), creation/update/deletion times, never plaintext keys. `kid=issuer/<immutable-id>`; same-name recreation gets a fresh ID and cannot revive old tokens.
-- Verification requires an authoritative active record (initial implementation may be uncached). Missing, disabled, soft-deleted, over-TTL or out-of-scope issuers fail closed. Deletion is irreversible; create/disable/delete are captured control-cell writes, acknowledged only after durability confirmation. Non-owner local SQLite is not authority.
-- If positive caching is used, authorization lasts at most 5 seconds from the start of the authoritative read. Errors never extend it; expired lookup failures reject. Local management writes invalidate cache and prevent stale in-flight refill. Do not claim instant global revocation.
+- `kid=issuer/<pattern>` carries its namespace ceiling: exact, trailing `*` prefix or `*`. Fixed `0 < exp-iat <= 86400` seconds; reject expired or over-ceiling JWTs in full. Reject legacy issuer IDs of exactly 32 hexadecimal characters, without fallback.
+- No issuer CRUD, active record, owner lookup, authorization cache or persistence check; the namespaces registry does not authorize issuers either. Historical issuer table data may remain inert without destructive migration. Resource registries and lifecycle fences remain.
+- No instant per-issuer revocation: issued JWTs expire at exp; a leaked key can keep minting, requiring root rotation and redistribution of derived keys for containment.
 - JWT key = `HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)`. Retain the old `ScopeSecret` derivation for Hyperdrive and other non-HTTP credentials only, never JWTs.
-- Bootstrap signs a short-lived admin JWT with root-derived `token/admin` for registry creation/recovery; the key itself is not a Bearer credential. This system identity is not a deletable business issuer; **missing business issuer records never have a bypass**.
-- Owner forwarding retains original authorization and revalidates at the destination. CF bridges cannot substitute unrestricted credentials and lose namespace ceilings. Authoritative issuer reads use separate internal authentication to avoid recursion.
-- Assets/Tail sessions use purpose-separated keys, cannot expand parent authority and inherit issuer revocation constraints. Stock Wrangler Tail's real session query token remains a protocol exception, not an ordinary user-header fallback.
+- Bootstrap signs short-lived global admin JWTs with root-derived `token/admin`, without issuer records; keys are not Bearer credentials. `cellhive creds issuer 'vwork-*'` locally derives a raw 32-byte key encoded as unpadded base64url; trusted signers use `cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m`.
+- Owner forwarding retains original authorization and revalidates statelessly at the destination. CF bridges cannot replace it with unrestricted credentials. Issuer authentication does not look up owners.
+- Assets/Tail sessions use purpose-separated keys, statelessly bind the parent issuer pattern, target namespace and parent expiry, and cannot widen authority or outlive parent exp. Tail checks expiry every 500ms, not revoked records; assets recheck after reading upload bodies. Stock Wrangler Tail query tokens remain a protocol exception, not ordinary header fallback.
 - **Explicit ADR-178 exception**: private `:7001/metrics` retains unauthenticated full-platform pull, accessible only to trusted collectors through private networking and firewall/NetworkPolicy controls, never public ingress or tenant egress. No JWT refresher, proxy or extra service is needed. Business `/v1/control/metrics` requires JWT authentication and namespace filtering; platform or unattributable series must not leak to restricted tenants. Full `/metrics` on the admin listener requires admin or an explicit `*` namespace JWT. Long-running authenticated API clients still refresh JWTs; the private metrics pull exception does not.
 
 ## Acceptance Status
 
-ADR-304 local acceptance passed; see [testing](testing.md) and [known issues](known-issues.md) for evidence. Not deployed; production cutover is not complete. New DO grants recheck the parent and execution metadata is signed; already-issued tickets have an at-most-30-second revocation bound, not instant global revocation.
+The ADR-304 stateless amendment is in implementation and acceptance; see [testing](testing.md) and [known issues](known-issues.md). Earlier stateful tests do not validate it; not deployed. DO grants still revalidate parents statelessly and sign execution metadata; tickets last at most30 seconds and never outlive parent expiry, without instant cancellation. Secret encryption and ADR-302 pinned KV authorization are unchanged.
 
 ## Root Key Sources (ADR-150)
 

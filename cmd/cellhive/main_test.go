@@ -443,7 +443,7 @@ func TestWranglerRejectionsAreActionable(t *testing.T) {
 }
 
 // Root binding signing remains private to data-plane requests; business issuers
-// require explicit provisioned IDs and keys, never a name-derived identity.
+// require explicit namespace patterns and keys.
 func TestMintScopeToken(t *testing.T) {
 	jwtCLIEnv(t)
 	key, err := (config.Config{RootKey: config.LoadRootKey()}).JWTKey("token/scope")
@@ -463,9 +463,9 @@ func TestMintScopeToken(t *testing.T) {
 	}
 
 	if _, err := mintScopeToken("acme", "d1", "a", "vwork", 0, ""); err == nil {
-		t.Fatal("unregistered issuer name accepted")
+		t.Fatal("issuer mint accepted without key or valid lifetime")
 	}
-	ktok, err := mintScopeToken("acme", "kv", "main", "00112233445566778899aabbccddeeff", time.Minute, base64.RawURLEncoding.EncodeToString(key))
+	ktok, err := mintScopeToken("acme", "kv", "main", "acme", time.Minute, base64.RawURLEncoding.EncodeToString(key))
 	if err != nil {
 		t.Fatalf("key-path mint: %v", err)
 	}

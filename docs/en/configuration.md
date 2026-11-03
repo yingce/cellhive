@@ -1,6 +1,6 @@
 # Configuration and Environment Variables
 
-Configuration implementation lives in `internal/config/config.go` and runtime/CLI entry points. **ADR-304 is implemented, local acceptance passed, not deployed**; DO ticket hardening and full baseline passed, but production cutover is not complete. Deployment must migrate together without old-header dual acceptance.
+Configuration implementation lives in `internal/config/config.go` and runtime/CLI entry points. **ADR-304 stateless issuer amendment is in implementation and acceptance, not deployed**; earlier stateful tests do not validate it. Deployment must migrate together without old-header dual acceptance.
 
 ## Parsing Rules
 
@@ -17,10 +17,10 @@ Configuration implementation lives in `internal/config/config.go` and runtime/CL
 
 ```
 JWT key = HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)
-kid = issuer/<immutable-id> or token/<purpose>
+kid = issuer/<pattern> or token/<purpose>
 ```
 
-Ordinary HTTP uses only `Authorization: Bearer <HS256 JWT>`, default audience `cellhive`. `token/admin` signs bootstrap admin JWTs, never raw key Bearers; business issuers require active persisted records. Retain old `ScopeSecret` derivation for Hyperdrive non-HTTP credentials only, not JWTs; do not incidentally rederive existing secret-encryption keys. Long-running components must refresh JWTs.
+Ordinary HTTP uses only `Authorization: Bearer <HS256 JWT>`, default audience `cellhive`. `token/admin` signs global bootstrap admin JWTs, never raw key Bearers; business issuers are stateless with a kid pattern ceiling. Retain old `ScopeSecret` derivation for Hyperdrive non-HTTP credentials only, not JWTs; do not rederive existing secret-encryption keys. Long-running components must refresh JWTs.
 
 **Migration note**: Variables removed or renamed by ADR-136/137 (such as `CELLHIVE_TOKEN_*`, `CELLHIVE_S3_*`, `CELLHIVE_NS_RPS`, `CELLHIVE_*_MS`/`_S`) will print a WARN with the replacement name (`config.LegacyEnvWarnings`) when components start if they are still set. They will not silently take effect.
 
@@ -32,7 +32,7 @@ Ordinary HTTP uses only `Authorization: Bearer <HS256 JWT>`, default audience `c
 | `CELLHIVE_ROOT_KEY_FILE` | Empty | Root key **file** path (Docker/K8s secret mount; trim after reading). Takes precedence over the dev fallback and lower precedence than inline `CELLHIVE_ROOT_KEY`; if the file is unreadable/empty, it **fails closed** (ADR-150) |
 | `CELLHIVE_ALLOW_INSECURE_DEFAULTS` | `false` | Allow the local development root (`DevRootKey`). Must be false in production |
 
-Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are removed from the target contract, not compatibility settings. Issuer ceilings and `max token TTL <= 86400` live in the control cell, not client declarations. Disabled/soft-deleted issuers fail closed; same-name recreation gets a new ID. Authorization caches, if used, last at most 5 seconds; initial reads may be uncached.
+Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are removed. Issuer patterns are exact/prefix `*`/`*`, with a fixed maximum TTL86400 seconds. Reject exactly32-hex legacy IDs without fallback. No issuer CRUD, owner/persistence checks or namespaces-registry authorization; historical issuer table data may remain inert without destructive migration. No instant per-issuer revocation, only exp/root rotation; leaked keys can keep minting and require root rotation for containment.
 
 ## Object Storage
 
@@ -232,9 +232,9 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | `CELLHIVE_TOKEN` | empty | Preferred CLI JWT; then `CELLHIVE_ADMIN_TOKEN` (JWT only), then profile token/adminToken; absent explicit tokens, trusted CLI signs five-minute admin JWT from root |
 | `CELLHIVE_BIN` | auto | packager used by dev `--strict-build` |
 
-ADR-304 is implemented, local acceptance including DO ticket/full baseline passed, not deployed. CLI does not read `CELLHIVE_ADMIN_JWT`. `CELLHIVE_ADMIN_TOKEN` is a CLI JWT input alias, not a server static override or old-header fallback. Issuer create requires `--max-token-ttl`, no default, maximum24h; token `--ttl` defaults to5m. See [examples](control-plane.md). Current issuer owner-authoritative reads are uncached; the future five-second cache cap is not a current revocation delay.
+ADR-304 stateless amendment is in implementation and acceptance, not deployed. CLI does not read `CELLHIVE_ADMIN_JWT`. `CELLHIVE_ADMIN_TOKEN` is a CLI JWT input alias, not a server static override or old-header fallback. `creds issuer 'vwork-*'` locally derives a raw32-byte key encoded as unpadded base64url from root; `token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m` mints locally. TTL defaults to5m with a fixed maximum86400 seconds, no record-specific TTL. See [examples](control-plane.md).
 
-Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD. Private unauthenticated `:7001/metrics` is separate from authenticated/filtered `:8082/v1/control/metrics`.
+`issuer/*` with explicit `ns=["*"]` permits all global business operations and operational reads/GC/full metrics; issuer CRUD is removed. Private unauthenticated `:7001/metrics` is separate from authenticated/filtered `:8082/v1/control/metrics`.
 
 ## Tests / CI (non-runtime)
 

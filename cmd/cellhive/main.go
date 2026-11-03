@@ -689,17 +689,20 @@ func bindingToken(ns, kind, name string) (string, error) {
 	return mintRootToken("token/scope", bearertoken.Claims{Type: "binding", Namespace: ns, Kind: kind, Name: name})
 }
 
-// Issuer holders mint offline; only the server can enforce the authoritative ceiling.
+// Issuer holders mint offline within their namespace-pattern ceiling.
 func mintScopeToken(ns, kind, name, iss string, ttl time.Duration, keyB64 string) (string, error) {
-	if !validIssuerID(iss) {
-		return "", fmt.Errorf("--issuer requires an immutable 32-character lowercase hex ID")
+	if err := bearertoken.ValidatePattern(iss); err != nil {
+		return "", fmt.Errorf("--issuer requires a valid namespace pattern: %w", err)
 	}
 	key, err := base64.RawURLEncoding.Strict().DecodeString(keyB64)
 	if err != nil || len(key) != 32 || base64.RawURLEncoding.EncodeToString(key) != keyB64 {
 		return "", fmt.Errorf("--key requires canonical raw base64url encoding of 32 bytes")
 	}
-	if ttl < time.Second || ttl%time.Second != 0 {
-		return "", fmt.Errorf("--ttl must be positive whole seconds within the issuer maximum")
+	if ttl < time.Second || ttl%time.Second != 0 || ttl > 24*time.Hour {
+		return "", fmt.Errorf("--ttl must be positive whole seconds, at most 86400 seconds")
+	}
+	if !bearertoken.Contains([]string{iss}, strings.Split(ns, ",")) {
+		return "", fmt.Errorf("--ns must be a subset of issuer namespace pattern %q", iss)
 	}
 	now := time.Now().Unix()
 	c := bearertoken.Claims{Ver: 1, Type: "namespace", Subject: "CLI", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + int64(ttl/time.Second), Namespaces: strings.Split(ns, ",")}

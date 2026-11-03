@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"cellhive/internal/bearertoken"
-	"cellhive/internal/control"
 	"github.com/gorilla/websocket"
 )
 
@@ -42,15 +40,6 @@ func sessionParentJWT(t *testing.T, s *Server, issuer string, ttl int64) string 
 		t.Fatal(err)
 	}
 	return token
-}
-
-func sessionIssuer(t *testing.T, s *Server) control.Issuer {
-	t.Helper()
-	i, err := s.Control.CreateIssuer(t.Context(), "sessions", []string{"acme"}, 3600, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return i
 }
 
 func createSessionJWT(t *testing.T, s *Server, purpose, parent string) (string, string) {
@@ -96,8 +85,7 @@ func TestSessionJWTPurposeAndParent(t *testing.T) {
 	for _, purpose := range []string{"assets", "tail"} {
 		t.Run(purpose, func(t *testing.T) {
 			s := sessionJWTServer(t)
-			i := sessionIssuer(t, s)
-			parent := sessionParentJWT(t, s, i.ID, 60)
+			parent := sessionParentJWT(t, s, "acme", 60)
 			token, _ := createSessionJWT(t, s, purpose, parent)
 			key, err := s.Cfg.JWTKey("token/" + purpose)
 			if err != nil {
@@ -118,7 +106,7 @@ func TestSessionJWTPurposeAndParent(t *testing.T) {
 			if err := json.Unmarshal(payload, &wire); err != nil {
 				t.Fatal(err)
 			}
-			if wire["parent_issuer"] != i.ID || wire["session"] == "" {
+			if wire["parent_issuer"] != "acme" || wire["session"] == "" {
 				t.Fatalf("missing parent/session: %s", payload)
 			}
 			if purpose == "assets" && wire["wrangler_single_asset_uploads"] != true {
@@ -131,10 +119,9 @@ func TestSessionJWTPurposeAndParent(t *testing.T) {
 	}
 }
 
-func TestAssetsSessionJWTRevocationAndScope(t *testing.T) {
+func TestAssetsSessionJWTStatelessAndScope(t *testing.T) {
 	s := sessionJWTServer(t)
-	i := sessionIssuer(t, s)
-	token, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, i.ID, 60))
+	token, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, "acme", 60))
 	upload := func(ns, credential string, duplicate bool) int {
 		r := httptest.NewRequest(http.MethodPost, "/assets", strings.NewReader("hello"))
 		r.SetPathValue("account_id", ns)
@@ -156,22 +143,13 @@ func TestAssetsSessionJWTRevocationAndScope(t *testing.T) {
 	if got := upload("acme", token, true); got != http.StatusUnauthorized {
 		t.Fatalf("ambiguous auth = %d", got)
 	}
-	tail, _ := createSessionJWT(t, s, "tail", sessionParentJWT(t, s, i.ID, 60))
+	tail, _ := createSessionJWT(t, s, "tail", sessionParentJWT(t, s, "acme", 60))
 	if got := upload("acme", tail, false); got != http.StatusUnauthorized {
 		t.Fatalf("tail as assets = %d", got)
 	}
-	if err := s.Control.SetIssuerEnabled(t.Context(), i.ID, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if got := upload("acme", token, false); got != http.StatusUnauthorized {
-		t.Fatalf("disabled issuer = %d", got)
-	}
-	if err := s.Control.DeleteIssuer(t.Context(), i.ID, "test"); err != nil {
-		t.Fatal(err)
-	}
-	_ = sessionIssuer(t, s)
-	if got := upload("acme", token, false); got != http.StatusUnauthorized {
-		t.Fatalf("recreated issuer revived session = %d", got)
+	s.Control = nil
+	if got := upload("acme", token, false); got != http.StatusOK {
+		t.Fatalf("control outage affected session = %d", got)
 	}
 	admin, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, "token/admin", 60))
 	if got := upload("acme", admin, false); got != http.StatusOK {
@@ -179,10 +157,10 @@ func TestAssetsSessionJWTRevocationAndScope(t *testing.T) {
 	}
 }
 
-func TestTailSessionJWTRevokesOpenStream(t *testing.T) {
+func TestTailSessionJWTExpiresOpenStream(t *testing.T) {
 	s := sessionJWTServer(t)
-	i := sessionIssuer(t, s)
-	token, id := createSessionJWT(t, s, "tail", sessionParentJWT(t, s, i.ID, 60))
+	token, id := createSessionJWT(t, s, "tail", sessionParentJWT(t, s, "acme", 2))
+	s.Control = nil
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{account_id}/{script_name}/{tail_id}", s.handleCloudflareTailStream)
 	ts := httptest.NewServer(mux)
@@ -205,22 +183,19 @@ func TestTailSessionJWTRevokesOpenStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := s.Control.SetIssuerEnabled(context.Background(), i.ID, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
 	_, _, err = conn.ReadMessage()
 	if err == nil {
-		t.Fatal("revoked stream remained open")
+		t.Fatal("expired stream remained open")
 	}
 	if e, ok := err.(interface{ Timeout() bool }); ok && e.Timeout() {
-		t.Fatalf("revocation did not close stream: %v", err)
+		t.Fatalf("expiry did not close stream: %v", err)
 	}
 	if conn, resp, err := dial("acme", "api", id); err == nil {
 		conn.Close()
-		t.Fatal("revoked session reconnected")
+		t.Fatal("expired session reconnected")
 	} else if resp == nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("revoked handshake: %v %v", resp, err)
+		t.Fatalf("expired handshake: %v %v", resp, err)
 	} else {
 		resp.Body.Close()
 	}
@@ -241,16 +216,13 @@ func (r *sessionRevokeReader) Read(p []byte) (int, error) {
 
 func TestAssetsSessionJWTRechecksAfterBodyRead(t *testing.T) {
 	s := sessionJWTServer(t)
-	i := sessionIssuer(t, s)
-	token, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, i.ID, 60))
+	token, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, "acme", 2))
 	claims, err := s.verifyAssetsClaim(t.Context(), token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := &sessionRevokeReader{Reader: strings.NewReader("hello"), revoke: func() {
-		if err := s.Control.SetIssuerEnabled(t.Context(), i.ID, false, "test"); err != nil {
-			t.Fatal(err)
-		}
+		time.Sleep(time.Until(time.Unix(claims.Exp, 0)))
 	}}
 	r := httptest.NewRequest(http.MethodPost, "/assets", body)
 	r.SetPathValue("account_id", "acme")
@@ -259,18 +231,17 @@ func TestAssetsSessionJWTRechecksAfterBodyRead(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.handleCloudflareAssetsUpload(w, r)
 	if w.Code == http.StatusOK {
-		t.Fatal("upload accepted after issuer revoked during body read")
+		t.Fatal("upload accepted after session expired during body read")
 	}
 	if _, err := s.artifactStore().GetAsset(t.Context(), "acme", "api", claims.Token, "index.html"); err == nil {
-		t.Fatal("revoked upload persisted")
+		t.Fatal("expired upload persisted")
 	}
 }
 
 func TestSessionJWTRejectsUnauthorizedParents(t *testing.T) {
 	s := sessionJWTServer(t)
-	i := sessionIssuer(t, s)
 	for _, purpose := range []string{"assets", "tail"} {
-		parent := sessionParentJWT(t, s, i.ID, 60)
+		parent := sessionParentJWT(t, s, "acme", 60)
 		for _, credential := range []string{"", "admin-tok", parent} {
 			r := httptest.NewRequest(http.MethodPost, "/session", strings.NewReader(`{"manifest":{"index.html":{"hash":"h","size":1}}}`))
 			r.SetPathValue("account_id", "other")
@@ -291,12 +262,11 @@ func TestSessionJWTRejectsUnauthorizedParents(t *testing.T) {
 	}
 }
 
-func TestSessionJWTExpiryAndIssuerLookupFailure(t *testing.T) {
+func TestSessionJWTExpiryAndControlIndependence(t *testing.T) {
 	for _, purpose := range []string{"assets", "tail"} {
 		t.Run(purpose, func(t *testing.T) {
 			s := sessionJWTServer(t)
-			i := sessionIssuer(t, s)
-			token, _ := createSessionJWT(t, s, purpose, sessionParentJWT(t, s, i.ID, 60))
+			token, _ := createSessionJWT(t, s, purpose, sessionParentJWT(t, s, "acme", 60))
 			key, err := s.Cfg.JWTKey("token/" + purpose)
 			if err != nil {
 				t.Fatal(err)
@@ -317,9 +287,35 @@ func TestSessionJWTExpiryAndIssuerLookupFailure(t *testing.T) {
 				t.Fatal("accepted tampered session")
 			}
 			s.Control = nil
-			if _, err := s.verifySessionJWT(t.Context(), token, purpose); err == nil {
-				t.Fatal("issuer lookup failure extended authorization")
+			if _, err := s.verifySessionJWT(t.Context(), token, purpose); err != nil {
+				t.Fatalf("control outage affected session: %v", err)
 			}
 		})
+	}
+}
+
+func TestSessionJWTStatelessParentCeiling(t *testing.T) {
+	s := sessionJWTServer(t)
+	s.Control = nil
+	for _, purpose := range []string{"assets", "tail"} {
+		for _, tc := range []struct {
+			parent, ns string
+			want       bool
+		}{
+			{"vwork-*", "vwork-42", true},
+			{"*", "vwork-42", true},
+			{"vwork-*", "other", false},
+			{"vwork-42", "vwork-43", false},
+			{"00112233445566778899aabbccddeeff", "acme", false},
+			{"vwork/**", "vwork-42", false},
+		} {
+			t.Run(purpose+"/"+tc.parent+"/"+tc.ns, func(t *testing.T) {
+				c := bearertoken.Claims{Type: purpose, Namespace: tc.ns, Worker: "api", Session: "session", ParentIssuer: tc.parent}
+				token := rawIssuerJWT(t, s, "token/"+purpose, "token/"+purpose, c)
+				if _, err := s.verifySessionJWT(t.Context(), token, purpose); (err == nil) != tc.want {
+					t.Fatalf("verify = %v, want accepted %v", err, tc.want)
+				}
+			})
+		}
 	}
 }

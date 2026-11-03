@@ -28,7 +28,7 @@ type wranglerAssetsClaim struct {
 	Token        string `json:"token"`
 	Exp          int64  `json:"exp"`
 	Single       bool   `json:"wrangler_single_asset_uploads"`
-	ParentIssuer string `json:"parent_issuer"`
+	ParentIssuer string `json:"parent_issuer"` // Issuer pattern suffix, or token/admin.
 	Subject      string `json:"sub"`
 	IssuedAt     int64  `json:"iat"`
 }
@@ -58,11 +58,14 @@ func (s *Server) sessionClaims(r *http.Request, purpose, ns, worker, session str
 	if err != nil {
 		return bearertoken.Claims{}, err
 	}
-	issuer := strings.TrimPrefix(kid, "issuer/")
+	var issuer string
 	if kid == "token/admin" && parent.Type == "admin" {
 		issuer = kid
-	} else if !strings.HasPrefix(kid, "issuer/") || parent.Type != "namespace" || !bearertoken.Allows(parent.Namespaces, ns) {
-		return bearertoken.Claims{}, errors.New("session parent not authorized")
+	} else {
+		issuer, err = issuerPattern(kid)
+		if err != nil || parent.Type != "namespace" || !bearertoken.Allows([]string{issuer}, ns) || !bearertoken.Allows(parent.Namespaces, ns) {
+			return bearertoken.Claims{}, errors.New("session parent not authorized")
+		}
 	}
 	now := time.Now()
 	exp := min(parent.ExpiresAt, now.Add(ttl).Unix())
@@ -90,18 +93,20 @@ func (s *Server) verifySessionJWT(ctx context.Context, token, purpose string) (b
 	return c, nil
 }
 
-func (s *Server) checkSessionIssuer(ctx context.Context, c bearertoken.Claims) error {
-	if c.ExpiresAt <= time.Now().Unix() {
+func (s *Server) checkSessionIssuer(_ context.Context, c bearertoken.Claims) error {
+	// The signed parent pattern is a ceiling, not a control-cell identity.
+	now := time.Now().Unix()
+	if c.ExpiresAt <= now || c.ExpiresAt <= c.IssuedAt || c.IssuedAt > now+30 || c.ExpiresAt-c.IssuedAt > maxIssuerJWTLifetime {
 		return errors.New("session expired")
 	}
 	if c.ParentIssuer == "token/admin" {
 		return nil
 	}
-	i, err := s.issuerFromOwner(ctx, c.ParentIssuer)
+	pattern, err := issuerPattern("issuer/" + c.ParentIssuer)
 	if err != nil {
 		return err
 	}
-	if !i.Enabled || i.DeletedMs != 0 || c.ExpiresAt-c.IssuedAt > i.MaxTokenTTLSeconds || !bearertoken.Allows(i.Namespaces, c.Namespace) {
+	if !bearertoken.Allows([]string{pattern}, c.Namespace) {
 		return errors.New("session issuer not authorized")
 	}
 	return nil
@@ -247,7 +252,7 @@ func (s *Server) storeCloudflareAsset(r *http.Request, st *artifacts.Store, clai
 		body = decoded
 	}
 	// Reading a client body is unbounded in time; the handshake authorization
-	// must not let a slow upload outlive its issuer or session expiry.
+	// must not let a slow upload outlive the signed session expiry.
 	if err := s.checkSessionIssuer(r.Context(), bearertoken.Claims{
 		Namespace: claim.NS, ParentIssuer: claim.ParentIssuer, IssuedAt: claim.IssuedAt, ExpiresAt: claim.Exp,
 	}); err != nil {

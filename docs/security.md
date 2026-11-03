@@ -1,6 +1,6 @@
 # 安全模型
 
-> ADR-304 **已实现，本地验收通过，未部署**：Go/JS/CLI/vwork、DO ticket 授权收紧和完整 runtime baseline 已完成本地验收；不代表生产切换完成，旧实现不构成兼容承诺。
+> ADR-304 **无状态 issuer 修订实施与验收中，未部署**。此前有状态版本的 Go/JS/CLI/vwork、DO ticket 和 runtime baseline 测试不证明本次修订通过；无旧凭据兼容承诺。
 
 ## 信任边界
 
@@ -25,7 +25,7 @@
 
 - 单一管理后台（无独立 Web UI，= admin API），租户身份（ns/app）由请求携带；
 - 普通 HTTP 仅接受 `Authorization: Bearer <JWT>`，固定 HS256；不接受静态凭据、旧 admin/scope header 或 OIDC/JWKS 回退。vwork 自身登录不受此变更影响。
-- namespace JWT 授权所属 namespace 的全部业务，包括发布、CF 资源数据、secret、日志与按 namespace 过滤的监控；不引入 actions 或 metrics-reader 角色。issuer 上限允许且 token 显式包含 `ns=["*"]` 时，还可执行全平台运维读取和 GC，包括 admin 监听的全量 `/metrics`；精确或前缀 namespace 授权不具备这些全平台权限。**issuer registry 的创建、读取、列表、修改与删除始终仅允许 bootstrap admin JWT，通配 issuer 也不能管理 registry**。
+- namespace JWT 授权所属 namespace 的全部业务，包括发布、CF 数据、secret、日志与监控；无 actions 或 metrics-reader。`issuer/*` 且显式 `ns=["*"]` 允许全部全局业务，包括全平台运维读取、GC 和 admin 全量 `/metrics`；精确/前缀授权不具备这些全平台权限。`token/admin` 保留全局 bootstrap 权限；issuer CRUD 已移除。
 - admin host 由运维限制暴露范围；经 TLS 和 JWT 认证开放的业务入口与私网内部监听分离；
 - 所有控制写操作留**审计日志**（记录 actor/sub）。
 
@@ -55,24 +55,24 @@
 - **安全默认**：`Validate()` 在未设 `CELLHIVE_ALLOW_INSECURE_DEFAULTS=1` 时拒绝缺失/dev 根密钥（否则 admin 面可被已知凭据访问，ADR-134/137）。
 - **诚实说明**：无 PKI 时角色隔离 = 独立 secret，非密码学身份；mTLS/内部 CA 为后续更强方案（未做）。
 
-## JWT 与持久化 issuer（ADR-304，本地验收通过，未部署）
+## JWT 与无状态 issuer（ADR-304，修订实施与验收中）
 
 - header 必须为 `alg=HS256, typ=JWT, kid=<key-id>`；公共 claims 为 `ver=1,type,sub,aud,iat,exp`，默认 audience 为 `cellhive`，时间为 Unix 秒。未知算法/类型、歧义 header、无效时间、错误 audience 或签名一律拒绝。
 - `namespace` 的 `ns` 是非空字符串数组，仅支持精确名称、末尾 `*` 前缀、单独 `*`。issuer 上限、token 范围、请求范围逐层收窄；超出上限拒绝整张 token，不静默裁剪。列表、日志、指标和跨资源引用同样受限。
-- `binding` 的 `ns` 是精确字符串，`kind/name` 也必须精确；不能部署或管理 issuer。`worker/version/resource` 固定映射字段仅平台签发。namespace JWT 调 binding 也必须显式指定资源，执行注册表解析和 resource fence。
+- `binding` 的 `ns` 是精确字符串，`kind/name` 也必须精确；不能部署。`worker/version/resource` 固定映射字段仅平台签发。namespace JWT 调 binding 也必须显式指定资源，执行资源注册表解析和 resource fence。
 - 单个 vwork issuer key 可签 `vwork-*` 前缀、单 App namespace 或受限 binding JWT，不强制两把 key；无 `actions`、无 `key_version`。key 绝不随请求传输，持有 JWT 不能再签发。
-- issuer 元数据位于 `__platform__/__control__/main` SQLite：随机不可复用 ID、显示名称、namespace 上限、enabled、最大 TTL（`0 < TTL <= 86400` 秒）、创建/更新/删除时间，不存明文 key。`kid=issuer/<immutable-id>`；同名重建分配新 ID，旧 token 不复活。
-- 每次验证必须权威读取有效记录（可初版不缓存）；不存在、禁用、软删除、超 TTL 或越界均 fail closed。删除不可恢复；创建/禁用/删除为控制 cell 捕获写，满足持久化确认后成功。不得信任非 owner 本地 SQLite。
-- 若使用正缓存，授权最多持续权威读取开始后的 5 秒；错误不得续期，过期查询失败拒绝。本地管理写失效缓存并阻止旧在途读回填；不得声称即时全局撤销。
+- `kid=issuer/<pattern>` 自带 namespace 上限：精确、末尾 `*` 前缀或 `*`。固定 `0 < exp-iat <= 86400` 秒；超时或越界拒绝整张 JWT。恰好 32 位十六进制旧 issuer ID 拒绝，无回退。
+- 无 issuer CRUD、active record、owner 点查、授权缓存或持久化检查，也不查询 namespaces 注册表授权。历史 issuer 表可保留为惰性数据，不参与认证、不做破坏性迁移。资源注册表和 lifecycle fence 仍保留。
+- 无即时单 issuer 撤销：已签 JWT 靠 exp 到期；泄露 key 可持续签发，须轮换 root 并重新分发派生 key 才能止损。
 - JWT key = `HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)`。旧 `ScopeSecret` 派生仅保留给 Hyperdrive 等非 HTTP 凭据，不用于 JWT。
-- bootstrap 用 root 派生的 `token/admin` key 签短期 admin JWT，创建 registry 与故障恢复；key 本身不是 Bearer。该系统身份不是可删除的业务 issuer，**业务 issuer 缺记录无旁路**。
-- owner 转发保留原始授权并在目标重新验证；CF bridge 不得换成全权凭据而丢失 namespace 上限。issuer 权威点查使用独立内部认证，避免递归。
-- assets/Tail 会话使用用途隔离 key，授权不超原 token，issuer 撤销约束同样适用。真实 stock Wrangler Tail 的会话 query token 是协议例外，不是普通用户 header 缺失时的回退。
+- bootstrap 用 root 派生的 `token/admin` key 签短期全局 admin JWT，无需 issuer 记录；key 本身不是 Bearer。`cellhive creds issuer 'vwork-*'` 本地派生原始 32 字节 key 的无填充 base64url；可信签发方可用 `cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m`。
+- owner 转发保留原始授权并在目标无状态重验；CF bridge 不得换成全权凭据而丢失 namespace 上限。issuer 认证不查询 owner。
+- assets/Tail 会话使用用途隔离 key，无状态绑定父 issuer pattern、目标 namespace 和父有效期，不能扩权或超过父 exp。Tail 每 500ms 检查有效期，不查询撤销记录；assets 读完上传体后重验。真实 stock Wrangler Tail query token 仅为协议例外，不是普通 header 回退。
 - **ADR-178 明确例外**：私网 `:7001/metrics` 保留免鉴权全量 pull，仅允许可信采集器通过私网与防火墙/NetworkPolicy 访问，不得公网暴露或允许租户出网触达；不需要 JWT 刷新器、代理或额外服务。业务 namespace 视图 `/v1/control/metrics` 必须 JWT 鉴权并过滤，平台级或无法归属的序列不能泄漏给受限租户。admin 监听的全量 `/metrics` 仅允许 admin 或显式 `*` namespace JWT。长期运行的鉴权 API 客户端仍须刷新 JWT，此要求不适用于私网 metrics pull 例外。
 
 ## 验收状态
 
-ADR-304 本地验收已通过，证据见 [测试](testing.md) 与 [已知问题](known-issues.md)；未部署，不宣称生产切换完成。新 DO grant 重验 parent，执行 metadata 已签名；已签发 ticket 的撤销边界最多30秒，不是即时全局撤销。
+ADR-304 无状态修订实施与验收中，见 [测试](testing.md) 与 [已知问题](known-issues.md)；旧有状态测试不能证明本次通过，未部署。DO grant 仍须无状态重验 parent，执行 metadata 纳入签名；票据最长30秒且不超过父有效期，不承诺即时取消。secret 加密及 ADR-302 固定 KV 授权不变。
 
 ## 根密钥来源（ADR-150）
 

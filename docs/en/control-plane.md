@@ -1,10 +1,10 @@
 # Control Plane
 
-> ADR-304 Bearer JWT and persisted issuers are **implemented, local acceptance passed, not deployed**. DO ticket hardening and the full baseline rebuilt from current source passed. Production cutover is not complete. No static-header/OIDC compatibility.
+> ADR-304 Bearer JWT stateless issuer amendment is **in implementation and acceptance, not deployed**. Earlier stateful test results do not validate this amendment. No static-header/OIDC compatibility.
 
 ## Positioning and Form
 
-- **Single management API**: namespace JWTs authorize scoped business operations. Explicit `ns=["*"]` permits global operational reads, GC and full metrics, but issuer CRUD (including reads) requires bootstrap admin JWT. Request parameters are not authority.
+- **Single management API**: namespace JWTs authorize all scoped business operations. `issuer/*` with explicit `ns=["*"]` permits all global business operations, operational reads, GC and full metrics. `token/admin` retains global bootstrap authority; issuer CRUD is removed. Request parameters are not authority.
 - **Merged into `cell-agent`** (ADR-012): single Go binary; the control plane listens on `:8082` (via an operator-provided reverse proxy/cloud LB), with separate listeners and separate authentication from the data plane `:7001` (Go↔Go and JS↔cell share :7001; no gRPC plane, ADR-136).
 - secrets: `POST /v1/control/secret` (put), `GET /v1/control/secret` (get), `DELETE /v1/control/secret`, `GET /v1/control/secrets` (only lists key/update time); CLI `cellhive secret put|get|delete|list` (ADR-147).
 - **Per-domain resource management (ADR-157, recommended)**: `POST|GET|DELETE /v1/<kind>/resources` (`kind=kv|d1|queue|r2|workflow|hyperdrive`), kind is fixed by the path, `scope` defaults to `<ns>/__<kind>__/<name>`; `GET /v1/<kind>/stats` provides read-only operational statistics (see `docs/bindings.md`); queue dead-letter replay is `POST /v1/queue/dead-letters/replay`. Corresponding CLI: `cellhive kv namespace|d1|r2 bucket|queue|workflows|hyperdrive create|list|delete|stats`. The following `/v1/control/*` forms are retained as **compatibility aliases** (same handler).
@@ -60,38 +60,33 @@ Wrangler's "automatic resource creation without id" is **rejected** (wrangler-co
 - deploy references a non-existent resource → **explicit error and suggestion of the corresponding create command**;
 - Resource creation = register scope in the control plane (the cell is lazily activated on first access).
 
-## Issuer Management and Minting (ADR-304, Local Acceptance Passed, Not Deployed)
+## Stateless Issuer Minting (ADR-304 Amendment, In Progress)
 
-- Bootstrap uses a root-derived short-lived admin JWT for registry creation/recovery, never a raw root/key Bearer or a missing-business-issuer bypass.
-- Records live in existing `__platform__/__control__/main`: immutable random ID, display name, namespace ceiling, enabled, maximum TTL (at most 86400 seconds), creation/update/soft-deletion times. No plaintext keys or `key_version`. Create/disable/delete are audited captured writes subject to RPO=0 acknowledgement.
-- Creation limits: display name at most 256 UTF-8 bytes; 1–64 namespace patterns, each at most 128 bytes; serialized metadata budget at most 8192 bytes, reserving future update/tombstone fields below the 16384-byte owner lookup cap. Invalid input returns 400 before capture, duplicate names return 409, and storage/capture failures return 503.
-- If create/disable/delete commits locally but durability is not confirmed, the response is `503` with `error=outcome_unknown` and `issuer_id`, never a key; it does not imply rollback. Bootstrap callers first perform an authoritative get/list. If creation returned no key but the record exists, delete that ID and wait for successful acknowledgement, then recreate the same name with a fresh ID/key. Retrying the original create may return 409; get/list never reissue keys and there is no recover-key endpoint. Disable/delete can be retried to obtain a new durability confirmation.
-- `kid=issuer/<id>` resolves by authoritative ID lookup, **currently uncached**; missing/disabled/soft-deleted records reject. Same-name recreation gets a fresh ID; old JWTs remain invalid. Future caches are capped at5 seconds from read start, without error renewal or stale refill. Create returns the key once; get/list do not return keys.
-- One vwork key signs namespace tokens (`ns` array; exact/trailing-prefix `*`/`*`) and binding tokens (exact `ns` string and `kind/name`), without actions. Pinned `worker/version/resource` fields are platform-only.
-- Namespace JWTs cover all scoped business operations. Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD. `:8082/v1/control/metrics` authenticates and filters by namespace; `:7001/metrics` is the private unauthenticated full-scrape exception. CF only on `:8082`, never `:7001/:8083`; bridges/forwarding retain ceilings.
-- CLI issuer lifecycle and short-lived JWT minting still require joint acceptance. Name-derived, unregistered issuer and nonexpiring scope commands are no longer the contract. See [security](security.md) for derivation, revocation and session exceptions.
+- `kid=issuer/<pattern>` directly encodes an exact/trailing-prefix `*`/`*` ceiling, with fixed `0 < exp-iat <= 86400` seconds. Reject legacy issuer IDs of exactly 32 hexadecimal characters, without fallback.
+- No issuer CRUD, owner lookup, active record, durability confirmation or namespaces-registry authorization. Old issuer table data may remain inert without destructive migration; resource registration and RPO=0 remain unchanged.
+- Key = `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`. One vwork key signs namespace (`ns` array) or binding (exact `ns` string and `kind/name`) JWTs; no actions/key_version. Pinned `worker/version/resource` fields are platform-only.
+- No instant per-issuer revocation. JWTs expire at exp; leaked signing keys require root rotation and redistribution. Sessions statelessly bind parent patterns and expiry; see [security](security.md).
+- Namespace JWTs cover all scoped business; `issuer/*` with explicit `ns=["*"]` covers global business, operations, GC and full metrics. `:8082/v1/control/metrics` authenticates/filters; `:7001/metrics` remains the private unauthenticated exception. CF only on `:8082`; bridges/forwarding retain ceilings.
 
 ### CLI Bootstrap, Provision and Minting
 
-Run only in trusted operations environments with a mounted root secret, shell tracing disabled and no business token in the selected profile. Without an explicit/profile JWT, the CLI automatically signs a five-minute bootstrap admin JWT.
+Derive only in trusted operations environments with a mounted root secret and shell tracing disabled. Never log keys/JWTs. Without an explicit/profile JWT, the CLI automatically signs a five-minute global bootstrap admin JWT.
 
 ```bash
 export CELLHIVE_ADMIN_URL=https://cellhive.example.com
 export CELLHIVE_ROOT_KEY_FILE=/run/secrets/cellhive-root-key
 unset CELLHIVE_TOKEN CELLHIVE_ADMIN_TOKEN
-cellhive issuer create vwork --ns 'vwork-*' --max-token-ttl 1h
-cellhive issuer list
-cellhive issuer get "$ISSUER_ID"
+key="$(cellhive creds issuer 'vwork-*')"
 ```
 
-Create returns `{issuer,kid,key}`; securely deliver `.issuer.id` and the one-time `.key` to the trusted signer. Inject the following variables from secret management, without root. `--max-token-ttl` is required with no default (maximum24h); this example chooses1h. Token `--ttl` defaults to5m and is explicit here.
+`creds issuer` uses no network or registry and outputs the raw32-byte key as unpadded base64url. Deliver it through secret management to trusted signers, who do not hold root. TTL is fixed at a maximum86400 seconds; token `--ttl` defaults to5m.
 
 ```bash
-export CELLHIVE_TOKEN="$(cellhive token --issuer "$ISSUER_ID" --key "$ISSUER_KEY" --ns 'vwork-*' --ttl 5m)"
-cellhive token --issuer "$ISSUER_ID" --key "$ISSUER_KEY" --ns vwork-42 --kind kv --name CACHE --ttl 5m
+export CELLHIVE_TOKEN="$(cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m)"
+cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --kind kv --name CACHE --ttl 5m
 ```
 
-The `--key` argument can appear in process listings; use trusted hosts and never log keys/JWTs. Minting is local without issuer lookup; servers check authoritative state on every use. Omit kind/name for namespace tokens, provide exact values for binding tokens. With bootstrap authority, use `cellhive issuer disable "$ISSUER_ID"` or `cellhive issuer delete "$ISSUER_ID"`; deletion is irreversible and same-name create gets a fresh ID. `cellhive creds [role]` prints purpose keys, not Bearer tokens; `creds issuer <name>` is removed.
+The `--key` argument can appear in process listings; use trusted hosts. Neither minting nor server issuer authentication consults records. Omit kind/name for namespace tokens; provide exact values for binding tokens. `cellhive creds [role]` and `creds issuer <pattern>` output keys, not Bearers. Issuer create/list/get/enable/disable/delete are removed.
 
 ### Bundle Authorization
 
@@ -121,13 +116,13 @@ Error shape `{error, message, field_path?}`, stable error codes: `unsupported_bi
 
 - Reverse proxy/cloud LB load-balances admin traffic to **any cell-agent replica**;
 - Non-owner replicas forward business requests to the owner's admin address, preserving Bearer authorization for destination revalidation. Native internal control mirrors admit designated internal identities only, never CF routes;
-- General reads may be cached, but issuer authorization requires owner authority and at most a 5-second authorization window; deploy/rollback ordering remains single-writer;
+- General control reads may be cached; issuer authorization is stateless without owner lookup. Deploy/rollback ordering remains single-writer;
 - Control cell owner death → standard takeover flow; during the brief unavailability window, admin writes return `503`.
 
 ## Authentication and Identity
 
 - Unified Bearer HS256 JWT, default audience `cellhive`; no OIDC, static credentials or legacy headers;
-- Namespace authority comes from verified claims and persisted issuer ceilings, not request parameters; CellHive does not take over vwork login;
+- Namespace authority comes from verified claims and the `kid` pattern ceiling, not namespaces-registry entries or request parameters; CellHive does not take over vwork login;
 - Runtime binding isolation (ADR-029) is independent of this.
 
 ## To Be Refined

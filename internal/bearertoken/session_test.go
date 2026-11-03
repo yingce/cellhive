@@ -61,6 +61,52 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+func TestSessionParentPattern(t *testing.T) {
+	for _, typ := range []string{"assets", "tail"} {
+		for _, tc := range []struct {
+			parent string
+			ns     string
+			valid  bool
+		}{
+			{"vwork-*", "vwork-app", true},
+			{"vwork-app", "vwork-app", true},
+			{"*", "vwork-app", true},
+			{"token/admin", "vwork-app", true},
+			{"vwork-*", "foreign-app", false},
+			{"vwork-app", "vwork-other", false},
+			{"issuer/vwork-*", "vwork-app", false},
+			{"vwork-**", "vwork-app", false},
+			{"vwork-*x", "vwork-app", false},
+			{"__platform__", "vwork-app", false},
+			{"vwork/a", "vwork-app", false},
+			{"vwork\\a", "vwork-app", false},
+			{"vwork a", "vwork-app", false},
+			{"00112233445566778899aabbccddeeff", "00112233445566778899aabbccddeeff", false},
+		} {
+			t.Run(typ+"/"+tc.parent+"/"+tc.ns, func(t *testing.T) {
+				c := sessionClaims(typ)
+				c.ParentIssuer, c.Namespace = tc.parent, tc.ns
+				_, err := Mint(testKey, "token/"+typ, c)
+				if (err == nil) != tc.valid {
+					t.Fatalf("Mint valid=%v: %v", tc.valid, err)
+				}
+				payload, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token := signed(`{"alg":"HS256","typ":"JWT","kid":"token/`+typ+`"}`, string(payload))
+				_, got, err := Verify(testKey, token, testNow)
+				if (err == nil) != tc.valid {
+					t.Fatalf("Verify valid=%v: %+v, %v", tc.valid, got, err)
+				}
+				if err == nil && got.ParentIssuer != tc.parent {
+					t.Fatalf("parent suffix changed: %q", got.ParentIssuer)
+				}
+			})
+		}
+	}
+}
+
 func TestDOTicket(t *testing.T) {
 	shard := 0
 	c := baseClaims()

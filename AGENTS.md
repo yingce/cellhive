@@ -31,7 +31,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 必须遵守的决策
 
-见 `docs/decisions.md`（最新 ADR-304，持续追加；Bearer JWT、持久化 issuer 与 DO ticket 授权收紧已实现，本地验收含完整 baseline 已通过，未部署；不得宣称生产切换完成）。改设计要先改文档。
+见 `docs/decisions.md`（最新 ADR-304，持续追加；无状态 issuer 修订实施与验收中，未部署；此前有状态测试不证明本次修订通过）。issuer 使用 `kid=issuer/<pattern>`（精确/前缀 `*`/`*`），固定最大 TTL 86400 秒，无 issuer CRUD、注册表授权或 owner 点查；恰好 32 位十六进制旧 issuer ID 拒绝且无回退。保留 secret 加密、ADR-302 固定 KV 授权和 DO 最长 30 秒票据边界，不得宣称生产切换完成。改设计要先改文档。
 
 ## 命令
 

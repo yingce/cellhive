@@ -41,3 +41,32 @@ func TestBindingAuthorization(t *testing.T) {
 		t.Fatalf("explicit credential changed: %s %v", token, err)
 	}
 }
+
+func TestIssuerAuthorization(t *testing.T) {
+	c := conf{issuer: "vwork-*", signingKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nsList: []string{"vwork-42"}, tokens: []string{""}, kind: "kv", name: "KV"}
+	token, err := c.authorization(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := bearertoken.DecodeKey(c.signingKey)
+	kid, claims, err := bearertoken.Verify(key, token, time.Now())
+	if err != nil || kid != "issuer/vwork-*" || claims.Namespace != "vwork-42" || claims.Kind != "kv" || claims.Name != "KV" || claims.ExpiresAt-claims.IssuedAt != 300 {
+		t.Fatalf("kid=%s claims=%+v err=%v", kid, claims, err)
+	}
+	for _, ns := range []string{"other", "vwork-*"} {
+		c.nsList[0] = ns
+		if _, err := c.authorization(0); err == nil {
+			t.Fatalf("accepted namespace %q", ns)
+		}
+	}
+	c.nsList[0] = "vwork-42"
+	c.signingKey += "="
+	if _, err := c.authorization(0); err == nil {
+		t.Fatal("accepted padded key")
+	}
+	c.signingKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	c.tokens[0] = "static"
+	if _, err := c.authorization(0); err == nil {
+		t.Fatal("issuer mode accepted static token")
+	}
+}

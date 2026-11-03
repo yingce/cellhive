@@ -1,22 +1,35 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"cellhive/internal/bearertoken"
-	"cellhive/internal/control"
-	"cellhive/internal/owner"
 )
 
+const maxIssuerJWTLifetime = 86400
+
 func (s *Server) jwtKey(kid string) ([]byte, error) { return s.Cfg.JWTKey(kid) }
+
+func issuerPattern(kid string) (string, error) {
+	if !strings.HasPrefix(kid, "issuer/") {
+		return "", errors.New("invalid issuer key ID")
+	}
+	pattern := strings.TrimPrefix(kid, "issuer/")
+	if err := bearertoken.ValidatePattern(pattern); err != nil {
+		return "", err
+	}
+	// Retired random IDs must never become exact-namespace signing identities.
+	if len(pattern) == 32 {
+		if _, err := hex.DecodeString(pattern); err == nil {
+			return "", errors.New("retired issuer key ID")
+		}
+	}
+	return pattern, nil
+}
 
 func (s *Server) verifyBearer(r *http.Request) (string, bearertoken.Claims, error) {
 	var empty bearertoken.Claims
@@ -37,18 +50,19 @@ func (s *Server) verifyBearer(r *http.Request) (string, bearertoken.Claims, erro
 		return "", empty, err
 	}
 	if strings.HasPrefix(kid, "issuer/") {
-		issuer, err := s.issuerFromOwner(r.Context(), strings.TrimPrefix(kid, "issuer/"))
+		pattern, err := issuerPattern(kid)
 		if err != nil {
 			return "", empty, err
 		}
-		patterns := c.Namespaces
+		ceiling := []string{pattern}
+		allowed := bearertoken.Contains(ceiling, c.Namespaces)
 		if c.Type == "binding" {
-			patterns = []string{c.Namespace}
+			allowed = bearertoken.Allows(ceiling, c.Namespace)
 		}
-		if !issuer.Enabled || issuer.DeletedMs != 0 || c.ExpiresAt-c.IssuedAt > issuer.MaxTokenTTLSeconds || !bearertoken.Contains(issuer.Namespaces, patterns) {
+		if c.ExpiresAt-c.IssuedAt > maxIssuerJWTLifetime || !allowed {
 			return "", empty, errors.New("issuer authorization denied")
 		}
-		if target := r.URL.Query().Get("target_ns"); c.Type == "binding" && c.Kind == "service" && target != "" && !bearertoken.Allows(issuer.Namespaces, target) {
+		if target := r.URL.Query().Get("target_ns"); c.Type == "binding" && c.Kind == "service" && target != "" && !bearertoken.Allows(ceiling, target) {
 			return "", empty, errors.New("service target exceeds issuer ceiling")
 		}
 	}
@@ -66,89 +80,4 @@ func (s *Server) setInternalAuthorization(r *http.Request, role string) error {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	return err
-}
-
-// Issuer reads are uncached and fenced by the control-cell owner. This endpoint
-// uses an internal JWT, so verifying an issuer never recursively checks itself.
-func (s *Server) issuerFromOwner(ctx context.Context, id string) (control.Issuer, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://cellhive.internal/v1/control/issuer-info?id="+url.QueryEscape(id), http.NoBody)
-		if err != nil {
-			return control.Issuer{}, err
-		}
-		if err = s.setInternalAuthorization(req, "internal"); err != nil {
-			return control.Issuer{}, err
-		}
-		resp, forwarded, err := s.forwardTo(req, control.Scope(), []byte{})
-		if err != nil {
-			return control.Issuer{}, err
-		}
-		if forwarded {
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				return control.Issuer{}, fmt.Errorf("issuer owner returned %d", resp.StatusCode)
-			}
-			// Creation reserves at most 8 KiB, including future tombstone fields;
-			// retain headroom here without accepting unbounded owner responses.
-			var issuer control.Issuer
-			err = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&issuer)
-			return issuer, err
-		}
-		issuer, err := s.localIssuer(ctx, id)
-		if attempt == 0 && (errors.Is(err, owner.ErrNotOwner) || errors.Is(err, owner.ErrUnowned)) {
-			if err = s.claimForRead(ctx, control.Scope()); err != nil {
-				return control.Issuer{}, err
-			}
-			continue
-		}
-		return issuer, err
-	}
-	return control.Issuer{}, owner.ErrNotOwner
-}
-
-func (s *Server) localIssuer(ctx context.Context, id string) (record control.Issuer, err error) {
-	if s.Control == nil {
-		return record, errors.New("control unavailable")
-	}
-	if s.Owner != nil {
-		fence, ok := s.Owner.ReadFence(control.Scope())
-		if !ok {
-			return record, owner.ErrNotOwner
-		}
-		defer func() {
-			if !fence() {
-				record = control.Issuer{}
-				err = owner.ErrNotOwner
-			}
-		}()
-		if check, ok := s.Owner.LocalReadGuard(control.Scope()); ok {
-			defer func() {
-				if !check() {
-					record = control.Issuer{}
-					err = owner.ErrNotOwner
-				}
-			}()
-		} else {
-			o, _, e := s.Owner.Resolve(ctx, control.Scope())
-			if e != nil {
-				return record, e
-			}
-			if o.Node != s.Cfg.NodeID || o.Session != s.Owner.Session || !s.ownerLive(ctx, o, time.Now()) {
-				return record, owner.ErrNotOwner
-			}
-		}
-	}
-	return s.Control.GetIssuer(ctx, id)
-}
-
-func (s *Server) handleIssuerInfo(w http.ResponseWriter, r *http.Request) {
-	if s.forwardRead(w, r, control.Scope(), nil) {
-		return
-	}
-	issuer, err := s.localIssuer(r.Context(), r.URL.Query().Get("id"))
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "issuer_unavailable", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, issuer)
 }

@@ -102,9 +102,9 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
   - `bash scripts/otlp-collector-smoke.sh`：真实 `otelcol-contrib`（file/debug 导出）+ cell-agent + user-runtime + 探针 worker，断言 collector 收到 span（带 `cellhive.namespace`）且 `/metrics` 出现带 `ns` 的绑定计数。它不再把租户 console log record 作为验收条件。
   - `bash scripts/openobserve-e2e.sh`：真实 **OpenObserve** + 仓库参考 collector 配置，端到端验证 traces：慢请求（>1s）经参考配置的 `tail_sampling`（keep-slow）保留整条 trace 进 `default traces`（span 带 `cellhive_namespace`/`cellhive_binding`）。它不再声称租户 console 日志进入 `default logs`。
   - **后端字段命名**：OpenObserve 会把属性点号展平（`cellhive.namespace` → 查询列 `cellhive_namespace`），SQL 用展平名；trace 查询用 `POST /api/<org>/_search?type=traces`，span 名在 `operation_name`。
-- **ADR-178 私网采集例外保留**：`:7001/metrics` 全量 pull 免鉴权，Vector/Collector `prometheus` receiver 继续直接抓取，不需要 JWT 刷新器、代理或额外服务。通过私网、防火墙/NetworkPolicy 限定可信采集器，不得公网暴露或允许租户出网触达。这不豁免业务 namespace 监控视图的鉴权。ADR-304 本地验收已通过，未部署，不代表生产切换完成。
-- namespace 视图 `/v1/control/metrics` 使用 Bearer HS256 namespace JWT，与发布/CF 数据同属全部业务权限，无 metrics-reader/actions。按 issuer 上限、token `ns` 数组、请求范围过滤；全局平台、无 ns 或无法归属的 `platform/other` 聚合序列不得泄漏给受限租户。admin 监听的全量 `/metrics` 要求 admin 或 issuer 上限允许且 token 显式授予 `*` 的 namespace JWT；后者也可执行全平台运维读取和 GC，但 **issuer registry CRUD（含读取/列表）仍仅允许 bootstrap admin**。精确/前缀授权不具备全平台运维权限。
-- 日志与 Tail 同样遵守上限与 issuer 撤销。stock Wrangler 的真实 Tail 会话 query token 是协议例外，不是普通用户缺失 Authorization 的回退；会话用途 key 与 admin 分离，权限不扩大，撤销服从同一最多5秒窗口（无缓存时权威点读）。长期鉴权 API 客户端必须刷新 JWT，私网免鉴权 metrics 采集不需要。
+- **ADR-178 私网采集例外保留**：`:7001/metrics` 全量 pull 免鉴权，Vector/Collector 直接抓取，无 JWT 刷新器、代理或额外服务。私网、防火墙/NetworkPolicy 限定可信采集器，不得公网暴露或允许租户出网触达；业务监控仍须鉴权。ADR-304 无状态修订实施与验收中，未部署，此前有状态测试不证明本次通过。
+- `/v1/control/metrics` 使用 Bearer HS256 namespace JWT，与发布/CF 数据同属全部业务，无 metrics-reader/actions。按 kid pattern 上限、token `ns`、请求范围过滤；无 ns 或 `platform/other` 聚合不得泄漏给受限租户。admin 全量 `/metrics` 允许 admin 或 `issuer/*` 且显式 `ns=["*"]`；后者拥有全部全局业务及运维读取/GC 权限。精确/前缀授权无全平台权限，issuer CRUD 已移除。
+- 日志/Tail 遵守无状态 pattern 上限与有效期；会话用途 key 与 admin 分离，绑定父 pattern/namespace/exp，不扩权或延寿。Tail 每500ms检查到期，不查询 issuer 撤销记录。无即时单 issuer 撤销，只有 exp/root轮换；泄露 key 需轮换 root 止损。Wrangler query token 仅为协议例外，无普通 Authorization 回退。长期鉴权客户端须刷新 JWT，私网 metrics scrape 不需要。
 - **投递语义**：OTLP 导出是 **best-effort、有界内存批**；后端不可用会丢遥测而不阻塞请求。审计级留存需在 Collector/后端前加持久缓冲（file exporter）。
 
 ## 告警建议（运维）

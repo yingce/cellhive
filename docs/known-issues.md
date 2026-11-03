@@ -1,16 +1,16 @@
 # 评审问题与发布状态（Known Issues / Review Closure）
 
-## 2026-11-03 ADR-304 授权重设计（已实现，本地验收通过，未部署）
+## 2026-11-03 ADR-304 授权重设计（无状态修订实施与验收中，未部署）
 
 统一 Bearer HS256 JWT，默认 audience `cellhive`，无静态 header/OIDC 兼容。单个 vwork issuer key 签 namespace 与受限 binding，无 actions/key_version；namespace `ns` 为精确/前缀 `*`/`*` 数组，binding 为精确 `ns` 字符串与 kind/name，固定字段仅平台签发。
 
-issuer 持久化在现有 control cell，`kid=issuer/<immutable-id>`，强制 namespace 上限和 TTL<=86400；缺失/禁用/不可恢复软删 fail closed，同名重建新 ID。owner 权威读可不缓存；若缓存从读开始最多5秒，失败不续期、本地写阻止旧读回填。bootstrap admin JWT 创建 registry 不是业务缺记录旁路。JWT 使用独立 `cellhive/jwt/v1/` HKDF 域，旧 ScopeSecret 仅保留给 Hyperdrive 非 HTTP 凭据。
+无状态 `kid=issuer/<pattern>`，支持精确/前缀 `*`/`*` 上限与固定最大 TTL86400秒；恰好32位十六进制旧 issuer ID 拒绝、无回退。无 CRUD、active record、owner 点查、持久化检查或 namespaces 注册表授权；历史 issuer 表可保留惰性数据，不做破坏性迁移。key 使用 `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`；旧 ScopeSecret 仅保留给 Hyperdrive 非 HTTP 凭据，secret 加密不变。无即时单 issuer 撤销，JWT 靠 exp，泄露 key 需轮换 root 并重分发才能止损。
 
 namespace JWT 包含全部业务、CF 数据和过滤后的监控，平台 admin 独立。CF 仅8082，不在7001/8083，转发保留授权。真实 Wrangler Tail 会话 query 是协议例外，不是普通用户 header 回退；私网全量 metrics scrape 可保留明确例外。root/key 限定分发，内部角色用途隔离，长期组件须刷新 JWT。
 
-**已实现，本地验收通过，未部署**：metadata/durability 修复后的最终 build/vet/test 全通过；111项 JS 与真实 runtime、DO 收紧后的完整相关 race/测试、重建当前源码的完整 runtime baseline 均通过。原版 Wrangler4.133.0 assets/control/vectorize 3/3通过（18.332秒，无跳过）；VWork TS1706通过/19跳过，Rust369通过/1忽略，Docker3/3通过无跳过。证据见 [测试](testing.md)，不是本次文档任务重跑，不代表生产切换完成。
+**历史有状态版本验收，不证明本次无状态修订通过**：metadata/durability 修复后的最终 build/vet/test 全通过；111项 JS 与真实 runtime、DO 收紧后的完整相关 race/测试、当时源码的完整 runtime baseline 均通过。原版 Wrangler4.133.0 assets/control/vectorize 3/3通过（18.332秒，无跳过）；VWork TS1706通过/19跳过，Rust369通过/1忽略，Docker3/3通过无跳过。证据见 [测试](testing.md)，不是本次文档任务重跑，未部署，不代表生产切换完成。
 
-**已验收的撤销边界**：新 DO grant 重验 parent，执行 metadata 已签名；已签发 ticket 最多30秒后失效，不宣称即时全局撤销。当前 issuer 权威点读无缓存，create 仅返回一次 key；HTTP metadata 限制与 `outcome_unknown` 恢复见控制面说明。显式 `ns=["*"]` 可全局运维读/GC/全量指标，但 issuer CRUD 仅 bootstrap admin。`:7001/metrics` 私网免鉴权全量 scrape 为例外，`:8082/v1/control/metrics` 鉴权过滤。`bundle_grants` 持久化 namespace/SHA 授权，namespace 原生上传须显式 namespace，CF 同等授予 grant；SHA 可知不代表可部署。旧 OIDC/静态/未受限 issuer 条目为历史记录，不是兼容承诺。
+**本次待验收边界**：DO grant 无状态重验 parent，执行 metadata 签名；票据最长30秒且不超过父 exp，保留 ADR-302 固定 KV 授权。assets/Tail 无状态绑定父 pattern/namespace/有效期，Tail 每500ms检查到期，不查撤销记录。`issuer/*` 且显式 `ns=["*"]` 允许全部全局业务及运维读/GC/指标，`token/admin` 保留全局 bootstrap。`:7001/metrics` 私网免鉴权例外、`:8082/v1/control/metrics` 鉴权过滤不变。`bundle_grants` 持久化 namespace/SHA 授权不变；已知 SHA 不代表可部署。旧 OIDC/静态/有状态 issuer 记录不是兼容承诺。
 
 本文件记录系统评审发现的全部问题，以及**每条问题的解决决议**。原始分级见文末附录。设计文档（architecture / cell-protocol / durable-objects / networking / decisions）已按此同步。
 
@@ -27,7 +27,7 @@ _最后更新：2026-11-01_
 - control：`resource_cleanups` due 索引、completed job 7 天保留期、app/worker purge 连带清理 `deployment_events`。
 - 验证：`make test`、`make vet`、`make js-test`、受影响包 race 和全量 in-repo e2e 通过；两区 Pod 新 digest、Ready、`restartCount=0`。详见 [release-2026-10-31-03](archive/release-2026-10-31-03.md) 和 [release-2026-10-31](archive/release-2026-10-31.md)。
 - 残余：objgc recheck→Delete 微秒窗口、legacy scope 缺 `owner-gen` 时仍可能从 1 开始、waker `Due` 的逐 key Get、DO envelope 二次 JSON 编解码。
-- CF-API（历史验收记录）：Wrangler 4 的 `assets` binding 已支持（4.133 可能省略 `assets.config.binding`，采用 bindings 里的名字；含 assets-only、重复部署继承 active asset token）；Wrangler 4.133 真实 CLI 的 Worker+assets、重复部署、assets-only、租户 JWT 部署均已通过；错误码区分 `unsupported_binding`/`invalid_binding`/`invalid_multipart`。当时的独立 CF 监听与 JWT `cellhive_ns` 授权属于旧契约；ADR-304 已改为仅 admin `:8082`、已注册 issuer 的 HS256 namespace JWT（`ns` 数组）或 bootstrap admin JWT，无静态/OIDC 回退，见本文顶部状态；不代表生产切换完成。
+- CF-API（历史验收记录）：Wrangler 4 的 `assets` binding 已支持（4.133 可能省略 `assets.config.binding`，采用 bindings 里的名字；含 assets-only、重复部署继承 active asset token）；Wrangler 4.133 真实 CLI 的 Worker+assets、重复部署、assets-only、租户 JWT 部署均已通过；错误码区分 `unsupported_binding`/`invalid_binding`/`invalid_multipart`。当时独立 CF 监听与 `cellhive_ns` 属于旧契约；现行 ADR-304 无状态修订要求仅 admin `:8082`、pattern issuer HS256 namespace JWT（`ns` 数组）或 bootstrap admin JWT，无静态/OIDC 回退。见顶部状态，不证明本次修订通过或生产切换完成。
 - `vwork-40/vlog-daily-report` 的 cron 500 是租户 `sendFeishu` 错误（`Feishu send failed with HTTP 200`），不是平台 dispatch 修复项；需租户修响应解析或调用 `controller.noRetry()`。
 
 ## 2026-10-27 COS并发创建空读（已随 48216e7 发布：SG rev71 / USW rev56）
@@ -325,7 +325,7 @@ Cron 同分钟不同表达式独立物化；`noRetry()` 返回租户执行结果
 - **主防线是网络隔离**（见 I-09）：租户 Worker **无法**访问内网 cell-agent :7001。
 - 平台角色 token **只存在于 host adapter（平台代码）与 cell-agent 之间**，**绝不注入租户 env**；租户只拿到 binding facade。
 - host adapter 为每个 binding 生成资源范围 token；cell-agent 校验签名、namespace、binding kind/name 与登记 ACL，缺省或越权即拒（ADR-074/181）。
-- ADR-304 要求持久化 issuer 上限、过期和禁用/软删撤销，实施与验收中；完整边界见 [`security.md`](./security.md)。
+- ADR-304 要求无状态 kid pattern 上限、固定最大86400秒、到期/root轮换，无 issuer 注册表或即时撤销；修订实施与验收中，见 [`security.md`](./security.md)。
 - 管理与业务 binding 统一 Bearer HS256 JWT，namespace 业务权限与平台 admin 分离，无静态/OIDC 回退。
 
 ## I-03 WAL checkpoint/截断（定稿）

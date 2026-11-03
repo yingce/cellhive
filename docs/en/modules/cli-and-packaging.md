@@ -11,8 +11,8 @@ Stock Wrangler 4.133.0 can reach the compatible admin API with `CLOUDFLARE_API_B
 
 **Credentials and scoped-token issuance (ADR-181)**:
 - `cellhive creds [role]`: print the 8 root-derived role credentials.
-- `cellhive creds issuer <name>`: print a delegated issuer key (`HKDF(SCOPE_SECRET,"issuer/"+name)`) to hand to a trusted entry (holds no root).
-- `cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <name>] [--ttl 5m] [--key <b64>]`: single issuance entry point (platform key / delegated issuer key / a given key); delegated tokens require `--ttl>0`; `kind`/`name` accept `*`/`pre*`.
+- ADR-304 stateless amendment is in implementation and acceptance; old tests do not validate it. `cellhive creds issuer 'vwork-*'` locally derives a raw32-byte unpadded base64url key using `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/issuer/vwork-*",32)` for trusted signers without root; no issuer CRUD or registry dependency.
+- `cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m` signs namespace JWTs; add `--kind kv --name CACHE` for exact binding JWTs. TTL defaults to5m, fixed maximum86400 seconds. The kid pattern is exact/prefix `*`/`*`; exactly32-hex legacy IDs reject without fallback, no old `--iss`/scope-token compatibility.
 
 ## Configuration (Environment Variables)
 
@@ -47,7 +47,7 @@ Stock Wrangler 4.133.0 can reach the compatible admin API with `CLOUDFLARE_API_B
 
 ## Test Anchors
 
-`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`, `cmd/cellhive TestTranslateWrangler`, `internal/server TestStockWrangler` (runs real Wrangler only when `CELLHIVE_WRANGLER_BIN` is set); `cmd/cellhive TestMintScopeToken` (issuance), `internal/scopedtoken` (glob/issuer), `internal/server TestScopeAuthDelegated`. Reproduction command: [test strategy](../testing.md).
+`make cli-test`, `internal/bundler`, `internal/wrangler`, `internal/wranglercompat`, `cmd/cellhive TestTranslateWrangler`, `internal/server TestStockWrangler` (real Wrangler requires `CELLHIVE_WRANGLER_BIN`). Historical issuance tests `TestMintScopeToken`, `internal/scopedtoken` and `TestScopeAuthDelegated` do not validate the ADR-304 stateless amendment; current gates are in [test strategy](../testing.md).
 
 ## Related Documentation
 

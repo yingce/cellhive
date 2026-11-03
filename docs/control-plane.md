@@ -1,10 +1,10 @@
 # 控制面
 
-> ADR-304 Bearer JWT 与持久化 issuer **已实现，本地验收通过，未部署**；DO ticket 授权收紧及重建当前源码的完整 baseline 已通过。生产切换尚未完成；旧静态 header/OIDC 不保留兼容路径。
+> ADR-304 Bearer JWT 的无状态 issuer 修订**实施与验收中，未部署**；此前有状态测试不证明本次修订通过。旧静态 header/OIDC 不保留兼容路径。
 
 ## 定位与形态
 
-- **单一管理 API**：namespace JWT 管理授权 namespace 的全部业务；显式 `ns=["*"]` 可执行全局运维读取、GC、全量指标，但 issuer CRUD（含读取）仅 bootstrap admin JWT。请求 ns 参数不能替代授权。
+- **单一管理 API**：namespace JWT 管理授权 namespace 的全部业务；`issuer/*` 且显式 `ns=["*"]` 允许全部全局业务及运维读取、GC、全量指标。`token/admin` 保留全局 bootstrap 权限；issuer CRUD 已移除。请求 ns 参数不能替代授权。
 - **并入 `cell-agent`**（ADR-012）：单 Go 二进制；控制面监听 `:8082`（经运维自备的反代/云 LB），与数据面 `:7001` 分监听、分鉴权（Go↔Go 与 JS↔cell 共用 :7001；无 gRPC 平面，ADR-136）。
 - secrets：`POST /v1/control/secret`（put）、`GET /v1/control/secret`（get）、`DELETE /v1/control/secret`、`GET /v1/control/secrets`（只列 key/更新时间）；CLI `cellhive secret put|get|delete|list`（ADR-147）。
 - **每域资源管理（ADR-157，推荐）**：`POST|GET|DELETE /v1/<kind>/resources`（`kind=kv|d1|queue|r2|workflow|hyperdrive`），kind 由路径固定、`scope` 缺省 `<ns>/__<kind>__/<name>`；`GET /v1/<kind>/stats` 给只读运维统计（见 `docs/bindings.md`）；队列死信重放为 `POST /v1/queue/dead-letters/replay`。CLI 对应 `cellhive kv namespace|d1|r2 bucket|queue|workflows|hyperdrive create|list|delete|stats`。以下 `/v1/control/*` 形式保留为**兼容别名**（同 handler）。
@@ -61,38 +61,33 @@ Wrangler 的"无 id 自动创建资源"被**拒绝**（wrangler-compat.md）：�
 - 资源创建 = 在控制面登记 scope（cell 首次访问时惰性激活）。
 - **name / scope 必须可寻址（ADR-269）**：`name` 是默认 cell id、registry 主键和 binding/token 名，必须是单个 cell 组件（不能含 `/` 或 `\`，不能是 `.`/`..` 或含 `..`）；`scope` 只能省略（配置型资源/无 id 声明）、给完整 `<ns>/__<kind>__/<id>`，或给裸 cell id（如 `sessions`）。需要"名字与物理 cell 不同"时用显式 `--scope`，不要把 `/` 写进 name（如 `name: vwork-74/CHTEST` 会在创建时 400，不会留下不可用/不可删的登记）。
 
-## Issuer 管理与签发（ADR-304，本地验收通过，未部署）
+## 无状态 Issuer 签发（ADR-304，修订实施与验收中）
 
-- bootstrap root 派生的短期 admin JWT 用于创建 registry 和恢复，不发送 root/key 本身，也不为缺记录业务 issuer 开旁路。
-- issuer 记录保存在现有 `__platform__/__control__/main`：不可变随机 ID、显示名称、namespace 上限、enabled、最大 TTL（不超过 86400 秒）及创建/更新/软删除时间，不存明文 key、无 `key_version`。创建/禁用/删除走捕获写与审计，遵守现有 RPO=0 确认。
-- 创建限制：显示名称最多 256 个 UTF-8 字节；namespace pattern 为 1–64 个，每个最多 128 字节；序列化元数据预算最多 8192 字节（预留后续更新时间和软删除字段），低于 owner 点查的 16384 字节上限。无效输入在捕获前返回 400，同名冲突返回 409，存储或捕获失败返回 503。
-- 若创建/禁用/删除已本地提交，但持久化确认失败，返回 `503`、`error=outcome_unknown` 和 `issuer_id`，不返回 key，也不表示操作已回滚。bootstrap 调用方先通过 get/list 权威确认；若创建未取得 key 且记录已存在，删除该 ID 并等待成功确认，再同名创建新 ID 获取新 key。重试原 create 可能返回 409；get/list 不补发 key，未新增 recover-key 接口。禁用/删除可重试以重新取得持久化确认。
-- `kid=issuer/<id>` 按 ID 权威点查，**当前不缓存**；缺失、禁用、软删拒绝；同名重建新 ID，旧 JWT 不复活。未来若缓存，最多从权威读取开始计5秒，失败不续期、本地写阻止旧读回填。创建响应仅此次返回 key，get/list 不返回 key。
-- 一个 vwork key 可签 namespace（`ns` 数组，精确/末尾前缀 `*`/`*`）和 binding（精确 `ns` 字符串、`kind/name`）；无 actions。平台固定 `worker/version/resource` 字段不能由 issuer 自签。
-- namespace JWT 覆盖发布、CF 数据、secret、日志、监控；显式 `ns=["*"]` 允许全局运维读取/GC/全量指标，但不允许 issuer CRUD。`:8082/v1/control/metrics` 鉴权并按 namespace 过滤；`:7001/metrics` 为私网免鉴权全量 scrape 例外。CF API 仅 `:8082`，不在 `:7001/:8083`；bridge/owner 转发保留上限。
-- CLI 的 issuer 生命周期和短期 JWT 签发迁移须联合验收；旧按名称派生、无记录 issuer 和无过期 scope 签发命令不再是有效契约。key 派生、撤销和会话例外见 [安全模型](security.md)。
+- `kid=issuer/<pattern>` 直接编码精确/末尾前缀 `*`/`*` 上限，固定 `0 < exp-iat <= 86400` 秒。恰好 32 位十六进制旧 issuer ID 拒绝，无回退。
+- 无 issuer CRUD、owner 点查、active record、持久化确认或 namespaces 注册表授权。旧 issuer 表可保留为惰性数据，不做破坏性迁移；资源注册与 RPO=0 不变。
+- key 为 `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`。同一 vwork key 签 namespace（`ns` 数组）或 binding（精确 `ns` 字符串与 `kind/name`）；无 actions/key_version，固定 `worker/version/resource` 仅平台签发。
+- 无即时单 issuer 撤销；JWT 靠 exp 到期，泄露 key 需轮换 root 并重新分发才能止损。会话无状态绑定父 pattern 和有效期，见 [安全模型](security.md)。
+- namespace JWT 覆盖全部授权业务；`issuer/*` 且显式 `ns=["*"]` 覆盖全局业务、运维、GC、全量指标。`:8082/v1/control/metrics` 鉴权过滤；`:7001/metrics` 为私网免鉴权例外。CF 仅 `:8082`，bridge/owner 转发保留上限。
 
 ### CLI Bootstrap、Provision 与签发
 
-以下示例仅在可信运维环境执行，root 文件已由 secret 挂载提供；无显式 JWT/profile token 时 CLI 自动签5分钟 bootstrap admin JWT。先确保当前 profile 不含业务 token，关闭 shell tracing，避免将创建输出写入日志。
+以下派生仅在可信运维环境执行，root 文件由 secret 挂载提供；无显式 JWT/profile token 时 CLI 自动签5分钟全局 bootstrap admin JWT。关闭 shell tracing，不记录 key/JWT。
 
 ```bash
 export CELLHIVE_ADMIN_URL=https://cellhive.example.com
 export CELLHIVE_ROOT_KEY_FILE=/run/secrets/cellhive-root-key
 unset CELLHIVE_TOKEN CELLHIVE_ADMIN_TOKEN
-cellhive issuer create vwork --ns 'vwork-*' --max-token-ttl 1h
-cellhive issuer list
-cellhive issuer get "$ISSUER_ID"
+key="$(cellhive creds issuer 'vwork-*')"
 ```
 
-创建返回 `{issuer,kid,key}`，将 `.issuer.id` 与只返回一次的 `.key` 安全交付可信签发方，以下变量由 secret 管理注入，不使用 root。`--max-token-ttl` 必填、无默认（最大24h），本例选择1h；`token --ttl` 默认5m，本例也显式指定。
+`creds issuer` 不访问网络或注册记录，输出原始32字节 key 的无填充 base64url。通过 secret 管理将 key 交付可信签发方；后者不持 root。TTL 固定最大86400秒，`token --ttl` 默认5m。
 
 ```bash
-export CELLHIVE_TOKEN="$(cellhive token --issuer "$ISSUER_ID" --key "$ISSUER_KEY" --ns 'vwork-*' --ttl 5m)"
-cellhive token --issuer "$ISSUER_ID" --key "$ISSUER_KEY" --ns vwork-42 --kind kv --name CACHE --ttl 5m
+export CELLHIVE_TOKEN="$(cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m)"
+cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --kind kv --name CACHE --ttl 5m
 ```
 
-`--key` 参数可能出现在进程列表，仅在可信主机执行；不记录输出 JWT。签发为本地操作，不查询 issuer 状态；服务端每次使用权威校验。CLI namespace 模式不传 kind/name，binding 模式精确传二者。bootstrap 身份下运行 `cellhive issuer disable "$ISSUER_ID"` 或 `cellhive issuer delete "$ISSUER_ID"`；删除不可恢复，同名再次 create 得新 ID。`cellhive creds [role]` 打印用途 key，不是 Bearer；`creds issuer <name>` 已移除。
+`--key` 可能出现在进程列表，仅在可信主机执行。签发与服务端 issuer 认证均不查询记录。namespace 模式不传 kind/name，binding 模式精确传二者。`cellhive creds [role]` 与 `creds issuer <pattern>` 输出 key，不是 Bearer；issuer create/list/get/enable/disable/delete 已移除。
 
 ### Bundle 授权
 
@@ -122,13 +117,13 @@ CLI 只是**快速反馈**；`deploy` 的校验以**服务端为权威**（防�
 
 - 反代/云 LB 把 admin 流量负载均衡到**任意 cell-agent 副本**；
 - 非 owner 副本把业务请求转发到 owner 的 admin 地址，保留原始 Bearer 授权并由目标重新验证；原生内部控制镜像仅接受指定内部身份，不提供 CF API；
-- 一般读可缓存，但 issuer 授权读必须 owner 权威并遵守最多 5 秒授权窗口；deploy/rollback 由 control cell owner 单写；
+- 一般控制面读可缓存；issuer 授权无状态，不查询 owner。deploy/rollback 仍由 control cell owner 单写；
 - control cell owner 死亡 → 标准接管流程；短暂不可用期间 admin 写返回 `503`。
 
 ## 鉴权与身份
 
 - 统一 Bearer HS256 JWT，默认 audience `cellhive`；不接 OIDC，不接受静态凭据/旧 header；
-- namespace 权限来自已验证 JWT 与持久化 issuer 上限，不只看请求参数；平台不接管 vwork 登录；
+- namespace 权限来自已验证 JWT 与 `kid` pattern 上限，不依赖 namespaces 注册表或请求参数；平台不接管 vwork 登录；
 - 运行时的 binding 隔离（ADR-029）与此独立。
 
 ## 待细化

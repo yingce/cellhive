@@ -6,6 +6,7 @@ CellHive records every design decision as an ADR. **The full ADR text is written
 
 | ADR | Title | Summary |
 |---|---|---|
+| ADR-304 | Bearer JWT and Stateless Issuer Authorization | Amendment in implementation and acceptance, not deployed; earlier stateful tests do not validate it. `kid=issuer/<pattern>` encodes exact/prefix `*`/`*` ceilings, fixed maximum TTL86400 seconds; keys use `cellhive/jwt/v1/` plus full kid. Reject exactly32-hex legacy IDs without fallback. No issuer CRUD, owner/persistence or issuer/namespaces-registry authorization; historical data may remain inert. No instant issuer revocation, only exp/root rotation. Global `issuer/*` business and `token/admin` bootstrap remain; secret encryption, ADR-302 and DO30-second limits are unchanged. |
 | ADR-001 | Use Stock workerd for the Compute Layer; Do Not Modify workerd (superseded by ADR-264) | Historical: the compute layer originally relied on unmodified upstream workerd. Superseded by the cellhive-workerd fork. |
 | ADR-264 | Use the cellhive-workerd Fork for the Compute Layer | Runtime workerd is the pinned `yingce/cellhive-workerd` fork (CellHive per-invocation limits); the main repo does not inline-patch workerd. |
 | ADR-269 | Resource names and scopes must be addressable single cell components | Creation rejects names containing separators or traversal components and scopes that are neither a parseable full cell scope nor a bare cell id; Cloudflare-compatible and native create paths share the store-level validation. |

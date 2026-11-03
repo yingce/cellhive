@@ -194,15 +194,11 @@ func scopeAuthCode(s *Server, kind, token, query string) int {
 	return rr.Code
 }
 
-// TestScopeAuthDelegated covers registered issuer binding capabilities and
+// TestScopeAuthDelegated covers stateless issuer binding capabilities and
 // rejects the retired wildcard/expiry-free delegated format.
 func TestScopeAuthDelegated(t *testing.T) {
 	s := newScopeServer(t)
-	issuer, err := s.Control.CreateIssuer(t.Context(), "vwork", []string{"acme"}, 120, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	kid := "issuer/" + issuer.ID
+	kid := "issuer/acme"
 	tok := jwtTestToken(t, s, kid, bearertoken.Claims{Type: "binding", Namespace: "acme", Kind: "d1", Name: "user42"})
 	if code := scopeAuthCode(s, "d1", tok, "ns=acme&db=user42"); code != http.StatusOK {
 		t.Fatalf("glob match = %d, want 200", code)

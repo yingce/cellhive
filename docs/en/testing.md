@@ -1,8 +1,8 @@
 # Test Strategy
 
-## ADR-304 Acceptance Gate (Implemented, Local Acceptance Passed, Not Deployed)
+## ADR-304 Acceptance Gate (Stateless Amendment In Progress, Not Deployed)
 
-Bearer HS256 JWT and persisted issuers are implemented, local acceptance passed, not deployed. Final coordinated evidence supplied on 2026-11-03 follows; this docs task did not rerun these tests, and production cutover is not complete.
+The Bearer HS256 JWT stateless issuer amendment is in implementation and acceptance, not deployed. The following preserves earlier stateful-version evidence from2026-11-03; it does not validate this amendment. This docs task did not rerun these tests, and production cutover is not complete.
 
 - Final `make build`, `make vet`, and `make test` passed after metadata/durability fixes (`bgp_1a10b8cbe0017e91RBThcXEZvP`).
 - Full `make js-test`: 111 JS tests and real runtime validation passed.
@@ -11,14 +11,14 @@ Bearer HS256 JWT and persisted issuers are implemented, local acceptance passed,
 - Stock Wrangler 4.133.0 assets/control/vectorize: 3/3 passed in 18.332 seconds, no skips.
 - VWork TS: 1706 passed, 19 skipped; Rust: 369 passed, 1 ignored; real Docker publication/assets/issuer lifecycle/direct binding: 3/3 passed, no skips.
 
-New DO grants recheck the parent, and execution metadata is signed. Already-issued tickets have an at-most-30-second revocation bound; uncached issuer reads do not imply instant global revocation. See control-plane notes for HTTP issuer metadata limits and `outcome_unknown` recovery. Legacy OIDC/JWKS/static/scope test records are historical evidence, not compatibility promises.
+The target still requires stateless parent revalidation for DO grants and signed execution metadata; tickets last at most30 seconds and never outlive parent exp, without instant cancellation. Old issuer metadata/CRUD/durability tests and OIDC/JWKS/static/scope tests are historical evidence, not acceptance gates for this amendment or compatibility promises.
 
-Additional gates: current issuer authority reads are uncached. Explicit `ns=["*"]` allows global operational reads/GC/full metrics, not issuer CRUD (bootstrap admin only). Private unauthenticated `:7001/metrics` full scraping is an exception; `:8082/v1/control/metrics` authenticates/filters. Verify durable `bundle_grants` namespace/SHA authority, explicit namespace on native namespace uploads, equivalent CF grants and cross-namespace SHA rejection.
+Pending stateless gates: `issuer/*` with explicit `ns=["*"]` allows all global business operations and operational reads/GC/full metrics; `token/admin` retains global bootstrap, issuer CRUD is removed. Test private unauthenticated `:7001/metrics` separately from authenticated/filtered `:8082/v1/control/metrics`. Preserve durable `bundle_grants` namespace/SHA authority, explicit namespace uploads, equivalent CF grants and cross-namespace SHA rejection.
 
 - Shared Go/JS/vwork TS/Rust vectors: headers, Unix-second claims, default `aud=cellhive`, `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`; reject invalid algorithm/type/audience/signature/time, ambiguous headers and old headers/OIDC.
-- Bootstrap admin JWT creates the registry, never a missing-business-issuer bypass. Test captured durability, owner-authoritative reads, disable/soft-delete/same-name fresh ID without revival, TTL<=86400 and whole-token ceiling rejection, no actions/key_version. Optional caches: at most5 seconds from read start, no error renewal/stale refill.
-- Namespace `ns` arrays support exact/prefix `*`/`*` for all business including CF data/filtered monitoring, not global admin. Binding `ns` string and kind/name are exact; pinned fields are platform-only, retaining ADR-302/resource fences.
-- Real stock Wrangler deploy/assets/Tail, owner forwarding original authority and destination revalidation, CF bridges retaining ceilings; CF only8082, not7001/8083. Tail session query exception must not become ordinary user-header fallback; issuer revocation applies to sessions.
+- Test `kid=issuer/<pattern>` exact/prefix `*`/`*` ceilings, fixed `0 < exp-iat <= 86400` seconds and whole-token over-ceiling rejection; exactly32-hex legacy IDs reject without fallback. No issuer/namespaces-registry, owner or persistence dependencies. Historical table data remains inert without destructive migration; CRUD routes/CLI are unavailable, no actions/key_version.
+- Test local root derivation via `creds issuer 'vwork-*'` producing raw32-byte unpadded base64url keys, and `token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m`. Namespace arrays grant all scoped business; binding `ns`/kind/name are exact and pinned fields platform-only. Retain ADR-302/resource fences and secret encryption. No instant issuer revocation; verify exp/root-rotation boundaries.
+- Real stock Wrangler deploy/assets/Tail, original owner-forwarded authority and destination revalidation, CF bridges retaining ceilings; CF only8082. Sessions statelessly bind parent pattern/namespace/exp without widening or extending authority; Tail checks expiry every500ms, assets recheck after upload bodies. Query-token exceptions must not become ordinary header fallback.
 - Metrics cannot leak unlabeled/platform/other aggregates; test private full-scrape exception separately. Verify long-running JWT refresh and scoped root/purpose-key distribution; Hyperdrive non-HTTP credentials retain old ScopeSecret derivation.
 
 > **Mirror notice:** this English page may lag the Chinese source. See [`../testing.md`](../testing.md) for the latest gates and evidence.

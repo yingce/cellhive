@@ -1,6 +1,6 @@
 # 模块：控制面与发布
 
-> ADR-304 **已实现，本地验收通过，未部署**。Bearer HS256 JWT，默认 audience `cellhive`；无旧静态 header/OIDC 兼容。namespace JWT 覆盖全部业务，显式 `ns=["*"]` 可全局运维读/GC/全量指标；issuer CRUD 仅 bootstrap admin。CF 仅 `:8082`，不挂 `:7001/:8083`。
+> ADR-304 **无状态修订实施与验收中，未部署**，旧有状态测试不证明本次通过。Bearer HS256 JWT，audience `cellhive`，无旧 header/OIDC。namespace JWT 覆盖全部授权业务，`issuer/*` 且显式 `ns=["*"]` 覆盖全局业务/运维/GC/指标；`token/admin` 保留全局 bootstrap，issuer CRUD 移除。CF 仅 `:8082`。
 
 应用/版本/路由/域名/资源/密钥/审计与发布流水线；单控制库（app 是表里的 `ns`），版本不可变、发布原子，资源先登记再 deploy。
 
@@ -27,8 +27,8 @@ admin `:8082` 上的 `/v1/control/*`（apps、deploy、promote、rollback、rout
 
 ## 关键不变量
 
-- ADR-304 已实现、本地验收含 DO ticket/完整 baseline 已通过，未部署。显式 `ns=["*"]` 可全局运维读/GC/全量指标，不可 issuer CRUD；后者仅 bootstrap admin。当前 issuer 权威读无缓存，create 仅返回一次 key。`bundle_grants` 持久化 namespace/SHA 授权，namespace 原生上传须显式 namespace，CF 同样授予 grant。`:7001/metrics` 私网免鉴权例外；`:8082/v1/control/metrics` 鉴权过滤。
-- issuer 位于现有 control cell，`kid=issuer/<immutable-id>`，有 namespace 上限与最大 TTL（<=86400 秒）；无 actions/key_version。同名重建新 ID，缺失/禁用/软删拒绝；权威读取，可不缓存，若缓存最多5秒。bootstrap admin JWT 创建 registry 不构成业务缺记录旁路。
+- `bundle_grants` 持久化 namespace/SHA 授权，namespace 原生上传须显式 namespace，CF 同样授予 grant。`:7001/metrics` 私网免鉴权例外；`:8082/v1/control/metrics` 鉴权过滤。ADR-302 固定 KV、secret 加密与 DO 最长30秒且不超过父 exp 的票据边界不变。
+- 无状态 `kid=issuer/<pattern>`，精确/前缀 `*`/`*` 上限，固定最大 TTL86400秒；无 actions/key_version、issuer/namespaces 注册表授权、owner/持久化检查。恰好32位十六进制旧 ID 拒绝且无回退。旧表可惰性保留，无破坏性迁移；无即时 issuer 撤销，只有 exp/root轮换，泄露 key 需轮换 root 止损。
 - 自动 provisioning **拒绝**：binding 必须引用已登记资源。
 - 域名登记即授权（无 DNS 校验，ADR-133）；host 唯一。
 - 版本不可变；rollback/promote 是原子切换。

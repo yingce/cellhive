@@ -11,8 +11,8 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`d1`/`kv`/
 
 **凭据与 scoped token 签发（ADR-181）**：
 - `cellhive creds [role]`：打印 root 派生的 8 个角色凭据。
-- `cellhive creds issuer <name>`：打印委派签发方的 issuer key（`HKDF(SCOPE_SECRET,"issuer/"+name)`），交给可信入口（不持 root）。
-- `cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <name>] [--ttl 5m] [--key <b64>]`：统一签发 scoped token（平台 key / 委派 issuer key / 直接给定 key）；委派令牌强制 `--ttl>0`；`kind`/`name` 支持 `*`/`pre*`。
+- ADR-304 无状态修订实施与验收中，旧测试不证明本次通过。`cellhive creds issuer 'vwork-*'` 本地以 `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/issuer/vwork-*",32)` 派生原始32字节无填充 base64url key，交给不持 root 的可信入口；无 issuer CRUD 或注册表依赖。
+- `cellhive token --issuer 'vwork-*' --key "$key" --ns vwork-42 --ttl 5m` 签 namespace JWT；加 `--kind kv --name CACHE` 签精确 binding。TTL 默认5m、固定最大86400秒；kid 为精确/前缀 `*`/`*` pattern，恰好32位十六进制旧 ID 拒绝且无回退，无旧 `--iss`/scope token 兼容。
 
 ## 配置（环境变量）
 
@@ -47,7 +47,7 @@ CLI 命令面（`deploy --config`、`bundle build/put`、`resource`、`d1`/`kv`/
 
 ## 测试锚点
 
-`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`、`cmd/cellhive TestTranslateWrangler`、`internal/server TestStockWrangler`（设置 `CELLHIVE_WRANGLER_BIN` 才执行真实 Wrangler）；`cmd/cellhive TestMintScopeToken`（签发）、`internal/scopedtoken`（glob/issuer）、`internal/server TestScopeAuthDelegated`。复现命令见 [测试策略](../testing.md)。
+`make cli-test`、`internal/bundler`、`internal/wrangler`、`internal/wranglercompat`、`cmd/cellhive TestTranslateWrangler`、`internal/server TestStockWrangler`（设置 `CELLHIVE_WRANGLER_BIN` 才执行真实 Wrangler）。历史签发测试 `TestMintScopeToken`、`internal/scopedtoken`、`TestScopeAuthDelegated` 不证明 ADR-304 无状态修订通过；现行验收门见 [测试策略](../testing.md)。
 
 ## 相关文档
 

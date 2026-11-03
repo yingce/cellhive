@@ -1,6 +1,6 @@
 # Module: Control Plane and Release
 
-> ADR-304 is **implemented, local acceptance passed, not deployed**. Bearer HS256 JWT, default audience `cellhive`, no static-header/OIDC compatibility. Explicit `ns=["*"]` permits global operational reads/GC/full metrics; issuer CRUD requires bootstrap admin. CF only on `:8082`, never `:7001/:8083`.
+> ADR-304 **stateless amendment is in implementation and acceptance, not deployed**; earlier stateful tests do not validate it. Bearer HS256 JWT, audience `cellhive`, no old headers/OIDC. Namespace JWTs grant all scoped business; `issuer/*` with explicit `ns=["*"]` grants global business/operations/GC/metrics. `token/admin` retains global bootstrap; issuer CRUD is removed. CF only on `:8082`.
 
 Applications/versions/routes/domains/resources/secrets/audit and release pipelines; single control database (`app` is the `ns` in the table), immutable versions, atomic releases, resources are registered before deploy.
 
@@ -27,8 +27,8 @@ Applications/versions/routes/domains/resources/secrets/audit and release pipelin
 
 ## Key Invariants
 
-- ADR-304 implemented, local acceptance including DO ticket/full baseline passed, not deployed. Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD (bootstrap admin only). Current issuer authority reads are uncached; create returns keys once. Durable `bundle_grants` binds namespace/SHA; native namespace uploads require explicit namespace, CF grants likewise. `:7001/metrics` is the private unauthenticated exception; `:8082/v1/control/metrics` authenticates/filters.
-- Issuers live in the existing control cell, `kid=issuer/<immutable-id>`, with namespace ceiling and max TTL (<=86400 seconds), no actions/key_version. Same-name recreation gets a new ID; missing/disabled/soft-deleted records reject. Reads are authoritative, optionally uncached; caches last at most 5 seconds. Bootstrap admin JWT registry creation is not a missing-business-record bypass.
+- Durable `bundle_grants` binds namespace/SHA; native uploads require explicit namespace, CF grants likewise. `:7001/metrics` is the private unauthenticated exception; `:8082/v1/control/metrics` authenticates/filters. ADR-302 pinned KV, secret encryption and DO tickets bounded by30 seconds and parent exp remain unchanged.
+- Stateless `kid=issuer/<pattern>` carries exact/prefix `*`/`*` ceilings, fixed maximum TTL86400 seconds. No actions/key_version, issuer/namespaces-registry authorization, owner/persistence checks. Exactly32-hex legacy IDs reject without fallback. Old table data may remain inert without destructive migration; no instant issuer revocation, only exp/root rotation. Leaked keys require root rotation.
 - Automatic provisioning is **rejected**: bindings must reference registered resources.
 - Domain registration grants authorization (no DNS validation, ADR-133); host must be unique.
 - Versions are immutable; rollback/promote are atomic switches.

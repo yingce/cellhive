@@ -29,9 +29,9 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 - 每个 binding 在加载期生成一个 **binding-scoped facade**，props 不可变（`ns` + binding 类型/id）；
 - 租户代码只拿到 facade；**拿不到** internal token、后端地址、通用 Fetcher；
 - facade 由平台侧 RPC entrypoint stub 持有可信 private transport（ADR-184），调用 `cell-agent`（`:7001` REST/JSON）；租户 loaded worker 的 `globalOutbound` 仍为 public-only；
-- **ADR-304 已实现，本地验收通过，未部署**：facade 使用短期 `Authorization: Bearer <HS256 JWT>`，可信 host 负责刷新；不接受旧 scope header/静态凭据，不带广权限 internal token。binding claims 为精确 `ns` 字符串与 `kind/name`，默认 audience `cellhive`；固定 `worker/version/resource` 字段仅平台签发，继续执行 ADR-302 版本授权和 resource fence。
-- 同一持久化 issuer key 可签 namespace 与受限 binding JWT，无 actions/key_version；验证 issuer 上限与 TTL（<=86400 秒），缺失/禁用/软删 fail closed。同名重建新 ID；当前权威读无缓存，未来若缓存最多5秒。namespace JWT 调 binding 也须明确资源并经注册表/生命周期保护。
-- JWT 与 DO ticket 收紧已实现、本地验收通过、未部署。显式 `ns=["*"]` 可全局运维读/GC/全量指标，不可 issuer CRUD。新 DO grant 重验 parent，执行 metadata 纳入签名；已签发 ticket 的撤销边界最多30秒，issuer 无缓存不代表即时全局撤销。
+- **ADR-304 无状态修订实施与验收中，未部署**：facade 使用短期 `Authorization: Bearer <HS256 JWT>`，可信 host 刷新；无旧 scope header/静态凭据，不带广权限 internal token。binding claims 为精确 `ns` 字符串与 `kind/name`，默认 audience `cellhive`；固定 `worker/version/resource` 仅平台签发，保留 ADR-302 版本授权和 resource fence。此前有状态测试不证明本次通过。
+- 同一无状态 issuer key 可签 namespace 与受限 binding JWT，无 actions/key_version；`kid=issuer/<pattern>` 限精确/前缀 `*`/`*`，固定最大 TTL86400秒。拒绝恰好32位十六进制旧 ID，无回退；无 issuer/namespaces 注册表授权、owner 点查或持久化检查。namespace JWT 调 binding 仍须明确资源并经资源注册表/生命周期保护。
+- `issuer/*` 且显式 `ns=["*"]` 可全部全局业务及运维读/GC/全量指标；issuer CRUD 移除。新 DO grant 无状态重验 parent，执行 metadata 纳入签名；票据最长30秒且不超过父 exp。issuer 无即时撤销，只有到期/root 轮换；泄露 key 需轮换 root 止损。
 - JWT key 使用 `HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)`；旧 `ScopeSecret` 派生仅保留给 Hyperdrive 非 HTTP 凭据，不用于 JWT。见 [安全模型](security.md)。
 - KV `get()`/`getWithMetadata()` 在同一个 stub、同一 microtask 内自然并发时合并为一次 `POST /v1/kv/get-batch`（每批最多 256 key）；不设置等待定时器，单次读取只延后到 microtask checkpoint。cell-agent 只做一次 owner 路由，并在同一 SQLite 连接/只读事务内按输入顺序点查；缺失、重复、metadata 与 `text/json/arrayBuffer` 语义保持不变。
 

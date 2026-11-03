@@ -24,13 +24,19 @@ Goal: preserve the Workers programming model. Official Wrangler can use `wrangle
 
 Cloudflare-compatible routes (`/client/v4/**`) share the native control-plane
 listener (`CELLHIVE_ADMIN_ADDR`); there is no separate CF-API port. ADR-304 uses
-HS256 JWTs signed by registered, enabled issuers, with `type=namespace`, an `ns`
-array of namespace grant patterns, and `aud=cellhive`. The server checks issuer
-ceilings, expiry and revocation, then authorizes `account_id`; `/accounts` and
+stateless `kid=issuer/<pattern>` HS256 JWTs, with `type=namespace`, an `ns`
+array and `aud=cellhive`. The server checks exact/prefix `*`/`*` ceilings,
+fixed maximum86400-second TTL and expiry, then authorizes `account_id`; `/accounts` and
 `/memberships` only return allowed namespaces. Trusted operators may instead use
 a short-lived bootstrap admin JWT. Static admin tokens, OIDC and legacy
 `cellhive_ns` claims are not accepted. Signing keys are not Bearer credentials;
 refresh JWTs before expiry.
+
+Issuer authentication does not consult issuer/namespaces registries. Exactly32-hex
+legacy issuer IDs reject without fallback. No instant per-issuer revocation;
+expiry/root rotation are the boundaries. Assets/Tail sessions statelessly bind
+parent pattern/namespace/exp; Tail checks expiry every500ms. The stateless amendment
+is in implementation and acceptance, not deployed; earlier stateful tests do not validate it.
 
 ```bash
 CLOUDFLARE_API_BASE_URL=https://<admin-host>/client/v4 CLOUDFLARE_API_TOKEN='<namespaceJWT or bootstrapadminJWT>' CLOUDFLARE_ACCOUNT_ID=<namespace> wrangler deploy
