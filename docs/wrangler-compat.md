@@ -83,6 +83,15 @@
 
 **KV/R2 数据面**：原版 Wrangler 4.133.0 的 `kv key put/get/list/delete --remote` 与 `r2 object put/get/delete --remote` 已真实对拍；等效功能也通过 `cellhive kv key ...`、`cellhive r2 object ...` 提供（CellHive 命令额外传 `<namespace>`）。
 - **原版 Wrangler API 兼容**：管理员端提供 Cloudflare API 形状的 `PUT /client/v4/accounts/:account_id/workers/scripts/:script_name/content`，并兼容 **legacy `PUT .../workers/scripts/{script_name}`**（Wrangler 在存在 migrations/DO/containers 等条件时走旧上传路径）。上传接受原版 Wrangler 的 Bearer token 与 multipart（`metadata` + 主模块）；`migrations` 同时接受 array 和 `{new_tag, steps}` 两种形状，`assets.config.run_worker_first` 同时接受 bool 和路径数组（数组不再被误判为 `invalid_multipart`）。官方 `versions upload` / `versions secret put` 支持 upload-only，显式 deployment 才切换 active；普通 PUT script 仍执行原子发布。`account_id` 映射为 CellHive namespace；上传后转为 CellHive bundle 并创建版本。`/services/:name`、`/versions` 和 `/deployments` 已提供真实查询/激活语义。使用 `CLOUDFLARE_API_BASE_URL=<CellHive admin>/client/v4`、`CLOUDFLARE_API_TOKEN=<CellHive admin token>`、`CLOUDFLARE_ACCOUNT_ID=<namespace>`。
+- **独立 Wrangler 接入（2026-11-01）**：设置 `CELLHIVE_CF_API_ADDR=:8083` 后，该监听只挂 Cloudflare 兼容路由（`/client/v4/**`），不暴露 `/v1/control`。租户可用 `CELLHIVE_OIDC_*` 签发、带 `cellhive_ns` 的 JWT：
+  ```
+  CLOUDFLARE_API_BASE_URL=https://<cf-api-host>/client/v4
+  CLOUDFLARE_API_TOKEN=<tenant JWT>
+  CLOUDFLARE_ACCOUNT_ID=<namespace>
+  WRANGLER_SEND_METRICS=false
+  ```
+  `account_id` 由 `authorizeNS` 校验；`/accounts`、`/memberships` 只返回允许的 namespace。静态 admin token 仍保留全权，适合内部使用。Wrangler 4 的 `assets` binding 已接受（4.133 的 metadata 常把绑定名只放在 `bindings` 里、省略 `assets.config.binding`，服务端会采用该绑定名）；assets-only 和重复部署继承 active asset token 也已覆盖；`wrangler pages` 仍然不支持。
+- **CF-API 错误码**：真实 multipart 解析失败仍为 `invalid_multipart`；未知 binding type 为 `unsupported_binding`；assets binding 缺 `assets.config.binding` 或名字不一致为 `invalid_binding`；超出单文件限制为 `payload_too_large`。错误 message 带类型/名字，便于 Wrangler 透出。
 - **原版 Wrangler API 资源语义**：管理员兼容端点同时提供 KV/D1/R2/Queues 的 create/list/delete（分别映射到 `storage/kv/namespaces`、`d1/database`、`r2/buckets`、`queues`），以及 Workflow 的 create/list/get/delete。Worker 版本 list/get、Cron schedules、secret get 也已覆盖。Workflow 的 `concurrency.limit`、`schedules`、`default_retention.success_retention/error_retention` 会持久化并执行；`limits` 仍显式拒绝。Assets 使用 Wrangler 的 `assets-upload-session` + JWT 单文件或 multipart bulk 上传协议，上传内容进入版本资产 token。资源端点只登记 CellHive 资源，不改变“资源先创建、部署引用 ID”的控制面约束；绑定 ID 与资源登记名均可用于部署校验。Secrets 和 Workers routes 也提供 Cloudflare 形状的 CRUD。
 - **兼容边界**：复杂多模块上传、官方 Wrangler 的本地 dev/login 及未列出的 Cloudflare 专有资源 API 不属于当前兼容端点；`wrangler deploy` 已可返回发布成功，但 CLI 显示的 `Current Version ID` 仍可能为 `null`（`versions list` 有真实版本）。账号发现、Worker 删除、版本查询与按版本发布已提供；tail 有短期 session 和 WebSocket 日志推送。Workflow/Queue/Vectorize/Hyperdrive 的命令级边界见上文和兼容矩阵。
 

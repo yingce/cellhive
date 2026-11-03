@@ -1,6 +1,6 @@
 {
   "name": "cellhive",
-  "version": "2026.11.01.01",
+  "version": "2026.11.01.02",
   "baseUrl": "https://cellhive.example.com",
   "entrypoint": "SKILL.md",
   "files": [
@@ -12,6 +12,6 @@
   "sha256": {
     "SKILL.md": "8967b90a0478fca4a0d367a54d492cd55bed9f3b353bbdc4efb21573c9475ba8",
     "agents/openai.yaml": "ec5ea0a2bb656e4c36caeb22cf009004f85b1e4eeff2e0c0ffae0a6e424b508e",
-    "references/catalog.json": "a57730e412fd0a16362416327fc7befa1d5f6a40a8167c3aa539537e2b020148"
+    "references/catalog.json": "3703e61cbe77edb08edb3c8b45fe9db787aeccc77a19810bc3131ed2b9f0ad8a"
   }
 }

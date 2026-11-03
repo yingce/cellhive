@@ -305,6 +305,9 @@ type Config struct {
 	// plane (ADR-136).
 	RESTAddr  string // :7001 internal workerd bindings + Go<->Go
 	AdminAddr string // :8082 admin/control
+	// CFAPIAddr optionally exposes the Cloudflare-compatible API on a separate
+	// listener (no /v1/control routes). Empty disables it. See docs/wrangler-compat.md.
+	CFAPIAddr string
 
 	// RootKey is the single platform root secret (base64 or hex, >=16 bytes;
 	// 32 recommended). Every role credential below is HKDF-derived from it, so
@@ -611,6 +614,7 @@ func FromEnv() Config {
 		BundleGCGrace:                envDuration("CELLHIVE_BUNDLE_GC_GRACE", 24*time.Hour),
 		RESTAddr:                     env("CELLHIVE_REST_ADDR", ":7001"),
 		AdminAddr:                    env("CELLHIVE_ADMIN_ADDR", ":8082"),
+		CFAPIAddr:                    env("CELLHIVE_CF_API_ADDR", ""),
 		RootKey:                      rootKey,
 		TokenPeer:                    creds.Peer,
 		TokenInternal:                creds.Internal,

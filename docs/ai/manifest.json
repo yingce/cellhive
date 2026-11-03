@@ -1,13 +1,1 @@
-{
-  "version": "2026.11.01.01",
-  "product": "cellhive",
-  "catalog": "catalog.json",
-  "documents": [
-    {"id":"overview","path":"index.md","type":"router"},
-    {"id":"cli","path":"cli.md","type":"workflow"},
-    {"id":"capability-catalog","path":"catalog.json","type":"catalog"}
-  ],
-  "skills": [
-    {"name":"cellhive","manifest":"cellhive/manifest.json"}
-  ]
-}
+{"version":"2026.11.01.02","product":"cellhive","catalog":"catalog.json","documents":[{"id":"overview","path":"index.md","type":"router"},{"id":"cli","path":"cli.md","type":"workflow"},{"id":"capability-catalog","path":"catalog.json","type":"catalog"}],"skills":[{"name":"cellhive","manifest":"cellhive/manifest.json"}]}

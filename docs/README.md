@@ -9,6 +9,12 @@ The full English documentation index is [`en/README.md`](en/README.md). Use it t
 - **Contribute:** architecture → cell protocol → contributing → testing
 - **Study the protocol:** cell protocol → protocol formats → Durable Objects → storage and replication
 
+## Audience
+
+- `ai/` (and the repo-root `skills/` bundle) are the Skill/agent entry points (`ai/catalog.json` is the machine catalog).
+- The remaining `*.md`, `en/`, and `modules/` documents are developer/operator references; the Skill reads the canonical references listed in `ai/catalog.json`.
+- `archive/` and `superpowers/` are historical records, not current contracts; `docs-site/dist/` is generated.
+
 ## Directory routes
 
 | Area | English entry point | Chinese entry point |
@@ -19,4 +25,4 @@ The full English documentation index is [`en/README.md`](en/README.md). Use it t
 
 Keep new documents registered in the English and Chinese maps. Source code and tests remain authoritative for behavior; design changes must also update `decisions.md`.
 
-_Last updated: 2026-10-15_
+_Last updated: 2026-11-01_

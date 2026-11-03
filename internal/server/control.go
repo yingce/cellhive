@@ -139,6 +139,21 @@ func (s *Server) AdminHandler() http.Handler {
 	return s.adminHandler
 }
 
+// CFAPIHandler exposes only the Cloudflare-compatible surface (no admin or
+// /v1/control routes) on the optional CFAPIAddr listener.
+func (s *Server) CFAPIHandler() http.Handler {
+	s.cfAPIOnce.Do(func() {
+		mux := http.NewServeMux()
+		s.registerCloudflareWorkerRoutes(mux)
+		// CF-API is control-plane traffic: owner forwarding must use the admin
+		// listener, not the data-plane REST listener.
+		s.cfAPIHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mux.ServeHTTP(w, r.WithContext(withAdminForward(r.Context())))
+		})
+	})
+	return s.cfAPIHandler
+}
+
 func (s *Server) buildAdminHandler() http.Handler {
 	s.adminBuilds.Add(1)
 	mux := http.NewServeMux()

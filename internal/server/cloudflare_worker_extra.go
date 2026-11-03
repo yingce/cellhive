@@ -22,8 +22,12 @@ func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, "accounts_failed", err.Error())
 		return
 	}
+	allowed := allowedNS(r.Context())
 	out := make([]any, 0, len(apps))
 	for _, app := range apps {
+		if allowed != nil && !allowed[app.Namespace] {
+			continue
+		}
 		out = append(out, map[string]any{"id": app.Namespace, "name": app.Namespace, "status": "active"})
 	}
 	cloudflareResult(w, out)
@@ -38,8 +42,12 @@ func (s *Server) handleCloudflareMemberships(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, "memberships_failed", err.Error())
 		return
 	}
+	allowed := allowedNS(r.Context())
 	out := make([]any, 0, len(apps))
 	for _, app := range apps {
+		if allowed != nil && !allowed[app.Namespace] {
+			continue
+		}
 		out = append(out, map[string]any{"id": app.Namespace, "account": map[string]any{"id": app.Namespace, "name": app.Namespace}})
 	}
 	cloudflareResult(w, out)

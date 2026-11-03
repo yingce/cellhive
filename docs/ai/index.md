@@ -33,6 +33,11 @@
 - 生产路径：先登记资源，再 `cellhive deploy <ns> - --config examples/<name>/wrangler.jsonc`；示例不自动 provisioning；
 - 示例是演示，不是生产模板；复制前先读对应 `index.js`/`wrangler.jsonc`，不要把示例中的占位密钥当真。
 
+## Skill 离线与更新
+
+- Skill 安装包内的 `references/catalog.json` 是 catalog 快照；在线 docs host 不可达时先用它，再回退到源码树 `docs/ai/catalog.json`。
+- 更新 Skill 时必须显式指定 docs base URL：`cellhive skills update --url https://docs.example.com` 或 `CELLHIVE_SKILL_BASE_URL`；安装器会校验 sha256。
+
 ## 明确边界
 
 - CellHive 使用 [cellhive-workerd](https://github.com/yingce/cellhive-workerd) fork（ADR-264）；fork 改动只在 fork 仓，本仓通过 loader/bindings/capnp 集成；

@@ -9,7 +9,7 @@ CellHive-specific admin extensions (`:8082`, `x-cellhive-admin-token` or configu
 - KV/Queue resource DELETE revokes immediately and returns a cleanup job. Query `GET /v1/control/resource/cleanup?namespace=acme&kind=queue&name=jobs`; retry `POST /v1/control/resource/cleanup/retry?...`. The job is pending/running/failed/complete with errors/backoff/attempts. Recreate is blocked until complete. Independent DLQ resources remain; only provably source-owned dead letters are removed.
 - `GET /v1/control/invocations?namespace=acme&worker=web&kind=cron&from_ms=...&to_ms=...&invocation_id=...&limit=100&cursor=...` returns execution results/errors and correlated console lines. Attempt UUIDs are distinct from logical retry IDs. Retention: seven days/10,000 attempts per namespace, bounded write-time pruning; console truncation is explicit. Unfinished crashed attempts remain running. Disabling native Tail does not disable invocation records; invocation records are controlled node-wide by `CELLHIVE_INVOCATION_LOGS` (default on, ADR-239) and have no per-worker policy.
 
-See [the current contract](../superpowers/specs/2026-10-15-resource-operations-and-invocations.md) and the Chinese runbook for cleanup and rollout boundaries.
+See the Chinese runbook [operations.md](../operations.md) for the current cleanup, invocation and rollout contract. The 2026-10-15 spec under `superpowers/` is historical.
 
 Queue regrouping retains per-message logical IDs/attempts and predecessor
 invocation IDs. Query `message_id` or `message_logical_id` to follow a partial

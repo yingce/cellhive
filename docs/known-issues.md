@@ -4,7 +4,19 @@
 
 Static Assets 标准部署收口（ADR-206）实施中：assets-only、生产 ASSETS binding、忽略规则、不可变上传、HTML/SPA 路由与入口配置需以 `static-sites.md` 验收记录为准。
 
-_最后更新：2026-10-28_
+_最后更新：2026-11-01_
+
+## 2026-10-31 / 11-01 评审修复与 dispatch 回归（已发布 SG rev85/86，USW 69/70）
+
+本轮 review 修复随 `20261031-02`（源码 `7be1102`）和 `20261031-03`（源码 `c9ba0fd`）发布：
+
+- 数据/恢复：`restore.ApplyFile` 改为 temp+fsync+rename 原子落盘；paged cache 对 dirty/无 source 情况 fail closed 并传播探测错误；workflow `Prune` 单事务、retention 分批/索引；objgc 删除前复核引用；owner 在 `owner-gen` 缺失时保持 epoch 高于被替换记录，并增加 node-lease segment Touch；invocation 只清理被 prune 记录的 membership。
+- 热路径：queue ack 批量化 + claim 排序索引；R2 conditional PUT 用 HEAD/Stat、multipart marker 保留到 part 清完；server mux 缓存、projection singleflight、KV TTL 锁外快速路径；loader 仅在新版本出现时扫描 residents；ingress/hybrid host map 有界；segmented 窗口回看 + HostView 索引。
+- control：`resource_cleanups` due 索引、completed job 7 天保留期、app/worker purge 连带清理 `deployment_events`。
+- 验证：`make test`、`make vet`、`make js-test`、受影响包 race 和全量 in-repo e2e 通过；两区 Pod 新 digest、Ready、`restartCount=0`。详见 [release-2026-10-31-03](archive/release-2026-10-31-03.md) 和 [release-2026-10-31](archive/release-2026-10-31.md)。
+- 残余：objgc recheck→Delete 微秒窗口、legacy scope 缺 `owner-gen` 时仍可能从 1 开始、waker `Due` 的逐 key Get、DO envelope 二次 JSON 编解码。
+- CF-API：Wrangler 4 的 `assets` binding 已支持（4.133 可能省略 `assets.config.binding`，采用 bindings 里的名字；含 assets-only、重复部署继承 active asset token）；Wrangler 4.133 真实 CLI 的 Worker+assets、重复部署、assets-only、租户 JWT 部署均已通过；错误码区分 `unsupported_binding`/`invalid_binding`/`invalid_multipart`；新增 `CELLHIVE_CF_API_ADDR` 独立监听（只含 `/client/v4/**`），JWT `cellhive_ns` 按 `account_id` 授权，`/accounts` 过滤可见 namespace。
+- `vwork-40/vlog-daily-report` 的 cron 500 是租户 `sendFeishu` 错误（`Feishu send failed with HTTP 200`），不是平台 dispatch 修复项；需租户修响应解析或调用 `controller.noRetry()`。
 
 ## 2026-10-27 COS并发创建空读（已随 48216e7 发布：SG rev71 / USW rev56）
 

@@ -147,6 +147,16 @@ networkPolicy:
   #   adminIngressFrom:
   #     - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress}}
   adminIngressFrom: []
+  # Extra ingress sources for the CF-API port (cfApi.port), e.g. the
+  # ingress/reverse-proxy namespace or a tenant egress range.
+  cfApiIngressFrom: []
+
+cfApi:
+  enabled: false
+  # Separate Cloudflare-compatible API listener (only /client/v4/**).
+  # Expose the cell-agent Service port through your ingress/reverse proxy and
+  # give tenants a JWT with cellhive_ns; see docs/wrangler-compat.md.
+  port: 8083
 
 ingress:
   enabled: false

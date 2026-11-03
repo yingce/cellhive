@@ -170,6 +170,8 @@ type Server struct {
 	adminOnce     sync.Once
 	adminHandler  http.Handler
 	adminBuilds   atomic.Int32
+	cfAPIOnce     sync.Once
+	cfAPIHandler  http.Handler
 
 	// Observability (ADR-165).
 	proofByNS     sync.Map // ns -> *proofHist (ADR-179)
@@ -3883,7 +3885,7 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		srv := &http.Server{Addr: s.Cfg.RESTAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 		shutdown = srv.Shutdown
-		errCh = make(chan error, 2)
+		errCh = make(chan error, 3)
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
@@ -3893,6 +3895,18 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// The control plane listens separately (ADR-012) with its own credential; the
 	// data listener never exposes control writes.
+	var cfapi *http.Server
+	if s.Control != nil && s.Cfg.CFAPIAddr != "" && (s.Cfg.AdminToken != "" || s.AdminAuth != nil) {
+		cfapi = &http.Server{Addr: s.Cfg.CFAPIAddr, Handler: s.CFAPIHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			s.Log.Info("cell-agent Cloudflare API listening", "addr", s.Cfg.CFAPIAddr)
+			if err := cfapi.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	} else if s.Cfg.CFAPIAddr != "" {
+		s.Log.Info("cell-agent Cloudflare API disabled", "control", s.Control != nil, "addr", s.Cfg.CFAPIAddr, "token_set", s.Cfg.AdminToken != "", "admin_auth", s.AdminAuth != nil)
+	}
 	var admin *http.Server
 	if s.Control != nil && s.Cfg.AdminAddr != "" && s.Cfg.AdminToken != "" {
 		admin = &http.Server{Addr: s.Cfg.AdminAddr, Handler: s.AdminHandler(), ReadHeaderTimeout: 10 * time.Second}
@@ -3912,6 +3926,9 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		if admin != nil {
 			_ = admin.Shutdown(shutdownCtx)
+		}
+		if cfapi != nil {
+			_ = cfapi.Shutdown(shutdownCtx)
 		}
 		return shutdown(shutdownCtx)
 	case err := <-errCh:

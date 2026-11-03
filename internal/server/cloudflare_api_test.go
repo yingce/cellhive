@@ -157,6 +157,13 @@ func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {
 	if got["success"] != true {
 		t.Fatalf("routes response=%v", got)
 	}
+	projection, err := s.Control.Projection(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view := projection.HostView("example.com"); len(view.Routes) != 1 || view.Routes[0].Path != "/" {
+		t.Fatalf("route path was not normalized to a mount: %+v", view)
+	}
 }
 
 func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {

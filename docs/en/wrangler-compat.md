@@ -20,6 +20,24 @@ Goal: preserve the Workers programming model. Official Wrangler can use `wrangle
 
 **Cost**: requires continuously tracking the evolution of Wrangler's **semantics** (configuration defaults, inheritance rules, edge cases), relying on the compatibility matrix + contract tests + strict rejection as the fallback.
 
+## Standalone Wrangler Access (2026-11-01)
+
+Set `CELLHIVE_CF_API_ADDR=:8083` to expose a listener containing only the
+Cloudflare-compatible routes (`/client/v4/**`); `/v1/control/*` is not mounted
+there. Tenant JWT credentials (from `CELLHIVE_OIDC_*`, with the `cellhive_ns`
+claim) are authorized per `account_id`; `/accounts` and `/memberships` only
+return allowed namespaces. The static admin token still grants full access.
+
+```bash
+CLOUDFLARE_API_BASE_URL=https://<cf-api-host>/client/v4 CLOUDFLARE_API_TOKEN=<tenant-jwt> CLOUDFLARE_ACCOUNT_ID=<namespace> wrangler deploy
+```
+
+Wrangler 4 `assets` bindings are accepted; assets-only deploys use a fixed 404
+Worker and repeat deploys inherit the active version's asset token. Metadata
+errors distinguish `unsupported_binding`, `invalid_binding`,
+`invalid_multipart` and `payload_too_large`. `wrangler pages` remains
+unsupported.
+
 ## Configuration Parsing
 
 - Format: **both jsonc + toml are supported** (`cellhive dev`); **`cellhive deploy --config` only parses jsonc/json** (no third-party TOML library introduced; toml users can convert to jsonc or use dev);

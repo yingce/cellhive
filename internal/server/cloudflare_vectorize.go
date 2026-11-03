@@ -26,6 +26,9 @@ func (s *Server) cloudflareAdminBridge(r *http.Request, method, path string, q u
 	}
 	req.Body = io.NopCloser(bytes.NewReader(raw))
 	req.ContentLength = int64(len(raw))
+	// The CF-API request is already authenticated/authorized; bridge into the
+	// admin mux with the internal static credential (never a tenant JWT).
+	req.Header.Set("x-cellhive-admin-token", s.Cfg.AdminToken)
 	rec := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rec, req)
 	return rec

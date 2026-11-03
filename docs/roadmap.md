@@ -1,6 +1,6 @@
 # 路线图与剩余工作
 
-_最后更新：2026-10-28_
+_最后更新：2026-11-01_
 
 历史路线图（2026-09，P0–P5 退出标准）已归档到 [roadmap-2026-09](archive/roadmap-2026-09.md)。P0–P5 已交付；本文件只记录当前状态和剩余项，不再重复历史阶段。
 
@@ -8,7 +8,7 @@ _最后更新：2026-10-28_
 
 - 计算层：`cellhive-workerd` fork（ADR-264）；CellHive 通过 `workerLoader`、bindings 与 capnp 集成，不在本仓改 workerd。
 - 状态层：SQLite + 对象存储权威，owner/epoch/lease、RPO=0、fleet 复制已上线。
-- 生产：SG Helm revision 79、USW 63（源码 `49133b1`），见 [release-2026-10-28](release-notes.md)。
+- 生产：SG Helm revision 86、USW 70（镜像 `20261031-03`，源码 `c9ba0fd`），见 [release-notes](release-notes.md)。
 - 完整功能与兼容边界以 [compatibility-matrix](compatibility-matrix.md)、[bindings](bindings.md)、[known-issues](known-issues.md) 为准。
 
 ## 剩余工作（按风险排序）

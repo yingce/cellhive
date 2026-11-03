@@ -1,6 +1,6 @@
 # Roadmap and remaining work
 
-_Last updated: 2026-10-28_
+_Last updated: 2026-11-01_
 
 The historical roadmap (2026-09, P0–P5 exit criteria) is archived at
 [roadmap-2026-09](archive/roadmap-2026-09.en.md). P0–P5 are delivered; this page
@@ -12,7 +12,7 @@ tracks current status and remaining work only.
   `workerLoader`, bindings and capnp and does not patch workerd in this repo.
 - State: SQLite plus object storage are authoritative; owner/epoch/lease,
   RPO=0 and fleet replication are live.
-- Production: SG Helm revision 79, USW 63 (source `49133b1`); see
+- Production: SG Helm revision 86, USW 70 (image `20261031-03`, source `c9ba0fd`); see
   [release notes](release-notes.md).
 - Functional and compatibility boundaries: [compatibility matrix](compatibility-matrix.md),
   [bindings](bindings.md), [known issues](known-issues.md).

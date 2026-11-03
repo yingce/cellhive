@@ -91,6 +91,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 一次性运行目录根；各 runtime 用其子目录 |
 | `CELLHIVE_REST_ADDR` | `:7001` | 内部 REST（Go↔Go 与 workerd bindings 共用，无 gRPC） |
 | `CELLHIVE_ADMIN_ADDR` | `:8082` | admin/控制面监听 |
+| `CELLHIVE_CF_API_ADDR` | 空 | 可选独立 Cloudflare 兼容 API 监听（只挂 `/client/v4/**`，不挂 `/v1/control`）；供 Wrangler 直连，JWT/静态 token 鉴权 |
 | `CELLHIVE_DO_RUNTIMES` | 空 | do-runtime 列表（DO 放置）；空则禁用 `/v1/do/invoke` |
 
 ## 持久性 / 复制 / RPO

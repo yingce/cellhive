@@ -5,7 +5,19 @@
 
 This document records all issues found during the system review, as well as **the resolution decision for each issue**. See the appendix at the end for the original severity levels. The design documents (architecture / cell-protocol / durable-objects / networking / decisions) have been synchronized accordingly.
 
-_Last updated: 2026-10-24_
+_Last updated: 2026-11-01_
+
+## 2026-10-31 / 11-01 review closure (SG 85/86, USW 69/70)
+
+Shipped in `20261031-02` (source `7be1102`) and `20261031-03` (source `c9ba0fd`):
+
+- Data/recovery: atomic restore (temp+fsync+rename); paged caches fail closed when dirty or unsourced; workflow prune in one transaction with batched retention/indexes; objgc pre-delete reference recheck; owner epoch floor when `owner-gen` is missing plus node-lease segment Touch; precise invocation-membership pruning.
+- Hot paths: batched queue acks + claim order index; R2 conditional PUT via Stat/HEAD, multipart marker retained until parts are gone; cached muxes, projection singleflight, KV TTL lock-free fast path; loader scans residents only on a newer version; bounded ingress/hybrid host maps; segmented lookback and indexed HostView.
+- Control: `resource_cleanups` due indexes, 7-day completed-job retention, and `deployment_events` purge with app/worker deletion.
+- Validation: `make test`, `make vet`, `make js-test`, affected race tests and the full in-repo e2e suite pass; both regions run the new digest with Ready pods and zero restarts. Evidence: [release-2026-10-31-03](../archive/release-2026-10-31-03.md).
+- Residual: objgc recheck→Delete microsecond window, legacy scopes without `owner-gen`, waker `Due` per-key Get, DO envelope double JSON encode/decode.
+- CF-API: Wrangler 4 `assets` bindings (including assets-only and repeat deploys inheriting the active asset token) are accepted; metadata errors use `unsupported_binding`/`invalid_binding`/`invalid_multipart`/`payload_too_large`; the optional `CELLHIVE_CF_API_ADDR` listener exposes only `/client/v4/**` and authorizes JWT `cellhive_ns` by `account_id`, filtering `/accounts` and `/memberships`.
+- The `vwork-40/vlog-daily-report` cron 500 is a tenant `sendFeishu` error (`Feishu send failed with HTTP 200`), not a platform dispatch fix; fix the response check or call `controller.noRetry()`.
 
 ## 2026-10-24 COS cell latency, restore, and Cron recovery (ADR-276–278)
 

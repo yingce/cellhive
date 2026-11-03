@@ -1,10 +1,23 @@
 # Release Notes
 
-_Last updated: 2026-10-28_
+_Last updated: 2026-11-01_
 
-Current production version and the two most recent releases. Full release records
+Current production version and recent releases. Full release records
 (image, Helm revisions, acceptance evidence, residual warnings) live in
-`docs/archive/release-*.md`.
+`docs/archive/release-*.md` (Chinese source).
+
+## 2026-10-31 — recovery/retention hardening and dispatch hotfix
+
+- `20261031-02` (source `7be1102`, digest `sha256:ee6df63604fb0e0c9551037a39a43511b4b7a26440cb6cf62b423260e39745ae`, SG rev **85** / USW **69**): atomic restore, paged fail-closed, workflow prune/retention batching, objgc pre-delete recheck, owner epoch floor and node-lease touch, queue ack batching/claim index, R2 Stat/multipart metadata, cached muxes, projection singleflight, KV TTL fast path, loader resident scan, bounded host maps and indexed HostView.
+- `20261031-03` (source `c9ba0fd`, digest `sha256:f3a7cf6b1e515e8a94e205f9dc89fa70f2d9d615b7e28d536e885d07b6022159`, SG rev **86** / USW **70**): invocation persistence is best-effort after a successful handler; a finish-write 503 no longer turns `scheduled`/queue/workflow success into a retryable 500.
+- `20261031-01` (source `bd2c5d7`, digest `sha256:b437c8ce1aa59bcb70133dde34fa0bfc9c270bbfc386872d65286695564d2ea2`, SG rev **84** / USW **68**): `CellHiveLifecycle` status/retire control RPCs are filtered from tenant Tail/function errors.
+- This does **not** fix the `vwork-40/vlog-daily-report` tenant cron: its handler still throws `Feishu send failed with HTTP 200`; that needs a tenant-side response check or `controller.noRetry()`.
+- Evidence: [release-2026-10-31-03](../archive/release-2026-10-31-03.md), [release-2026-10-31](../archive/release-2026-10-31.md).
+
+## 2026-10-30 — runtime retirement and serialization hardening
+
+- `20261030-01` (source `951ee79`, SG rev **82** / USW **66**) and `20261030-02` (source `251725a`, SG rev **83** / USW **67**): tighter upload spool/eviction/staticgen/session locking, dead-code cleanup, and the runtime retirement plus ownership-recovery race fixes.
+- Acceptance: both regions on new digests, Ready, `restartCount=0`.
 
 ## 2026-10-28 — pinned KV resource-id fix and cleanup
 

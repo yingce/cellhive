@@ -1,8 +1,11 @@
 # 模块：timers 与派发
 
+> 模块级摘要：当前 timer/派发行为的权威说明是 [`../timers-and-dispatch.md`](../timers-and-dispatch.md)（2026-10-25+）以及代码/测试；两者冲突时以顶层文档和代码为准。
+
 统一定时器抽象：cron、queue 延迟/重试、DO alarm、workflow sleep/timeout、KV 过期；每个 owner 派发自己的 cell，单 fleet waker 兜"owner 已死/无主"的项。
 
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
+
 ## 关键接口
 
 timer 行存于所属 cell SQLite；`POST /v1/internal/kv/expire`、`POST /v1/internal/do/alarm/upsert`、`POST /v1/timers/dispatch`（到 user-runtime）。

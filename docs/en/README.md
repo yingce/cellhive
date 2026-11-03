@@ -6,6 +6,12 @@ This directory mirrors the **finalized design** docs in English (the Chinese ori
 
 > English is the default documentation route. The maintained Chinese entry point is [`../README.zh.md`](../README.zh.md); the Chinese design records remain authoritative when the mirrors differ. `decisions.md` here is an English index that links to the full Chinese ADR record.
 
+## Documentation Audience
+
+- `../ai/` plus the installed `cellhive` Skill are the agent entry points; `ai/catalog.json` is the machine catalog and the Skill reads the canonical references it lists.
+- The rest of this directory is developer/operator reference material.
+- `../archive/` and `../superpowers/` are historical records, not current contracts.
+
 ## Start Here
 
 Choose a path based on your role; the first two steps are enough to get started:
@@ -139,4 +145,4 @@ Before changing code, read the corresponding contracts and test anchors; see [`c
 - **owner / epoch / fence**: The single-writer lease, monotonically increasing generation, and fence for a cell.
 - **LTX**: The replication format for SQLite transaction logs (implementation follows LiteFS/`superfly/ltx`).
 
-_Last updated: 2026-10-15_
+_Last updated: 2026-11-01_

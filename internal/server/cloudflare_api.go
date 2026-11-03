@@ -8,6 +8,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,12 +21,26 @@ import (
 	"strings"
 	"time"
 
+	"cellhive/internal/auth"
 	"cellhive/internal/control"
 	queuepkg "cellhive/internal/queue"
 )
 
+// cloudflareAPIError carries a stable Cloudflare-compatible error code so
+// metadata problems are not all reported as invalid_multipart.
+type cloudflareAPIError struct {
+	Code    string
+	Message string
+}
+
+func (e *cloudflareAPIError) Error() string { return e.Message }
+
+func cfErr(code, format string, args ...any) error {
+	return &cloudflareAPIError{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
 func (s *Server) registerCloudflareWorkerRoutes(mux *http.ServeMux) {
-	compat := s.cloudflareAuth
+	compat := s.cloudflareCFAuth
 	for _, prefix := range []string{"", "/client/v4"} {
 		mux.HandleFunc("GET "+prefix+"/memberships", compat(s.handleCloudflareMemberships))
 		mux.HandleFunc("GET "+prefix+"/user/tokens/verify", compat(s.handleCloudflareTokenVerify))
@@ -234,25 +249,45 @@ func (s *Server) handleCloudflareWorkerSettings(w http.ResponseWriter, r *http.R
 	cloudflareResult(w, map[string]any{"bindings": bindings, "compatibility_date": view.CompatDate, "compatibility_flags": flags})
 }
 
-// cloudflareAuth accepts the bearer token used by Wrangler and translates it to
-// the native admin header before invoking the existing control handler.
+// cloudflareAuth accepts either the configured AdminAuth (JWT/static) or the
+// legacy static token in x-cellhive-admin-token / Bearer form, and attaches the
+// authenticated principal to the request context. It deliberately does not
+// rewrite x-cellhive-admin-token: a tenant JWT must never become an internal
+// admin credential.
 func (s *Server) cloudflareAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("x-cellhive-admin-token")
-		if token == "" {
-			authz := r.Header.Get("Authorization")
-			if strings.HasPrefix(authz, "Bearer ") {
-				token = strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+		p, ok := s.adminPrincipal(r)
+		if !ok {
+			token := r.Header.Get("x-cellhive-admin-token")
+			if token == "" {
+				if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+					token = strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+				}
+			}
+			if token != "" && s.Cfg.AdminToken != "" && hmac.Equal([]byte(token), []byte(s.Cfg.AdminToken)) {
+				p = auth.Principal{Sub: "static-admin", Kind: "static", All: true}
+				ok = true
 			}
 		}
-		if token == "" || s.Cfg.AdminToken == "" || token != s.Cfg.AdminToken {
+		if !ok {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "Cloudflare API token required")
 			return
 		}
-		r2 := r.Clone(r.Context())
-		r2.Header.Set("x-cellhive-admin-token", token)
-		next(w, r2)
+		next(w, withPrincipal(r, p))
 	}
+}
+
+// cloudflareCFAuth authenticates the CF-API caller and enforces the namespace
+// from {account_id} before the handler can read, write or forward the request.
+func (s *Server) cloudflareCFAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.cloudflareAuth(func(w http.ResponseWriter, r *http.Request) {
+		if ns := r.PathValue("account_id"); ns != "" {
+			if !s.authorizeNS(w, r, ns) {
+				return
+			}
+		}
+		next(w, r)
+	})
 }
 
 func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Request) {
@@ -266,8 +301,22 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	}
 	metadata, module, err := parseCloudflareWorkerMultipart(r)
 	if err != nil {
+		var ce *cloudflareAPIError
+		if errors.As(err, &ce) {
+			status := http.StatusBadRequest
+			if ce.Code == "payload_too_large" {
+				status = http.StatusRequestEntityTooLarge
+			}
+			writeErr(w, status, ce.Code, ce.Message)
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid_multipart", err.Error())
 		return
+	}
+	if len(module) == 0 && metadata.Assets != nil && metadata.Assets.Binding == "" {
+		// Assets-only Wrangler deployments have no main module. CellHive uses
+		// a fixed 404 Worker, matching the native assets-only path.
+		module = []byte(`export default { fetch() { return new Response(null, { status: 404 }); } };`)
 	}
 	if len(module) == 0 {
 		writeErr(w, http.StatusBadRequest, "missing_module", "metadata main_module was not uploaded")
@@ -368,6 +417,10 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 			metadata.Crons = active.Crons
 		}
 		metadata.Consumers = active.Consumers
+		if metadata.Assets != nil && metadata.AssetsToken == "" && active.AssetsSHA != "" {
+			// Repeat deploys may omit assets.jwt when the content is unchanged.
+			metadata.AssetsToken = active.AssetsSHA
+		}
 	} else if !errors.Is(err, control.ErrNotFound) {
 		writeErr(w, http.StatusInternalServerError, "active_version_failed", err.Error())
 		return
@@ -376,6 +429,10 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if metadata.Assets != nil && metadata.AssetsToken == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_assets", "assets binding requires an asset upload session or an existing version's assets")
+		return
+	}
 	req := deployReq{
 		StageOnly: r.Method == http.MethodPost,
 		Namespace: ns, Worker: worker, BundleSHA: sha,
@@ -397,7 +454,10 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	inner.ContentLength = int64(len(body))
 	inner.Header.Set("content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	s.adminAuth(s.handleControlDeploy)(recorder, inner)
+	if p, ok := principalFrom(r.Context()); ok {
+		inner = withPrincipal(inner, p)
+	}
+	s.handleControlDeploy(recorder, inner)
 	if recorder.Code < 200 || recorder.Code >= 300 {
 		for k, values := range recorder.Header() {
 			for _, value := range values {
@@ -518,7 +578,7 @@ func parseCloudflareWorkerMultipart(r *http.Request) (cloudflareWorkerMetadata, 
 			return out, nil, err
 		}
 		if len(data) > maxArtifactBytes {
-			return out, nil, io.ErrShortBuffer
+			return out, nil, cfErr("payload_too_large", "artifact exceeds %d bytes", maxArtifactBytes)
 		}
 		name := part.FormName()
 		if name == "metadata" {
@@ -588,40 +648,41 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		} `json:"triggers"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return cfErr("invalid_metadata", "invalid metadata: %v", err)
 	}
 	out.MainModule, out.CompatibilityDate, out.CompatibilityFlags = raw.MainModule, raw.CompatibilityDate, raw.CompatibilityFlags
 	if raw.Limits.CpuMs != nil && raw.Limits.CpuMsNative != nil && *raw.Limits.CpuMs != *raw.Limits.CpuMsNative {
-		return fmt.Errorf("limits.cpu_ms and limits.cpuMs disagree")
+		return cfErr("invalid_metadata", "limits.cpu_ms and limits.cpuMs disagree")
 	}
 	cpu := raw.Limits.CpuMs
 	if cpu == nil {
 		cpu = raw.Limits.CpuMsNative
 	}
 	if cpu != nil && *cpu <= 0 {
-		return fmt.Errorf("limits.cpu_ms must be positive")
+		return cfErr("invalid_metadata", "limits.cpu_ms must be positive")
 	}
 	if raw.Limits.SubRequests != nil && *raw.Limits.SubRequests <= 0 {
-		return fmt.Errorf("limits.subrequests must be positive")
+		return cfErr("invalid_metadata", "limits.subrequests must be positive")
 	}
 	if cpu != nil || raw.Limits.SubRequests != nil {
 		out.Limits = &control.WorkerLimits{CpuMs: cpu, SubRequests: raw.Limits.SubRequests}
 	}
 	migrations, err := decodeCloudflareMigrations(raw.Migrations)
 	if err != nil {
-		return err
+		return cfErr("invalid_metadata", "%v", err)
 	}
 	out.Migrations, out.Crons = migrations, raw.Triggers.Crons
-	if raw.Assets.JWT != "" {
+	if raw.Assets.JWT != "" || raw.Assets.Config.Binding != "" || raw.Assets.Config.NotFoundHandling != "" ||
+		raw.Assets.Config.HTMLHandling != "" || len(raw.Assets.Config.RunWorkerFirst) > 0 {
 		runWorkerFirst, runWorkerFirstPaths, err := decodeRunWorkerFirst(raw.Assets.Config.RunWorkerFirst)
 		if err != nil {
-			return err
+			return cfErr("invalid_metadata", "%v", err)
 		}
 		out.AssetsJWT = raw.Assets.JWT
 		out.Assets = &control.AssetsConfig{
 			Binding: raw.Assets.Config.Binding, NotFoundHandling: raw.Assets.Config.NotFoundHandling,
 			HTMLHandling: raw.Assets.Config.HTMLHandling, RunWorkerFirst: runWorkerFirst,
-			RunWorkerFirstPaths: runWorkerFirstPaths,
+			RunWorkerFirstPaths: runWorkerFirstPaths, AssetsOnly: raw.MainModule == "",
 		}
 	}
 	for _, b := range raw.Bindings {
@@ -629,7 +690,7 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 		switch typ {
 		case "inherit":
 			if name == "" {
-				return fmt.Errorf("inherited binding name is required")
+				return cfErr("invalid_binding", "inherited binding name is required")
 			}
 			out.Inherit = append(out.Inherit, name)
 		case "ai":
@@ -658,8 +719,23 @@ func decodeCloudflareMetadata(data []byte, out *cloudflareWorkerMetadata) error 
 			out.Bindings = append(out.Bindings, control.Binding{Type: "service", Name: name, ID: stringValue(b["service"]), Entrypoint: stringValue(b["entrypoint"])})
 		case "workflow":
 			out.Bindings = append(out.Bindings, control.Binding{Type: "workflow", Name: name, ID: stringValue(b["workflow_name"]), ClassName: stringValue(b["class_name"])})
+		case "assets":
+			if out.Assets == nil {
+				return cfErr("invalid_binding", "assets binding %q requires assets config", name)
+			}
+			switch {
+			case out.Assets.Binding == "":
+				// Wrangler 4.133 may put the only binding name in bindings and
+				// omit assets.config.binding in metadata. Adopt it; control will
+				// inject the binding with AssetsSHA.
+				out.Assets.Binding = name
+			case name != out.Assets.Binding:
+				return cfErr("invalid_binding", "assets binding %q does not match assets.config.binding %q", name, out.Assets.Binding)
+			}
+			// control injects the assets binding with AssetsSHA; appending here
+			// would suppress that injection and leave the binding id empty.
 		default:
-			return fmt.Errorf("unsupported binding type %q for %q", typ, name)
+			return cfErr("unsupported_binding", "unsupported binding type %q for %q", typ, name)
 		}
 	}
 	return nil
@@ -782,8 +858,19 @@ func (s *Server) handleCloudflareRoutePut(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "route_host_failed", err.Error())
 		return
 	}
+	path := u.EscapedPath()
+	// Cloudflare route patterns are host/path globs. CellHive routes are mount
+	// prefixes, so normalize the common trailing /* to the mount path.
+	if path == "" || path == "/*" || path == "*" {
+		path = "/"
+	} else if strings.HasSuffix(path, "/*") {
+		path = strings.TrimSuffix(path, "/*")
+		if path == "" {
+			path = "/"
+		}
+	}
 	if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
-		return s.Control.PutRoute(r.Context(), ns, control.Route{Host: u.Host, Path: u.EscapedPath(), Worker: in.Script}, "wrangler")
+		return s.Control.PutRoute(r.Context(), ns, control.Route{Host: u.Host, Path: path, Worker: in.Script}, "wrangler")
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, "route_put_failed", err.Error())
 		return

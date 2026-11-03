@@ -1,7 +1,1 @@
-{
-  "name": "cellhive-skills",
-  "version": "2026.11.01.01",
-  "skills": [
-    {"name":"cellhive","manifest":"cellhive/manifest.json"}
-  ]
-}
+{"name":"cellhive-skills","version":"2026.11.01.02","skills":[{"name":"cellhive","manifest":"cellhive/manifest.json"}]}
