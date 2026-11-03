@@ -16,7 +16,7 @@ Tenants ──(OpenObserve users/roles, or a thin query proxy)──► read onl
   `prometheus` receiver for turning CellHive's `/metrics` into OTLP.
 - CellHive side (set on **every** node; endpoint empty = fully disabled):
   - `CELLHIVE_OTLP_ENDPOINT=http://otel-collector:4318`
-  - `CELLHIVE_OTLP_HEADERS=authorization=Bearer <internal-token>` (optional)
+  - `CELLHIVE_OTLP_HEADERS=<collector-specific headers>` (optional; not CellHive role keys)
   - `CELLHIVE_OTLP_LOGS=off|tail|all` (default `off`)
   - `CELLHIVE_TRACES_SAMPLE_RATIO=0.01` (new traces; upstream sampled flag wins)
 - Compose: the `tracing` profile starts OpenObserve; add the collector with
@@ -72,7 +72,8 @@ CellHive logs ────────────────► SLS Kafka (top
 - Compose: `docker compose --profile vector up vector` (do not also enable the
   `observability` profile; both bind 4317/4318).
 
-The config is validated with `vector validate` against Vector 0.58. The
+The reference config was validated with `vector validate` against Vector 0.58.
+Private scraping keeps the ADR-178 unauthenticated pull contract. The
 `cellhive_otlp.metrics` port is intentionally unconsumed today because CellHive
 does not push OTLP metrics; metrics come from `prometheus_scrape`.
 
@@ -148,9 +149,29 @@ Notes learned from the live run:
 
 ## Metrics
 
-Keep `/metrics` **internal** (Prometheus pull). It is unauthenticated, so do not
-expose it publicly. To include metrics in the OTLP pipeline, enable the
-collector's `prometheus` receiver instead of exposing the endpoint.
+**ADR-178 private pull exception:** cell-agent `:7001/metrics` remains
+unauthenticated. The existing Vector scrape and optional Collector Prometheus
+receiver continue to scrape directly without JWTs, token files, a refresher,
+an auth proxy or an extra service. No root or role signing keys belong in the
+collector. Keep the scrape source enabled; working logs/traces or collector
+health alone do not prove successful metrics collection.
+
+This full-platform endpoint must be accessible only to trusted collectors over
+private networking, with firewall/NetworkPolicy controls. Never publish it via
+public ingress or make it reachable from tenant egress. This is an explicit
+observability exception, not a bypass for other internal or business APIs.
+
+Business monitoring uses authenticated `/v1/control/metrics` with namespace
+filtering. Full `/metrics` on the admin listener requires an admin JWT or a
+namespace JWT explicitly granting `*` within its issuer ceiling. Such wildcard
+issuers can perform full-platform operational reads and GC, but issuer registry
+CRUD remains exclusively bootstrap-admin-authorized. Exact or prefix namespace
+grants do not confer full-platform operational access.
+
+Verify successful scrapes and failure/recovery visibility on the private path;
+do not substitute the logs-only pipeline for metrics acceptance. JWT refresh
+still applies to long-running clients of authenticated APIs, not this private
+Prometheus pull exception.
 
 ## Notes and boundaries
 

@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 )
 
 func TestPublicRoutingPinsVersionAndStripsMount(t *testing.T) {
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-cellhive-internal-token") != "internal" {
+		if bearertoken.VerifyInternal(r.Header, testJWTKey, "internal", time.Now()) != nil {
 			t.Error("missing control authentication")
 		}
 		if r.URL.Query().Get("host") != "app.test" {
@@ -24,10 +25,13 @@ func TestPublicRoutingPinsVersionAndStripsMount(t *testing.T) {
 		json.NewEncoder(w).Encode(control.HostView{Routes: []control.HostRoute{{Namespace: "n", Worker: "web", Path: "/"}, {Namespace: "n", Worker: "api", Path: "/api"}}, Workers: map[string]control.HostWorkerPtr{"n/web": {Version: 1, BundleSHA: "web"}, "n/api": {Version: 3, BundleSHA: "api"}}})
 	}))
 	defer agent.Close()
-	router := NewRouter(agent.URL, "internal", "dispatch")
+	router := NewRouter(agent.URL, testJWTKey, testJWTKey)
 	r := httptest.NewRequest("POST", "http://app.test/api/users?q=1", strings.NewReader("body"))
 	r.Host = "APP.TEST:8081"
 	r.Header.Set("x-cellhive-pool-worker", "attacker")
+	r.Header.Set("Authorization", "Basic tenant-auth")
+	r.Header.Set("x-cellhive-app-authorization", "attacker")
+	r.Header.Set("Connection", "Authorization, x-cellhive-app-authorization")
 	route, err := router.Public(r)
 	if err != nil {
 		t.Fatal(err)
@@ -42,8 +46,11 @@ func TestPublicRoutingPinsVersionAndStripsMount(t *testing.T) {
 	if clone.URL.Path != "/users" || clone.URL.RawQuery != "q=1" {
 		t.Fatalf("url=%s", clone.URL)
 	}
-	if clone.Header.Get("x-cellhive-pool-worker") != "api" || clone.Header.Get("x-cellhive-internal-token") != "internal" {
+	if clone.Header.Get("x-cellhive-pool-worker") != "api" || bearertoken.VerifyInternal(clone.Header, testJWTKey, "internal", time.Now()) != nil {
 		t.Fatal("fixed identity not installed")
+	}
+	if clone.Header.Get("x-cellhive-app-authorization") != "Basic tenant-auth" || clone.Header.Get("Connection") != "" {
+		t.Fatal("application authorization envelope not preserved")
 	}
 	if r.URL.Path != "/api/users" {
 		t.Fatal("resolver changed caller URL")
@@ -51,14 +58,16 @@ func TestPublicRoutingPinsVersionAndStripsMount(t *testing.T) {
 }
 
 func TestInternalDispatchAuthenticatesAndPreservesBody(t *testing.T) {
-	router := NewRouter("http://unused", "internal", "dispatch")
+	router := NewRouter("http://unused", testJWTKey, testJWTKey)
 	body := `{"namespace":"n","worker":"consumer","version":7,"bundle_sha":"sha","messages":[{"body":"hello"}]}`
 	r := httptest.NewRequest("POST", "http://internal/v1/queues/dispatch", strings.NewReader(body))
 	if _, err := router.Internal(r); err == nil {
 		t.Fatal("unauthenticated dispatch routed")
 	}
 	r = httptest.NewRequest("POST", "http://internal/v1/queues/dispatch", strings.NewReader(body))
-	r.Header.Set("x-cellhive-internal-token", "dispatch")
+	if err := bearertoken.SetInternal(r, testJWTKey, "dispatch"); err != nil {
+		t.Fatal(err)
+	}
 	route, err := router.Internal(r)
 	if err != nil {
 		t.Fatal(err)

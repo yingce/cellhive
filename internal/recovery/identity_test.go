@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
-	"cellhive/internal/config"
 	"cellhive/internal/lease"
 	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
@@ -28,7 +28,7 @@ func TestRecoveryFollowsIdentityAfterAddressChange(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	lm := lease.NewManager(b, "follower", "new-process", "", "", time.Minute)
 	lm.Instance = "original-disk"
-	h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{NodeID: "follower", TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+	h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig("follower"), Lease: lm, Spool: spool}).Handler())
 	defer h.Close()
 	lm.PeerURL = h.URL
 	if err := lm.Publish(ctx, lease.Load{}); err != nil {
@@ -45,7 +45,7 @@ func TestRecoveryFollowsIdentityAfterAddressChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	nl := nodelog.New(b, "owner")
-	m := recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil))
+	m := recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	// Resolver is wired explicitly once the implementation adds it.
 	configureIdentityRecovery(m, lm)
 	if _, err := m.Recover(ctx, nl, "owner", "old-session"); err != nil {
@@ -67,10 +67,12 @@ func TestPeerRejectsWrongPersistentIdentity(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	lm := lease.NewManager(nil, "follower", "current", "", "", time.Minute)
 	lm.Instance = "replacement-disk"
-	h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{NodeID: "follower", TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+	h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig("follower"), Lease: lm, Spool: spool}).Handler())
 	defer h.Close()
 	req, _ := http.NewRequest(http.MethodPost, h.URL+"/v1/peer/seal?session=old", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	if err := bearertoken.SetInternal(req, recoveryPeerKey(), "peer"); err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set("X-Cellhive-Target-Node", "follower")
 	req.Header.Set("X-Cellhive-Target-Instance", "original-disk")
 	resp, err := http.DefaultClient.Do(req)
@@ -89,10 +91,10 @@ func TestIdentifiedSealRejectsMissingLog(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	lm := lease.NewManager(nil, "f", "s", "", "", time.Minute)
 	lm.Instance = "disk"
-	h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+	h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig(""), Lease: lm, Spool: spool}).Handler())
 	defer h.Close()
 	ctx := peer.WithIdentity(context.Background(), cell.PeerIdentity{Node: "f", Instance: "disk"})
-	if _, err := peer.NewHTTPTransport("tok", nil).Seal(ctx, h.URL, "missing"); err == nil {
+	if _, err := peer.NewHTTPTransport(recoveryPeerKey(), nil).Seal(ctx, h.URL, "missing"); err == nil {
 		t.Fatal("missing retained log accepted as a complete empty tail")
 	}
 }
@@ -103,7 +105,7 @@ func TestRecoveryRefusesReplacementDiskAndPreservesRecord(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	lm := lease.NewManager(b, "follower", "new", "", "", time.Minute)
 	lm.Instance = "new-disk"
-	h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+	h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig(""), Lease: lm, Spool: spool}).Handler())
 	defer h.Close()
 	lm.PeerURL = h.URL
 	if err := lm.Publish(ctx, lease.Load{}); err != nil {
@@ -113,7 +115,7 @@ func TestRecoveryRefusesReplacementDiskAndPreservesRecord(t *testing.T) {
 	if _, err := nl.OpenIdentified(ctx, "old", 1, map[string]cell.PeerIdentity{"http://old": {Node: "follower", Instance: "old-disk"}}); err != nil {
 		t.Fatal(err)
 	}
-	m := recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil))
+	m := recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	m.Lease = lm
 	if _, err := m.Recover(ctx, nl, "owner", "old"); err == nil {
 		t.Fatal("replacement disk accepted")
@@ -133,7 +135,7 @@ func TestRecoveryUsesBootAddressBeforeNewLease(t *testing.T) {
 	if err := lm.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatal(err)
 	}
-	h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+	h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig(""), Lease: lm, Spool: spool}).Handler())
 	defer h.Close()
 	lm.PeerURL = h.URL
 	if err := lm.PublishRecoveryAddress(ctx); err != nil {
@@ -147,7 +149,7 @@ func TestRecoveryUsesBootAddressBeforeNewLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil))
+	m := recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	m.Lease = lm
 	if _, err = m.Recover(ctx, nl, "owner", "old"); err != nil {
 		t.Fatal(err)
@@ -169,7 +171,7 @@ func TestRecoveryResumesCheckpointAfterTailFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	actual := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok"}, Spool: spool}).Handler()
+	actual := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool}).Handler()
 	var fail atomic.Bool
 	fail.Store(true)
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +186,7 @@ func TestRecoveryResumesCheckpointAfterTailFailure(t *testing.T) {
 	if _, err := nl.Open(ctx, "old", 1, []string{h.URL}); err != nil {
 		t.Fatal(err)
 	}
-	m := recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil))
+	m := recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	if _, err := m.Recover(ctx, nl, "owner", "old"); err == nil {
 		t.Fatal("interruption ignored")
 	}
@@ -194,7 +196,7 @@ func TestRecoveryResumesCheckpointAfterTailFailure(t *testing.T) {
 	}
 	fail.Store(false)
 	// New recovery manager simulates loss of all in-memory recovery state.
-	m = recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil))
+	m = recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	n, err := m.Recover(ctx, nl, "owner", "old")
 	if err != nil || n != 44 {
 		t.Fatalf("resume uploaded=%d want44 err=%v", n, err)
@@ -215,20 +217,20 @@ func TestReplicationRequiresMatchingIdentityHTTPAndStream(t *testing.T) {
 			spool, _ := peer.NewSpool(t.TempDir())
 			lm := lease.NewManager(nil, "f", "s", "", "", time.Minute)
 			lm.Instance = "disk"
-			h := httptest.NewServer(server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok"}, Lease: lm, Spool: spool}).Handler())
+			h := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig(""), Lease: lm, Spool: spool}).Handler())
 			defer h.Close()
 			targets := &peer.Targets{}
 			if err := targets.Bind(map[string]cell.PeerIdentity{h.URL: {Node: "f", Instance: "disk"}}); err != nil {
 				t.Fatal(err)
 			}
-			tr := peer.NewHTTPTransport("tok", nil).WithSession("owner")
+			tr := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("owner")
 			tr.Targets = targets
 			if err := tr.Prepare(ctx, h.URL, "owner"); err != nil {
 				t.Fatal(err)
 			}
 			var transport peer.Transport = tr
 			if stream {
-				st := peer.NewSessionStreamTransport("tok", "owner", 1, 1)
+				st := peer.NewSessionStreamTransport(recoveryPeerKey(), "owner", 1, 1)
 				st.Targets = targets
 				transport = st
 				defer st.Close()
@@ -244,12 +246,12 @@ func TestReplicationRequiresMatchingIdentityHTTPAndStream(t *testing.T) {
 			bad := &peer.Targets{}
 			_ = bad.Bind(map[string]cell.PeerIdentity{h.URL: {Node: "f", Instance: "wrong-disk"}})
 			if stream {
-				st := peer.NewSessionStreamTransport("tok", "owner", 1, 1)
+				st := peer.NewSessionStreamTransport(recoveryPeerKey(), "owner", 1, 1)
 				st.Targets = bad
 				transport = st
 				defer st.Close()
 			} else {
-				tr := peer.NewHTTPTransport("tok", nil).WithSession("owner")
+				tr := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("owner")
 				tr.Targets = bad
 				transport = tr
 			}

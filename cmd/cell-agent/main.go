@@ -22,7 +22,6 @@ import (
 
 	"cellhive/internal/admission"
 	"cellhive/internal/artifacts"
-	"cellhive/internal/auth"
 	"cellhive/internal/autoscaler"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -733,7 +732,6 @@ func main() {
 		Timers:           timerReg,
 		OpenTimer:        openTimer,
 		Control:          ctrl,
-		AdminAuth:        buildAdminAuth(cfg),
 		D1:               d1.New(store),
 		R2:               r2.New(b),
 		Queue:            queue.New(store),
@@ -1284,8 +1282,6 @@ func performHandoff(log *slog.Logger, cfg config.Config, nl *nodelog.Manager, om
 	log.Info("handoff complete", "released", released)
 }
 
-// buildAdminAuth picks the admin authenticator: OIDC/JWT bearer when a JWKS URL
-// is configured (accepting the static ops token too), else the static token.
 // runRebalanceLoop releases idle owned cells so the fleet moves toward a
 // weight-proportional ownership split (ADR-101). It only schedules or releases
 // hibernated (locally closed) cells; a peer claims them on demand.
@@ -1581,18 +1577,6 @@ func runWakeRepairLoop(ctx context.Context, log *slog.Logger, store *cellstore.S
 		case <-t.C:
 			pass()
 		}
-	}
-}
-
-func buildAdminAuth(cfg config.Config) auth.Authenticator {
-	static := auth.StaticToken{Token: cfg.AdminToken}
-	if cfg.OIDCJWKSURL == "" {
-		return static
-	}
-	jwks := &auth.JWKS{URL: cfg.OIDCJWKSURL, TTL: 10 * time.Minute}
-	return auth.Any{
-		&auth.JWTBearer{Issuer: cfg.OIDCIssuer, Audience: cfg.OIDCAudience, Keys: jwks},
-		static,
 	}
 }
 

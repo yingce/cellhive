@@ -40,7 +40,7 @@ func TestUserRuntimeLogCaptureTimeoutDoesNotBlockDispatch(t *testing.T) {
 	}))
 	defer agent.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
-	cfg, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: "test-token", DispatchToken: "test-token", InternalPort: internalPort, PublicPort: publicPort, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js"})
+	cfg, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestUserRuntimeLogCaptureTimeoutDoesNotBlockDispatch(t *testing.T) {
 	raw, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(raw))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "test-token")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer requestCancel()
 	resp, err := client.Do(req.WithContext(requestCtx))

@@ -3,6 +3,7 @@ package doruntime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,11 +19,32 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/dosupervisor"
 	"cellhive/internal/replica"
 )
+
+func testJWTKey(role string) string {
+	key, err := bearertoken.DeriveKey(bytes.Repeat([]byte{0x71}, 32), "token/"+role)
+	if err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(key)
+}
+
+func testJWTAuthorization(role string) string {
+	token, err := bearertoken.MintInternal(testJWTKey(role), role, "runtime-test", time.Now())
+	if err != nil {
+		panic(err)
+	}
+	return "Bearer " + token
+}
+
+func verifyTestJWTAuthorization(authorization, role string) error {
+	return bearertoken.VerifyInternal(http.Header{"Authorization": {authorization}}, testJWTKey(role), role, time.Now())
+}
 
 const tenantDO = `
 import { DurableObject } from "cloudflare:workers";
@@ -192,7 +214,7 @@ func (o *ownerStub) handler(bundle string) http.HandlerFunc {
 			body, _ := io.ReadAll(r.Body)
 			req, _ := http.NewRequest(http.MethodPost, self+"/v1/do/invoke", bytes.NewReader(body))
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", testJWTAuthorization("internal"))
 			resp, err := noProxyClient().Do(req)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
@@ -235,7 +257,7 @@ func startRuntimeWithBundle(t *testing.T, o *ownerStub, bundle string) (base str
 	t.Cleanup(stub.Close)
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime",
 		NodeID: "do-node-1", PreventEviction: true,
 	})
@@ -287,7 +309,7 @@ func invokeSpec(t *testing.T, base string, spec map[string]any) (*http.Response,
 	body, _ := json.Marshal(spec)
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/do/invoke", bytes.NewReader(body))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", testJWTAuthorization("internal"))
 	client := noProxyClient()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
@@ -374,7 +396,7 @@ func TestDoRuntimeOwnershipFenceAndDrain(t *testing.T) {
 
 	// Drain releases leases and refuses new work.
 	dreq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/drain", strings.NewReader("{}"))
-	dreq.Header.Set("x-cellhive-internal-token", "tok")
+	dreq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	dresp, err := noProxyClient().Do(dreq)
 	if err != nil {
 		t.Fatalf("drain: %v", err)
@@ -418,7 +440,7 @@ func TestRenderResidencyAndDisk(t *testing.T) {
 		dir := t.TempDir()
 		disk := t.TempDir()
 		path, err := Render(dir, Config{
-			CellURL: "http://cell:7001", CellToken: "tok", Addr: "*:8788",
+			CellURL: "http://cell:7001", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: "*:8788",
 			DiskDir: disk, PlatformJS: "../../workerd/do-runtime", NodeID: "n1",
 			PreventEviction: prev,
 		})
@@ -447,7 +469,7 @@ func TestRenderResidencyAndDisk(t *testing.T) {
 func TestRenderUsesEnvironmentBindings(t *testing.T) {
 	dir := t.TempDir()
 	path, err := Render(dir, Config{
-		CellURL: "https://platform-secret.invalid", CellToken: "token-canary-7f6e",
+		CellURL: "https://platform-secret.invalid", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		Addr: "*:8788", DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime",
 	})
 	if err != nil {
@@ -458,7 +480,7 @@ func TestRenderUsesEnvironmentBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, leaked := range []string{"https://platform-secret.invalid", "token-canary-7f6e"} {
+	for _, leaked := range []string{"https://platform-secret.invalid", testJWTKey("internal"), testJWTKey("scope")} {
 		if strings.Contains(s, leaked) {
 			t.Fatalf("capnp leaks %q", leaked)
 		}
@@ -481,7 +503,7 @@ func TestRenderUsesEnvironmentBindings(t *testing.T) {
 
 func TestRenderDisablesTenantLogCapture(t *testing.T) {
 	path, err := Render(t.TempDir(), Config{
-		CellURL: "http://cell:7001", CellToken: "tok", Addr: "*:8788", DiskDir: t.TempDir(),
+		CellURL: "http://cell:7001", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: "*:8788", DiskDir: t.TempDir(),
 		PlatformJS: "../../workerd/do-runtime", DisableTenantLogs: true,
 	})
 	if err != nil {
@@ -643,6 +665,7 @@ func TestDoRuntimeDurableObjectToDurableObjectRPC(t *testing.T) {
 		"OTHER": map[string]any{
 			"kind": "do", "ns": "demo", "worker": "counter", "bundle_sha": "sha1",
 			"version": 1, "class": "Tenant", "name": "OTHER", "storage_id": "",
+			"authorization": map[string]any{"ns": "demo", "kind": "do", "name": "OTHER"},
 		},
 	}}
 	base, stop := startRuntime(t, o)
@@ -672,7 +695,7 @@ func TestDoRuntimeOwnerForwardAndResultUnknown(t *testing.T) {
 	var fwdBody map[string]any
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fwdPath = r.URL.Path
-		fwdToken = r.Header.Get("x-cellhive-internal-token")
+		fwdToken = r.Header.Get("Authorization")
 		_ = json.NewDecoder(r.Body).Decode(&fwdBody)
 		_, _ = w.Write([]byte("forwarded:" + fwdBody["id"].(string)))
 	}))
@@ -689,7 +712,7 @@ func TestDoRuntimeOwnerForwardAndResultUnknown(t *testing.T) {
 	if resp.StatusCode != 200 || body != "forwarded:a1" {
 		t.Fatalf("forward = %d %q", resp.StatusCode, body)
 	}
-	if fwdPath != "/v1/do/invoke" || fwdToken != "tok" || fwdBody["class"] != "Tenant" {
+	if fwdPath != "/v1/do/invoke" || verifyTestJWTAuthorization(fwdToken, "internal") != nil || fwdBody["class"] != "Tenant" {
 		t.Fatalf("forwarded path=%q token=%q body=%+v", fwdPath, fwdToken, fwdBody)
 	}
 	// Hint cached: a second invoke forwards again without a new claim.
@@ -740,7 +763,7 @@ func wsClient(t *testing.T, url, token string) (wait func(string, time.Duration)
 	}
 	script := `
 const [url, token] = process.argv.slice(-2);
-const ws = new WebSocket(url, { headers: { "x-cellhive-internal-token": token } });
+const ws = new WebSocket(url, { headers: { "Authorization": token } });
 ws.onopen = () => ws.send("hi");
 ws.onmessage = (e) => { console.log("MSG:" + e.data); };
 ws.onclose = (e) => { console.log("CLOSE:" + e.code); process.exit(0); };
@@ -794,7 +817,7 @@ func TestDoRuntimeWebSocketCrossNodeForward(t *testing.T) {
 	o.setForwardTo(strings.TrimPrefix(baseA, "http://"))
 
 	wsURL := baseB + "/v1/do/connect?namespace=demo&worker=counter&class=Tenant&id=a1&bundle_sha=sha1"
-	wait, stopWS := wsClient(t, wsURL, "tok")
+	wait, stopWS := wsClient(t, wsURL, testJWTAuthorization("internal"))
 	defer stopWS()
 	if got := wait("MSG:echo:hi", 14*time.Second); !strings.Contains(got, "MSG:echo:hi") {
 		t.Fatalf("cross-node WS echo missing; log=%q", got)
@@ -803,7 +826,7 @@ func TestDoRuntimeWebSocketCrossNodeForward(t *testing.T) {
 	abortBody, _ := json.Marshal(map[string]any{"namespace": "demo", "worker": "counter", "class": "Tenant", "id": "a1"})
 	areq, _ := http.NewRequest(http.MethodPost, baseA+"/v1/do/abort", bytes.NewReader(abortBody))
 	areq.Header.Set("content-type", "application/json")
-	areq.Header.Set("x-cellhive-internal-token", "tok")
+	areq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	aresp, err := noProxyClient().Do(areq)
 	if err != nil {
 		t.Fatalf("abort: %v", err)
@@ -835,7 +858,7 @@ func TestDoRuntimeWebSocketAbort(t *testing.T) {
 	wsURL := base + "/v1/do/connect?namespace=demo&worker=counter&class=Tenant&id=a1&bundle_sha=sha1"
 	script := `
 const [url, token] = process.argv.slice(-2);
-const ws = new WebSocket(url, { headers: { "x-cellhive-internal-token": token } });
+const ws = new WebSocket(url, { headers: { "Authorization": token } });
 ws.onopen = () => ws.send("hi");
 ws.onmessage = (e) => { console.log("MSG:" + e.data); };
 ws.onclose = (e) => { console.log("CLOSE:" + e.code); process.exit(0); };
@@ -844,7 +867,7 @@ setTimeout(() => { console.log("TIMEOUT"); process.exit(2); }, 8000);
 `
 	outFile := filepath.Join(t.TempDir(), "ws.log")
 	f, _ := os.Create(outFile)
-	cmd := exec.Command(bun, "-e", script, wsURL, "tok")
+	cmd := exec.Command(bun, "-e", script, wsURL, testJWTAuthorization("internal"))
 	cmd.Stdout = f
 	cmd.Stderr = f
 	if err := cmd.Start(); err != nil {
@@ -871,7 +894,7 @@ setTimeout(() => { console.log("TIMEOUT"); process.exit(2); }, 8000);
 	abortBody, _ := json.Marshal(map[string]any{"namespace": "demo", "worker": "counter", "class": "Tenant", "id": "a1"})
 	areq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/abort", bytes.NewReader(abortBody))
 	areq.Header.Set("content-type", "application/json")
-	areq.Header.Set("x-cellhive-internal-token", "tok")
+	areq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	aresp, err := noProxyClient().Do(areq)
 	if err != nil {
 		t.Fatalf("abort: %v", err)
@@ -1005,7 +1028,7 @@ func TestDoRuntimeObjectRegistryAndDelete(t *testing.T) {
 	}
 	// Registry lists the object.
 	oreq, _ := http.NewRequest(http.MethodGet, base+"/v1/do/objects", nil)
-	oreq.Header.Set("x-cellhive-internal-token", "tok")
+	oreq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	oresp, err := noProxyClient().Do(oreq)
 	if err != nil {
 		t.Fatalf("objects: %v", err)
@@ -1017,7 +1040,7 @@ func TestDoRuntimeObjectRegistryAndDelete(t *testing.T) {
 	}
 	// Restart (eager) aborts residents.
 	rreq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/restart", strings.NewReader(`{}`))
-	rreq.Header.Set("x-cellhive-internal-token", "tok")
+	rreq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	rresp, _ := noProxyClient().Do(rreq)
 	if rresp.StatusCode != 200 {
 		t.Fatalf("restart = %d", rresp.StatusCode)
@@ -1025,7 +1048,7 @@ func TestDoRuntimeObjectRegistryAndDelete(t *testing.T) {
 	rresp.Body.Close()
 	// Delete physically removes the object's storage: next call is fresh.
 	dreq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/delete", strings.NewReader(`{"namespace":"demo","worker":"counter","class":"Tenant","id":"d1"}`))
-	dreq.Header.Set("x-cellhive-internal-token", "tok")
+	dreq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	dresp, _ := noProxyClient().Do(dreq)
 	if dresp.StatusCode != 200 {
 		t.Fatalf("delete = %d", dresp.StatusCode)
@@ -1108,7 +1131,7 @@ func startRuntimeGate(t *testing.T, o *ownerStub, diskDir, gateURL string) (base
 	t.Cleanup(stub.Close)
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: diskDir, PlatformJS: "../../workerd/do-runtime",
 		NodeID: "do-node-gate", PreventEviction: true, GateURL: gateURL,
 	})
@@ -1237,7 +1260,7 @@ func startRuntimeAt(t *testing.T, cellURL, bundle, diskDir, gateURL, nodeID stri
 	t.Helper()
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: cellURL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: cellURL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: diskDir, PlatformJS: "../../workerd/do-runtime",
 		NodeID: nodeID, PreventEviction: true, GateURL: gateURL,
 	})
@@ -1360,7 +1383,7 @@ func TestDoRuntimeReadyAndDrainProbe(t *testing.T) {
 	}
 
 	dreq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/drain", strings.NewReader("{}"))
-	dreq.Header.Set("x-cellhive-internal-token", "tok")
+	dreq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	dresp, err := noProxyClient().Do(dreq)
 	if err != nil {
 		t.Fatalf("drain: %v", err)

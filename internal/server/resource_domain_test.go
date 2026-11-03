@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"cellhive/internal/auth"
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/d1"
@@ -247,11 +246,7 @@ func TestStatsFailClosedAndScoped(t *testing.T) {
 	}
 
 	// A JWT scoped to acme cannot read another namespace's stats.
-	secret := []byte("test-secret-0123456789abcdef")
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
-	token := signJWT(t, secret, map[string]any{
-		"sub": "alice@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	token := testNamespaceJWT(t, s, "alice@corp", "acme")
 	rr = adminTokenDo(t, s, http.MethodGet, "/v1/kv/stats?namespace=other&name=FOREIGN", token, "")
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("foreign ns stats = %d, want 403: %s", rr.Code, rr.Body.String())
@@ -266,7 +261,7 @@ func TestMetricsBucketAndCellGauges(t *testing.T) {
 	admin := s.AdminHandler()
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
 
-	rr := do(t, s.Handler(), http.MethodGet, "/metrics", "", nil)
+	rr := do(t, s.Handler(), http.MethodGet, "/metrics", testRoleJWT(t, "internal"), nil)
 	body := rr.Body.String()
 	for _, want := range []string{
 		"cellhive_list_calls_total",
@@ -290,7 +285,7 @@ func TestMetricsPagedStats(t *testing.T) {
 	s := newDomainServer(t)
 	admin := s.AdminHandler()
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
-	rr := do(t, s.Handler(), http.MethodGet, "/metrics", "", nil)
+	rr := do(t, s.Handler(), http.MethodGet, "/metrics", testRoleJWT(t, "internal"), nil)
 	body := rr.Body.String()
 	for _, want := range []string{
 		"cellhive_paged_cells",

@@ -7,10 +7,10 @@
 # Each scenario prints one RESULT line, then reads back every acknowledged key
 # from the harness ledger (key -> sha256) and counts missing/wrong.
 #
-# KV access: scoped token (x-cellhive-scope-token, minted by cmd/kvbench
-# -print-token from CELLHIVE_ROOT_KEY) on POST /v1/kv/put and GET /v1/kv/get of
+# KV access: bounded Bearer JWTs minted on demand by scripts/e2e/jwt.cjs
+# from CELLHIVE_ROOT_KEY on POST /v1/kv/put and GET /v1/kv/get of
 # the cell-agent REST listener. The app and kv resource are registered through
-# the admin listener (x-cellhive-admin-token), as scripts/bench-capture-cells.sh.
+# the admin listener (Bearer admin JWT), as scripts/bench-capture-cells.sh.
 #
 # Env (defaults): BIN (prebuilt cell-agent; default builds ./cmd/cell-agent),
 #   CELLHIVE_E2E_BUCKET=fs|cos, CELLHIVE_COS_ENV_FILE (cos only; defines
@@ -56,7 +56,8 @@ NS=$RUN_ID
 NS_ALL=("$NS")
 LEDGER=$TMP/ledger-main.tsv
 : >"$LEDGER"
-TOKEN_ADMIN=$(openssl rand -hex 16)
+export E2E_BIN="$ROOT/bin" E2E_ROOT="$ROOT"
+auth(){ node "$ROOT/scripts/e2e/jwt.cjs" "$@"; }
 _CK=""; _CS=""
 DELETE_APP=${CELLHIVE_E2E_DELETE_APP:-$([[ $BUCKET_MODE == cos ]] && echo 1 || echo 0)}
 
@@ -79,20 +80,17 @@ fail(){ echo "COLD-E2E: FAIL: $*" >&2; show_logs; FAILED=1; }
 die(){ fail "$*"; exit 1; }
 write_client(){
 cat >"$TMP/kvc.py" <<'PY'
-import argparse, hashlib, http.client, math, os, sys, time, urllib.parse
-TOK = {}
+import argparse, hashlib, http.client, math, os, sys, time, urllib.parse, subprocess
 def tok(a, name):
-    if name not in TOK:
-        with open(os.path.join(a.tokdir, "tok-%s-%s" % (a.ns, name))) as f:
-            TOK[name] = f.read().strip()
-    return TOK[name]
+    return subprocess.check_output(['node', os.path.join(os.environ['E2E_ROOT'], 'scripts/e2e/jwt.cjs'), 'scope', a.ns, 'kv', name], text=True).strip()
 def call(a, method, name, key, body=None, timeout=20):
     op = "put" if method == "POST" else "get"
     path = "/v1/kv/%s?ns=%s&key=%s" % (op, urllib.parse.quote(a.ns, safe=""), urllib.parse.quote(key, safe=""))
+    token = tok(a, name)
     t0 = time.perf_counter()
     try:
         c = http.client.HTTPConnection("127.0.0.1", a.port, timeout=timeout)
-        c.request(method, path, body=body, headers={"x-cellhive-scope-token": tok(a, name)})
+        c.request(method, path, body=body, headers={"Authorization": "Bearer "+token})
         r = c.getresponse(); data = r.read(); code = r.status; c.close()
     except Exception as e:
         return 0, str(e).encode(), (time.perf_counter() - t0) * 1000
@@ -170,26 +168,15 @@ def cmd_pct(a):
     def p(q): return xs[min(len(xs) - 1, int(math.ceil(q * len(xs))) - 1)] if xs else 0.0
     print("puts=%d p50_ms=%.1f p99_ms=%.1f max_ms=%.1f" % (len(xs), p(0.5), p(0.99), xs[-1] if xs else 0.0)); return 0
 def cmd_mint(a):
-    import base64, hmac, json
-    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-    root = bytes.fromhex(os.environ["CELLHIVE_ROOT_KEY"].strip())
-    prk = hmac.new(b"\0" * 32, root, hashlib.sha256).digest()
-    okm = hmac.new(prk, b"cellhive/token/scope\x01", hashlib.sha256).digest()
-    secret = b64(okm).encode()
-    payload = json.dumps({"ns": a.ns, "kind": "kv", "name": a.name}, separators=(",", ":"), ensure_ascii=False).encode()
-    t = b64(payload) + "." + b64(hmac.new(secret, payload, hashlib.sha256).digest())
-    with open(os.path.join(a.tokdir, "tok-%s-%s" % (a.ns, a.name)), "w") as f: f.write(t)
+    tok(a, a.name) # Validate signing configuration; never persist credentials.
     return 0
 def cmd_owner(a):
-    import base64, hmac, json
-    root = bytes.fromhex(os.environ["CELLHIVE_ROOT_KEY"].strip())
-    prk = hmac.new(b"\0" * 32, root, hashlib.sha256).digest()
-    raw = hmac.new(prk, b"cellhive/token/internal\x01", hashlib.sha256).digest()
-    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    import json
+    token = subprocess.check_output(['node', os.path.join(os.environ['E2E_ROOT'], 'scripts/e2e/jwt.cjs'), 'internal'], text=True).strip()
     conn = http.client.HTTPConnection("127.0.0.1", a.port, timeout=15)
     scope = urllib.parse.quote(a.ns + "/__kv__/main", safe="")
     conn.request("GET", "/v1/internal/resolve?scope=" + scope,
-                 headers={"x-cellhive-internal-token": token})
+                 headers={"Authorization": "Bearer "+token})
     response = conn.getresponse()
     data = json.loads(response.read())
     if response.status != 200 or not data.get("owned"):
@@ -240,7 +227,7 @@ delete_app(){
   local n code
   for n in "${NS_ALL[@]}"; do
     [[ $n == e2e-cold-* ]] || { echo "cleanup: refusing to delete namespace $n"; continue; }
-    code=$(curl -sS -m 180 -o "$TMP/del.out" -w '%{http_code}' -X DELETE -H "x-cellhive-admin-token: $TOKEN_ADMIN" \
+    code=$(curl -sS -m 180 -o "$TMP/del.out" -w '%{http_code}' -X DELETE -H "Authorization: Bearer $(auth admin)" \
       "http://127.0.0.1:$(admin_port "$CUR")/v1/control/app?namespace=$n" 2>/dev/null)
     echo "cleanup: delete app $n http=$code $(head -c 300 "$TMP/del.out" 2>/dev/null | mask)"
   done
@@ -294,7 +281,7 @@ stop_agent(){ # TAG: graceful SIGTERM (falls back to SIGKILL after 15s)
 }
 # snap PORT -> "list get put epoch evicted open_cells" (absolute counters)
 snap(){
-  curl -sS -m 5 "http://127.0.0.1:$1/metrics" 2>/dev/null | awk '
+  curl -sS -m 5 -H "Authorization: Bearer $(auth internal)" "http://127.0.0.1:$1/metrics" 2>/dev/null | awk '
     /^cellhive_bucket_ops_total\{op="list"\}/{l=$NF}
     /^cellhive_bucket_ops_total\{op="get"\}/{g=$NF}
     /^cellhive_bucket_ops_total\{op="put"\}/{p=$NF}
@@ -305,7 +292,7 @@ snap(){
 }
 register_resource(){ # NAME SCOPE
   local code
-  code=$(curl -sS -m 60 -o "$TMP/reg.out" -w '%{http_code}' -X POST -H "x-cellhive-admin-token: $TOKEN_ADMIN" \
+  code=$(curl -sS -m 60 -o "$TMP/reg.out" -w '%{http_code}' -X POST -H "Authorization: Bearer $(auth admin)" \
     -H 'content-type: application/json' --data-binary "{\"namespace\":\"$NS\",\"kind\":\"kv\",\"name\":\"$1\",\"scope\":\"$2\"}" \
     "http://127.0.0.1:$(admin_port "$CUR")/v1/control/resource")
   [[ $code == 200 ]] || { fail "register kv resource $1: http=$code $(head -c 300 "$TMP/reg.out")"; return 1; }
@@ -364,8 +351,10 @@ if [[ -z ${BIN:-} ]]; then
   go build -tags "$TAGS" -o "$BIN" ./cmd/cell-agent || die "build"
 fi
 [[ -x $BIN ]] || die "BIN=$BIN is not executable"
+[[ -x "$E2E_BIN/cellhive" ]] || die "build bin/cellhive for JWT signing"
 export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32)
-export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 CELLHIVE_ADMIN_TOKEN=$TOKEN_ADMIN
+export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
 mkdir -p "$TMP/tok"
 echo "COLD-E2E: bucket=$BUCKET_MODE ns=$NS lease_ttl=$LEASE_TTL steady=${STEADY_SECONDS}s preload=${PRELOAD_BYTES}B p99_limit=${P99_LIMIT_MS}ms bin=$BIN"
 PORT_A=$A_REST_PORT; PORT_B=$B_REST_PORT
@@ -376,7 +365,7 @@ start_agent a 32 5m || exit 1
 # A shared test bucket can still be releasing its previous control owner.
 # Retry only the explicit pre-execution invalidation rejection, never ambiguous writes.
 for setup_attempt in $(seq 1 30); do
-code=$(curl -sS -m 60 -o "$TMP/app.out" -w '%{http_code}' -X POST -H "x-cellhive-admin-token: $TOKEN_ADMIN" \
+code=$(curl -sS -m 60 -o "$TMP/app.out" -w '%{http_code}' -X POST -H "Authorization: Bearer $(auth admin)" \
   -H 'content-type: application/json' --data-binary "{\"namespace\":\"$NS\"}" "http://127.0.0.1:$A_ADMIN_PORT/v1/control/app")
   [[ $code == 200 ]] && break
   [[ $code == 503 ]] && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("error") != "local_invalidation_failed")' "$TMP/app.out" || break

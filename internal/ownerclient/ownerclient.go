@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/cell"
 )
 
@@ -123,7 +124,9 @@ func (c *Client) resolveFrom(ctx context.Context, seed, scope string) (Hint, err
 		return Hint{}, err
 	}
 	if c.Token != "" {
-		req.Header.Set("x-cellhive-internal-token", c.Token)
+		if err := bearertoken.SetInternal(req, c.Token, "internal"); err != nil {
+			return Hint{}, err
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -199,8 +202,10 @@ func (c *Client) forwardTo(ctx context.Context, h Hint, method, path string, bod
 			req.Header.Add(k, v)
 		}
 	}
-	if c.Token != "" {
-		req.Header.Set("x-cellhive-internal-token", c.Token)
+	if c.Token != "" && len(req.Header.Values("Authorization")) == 0 {
+		if err := bearertoken.SetInternal(req, c.Token, "internal"); err != nil {
+			return nil, err
+		}
 	}
 	req.Header.Set(ForwardedHeader, "1")
 	return c.HTTP.Do(req)

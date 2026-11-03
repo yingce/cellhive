@@ -14,9 +14,8 @@ import (
 func scopeDo(t *testing.T, s *Server, method, path, scopeToken string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	req.Header.Set("x-cellhive-internal-token", "tok")
 	if scopeToken != "" {
-		req.Header.Set("x-cellhive-scope-token", scopeToken)
+		req.Header.Set("Authorization", "Bearer "+scopeToken)
 	}
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -80,8 +79,7 @@ func TestBindingAPIs(t *testing.T) {
 		t.Fatalf("r2 get = %d %q", rr.Code, rr.Body.String())
 	}
 	rreq := httptest.NewRequest(http.MethodGet, "/v1/r2/object?ns=acme&bucket=files&key=dir/x.txt", nil)
-	rreq.Header.Set("x-cellhive-internal-token", "tok")
-	rreq.Header.Set("x-cellhive-scope-token", r2T)
+	rreq.Header.Set("Authorization", "Bearer "+r2T)
 	rreq.Header.Set("Range", "bytes=0-4")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, rreq)

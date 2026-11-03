@@ -84,7 +84,7 @@ func TestDOOwnerHintSkipsShardingRouter(t *testing.T) {
 		t.Fatal("no id found")
 	}
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "ticket-secret", DoRuntimes: []string{srvA.URL, srvB.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "ticket-secret", DoRuntimes: []string{srvA.URL, srvB.URL}})})
 	invoke := func() *httptest.ResponseRecorder {
 		body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: id, BundleSHA: "sha"})
 		req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
@@ -103,7 +103,11 @@ func TestDOOwnerHintSkipsShardingRouter(t *testing.T) {
 	if tok == "" {
 		t.Fatalf("no owner ticket header")
 	}
-	if _, err := doticket.Verify([]byte("ticket-secret"), tok, time.Now()); err != nil {
+	key, err := srv.Cfg.JWTKey("token/do-ticket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doticket.Verify(key, tok, time.Now()); err != nil {
 		t.Fatalf("ticket does not verify: %v", err)
 	}
 	if aHits.Load() != 1 || bHits.Load() != 0 {
@@ -149,7 +153,7 @@ func TestDOInvokePropagatesTraceparent(t *testing.T) {
 	}))
 	defer runtime.Close()
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{runtime.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{runtime.URL}})})
 	body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: "x", BundleSHA: "sha"})
 	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
@@ -178,7 +182,7 @@ func TestDOProxyRPCPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{upstream.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{upstream.URL}})})
 	post := func(req doInvokeReq) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(req)
 		r := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
@@ -231,7 +235,7 @@ func TestDOProxyForwardsTenantResponse(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{upstream.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{upstream.URL}})})
 	body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "W", ID: "w", BundleSHA: "sha",
 		Request: map[string]any{"method": "GET", "path": "/"}})
 	r := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
@@ -278,7 +282,7 @@ func TestDOProxyAmbiguousTransportIsNotRetried(t *testing.T) {
 	}))
 	defer trunc.Close()
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{trunc.URL, good.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{trunc.URL, good.URL}})})
 	id := pickShardID(t, 2, 0)
 	if rr := invokeDO(t, srv, id); rr.Code != http.StatusConflict {
 		t.Fatalf("ambiguous transport = %d %s, want 409", rr.Code, rr.Body.String())
@@ -305,7 +309,7 @@ func TestDOProxyDialFailureFailsOver(t *testing.T) {
 	}))
 	defer good.Close()
 
-	srv := New(Deps{Cfg: config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{dead, good.URL}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{dead, good.URL}})})
 	id := pickShardID(t, 2, 0)
 	if rr := invokeDO(t, srv, id); rr.Code != http.StatusOK || rr.Body.String() != `{"ok":"good"}` {
 		t.Fatalf("dial failover = %d %s", rr.Code, rr.Body.String())
@@ -316,7 +320,7 @@ func TestDOProxyDialFailureFailsOver(t *testing.T) {
 }
 
 func TestDOProxyRejectsBodyNamespaceOutsideToken(t *testing.T) {
-	srv := New(Deps{Cfg: config.Config{DoRuntimes: []string{"http://127.0.0.1:1"}}})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{DoRuntimes: []string{"http://127.0.0.1:1"}})})
 	body, _ := json.Marshal(doInvokeReq{Namespace: "victim", Worker: "web", Class: "Room", ID: "x", BundleSHA: "sha"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), ctxScopeNS, "acme"))
@@ -375,7 +379,7 @@ func TestDOProxyPreservesHTTPResponse(t *testing.T) {
 				w.Write([]byte{0, 255, 128, 65})
 			}))
 			defer runtime.Close()
-			s := &Server{Cfg: config.Config{DoRuntimes: []string{runtime.URL}}}
+			s := &Server{Cfg: testAuthConfig(config.Config{DoRuntimes: []string{runtime.URL}})}
 			got := invokeDO(t, s, "one")
 			if followed.Load() || got.Code != status {
 				t.Fatalf("redirect followed or status changed: %d", got.Code)
@@ -415,7 +419,7 @@ func TestDOProxyAuthorizesAgainstControlOwner(t *testing.T) {
 	for _, class := range []string{"Room", "Other"} {
 		body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: class, ID: "x", BundleSHA: "sha"})
 		req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
-		req.Header.Set("x-cellhive-scope-token", mint(t, follower, "acme", "do", "ROOM"))
+		req.Header.Set("Authorization", "Bearer "+mint(t, follower, "acme", "do", "ROOM"))
 		rr := httptest.NewRecorder()
 		follower.Handler().ServeHTTP(rr, req)
 		want := http.StatusOK

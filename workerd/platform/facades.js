@@ -1,26 +1,36 @@
 // Platform-side binding facades (host adapter) mapping CF-shaped env bindings onto
 // cell-agent binding endpoints (docs/bindings.md). Tenant code sees only these
 // facades; it never sees the internal token, backend address, or a generic
-// Fetcher. Each facade closes over its own scoped token (ADR-029).
+// Fetcher. Trusted transports mint binding JWTs per call (ADR-304).
 
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 
-function headers(platform, scopeToken) {
-  // Binding calls authenticate with the scoped token only (ADR-074); the broad
-  // internal token is never sent from a tenant-adjacent worker.
-  const h = {};
-  if (scopeToken) h["x-cellhive-scope-token"] = scopeToken;
-  return h;
+const bindingClaims = Symbol("binding claims");
+function headers(platform, claims) {
+  if (claims !== undefined && (!claims || typeof claims !== "object" || Array.isArray(claims))) {
+    throw new Error("binding authorization requires claims, not a startup token");
+  }
+  return claims ? { [bindingClaims]: claims } : {};
 }
 
 // pfetch routes facade traffic through the platform's service binding when
 // present, so binding calls reach cell-agent even though the tenant worker's
 // globalOutbound is public-only (ADR-029/I-09). Falls back to global fetch
 // (e.g. the p0 loader, which allows private outbound).
-function pfetch(platform, url, opts) {
+async function pfetch(platform, url, opts) {
+  const claims = opts?.headers?.[bindingClaims];
+  if (claims) {
+    if (typeof platform.authorization !== "function") throw new Error("binding authorization signer missing");
+    opts = { ...opts, headers: { ...opts.headers } };
+    delete opts.headers[bindingClaims];
+    opts.headers.authorization = await platform.authorization(claims);
+  }
+  if (platform.authorization && !new Headers(opts?.headers).has("authorization")) {
+    opts = {...opts, headers: {...opts?.headers, authorization: await platform.authorization()}};
+  }
   // W3C trace context: the loaded-worker wrapper sets the inbound request's
   // traceparent on globalThis; every facade call carries it (ADR-146).
   const tp = globalThis.__cellhiveTraceparent;
@@ -241,7 +251,7 @@ export function makeDO(platform, spec) {
       try {
         direct = await pfetch(platform, hint.url + "/v1/do/invoke", {
           method: "POST",
-          headers: { "content-type": "application/json", "x-cellhive-do-ticket": hint.ticket },
+          headers: { "content-type": "application/json", authorization: "Bearer " + hint.ticket },
           body: payload, redirect: "manual",
         });
       } catch (e) {
@@ -260,7 +270,7 @@ export function makeDO(platform, spec) {
 
     const r = await pfetch(platform, platform.url + "/v1/do/invoke", {
       method: "POST",
-      headers: { ...headers(platform, spec.token), "content-type": "application/json" },
+      headers: { ...headers(platform, spec.authorization), "content-type": "application/json" },
       body: payload, redirect: "manual",
     });
     if (r.ok) {
@@ -281,7 +291,7 @@ export function makeDO(platform, spec) {
   async function connectInfo(id) {
     if (spec.deleted) throw new Error("do: class " + spec.class + " was deleted");
     const qs = q(identity(id));
-    const look = await pfetch(platform, platform.url + "/v1/do/connect?" + qs, { headers: headers(platform, spec.token) });
+    const look = await pfetch(platform, platform.url + "/v1/do/connect?" + qs, { headers: headers(platform, spec.authorization) });
     if (!look.ok) throw new Error("do: connect lookup " + look.status + " " + (await look.text()));
     const info = await look.json();
     const base = String(info.owner || "").startsWith("http") ? info.owner : "http://" + info.owner;
@@ -303,10 +313,12 @@ export function makeDO(platform, spec) {
           lk === "content-length" || lk.startsWith("x-cellhive-")) return;
       h[k] = v;
     });
-    Object.assign(h, headers(platform, spec.token));
+    if (h.authorization !== undefined) h["x-cellhive-app-authorization"] = h.authorization;
+    delete h.authorization;
     h["Upgrade"] = req.headers.get("Upgrade") || "websocket";
     h["Connection"] = "Upgrade";
-    if (info.ticket) h["x-cellhive-do-ticket"] = info.ticket;
+    if (!info.ticket) throw new Error("do: owner ticket missing");
+    h.authorization = "Bearer " + info.ticket;
     return await pfetch(platform, info.url, { headers: h });
   }
 
@@ -813,7 +825,8 @@ function makeD1Session(database, initialBookmark) {
 }
 
 // buildBindings constructs the tenant-visible env from per-binding specs:
-//   { KV: {kind:"kv", ns, name, token}, DB: {kind:"d1", ns, name, token}, ... }
+//   { KV: {kind:"kv", ns, name, authorization}, ... }
+// platform.authorization(claims) is a trusted per-call signer, never tenant env.
 // wrapR2Metadata re-attaches a local R2ObjectBody.writeHttpMetadata after the
 // props-bound R2 entrypoint returns. A binding call crosses workerd RPC, where
 // arguments are serialized by value, so a method running on the binding side
@@ -867,12 +880,12 @@ export function buildBindings(platform, specs) {
   const out = {};
   for (const [binding, spec] of Object.entries(specs)) {
     switch (spec.kind) {
-      case "kv": out[binding] = makeKV(platform, spec.ns, spec.token); break;
-      case "d1": out[binding] = makeD1(platform, spec.ns, spec.name, spec.token); break;
-      case "r2": out[binding] = makeR2(platform, spec.ns, spec.name, spec.token); break;
-      case "queue": out[binding] = makeQueue(platform, spec.ns, spec.name, spec.token); break;
-      case "workflow": out[binding] = makeWorkflow(platform, spec.ns, spec.name, spec.token); break;
-      case "vectorize": out[binding] = makeVectorize(platform, spec.ns, spec.index || spec.name, spec.token); break;
+      case "kv": out[binding] = makeKV(platform, spec.ns, spec.authorization); break;
+      case "d1": out[binding] = makeD1(platform, spec.ns, spec.name, spec.authorization); break;
+      case "r2": out[binding] = makeR2(platform, spec.ns, spec.name, spec.authorization); break;
+      case "queue": out[binding] = makeQueue(platform, spec.ns, spec.name, spec.authorization); break;
+      case "workflow": out[binding] = makeWorkflow(platform, spec.ns, spec.name, spec.authorization); break;
+      case "vectorize": out[binding] = makeVectorize(platform, spec.ns, spec.index || spec.name, spec.authorization); break;
       case "do": out[binding] = makeDO(platform, spec); break;
       default: throw new Error("unknown binding kind: " + spec.kind);
     }

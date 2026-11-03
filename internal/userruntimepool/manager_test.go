@@ -36,7 +36,7 @@ func TestManagerProxyRealPinnedWorkerAndProcessReplacement(t *testing.T) {
 	defer agent.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m, err := NewManager(ctx, bin, t.TempDir(), userruntime.Config{CellURL: agent.URL, CellToken: "internal", DispatchToken: "dispatch", PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true}, workerdpool.Config{MaxSlots: 2})
+	m, err := NewManager(ctx, bin, t.TempDir(), userruntime.Config{CellURL: agent.URL, CellToken: testJWTKey, DispatchToken: testJWTKey, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true}, workerdpool.Config{MaxSlots: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestManagerProxyRealPinnedWorkerAndProcessReplacement(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	router := NewRouter(agent.URL, "internal", "dispatch")
+	router := NewRouter(agent.URL, testJWTKey, testJWTKey)
 	defer router.Close()
 	proxy := workerdpool.NewProxy(m.Supervisor, router.Public, m.Acquire)
 	defer proxy.Close()

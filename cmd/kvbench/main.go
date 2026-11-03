@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cellhive/internal/scopedtoken"
+	"cellhive/internal/bearertoken"
 )
 
 type result struct {
@@ -29,6 +29,7 @@ type result struct {
 	Failures int
 	P50ms    float64
 	P90ms    float64
+	P95ms    float64
 	P99ms    float64
 	Meanms   float64
 	RPS      float64
@@ -43,9 +44,9 @@ func main() {
 	dur := flag.Duration("d", 0, "run for this duration instead of -n")
 	keys := flag.Int("keys", 1000, "key space (round-robin)")
 	bytesz := flag.Int("bytes", 64, "PUT value bytes")
-	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
-	scopeToken := flag.String("scope-token", "", "scoped binding token (x-cellhive-scope-token)")
-	scopeSecret := flag.String("scope-secret", config.DeriveCredentials(config.LoadRootKey()).Scope, "mint a scoped token from this secret when -scope-token is empty (default derived from CELLHIVE_ROOT_KEY)")
+	verifyGet := flag.Bool("verify-get", false, "validate every GET body equals -bytes copies of x")
+	scopeToken := flag.String("scope-token", "", "binding JWT sent as Authorization Bearer")
+	scopeSecret := flag.String("scope-secret", config.DeriveCredentials(config.LoadRootKey()).Binding, "canonical base64url token/scope signing key; mint a fresh JWT per request")
 	warm := flag.Int("warm", 100, "warmup requests")
 	printToken := flag.Bool("print-token", false, "mint a scoped token for -ns and print it, then exit")
 	flag.Parse()
@@ -69,20 +70,17 @@ func main() {
 	if *mode == "d1" || *mode == "d1query" {
 		kind, name = "d1", "DB"
 	}
-	for i, n := range nsList {
-		if *scopeToken != "" {
-			tokens[i] = *scopeToken
-			continue
-		}
-		tk, err := scopedtoken.Mint([]byte(*scopeSecret), scopedtoken.Claims{Namespace: n, Kind: kind, Name: name})
+	for i := range nsList {
+		tokens[i] = *scopeToken
+	}
+	cfg := conf{addr: *addr, nsList: nsList, tokens: tokens, mode: *mode, keys: *keys, signingKey: *scopeSecret, kind: kind, name: name}
+	if *printToken {
+		token, err := cfg.authorization(0)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "mint scope token:", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		tokens[i] = tk
-	}
-	if *printToken {
-		fmt.Print(tokens[0])
+		fmt.Print(token)
 		return
 	}
 	client := &http.Client{
@@ -90,7 +88,8 @@ func main() {
 		Timeout:   30 * time.Second,
 	}
 	body := bytes.Repeat([]byte("x"), *bytesz)
-	cfg := conf{addr: *addr, nsList: nsList, tokens: tokens, mode: *mode, keys: *keys, token: *token, body: body}
+	cfg.body = body
+	cfg.verifyGet = *verifyGet
 	if *mode == "d1" || *mode == "d1query" {
 		for i := range nsList {
 			if code, err := d1Setup(client, cfg, i); err != nil || code != http.StatusOK {
@@ -102,19 +101,32 @@ func main() {
 	run(client, cfg, 4, *warm, 0)
 
 	st := run(client, cfg, *c, *n, *dur)
-	fmt.Printf("mode=%-3s cells=%-2d c=%-4d n=%-7d fail=%-4d p50=%-7.2fms p90=%-7.2fms p99=%-8.2fms mean=%-7.2fms rps=%-9.0f\n",
-		*mode, len(nsList), *c, st.N, st.Failures, st.P50ms, st.P90ms, st.P99ms, st.Meanms, st.RPS)
+	fmt.Printf("mode=%-3s cells=%-2d c=%-4d n=%-7d fail=%-4d p50=%-7.2fms p90=%-7.2fms p95=%-7.2fms p99=%-8.2fms mean=%-7.2fms rps=%-9.0f\n",
+		*mode, len(nsList), *c, st.N, st.Failures, st.P50ms, st.P90ms, st.P95ms, st.P99ms, st.Meanms, st.RPS)
 	if st.Failures > 0 {
 		os.Exit(1)
 	}
 }
 
 type conf struct {
-	addr, mode, token string
-	nsList            []string
-	tokens            []string
-	keys              int
-	body              []byte
+	addr, mode, signingKey, kind, name string
+	nsList                             []string
+	tokens                             []string
+	keys                               int
+	body                               []byte
+	verifyGet                          bool
+}
+
+func (c conf) authorization(idx int) (string, error) {
+	if c.tokens[idx] != "" {
+		return c.tokens[idx], nil
+	}
+	key, err := bearertoken.DecodeKey(c.signingKey)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().Unix()
+	return bearertoken.Mint(key, "token/scope", bearertoken.Claims{Ver: 1, Type: "binding", Subject: "kvbench", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 300, Namespace: c.nsList[idx], Kind: c.kind, Name: c.name})
 }
 
 func run(client *http.Client, cfg conf, conc, n int, dur time.Duration) result {
@@ -178,7 +190,7 @@ func run(client *http.Client, cfg conf, conc, n int, dur time.Duration) result {
 	}
 	return result{
 		Mode: cfg.mode, N: len(all), Failures: int(fails),
-		P50ms: ms(pct(all, 0.5)), P90ms: ms(pct(all, 0.9)), P99ms: ms(pct(all, 0.99)), Meanms: ms(mean),
+		P50ms: ms(pct(all, 0.5)), P90ms: ms(pct(all, 0.9)), P95ms: ms(pct(all, 0.95)), P99ms: ms(pct(all, 0.99)), Meanms: ms(mean),
 		RPS: float64(len(all)) / elapsed.Seconds(),
 	}
 }
@@ -194,7 +206,11 @@ func d1Exec(client *http.Client, cfg conf, idx int, sqlText string, params []any
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("x-cellhive-scope-token", cfg.tokens[idx])
+	token, err := cfg.authorization(idx)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
@@ -211,7 +227,11 @@ func d1Query(client *http.Client, cfg conf, idx int, sqlText string, params []an
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("x-cellhive-scope-token", cfg.tokens[idx])
+	token, err := cfg.authorization(idx)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
@@ -240,17 +260,28 @@ func call(client *http.Client, cfg conf, key string, i int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("x-cellhive-internal-token", cfg.token)
-	if cfg.tokens[idx] != "" {
-		req.Header.Set("x-cellhive-scope-token", cfg.tokens[idx])
+	token, err := cfg.authorization(idx)
+	if err != nil {
+		return 0, err
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+	if cfg.mode == "get" && cfg.verifyGet {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(cfg.body))+1))
+		if err != nil {
+			return resp.StatusCode, err
+		}
+		if !bytes.Equal(body, cfg.body) {
+			return resp.StatusCode, fmt.Errorf("GET body mismatch: got %d bytes, expected %d", len(body), len(cfg.body))
+		}
+		return resp.StatusCode, nil
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, err
 }
 
 func pct(s []time.Duration, p float64) time.Duration {

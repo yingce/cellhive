@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/cell"
 )
 
@@ -30,7 +31,7 @@ func TestResolveCachesAndInvalidates(t *testing.T) {
 	o := &cell.Owner{Node: "node-1", Role: cell.RoleCellAgent, Address: "127.0.0.1:7001", Epoch: 3, Expiry: time.Now().Add(time.Minute).UnixMilli(), ProtoVersion: "v1"}
 	srv := resolveServer(t, &hits, o, false)
 	defer srv.Close()
-	c := New([]string{srv.URL}, "tok", 50*time.Millisecond)
+	c := New([]string{srv.URL}, jwtTestKey, 50*time.Millisecond)
 
 	h, err := c.Resolve(ctx, "app/__kv__/x")
 	if err != nil || h.Node != "node-1" || h.Epoch != 3 || h.Address != "127.0.0.1:7001" {
@@ -56,7 +57,7 @@ func TestResolveUnowned(t *testing.T) {
 	var hits atomic.Int64
 	srv := resolveServer(t, &hits, nil, false)
 	defer srv.Close()
-	c := New([]string{srv.URL}, "tok", time.Second)
+	c := New([]string{srv.URL}, jwtTestKey, time.Second)
 	if _, err := c.Resolve(ctx, "app/__kv__/x"); !errors.Is(err, ErrUnowned) {
 		t.Fatalf("err = %v, want ErrUnowned", err)
 	}
@@ -73,7 +74,10 @@ func TestForwardPostsToOwner(t *testing.T) {
 	var gotBody []byte
 	ownerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotToken = r.Header.Get("x-cellhive-internal-token")
+		gotToken = r.Header.Get("Authorization")
+		if err := bearertoken.VerifyInternal(r.Header, jwtTestKey, "internal", time.Now()); err != nil {
+			t.Error(err)
+		}
 		gotGuard = r.Header.Get(ForwardedHeader)
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
@@ -82,7 +86,7 @@ func TestForwardPostsToOwner(t *testing.T) {
 	defer ownerSrv.Close()
 	o.Address = ownerSrv.URL // includes http://
 
-	c := New([]string{resolve.URL}, "tok", time.Second)
+	c := New([]string{resolve.URL}, jwtTestKey, time.Second)
 	resp, err := c.Forward(ctx, "app/__kv__/x", http.MethodPost, "/v1/internal/commit_binary?scope=app%2F__kv__%2Fx&epoch=1", []byte("payload"), http.Header{"x-cellhive-followers": []string{"f1"}})
 	if err != nil {
 		t.Fatalf("forward: %v", err)
@@ -91,7 +95,7 @@ func TestForwardPostsToOwner(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if gotPath != "/v1/internal/commit_binary" || gotToken != "tok" || gotGuard != "1" || string(gotBody) != "payload" {
+	if gotPath != "/v1/internal/commit_binary" || gotToken == "" || gotGuard != "1" || string(gotBody) != "payload" {
 		t.Fatalf("owner got path=%q token=%q guard=%q body=%q", gotPath, gotToken, gotGuard, gotBody)
 	}
 }
@@ -113,7 +117,7 @@ func TestForwardRetriesOnceOnConflict(t *testing.T) {
 	defer ownerSrv.Close()
 	o.Address = ownerSrv.URL
 
-	c := New([]string{resolve.URL}, "tok", time.Minute)
+	c := New([]string{resolve.URL}, jwtTestKey, time.Minute)
 	resp, err := c.Forward(ctx, "s", http.MethodPost, "/x", nil, nil)
 	if err != nil {
 		t.Fatalf("forward: %v", err)

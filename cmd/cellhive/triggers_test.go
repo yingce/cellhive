@@ -11,6 +11,7 @@ import (
 // concatenating every historical release's crons (and reading the wrong JSON
 // field names, so it always printed none).
 func TestWorkerCronsUsesActiveVersion(t *testing.T) {
+	jwtCLIEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespace": "acme",

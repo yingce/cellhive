@@ -33,7 +33,7 @@ func main() {
 	epoch := flag.Uint64("epoch", 1, "epoch")
 	owner := flag.String("owner", "http://127.0.0.1:7001", "owner cell-agent URL")
 	follower := flag.String("follower", "", "comma-separated follower URLs")
-	token := flag.String("token", cellcfg.DeriveCredentials(cellcfg.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
+	token := flag.String("token", cellcfg.DeriveCredentials(cellcfg.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
 	restore := flag.Bool("restore", false, "cold-restore captured shard files into -dir via cell-agent, then exit")
 	restoreIfPresent := flag.Bool("restore-if-present", false, "cold-restore captured files when a manifest exists, then exit")
 	restoreObj := flag.String("restore-object", "", "with -restore: restore only one object as storage_id/class/name (per-object cold start)")
@@ -144,13 +144,14 @@ func main() {
 		}
 		creds := cellcfg.DeriveCredentials(cellcfg.LoadRootKey())
 		childEnv, err := doruntime.WorkerdEnv(doruntime.Config{
-			CellURL:        *owner,
-			CellToken:      *token,
-			DoTicketSecret: creds.DoTicket,
-			LogToken:       creds.Log,
-			AIURL:          os.Getenv("CELLHIVE_AI_URL"),
-			AIKey:          os.Getenv("CELLHIVE_AI_KEY"),
-			GateURL:        os.Getenv("CELLHIVE_DO_GATE_URL"),
+			CellURL:           *owner,
+			CellToken:         *token,
+			BindingSigningKey: creds.Binding,
+			DoTicketSecret:    creds.DoTicket,
+			LogToken:          creds.Log,
+			AIURL:             os.Getenv("CELLHIVE_AI_URL"),
+			AIKey:             os.Getenv("CELLHIVE_AI_KEY"),
+			GateURL:           os.Getenv("CELLHIVE_DO_GATE_URL"),
 		})
 		if err != nil {
 			log.Fatalf("build workerd environment: %v", err)

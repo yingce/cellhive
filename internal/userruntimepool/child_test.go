@@ -1,6 +1,7 @@
 package userruntimepool
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"io"
@@ -45,7 +46,7 @@ func testChildExecutesPinnedVersion(t *testing.T, storageID string) {
 	}))
 	defer agent.Close()
 	dir := t.TempDir()
-	cfg := userruntime.Config{CellURL: agent.URL, CellToken: "internal", DispatchToken: "dispatch", PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true, PoolMode: true, PoolTarget: &userruntime.ExecutionTarget{Namespace: "n", Worker: "api", Version: 3, BundleSHA: "sha3", StorageID: storageID}}
+	cfg := userruntime.Config{CellURL: agent.URL, CellToken: testJWTKey, DispatchToken: testJWTKey, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true, PoolMode: true, PoolTarget: &userruntime.ExecutionTarget{Namespace: "n", Worker: "api", Version: 3, BundleSHA: "sha3", StorageID: storageID}}
 	l := workerdpool.WorkerdLauncher{Prepare: func(ctx context.Context, slot workerdpool.Slot, ports workerdpool.Ports) (workerdpool.Prepared, error) {
 		cfg.PublicPort = ports.Public
 		cfg.InternalPort = ports.Internal
@@ -84,7 +85,9 @@ func testChildExecutesPinnedVersion(t *testing.T, storageID string) {
 			req.Header.Set("x-cellhive-pool-storage-id", pin)
 		}
 		if auth {
-			req.Header.Set("x-cellhive-internal-token", "internal")
+			if err := bearertoken.SetInternal(req, testJWTKey, "internal"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		r, e := client.Do(req)
 		if e != nil {

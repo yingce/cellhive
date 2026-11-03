@@ -257,7 +257,9 @@ func (s *Server) fanOutLogSubscribe(ctx context.Context, ns, worker string, ttl 
 				return
 			}
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+			if err := s.setInternalAuthorization(req, "internal"); err != nil {
+				return
+			}
 			client := s.ForwardClient
 			if client == nil {
 				client = &http.Client{Timeout: 3 * time.Second}

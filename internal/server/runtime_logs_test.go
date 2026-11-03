@@ -1,12 +1,14 @@
 package server
 
 import (
+	"cellhive/internal/bearertoken"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"cellhive/internal/config"
 	"cellhive/internal/logbuf"
@@ -17,7 +19,7 @@ func TestRuntimeLogsPullByCursorAndRestart(t *testing.T) {
 	session := "first"
 	events := []string{"one", "two"}
 	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-cellhive-internal-token") != "log-token" {
+		if bearertoken.VerifyInternal(r.Header, testAuthConfig(config.Config{}).TokenLog, "log", time.Now()) != nil {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
@@ -39,10 +41,10 @@ func TestRuntimeLogsPullByCursorAndRestart(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(page)
 	}))
 	defer runtime.Close()
-	s := New(Deps{Cfg: config.Config{TokenInternal: "internal-token", TokenLog: "log-token", AdminToken: "admin-tok"}, Logs: logbuf.New(100, 10)})
+	s := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "internal-token", TokenLog: "log-token", AdminToken: "admin-tok"}), Logs: logbuf.New(100, 10)})
 	register := func() {
 		body, _ := json.Marshal(map[string]any{"session": "runtime-1", "urls": []string{runtime.URL}})
-		if rr := do(t, s.Handler(), http.MethodPost, "/v1/internal/logs/runtime", "internal-token", body); rr.Code != 200 {
+		if rr := do(t, s.Handler(), http.MethodPost, "/v1/internal/logs/runtime", testRoleJWT(t, "internal"), body); rr.Code != 200 {
 			t.Fatalf("register = %d %s", rr.Code, rr.Body.String())
 		}
 	}

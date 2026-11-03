@@ -9,7 +9,6 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
-	"cellhive/internal/config"
 	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
@@ -52,7 +51,7 @@ func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	http := httptest.NewServer(follower.Handler())
 	defer http.Close()
 	nl := nodelog.New(fb, "dead")
@@ -60,7 +59,7 @@ func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := replica.New(fb)
-	rec := recovery.New(rep, peer.NewHTTPTransport("tok", nil))
+	rec := recovery.New(rep, peer.NewHTTPTransport(recoveryPeerKey(), nil))
 	if n, err := rec.Recover(ctx, nl, "dead", "session"); err == nil || n != 64 {
 		t.Fatalf("partial recover=%d %v", n, err)
 	}

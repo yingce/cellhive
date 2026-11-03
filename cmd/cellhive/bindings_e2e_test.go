@@ -21,7 +21,6 @@ import (
 	"cellhive/internal/owner"
 	"cellhive/internal/queue"
 	"cellhive/internal/r2"
-	"cellhive/internal/scopedtoken"
 	"cellhive/internal/server"
 )
 
@@ -96,7 +95,7 @@ func TestBindingsScopeAndTriggersE2E(t *testing.T) {
 	}
 
 	// 2) Scoped-token cross-resource denial through the real handler.
-	tokA, err := scopedtoken.Mint([]byte(cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "d1", Name: "A"})
+	tokA, err := bindingToken("acme", "d1", "A")
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -108,7 +107,7 @@ func TestBindingsScopeAndTriggersE2E(t *testing.T) {
 	}
 
 	// 3) R2 multipart lifecycle through the real handler.
-	r2tok, err := scopedtoken.Mint([]byte(cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "r2", Name: "bucketA"})
+	r2tok, err := bindingToken("acme", "r2", "bucketA")
 	if err != nil {
 		t.Fatalf("mint r2: %v", err)
 	}
@@ -157,7 +156,7 @@ func e2eReq(t *testing.T, base, method, path, token string, body []byte) (int, [
 		t.Fatalf("request: %v", err)
 	}
 	if token != "" {
-		req.Header.Set("x-cellhive-scope-token", token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

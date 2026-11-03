@@ -13,7 +13,7 @@ func TestCaptureEnsureMetrics(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.RecordCaptureEnsure(cell.Scope{Namespace: "acme"}, "resume", 12*time.Millisecond)
 	s.RecordCaptureEnsure(cell.Scope{Namespace: "acme"}, "snapshot", 2*time.Second)
-	rr := do(t, s.Handler(), http.MethodGet, "/metrics", "", nil)
+	rr := do(t, s.Handler(), http.MethodGet, "/metrics", testRoleJWT(t, "internal"), nil)
 	body := rr.Body.String()
 	for _, want := range []string{
 		`cellhive_capture_ensure_seconds_count{ns="acme"} 2`,

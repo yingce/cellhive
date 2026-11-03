@@ -56,7 +56,7 @@ func TestKVForwardSkipsOnlyEntryResourceAdmission(t *testing.T) {
 	token := mint(t, entry, "acme", "kv", "KV")
 	request := func(tok, path string, forwarded bool) int {
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("value"))
-		r.Header.Set("x-cellhive-scope-token", tok)
+		r.Header.Set("Authorization", "Bearer "+tok)
 		if forwarded {
 			r.Header.Set(ownerclient.ForwardedHeader, "1")
 		}

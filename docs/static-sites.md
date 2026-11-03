@@ -13,7 +13,7 @@ React/Vite 在本地或 CI 构建，上传 `dist`；构建时变量和 runtime v
 ## 当前实现
 
 - Wrangler 4 的 CF-API metadata 支持 `{"type":"assets","name":...}` binding；4.133 可能省略 `assets.config.binding`，服务端采用 `bindings` 里的资产绑定名。有 `assets.jwt/config` 时注入版本资产 token，assets-only 部署会使用固定 404 Worker，重复部署可继承 active 版本的资产 token。
-- 独立 Wrangler 接入：`CELLHIVE_CF_API_ADDR` 提供只含 `/client/v4/**` 的监听；JWT 的 `cellhive_ns` 由 `account_id` 校验，`/accounts` 只返回允许的 namespace；`/v1/control/*` 不在该监听上。
+- Wrangler 接入走 `CELLHIVE_ADMIN_ADDR`（默认 `:8082`）上的 `/client/v4/**`；`CLOUDFLARE_API_TOKEN` 使用已注册且启用的 issuer 签发的 HS256 namespace JWT（`type=namespace`、`ns` 为授权模式数组、`aud=cellhive`），或可信运维的短期 bootstrap admin JWT。服务端校验 issuer 上限、有效期、撤销状态及 `account_id`，`/accounts` 只返回允许的 namespace；不接受静态 admin token、OIDC 或旧 `cellhive_ns` claims。
 - CF-API 错误码区分：真实 multipart 失败为 `invalid_multipart`；未知 binding 为 `unsupported_binding`；assets 缺配置/名字不一致为 `invalid_binding`；超限为 `payload_too_large`。
 - 已用 Wrangler 4.133.0 真实 CLI 验证 Worker+assets、重复部署、assets-only 和租户 JWT 部署（`TestReviewWranglerAssetsRealCLI`，需要 `CELLHIVE_TEST_WRANGLER_CLI`）。
 

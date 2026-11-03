@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cellhive/internal/control"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,9 @@ import (
 // the cross-namespace allowlist (ADR-144): same-namespace targets need no grant,
 // a different namespace requires a service_acls row for the caller.
 func (s *Server) serviceTarget(w http.ResponseWriter, r *http.Request, callerNS string) (string, string, bool) {
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return "", "", false
+	}
 	target := r.URL.Query().Get("worker")
 	// "ns" is the caller's namespace (bound to the scope token); "target_ns"
 	// carries a cross-namespace target.
@@ -24,6 +28,12 @@ func (s *Server) serviceTarget(w http.ResponseWriter, r *http.Request, callerNS 
 	}
 	if callerNS == "" || target == "" || targetNS == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "caller namespace and target worker are required")
+		return "", "", false
+	}
+	bound, _ := r.Context().Value(ctxResolvedResource).(string)
+	boundNS, boundWorker, valid := splitServiceTarget(callerNS, bound)
+	if !valid || boundNS != targetNS || boundWorker != target {
+		writeErr(w, http.StatusForbidden, "scope_resource_mismatch", "service target does not match the registered binding")
 		return "", "", false
 	}
 	if targetNS != callerNS {
@@ -103,7 +113,10 @@ func (s *Server) handleServiceRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenDispatch)
+	if err := s.setInternalAuthorization(req, "dispatch"); err != nil {
+		writeErr(w, 500, "auth_failed", err.Error())
+		return
+	}
 	client := s.ForwardClient
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
@@ -195,7 +208,10 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenDispatch)
+	if err := s.setInternalAuthorization(req, "dispatch"); err != nil {
+		writeErr(w, 500, "auth_failed", err.Error())
+		return
+	}
 	client := s.ForwardClient
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}

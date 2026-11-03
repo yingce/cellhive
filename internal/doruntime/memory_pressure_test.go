@@ -65,7 +65,7 @@ func TestFacetMemoryPressure(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{"namespace": "demo", "worker": worker, "bundle_sha": sha, "class": "Tenant", "id": fmt.Sprintf("obj%d", i), "request": map[string]any{"path": "/"}})
 		req, _ := http.NewRequest("POST", base+"/v1/do/invoke", bytes.NewReader(body))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("internal"))
 		r, err := client.Do(req)
 		if err != nil {
 			sample("failure", i)

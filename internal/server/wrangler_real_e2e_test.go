@@ -61,7 +61,7 @@ func TestStockWranglerControlE2E(t *testing.T) {
 		t.Helper()
 		cmd := exec.CommandContext(t.Context(), "node", append([]string{bin}, args...)...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "CLOUDFLARE_API_BASE_URL="+h.URL+"/client/v4", "CLOUDFLARE_API_TOKEN=admin-tok", "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false")
+		cmd.Env = append(os.Environ(), "CLOUDFLARE_API_BASE_URL="+h.URL+"/client/v4", "CLOUDFLARE_API_TOKEN="+testRoleJWT(t, "admin"), "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("wrangler %v: %v\n%s", args, err, out)
@@ -121,7 +121,7 @@ func TestStockWranglerVectorizeE2E(t *testing.T) {
 		t.Helper()
 		cmd := exec.CommandContext(t.Context(), "node", append([]string{bin}, args...)...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "CLOUDFLARE_API_BASE_URL="+h.URL+"/client/v4", "CLOUDFLARE_API_TOKEN=admin-tok", "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false")
+		cmd.Env = append(os.Environ(), "CLOUDFLARE_API_BASE_URL="+h.URL+"/client/v4", "CLOUDFLARE_API_TOKEN="+testRoleJWT(t, "admin"), "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("wrangler %v: %v\n%s", args, err, out)

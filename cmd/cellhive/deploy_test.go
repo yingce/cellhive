@@ -21,7 +21,7 @@ func TestDeployBuildsPayloadFromTypedFlags(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 
 	if _, _, err := executeRoot(t,
 		"deploy", "acme", "api",
@@ -59,7 +59,7 @@ func TestDeployBuildsPayloadFromTypedFlags(t *testing.T) {
 
 func TestDeployRequiresBundleSource(t *testing.T) {
 	t.Setenv("CELLHIVE_ADMIN_URL", "http://127.0.0.1:1")
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 	_, _, err := executeRoot(t, "deploy", "acme", "api")
 	if err == nil || !strings.Contains(err.Error(), "--bundle, --bundle-sha or --config") {
 		t.Fatalf("deploy without bundle = %v", err)
@@ -88,7 +88,7 @@ func TestPromoteAndRollbackPayloads(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 
 	if _, _, err := executeRoot(t, "promote", "acme", "api", "--version", "3"); err != nil {
 		t.Fatal(err)

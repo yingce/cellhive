@@ -2,6 +2,7 @@ package peer
 
 import (
 	"bufio"
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -173,10 +174,13 @@ func dialRawStream(ctx context.Context, baseURL, token, session string, pipeline
 		URL:    &url.URL{Path: path},
 		Host:   u.Host,
 		Header: http.Header{
-			"Connection":                []string{"Upgrade"},
-			"Upgrade":                   []string{StreamProtocol},
-			"X-Cellhive-Internal-Token": []string{token},
+			"Connection": []string{"Upgrade"},
+			"Upgrade":    []string{StreamProtocol},
 		},
+	}
+	if err := bearertoken.SetInternal(req, token, "peer"); err != nil {
+		conn.Close()
+		return nil, err
 	}
 	if session != "" {
 		req.Header.Set("X-Cellhive-Owner-Session", session)

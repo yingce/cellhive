@@ -37,7 +37,7 @@ func deployDeathServer(t *testing.T, root string) (*Server, *cellstore.Store) {
 		cs.Close()
 		t.Fatal(err)
 	}
-	s := New(Deps{Cfg: config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok"},
+	s := New(Deps{Cfg: testAuthConfig(config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok"}),
 		Bucket: b, Store: cs, Control: control.New(cs, env), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	return s, cs
 }
@@ -121,7 +121,7 @@ func TestDeployHTTPProcessDeathInsideTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("x-cellhive-admin-token", "admin-tok")
+	request.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	requestDone := make(chan error, 1)
 	go func() {
 		client := &http.Client{Timeout: 20 * time.Second}

@@ -7,7 +7,7 @@
 // and the constructor-parameter env) — no HTTP facade shim needed.
 //
 // Each entrypoint runs in the (trusted) platform worker and calls cell-agent
-// with the scoped token carried in props.
+// with a fresh binding JWT minted from trusted claims carried in props.
 
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
 import {
@@ -15,6 +15,7 @@ import {
   RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 import { makeDOTransport } from "facades.js";
+import { mintJWT, internalHeaders } from "jwt.js";
 
 function q(params) {
   return Object.entries(params)
@@ -31,10 +32,24 @@ export function setTraceContext(traceparent) {
   else delete globalThis.__cellhiveTraceparent;
 }
 
-function call(env, path, init) {
+async function bindingAuthorization(env, authorization) {
+  if (!authorization || typeof authorization !== "object") throw new Error("binding authorization missing");
+  // Only binding identity comes from props; purpose and lifetime are host-owned.
+  const { ns, kind, name, worker, version, resource } = authorization;
+  return "Bearer " + await mintJWT(env.BINDING_SIGNING_KEY, "token/scope", {
+    type: "binding", sub: "workerd", ns, kind, name, worker, version, resource,
+  });
+}
+
+async function call(env, path, init) {
   const url = env.CELL_URL.replace(/\/$/, "") + path;
   const opts = Object.assign({}, init || {});
   opts.headers = Object.assign({}, (init && init.headers) || {});
+  const claims = opts.headers.__bindingClaims;
+  if (claims) {
+    delete opts.headers.__bindingClaims;
+    opts.headers.authorization = await bindingAuthorization(env, claims);
+  }
   const tp = globalThis.__cellhiveTraceparent;
   if (tp && !opts.headers["traceparent"]) opts.headers["traceparent"] = tp;
   if (env.PLATFORM && typeof env.PLATFORM.fetch === "function") return env.PLATFORM.fetch(url, opts);
@@ -42,7 +57,8 @@ function call(env, path, init) {
 }
 
 function scopeHeaders(props) {
-  return { "x-cellhive-scope-token": props.token || "" };
+  if (!props.authorization) throw new Error("binding authorization missing");
+  return { __bindingClaims: props.authorization };
 }
 
 // must throws a Cloudflare-shaped binding error. The server returns
@@ -648,7 +664,7 @@ function serviceRpc(ctx, env, props) {
       worker: props.target,
     }), {
       method: "POST",
-      headers: Object.assign({ "content-type": "application/json", "x-cellhive-scope-token": props.token }),
+      headers: Object.assign({ "content-type": "application/json" }, scopeHeaders(props)),
       body: JSON.stringify({ entrypoint: props.entrypoint || "", method, args: args || [] }),
     });
     if (!r.ok) throw new Error("service." + method + ": " + r.status + " " + (await r.text()));
@@ -710,7 +726,7 @@ export class ServiceBinding extends WorkerEntrypoint {
     }), {
       method: "POST",
       headers: Object.assign({
-        "x-cellhive-scope-token": p.token,
+        ...scopeHeaders(p),
         "x-cellhive-req-method": req.method,
         "x-cellhive-req-url": req.url,
         "x-cellhive-req-content-type": req.headers.get("content-type") || "text/plain",
@@ -751,10 +767,12 @@ export class ServiceBinding extends WorkerEntrypoint {
 const doTransports = new Map();
 const DO_TRANSPORT_MAX = 256;
 function doTransportFor(env, props) {
-  const key = [props.ns, props.worker, props.bundle_sha, props.version, props.class, props.storage_id || ""].join("\u0000");
+  const key = JSON.stringify([props.ns, props.worker, props.bundle_sha, props.version,
+    props.class, props.storage_id || "", props.authorization]);
   let t = doTransports.get(key);
   if (t === undefined) {
-    t = makeDOTransport({ url: env.CELL_URL, token: "", fetcher: env.PLATFORM }, props);
+    t = makeDOTransport({ url: env.CELL_URL, fetcher: env.PLATFORM,
+      authorization: () => bindingAuthorization(env, props.authorization) }, props);
     if (doTransports.size >= DO_TRANSPORT_MAX) {
       doTransports.delete(doTransports.keys().next().value);
     }
@@ -819,9 +837,8 @@ class WorkflowInstanceTarget extends RpcTarget {
 // the tenant env holds only this stub.
 export class WorkflowBinding extends WorkerEntrypoint {
   #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/workflow/"; }
-  #headers() {
-    const token = (this.ctx.props || {}).token;
-    return token ? { "x-cellhive-scope-token": token, "content-type": "application/json" } : { "content-type": "application/json" };
+  async #headers() {
+    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization), "content-type": "application/json"};
   }
   async __call(path, method, extra, body) {
     const props = this.ctx.props || {};
@@ -829,7 +846,7 @@ export class WorkflowBinding extends WorkerEntrypoint {
       this.#base() + path + "?" + q({ ns: props.ns, workflow: props.name, ...(extra || {}) }),
       {
         method: method || "GET",
-        headers: this.#headers(),
+        headers: await this.#headers(),
         body: body === undefined ? undefined : JSON.stringify(body),
       },
     );
@@ -861,9 +878,8 @@ export class WorkflowBinding extends WorkerEntrypoint {
 // so the tenant env needs no transport for it.
 export class Vectorize extends WorkerEntrypoint {
   #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/vectorize/"; }
-  #hdrs() {
-    const token = (this.ctx.props || {}).token;
-    return token ? { "x-cellhive-scope-token": token } : {};
+  async #hdrs() {
+    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization)};
   }
   #qp(extra) {
     const p = this.ctx.props || {};
@@ -872,7 +888,7 @@ export class Vectorize extends WorkerEntrypoint {
   async #json(path, body) {
     const r = await this.env.PLATFORM.fetch(this.#base() + path + "?" + this.#qp(), {
       method: "POST",
-      headers: Object.assign({ "content-type": "application/json" }, this.#hdrs()),
+      headers: Object.assign({ "content-type": "application/json" }, await this.#hdrs()),
       body: JSON.stringify(body),
     });
     await must(r, "vectorize." + path);
@@ -899,7 +915,7 @@ export class Vectorize extends WorkerEntrypoint {
   async getByIds(ids) {
     const r = await this.env.PLATFORM.fetch(this.#base() + "get?" + this.#qp(), {
       method: "POST",
-      headers: Object.assign({ "content-type": "application/json" }, this.#hdrs()),
+      headers: Object.assign({ "content-type": "application/json" }, await this.#hdrs()),
       body: JSON.stringify({ ids: ids || [] }),
     });
     await must(r, "vectorize.getByIds");
@@ -907,14 +923,14 @@ export class Vectorize extends WorkerEntrypoint {
   }
   async deleteByIds(ids) { return await this.#json("delete", { ids: ids || [] }); }
   async describe() {
-    const r = await this.env.PLATFORM.fetch(this.#base() + "describe?" + this.#qp(), { method: "GET", headers: this.#hdrs() });
+    const r = await this.env.PLATFORM.fetch(this.#base() + "describe?" + this.#qp(), { method: "GET", headers: await this.#hdrs() });
     await must(r, "vectorize.describe");
     return await r.json();
   }
   async listVectors(options) {
     const o = options || {};
     const r = await this.env.PLATFORM.fetch(this.#base() + "list?" + this.#qp({ count: o.count, cursor: o.cursor }), {
-      method: "GET", headers: this.#hdrs(),
+      method: "GET", headers: await this.#hdrs(),
     });
     await must(r, "vectorize.listVectors");
     return await r.json();
@@ -975,7 +991,7 @@ export class WorkflowBridgeTarget extends RpcTarget {
       this.#env.CELL_URL.replace(/\/$/, "") + path + "?" + qs.join("&"),
       {
         method,
-        headers: { "x-cellhive-internal-token": this.#env.CELL_TOKEN || "",
+        headers: { ...await internalHeaders(this.#env.CELL_TOKEN),
           ...(props.traceparent ? { traceparent: props.traceparent } : {}) },
         body: body === undefined || body === null ? undefined : body,
       },
@@ -1027,7 +1043,7 @@ export class Assets extends WorkerEntrypoint {
     const u = new URL(req.url);
     const path = u.pathname.replace(/^\/+/, "") || "index.html";
     const q = `?ns=${encodeURIComponent(p.ns)}&worker=${encodeURIComponent(p.worker)}&token=${encodeURIComponent(p.token)}&path=${encodeURIComponent(path)}`;
-    const r = await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/asset" + q, { headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN || "" } });
+    const r = await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/asset" + q, { headers: await internalHeaders(this.env.CELL_TOKEN) });
     if (r.status === 404) return new Response(null, { status: 404 });
     if (!r.ok) return new Response("asset fetch failed", { status: 502 });
     const headers = new Headers({ "content-type": contentType(path) });

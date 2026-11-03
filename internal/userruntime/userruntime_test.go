@@ -29,8 +29,73 @@ import (
 	"testing"
 	"time"
 
-	"cellhive/internal/scopedtoken"
+	"cellhive/internal/bearertoken"
 )
+
+func testJWTKey(role string) string {
+	key, err := bearertoken.DeriveKey(bytes.Repeat([]byte{0x71}, 32), "token/"+role)
+	if err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(key)
+}
+
+func testJWTAuthorization(role string) string {
+	token, err := bearertoken.MintInternal(testJWTKey(role), role, "runtime-test", time.Now())
+	if err != nil {
+		panic(err)
+	}
+	return "Bearer " + token
+}
+
+func verifyTestJWTAuthorization(authorization, role string) error {
+	return bearertoken.VerifyInternal(http.Header{"Authorization": {authorization}}, testJWTKey(role), role, time.Now())
+}
+
+func verifyTestBindingJWT(authorization string) (bearertoken.Claims, error) {
+	token, err := bearertoken.Bearer(http.Header{"Authorization": {authorization}})
+	if err != nil {
+		return bearertoken.Claims{}, err
+	}
+	key, err := bearertoken.DecodeKey(testJWTKey("scope"))
+	if err != nil {
+		return bearertoken.Claims{}, err
+	}
+	kid, claims, err := bearertoken.Verify(key, token, time.Now())
+	if err == nil && (kid != "token/scope" || claims.Type != "binding") {
+		err = fmt.Errorf("unexpected binding kid/type: %s/%s", kid, claims.Type)
+	}
+	return claims, err
+}
+
+func testDOTicket() string {
+	key, err := bearertoken.DecodeKey(testJWTKey("do-ticket"))
+	if err != nil {
+		panic(err)
+	}
+	now, shard := time.Now().Unix(), 0
+	token, err := bearertoken.Mint(key, "token/do-ticket", bearertoken.Claims{Ver: 1, Type: "internal", Subject: "do-test", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 30, Namespace: "acme", Worker: "web", StorageClass: "Room", Shard: &shard, Execution: `{"class":"Room","bundle_sha":"sha","storage_id":"","version":0,"limits":null}`})
+	if err != nil {
+		panic(err)
+	}
+	return token
+}
+
+func verifyTestDOTicket(authorization string) error {
+	token, err := bearertoken.Bearer(http.Header{"Authorization": {authorization}})
+	if err != nil {
+		return err
+	}
+	key, err := bearertoken.DecodeKey(testJWTKey("do-ticket"))
+	if err != nil {
+		return err
+	}
+	kid, c, err := bearertoken.Verify(key, token, time.Now())
+	if err == nil && (kid != "token/do-ticket" || c.Namespace != "acme" || c.Worker != "web" || c.StorageClass != "Room" || c.Shard == nil || *c.Shard != 0) {
+		return fmt.Errorf("unexpected DO ticket: %s %+v", kid, c)
+	}
+	return err
+}
 
 // tenantBundle is a tenant module with a queue() handler that echoes the batch.
 const tenantBundle = `
@@ -116,7 +181,7 @@ func TestUserRuntimeFetchesBundleThroughPresignedURL(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: agent.URL, CellToken: "test-token", DispatchToken: "test-token",
+		CellURL: agent.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -147,7 +212,7 @@ func TestUserRuntimeFetchesBundleThroughPresignedURL(t *testing.T) {
 		"messages": []map[string]any{{"id": "m1", "body": base64.StdEncoding.EncodeToString([]byte("hello")), "content_type": "text/plain", "attempts": 1}},
 	})
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-internal-token", "test-token")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	req.Header.Set("content-type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -188,7 +253,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		gotToken = r.Header.Get("x-cellhive-internal-token")
+		gotToken = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(tenantBundle))
 	}))
 	defer stub.Close()
@@ -196,14 +261,15 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	internalPort, publicPort := freePort(t), freePort(t)
 	dir := t.TempDir()
 	capnpPath, err := Render(dir, Config{
-		CellURL:       stub.URL,
-		CellToken:     "test-token",
-		DispatchToken: "test-token",
-		LogToken:      "test-log",
-		InternalPort:  internalPort,
-		PublicPort:    publicPort,
-		PlatformJS:    "../../workerd/user-runtime",
-		FacadesJS:     "../../workerd/platform/facades.js",
+		CellURL:           stub.URL,
+		CellToken:         testJWTKey("internal"),
+		DispatchToken:     testJWTKey("dispatch"),
+		LogToken:          testJWTKey("log"),
+		BindingSigningKey: testJWTKey("scope"),
+		InternalPort:      internalPort,
+		PublicPort:        publicPort,
+		PlatformJS:        "../../workerd/user-runtime",
+		FacadesJS:         "../../workerd/platform/facades.js",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -219,7 +285,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	client := noProxyClient()
 	collectTail := func() error {
 		req, _ := http.NewRequest(http.MethodGet, base+"/v1/internal/logs/events?ns=demo&worker=consumer&since="+strconv.FormatUint(tailSince, 10), nil)
-		req.Header.Set("x-cellhive-internal-token", "test-log")
+		req.Header.Set("Authorization", testJWTAuthorization("log"))
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
@@ -285,7 +351,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	// Authorized -> handler runs.
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(body))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "test-token")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -307,7 +373,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	if out.Handled != 1 || out.Result != "handled:1:hello" {
 		t.Fatalf("handler result = %+v; want handled:1:hello", out)
 	}
-	if gotToken != "test-token" {
+	if verifyTestJWTAuthorization(gotToken, "internal") != nil {
 		t.Fatalf("bundle fetch token = %q", gotToken)
 	}
 
@@ -321,7 +387,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 	v8Body, _ := json.Marshal(v8Payload)
 	v8Req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(v8Body))
 	v8Req.Header.Set("content-type", "application/json")
-	v8Req.Header.Set("x-cellhive-internal-token", "test-token")
+	v8Req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	v8Resp, err := client.Do(v8Req)
 	if err != nil {
 		t.Fatalf("v8 dispatch: %v", err)
@@ -352,7 +418,7 @@ func TestUserRuntimeDispatchesQueueToTenantHandler(t *testing.T) {
 			encoded, _ := json.Marshal(copyPayload)
 			request, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(encoded))
 			request.Header.Set("content-type", "application/json")
-			request.Header.Set("x-cellhive-internal-token", "test-token")
+			request.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 			response, err := client.Do(request)
 			if err != nil {
 				dispatchErrs <- err
@@ -429,13 +495,14 @@ func TestRuntimeRejectsUserEnvOverBudget(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL:       stub.URL,
-		CellToken:     "test-token",
-		DispatchToken: "test-token",
-		InternalPort:  internalPort,
-		PublicPort:    publicPort,
-		PlatformJS:    "../../workerd/user-runtime",
-		FacadesJS:     "../../workerd/platform/facades.js",
+		CellURL:           stub.URL,
+		CellToken:         testJWTKey("internal"),
+		DispatchToken:     testJWTKey("dispatch"),
+		BindingSigningKey: testJWTKey("scope"),
+		InternalPort:      internalPort,
+		PublicPort:        publicPort,
+		PlatformJS:        "../../workerd/user-runtime",
+		FacadesJS:         "../../workerd/platform/facades.js",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -480,7 +547,7 @@ func TestRuntimeRejectsUserEnvOverBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "test-token")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -516,7 +583,7 @@ func TestRuntimeRejectsUserEnvOverBudget(t *testing.T) {
 func TestRenderSubstitutesConfig(t *testing.T) {
 	dir := t.TempDir()
 	path, err := Render(dir, Config{
-		CellURL: "http://cell:7001", CellToken: "tok",
+		CellURL: "http://cell:7001", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: 18088, PublicPort: 18081,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -527,7 +594,7 @@ func TestRenderSubstitutesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	for _, leaked := range []string{"http://cell:7001", `text = "tok"`} {
+	for _, leaked := range []string{"http://cell:7001", testJWTKey("internal"), testJWTKey("scope")} {
 		if strings.Contains(string(data), leaked) {
 			t.Fatalf("capnp leaks %q:\n%s", leaked, data)
 		}
@@ -550,7 +617,7 @@ func TestRenderSubstitutesConfig(t *testing.T) {
 
 func TestRenderDisablesTenantLogCapture(t *testing.T) {
 	path, err := Render(t.TempDir(), Config{
-		CellURL: "http://cell:7001", CellToken: "tok", InternalPort: 18088, PublicPort: 18081,
+		CellURL: "http://cell:7001", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: 18088, PublicPort: 18081,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true,
 	})
 	if err != nil {
@@ -572,7 +639,7 @@ func TestFromEnvironmentRequiresExplicitChildEnv(t *testing.T) {
 	}
 	internalPort, publicPort := freePort(t), freePort(t)
 	cfg := Config{
-		CellURL: "http://127.0.0.1:1", CellToken: "token-canary",
+		CellURL: "http://127.0.0.1:1", CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	}
@@ -672,7 +739,7 @@ func TestUserRuntimePublicLoaderRoutesAndLoads(t *testing.T) {
 	internalPort, publicPort := freePort(t), freePort(t)
 	dir := t.TempDir()
 	capnpPath, err := Render(dir, Config{
-		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -791,7 +858,7 @@ func TestUserRuntimeStreamSurvivesVersionRetirement(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		HostCacheTTLMs: 50, RevPollMs: 50,
 	})
@@ -928,7 +995,7 @@ export default {
 			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 				// The owner leg: the platform worker connects here with the
 				// ticket it minted, never with anything the tenant can see.
-				connectTicket = r.Header.Get("x-cellhive-do-ticket")
+				connectTicket = r.Header.Get("Authorization")
 				if _, err := wsHandshakeAndEcho(w, r); err != nil {
 					t.Errorf("ws owner: %v", err)
 				}
@@ -937,7 +1004,7 @@ export default {
 			// The lookup leg (cell-agent): return this same server as the owner.
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"owner":  strings.TrimPrefix(stubURL, "http://"),
-				"ticket": "tkt",
+				"ticket": testDOTicket(),
 			})
 		default:
 			http.NotFound(w, r)
@@ -949,7 +1016,7 @@ export default {
 	internalPort, publicPort := freePort(t), freePort(t)
 	// cap-egress must reach the httptest stub (127.0.0.1 = "local").
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		EgressAllow: []string{"local"},
@@ -997,7 +1064,7 @@ export default {
 			t.Fatalf("probe %q missing in: %s", want, body)
 		}
 	}
-	if connectTicket != "tkt" {
+	if verifyTestDOTicket(connectTicket) != nil {
 		t.Fatalf("owner ticket = %q, want the platform-minted tkt", connectTicket)
 	}
 
@@ -1051,7 +1118,7 @@ export default {
 			_, _ = w.Write([]byte(probe))
 		case "/v1/do/connect":
 			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-				connectTicket = r.Header.Get("x-cellhive-do-ticket")
+				connectTicket = r.Header.Get("Authorization")
 				if _, err := wsHandshakeAndEcho(w, r); err != nil {
 					t.Errorf("ws owner: %v", err)
 				}
@@ -1059,7 +1126,7 @@ export default {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"owner":  strings.TrimPrefix(stubURL, "http://"),
-				"ticket": "public-tkt",
+				"ticket": testDOTicket(),
 			})
 		default:
 			http.NotFound(w, r)
@@ -1070,7 +1137,7 @@ export default {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		EgressAllow: []string{"local"},
@@ -1127,7 +1194,7 @@ export default {
 	if got, err := wsReadText(reader); err != nil || got != "owner-echo:from-public" {
 		t.Fatalf("public ws echo = %q, %v", got, err)
 	}
-	if connectTicket != "public-tkt" {
+	if verifyTestDOTicket(connectTicket) != nil {
 		t.Fatalf("owner ticket = %q, want public-tkt", connectTicket)
 	}
 
@@ -1307,7 +1374,7 @@ export class Probe extends WorkflowEntrypoint {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InvocationLogging: true,
 		InternalPort:      internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
@@ -1343,7 +1410,7 @@ export class Probe extends WorkflowEntrypoint {
 	})
 	req, _ := http.NewRequest(http.MethodPost, internal+"/v1/workflows/run", bytes.NewReader(payload))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -1446,7 +1513,7 @@ export default {
 	internalPort, publicPort := freePort(t), freePort(t)
 	dir := t.TempDir()
 	capnpPath, err := Render(dir, Config{
-		CellURL: stub.URL, CellToken: "secret-internal-token", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -1584,7 +1651,7 @@ export default {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "platform-token", DispatchToken: "platform-token", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -1656,7 +1723,7 @@ export default {
 		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequest(http.MethodPost, internal+path, bytes.NewReader(body))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "platform-token")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
@@ -1760,7 +1827,7 @@ func TestUserRuntimePublicLoaderServesAssets(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -1860,6 +1927,7 @@ export default {
 // real workerd: a timer dispatch loads the tenant and calls its scheduled()
 // handler (ADR-070).
 func TestUserRuntimeDispatchesTimerToTenantHandler(t *testing.T) {
+	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
@@ -1874,7 +1942,7 @@ func TestUserRuntimeDispatchesTimerToTenantHandler(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok",
+		CellURL: stub.URL, CellToken: key, DispatchToken: key,
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -1910,7 +1978,9 @@ func TestUserRuntimeDispatchesTimerToTenantHandler(t *testing.T) {
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/timers/dispatch", bytes.NewReader(body))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	if err := bearertoken.SetInternal(req, key, "dispatch"); err != nil {
+		t.Fatal(err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
@@ -1931,7 +2001,9 @@ func TestUserRuntimeDispatchesTimerToTenantHandler(t *testing.T) {
 		payload["cron"] = cron
 		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequest(http.MethodPost, base+"/v1/timers/dispatch", bytes.NewReader(body))
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		if err := bearertoken.SetInternal(req, key, "dispatch"); err != nil {
+			t.Fatal(err)
+		}
 		res, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -1984,7 +2056,7 @@ func startLoader(t *testing.T, proj map[string]any, assets map[string]string, bu
 	}))
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", InternalPort: internalPort, PublicPort: publicPort,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -2132,7 +2204,6 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 		}}},
 	}}}
 
-	const scopeSecret = "test-scope-secret"
 	var kvMu sync.Mutex
 	var kvScope, kvInternal, kvPath string
 	var kvRequests int
@@ -2146,7 +2217,7 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 			kvMu.Lock()
 			kvRequests++
 			kvPath = r.URL.Path
-			kvScope = r.Header.Get("x-cellhive-scope-token")
+			kvScope = r.Header.Get("Authorization")
 			kvInternal = r.Header.Get("x-cellhive-internal-token")
 			kvMu.Unlock()
 			if r.URL.Query().Get("key") == "missing" {
@@ -2158,7 +2229,7 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 			kvMu.Lock()
 			kvRequests++
 			kvPath = r.URL.Path
-			kvScope = r.Header.Get("x-cellhive-scope-token")
+			kvScope = r.Header.Get("Authorization")
 			kvInternal = r.Header.Get("x-cellhive-internal-token")
 			kvMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
@@ -2174,7 +2245,7 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: scopeSecret,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -2224,11 +2295,11 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 	}
 	// The loader computed the token locally; a real Go verifier accepts it,
 	// proving JS/Go canonical JSON agreement (ADR-074).
-	claims, err := scopedtoken.Verify([]byte(scopeSecret), kvScope, time.Now())
+	claims, err := verifyTestBindingJWT(kvScope)
 	if err != nil {
 		t.Fatalf("JS-minted token did not verify: %v (token=%q)", err, kvScope)
 	}
-	if claims.Namespace != "acme" || claims.Kind != "kv" || claims.Name != "KV" || claims.Resource != "acme/__kv__/main" || claims.ExpiresMs != 0 {
+	if claims.Namespace != "acme" || claims.Kind != "kv" || claims.Name != "KV" || claims.Resource != "acme/__kv__/main" || claims.Worker != "web" || claims.Version != 1 || claims.ExpiresAt <= claims.IssuedAt {
 		t.Fatalf("claims = %+v", claims)
 	}
 	// The broad internal token must not be sent from the tenant-adjacent worker.
@@ -2251,7 +2322,7 @@ func TestUserRuntimePublicLoaderBuildsBindingFacades(t *testing.T) {
 	// The correct token flips readiness to 503 draining.
 	drainReq, _ := http.NewRequest(http.MethodPost, public+"/drain", nil)
 	drainReq.Host = "app.test"
-	drainReq.Header.Set("x-cellhive-internal-token", "tok")
+	drainReq.Header.Set("Authorization", testJWTAuthorization("internal"))
 	drainResp, err := client.Do(drainReq)
 	if err != nil {
 		t.Fatalf("drain: %v", err)
@@ -2290,7 +2361,6 @@ func TestUserRuntimeDurableObjectBinding(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	const scopeSecret = "test-scope-secret"
 	proj := map[string]any{"apps": []any{map[string]any{
 		"namespace": "acme",
 		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
@@ -2309,7 +2379,7 @@ func TestUserRuntimeDurableObjectBinding(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(doTenantBundle))
 		case "/v1/do/invoke":
-			doToken = r.Header.Get("x-cellhive-scope-token")
+			doToken = r.Header.Get("Authorization")
 			_ = json.NewDecoder(r.Body).Decode(&doBody)
 			_, _ = w.Write([]byte("handled"))
 		default:
@@ -2320,7 +2390,7 @@ func TestUserRuntimeDurableObjectBinding(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: scopeSecret,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -2353,7 +2423,7 @@ func TestUserRuntimeDurableObjectBinding(t *testing.T) {
 		t.Fatalf("DO binding response = %d %q", resp.StatusCode, body)
 	}
 	// The `do`-scoped token verifies, and platform identity is pinned.
-	claims, err := scopedtoken.Verify([]byte(scopeSecret), doToken, time.Now())
+	claims, err := verifyTestBindingJWT(doToken)
 	if err != nil || claims.Kind != "do" || claims.Name != "ROOM" || claims.Namespace != "acme" {
 		t.Fatalf("do token claims = %+v, %v", claims, err)
 	}
@@ -2394,7 +2464,6 @@ func TestUserRuntimeDurableObjectRPC(t *testing.T) {
 	if _, err := FindWorkerd(); err != nil {
 		t.Skipf("workerd unavailable: %v", err)
 	}
-	const scopeSecret = "test-scope-secret"
 	proj := map[string]any{"apps": []any{map[string]any{
 		"namespace": "acme",
 		"routes":    []any{map[string]any{"host": "app.test", "worker": "web"}},
@@ -2438,7 +2507,7 @@ func TestUserRuntimeDurableObjectRPC(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: scopeSecret,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -2680,7 +2749,7 @@ func TestUserRuntimeR2ObjectFidelityAndD1Meta(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -2953,7 +3022,7 @@ func runWorkflow(t *testing.T, base, class, id string, params ...string) map[str
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/workflows/run", bytes.NewReader(body))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	resp, err := noProxyClient().Do(req)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -2979,7 +3048,7 @@ func TestUserRuntimeRunsWorkflow(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3287,7 +3356,7 @@ func TestUserRuntimePublicLoaderD1R2Queue(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3401,7 +3470,7 @@ func TestUserRuntimeServiceBinding(t *testing.T) {
 			})
 			req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/services/fetch", internalPort), bytes.NewReader(payload))
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 			resp, err := noProxyClient().Do(req)
 			if err != nil {
 				http.Error(w, err.Error(), 502)
@@ -3419,7 +3488,7 @@ func TestUserRuntimeServiceBinding(t *testing.T) {
 
 	internalPort, publicPort = freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3519,7 +3588,7 @@ func TestUserRuntimeServiceBindingRPC(t *testing.T) {
 			payload, _ := json.Marshal(in)
 			req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/services/run", internalPort), bytes.NewReader(payload))
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 			resp, err := noProxyClient().Do(req)
 			if err != nil {
 				http.Error(w, err.Error(), 502)
@@ -3537,7 +3606,7 @@ func TestUserRuntimeServiceBindingRPC(t *testing.T) {
 
 	internalPort, publicPort = freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3637,7 +3706,7 @@ func TestUserRuntimeWorkflowLifecycleFacade(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3712,7 +3781,7 @@ func TestUserRuntimeWorkflowStepRetries(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3787,7 +3856,7 @@ func TestUserRuntimeWorkflowWaitForEvent(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3865,7 +3934,7 @@ func TestUserRuntimeWorkflowCooperativePause(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -3937,7 +4006,7 @@ func TestUserRuntimeWorkflowNonRetryable(t *testing.T) {
 	defer stub.Close()
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4028,7 +4097,7 @@ func TestUserRuntimeAIBinding(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		AIURL: provider.URL, AIKey: "secret-key",
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
@@ -4128,7 +4197,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", LogToken: "dev-log-token", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), LogToken: testJWTKey("log"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4145,7 +4214,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	var tailSince uint64
 	collect := func() error {
 		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=web&since="+strconv.FormatUint(tailSince, 10), nil)
-		req.Header.Set("x-cellhive-internal-token", "dev-log-token")
+		req.Header.Set("Authorization", testJWTAuthorization("log"))
 		res, err := client.Do(req)
 		if err != nil {
 			return err
@@ -4175,7 +4244,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 		logRequests = append(logRequests, struct {
 			Namespace, Worker, Token string
 			Events                   []map[string]any
-		}{"acme", "web", "dev-log-token", events})
+		}{"acme", "web", req.Header.Get("Authorization"), events})
 		mu.Unlock()
 		return nil
 	}
@@ -4231,7 +4300,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	if got[0].Namespace != "acme" || got[0].Worker != "web" {
 		t.Fatalf("tail identity = %s/%s, want acme/web", got[0].Namespace, got[0].Worker)
 	}
-	if got[0].Token != "dev-log-token" {
+	if verifyTestJWTAuthorization(got[0].Token, "log") != nil {
 		t.Fatalf("tail token = %q, want log-role token", got[0].Token)
 	}
 	if len(got[0].Events) != 1 {
@@ -4304,7 +4373,7 @@ func TestUserRuntimeCapturesConsoleWithNativeTail(t *testing.T) {
 	quietDeadline := time.Now().Add(5 * time.Second)
 	for {
 		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=quiet&since="+strconv.FormatUint(quietSince, 10), nil)
-		req.Header.Set("x-cellhive-internal-token", "dev-log-token")
+		req.Header.Set("Authorization", testJWTAuthorization("log"))
 		res, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -4439,7 +4508,7 @@ func TestUserRuntimeCanDisableNativeTailCapture(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", LogToken: "log-tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), LogToken: testJWTKey("log"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort, DisableTenantLogs: true,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4545,7 +4614,7 @@ func TestUserRuntimeKVTTLAndMetadata(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4664,7 +4733,7 @@ func TestUserRuntimeKVPutStreamAndBytes(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4783,7 +4852,7 @@ func TestUserRuntimeServiceBindingNativeRPC(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret", HostCacheTTLMs: 20,
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"), HostCacheTTLMs: 20,
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4886,7 +4955,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", LogToken: "log-tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), LogToken: testJWTKey("log"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -4920,7 +4989,7 @@ func TestUserRuntimeServiceBindingNativeTargetLogTail(t *testing.T) {
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		req, _ := http.NewRequest(http.MethodGet, public+"/v1/internal/logs/events?ns=acme&worker=api", nil)
-		req.Header.Set("x-cellhive-internal-token", "log-tok")
+		req.Header.Set("Authorization", testJWTAuthorization("log"))
 		res, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -4986,12 +5055,12 @@ func TestUserRuntimeDOOwnerHintDirectCall(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(doHintBundle))
 		case "/v1/do/invoke":
-			if r.Header.Get("x-cellhive-do-ticket") != "" {
+			if verifyTestDOTicket(r.Header.Get("Authorization")) == nil {
 				ticketHits.Add(1)
 			} else {
 				routerHits.Add(1)
 				w.Header().Set("x-cellhive-do-owner", strings.TrimPrefix(stub.URL, "http://"))
-				w.Header().Set("x-cellhive-do-owner-ticket", "tkt")
+				w.Header().Set("x-cellhive-do-owner-ticket", testDOTicket())
 				w.Header().Set("x-cellhive-do-owner-exp", fmt.Sprint(time.Now().Add(time.Minute).UnixMilli()))
 			}
 			_, _ = w.Write([]byte("h"))
@@ -5003,7 +5072,7 @@ func TestUserRuntimeDOOwnerHintDirectCall(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -5096,10 +5165,10 @@ func runFastPathLatency(t *testing.T, serviceNative, doDirect string) (doFirstMs
 				_, _ = w.Write([]byte(latencyBundle))
 			}
 		case "/v1/do/invoke":
-			if r.Header.Get("x-cellhive-do-ticket") == "" {
+			if verifyTestDOTicket(r.Header.Get("Authorization")) != nil {
 				time.Sleep(hopDelay) // router hop cost
 				w.Header().Set("x-cellhive-do-owner", strings.TrimPrefix(stub.URL, "http://"))
-				w.Header().Set("x-cellhive-do-owner-ticket", "tkt")
+				w.Header().Set("x-cellhive-do-owner-ticket", testDOTicket())
 				w.Header().Set("x-cellhive-do-owner-exp", fmt.Sprint(time.Now().Add(time.Minute).UnixMilli()))
 			}
 			_, _ = w.Write([]byte("h"))
@@ -5114,7 +5183,7 @@ func runFastPathLatency(t *testing.T, serviceNative, doDirect string) (doFirstMs
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		ServiceNative: serviceNative, DoDirect: doDirect,
@@ -5251,7 +5320,7 @@ func TestUserRuntimeHostCacheGovernance(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		HostCacheTTLMs: 200,
@@ -5442,7 +5511,7 @@ func TestUserRuntimeRoutingScale(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		HostCacheTTLMs:      10000, // long: only the rev poll may invalidate
@@ -5574,7 +5643,7 @@ func TestUserRuntimeBindingOnlyRedeployTakesEffect(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		RevPollMs: 150,
@@ -5674,7 +5743,7 @@ export default { async fetch() { return new Response("probe"); } };
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -5709,7 +5778,7 @@ export default { async fetch() { return new Response("probe"); } };
 		req, _ := http.NewRequest(http.MethodPost,
 			fmt.Sprintf("http://127.0.0.1:%d/v1/services/run", internalPort), bytes.NewReader(payload))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("services/run: %v", err)
@@ -5785,7 +5854,7 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "token": "t"}},
+				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "authorization": map[string]any{"ns": "acme", "kind": "kv", "name": "KV", "worker": "consumer", "version": 3, "resource": "acme/__kv__/main"}}},
 				"vars":     map[string]any{"MY_VAR": "x"},
 			})
 		case "/v1/kv/get":
@@ -5798,7 +5867,7 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -5832,7 +5901,7 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost,
 			fmt.Sprintf("http://127.0.0.1:%d/v1/queues/dispatch", internalPort), bytes.NewReader(payload))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("queue dispatch: %v", err)
@@ -5851,7 +5920,7 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost,
 			fmt.Sprintf("http://127.0.0.1:%d%s", internalPort, path), bytes.NewReader(payload))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
@@ -5952,7 +6021,7 @@ export default {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6045,7 +6114,7 @@ export default {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6152,7 +6221,7 @@ func TestUserRuntimeColdLookupFailureRecovers(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6248,7 +6317,7 @@ export default { fetch() { return new Response("buf:" + typeof Buffer.from); } }
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6310,7 +6379,7 @@ func TestUserRuntimeCrossNamespaceServiceBinding(t *testing.T) {
 				"number": 1, "bundle_sha": "shaA",
 				"bindings": []any{map[string]any{
 					"type": "service", "name": "SVC", "id": "team/api",
-					"ns": "team", "caller_ns": "acme", "target": "api", "token": "t",
+					"ns": "team", "caller_ns": "acme", "target": "api", "authorization": map[string]any{"ns": "acme", "kind": "service", "name": "SVC"},
 				}},
 			}}},
 		},
@@ -6349,7 +6418,7 @@ func TestUserRuntimeCrossNamespaceServiceBinding(t *testing.T) {
 			})
 			req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/services/fetch", internalPort), bytes.NewReader(payload))
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 			resp, err := noProxyClient().Do(req)
 			if err != nil {
 				http.Error(w, err.Error(), 502)
@@ -6367,7 +6436,7 @@ func TestUserRuntimeCrossNamespaceServiceBinding(t *testing.T) {
 
 	internalPort, publicPort = freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", DispatchToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		ServiceNative: "0", // force the JSON path so the query params are observable
@@ -6462,7 +6531,7 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6579,7 +6648,7 @@ func TestUserRuntimeVectorizeBinding(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(vectorizeTenant))
 		case "/v1/vectorize/insert":
-			scopeToken = r.Header.Get("x-cellhive-scope-token")
+			scopeToken = r.Header.Get("Authorization")
 			queryParams = append(queryParams, r.URL.Query().Get("ns")+"/"+r.URL.Query().Get("index"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"mutationId": "m1", "count": 1, "ids": []string{"a"}})
 		case "/v1/vectorize/upsert":
@@ -6614,7 +6683,7 @@ func TestUserRuntimeVectorizeBinding(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
@@ -6653,8 +6722,8 @@ func TestUserRuntimeVectorizeBinding(t *testing.T) {
 	if len(queryParams) == 0 || queryParams[0] != "acme/docs" {
 		t.Fatalf("vectorize query params = %v, want acme/docs", queryParams)
 	}
-	if _, err := scopedtoken.Verify([]byte("test-scope-secret"), scopeToken, time.Now()); err != nil {
-		t.Fatalf("JS-minted scope token did not verify: %v", err)
+	if claims, err := verifyTestBindingJWT(scopeToken); err != nil || claims.Namespace != "acme" || claims.Kind != "vectorize" || claims.Name != "docs" {
+		t.Fatalf("JS-minted binding claims = %+v, %v", claims, err)
 	}
 	cancel()
 	select {
@@ -6696,12 +6765,15 @@ func TestUserRuntimeTraceExport(t *testing.T) {
 		case "/v1/internal/bundle":
 			_, _ = w.Write([]byte(telemetryTenantBundle))
 		case "/v1/internal/telemetry/spans":
-			token = r.Header.Get("x-cellhive-internal-token")
+			if r.Header.Get("x-cellhive-internal-token") != "" {
+				t.Error("telemetry leaked legacy internal credential header")
+			}
 			var req struct {
 				Spans []map[string]any `json:"spans"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			mu.Lock()
+			token = r.Header.Get("Authorization")
 			spans = append(spans, req.Spans...)
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"accepted":1}`))
@@ -6713,7 +6785,7 @@ func TestUserRuntimeTraceExport(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", ScopeSecret: "test-scope-secret",
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		TraceSampleRatio: 1,
@@ -6763,10 +6835,11 @@ func TestUserRuntimeTraceExport(t *testing.T) {
 				found = true
 			}
 		}
+		authorization := token
 		mu.Unlock()
 		if found {
-			if token != "tok" {
-				t.Fatalf("telemetry token = %q, want tok", token)
+			if err := verifyTestJWTAuthorization(authorization, "internal"); err != nil {
+				t.Fatalf("telemetry internal JWT invalid: %v", err)
 			}
 			return
 		}

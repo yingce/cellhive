@@ -18,7 +18,7 @@ func TestCloudflareDataPlaneMatchesNativeBindings(t *testing.T) {
 	call := func(method, path string, body []byte) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -67,7 +67,7 @@ func TestCloudflareDataPlaneMatchesNativeBindings(t *testing.T) {
 		t.Fatalf("r2 put = %d: %s", rr.Code, rr.Body.String())
 	}
 	metaReq := httptest.NewRequest(http.MethodPut, r2Path, bytes.NewReader([]byte("r2 bytes")))
-	metaReq.Header.Set("Authorization", "Bearer admin-tok")
+	metaReq.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	metaReq.Header.Set("Content-Type", "text/plain")
 	metaResponse := httptest.NewRecorder()
 	h.ServeHTTP(metaResponse, metaReq)
@@ -96,7 +96,7 @@ func TestCloudflareD1FileImportRetry(t *testing.T) {
 	call := func(method, path string, body []byte, auth bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
 		if auth {
-			req.Header.Set("Authorization", "Bearer admin-tok")
+			req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		}
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -151,7 +151,7 @@ func TestCloudflareD1ExportAndKVBulk(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -231,7 +231,7 @@ func TestCloudflareWranglerMigrationDetectsChangedFile(t *testing.T) {
 	call := func(sql string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]string{"sql": sql})
 		req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/d1/database/main/query", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr

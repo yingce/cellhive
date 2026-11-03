@@ -38,7 +38,7 @@ func TestPeerStreamStallBucketProofAndRecoveryHTTP(t *testing.T) {
 		follower.Handler().ServeHTTP(w, r)
 	}))
 	defer fh.Close()
-	tr := peer.NewSessionStreamTransport("tok", "recovery-http-session", 1, 4)
+	tr := peer.NewSessionStreamTransport(owner.Cfg.TokenPeer, "recovery-http-session", 1, 4)
 	defer tr.Close()
 	owner.PeerMgr = peer.NewManager(tr)
 	shipCtx, stopShip := context.WithCancel(context.Background())
@@ -52,7 +52,7 @@ func TestPeerStreamStallBucketProofAndRecoveryHTTP(t *testing.T) {
 	call := func(path string, body []byte) []byte {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPost, oh.URL+path, bytes.NewReader(body))
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 		resp, e := client.Do(req)
 		if e != nil {
 			t.Fatal(e)

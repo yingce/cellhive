@@ -20,7 +20,8 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 	var got map[string]any
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/workflows/run" || r.Header.Get("x-cellhive-internal-token") != "tok" {
+		assertJWT(t, r, "dispatch")
+		if r.URL.Path != "/v1/workflows/run" {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}
@@ -33,7 +34,7 @@ func TestWorkflowDispatcherRunAndSleepTimer(t *testing.T) {
 
 	next := &recorder{}
 	d := &WorkflowDispatcher{
-		URL: srv.URL, Token: "tok", Next: next,
+		URL: srv.URL, Token: jwtTestKey, Next: next,
 		Params: func(context.Context, string, string, string) ([]byte, error) { return []byte(`{"seed":20}`), nil },
 		Claim: func(context.Context, string, string, string) (string, uint64, bool, error) {
 			return "tok2", 2, true, nil
@@ -128,7 +129,7 @@ func TestWorkflowOutboxRetriesBusyRunAfterReopen(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	d := &WorkflowDispatcher{URL: server.URL, Target: func(context.Context, string, string) (control.WorkflowTarget, bool) {
+	d := &WorkflowDispatcher{URL: server.URL, Token: jwtTestKey, Target: func(context.Context, string, string) (control.WorkflowTarget, bool) {
 		return control.WorkflowTarget{Worker: "web", BundleSHA: "sha", ClassName: "WF", Version: 1}, true
 	}, Params: func(context.Context, string, string, string) ([]byte, error) { return nil, nil }, Skip: store.SkipWake, Claim: func(ctx context.Context, ns, name, id string) (string, uint64, bool, error) {
 		token, gen, _, ok, err := store.ClaimRunLimited(ctx, ns, name, id, 60000, 1)

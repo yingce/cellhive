@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"cellhive/internal/auth"
 	"context"
 	"net/http/httptest"
 	"os"
@@ -61,7 +60,7 @@ func TestReviewWranglerAssetsRealCLI(t *testing.T) {
 	}
 	env = append(env,
 		"CLOUDFLARE_API_BASE_URL="+httpServer.URL+"/client/v4",
-		"CLOUDFLARE_API_TOKEN=admin-tok",
+		"CLOUDFLARE_API_TOKEN="+testRoleJWT(t, "admin"),
 		"CLOUDFLARE_ACCOUNT_ID=acme",
 		"WRANGLER_SEND_METRICS=false", "CI=true", "NO_PROXY=*",
 	)
@@ -139,12 +138,8 @@ func TestReviewWranglerAssetsRealCLI(t *testing.T) {
 	}
 
 	// Tenant JWT on the same CF-API surface: no admin token required.
-	secret := []byte("cf-api-jwt-secret")
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
-	jwt := signJWT(t, secret, map[string]any{
-		"sub": "tenant@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
-	cfServer := httptest.NewServer(s.CFAPIHandler())
+	jwt := testNamespaceJWT(t, s, "tenant@corp", "acme")
+	cfServer := httptest.NewServer(s.AdminHandler())
 	defer cfServer.Close()
 	jwtEnv := append([]string{}, env...)
 	for i, v := range jwtEnv {

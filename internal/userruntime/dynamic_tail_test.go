@@ -46,14 +46,15 @@ func TestUserRuntimeDynamicTailGate(t *testing.T) {
 
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL:       stub.URL,
-		CellToken:     "test-token",
-		DispatchToken: "test-token",
-		LogToken:      "test-log",
-		InternalPort:  internalPort,
-		PublicPort:    publicPort,
-		PlatformJS:    "../../workerd/user-runtime",
-		FacadesJS:     "../../workerd/platform/facades.js",
+		CellURL:           stub.URL,
+		CellToken:         testJWTKey("internal"),
+		DispatchToken:     testJWTKey("dispatch"),
+		LogToken:          testJWTKey("log"),
+		BindingSigningKey: testJWTKey("scope"),
+		InternalPort:      internalPort,
+		PublicPort:        publicPort,
+		PlatformJS:        "../../workerd/user-runtime",
+		FacadesJS:         "../../workerd/platform/facades.js",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -88,7 +89,7 @@ func TestUserRuntimeDynamicTailGate(t *testing.T) {
 		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(body))
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", "test-token")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
@@ -104,7 +105,7 @@ func TestUserRuntimeDynamicTailGate(t *testing.T) {
 	var events int
 	collect := func() error {
 		req, _ := http.NewRequest(http.MethodGet, base+"/v1/internal/logs/events?ns=demo&worker=consumer&since="+strconv.FormatUint(since, 10), nil)
-		req.Header.Set("x-cellhive-internal-token", "test-log")
+		req.Header.Set("Authorization", testJWTAuthorization("log"))
 		resp, err := client.Do(req)
 		if err != nil {
 			return err

@@ -1,6 +1,7 @@
 package plangen
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,13 @@ import (
 func fakeCell(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/internal/") || strings.HasPrefix(r.URL.Path, "/v1/control/") {
+			if err := bearertoken.VerifyInternal(r.Header, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "internal", time.Now()); err != nil {
+				t.Error(err)
+				http.Error(w, "unauthorized", 401)
+				return
+			}
+		}
 		q := r.URL.Query()
 		switch r.URL.Path {
 		case "/v1/control/host":
@@ -68,9 +76,9 @@ func fakeCell(t *testing.T) *httptest.Server {
 			var bindings = map[string]any{}
 			switch q.Get("worker") {
 			case "bound":
-				bindings["KV"] = map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "token": "tok"}
+				bindings["KV"] = map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "authorization": map[string]any{"ns": "acme", "kind": "kv", "name": "KV"}}
 			case "svc":
-				bindings["SVC"] = map[string]any{"kind": "service", "ns": "acme", "name": "SVC", "target": "other", "token": "tok"}
+				bindings["SVC"] = map[string]any{"kind": "service", "ns": "acme", "name": "SVC", "target": "other", "authorization": map[string]any{"ns": "acme", "kind": "service", "name": "SVC"}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bindings": bindings, "vars": map[string]string{"Z": "last", "A": "first"},
@@ -99,7 +107,7 @@ func TestBuildBindingFreeHosts(t *testing.T) {
 	cell := fakeCell(t)
 	defer cell.Close()
 	b := New(Config{
-		CellURL: cell.URL, CellToken: "tok",
+		CellURL: cell.URL, CellToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", BindingSigningKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		LogToken: "logtok", MinimalMode: "off",
 	})
@@ -169,7 +177,7 @@ func TestBuildBindingFreeHosts(t *testing.T) {
 	if bound.GlobalOutbound != "public-network" || platform.GlobalOutbound != "cap-egress" {
 		t.Fatalf("globalOutbound = %q / %q", bound.GlobalOutbound, platform.GlobalOutbound)
 	}
-	if len(platform.Modules) != 3 || platform.Bindings[0].Name != "CELL_URL" {
+	if len(platform.Modules) != 4 || platform.Bindings[0].Name != "CELL_URL" {
 		t.Fatalf("platform service = %+v", platform)
 	}
 	if !strings.Contains(svc.Modules[0].Source, "hello-sha-plain") {
@@ -210,7 +218,7 @@ func TestBoundWorkerRunsAsStaticGeneration(t *testing.T) {
 	cell := fakeCell(t)
 	defer cell.Close()
 	b := New(Config{
-		CellURL: cell.URL, CellToken: "tok",
+		CellURL: cell.URL, CellToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", BindingSigningKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		LogToken: "logtok", MinimalMode: "off",
 	})
@@ -338,7 +346,7 @@ func TestCaptureActiveSkipsStatic(t *testing.T) {
 	}))
 	defer cell.Close()
 	b := New(Config{
-		CellURL: cell.URL, CellToken: "tok",
+		CellURL: cell.URL, CellToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", BindingSigningKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		MinimalMode: "auto",
 	})
@@ -370,7 +378,7 @@ func TestBindingFreeStaticPlanDefinesPublicNetwork(t *testing.T) {
 	cell := fakeCell(t)
 	defer cell.Close()
 	b := New(Config{
-		CellURL: cell.URL, CellToken: "tok",
+		CellURL: cell.URL, CellToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", BindingSigningKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		LogToken: "logtok", MinimalMode: "off",
 	})

@@ -48,7 +48,7 @@ func TestHTTPHydrationIndependentOfBackground(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	// This deadline belongs to the client; net/http does not transfer it to
 	// the server's Request.Context. The server must mark interactive work.
 	client := &http.Client{Timeout: 300 * time.Millisecond}

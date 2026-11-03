@@ -79,7 +79,7 @@ func newDeployCommand() *cobra.Command {
 
 func deployCore(ns, worker string, o deployOptions) error {
 	if o.bundleFile != "" {
-		sha, err := uploadBundle(o.bundleFile)
+		sha, err := uploadBundle(o.bundleFile, ns)
 		if err != nil {
 			return err
 		}
@@ -119,7 +119,7 @@ func deployCore(ns, worker string, o deployOptions) error {
 			return fmt.Errorf("config rejected by the compatibility gate")
 		}
 		if o.bundleSHA == "" {
-			sha, err := bundleFromConfig(m)
+			sha, err := bundleFromConfig(m, ns)
 			if err != nil {
 				return err
 			}

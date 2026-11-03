@@ -22,7 +22,6 @@ import (
 
 	"cellhive/internal/control"
 	"cellhive/internal/d1"
-	"cellhive/internal/scopedtoken"
 )
 
 type cloudflareD1Import struct {
@@ -279,22 +278,18 @@ func (s *Server) cloudflareBindingCall(r *http.Request, kind, name, method, path
 	if err := s.requireCloudflareResource(r.Context(), ns, kind, name); err != nil {
 		return nil, err
 	}
-	token, err := scopedtoken.Mint(s.scopeSecret(), scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name, ExpiresMs: time.Now().Add(time.Minute).UnixMilli()})
-	if err != nil {
-		return nil, err
-	}
 	if q == nil {
 		q = url.Values{}
 	}
 	q.Set("ns", ns)
-	req := r.Clone(r.Context())
+	q.Set("name", name)
+	req := r.Clone(context.WithValue(r.Context(), adminForwardKey{}, false))
 	req.Method = method
 	req.URL.Path = path
 	req.URL.RawPath = ""
 	req.URL.RawQuery = q.Encode()
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
-	req.Header.Set("x-cellhive-scope-token", token)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	return rec, nil

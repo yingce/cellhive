@@ -7,6 +7,8 @@
 // is sampled (W3C traceparent sampled bit), so an unsampled request pays
 // nothing beyond the traceparent check.
 
+import { internalHeaders } from "jwt.js";
+
 const MAX_BUFFER = 256;
 let buffer = [];
 
@@ -90,7 +92,7 @@ export async function flushSpans(env) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-cellhive-internal-token": env.CELL_TOKEN || "",
+        ...await internalHeaders(env.CELL_TOKEN),
       },
       body: JSON.stringify({ spans }),
     });

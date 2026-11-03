@@ -76,7 +76,7 @@ func TestSessionStreamDoesNotFallbackToLegacyAppend(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	transport := NewSessionStreamTransport("tok", "owner-session", 1, 1)
+	transport := NewSessionStreamTransport(jwtTestKey, "owner-session", 1, 1)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "upgrade"}
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
 	if err := transport.AppendBatch(context.Background(), srv.URL, sc, 1, [][]byte{seg}); err == nil {
@@ -93,7 +93,7 @@ func TestSessionHTTPAppendRequiresV2Proof(t *testing.T) {
 		_, _ = io.WriteString(w, `{"status":"fsynced"}`)
 	}))
 	defer legacy.Close()
-	transport := NewHTTPTransport("tok", nil).WithSession("owner-session")
+	transport := NewHTTPTransport(jwtTestKey, nil).WithSession("owner-session")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http-v2"}
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
 	if err := transport.Append(context.Background(), legacy.URL, sc, 1, seg); err == nil {
@@ -610,7 +610,7 @@ func TestReplicateQuorumOne(t *testing.T) {
 	}))
 	defer bad.Close()
 
-	m := NewManager(NewHTTPTransport("tok", nil))
+	m := NewManager(NewHTTPTransport(jwtTestKey, nil))
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, EndTxID: 1}, []byte("x"))
 
@@ -630,7 +630,7 @@ func TestReplicateAllFail(t *testing.T) {
 	}))
 	defer bad.Close()
 
-	m := NewManager(NewHTTPTransport("tok", nil))
+	m := NewManager(NewHTTPTransport(jwtTestKey, nil))
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, EndTxID: 1}, []byte("x"))
 

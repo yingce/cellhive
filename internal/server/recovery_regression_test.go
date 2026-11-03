@@ -47,8 +47,11 @@ func TestScopedBusyReplicaRefusesTakeoverAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	mine := &owner.Manager{B: b, NodeID: "a", Session: "sa", Advertise: "a:7001", OwnerTTL: time.Minute}
-	srv := New(Deps{Cfg: config.Config{NodeID: "a", ScopeSecret: "scope-secret"}, Bucket: b, Store: cs, Owner: mine})
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "FLOW"})
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{NodeID: "a", ScopeSecret: "scope-secret"}), Bucket: b, Store: cs, Owner: mine})
+	if err := registerTestBinding(srv, "acme", "workflow", "FLOW", sc.String()); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "FLOW"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +68,7 @@ func TestScopedBusyReplicaRefusesTakeoverAndRetries(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/workflow/create?ns=acme&workflow=FLOW&id=i1", nil)
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { rr := httptest.NewRecorder(); h(rr, req); done <- rr }()
 	select {

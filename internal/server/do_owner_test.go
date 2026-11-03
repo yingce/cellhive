@@ -28,7 +28,7 @@ func newDOServer(t *testing.T) *Server {
 		t.Fatalf("bucket: %v", err)
 	}
 	return New(Deps{
-		Cfg:     config.Config{NodeID: "cell", TokenInternal: "tok", ScopeSecret: "s"},
+		Cfg:     testAuthConfig(config.Config{NodeID: "cell", TokenInternal: "tok", ScopeSecret: "s"}),
 		Bucket:  b,
 		Control: control.New(cs, nil),
 		Owner:   &owner.Manager{B: b, NodeID: "cell", Session: "s", OwnerTTL: time.Minute},

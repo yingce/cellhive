@@ -13,7 +13,6 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
-	"cellhive/internal/config"
 	"cellhive/internal/lease"
 	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
@@ -31,10 +30,10 @@ func follower(t *testing.T, dir string) (string, peer.Transport) {
 	if err != nil {
 		t.Fatalf("spool: %v", err)
 	}
-	srv := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	srv := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	h := httptest.NewServer(srv.Handler())
 	t.Cleanup(h.Close)
-	return h.URL, peer.NewHTTPTransport("tok", nil).WithSession("s1")
+	return h.URL, peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("s1")
 }
 
 func ackSegment(t *testing.T, transport peer.Transport, followers []string, sc cell.Scope, epoch uint64, payload string) {
@@ -251,7 +250,7 @@ func TestRunnerBacksOffFailedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "current", "", "", time.Minute), Recovery: recovery.New(replica.New(b), peer.NewHTTPTransport("tok", nil)), Now: func() time.Time { return now }}
+	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "current", "", "", time.Minute), Recovery: recovery.New(replica.New(b), peer.NewHTTPTransport(recoveryPeerKey(), nil)), Now: func() time.Time { return now }}
 	_, _, _, _ = runner.Pass(ctx)
 	if calls.Load() != 1 {
 		t.Fatalf("first attempt calls=%d", calls.Load())

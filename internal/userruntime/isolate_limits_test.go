@@ -10,7 +10,7 @@ import (
 // bounds: defaults are fixed (128 / 256MiB), env-provided values override them.
 func TestRenderIsolateLimits(t *testing.T) {
 	base := Config{
-		CellURL: "http://127.0.0.1:1", CellToken: "tok", DispatchToken: "tok",
+		CellURL: "http://127.0.0.1:1", CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: 18088, PublicPort: 18081,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	}
@@ -33,7 +33,7 @@ func TestRenderIsolateLimits(t *testing.T) {
 
 	dir = t.TempDir()
 	path, err = Render(dir, Config{
-		CellURL: "http://127.0.0.1:1", CellToken: "tok", DispatchToken: "tok",
+		CellURL: "http://127.0.0.1:1", CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: 18089, PublicPort: 18082,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		IsolateMax: 42,
@@ -55,7 +55,7 @@ func TestRenderIsolateLimits(t *testing.T) {
 
 	dir = t.TempDir()
 	path, err = Render(dir, Config{
-		CellURL: "http://127.0.0.1:1", CellToken: "tok", DispatchToken: "tok",
+		CellURL: "http://127.0.0.1:1", CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: 18090, PublicPort: 18083,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		IsolateMax: 7, IsolateBytes: 64 << 20,

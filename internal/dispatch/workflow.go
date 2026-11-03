@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -83,7 +84,9 @@ func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken str
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", d.Token)
+	if err := bearertoken.SetInternal(req, d.Token, "dispatch"); err != nil {
+		return err
+	}
 	resp, err := d.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("workflow: dispatch: %w", err)

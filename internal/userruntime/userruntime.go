@@ -79,9 +79,10 @@ type Config struct {
 	PlatformJS string
 	// FacadesJS is the path to facades.js (binding facades injected into tenants).
 	FacadesJS string
-	// ScopeSecret is the HMAC key the loader uses to compute binding tokens
-	// locally (ADR-074). Must match the cell-agent's scope secret.
+	// ScopeSecret retains the legacy Hyperdrive derivation domain, not JWT auth.
 	ScopeSecret string
+	// BindingSigningKey is the canonical base64url token/scope signing key.
+	BindingSigningKey string
 	// DispatchToken guards the internal dispatch endpoints (ADR-075).
 	DispatchToken string
 	// LogToken is the narrow credential used only by the trusted native Tail
@@ -156,6 +157,7 @@ const config :Workerd.Config = (
     (name = "internal", worker = (
       modules = [
         (name = "internal.js", esModule = embed "internal.js"),
+        (name = "jwt.js", esModule = embed "jwt.js"),
         (name = "bindings.js", esModule = embed "bindings.js"),
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
@@ -170,6 +172,7 @@ const config :Workerd.Config = (
         (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
         (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
         (name = "DISPATCH_TOKEN", fromEnvironment = "CELLHIVE_HOST_DISPATCH_TOKEN"),
+        (name = "BINDING_SIGNING_KEY", fromEnvironment = "CELLHIVE_HOST_BINDING_SIGNING_KEY"),
         (name = "WRAPPER_SRC", text = embed "queue-wrapper.js"),
         (name = "WF_WRAPPER_SRC", text = embed "workflow-wrapper.js"),
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
@@ -193,6 +196,7 @@ const config :Workerd.Config = (
     (name = "loader", worker = (
       modules = [
         (name = "loader.js", esModule = embed "loader.js"),
+        (name = "jwt.js", esModule = embed "jwt.js"),
         (name = "bindings.js", esModule = embed "bindings.js"),
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
@@ -207,6 +211,7 @@ const config :Workerd.Config = (
         (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
         (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
         (name = "SCOPE_SECRET", fromEnvironment = "CELLHIVE_HOST_SCOPE_SECRET"),
+        (name = "BINDING_SIGNING_KEY", fromEnvironment = "CELLHIVE_HOST_BINDING_SIGNING_KEY"),
         (name = "WRAPPER_SRC", text = embed "queue-wrapper.js"),
         (name = "WF_WRAPPER_SRC", text = embed "workflow-wrapper.js"),
         (name = "WF_BASE_SRC", text = embed "cellhive-workflow.js"),
@@ -296,6 +301,9 @@ func Render(dir string, cfg Config) (string, error) {
 	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "log-tail.js"), filepath.Join(dir, "log-tail.js")); err != nil {
 		return "", err
 	}
+	if err := copyFile(filepath.Join(cfg.PlatformJS, "..", "platform", "jwt.js"), filepath.Join(dir, "jwt.js")); err != nil {
+		return "", err
+	}
 	tpl, err := template.New("capnp").Parse(capnpTemplate)
 	if err != nil {
 		return "", err
@@ -316,13 +324,14 @@ func Render(dir string, cfg Config) (string, error) {
 // Cap'n Proto fromEnvironment bindings.
 func WorkerdEnv(cfg Config) ([]string, error) {
 	return runtimeenv.Build(map[string]string{
-		"CELLHIVE_HOST_AI_KEY":         cfg.AIKey,
-		"CELLHIVE_HOST_AI_URL":         cfg.AIURL,
-		"CELLHIVE_HOST_CELL_TOKEN":     cfg.CellToken,
-		"CELLHIVE_HOST_CELL_URL":       cfg.CellURL,
-		"CELLHIVE_HOST_DISPATCH_TOKEN": cfg.DispatchToken,
-		"CELLHIVE_HOST_LOG_TOKEN":      cfg.LogToken,
-		"CELLHIVE_HOST_SCOPE_SECRET":   cfg.ScopeSecret,
+		"CELLHIVE_HOST_AI_KEY":              cfg.AIKey,
+		"CELLHIVE_HOST_AI_URL":              cfg.AIURL,
+		"CELLHIVE_HOST_CELL_TOKEN":          cfg.CellToken,
+		"CELLHIVE_HOST_CELL_URL":            cfg.CellURL,
+		"CELLHIVE_HOST_DISPATCH_TOKEN":      cfg.DispatchToken,
+		"CELLHIVE_HOST_LOG_TOKEN":           cfg.LogToken,
+		"CELLHIVE_HOST_SCOPE_SECRET":        cfg.ScopeSecret,
+		"CELLHIVE_HOST_BINDING_SIGNING_KEY": cfg.BindingSigningKey,
 	})
 }
 
@@ -347,6 +356,7 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 		"CELLHIVE_HOST_DISPATCH_TOKEN",
 		"CELLHIVE_HOST_LOG_TOKEN",
 		"CELLHIVE_HOST_SCOPE_SECRET",
+		"CELLHIVE_HOST_BINDING_SIGNING_KEY",
 	); err != nil {
 		return fmt.Errorf("userruntime: child environment: %w", err)
 	}

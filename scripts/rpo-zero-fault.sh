@@ -31,8 +31,8 @@ B_URL="http://127.0.0.1:$B_PORT"
 B_ADMIN="http://127.0.0.1:$B_ADMIN_PORT"
 # Root-derived credentials (ADR-137): the dev root is used when ALLOW_INSECURE
 # is set, and the same derivation is applied by cell-agent.
-INTERNAL=${INTERNAL:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds internal)}
-ADMIN_TOKEN=${ADMIN_TOKEN:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds admin)}
+export E2E_BIN="$ROOT/bin"
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$@"; }
 
 # Never send the fault test to an unrelated service already using these ports.
 python3 - <<PY || exit 1
@@ -65,21 +65,20 @@ start_node() { # name data_dir rest admin
     "$BIN/cell-agent" > "$RUN/$1.log" 2>&1 &
   echo $!
 }
-claim() { curl -s -o /dev/null -w "%{http_code}" -H "x-cellhive-internal-token: $INTERNAL" -X POST "$1/v1/internal/claim" -d "{\"scope\":\"$2\"}"; }
+claim() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $(auth internal)" -X POST "$1/v1/internal/claim" -d "{\"scope\":\"$2\"}"; }
 wait_claim() { for _ in $(seq 1 60); do [[ "$(claim "$1" __platform__/__control__/main)" == "200" ]] && return 0; sleep 0.25; done; return 1; }
 
 A=$(start_node a "$D1" ":$A_PORT" ":$A_ADMIN_PORT")
 wait_claim "$A_URL" || { echo "node A not ready"; exit 1; }
 for sc in capA/__control__/main capA/__kv__/default; do claim "$A_URL" "$sc" >/dev/null; done
-curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$A_ADMIN/v1/control/app" -d '{"namespace":"capA"}'
-curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$A_ADMIN/v1/control/resource" -d '{"namespace":"capA","kind":"kv","name":"KV","scope":"default"}'
-TOK=$("$BIN/kvbench" -print-token -ns capA)
+curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$A_ADMIN/v1/control/app" -d '{"namespace":"capA"}'
+curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$A_ADMIN/v1/control/resource" -d '{"namespace":"capA","kind":"kv","name":"KV","scope":"default"}'
 
 ACKED=$RUN/acked.txt
 : > "$ACKED"
 for i in $(seq 1 "$N"); do
   code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$A_URL/v1/kv/put?ns=capA&key=k$i" \
-    -H "x-cellhive-scope-token: $TOK" --data "v$i")
+    -H "Authorization: Bearer $(auth scope capA kv KV)" --data "v$i")
   if [[ "$code" == "200" ]]; then
     echo "k$i v$i" >> "$ACKED"
   else
@@ -103,7 +102,7 @@ done
 missing=0
 wrong=0
 while read -r k v; do
-  got=$(curl -s "$B_URL/v1/kv/get?ns=capA&key=$k" -H "x-cellhive-scope-token: $TOK")
+  got=$(curl -s "$B_URL/v1/kv/get?ns=capA&key=$k" -H "Authorization: Bearer $(auth scope capA kv KV)")
   if [[ -z "$got" ]]; then missing=$((missing+1)); elif [[ "$got" != "$v" ]]; then wrong=$((wrong+1)); fi
 done < "$ACKED"
 echo "verified acked keys on node B: missing=$missing wrong=$wrong (of $ACKN)" | tee -a "$OUT"

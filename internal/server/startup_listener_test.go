@@ -16,7 +16,7 @@ func TestStartupListenerServesRecoveryButGatesBusiness(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	lm := lease.NewManager(nil, "f", "boot", "", "", time.Minute)
 	lm.Instance = "disk"
-	s := New(Deps{Cfg: config.Config{TokenPeer: "tok"}, Lease: lm, Spool: spool})
+	s := New(Deps{Cfg: testAuthConfig(config.Config{TokenPeer: "tok"}), Lease: lm, Spool: spool})
 	l, err := StartRecoveryListener("127.0.0.1:0", s)
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestStartupListenerServesRecoveryButGatesBusiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := peer.WithIdentity(context.Background(), cell.PeerIdentity{Node: "f", Instance: "disk"})
-	if _, err := peer.NewHTTPTransport("tok", nil).Seal(ctx, base, "old"); err != nil {
+	if _, err := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).Seal(ctx, base, "old"); err != nil {
 		t.Fatal(err)
 	}
 	l.Promote(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))

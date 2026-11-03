@@ -202,7 +202,7 @@ services:
   # OTLP Collector (profile "observability"): redaction / namespace routing /
   # tail sampling in front of a backend. Point CellHive at it with
   #   CELLHIVE_OTLP_ENDPOINT=http://otel-collector:4318
-  #   CELLHIVE_OTLP_HEADERS=authorization=Bearer <internal-token>   # optional
+  #   CELLHIVE_OTLP_HEADERS=<collector-specific headers>   # optional, not CellHive role keys
   # and set OPENOBSERVE_BASIC_AUTH (base64 of user:pass) for the backend hop.
   # See deploy/observability/README.md for the multi-tenant model.
   otel-collector:
@@ -220,6 +220,8 @@ services:
   # Prometheus /metrics scraped, then ARMS (traces/metrics) + SLS Kafka (logs).
   # Do not run this profile together with "observability": both bind 4317/4318.
   # Set ARMS_* and SLS_KAFKA_* in the environment; see deploy/observability/README.md.
+  # ADR-178: private :7001 /metrics stays unauthenticated; no JWT refresher.
+  # Keep scrape targets isolated from public ingress and tenant egress.
   vector:
     image: timberio/vector:0.58.0-alpine
     profiles: ["vector"]

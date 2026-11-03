@@ -21,7 +21,7 @@ func TestRenderInvocationLoggingSwitch(t *testing.T) {
 			internalPort, publicPort := freePort(t), freePort(t)
 			dir := t.TempDir()
 			path, err := Render(dir, Config{
-				CellURL: "http://127.0.0.1:1", CellToken: "tok", DispatchToken: "tok",
+				CellURL: "http://127.0.0.1:1", CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 				InternalPort: internalPort, PublicPort: publicPort,
 				PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 				InvocationLogging: tc.on,

@@ -12,13 +12,12 @@
 // not_found_handling, falling back to the worker on a miss.
 
 import { bindingStub, setServiceLoader } from "bindings.js";
+import { authorized, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
 import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 import { tailQuery, readLogCapture } from "log-tail.js";
-
-const SCOPE_TOKEN_TTL_S = 300;
 
 // Per-host routing cache (ADR-115): the loader fetches a small pointer view per
 // host (routes + worker versions), revalidates it with ETag, and fetches the
@@ -203,7 +202,12 @@ export default {
     if (url.pathname === "/drain" && req.method === "POST") return drainRequest(req, env);
     if (env.CH_POOL_MODE === "1") {
       if (draining) return text("runtime draining", 503);
-      if (!secureEqual(req.headers.get("x-cellhive-internal-token") || "", env.CELL_TOKEN || "")) return text("unauthorized", 401);
+      if (!await authorized(req, env.CELL_TOKEN)) return text("unauthorized", 401);
+      req = new Request(req);
+      const appAuthorization = req.headers.get("x-cellhive-app-authorization");
+      req.headers.delete("authorization");
+      req.headers.delete("x-cellhive-app-authorization");
+      if (appAuthorization !== null) req.headers.set("authorization", appAuthorization);
       const ns=req.headers.get("x-cellhive-pool-namespace"),worker=req.headers.get("x-cellhive-pool-worker");
       const number=Number(req.headers.get("x-cellhive-pool-version")),sha=req.headers.get("x-cellhive-pool-bundle");
       const storageID=req.headers.get("x-cellhive-pool-storage-id")||"";
@@ -275,7 +279,6 @@ export default {
   },
 };
 
-function secureEqual(a,b){if(!b||a.length!==b.length)return false;let diff=0;for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^b.charCodeAt(i);return diff===0;}
 async function fixedFetch(req,env,ctx,app,worker,version,url){
   if(version.assets_sha&&(req.method==='GET'||req.method==='HEAD')){
     const cfg=version.assets||{};
@@ -646,7 +649,7 @@ async function asset(env, app, worker, token, path) {
   const key = `${app.namespace}/${worker}/${token}/${path}`;
   if (assetCache.has(key)) return assetCache.get(key);
   const q = new URLSearchParams({ ns: app.namespace, worker, token, path });
-  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const headers = await internalHeaders(env.CELL_TOKEN);
   const signed = await fetch(env.CELL_URL + "/v1/internal/asset-url?" + q, { headers });
   let r;
   if (signed.ok) {
@@ -865,14 +868,8 @@ async function readyResponse(env) {
   return jsonStatus({ ready: true, projection_age_ms: age, cell: "ok" }, 200);
 }
 
-function drainRequest(req, env) {
-  const want = env.CELL_TOKEN || "";
-  const got = req.headers.get("x-cellhive-internal-token") || "";
-  let diff = got.length ^ want.length;
-  for (let i = 0; i < Math.max(got.length, want.length); i++) {
-    diff |= (got.charCodeAt(i) || 0) ^ (want.charCodeAt(i) || 0);
-  }
-  if (want === "" || diff !== 0) return new Response("unauthorized", { status: 401 });
+async function drainRequest(req, env) {
+  if (!await authorized(req, env.CELL_TOKEN)) return new Response("unauthorized", { status: 401 });
   draining = true;
   return jsonStatus({ ok: true, draining: true }, 200);
 }
@@ -885,7 +882,7 @@ let lookupCount = 0;
 
 async function pollRoutesOnce(env) {
   try {
-    const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+    const headers = await internalHeaders(env.CELL_TOKEN);
     if (knownRev) headers["if-none-match"] = knownRev;
     const r = await fetch(env.CELL_URL + "/v1/control/routes", { headers });
     if (r.status === 304) {
@@ -1054,7 +1051,7 @@ function revalidateHost(env, host, e) {
   const current = () => e.generation === generation;
   const p = (async () => {
     try {
-      const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+      const headers = await internalHeaders(env.CELL_TOKEN);
       if (e.etag) headers["if-none-match"] = e.etag;
       const read = (async () => {
         const r = await fetch(env.CELL_URL + "/v1/control/host?host=" + encodeURIComponent(host), { headers, signal: controller.signal });
@@ -1102,7 +1099,7 @@ async function workerEnv(env, ns, worker, wantVersion, wantSHA, wantStorageID) {
       if (wantVersion !== undefined) q += "&version=" + encodeURIComponent(wantVersion);
       else if (wantSHA) q += "&sha=" + encodeURIComponent(wantSHA);
       const r = await fetch(env.CELL_URL + "/v1/control/worker" + q, {
-        headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+        headers: await internalHeaders(env.CELL_TOKEN),
       });
       if (r.status === 404) {
         noteSuccess();
@@ -1185,7 +1182,7 @@ async function bundle(env, sha) {
   const p = (async () => {
     try {
       const q = "?sha=" + encodeURIComponent(sha);
-      const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+      const headers = await internalHeaders(env.CELL_TOKEN);
       const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
       let r;
       if (signed.ok) {
@@ -1227,7 +1224,7 @@ async function hyperdriveConnString(env, ns, ref, name) {
     try {
       const r = await fetch(
         env.CELL_URL.replace(/\/$/, "") + "/v1/internal/hyperdrive?ns=" + encodeURIComponent(ns) + "&name=" + encodeURIComponent(c),
-        { headers: { "x-cellhive-internal-token": env.CELL_TOKEN } },
+        { headers: await internalHeaders(env.CELL_TOKEN) },
       );
       if (r.ok) {
         const j = await r.json();
@@ -1267,7 +1264,7 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
         storage_class: (classStorage && classStorage[cls]) || cls,
         deleted: deleted.has(cls),
         name: b.name,
-        token: await scopedToken(env.SCOPE_SECRET, app.namespace, "do", b.name),
+        authorization: { ns: app.namespace, kind: "do", name: b.name },
       };
       continue;
     }
@@ -1309,7 +1306,7 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
         // Prefer the version pinned at deploy (ADR-104); fall back to the
         // target's active version resolved at render (ADR-102). Empty -> HTTP.
         version: b.version || targetVersion,
-        token: await scopedToken(env.SCOPE_SECRET, app.namespace, "service", b.name),
+        authorization: { ns: app.namespace, kind: "service", name: b.name },
       };
       continue;
     }
@@ -1318,7 +1315,7 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
       const qname = b.id || b.name;
       spec[b.name] = {
         kind: "queue", ns: app.namespace, name: qname,
-        token: await scopedToken(env.SCOPE_SECRET, app.namespace, "queue", qname),
+        authorization: { ns: app.namespace, kind: "queue", name: qname },
       };
       continue;
     }
@@ -1328,7 +1325,7 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
       const index = b.id || b.name;
       spec[b.name] = {
         kind: "vectorize", ns: app.namespace, name: b.name, index,
-        token: await scopedToken(env.SCOPE_SECRET, app.namespace, "vectorize", index),
+        authorization: { ns: app.namespace, kind: "vectorize", name: index },
       };
       continue;
     }
@@ -1347,48 +1344,18 @@ async function bindingSpec(env, app, worker, version, classStorage, deletedClass
       // KV keeps the declared binding key in name for the control ACL;
       // resource is the resolved cell identifier used for data routing.
       name: b.type === "kv" ? b.name : resource,
-      token: await scopedToken(
-        env.SCOPE_SECRET,
-        app.namespace,
-        b.type,
-        resource,
-        b.type === "kv" && b.id ? {
+      authorization: {
+        ns: app.namespace, kind: b.type, name: resource,
+        ...(b.type === "kv" && b.id ? {
           worker,
           version: version.version,
           resource: b.id,
-        } : null,
-      ),
+        } : {}),
+      },
     };
   }
   return spec;
 }
-
-// scopedToken computes the binding capability token locally from the shared
-// secret (ADR-074): HMAC-SHA256 over canonical JSON {ns,kind,name[,resource]} (no expiry).
-// Resource is the resolved cell ID used for routing; name remains the binding key.
-// The platform loader holds the secret; only the computed token reaches a
-// loaded worker. Byte-identical to Go scopedtoken.Mint (verified by tests).
-async function scopedToken(secret, ns, kind, name, pinned = null) {
-  const claims = {ns, kind, name};
-  if (pinned) Object.assign(claims, pinned);
-  const payload = JSON.stringify(claims);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret || ""),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
-  return b64url(new TextEncoder().encode(payload)) + "." + b64url(new Uint8Array(sig));
-}
-
-function b64url(bytes) {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
 
 function text(msg, status) {
   return new Response(msg + "\n", { status, headers: { "content-type": "text/plain" } });

@@ -10,6 +10,7 @@ package dosupervisor
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -198,7 +199,9 @@ func (h *HTTPStore) GetBlob(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-internal-token", h.Token)
+	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
+		return nil, err
+	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, err
@@ -223,7 +226,9 @@ func (h *HTTPStore) PutBlob(ctx context.Context, key string, data []byte) error 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", h.Token)
+	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
+		return err
+	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		return err
@@ -270,7 +275,9 @@ func (h *HTTPStore) RecoverScope(ctx context.Context, scope cell.Scope, claim Re
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", h.Token)
+	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
+		return err
+	}
 	req.Header.Set("content-type", "application/json")
 	resp, err := h.client().Do(req)
 	if err != nil {
@@ -302,7 +309,9 @@ func (h *HTTPStore) listKeys(ctx context.Context, cl *http.Client, scope cell.Sc
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-internal-token", h.Token)
+	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
+		return nil, err
+	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("dosupervisor: list segments: %w", err)
@@ -326,7 +335,9 @@ func (h *HTTPStore) readSegment(ctx context.Context, cl *http.Client, key string
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("x-cellhive-internal-token", h.Token)
+	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
+		return nil, 0, err
+	}
 	if rng != "" {
 		req.Header.Set("range", rng)
 	}

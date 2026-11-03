@@ -5,7 +5,6 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ADMIN_URL=${CELLHIVE_ADMIN_URL:-http://127.0.0.1:8082}
-TOKEN=${CELLHIVE_ADMIN_TOKEN:-$("$ROOT/bin/cellhive" creds admin)}
 NS=${DO_RPS_NS:-do-rps}
 HOST=${DO_RPS_HOST:-do-bench.local}
 WORKER=do-rps-bench
@@ -28,16 +27,16 @@ command -v wrk >/dev/null || { echo "wrk is required" >&2; exit 2; }
 command -v node >/dev/null || { echo "node is required" >&2; exit 2; }
 [ -x "$ROOT/bin/cellhive" ] || { echo "bin/cellhive is required (make build)" >&2; exit 2; }
 
-export CELLHIVE_ADMIN_URL="$ADMIN_URL" CELLHIVE_ADMIN_TOKEN="$TOKEN"
+export CELLHIVE_ADMIN_URL="$ADMIN_URL"
 "$ROOT/bin/cellhive" app create "$NS" >/dev/null 2>&1 || true
 cp "$FIXTURES/worker.js" "$TMP/worker.js"
 cp "$FIXTURES/wrangler.jsonc" "$TMP/wrangler.jsonc"
 
 export CLOUDFLARE_API_BASE_URL="$ADMIN_URL/client/v4"
-export CLOUDFLARE_API_TOKEN="$TOKEN"
+export CLOUDFLARE_API_TOKEN="${CELLHIVE_TOKEN:-$(node "$ROOT/scripts/e2e/jwt.cjs" admin)}"
 export CLOUDFLARE_ACCOUNT_ID="$NS"
 export WRANGLER_SEND_METRICS=false
-if ! ( cd "$TMP" && npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy.log" 2>&1 ); then
+if ! ( cd "$TMP" && timeout 240s npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy.log" 2>&1 ); then
   echo "wrangler deploy failed:" >&2
   tail -40 "$TMP/deploy.log" >&2
   exit 1

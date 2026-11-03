@@ -55,7 +55,7 @@ func TestKnownFollowerHTTPWithBlockedDiscovery(t *testing.T) {
 	call := func(path string, body []byte) []byte {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPost, oh.URL+path, bytes.NewReader(body))
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

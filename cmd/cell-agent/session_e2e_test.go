@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/config"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
-	"cellhive/internal/scopedtoken"
 )
 
 // Run with scripts/e2e/session-recovery.sh. Real processes and HTTP; no workerd
@@ -37,6 +37,25 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	_, _ = rand.Read(key[:])
 	secret := hex.EncodeToString(key[:])
 	creds := config.DeriveCredentials(secret)
+	mint := func(encoded, kid, typ, name string) string {
+		t.Helper()
+		key, err := bearertoken.DecodeKey(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().Unix()
+		claims := bearertoken.Claims{Ver: 1, Type: typ, Subject: "session-e2e", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 300}
+		if typ == "binding" {
+			claims.Namespace, claims.Kind, claims.Name = "sessiontest", "kv", name
+		}
+		token, err := bearertoken.Mint(key, kid, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "Bearer " + token
+	}
+	adminToken := func() string { return mint(creds.Admin, "token/admin", "admin", "") }
+	bindingToken := func(name string) string { return mint(creds.Binding, "token/scope", "binding", name) }
 	b, err := bucket.NewFSBucket(filepath.Join(root, "bucket"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,19 +154,14 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	ready(a)
 	start(c, "b-old")
 	ready(c)
-	tokens := map[string]string{}
 	for _, name := range []string{"ka", "kb"} {
-		code, data, err := call(a.admin, "POST", "/v1/control/resource", "x-cellhive-admin-token", creds.Admin, []byte(fmt.Sprintf(`{"namespace":"sessiontest","kind":"kv","name":%q,"scope":"sessiontest/__kv__/%s"}`, name, name)))
+		code, data, err := call(a.admin, "POST", "/v1/control/resource", "Authorization", adminToken(), []byte(fmt.Sprintf(`{"namespace":"sessiontest","kind":"kv","name":%q,"scope":"sessiontest/__kv__/%s"}`, name, name)))
 		if err != nil || code != 200 {
 			t.Fatalf("register %s: %d %s %v", name, code, data, err)
 		}
-		tokens[name], err = scopedtoken.Mint([]byte(creds.Scope), scopedtoken.Claims{Namespace: "sessiontest", Kind: "kv", Name: name})
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
 	put := func(a *agent, name, key, value string) {
-		code, data, err := call(a.rest, "POST", "/v1/kv/put?ns=sessiontest&key="+key, "x-cellhive-scope-token", tokens[name], []byte(value))
+		code, data, err := call(a.rest, "POST", "/v1/kv/put?ns=sessiontest&key="+key, "Authorization", bindingToken(name), []byte(value))
 		if err != nil || code != 200 {
 			t.Fatalf("put %s/%s: %d %s %v", name, key, code, data, err)
 		}
@@ -275,7 +289,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	ready(c)
 	// B must take over control and hydrate the acknowledged registrations,
 	// even though its startup schema initialization pinned an older local DB.
-	code, body, err := call(c.admin, "GET", "/v1/control/resources?namespace=sessiontest", "x-cellhive-admin-token", creds.Admin, nil)
+	code, body, err := call(c.admin, "GET", "/v1/control/resources?namespace=sessiontest", "Authorization", adminToken(), nil)
 	if err != nil || code != 200 || !bytes.Contains(body, []byte(`"name":"ka"`)) || !bytes.Contains(body, []byte(`"name":"kb"`)) {
 		t.Fatalf("pinned control takeover lost registrations: %d %s %v", code, body, err)
 	}
@@ -287,7 +301,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 		name, prefix string
 	}{{a, "ka", "a"}, {c, "kb", "b"}} {
 		for i := 0; i < 40; i++ {
-			code, data, err := call(pair.a.rest, "GET", fmt.Sprintf("/v1/kv/get?ns=sessiontest&key=key%d", i), "x-cellhive-scope-token", tokens[pair.name], nil)
+			code, data, err := call(pair.a.rest, "GET", fmt.Sprintf("/v1/kv/get?ns=sessiontest&key=key%d", i), "Authorization", bindingToken(pair.name), nil)
 			want := fmt.Sprintf("%s-value%d", pair.prefix, i)
 			if err != nil || code != 200 || string(data) != want {
 				t.Fatalf("lost acknowledged %s key%d: %d %q want %q err=%v", pair.name, i, code, data, want, err)
@@ -322,7 +336,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(3300 * time.Millisecond)
-	code, data, err := call(peerAgent.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "x-cellhive-scope-token", tokens["ka"], nil)
+	code, data, err := call(peerAgent.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "Authorization", bindingToken("ka"), nil)
 	if err != nil || code != 200 || string(data) != "a-value0" {
 		t.Fatalf("paused-owner takeover: %d %q %v", code, data, err)
 	}
@@ -358,7 +372,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	}
 	start(paused, paused.node+"-after-fence")
 	ready(paused)
-	code, data, err = call(paused.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "x-cellhive-scope-token", tokens["ka"], nil)
+	code, data, err = call(paused.rest, "GET", "/v1/kv/get?ns=sessiontest&key=key0", "Authorization", bindingToken("ka"), nil)
 	if err != nil || code != 200 || string(data) != "a-value0" {
 		t.Fatalf("fresh-session read after fence: %d %q %v", code, data, err)
 	}

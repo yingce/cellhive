@@ -1,6 +1,7 @@
 // Closed-loop, persistent HTTP connections; latency includes complete response body.
 const http = require('node:http');
 const crypto = require('node:crypto');
+const {token} = require('./jwt.cjs');
 const {performance} = require('node:perf_hooks');
 const value = 'x'.repeat(1024);
 const results = [];
@@ -16,7 +17,7 @@ async function measure(layer, mode, concurrency, n, round, label='warm') {
       const i=index++; if(i>=n) break;
       const base=layer==='worker'?process.env.PERF_RUNTIME:layer==='forwarded'?process.env.PERF_PEER:process.env.PERF_AGENT;
       const path=layer!=='worker'?`/v1/kv/${mode}?ns=${encodeURIComponent(process.env.PERF_NS)}&key=k${i%32}`:`/${mode}?key=k${i%32}`;
-      const headers=layer!=='worker'?{'x-cellhive-scope-token':process.env.PERF_SCOPE_TOKEN}:{host:process.env.PERF_HOST};
+      const headers=layer!=='worker'?{authorization:'Bearer '+token('scope',{ns:process.env.PERF_NS,kind:'kv',name:'KV'})}:{host:process.env.PERF_HOST};
       const trace=crypto.randomBytes(16).toString('hex');
       if(process.env.PERF_TRACE || process.env.PERF_TAIL_DIAG) headers.traceparent=`00-${trace}-${crypto.randomBytes(8).toString('hex')}-01`;
       if(mode==='put') headers['content-length']=Buffer.byteLength(value);
@@ -50,7 +51,7 @@ async function commitCounts() {
  const out={fleet:0};
  for(const base of [process.env.PERF_AGENT,process.env.PERF_PEER]) {
   if(!base)continue;
-  const text=await read(base+'/metrics');
+  const text=await read(base+'/metrics', {authorization:'Bearer '+token('internal')});
   for(const match of text.matchAll(/cellhive_commit_total\{mode="([^"]+)"\} (\d+)/g)) out[match[1]]=(out[match[1]]||0)+Number(match[2]);
  }
  return out;
@@ -58,7 +59,7 @@ async function commitCounts() {
 (async()=>{
   await measure('direct','put',1,1,0,'first-write');
   if(process.env.PERF_PEER) {
-    const resolution=JSON.parse(await read(process.env.PERF_AGENT+'/v1/internal/resolve?scope='+encodeURIComponent(process.env.PERF_NS+'/__kv__/KV'),{'x-cellhive-internal-token':process.env.PERF_INTERNAL_TOKEN}));
+    const resolution=JSON.parse(await read(process.env.PERF_AGENT+'/v1/internal/resolve?scope='+encodeURIComponent(process.env.PERF_NS+'/__kv__/KV'),{authorization:'Bearer '+token('internal')}));
     if(!resolution.owned) throw new Error('initial node did not own KV cell');
     console.log(JSON.stringify({event:'owner-verified',owner:resolution.owner,entry:process.env.PERF_AGENT,peer:process.env.PERF_PEER}));
     let ready=false;

@@ -80,8 +80,21 @@ func (s *Server) runGC(w http.ResponseWriter, r *http.Request, kind string) {
 
 // handleBundlePut stores a content-addressed bundle (admin).
 func (s *Server) handleBundlePut(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAll(w, r) {
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = r.URL.Query().Get("ns")
+	}
+	if p, ok := principalFrom(r.Context()); ok && p.Kind == "namespace" && ns == "" {
+		writeErr(w, http.StatusForbidden, "namespace_required", "bundle upload requires an explicit namespace")
 		return
+	}
+	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	if ns != "" {
+		if !s.requireControl(w) || s.forwardOrClaim(w, r, control.Scope(), nil) {
+			return
+		}
 	}
 	st := s.artifactStore()
 	if st == nil {
@@ -101,6 +114,14 @@ func (s *Server) handleBundlePut(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "put_failed", err.Error())
 		return
+	}
+	if ns != "" {
+		if err := s.capturedWrite(r.Context(), control.Scope(), func() error {
+			return s.Control.GrantBundle(r.Context(), ns, sha, actorFor(r.Context()))
+		}); err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "bundle_grant_failed", err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sha": sha, "size": size})
 }

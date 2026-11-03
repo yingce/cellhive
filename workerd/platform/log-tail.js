@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { authorized, internalHeaders } from "jwt.js";
 
 // A stuck control-plane read must not pin workerd's shared HTTP client's old
 // resolved address indefinitely. The budget includes response body parsing.
@@ -7,7 +8,7 @@ export async function readLogCapture(env) {
   const timeout = setTimeout(() => controller.abort(), 2000);
   try {
     const response = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/v1/internal/log-capture", {
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+      headers: await internalHeaders(env.CELL_TOKEN),
       signal: controller.signal,
     });
     if (!response.ok) throw new Error("log capture configuration unavailable");
@@ -201,13 +202,8 @@ export function readTailEvents(namespace, worker, since = 0, limit = 128) {
   return { session: ringSession, events };
 }
 
-export function tailQuery(req, env) {
-  const expected = env.LOG_TOKEN || "";
-  const token = req.headers.get("x-cellhive-internal-token") || "";
-  if (!expected || token.length !== expected.length) return new Response("unauthorized", { status: 401 });
-  let diff = 0;
-  for (let i = 0; i < token.length; i++) diff |= token.charCodeAt(i) ^ expected.charCodeAt(i);
-  if (diff) return new Response("unauthorized", { status: 401 });
+export async function tailQuery(req, env) {
+  if (!await authorized(req, env.LOG_TOKEN, "log")) return new Response("unauthorized", { status: 401 });
   const url = new URL(req.url);
   const ns = url.searchParams.get("ns"), worker = url.searchParams.get("worker");
   const since = Number(url.searchParams.get("since") || "0");

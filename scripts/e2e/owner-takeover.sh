@@ -14,13 +14,16 @@ mkdir -p "$GOCACHE"
 TAGS='sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook'
 BIN=${BIN:-$ROOT/bin/cell-agent-takeover}
 TMP=$(mktemp -d /tmp/cellhive-takeover.XXXXXX)
-TOKEN=e2e-admin-token
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" admin; }
 FAILED=0
 fail(){ echo "TAKEOVER-E2E: FAIL: $*" >&2; [[ -f $TMP/a.log ]] && tail -20 "$TMP/a.log" >&2; [[ -f $TMP/b.log ]] && tail -20 "$TMP/b.log" >&2; FAILED=1; }
 cleanup(){ [[ -n ${A:-} ]] && kill -9 "$A" 2>/dev/null; [[ -n ${B:-} ]] && kill -9 "$B" 2>/dev/null; pkill -f "$TMP" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 mkdir -p "$(dirname "$BIN")"; go build -tags "$TAGS" -o "$BIN" ./cmd/cell-agent || { fail build; exit 1; }
-export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32); export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 CELLHIVE_ADMIN_TOKEN=$TOKEN
+export E2E_BIN="${E2E_BIN:-$ROOT/bin}"
+go build -tags "$TAGS" -o "$E2E_BIN/cellhive" ./cmd/cellhive || exit 1
+export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32); export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
 export CELLHIVE_BUCKET_DIR=$TMP/bucket; export CELLHIVE_LEASE_TTL=2s CELLHIVE_MAX_OPEN_CELLS=4 CELLHIVE_CELL_IDLE=1m
 export CELLHIVE_COMPACTION_INTERVAL=1m CELLHIVE_EPOCH_GC_INTERVAL=1m CELLHIVE_EPOCH_GC_INITIAL=1m
 mkdir -p "$CELLHIVE_BUCKET_DIR"
@@ -33,11 +36,11 @@ start_agent(){ # NODE SESSION RESTPORT ADMINPORT LOGFILE
   for _ in $(seq 1 200); do curl -sf "http://127.0.0.1:$rest/healthz" >/dev/null 2>&1 && { echo "$pid"; return 0; }; kill -0 "$pid" 2>/dev/null || { fail "agent $node exited"; return 1; }; sleep 0.05; done
   fail "agent $node not healthy"; return 1
 }
-upload(){ curl -sS -m 20 -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/javascript' --data-binary "$2" "http://127.0.0.1:$1/v1/control/bundle"; }
+upload(){ curl -sS -m 20 -X POST -H "Authorization: Bearer $(auth)" -H 'content-type: application/javascript' --data-binary "$2" "http://127.0.0.1:$1/v1/control/bundle"; }
 deploy(){ # ADMINPORT KEY JS -> "seconds http"
   local admin=$1 key=$2 js=$3 sha t
   sha=$(upload "$admin" "$js" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha"])') || return 1
-  curl -sS -m 30 -o "$TMP/deploy.out" -w '%{time_total} %{http_code}' -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' \
+  curl -sS -m 30 -o "$TMP/deploy.out" -w '%{time_total} %{http_code}' -X POST -H "Authorization: Bearer $(auth)" -H 'content-type: application/json' \
     --data-binary "{\"namespace\":\"e2e\",\"worker\":\"takeover\",\"bundle_sha\":\"$sha\",\"idempotency_key\":\"$key\",\"compatibility_date\":\"2026-06-15\",\"bindings\":[],\"crons\":[],\"consumers\":[]}" "http://127.0.0.1:$admin/v1/control/deploy"
 }
 A=$(start_agent node-a sess-a1 17111 17112 "$TMP/a.log") || { A=""; exit 1; }
@@ -63,7 +66,7 @@ import sys
 sys.exit(0 if int(sys.argv[1]) <= 4000 else 1)
 PY
 # The acknowledged control state from A must still be in the chain B hydrated.
-CODE=$(curl -sS -m 10 -o "$TMP/releases.out" -w '%{http_code}' -H "x-cellhive-admin-token: $TOKEN" "http://127.0.0.1:17114/v1/control/releases?namespace=e2e&worker=takeover")
+CODE=$(curl -sS -m 10 -o "$TMP/releases.out" -w '%{http_code}' -H "Authorization: Bearer $(auth)" "http://127.0.0.1:17114/v1/control/releases?namespace=e2e&worker=takeover")
 [[ $CODE == 200 ]] || { fail "B releases HTTP $CODE"; exit 1; }
 python3 - "$TMP/releases.out" <<'PY' || { fail "A acknowledged version missing after takeover"; exit 1; }
 import json,sys

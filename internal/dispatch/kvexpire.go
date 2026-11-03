@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"fmt"
 	"log/slog"
@@ -64,7 +65,9 @@ func (d *KVExpireDispatcher) Dispatch(ctx context.Context, t timer.Timer) error 
 		return err
 	}
 	if d.Token != "" {
-		req.Header.Set("x-cellhive-internal-token", d.Token)
+		if err := bearertoken.SetInternal(req, d.Token, "internal"); err != nil {
+			return err
+		}
 	}
 	resp, err := d.client().Do(req)
 	if err != nil {

@@ -22,7 +22,8 @@ func TestDoAlarmDispatcherRoutesAlarms(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotToken = r.Header.Get("x-cellhive-internal-token")
+		gotToken = r.Header.Get("Authorization")
+		assertJWT(t, r, "internal")
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -31,7 +32,7 @@ func TestDoAlarmDispatcherRoutesAlarms(t *testing.T) {
 	next := &countingDispatcher{}
 	d := &DoAlarmDispatcher{
 		Next:  next,
-		Token: "tok",
+		Token: jwtTestKey,
 		Resolve: func(context.Context, cell.Scope) (cell.Owner, string, error) {
 			return cell.Owner{Node: "do-1", Address: srv.URL}, "", nil
 		},
@@ -41,7 +42,7 @@ func TestDoAlarmDispatcherRoutesAlarms(t *testing.T) {
 	if err := d.Dispatch(context.Background(), tm); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if gotPath != "/v1/do/invoke" || gotToken != "tok" {
+	if gotPath != "/v1/do/invoke" || gotToken == "" {
 		t.Fatalf("path=%q token=%q", gotPath, gotToken)
 	}
 	if got["kind"] != "alarm" || got["worker"] != "w" || got["class"] != "C" || got["id"] != "a1" ||
@@ -74,7 +75,7 @@ func TestDoAlarmDispatcherAddsScheme(t *testing.T) {
 	defer srv.Close()
 	d := &DoAlarmDispatcher{
 		Next:  &countingDispatcher{},
-		Token: "tok",
+		Token: jwtTestKey,
 		Resolve: func(context.Context, cell.Scope) (cell.Owner, string, error) {
 			return cell.Owner{Node: "do-1", Address: strings.TrimPrefix(srv.URL, "http://")}, "", nil
 		},

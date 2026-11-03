@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -55,7 +56,9 @@ func runHotLoop(ctx context.Context, front *ingress.Server, mgr *staticgen.Manag
 		if err != nil {
 			return false
 		}
-		req.Header.Set("x-cellhive-internal-token", cellToken)
+		if err := bearertoken.SetInternal(req, cellToken, "internal"); err != nil {
+			return false
+		}
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return false

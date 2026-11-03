@@ -20,16 +20,20 @@ Goal: preserve the Workers programming model. Official Wrangler can use `wrangle
 
 **Cost**: requires continuously tracking the evolution of Wrangler's **semantics** (configuration defaults, inheritance rules, edge cases), relying on the compatibility matrix + contract tests + strict rejection as the fallback.
 
-## Standalone Wrangler Access (2026-11-01)
+## Wrangler Access (admin listener :8082)
 
-Set `CELLHIVE_CF_API_ADDR=:8083` to expose a listener containing only the
-Cloudflare-compatible routes (`/client/v4/**`); `/v1/control/*` is not mounted
-there. Tenant JWT credentials (from `CELLHIVE_OIDC_*`, with the `cellhive_ns`
-claim) are authorized per `account_id`; `/accounts` and `/memberships` only
-return allowed namespaces. The static admin token still grants full access.
+Cloudflare-compatible routes (`/client/v4/**`) share the native control-plane
+listener (`CELLHIVE_ADMIN_ADDR`); there is no separate CF-API port. ADR-304 uses
+HS256 JWTs signed by registered, enabled issuers, with `type=namespace`, an `ns`
+array of namespace grant patterns, and `aud=cellhive`. The server checks issuer
+ceilings, expiry and revocation, then authorizes `account_id`; `/accounts` and
+`/memberships` only return allowed namespaces. Trusted operators may instead use
+a short-lived bootstrap admin JWT. Static admin tokens, OIDC and legacy
+`cellhive_ns` claims are not accepted. Signing keys are not Bearer credentials;
+refresh JWTs before expiry.
 
 ```bash
-CLOUDFLARE_API_BASE_URL=https://<cf-api-host>/client/v4 CLOUDFLARE_API_TOKEN=<tenant-jwt> CLOUDFLARE_ACCOUNT_ID=<namespace> wrangler deploy
+CLOUDFLARE_API_BASE_URL=https://<admin-host>/client/v4 CLOUDFLARE_API_TOKEN='<namespaceJWT or bootstrapadminJWT>' CLOUDFLARE_ACCOUNT_ID=<namespace> wrangler deploy
 ```
 
 Wrangler 4 `assets` bindings are accepted; assets-only deploys use a fixed 404

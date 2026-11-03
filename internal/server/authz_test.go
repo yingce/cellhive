@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"cellhive/internal/auth"
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 )
 
@@ -18,11 +18,11 @@ import (
 func scopedServer(t *testing.T, ns ...string) (*Server, string) {
 	t.Helper()
 	s := newControlServer(t)
-	secret := []byte("authz-test-secret-0123456789ab")
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
-	token := signJWT(t, secret, map[string]any{
-		"sub": "tenant@corp", "cellhive_ns": ns, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	issuer, err := s.Control.CreateIssuer(t.Context(), "test", ns, 3600, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := jwtTestToken(t, s, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Subject: "tenant@corp", Namespaces: ns})
 	return s, token
 }
 
@@ -92,6 +92,9 @@ func TestScopedCredentialForwarding(t *testing.T) {
 	srvB, _, _ := newControlForwardServer(t, dir, "authz-node-2")
 	// Forwarding needs the owner record to carry A's address.
 	omA.Advertise = hsA.URL
+	adminA := httptest.NewServer(srvA.AdminHandler())
+	t.Cleanup(adminA.Close)
+	omA.AdminAdvertise = adminA.URL
 	// Claim the control scope on A via its HTTP plane.
 	if rr := do(t, srvA.Handler(), http.MethodPost, "/v1/control/app", "tok",
 		[]byte(`{"namespace":"acme"}`)); rr.Code != http.StatusOK {
@@ -103,11 +106,11 @@ func TestScopedCredentialForwarding(t *testing.T) {
 	}
 	// B authenticates with a scope-limited JWT and must refuse foreign namespaces
 	// locally (403), never forwarding them.
-	secret := []byte("authz-fwd-secret-0123456789abcd")
-	srvB.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
-	token := signJWT(t, secret, map[string]any{
-		"sub": "tenant@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	issuer, err := srvA.Control.CreateIssuer(ctx, "test", []string{"acme"}, 3600, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := jwtTestToken(t, srvB, "issuer/"+issuer.ID, bearertoken.Claims{Type: "namespace", Subject: "tenant@corp", Namespaces: []string{"acme"}})
 	rr := adminTokenDo(t, srvB, http.MethodPost, "/v1/control/app", token, `{"namespace":"other"}`)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("forwarded foreign app create = %d, want 403: %s", rr.Code, rr.Body.String())

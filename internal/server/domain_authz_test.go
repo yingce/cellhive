@@ -11,9 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"cellhive/internal/auth"
 	"cellhive/internal/control"
 )
 
@@ -137,17 +135,13 @@ func TestHostOwnershipConflict(t *testing.T) {
 func TestAdminNamespaceAuthorization(t *testing.T) {
 	ctx := context.Background()
 	s := newControlServer(t)
-	secret := []byte("test-secret-0123456789abcdef")
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
 	if _, err := s.Control.CreateApp(ctx, "acme", "ops"); err != nil {
 		t.Fatalf("app acme: %v", err)
 	}
 	if _, err := s.Control.CreateApp(ctx, "other", "ops"); err != nil {
 		t.Fatalf("app other: %v", err)
 	}
-	token := signJWT(t, secret, map[string]any{
-		"sub": "alice@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	token := testNamespaceJWT(t, s, "alice@corp", "acme")
 	deploy := func(ns string) *httptest.ResponseRecorder {
 		return adminTokenDo(t, s, http.MethodPost, "/v1/control/app", token, `{"namespace":"`+ns+`"}`)
 	}
@@ -166,9 +160,7 @@ func TestAdminNamespaceAuthorization(t *testing.T) {
 	if rr := adminTokenDo(t, s, http.MethodPost, "/v1/control/gc/bundles", token, ""); rr.Code != http.StatusForbidden {
 		t.Fatalf("gc with a scoped grant = %d, want 403", rr.Code)
 	}
-	wild := signJWT(t, secret, map[string]any{
-		"sub": "ops@corp", "cellhive_ns": []string{"*"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	wild := testNamespaceJWT(t, s, "ops@corp", "*")
 	if rr := adminTokenDo(t, s, http.MethodPost, "/v1/control/gc/bundles", wild, ""); rr.Code != http.StatusOK {
 		t.Fatalf("gc as platform = %d %s", rr.Code, rr.Body.String())
 	}

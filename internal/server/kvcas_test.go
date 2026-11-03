@@ -33,7 +33,7 @@ func TestKVCasAndIncrE2E(t *testing.T) {
 	h := s.Handler()
 	for _, value := range []string{"9007199254740993", "9223372036854775807", "-9223372036854775808"} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/kv/incr?ns=acme&key=wide-"+value+"&by="+value, nil)
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		var result map[string]any
@@ -46,7 +46,7 @@ func TestKVCasAndIncrE2E(t *testing.T) {
 	}
 	do := func(method, target, token string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, newBodyReader(body))
-		req.Header.Set("x-cellhive-scope-token", token)
+		req.Header.Set("Authorization", "Bearer "+token)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr

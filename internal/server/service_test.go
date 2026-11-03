@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 	"cellhive/internal/scopedtoken"
 )
@@ -39,7 +40,7 @@ func TestServiceFetchProxy(t *testing.T) {
 
 	var got map[string]any
 	disp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/services/fetch" || r.Header.Get("x-cellhive-internal-token") != "tok" {
+		if r.URL.Path != "/v1/services/fetch" || bearertoken.VerifyInternal(r.Header, srv.Cfg.TokenDispatch, "dispatch", time.Now()) != nil {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}
@@ -50,14 +51,13 @@ func TestServiceFetchProxy(t *testing.T) {
 	}))
 	defer disp.Close()
 	srv.Cfg.DispatchURL = disp.URL
-	srv.Cfg.TokenDispatch = "tok"
 
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/service/fetch?ns=acme&worker=api", bytes.NewReader([]byte("hi")))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("x-cellhive-req-method", "POST")
 	req.Header.Set("x-cellhive-req-url", "http://svc/")
 	req.Header.Set("x-cellhive-req-content-type", "text/plain")
@@ -81,9 +81,9 @@ func TestServiceFetchProxy(t *testing.T) {
 	}
 
 	// A token of the wrong kind is rejected.
-	bad, _ := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "SVC"})
+	bad, _ := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "SVC"})
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/service/fetch?ns=acme&worker=api", nil)
-	req2.Header.Set("x-cellhive-scope-token", bad)
+	req2.Header.Set("Authorization", "Bearer "+bad)
 	rr2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr2, req2)
 	if rr2.Code != http.StatusForbidden {
@@ -178,15 +178,14 @@ func TestServiceFetchCrossNamespaceACL(t *testing.T) {
 	}))
 	defer disp.Close()
 	srv.Cfg.DispatchURL = disp.URL
-	srv.Cfg.TokenDispatch = "tok"
 
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	call := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v1/service/fetch?ns=acme&target_ns=team&worker=api", bytes.NewReader([]byte("hi")))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		req.Header.Set("x-cellhive-req-method", "POST")
 		req.Header.Set("x-cellhive-req-url", "http://svc/")
 		rr := httptest.NewRecorder()
@@ -232,15 +231,14 @@ func TestServiceFetchPropagatesTraceparent(t *testing.T) {
 	}))
 	defer disp.Close()
 	srv.Cfg.DispatchURL = disp.URL
-	srv.Cfg.TokenDispatch = "tok"
 
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "service", Name: "SVC"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	req := httptest.NewRequest(http.MethodPost, "/v1/service/fetch?ns=acme&worker=api", bytes.NewReader([]byte("hi")))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("traceparent", tp)
 	req.Header.Set("x-cellhive-req-method", "POST")
 	req.Header.Set("x-cellhive-req-url", "http://svc/")

@@ -9,24 +9,23 @@ start_owner
 start_peer
 e2e_cli app create e2ebatch >/dev/null
 e2e_cli resource create e2ebatch kv KV >/dev/null
-TOKEN=$("$E2E_BIN/kvbench" -ns e2ebatch -print-token)
-request() { curl -fsS --max-time 30 -H "x-cellhive-scope-token: $TOKEN" "$@"; }
+request() { curl -fsS --max-time 30 -H "Authorization: Bearer $(e2e_token scope e2ebatch kv KV)" "$@"; }
 URL="http://127.0.0.1:$E2E_AGENT_PORT/v1/kv"
 PEER="http://127.0.0.1:$((E2E_PORT_BASE+4))"
 # Wait for actual follower acknowledgements, not just two ready processes.
 ready=0
 for i in $(seq 1 90); do
  request -X POST --data-binary warm "$URL/put?ns=e2ebatch&key=warm" >/dev/null
- if curl -fsS "http://127.0.0.1:$E2E_AGENT_PORT/metrics" | awk '/cellhive_commit_total\{mode="fleet"\}/ {if($NF>0) found=1} END {exit !found}'; then ready=1; break; fi
+ if curl -fsS -H "Authorization: Bearer $(e2e_token internal)" "http://127.0.0.1:$E2E_AGENT_PORT/metrics" | awk '/cellhive_commit_total\{mode="fleet"\}/ {if($NF>0) found=1} END {exit !found}'; then ready=1; break; fi
  sleep 1
 done
 [[ $ready = 1 ]] || e2e_fail 'no follower acknowledgement'
 sleep 1
-curl -fsS "http://127.0.0.1:$E2E_AGENT_PORT/metrics" > "$E2E_BASE/before.metrics"
+curl -fsS -H "Authorization: Bearer $(e2e_token internal)" "http://127.0.0.1:$E2E_AGENT_PORT/metrics" > "$E2E_BASE/before.metrics"
 for i in $(seq 1 100); do
  request -X POST --data-binary "value-$i" "$URL/put?ns=e2ebatch&key=k$i" >/dev/null
 done
-curl -fsS "http://127.0.0.1:$E2E_AGENT_PORT/metrics" > "$E2E_BASE/after.metrics"
+curl -fsS -H "Authorization: Bearer $(e2e_token internal)" "http://127.0.0.1:$E2E_AGENT_PORT/metrics" > "$E2E_BASE/after.metrics"
 # Kill immediately with asynchronous COS work potentially outstanding.
 kill -KILL "$(cat "$E2E_BASE/perf.pid")"
 rm "$E2E_BASE/perf.pid"

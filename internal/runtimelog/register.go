@@ -4,6 +4,7 @@ package runtimelog
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -54,7 +55,10 @@ func RegisterLoopFunc(ctx context.Context, cellURL, token string, urls func() []
 				continue
 			}
 			req.Header.Set("content-type", "application/json")
-			req.Header.Set("x-cellhive-internal-token", token)
+			if err := bearertoken.SetInternal(req, token, "internal"); err != nil {
+				cancel()
+				continue
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				cancel()

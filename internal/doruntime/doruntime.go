@@ -45,8 +45,9 @@ func (c Config) OutboundAllowList() string {
 type Config struct {
 	// CellURL/CellToken are the cell-agent base URL and internal-role token
 	// (used to fetch tenant bundles and to authenticate /v1/do/invoke).
-	CellURL   string
-	CellToken string
+	CellURL           string
+	CellToken         string
+	BindingSigningKey string
 	// LogToken is the narrow credential used only by the trusted native Tail
 	// entrypoint to ingest tenant console events.
 	LogToken string
@@ -99,6 +100,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "host.js", esModule = embed "host.js"),
         (name = "bindings.js", esModule = embed "bindings.js"),
+        (name = "jwt.js", esModule = embed "jwt.js"),
         (name = "rpc-codec.js", esModule = embed "rpc-codec.js"),
         (name = "facades.js", esModule = embed "facades.js"),
         (name = "telemetry.js", esModule = embed "telemetry.js"),
@@ -112,6 +114,7 @@ const config :Workerd.Config = (
         (name = "HOST", durableObjectNamespace = "Host"),
         (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
         (name = "CELL_TOKEN", fromEnvironment = "CELLHIVE_HOST_CELL_TOKEN"),
+        (name = "BINDING_SIGNING_KEY", fromEnvironment = "CELLHIVE_HOST_BINDING_SIGNING_KEY"),
         (name = "NODE_ID", text = "{{.NodeID}}"),
         (name = "ADVERTISE", text = "{{.Advertise}}"),
         (name = "CELLHIVE_DO_SRC", text = embed "cellhive-do.js"),
@@ -178,6 +181,7 @@ func Render(dir string, cfg Config) (string, error) {
 	for _, pair := range [][2]string{
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "facades.js"), "facades.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "bindings.js"), "bindings.js"},
+		{filepath.Join(cfg.PlatformJS, "..", "platform", "jwt.js"), "jwt.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "bindings-wrapper.js"), "bindings-wrapper.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "rpc-codec.js"), "rpc-codec.js"},
 		{filepath.Join(cfg.PlatformJS, "..", "platform", "telemetry.js"), "telemetry.js"},
@@ -213,13 +217,14 @@ func Render(dir string, cfg Config) (string, error) {
 // Cap'n Proto fromEnvironment bindings.
 func WorkerdEnv(cfg Config) ([]string, error) {
 	return runtimeenv.Build(map[string]string{
-		"CELLHIVE_HOST_AI_KEY":           cfg.AIKey,
-		"CELLHIVE_HOST_AI_URL":           cfg.AIURL,
-		"CELLHIVE_HOST_CELL_TOKEN":       cfg.CellToken,
-		"CELLHIVE_HOST_CELL_URL":         cfg.CellURL,
-		"CELLHIVE_HOST_LOG_TOKEN":        cfg.LogToken,
-		"CELLHIVE_HOST_DO_TICKET_SECRET": cfg.DoTicketSecret,
-		"CELLHIVE_HOST_GATE_URL":         cfg.GateURL,
+		"CELLHIVE_HOST_AI_KEY":              cfg.AIKey,
+		"CELLHIVE_HOST_AI_URL":              cfg.AIURL,
+		"CELLHIVE_HOST_CELL_TOKEN":          cfg.CellToken,
+		"CELLHIVE_HOST_BINDING_SIGNING_KEY": cfg.BindingSigningKey,
+		"CELLHIVE_HOST_CELL_URL":            cfg.CellURL,
+		"CELLHIVE_HOST_LOG_TOKEN":           cfg.LogToken,
+		"CELLHIVE_HOST_DO_TICKET_SECRET":    cfg.DoTicketSecret,
+		"CELLHIVE_HOST_GATE_URL":            cfg.GateURL,
 	})
 }
 
@@ -240,6 +245,7 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 		"CELLHIVE_HOST_AI_KEY",
 		"CELLHIVE_HOST_AI_URL",
 		"CELLHIVE_HOST_CELL_TOKEN",
+		"CELLHIVE_HOST_BINDING_SIGNING_KEY",
 		"CELLHIVE_HOST_CELL_URL",
 		"CELLHIVE_HOST_LOG_TOKEN",
 		"CELLHIVE_HOST_DO_TICKET_SECRET",

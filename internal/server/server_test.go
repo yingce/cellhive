@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"cellhive/internal/artifacts"
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
@@ -50,6 +51,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 		t.Fatalf("bucket: %v", err)
 	}
 	cfg := config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", TokenLog: "tok", AdminToken: "admin-tok", BucketDir: dir, Durability: "auto", BucketWait: true}
+	cfg = testAuthConfig(cfg)
 	lm := lease.NewManager(b, "node-1", "s1", "127.0.0.1:7000", "", 10*time.Second)
 	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
 		t.Fatalf("publish test node lease: %v", err)
@@ -60,7 +62,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatalf("spool: %v", err)
 	}
-	pm := peer.NewManager(peer.NewHTTPTransport("tok", nil))
+	pm := peer.NewManager(peer.NewHTTPTransport(cfg.TokenPeer, nil))
 	nl := nodelog.New(b, "node-1")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upCtx, upCancel := context.WithCancel(context.Background())
@@ -68,7 +70,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	up.Start(upCtx)
 	peerUp := upload.New(spool, log, 64, 1<<20, 2*time.Millisecond)
 	peerUp.Start(upCtx)
-	shipper := peer.NewShipBatcher(peer.NewHTTPTransport("tok", nil), 256, 4<<20, time.Millisecond, 4, 4, 0, 0)
+	shipper := peer.NewShipBatcher(peer.NewHTTPTransport(cfg.TokenPeer, nil), 256, 4<<20, time.Millisecond, 4, 4, 0, 0)
 	shipper.Start(upCtx)
 	t.Cleanup(func() { upCancel(); up.Stop(); peerUp.Stop(); shipper.Stop() })
 	cs, err := cellstore.New(filepath.Join(dir, "cells"))
@@ -92,7 +94,17 @@ func do(t *testing.T, h http.Handler, method, target, token string, body []byte)
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
 	if token != "" {
-		req.Header.Set("x-cellhive-internal-token", token)
+		if token == "tok" {
+			role := "internal"
+			if strings.Contains(target, "/v1/peer/") {
+				role = "peer"
+			}
+			if strings.HasPrefix(target, "/v1/internal/logs?") {
+				role = "log"
+			}
+			token = testRoleJWT(t, role)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -368,7 +380,7 @@ func TestPeerPersistentStreamAppendBatch(t *testing.T) {
 	server := httptest.NewServer(follower.Handler())
 	defer server.Close()
 
-	transport := peer.NewStreamTransport("tok", 2, 4)
+	transport := peer.NewStreamTransport(testAuthConfig(config.Config{}).TokenPeer, 2, 4)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "stream"}
 	segments := [][]byte{
 		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a")),
@@ -395,7 +407,7 @@ func TestPeerSessionHTTPAppendReturnsV2Proof(t *testing.T) {
 	server := httptest.NewServer(follower.Handler())
 	defer server.Close()
 
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("http-owner-session")
+	transport := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).WithSession("http-owner-session")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http-session"}
 	segments := [][]byte{
 		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a")),
@@ -445,7 +457,7 @@ func TestCommitBinaryFleet(t *testing.T) {
 	}
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("binary"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scopeText+"&epoch=1", bytes.NewReader(segment))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("content-type", "application/octet-stream")
 	req.Header.Set("x-cellhive-followers", followerHTTP.URL)
 	rr := httptest.NewRecorder()
@@ -471,7 +483,7 @@ func TestCommitBinaryBucketProofForDO(t *testing.T) {
 	}
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("do"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scopeText+"&epoch=1", bytes.NewReader(segment))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("x-cellhive-followers", followerHTTP.URL)
 	req.Header.Set("x-cellhive-bucket-proof", "1")
 	rr := httptest.NewRecorder()
@@ -492,7 +504,7 @@ func TestPeerStreamAppendBatchAsync(t *testing.T) {
 	server := httptest.NewServer(follower.Handler())
 	defer server.Close()
 
-	transport := peer.NewStreamTransport("tok", 2, 4)
+	transport := peer.NewStreamTransport(testAuthConfig(config.Config{}).TokenPeer, 2, 4)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "async"}
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -521,7 +533,7 @@ func TestCommitBinaryPipelinedFleet(t *testing.T) {
 	followerHTTP := httptest.NewServer(follower.Handler())
 	defer followerHTTP.Close()
 
-	streamT := peer.NewStreamTransport("tok", 2, 4)
+	streamT := peer.NewStreamTransport(testAuthConfig(config.Config{}).TokenPeer, 2, 4)
 	shipper := peer.NewShipBatcher(streamT, 256, 4<<20, time.Millisecond, 1, 1, 0, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	shipper.Start(ctx)
@@ -534,7 +546,7 @@ func TestCommitBinaryPipelinedFleet(t *testing.T) {
 	}
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scope+"&epoch=1&pipelined=1&base=1", bytes.NewReader(segment))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("content-type", "application/octet-stream")
 	req.Header.Set("x-cellhive-followers", followerHTTP.URL)
 
@@ -610,10 +622,14 @@ func newForwardServer(t *testing.T, dir, node string) (*Server, *owner.Manager, 
 		t.Fatalf("bucket: %v", err)
 	}
 	cfg := config.Config{NodeID: node, TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", TokenLog: "tok", AdminToken: "admin-tok", BucketDir: dir, Durability: "bucket", BucketWait: true}
+	cfg = testAuthConfig(cfg)
 	om := &owner.Manager{B: b, NodeID: node, Session: node + "-s", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
 	srv := New(Deps{Cfg: cfg, Bucket: b, Owner: om, Replica: replica.New(b), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
+	admin := httptest.NewServer(srv.AdminHandler())
+	t.Cleanup(admin.Close)
+	om.AdminAdvertise = admin.URL
 	return srv, om, hs
 }
 
@@ -631,7 +647,7 @@ func TestNonOwnerForwardsCommitBinary(t *testing.T) {
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("p"))
 	url := nonOwnerHS.URL + "/v1/internal/commit_binary?scope=" + url.QueryEscape(sc.String()) + "&epoch=1"
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(seg))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("forwarded commit: %v", err)
@@ -659,7 +675,7 @@ func TestNonOwnerForwardsCommitBinary(t *testing.T) {
 
 	// Loop guard: an already-forwarded request must not be forwarded again.
 	req2, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(seg))
-	req2.Header.Set("x-cellhive-internal-token", "tok")
+	req2.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req2.Header.Set(ownerclient.ForwardedHeader, "1")
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
@@ -720,7 +736,7 @@ func TestReadSegmentRange(t *testing.T) {
 		t.Fatal("payload not found in encoded segment")
 	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/internal/segment?key="+app.Key, nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", idx, idx+len("hello-range")-1))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -762,8 +778,15 @@ func TestProtocolVersionHandshake(t *testing.T) {
 // TestR2PresignEndpoint covers the tenant R2 presign path (scope-kind r2).
 func TestR2PresignEndpoint(t *testing.T) {
 	srv, _ := newTestServer(t)
+	srv.Control = control.New(srv.Store, nil)
+	if err := srv.claimForRead(t.Context(), control.Scope()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Control.CreateResource(t.Context(), "acme", "r2", "BUCKET", "acme/__r2__/BUCKET", "test"); err != nil {
+		t.Fatal(err)
+	}
 	h := srv.Handler()
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "r2", Name: "BUCKET"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "r2", Name: "BUCKET"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -771,7 +794,7 @@ func TestR2PresignEndpoint(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/r2/presign?ns=acme&bucket=BUCKET&key=k&expires_in=60", nil)
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte(`"url"`)) {
@@ -790,7 +813,7 @@ func TestLogIngestAndQuery(t *testing.T) {
 	body := `[{"level":"log","message":"hello","traceparent":"` + tp + `"},{"level":"error","message":"boom"}]`
 	{
 		req := httptest.NewRequest(http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", strings.NewReader(body))
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "log"))
 		req.Header.Set("traceparent", tp)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -830,6 +853,7 @@ func newControlForwardServer(t *testing.T, bucketDir, node string) (*Server, *ow
 		ScopeSecret: "tok", TokenLog: "tok", AdminToken: "admin-tok",
 		BucketDir: bucketDir, Durability: "bucket", BucketWait: true,
 	}
+	cfg = testAuthConfig(cfg)
 	om := &owner.Manager{B: b, NodeID: node, Session: node + "-s", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
 	cs, err := cellstore.New(filepath.Join(bucketDir, "cells-"+node))
 	if err != nil {
@@ -851,6 +875,9 @@ func newControlForwardServer(t *testing.T, bucketDir, node string) (*Server, *ow
 	})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
+	admin := httptest.NewServer(srv.AdminHandler())
+	t.Cleanup(admin.Close)
+	om.AdminAdvertise = admin.URL
 	return srv, om, hs
 }
 
@@ -945,15 +972,14 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	if _, err := omC.Claim(ctx, d1.Scope("app", "db"), time.Now()); err != nil {
 		t.Fatalf("claim d1: %v", err)
 	}
-	tok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "d1", Name: "db"})
+	tok, err := testBindingJWT(srvB, scopedtoken.Claims{Namespace: "app", Kind: "d1", Name: "db"})
 	if err != nil {
 		t.Fatalf("scope token: %v", err)
 	}
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, "/v1/d1/exec?ns=app&db=db",
 		strings.NewReader(`{"sql":"CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (7)"}`))
-	req.Header.Set("x-cellhive-internal-token", "tok")
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	srvB.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("forwarded d1 exec = %d: %s", rec.Code, rec.Body.String())
@@ -978,14 +1004,13 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	if _, err := omC.Claim(ctx, queue.Scope("app", "jobs"), time.Now()); err != nil {
 		t.Fatalf("claim queue: %v", err)
 	}
-	qtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "queue", Name: "jobs"})
+	qtok, err := testBindingJWT(srvB, scopedtoken.Claims{Namespace: "app", Kind: "queue", Name: "jobs"})
 	if err != nil {
 		t.Fatalf("queue scope token: %v", err)
 	}
 	rec = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodPost, "/v1/queue/send?ns=app&queue=jobs", strings.NewReader("hello"))
-	req.Header.Set("x-cellhive-internal-token", "tok")
-	req.Header.Set("x-cellhive-scope-token", qtok)
+	req.Header.Set("Authorization", "Bearer "+qtok)
 	req.Header.Set("content-type", "text/plain")
 	srvB.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1007,14 +1032,13 @@ func TestControlWriteClaimsAndForwards(t *testing.T) {
 	if _, err := omC.Claim(ctx, workflow.Scope("app", "wf"), time.Now()); err != nil {
 		t.Fatalf("claim workflow: %v", err)
 	}
-	wtok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "workflow", Name: "wf"})
+	wtok, err := testBindingJWT(srvB, scopedtoken.Claims{Namespace: "app", Kind: "workflow", Name: "wf"})
 	if err != nil {
 		t.Fatalf("workflow scope token: %v", err)
 	}
 	rec = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodPost, "/v1/workflow/create?ns=app&workflow=wf", strings.NewReader(`{}`))
-	req.Header.Set("x-cellhive-internal-token", "tok")
-	req.Header.Set("x-cellhive-scope-token", wtok)
+	req.Header.Set("Authorization", "Bearer "+wtok)
 	srvB.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("forwarded workflow create = %d: %s", rec.Code, rec.Body.String())
@@ -1084,15 +1108,14 @@ func TestReadForwardingAndRetry(t *testing.T) {
 	if _, err := omA.Claim(ctx, kvScope, time.Now()); err != nil {
 		t.Fatalf("claim kv: %v", err)
 	}
-	ktok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "kv", Name: "KV"})
+	ktok, err := testBindingJWT(srvB, scopedtoken.Claims{Namespace: "app", Kind: "kv", Name: "KV"})
 	if err != nil {
 		t.Fatalf("kv scope token: %v", err)
 	}
 	call := func(srv *Server, method, target, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req, _ := http.NewRequest(method, target, strings.NewReader(body))
-		req.Header.Set("x-cellhive-internal-token", "tok")
-		req.Header.Set("x-cellhive-scope-token", ktok)
+		req.Header.Set("Authorization", "Bearer "+ktok)
 		srv.Handler().ServeHTTP(rec, req)
 		return rec
 	}
@@ -1254,15 +1277,14 @@ func TestOverloadedRefusesClaims(t *testing.T) {
 	if _, err := srvB.Control.CreateResource(ctx, "app", "kv", "KV", sc.String(), "t"); err != nil {
 		t.Fatalf("resource: %v", err)
 	}
-	ktok, err := scopedtoken.Mint([]byte("tok"), scopedtoken.Claims{Namespace: "app", Kind: "kv", Name: "KV"})
+	ktok, err := testBindingJWT(srvB, scopedtoken.Claims{Namespace: "app", Kind: "kv", Name: "KV"})
 	if err != nil {
 		t.Fatalf("scope token: %v", err)
 	}
 	put := func() *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req, _ := http.NewRequest(http.MethodPost, "/v1/kv/put?ns=app&key=k", strings.NewReader("v"))
-		req.Header.Set("x-cellhive-internal-token", "tok")
-		req.Header.Set("x-cellhive-scope-token", ktok)
+		req.Header.Set("Authorization", "Bearer "+ktok)
 		srvB.Handler().ServeHTTP(rec, req)
 		return rec
 	}
@@ -1350,7 +1372,7 @@ func TestLogSubscribeFleetFanout(t *testing.T) {
 	var got atomic.Int64
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/internal/logs/subscribe" {
-			if r.Header.Get("x-cellhive-internal-token") != "tok" {
+			if bearertoken.VerifyInternal(r.Header, testAuthConfig(config.Config{}).TokenInternal, "internal", time.Now()) != nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -1369,10 +1391,10 @@ func TestLogSubscribeFleetFanout(t *testing.T) {
 		t.Fatalf("publish other: %v", err)
 	}
 	srv := New(Deps{
-		Cfg: config.Config{
+		Cfg: testAuthConfig(config.Config{
 			NodeID: "n1", TokenInternal: "tok", AdminToken: "admin-tok", TokenLog: "tok",
 			ScopeSecret: "s", BucketDir: dir, Durability: "bucket", BucketWait: true,
-		},
+		}),
 		Bucket: b, Lease: self, Logs: logbuf.New(10, 10),
 	})
 

@@ -1,20 +1,18 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"cellhive/internal/config"
-	"cellhive/internal/scopedtoken"
 )
 
 func newCredsCommand() *cobra.Command {
 	creds := &cobra.Command{
 		Use:   "creds [role]",
-		Short: "print root-derived role credentials",
+		Short: "print root-derived role signing keys (not Bearer tokens)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			role := ""
@@ -26,7 +24,7 @@ func newCredsCommand() *cobra.Command {
 	}
 	creds.AddCommand(&cobra.Command{
 		Use:   "issuer <name>",
-		Short: "print a delegated issuer signing key",
+		Short: "removed: use issuer create to provision an authoritative issuer",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return credsIssuer(args[0])
@@ -39,7 +37,7 @@ func credsPrint(role string) error {
 	c := config.DeriveCredentials(config.LoadRootKey())
 	all := map[string]string{
 		"peer": c.Peer, "internal": c.Internal, "dispatch": c.Dispatch,
-		"log": c.Log, "admin": c.Admin, "scope": c.Scope,
+		"log": c.Log, "admin": c.Admin, "scope": c.Binding,
 		"do-ticket": c.DoTicket, "secret-key": c.SecretKey,
 	}
 	if c.Internal == "" {
@@ -60,16 +58,7 @@ func credsPrint(role string) error {
 }
 
 func credsIssuer(name string) error {
-	c := config.DeriveCredentials(config.LoadRootKey())
-	if c.Scope == "" {
-		return fmt.Errorf("CELLHIVE_ROOT_KEY is required (or CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 for local use)")
-	}
-	key, err := scopedtoken.IssuerKey([]byte(c.Scope), name)
-	if err != nil {
-		return err
-	}
-	fmt.Println(base64.RawURLEncoding.EncodeToString(key))
-	return nil
+	return fmt.Errorf("name-derived issuer keys are removed; use cellhive issuer create %q --ns <patterns> --max-token-ttl <duration> to provision an immutable issuer ID and key", name)
 }
 
 func newTokenCommand() *cobra.Command {
@@ -77,23 +66,24 @@ func newTokenCommand() *cobra.Command {
 	var ttl time.Duration
 	cmd := &cobra.Command{
 		Use:   "token",
-		Short: "mint a scoped binding token",
+		Short: "mint a namespace or binding JWT locally using an issuer ID and key",
+		Long:  "Mint locally without querying issuer state. The server enforces the active issuer record, namespace ceiling and maximum TTL on every use.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tok, err := mintScopeToken(namespace, kind, name, issuer, ttl, keyB64)
 			if err != nil {
-				return fmt.Errorf("usage: cellhive token --ns <ns> --kind <kind> --name <name|glob> [--iss <issuer>] [--ttl 5m] [--key <b64>]: %w", err)
+				return err
 			}
-			fmt.Println(tok)
+			fmt.Fprintln(cmd.OutOrStdout(), tok)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&namespace, "ns", "", "namespace (exact)")
-	cmd.Flags().StringVar(&kind, "kind", "", "binding kind (may be * or pre*)")
-	cmd.Flags().StringVar(&name, "name", "", "resource name (may be * or pre*)")
-	cmd.Flags().StringVar(&issuer, "iss", "", "delegated issuer name (empty = platform scope key)")
-	cmd.Flags().DurationVar(&ttl, "ttl", 0, "lifetime; delegated tokens require > 0")
-	cmd.Flags().StringVar(&keyB64, "key", "", "issuer signing key (raw base64url); skips root derivation")
+	cmd.Flags().StringVar(&namespace, "ns", "", "comma-separated namespace patterns; one exact namespace for binding tokens")
+	cmd.Flags().StringVar(&kind, "kind", "", "exact binding kind; omit for a namespace token")
+	cmd.Flags().StringVar(&name, "name", "", "exact binding resource name; required with --kind")
+	cmd.Flags().StringVar(&issuer, "issuer", "", "immutable 32-character lowercase hex issuer ID (required)")
+	cmd.Flags().DurationVar(&ttl, "ttl", 5*time.Minute, "positive lifetime in whole seconds; must not exceed server issuer maximum")
+	cmd.Flags().StringVar(&keyB64, "key", "", "canonical raw base64url 32-byte issuer key (required)")
 	return cmd
 }
 

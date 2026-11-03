@@ -1,6 +1,7 @@
 package queue_test
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,7 +112,7 @@ func TestHTTPDispatcherPayload(t *testing.T) {
 		if r.URL.Path != "/v1/queues/dispatch" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		if r.Header.Get("x-cellhive-internal-token") != "tok" {
+		if bearertoken.VerifyInternal(r.Header, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "dispatch", time.Now()) != nil || r.Header.Get("x-cellhive-internal-token") != "" {
 			t.Errorf("missing token header")
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
@@ -119,7 +120,7 @@ func TestHTTPDispatcherPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := queue.NewHTTP(srv.URL, "tok")
+	d := queue.NewHTTP(srv.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	msgs := []queue.Message{{ID: "id1", Body: []byte("hi"), ContentType: "text/plain", Attempts: 1}}
 	if err := d.Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q", Worker: "consumer", BundleSHA: "sha1", Version: 7}, msgs); err != nil {
 		t.Fatalf("dispatch: %v", err)

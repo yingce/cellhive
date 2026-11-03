@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -127,10 +126,6 @@ type Deps struct {
 	Admission *admission.Limiter
 	// Advisor computes a capacity recommendation from node leases (roadmap P4).
 	Advisor *autoscaler.Advisor
-	// AdminAuth authenticates control-plane requests (static token or OIDC/JWT).
-	// Nil uses a static token from Cfg.AdminToken.
-	AdminAuth auth.Authenticator
-
 	// Timers/OpenTimer back the unified timer endpoint: producers upsert a due
 	// timer into its owning cell and register the scope for local dispatch.
 	Timers    *timer.Registry
@@ -170,8 +165,6 @@ type Server struct {
 	adminOnce     sync.Once
 	adminHandler  http.Handler
 	adminBuilds   atomic.Int32
-	cfAPIOnce     sync.Once
-	cfAPIHandler  http.Handler
 
 	// Observability (ADR-165).
 	proofByNS     sync.Map // ns -> *proofHist (ADR-179)
@@ -291,12 +284,10 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) buildHandler() http.Handler {
 	s.handlerBuilds.Add(1)
 	mux := http.NewServeMux()
-	// Owner forwarding uses the internal listener. Keep the Wrangler paths
-	// available there under their own admin-token check so multipart publishes
-	// can land on the control-cell owner without changing protocol shape.
-	s.registerCloudflareWorkerRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
+	// Private observability scrape retains its network-isolated ADR-178 contract.
+	// Public namespace metrics are separately authenticated on the admin listener.
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /v1/diagnose", s.auth(s.handleDiagnose))
 	mux.HandleFunc("POST /v1/internal/telemetry/spans", s.auth(s.handleTelemetrySpans))
@@ -378,6 +369,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /v1/control/host", s.auth(s.handleControlHost))
 	mux.HandleFunc("GET /v1/control/worker", s.auth(s.handleControlWorker))
 	mux.HandleFunc("GET /v1/control/binding", s.auth(s.handleControlBinding))
+	mux.HandleFunc("GET /v1/control/issuer-info", s.auth(s.handleIssuerInfo))
 	// Admin reads are mirrored here so a non-owner node can forward them to the
 	// control-cell owner (ADR-118 applies to reads too). The owner serves them
 	// under the internal token, which is the trusted plane.
@@ -489,32 +481,16 @@ func (s *Server) trace(next http.Handler) http.Handler {
 	})
 }
 
-// roleToken returns the token required for a platform role (Tier-1, ADR-075).
-// There is no fallback: an unconfigured role token rejects every call.
-func (s *Server) roleToken(role string) string {
-	switch role {
-	case "peer":
-		return s.Cfg.TokenPeer
-	case "dispatch":
-		return s.Cfg.TokenDispatch
-	case "log":
-		return s.Cfg.TokenLog
-	default:
-		return s.Cfg.TokenInternal
-	}
-}
-
-// roleAuth enforces a role-scoped platform token with a constant-time compare.
+// roleAuth checks the signing-key domain, not a caller-provided role claim.
 func (s *Server) roleAuth(role string) func(http.HandlerFunc) http.HandlerFunc {
-	want := s.roleToken(role)
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			got := r.Header.Get("x-cellhive-internal-token")
-			if want == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			kid, c, err := s.verifyBearer(r)
+			if err != nil || kid != "token/"+role || c.Type != "internal" {
 				writeErr(w, http.StatusUnauthorized, "unauthorized", role+" token required")
 				return
 			}
-			next(w, r)
+			next(w, withPrincipal(r, auth.Principal{Sub: c.Subject, Kind: "internal", All: true}))
 		}
 	}
 }
@@ -1194,7 +1170,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 func (s *Server) forwardOrClaim(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {
 	// Admin requests enter through AdminHandler and must stay on the owner's
 	// admin listener. Data-plane requests keep using the REST listener.
-	admin := isAdminForward(r.Context()) && sc == control.Scope()
+	admin := isAdminForward(r.Context())
 	return s.forwardOrClaimMode(w, r, sc, preRead, admin)
 }
 
@@ -1440,6 +1416,16 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 	// send performs one forwarding attempt to the given owner address.
 	send := func(hint ownerclient.Hint) (*http.Response, error) {
 		target := ownerclient.OwnerURL(hint) + r.URL.RequestURI()
+		if isAdminForward(r.Context()) && r.URL.Path == "/v1/control/apps" {
+			addr := s.adminAddressFor(cell.Owner{Address: hint.Address})
+			if hint.Address == o.Address {
+				addr = s.adminAddressFor(o)
+			}
+			if addr == "" {
+				return nil, fmt.Errorf("owner admin unavailable")
+			}
+			target = adminBaseURL(addr) + r.URL.RequestURI()
+		}
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -1452,7 +1438,11 @@ func (s *Server) forwardTo(r *http.Request, sc cell.Scope, preRead []byte) (*htt
 				req.Header.Add(k, v)
 			}
 		}
-		req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+		if req.Header.Get("Authorization") == "" {
+			if err := s.setInternalAuthorization(req, "internal"); err != nil {
+				return nil, err
+			}
+		}
 		req.Header.Set(ownerclient.ForwardedHeader, "1")
 		return client.Do(req)
 	}
@@ -3885,7 +3875,7 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		srv := &http.Server{Addr: s.Cfg.RESTAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 		shutdown = srv.Shutdown
-		errCh = make(chan error, 3)
+		errCh = make(chan error, 2)
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
@@ -3895,20 +3885,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// The control plane listens separately (ADR-012) with its own credential; the
 	// data listener never exposes control writes.
-	var cfapi *http.Server
-	if s.Control != nil && s.Cfg.CFAPIAddr != "" && (s.Cfg.AdminToken != "" || s.AdminAuth != nil) {
-		cfapi = &http.Server{Addr: s.Cfg.CFAPIAddr, Handler: s.CFAPIHandler(), ReadHeaderTimeout: 10 * time.Second}
-		go func() {
-			s.Log.Info("cell-agent Cloudflare API listening", "addr", s.Cfg.CFAPIAddr)
-			if err := cfapi.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errCh <- err
-			}
-		}()
-	} else if s.Cfg.CFAPIAddr != "" {
-		s.Log.Info("cell-agent Cloudflare API disabled", "control", s.Control != nil, "addr", s.Cfg.CFAPIAddr, "token_set", s.Cfg.AdminToken != "", "admin_auth", s.AdminAuth != nil)
-	}
 	var admin *http.Server
-	if s.Control != nil && s.Cfg.AdminAddr != "" && s.Cfg.AdminToken != "" {
+	if s.Control != nil && s.Cfg.AdminAddr != "" && s.Cfg.RootKey != "" {
 		admin = &http.Server{Addr: s.Cfg.AdminAddr, Handler: s.AdminHandler(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			s.Log.Info("cell-agent admin listening", "addr", s.Cfg.AdminAddr)
@@ -3917,7 +3895,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		}()
 	} else {
-		s.Log.Info("cell-agent admin disabled", "control", s.Control != nil, "addr", s.Cfg.AdminAddr, "token_set", s.Cfg.AdminToken != "")
+		s.Log.Info("cell-agent admin disabled", "control", s.Control != nil, "addr", s.Cfg.AdminAddr, "root_key_set", s.Cfg.RootKey != "")
 	}
 
 	select {
@@ -3926,9 +3904,6 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		if admin != nil {
 			_ = admin.Shutdown(shutdownCtx)
-		}
-		if cfapi != nil {
-			_ = cfapi.Shutdown(shutdownCtx)
 		}
 		return shutdown(shutdownCtx)
 	case err := <-errCh:

@@ -18,6 +18,7 @@
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { bindingStub } from "bindings.js";
+import { authorized, bearer, verifyJWT, internalHeaders } from "jwt.js";
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
@@ -231,12 +232,12 @@ async function indexObject(env, o, remove) {
     if (remove) {
       await fetch(base + "?ns=" + encodeURIComponent(o.namespace) + "&worker=" + encodeURIComponent(o.worker) +
         "&class=" + encodeURIComponent(o.class) + "&shard=" + o.shard + "&name=" + encodeURIComponent(o.id), {
-        method: "DELETE", headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+        method: "DELETE", headers: await internalHeaders(env.CELL_TOKEN),
       });
     } else {
       await fetch(base, {
         method: "POST",
-        headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
+        headers: { ...await internalHeaders(env.CELL_TOKEN), "content-type": "application/json" },
         body: JSON.stringify({
           namespace: o.namespace, worker: o.worker, class: o.storage_class || o.class,
           shard: o.shard, name: o.id,
@@ -257,6 +258,21 @@ function responseHeaders(res, tenant = false) {
 }
 function emptyHTTPBody(status, method) { return method === "HEAD" || [204, 205, 304].includes(status); }
 
+function ticketSpec(ticket, spec) {
+  try {
+    const fixed = JSON.parse(ticket.execution);
+    if (!fixed || typeof fixed.class !== "string" || !fixed.class || typeof fixed.bundle_sha !== "string" || !fixed.bundle_sha ||
+        typeof fixed.storage_id !== "string" || !Number.isSafeInteger(fixed.version) || fixed.version < 0 ||
+        !Object.hasOwn(fixed, "limits") || Object.keys(fixed).some(k => !["class", "bundle_sha", "storage_id", "version", "limits"].includes(k))) return false;
+    if (spec.class !== fixed.class || spec.bundle_sha !== fixed.bundle_sha || (spec.storage_id || "") !== fixed.storage_id ||
+        ![fixed.version, String(fixed.version), ...(fixed.version === 0 ? [undefined, null, ""] : [])].includes(spec.version) || ![undefined, "", "fetch", "rpc"].includes(spec.kind) ||
+        spec.compat_flags !== undefined || spec.compat_date !== undefined) return false;
+    spec.limits = fixed.limits;
+    spec.version = fixed.version;
+    return true;
+  } catch { return false; }
+}
+
 async function invoke(req, env, ticket) {
   if (draining) return json({ error: "draining" }, 503);
   let spec;
@@ -270,6 +286,11 @@ async function invoke(req, env, ticket) {
     return json({ error: "bad_request", message: "namespace, worker, class, id, bundle_sha are required" }, 400);
   }
   const shard = fnv1a(`${namespace}/${worker}/${spec.storage_class || cls}/${id}`) % SHARD_COUNT;
+  // Validate the narrow ticket before publishing any object index side effect.
+  if (ticket && (!ticketSpec(ticket, spec) || ticket.ns !== namespace || ticket.worker !== worker ||
+      ticket.storage_class !== (spec.storage_class || cls) || ticket.shard !== shard)) {
+    return json({ error: "forbidden", scope: "ticket_mismatch" }, 403);
+  }
   const indexKey = `${spec.storage_id || `${namespace}/${worker}`}/${spec.storage_class || cls}/${shard}/${id}`;
   const firstSight = !seen.has(indexKey);
   if (firstSight && seen.size >= SEEN_MAX) {
@@ -284,13 +305,6 @@ async function invoke(req, env, ticket) {
   });
   if (firstSight) {
     await indexObject(env, { namespace, worker, class: cls, storage_class: spec.storage_class || cls, shard, id }, false);
-  }
-  // Defense in depth: a ticket must match this exact shard/scope.
-  if (ticket) {
-    const sc = spec.storage_class || cls;
-    if (ticket.ns !== namespace || ticket.worker !== worker || (ticket.storage_class || "") !== sc || ticket.shard !== shard) {
-      return json({ error: "forbidden", scope: "ticket_mismatch" }, 403);
-    }
   }
   // Lease/hint identity follows the storage identity (class alias), so an aliased
   // class cannot hold two leases for one storage (ADR-082/135).
@@ -359,7 +373,7 @@ async function forward(env, address, spec) {
   try {
     const r = await fetch(ownerURL(address) + "/v1/do/invoke", {
       method: "POST",
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
+      headers: { ...await internalHeaders(env.CELL_TOKEN), "content-type": "application/json" },
       body: JSON.stringify(spec), redirect: "manual",
     });
     const hdrs = responseHeaders(r);
@@ -476,7 +490,7 @@ async function connect(req, env, url, ticket) {
   const shard = fnv1a(`${spec.namespace}/${spec.worker}/${spec.storage_class || spec.class}/${spec.id}`) % SHARD_COUNT;
   if (ticket) {
     const sc = spec.storage_class || spec.class;
-    if (ticket.ns !== spec.namespace || ticket.worker !== spec.worker ||
+    if (!ticketSpec(ticket, spec) || ticket.ns !== spec.namespace || ticket.worker !== spec.worker ||
         (ticket.storage_class || "") !== sc || ticket.shard !== shard) {
       return json({ error: "forbidden", scope: "ticket_mismatch" }, 403);
     }
@@ -563,7 +577,9 @@ async function proxyConnect(env, address, req, url) {
       if (lk === "host" || lk.startsWith("x-cellhive-")) continue;
       headers.set(k, v);
     }
-    headers.set("x-cellhive-internal-token", env.CELL_TOKEN);
+    const appAuthorization = req.headers.get("x-cellhive-app-authorization");
+    if (appAuthorization !== null) headers.set("x-cellhive-app-authorization", appAuthorization);
+    headers.set("authorization", (await internalHeaders(env.CELL_TOKEN)).authorization);
     headers.set("Upgrade", req.headers.get("Upgrade") || "websocket");
     headers.set("Connection", "Upgrade");
     upstream = await fetch(target.toString(), { headers });
@@ -851,6 +867,9 @@ function renderFacetModule(classes) {
 // is tenant-visible.
 function tenantRequest(req) {
   const headers = new Headers(req.headers);
+  const appAuthorization = headers.get("x-cellhive-app-authorization");
+  headers.delete("authorization");
+  if (appAuthorization !== null) headers.set("authorization", appAuthorization);
   for (const k of [...headers.keys()]) {
     if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
   }
@@ -1041,7 +1060,7 @@ export class Host extends DurableObject {
           this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/do/bindings?ns=" +
             encodeURIComponent(spec.namespace) + "&worker=" + encodeURIComponent(spec.worker) +
             (spec.version === undefined || spec.version === null ? "" : "&version=" + encodeURIComponent(spec.version)),
-          { headers: { "x-cellhive-internal-token": this.env.CELL_TOKEN } },
+          { headers: await internalHeaders(this.env.CELL_TOKEN) },
         );
         if (r.ok) { bs = await r.json(); policyLoaded = true; }
       } catch (e) {
@@ -1120,7 +1139,7 @@ export class Host extends DurableObject {
 
 async function fetchBundle(env, sha) {
   const q = "?sha=" + encodeURIComponent(sha);
-  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const headers = await internalHeaders(env.CELL_TOKEN);
   const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
   if (signed.ok) {
     const { url } = await signed.json();
@@ -1137,11 +1156,11 @@ async function fetchBundle(env, sha) {
   return await r.text();
 }
 
-function post(env, path, body, signal) {
+async function post(env, path, body, signal) {
   return fetch(env.CELL_URL + path, {
     signal,
     method: "POST",
-    headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
+    headers: { ...await internalHeaders(env.CELL_TOKEN), "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -1214,7 +1233,7 @@ async function gateSync(env, parentSpan, hostId, hostHash, spec) {
 async function reportAlarm(env, spec, dueMs, alarmId) {
   const response = await fetch(env.CELL_URL + "/v1/internal/do/alarm/upsert", {
     method: "POST",
-    headers: { "x-cellhive-internal-token": env.CELL_TOKEN, "content-type": "application/json" },
+    headers: { ...await internalHeaders(env.CELL_TOKEN), "content-type": "application/json" },
     body: JSON.stringify({
       namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
       id: spec.id, bundle_sha: spec.bundle_sha, storage_class: spec.storage_class || spec.class,
@@ -1228,59 +1247,18 @@ async function reportAlarm(env, spec, dueMs, alarmId) {
 // authorize accepts the internal token (full access) or a signed owner ticket
 // (invoke-only). It returns { ok, ticket } with the ticket claims, or null.
 async function authorize(req, env) {
-  const want = env.CELL_TOKEN || "";
-  const got = req.headers.get("x-cellhive-internal-token") || "";
-  if (want && got.length === want.length) {
-    let diff = 0;
-    for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ want.charCodeAt(i);
-    if (diff === 0) return { ok: true, ticket: null };
-  }
-  const t = await verifyTicket(env, req.headers.get("x-cellhive-do-ticket"), Date.now());
+  if (await authorized(req, env.CELL_TOKEN)) return { ok: true, ticket: null };
+  const t = await verifyTicket(env, bearer(req), Date.now());
   if (t) return { ok: true, ticket: t };
   return { ok: false, ticket: null };
 }
 
-let ticketKeyPromise = null;
-function ticketKey(secret) {
-  if (!ticketKeyPromise) {
-    ticketKeyPromise = crypto.subtle.importKey(
-      "raw", new TextEncoder().encode(secret || ""),
-      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  }
-  return ticketKeyPromise;
-}
-
-function b64urlToBytes(s) {
-  let b = String(s).replace(/-/g, "+").replace(/_/g, "/");
-  while (b.length % 4) b += "=";
-  const bin = atob(b);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 // verifyTicket checks the HMAC and expiry of a DO owner ticket (ADR-105).
 async function verifyTicket(env, token, nowMs) {
-  const secret = env.DO_TICKET_SECRET || "";
-  if (!secret || !token) return null;
-  const dot = token.lastIndexOf(".");
-  if (dot <= 0 || dot === token.length - 1) return null;
-  let payload, sig, key, got;
-  try {
-    payload = b64urlToBytes(token.slice(0, dot));
-    sig = b64urlToBytes(token.slice(dot + 1));
-    key = await ticketKey(secret);
-    got = new Uint8Array(await crypto.subtle.sign("HMAC", key, payload));
-  } catch (e) {
-    return null;
-  }
-  if (got.length !== sig.length) return null;
-  let diff = 0;
-  for (let i = 0; i < got.length; i++) diff |= got[i] ^ sig[i];
-  if (diff !== 0) return null;
-  let c;
-  try { c = JSON.parse(new TextDecoder().decode(payload)); } catch (e) { return null; }
-  if (!c || typeof c.exp !== "number" || c.exp <= nowMs) return null;
+  const c = await verifyJWT(env.DO_TICKET_SECRET, token, "token/do-ticket", "internal", Math.floor(nowMs / 1000));
+  if (!c || typeof c.ns !== "string" || !c.ns || typeof c.worker !== "string" || !c.worker ||
+      typeof c.storage_class !== "string" || !c.storage_class || !Number.isInteger(c.shard) || c.shard < 0 || c.shard >= SHARD_COUNT) return null;
+  if (typeof c.execution !== "string" || c.exp - c.iat > 30 || Object.keys(c).some(k => !["ver", "type", "sub", "aud", "iat", "exp", "ns", "worker", "storage_class", "shard", "execution"].includes(k))) return null;
   return c;
 }
 

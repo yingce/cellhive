@@ -149,8 +149,8 @@ func TestFromEnvDerivesRoleCredentials(t *testing.T) {
 		t.Fatalf("FromEnv did not derive the role credentials from the root key")
 	}
 	t.Setenv("CELLHIVE_ADMIN_TOKEN", "external-admin")
-	if c := FromEnv(); c.AdminToken != "external-admin" {
-		t.Fatalf("explicit admin token = %q, want external-admin", c.AdminToken)
+	if c := FromEnv(); c.AdminToken != want.Admin {
+		t.Fatal("removed static admin override must not replace JWT key")
 	}
 }
 

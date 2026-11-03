@@ -15,9 +15,6 @@ spec:
   ports:
     - {name: rest, port: 7001, targetPort: 7001}
     - {name: admin, port: 8082, targetPort: 8082}
-    {{- if .Values.cfApi.enabled }}
-    - {name: cfapi, port: {{ .Values.cfApi.port }}, targetPort: {{ .Values.cfApi.port }}}
-    {{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -83,9 +80,6 @@ spec:
           ports:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}
-            {{- if .Values.cfApi.enabled }}
-            - {name: cfapi, containerPort: {{ .Values.cfApi.port }}}
-            {{- end }}
           startupProbe:
             # Recovery can take minutes; readiness still gates business traffic.
             httpGet: {path: /healthz, port: 7001}

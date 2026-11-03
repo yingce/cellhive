@@ -1,6 +1,6 @@
 # Configuration and Environment Variables
 
-The authoritative source is the code: `internal/config/config.go` (cell-agent), `cmd/user-runtime/main.go`, `cmd/do-runtime/main.go`, `cmd/cellhive/main.go` (CLI), `internal/workerdbin`, and `internal/bundler`. This document lists **all** environment variables, defaults, and purposes by subsystem. If it conflicts with the code, the code takes precedence.
+Configuration implementation lives in `internal/config/config.go` and runtime/CLI entry points. **ADR-304 is implemented, local acceptance passed, not deployed**; DO ticket hardening and full baseline passed, but production cutover is not complete. Deployment must migrate together without old-header dual acceptance.
 
 ## Parsing Rules
 
@@ -13,14 +13,14 @@ The authoritative source is the code: `internal/config/config.go` (cell-agent), 
 | List | Comma-separated, trim whitespace per item, ignore empty items |
 | Pair/rate | `a:b` (such as `CELLHIVE_LOG_BUFFER=1000:200`) or `rps/burst` (such as `CELLHIVE_NS_RATE=100/200`) |
 
-**Credential model (ADR-137)**: Set only **one** `CELLHIVE_ROOT_KEY`. Tokens for each role are derived with HKDF-SHA256 using domain separation, so all components automatically stay consistent as long as they share the same root. There is no need to configure them one by one:
+**Credential model (ADR-304)**: Keep root in trusted platform derivation environments, not every component. Distribute required short-lived JWTs; trusted local signing components receive only required purpose keys:
 
 ```
-peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
-     = HKDF-SHA256(ROOT_KEY, "cellhive/token/<role>")
+JWT key = HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)
+kid = issuer/<immutable-id> or token/<purpose>
 ```
 
-`CELLHIVE_ADMIN_TOKEN` can still independently override the admin credential (to make independent operations rotation easier). Startup fails if no root is set and `CELLHIVE_ALLOW_INSECURE_DEFAULTS` is not enabled.
+Ordinary HTTP uses only `Authorization: Bearer <HS256 JWT>`, default audience `cellhive`. `token/admin` signs bootstrap admin JWTs, never raw key Bearers; business issuers require active persisted records. Retain old `ScopeSecret` derivation for Hyperdrive non-HTTP credentials only, not JWTs; do not incidentally rederive existing secret-encryption keys. Long-running components must refresh JWTs.
 
 **Migration note**: Variables removed or renamed by ADR-136/137 (such as `CELLHIVE_TOKEN_*`, `CELLHIVE_S3_*`, `CELLHIVE_NS_RPS`, `CELLHIVE_*_MS`/`_S`) will print a WARN with the replacement name (`config.LegacyEnvWarnings`) when components start if they are still set. They will not silently take effect.
 
@@ -28,12 +28,11 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_ROOT_KEY` | Empty | Platform root key (base64 or hex, ≥16 bytes, 32 recommended); derives all role credentials. In production, **configure only this one** (preferred when not using a file) |
+| `CELLHIVE_ROOT_KEY` | Empty | Platform root (base64 or hex, ≥16 bytes, 32 recommended); trusted derivation environments only, never ordinary clients/tenants |
 | `CELLHIVE_ROOT_KEY_FILE` | Empty | Root key **file** path (Docker/K8s secret mount; trim after reading). Takes precedence over the dev fallback and lower precedence than inline `CELLHIVE_ROOT_KEY`; if the file is unreadable/empty, it **fails closed** (ADR-150) |
-| `CELLHIVE_ADMIN_TOKEN` | Empty→derived | Optional: independently override the control-plane admin credential |
 | `CELLHIVE_ALLOW_INSECURE_DEFAULTS` | `false` | Allow the local development root (`DevRootKey`). Must be false in production |
-| `CELLHIVE_OIDC_JWKS_URL` | Empty | When set, admin can additionally use verified JWT bearer tokens (ADR-036/131) |
-| `CELLHIVE_OIDC_ISSUER` / `_AUDIENCE` | Empty | JWT iss/aud validation (JWT must contain `exp`) |
+
+Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are removed from the target contract, not compatibility settings. Issuer ceilings and `max token TTL <= 86400` live in the control cell, not client declarations. Disabled/soft-deleted issuers fail closed; same-name recreation gets a new ID. Authorization caches, if used, last at most 5 seconds; initial reads may be uncached.
 
 ## Object Storage
 
@@ -60,7 +59,7 @@ peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | Local working directory root (spool, DO disks, etc. are derived from this) |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | Ephemeral runtime directory root; each runtime uses a subdirectory |
 | `CELLHIVE_REST_ADDR` | `:7001` | Internal REST (shared by Go↔Go and workerd bindings, no gRPC) |
-| `CELLHIVE_ADMIN_ADDR` | `:8082` | admin/control-plane listener |
+| `CELLHIVE_ADMIN_ADDR` | `:8082` | admin/control-plane and CF API listener; CF routes are not on `:7001/:8083` |
 | `CELLHIVE_DO_RUNTIMES` | Empty | do-runtime list (DO placement); empty disables `/v1/do/invoke` |
 
 ## Durability / Replication / RPO
@@ -168,7 +167,7 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 | Variable | Default | Purpose |
 |---|---|---|
 | `CELLHIVE_CELL_URL` | `http://127.0.0.1:7001` | cell-agent REST |
-| `CELLHIVE_ROOT_KEY` | required | Derives internal/scope/dispatch/log credentials |
+| `CELLHIVE_ROOT_KEY` | Trusted derivation only | Keep root/purpose keys in trusted components, never ordinary clients or tenant workers |
 | `CELLHIVE_USER_RUNTIME_PORT` | `8081` | public entrypoint |
 | `CELLHIVE_USER_RUNTIME_INTERNAL_PORT` | `8088` | internal dispatch |
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
@@ -229,9 +228,13 @@ The production baseline pins esbuild `0.28.2`. Platform secrets do not travel th
 |---|---|---|
 | `CELLHIVE_ADMIN_URL` | `http://127.0.0.1:8082` | admin endpoint |
 | `CELLHIVE_CONTROL_URL` | `http://127.0.0.1:7001` | internal endpoint |
-| `CELLHIVE_ROOT_KEY` | required | Derives admin (`CELLHIVE_ADMIN_TOKEN` can override) and internal tokens |
-| `CELLHIVE_ADMIN_JWT` | empty | If set, use `Bearer` instead (namespace-level authorization) |
+| `CELLHIVE_ROOT_KEY` | Not needed by ordinary clients | Trusted platform bootstrap/derivation only; business clients use JWTs or an authorized issuer key |
+| `CELLHIVE_TOKEN` | empty | Preferred CLI JWT; then `CELLHIVE_ADMIN_TOKEN` (JWT only), then profile token/adminToken; absent explicit tokens, trusted CLI signs five-minute admin JWT from root |
 | `CELLHIVE_BIN` | auto | packager used by dev `--strict-build` |
+
+ADR-304 is implemented, local acceptance including DO ticket/full baseline passed, not deployed. CLI does not read `CELLHIVE_ADMIN_JWT`. `CELLHIVE_ADMIN_TOKEN` is a CLI JWT input alias, not a server static override or old-header fallback. Issuer create requires `--max-token-ttl`, no default, maximum24h; token `--ttl` defaults to5m. See [examples](control-plane.md). Current issuer owner-authoritative reads are uncached; the future five-second cache cap is not a current revocation delay.
+
+Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD. Private unauthenticated `:7001/metrics` is separate from authenticated/filtered `:8082/v1/control/metrics`.
 
 ## Tests / CI (non-runtime)
 

@@ -25,9 +25,9 @@ func benchKVServer(tb testing.TB, bindingCacheTTL time.Duration) (*Server, strin
 	env, _ := control.NewEnvelope(bytes.Repeat([]byte{0x3}, 32))
 	b, _ := bucket.NewFSBucket(tb.TempDir())
 	s := New(Deps{
-		Cfg: config.Config{
+		Cfg: testAuthConfig(config.Config{
 			NodeID: "node-1", ScopeSecret: "scope-secret", BindingCacheTTL: bindingCacheTTL,
-		},
+		}),
 		Store:   cs,
 		Bucket:  b,
 		Control: control.New(cs, env),
@@ -40,7 +40,7 @@ func benchKVServer(tb testing.TB, bindingCacheTTL time.Duration) (*Server, strin
 	if _, err := s.Control.CreateResource(ctx, "acme", "kv", "KV", "default", "bench"); err != nil {
 		tb.Fatalf("create resource: %v", err)
 	}
-	tok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
+	tok, err := testBindingJWT(s, scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
 	if err != nil {
 		tb.Fatalf("mint: %v", err)
 	}
@@ -59,7 +59,7 @@ func BenchmarkKVPutHandler(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			req := httptest.NewRequest(http.MethodPost, "/v1/kv/put?ns=acme&key=k", bytes.NewReader(body))
-			req.Header.Set("x-cellhive-scope-token", tok)
+			req.Header.Set("Authorization", "Bearer "+tok)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
 			if rr.Code != http.StatusOK {
@@ -79,13 +79,13 @@ func BenchmarkKVPutHandlerCachedBinding(b *testing.B) {
 	body := []byte("v")
 	// Warm the cache.
 	req := httptest.NewRequest(http.MethodPost, "/v1/kv/put?ns=acme&key=warm", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			req := httptest.NewRequest(http.MethodPost, "/v1/kv/put?ns=acme&key=k", bytes.NewReader(body))
-			req.Header.Set("x-cellhive-scope-token", tok)
+			req.Header.Set("Authorization", "Bearer "+tok)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
 			if rr.Code != http.StatusOK {

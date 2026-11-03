@@ -44,9 +44,9 @@ func newControlServer(t *testing.T) *Server {
 		t.Fatalf("bucket: %v", err)
 	}
 	return New(Deps{
-		Cfg: config.Config{
+		Cfg: testAuthConfig(config.Config{
 			NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok",
-		},
+		}),
 		Bucket:    b,
 		Control:   control.New(cs, env),
 		Workflows: workflow.New(cs),
@@ -68,7 +68,10 @@ func adminDo(t *testing.T, h http.Handler, method, target, token string, body st
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	if token != "" {
-		req.Header.Set("x-cellhive-admin-token", token)
+		if token == "admin-tok" {
+			token = testRoleJWT(t, "admin")
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -129,7 +132,7 @@ func TestControlAdminAuthAndDataPlaneIsolation(t *testing.T) {
 	}
 	// Conditional pull returns 304.
 	req := httptest.NewRequest(http.MethodGet, "/v1/control/routes", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("if-none-match", etag)
 	rr2 := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr2, req)
@@ -268,8 +271,8 @@ func TestDeployBudgetExactBoundaries(t *testing.T) {
 		admin := s.AdminHandler()
 		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
 		// Empty binding metadata renders to 111 bytes; the fixed runtime reserve is
-		// 84 KiB. This literal is independently derived from that public contract.
-		const bundleBytes = 67108864 - 86016 - 111
+		// 96 KiB. This literal is independently derived from that public contract.
+		const bundleBytes = 67108864 - 98304 - 111
 		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
 		if err != nil {
 			t.Fatal(err)
@@ -285,7 +288,7 @@ func TestDeployBudgetExactBoundaries(t *testing.T) {
 		s := newControlServer(t)
 		admin := s.AdminHandler()
 		mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
-		const bundleBytes = 67108864 - 86016 - 111 + 1
+		const bundleBytes = 67108864 - 98304 - 111 + 1
 		sha, _, err := s.artifactStore().PutBundle(context.Background(), bytes.Repeat([]byte{'x'}, bundleBytes))
 		if err != nil {
 			t.Fatal(err)
@@ -613,25 +616,22 @@ func TestControlDeployAssetsAndConsumersProjected(t *testing.T) {
 // cannot call internal endpoints and vice versa; each role's own token works.
 func TestRoleTokenIsolation(t *testing.T) {
 	s := newControlServer(t)
-	s.Cfg.TokenPeer = "peer-tok"
-	s.Cfg.TokenInternal = "internal-tok"
-	s.Cfg.TokenDispatch = "dispatch-tok"
 	h := s.Handler()
 
 	// Correct role -> routed (200 for the cheap internal route).
-	if rr := do(t, h, http.MethodGet, "/v1/control/routes", "internal-tok", nil); rr.Code != http.StatusOK {
+	if rr := do(t, h, http.MethodGet, "/v1/control/routes", testRoleJWT(t, "internal"), nil); rr.Code != http.StatusOK {
 		t.Fatalf("internal token on internal route = %d, want 200", rr.Code)
 	}
 	// Wrong role: peer token on an internal route -> 401.
-	if rr := do(t, h, http.MethodGet, "/v1/control/routes", "peer-tok", nil); rr.Code != http.StatusUnauthorized {
+	if rr := do(t, h, http.MethodGet, "/v1/control/routes", testRoleJWT(t, "peer"), nil); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("peer token on internal route = %d, want 401", rr.Code)
 	}
 	// Wrong role: internal token on a peer route -> 401.
-	if rr := do(t, h, http.MethodGet, "/v1/peer/held?followers=", "internal-tok", nil); rr.Code != http.StatusUnauthorized {
+	if rr := do(t, h, http.MethodGet, "/v1/peer/held?followers=", testRoleJWT(t, "internal"), nil); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("internal token on peer route = %d, want 401", rr.Code)
 	}
 	// Peer token on a peer route -> not 401 (routed; body may be rejected).
-	if rr := do(t, h, http.MethodGet, "/v1/peer/held?followers=", "peer-tok", nil); rr.Code == http.StatusUnauthorized {
+	if rr := do(t, h, http.MethodGet, "/v1/peer/held?followers=", testRoleJWT(t, "peer"), nil); rr.Code == http.StatusUnauthorized {
 		t.Fatalf("peer token on peer route = 401, want routed")
 	}
 }
@@ -813,7 +813,7 @@ func TestControlHostAndWorkerEndpoints(t *testing.T) {
 
 	// If-None-Match revalidation.
 	req := httptest.NewRequest(http.MethodGet, "/v1/control/host?host=app.test", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("if-none-match", hostEtag)
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -844,7 +844,7 @@ func TestControlHostAndWorkerEndpoints(t *testing.T) {
 	}
 	workerEtag := rr.Header().Get("etag")
 	req = httptest.NewRequest(http.MethodGet, "/v1/control/worker?ns=acme&worker=web", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("if-none-match", workerEtag)
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -897,7 +897,7 @@ func TestInternalBindingsIncludeManagedSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/internal/worker/bindings?ns=acme&worker=api", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -929,7 +929,7 @@ func TestWorkerExecutionViewIncludesManagedSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/control/worker?ns=acme&worker=api", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -961,7 +961,7 @@ func TestSecretPutRejectsRuntimeEnvOverBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/control/secret", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-admin-token", "admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), `"error":"worker_env_too_large"`) {
@@ -981,12 +981,12 @@ func TestWorkflowCreateRejectsPayloadOverLimit(t *testing.T) {
 	if _, err := s.Control.CreateResource(ctx, "acme", "workflow", "WF", "acme/__workflow__/WF", "me"); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "WF"})
+	tok, err := testBindingJWT(s, scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "WF"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/workflow/create?ns=acme&workflow=WF", bytes.NewReader(bytes.Repeat([]byte{'x'}, (1<<20)+1)))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusRequestEntityTooLarge {

@@ -19,7 +19,11 @@ with socket.socket() as sock:
 PY
 )
 export WRANGLER_SEND_METRICS=false
-export CLOUDFLARE_API_TOKEN=cf-tail-e2e-admin-token
+auth() { CELLHIVE_ROOT_KEY="$ROOT_KEY" node "$ROOT/scripts/e2e/jwt.cjs" admin; }
+# A Wrangler process cannot refresh an environment credential in place.
+# Keep each invocation below the JWT lifetime; HTTP loops mint independently.
+TAIL_DURATION=${CELLHIVE_CF_TAIL_DURATION:-100}
+[[ $TAIL_DURATION =~ ^[0-9]+$ && $TAIL_DURATION -le 240 ]] || { echo 'Tail duration must be <=240s for a 300s JWT' >&2; exit 1; }
 export CLOUDFLARE_ACCOUNT_ID=e2e
 
 compose() { docker compose --project-name "$PROJECT" -f "$TMP/compose.yml" "$@"; }
@@ -62,7 +66,6 @@ services:
     command: ["cell-agent"]
     environment:
       CELLHIVE_ROOT_KEY: $ROOT_KEY
-      CELLHIVE_ADMIN_TOKEN: cf-tail-e2e-admin-token
       CELLHIVE_BASE_DOMAIN: cell.test
       CELLHIVE_NODE_ID: cf-tail-a
       CELLHIVE_ADVERTISE: agent-a:7001
@@ -84,7 +87,6 @@ services:
     command: ["cell-agent"]
     environment:
       CELLHIVE_ROOT_KEY: $ROOT_KEY
-      CELLHIVE_ADMIN_TOKEN: cf-tail-e2e-admin-token
       CELLHIVE_BASE_DOMAIN: cell.test
       CELLHIVE_NODE_ID: cf-tail-b
       CELLHIVE_ADVERTISE: agent-b:7001
@@ -106,7 +108,6 @@ services:
     command: ["user-runtime"]
     environment:
       CELLHIVE_ROOT_KEY: $ROOT_KEY
-      CELLHIVE_ADMIN_TOKEN: cf-tail-e2e-admin-token
       CELLHIVE_CELL_URL: http://$RUNTIME_CELL_AGENT:7001
       CELLHIVE_USER_RUNTIME_PORT: '8081'
       CELLHIVE_USER_RUNTIME_INTERNAL_PORT: '8088'
@@ -175,7 +176,7 @@ retry compose exec -T agent-a cellhive app create e2e >/dev/null
 retry compose exec -T agent-a cellhive queue create e2e JOBS >/dev/null
 retry compose exec -T agent-a cellhive workflows create e2e FLOW >/dev/null
 
-(cd "$TMP/app" && CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$A_PORT/client/v4" npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy.log" 2>&1)
+(cd "$TMP/app" && CLOUDFLARE_API_TOKEN="$(auth)" CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$A_PORT/client/v4" timeout 240s npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy.log" 2>&1)
 compose up -d agent-b
 [[ $(compose port agent-b 8082) == "127.0.0.1:$B_PORT" ]]
 for i in $(seq 1 60); do
@@ -187,8 +188,8 @@ if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then
   compose up -d user-runtime
 fi
 RUNTIME_PORT=$(compose port user-runtime 8081 | sed 's/.*://')
-(cd "$TMP/app" && CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$B_PORT/client/v4" npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy-peer.log" 2>&1)
-curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+(cd "$TMP/app" && CLOUDFLARE_API_TOKEN="$(auth)" CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$B_PORT/client/v4" timeout 240s npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy-peer.log" 2>&1)
+curl -fsS -H "Authorization: Bearer $(auth)" \
   "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" >"$TMP/versions-b.json"
 python3 - "$TMP/versions-b.json" <<'PY'
 import json,sys
@@ -196,11 +197,12 @@ items=json.load(open(sys.argv[1]))['result']['items']
 assert len(items)>=2, items
 assert {'1','2'}.issubset({item['id'] for item in items}), items
 PY
-(cd "$TMP/app" && CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$B_PORT/client/v4" timeout "${CELLHIVE_CF_TAIL_DURATION:-100}s" npx --yes wrangler@4.133.0 tail web --format json --config wrangler.jsonc >"$TMP/tail.log" 2>&1) &
+(cd "$TMP/app" && CLOUDFLARE_API_TOKEN="$(auth)" CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$B_PORT/client/v4" timeout "${TAIL_DURATION}s" npx --yes wrangler@4.133.0 tail web --format json --config wrangler.jsonc >"$TMP/tail.log" 2>&1) &
 TAIL_PID=$!
 cat >"$TMP/tail-payload-ws.mjs" <<'JS'
 import fs from 'node:fs';
-const [base, token, output, ready] = process.argv.slice(2);
+const [base, output, ready] = process.argv.slice(2);
+const token = process.env.CLOUDFLARE_API_TOKEN;
 const response = await fetch(`${base}/client/v4/accounts/e2e/workers/scripts/web/tails`, {
   method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: '{}',
 });
@@ -216,7 +218,7 @@ process.on('SIGTERM', () => socket.close());
 JS
 start_raw_tail() {
   rm -f "$TMP/tail-raw.ready"
-  node "$TMP/tail-payload-ws.mjs" "http://127.0.0.1:$B_PORT" "$CLOUDFLARE_API_TOKEN" "$TMP/tail-raw.jsonl" "$TMP/tail-raw.ready" >>"$TMP/tail-raw.log" 2>&1 &
+  CLOUDFLARE_API_TOKEN="$(auth)" node "$TMP/tail-payload-ws.mjs" "http://127.0.0.1:$B_PORT" "$TMP/tail-raw.jsonl" "$TMP/tail-raw.ready" >>"$TMP/tail-raw.log" 2>&1 &
   RAW_TAIL_PID=$!
   for _ in $(seq 1 50); do [[ -f "$TMP/tail-raw.ready" ]] && break; kill -0 "$RAW_TAIL_PID" 2>/dev/null || break; sleep 0.1; done
   [[ -f "$TMP/tail-raw.ready" ]] || fail "raw Tail WebSocket did not open: $(cat "$TMP/tail-raw.log")"
@@ -313,7 +315,7 @@ if rg -q 'cf-tail-e2e-admin-token' "$TMP/tail.log"; then
 fi
 if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then
   echo '== Cron UTC minute while control owner A is stopped =='
-  curl -fsS -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
     >"$TMP/cron-invocations.json"
   python3 - "$TMP/cron-invocations.json" <<'PY'
@@ -351,7 +353,7 @@ PY
   }
   CRON_PROOF=''
   for _ in $(seq 1 90); do
-    if curl -fsS -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+    if curl -fsS -H "Authorization: Bearer $(auth)" \
       "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
       >"$TMP/cron-invocations.json" 2>/dev/null; then
       if CRON_PROOF=$(cron_slot_count); then break; fi
@@ -359,7 +361,7 @@ PY
     sleep 1
   done
   [[ -n $CRON_PROOF ]] || fail "B did not complete the Cron slot $CRON_SLOT_MS while A was stopped"
-  curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
     >"$TMP/versions-after-a-stop.json"
   python3 - "$TMP/versions-b.json" "$TMP/versions-after-a-stop.json" <<'PY'
@@ -375,7 +377,7 @@ PY
   done
   compose exec -T agent-a curl -fsS http://127.0.0.1:7001/readyz >/dev/null
   sleep 8
-  curl -fsS -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
     >"$TMP/cron-invocations.json"
   CRON_PROOF=$(cron_slot_count) || fail 'Cron slot disappeared after A returned'
@@ -403,13 +405,13 @@ PY
   CONTROL_OWNER=$(compose exec -T agent-a cat /data/bucket/cells/__platform__/__control__/main/owner.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
   [[ $CONTROL_OWNER == cf-tail-a ]] || fail "expected A to own control before precommit SIGKILL, got $CONTROL_OWNER"
   cat >"$TMP/hold-deploy-body.py" <<'PY'
-import pathlib,socket,sys
+import os,pathlib,socket,sys
 port,body_file,ready_file=sys.argv[1:]
 body=pathlib.Path(body_file).read_bytes()
 with socket.create_connection(('127.0.0.1',int(port)),timeout=10) as sock:
     sock.settimeout(30)
     head=(f'POST /v1/control/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\n'
-          f'x-cellhive-admin-token: cf-tail-e2e-admin-token\r\n'
+          f'Authorization: Bearer {os.environ["CLOUDFLARE_API_TOKEN"]}\r\n'
           f'Content-Type: application/json\r\nContent-Length: {len(body)}\r\n'
           f'Connection: close\r\n\r\n').encode()
     sock.sendall(head+body[:max(1,len(body)//2)])
@@ -418,7 +420,7 @@ with socket.create_connection(('127.0.0.1',int(port)),timeout=10) as sock:
     if data:
         raise SystemExit(f'server replied before request body completed: {data!r}')
 PY
-  python3 "$TMP/hold-deploy-body.py" "$A_PORT" "$TMP/precommit-deploy.json" "$TMP/precommit-ready" &
+  CLOUDFLARE_API_TOKEN="$(auth)" python3 "$TMP/hold-deploy-body.py" "$A_PORT" "$TMP/precommit-deploy.json" "$TMP/precommit-ready" &
   HOLD_PID=$!
   for _ in $(seq 1 50); do [[ -s "$TMP/precommit-ready" ]] && break; sleep 0.1; done
   [[ -s "$TMP/precommit-ready" ]] || fail 'partial HTTP request was not sent'
@@ -426,7 +428,7 @@ PY
   wait "$HOLD_PID" || fail 'partial HTTP request did not end with server death'
   PRECOMMIT_RECOVERED=0
   for _ in $(seq 1 40); do
-    if curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+    if curl -fsS -H "Authorization: Bearer $(auth)" \
       "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
       >"$TMP/precommit-versions-before-retry.json" 2>/dev/null; then
       if python3 - "$TMP/precommit-versions-before-retry.json" "$TMP/precommit-expected.json" <<'PY'
@@ -439,12 +441,12 @@ PY
     sleep 2
   done
   [[ $PRECOMMIT_RECOVERED == 1 ]] || fail 'B did not recover the unchanged version set after precommit SIGKILL'
-  curl -fsS -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     -H 'content-type: application/json' --data-binary "@$TMP/precommit-deploy.json" \
     "http://127.0.0.1:$B_PORT/v1/control/deploy" >"$TMP/precommit-retry.json"
-  curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" >"$TMP/precommit-versions-after-retry.json"
-  curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/deployments" >"$TMP/precommit-deployments.json"
   python3 - "$TMP/precommit-retry.json" "$TMP/precommit-versions-after-retry.json" "$TMP/precommit-deployments.json" "$TMP/precommit-expected.json" <<'PY'
 import json,sys
@@ -479,7 +481,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body=self.rfile.read(int(self.headers['Content-Length']))
         request=urllib.request.Request(target+self.path,body,method='POST',headers={
             'Content-Type':'application/json',
-            'x-cellhive-admin-token':self.headers['x-cellhive-admin-token']})
+            'Authorization':self.headers['Authorization']})
         try:
             with urllib.request.urlopen(request,timeout=30) as response:
                 status=response.status
@@ -503,7 +505,7 @@ PY
   for _ in $(seq 1 50); do [[ -s "$TMP/proxy-port" ]] && break; sleep 0.1; done
   [[ -s "$TMP/proxy-port" ]] || fail 'deploy fault proxy did not start'
   set +e
-  curl -s -o /dev/null -X POST -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+  curl -s -o /dev/null -X POST -H "Authorization: Bearer $(auth)" \
     -H 'content-type: application/json' --data-binary "@$TMP/reconcile-deploy.json" \
     "http://127.0.0.1:$(cat "$TMP/proxy-port")/v1/control/deploy"
   LOST_RESPONSE_RC=$?
@@ -528,7 +530,7 @@ PY
     RETRY_PORT=$B_PORT
     DEPLOY_RECOVERED=0
     for _ in $(seq 1 40); do
-      if curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+      if curl -fsS -H "Authorization: Bearer $(auth)" \
         "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
         >"$TMP/versions-after-deploy-kill.json" 2>/dev/null; then
         if python3 - "$TMP/versions-after-deploy-kill.json" "$TMP/reconcile-expected.json" <<'PY'
@@ -543,12 +545,12 @@ PY
     done
     [[ $DEPLOY_RECOVERED == 1 ]] || fail 'B did not recover deployment after A SIGKILL'
   fi
-  curl -fsS -H "x-cellhive-admin-token: $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     -H 'content-type: application/json' --data-binary "@$TMP/reconcile-deploy.json" \
     "http://127.0.0.1:$RETRY_PORT/v1/control/deploy" >"$TMP/reconcile-retry.json"
-  curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" >"$TMP/reconcile-versions.json"
-  curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/deployments" >"$TMP/reconcile-deployments.json"
   python3 - "$TMP/reconcile-retry.json" "$TMP/reconcile-versions.json" "$TMP/reconcile-deployments.json" "$TMP/reconcile-expected.json" <<'PY'
 import json,sys

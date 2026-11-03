@@ -31,8 +31,20 @@ func TestValidateRootKey(t *testing.T) {
 	base.RootKey = root
 	base.TokenPeer, base.TokenInternal, base.TokenDispatch = c.Peer, c.Internal, c.Dispatch
 	base.TokenLog, base.AdminToken, base.ScopeSecret = c.Log, c.Admin, c.Scope
+	base.BindingSigningKey, base.DoTicketSecret = c.Binding, c.DoTicket
 	if err := base.Validate(); err != nil {
 		t.Fatalf("real root key rejected: %v", err)
+	}
+	for _, field := range []string{"binding", "do-ticket"} {
+		broken := base
+		if field == "binding" {
+			broken.BindingSigningKey = ""
+		} else {
+			broken.DoTicketSecret = ""
+		}
+		if err := broken.Validate(); err == nil {
+			t.Fatalf("missing %s signing key accepted", field)
+		}
 	}
 
 	// An undecodable root derives nothing, which Validate must catch.

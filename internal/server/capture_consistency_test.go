@@ -80,9 +80,9 @@ func restoreDB(t *testing.T, rep *replica.Manager, scope cell.Scope, epoch uint6
 // no duplicate keys, and SQLite integrity.
 func TestKVCaptureConsistencyN(t *testing.T) {
 	const n = 250
-	srv, rep, secret := captureServer(t)
+	srv, rep, _ := captureServer(t)
 	h := srv.Handler()
-	tok, err := scopedtoken.Mint(secret, scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestKVCaptureConsistencyN(t *testing.T) {
 		val := fmt.Sprintf("v-%04d-%s", i, strings.Repeat("x", (i*37)%8192))
 		want[key] = val
 		req := httptest.NewRequest(http.MethodPost, "/v1/kv/put?ns=acme&key="+key, bytesReader(val))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
@@ -146,9 +146,9 @@ func TestKVCaptureConsistencyN(t *testing.T) {
 // bucket restore byte-exact with integrity intact.
 func TestD1CaptureConsistency(t *testing.T) {
 	const n = 100
-	srv, rep, secret := captureServer(t)
+	srv, rep, _ := captureServer(t)
 	h := srv.Handler()
-	tok, err := scopedtoken.Mint(secret, scopedtoken.Claims{Namespace: "acme", Kind: "d1", Name: "DB"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "d1", Name: "DB"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestD1CaptureConsistency(t *testing.T) {
 		pj, _ := json.Marshal(params)
 		body := fmt.Sprintf(`{"sql":%q,"params":%s}`, sqlStr, pj)
 		req := httptest.NewRequest(http.MethodPost, "/v1/d1/exec?ns=acme&db=DB", bytesReader(body))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {

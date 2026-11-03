@@ -1,5 +1,6 @@
 // CellHive user-runtime — internal privileged dispatch service (:8088).
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
+import { authorized as verifyInternal, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
 import { ByteLRU, textWeight, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
 import { decode, encode } from "rpc-codec.js";
@@ -26,29 +27,29 @@ export default {
     if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
     if (url.pathname === "/healthz") return new Response("ok");
     if(env.CH_POOL_TARGET&&env.CH_POOL_TARGET!=="null"){
-      if(!authorized(req,env))return json({error:"unauthorized"},401);
+      if(!await authorized(req,env))return json({error:"unauthorized"},401);
       let identity;try{identity=await req.clone().json();}catch(e){return json({error:"bad_json"},400);}
       const target=JSON.parse(env.CH_POOL_TARGET);
       if(identity.namespace!==target.namespace||identity.worker!==target.worker||identity.version!==target.version||identity.bundle_sha!==target.bundle_sha||(identity.storage_id||"")!==(target.storage_id||""))return json({error:"dedicated_target_mismatch"},403);
     }
     if (req.method === "POST" && url.pathname === "/v1/queues/dispatch") {
-      if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
+      if (!await authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchQueues(req, env, ctx);
     }
     if (req.method === "POST" && url.pathname === "/v1/timers/dispatch") {
-      if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
+      if (!await authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchTimers(req, env, ctx);
     }
     if (req.method === "POST" && url.pathname === "/v1/workflows/run") {
-      if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
+      if (!await authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchWorkflows(req, env, ctx);
     }
     if (req.method === "POST" && url.pathname === "/v1/services/fetch") {
-      if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
+      if (!await authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchServiceFetch(req, env, ctx);
     }
     if (req.method === "POST" && url.pathname === "/v1/services/run") {
-      if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
+      if (!await authorized(req, env)) return json({ error: "unauthorized" }, 401);
       return dispatchServiceRun(req, env, ctx);
     }
     return new Response("not found", { status: 404 });
@@ -58,13 +59,7 @@ export default {
 // Dispatch endpoints are privileged: only the cell-agent may call them with the
 // dispatch-role token (Tier-1, ADR-075). Constant-time compare.
 function authorized(req, env) {
-  const want = env.DISPATCH_TOKEN || "";
-  if (!want) return false;
-  const got = req.headers.get("x-cellhive-internal-token") || "";
-  if (got.length !== want.length) return false;
-  let diff = 0;
-  for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ want.charCodeAt(i);
-  return diff === 0;
+  return verifyInternal(req, env.DISPATCH_TOKEN, "dispatch");
 }
 
 async function dispatchQueues(req, env, ctx) {
@@ -161,7 +156,7 @@ async function persistInvocation(env, record) {
   const url = new URL(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/invocations");
   url.searchParams.set("ns", record.namespace);
   const response = await env.PLATFORM.fetch(url, {
-    method:"POST",headers:{"content-type":"application/json","x-cellhive-internal-token":env.CELL_TOKEN},body:JSON.stringify(payload),
+    method:"POST",headers:{"content-type":"application/json",...await internalHeaders(env.CELL_TOKEN)},body:JSON.stringify(payload),
   });
   if (!response.ok) throw new Error("invocation persistence failed: " + response.status);
   return { ...(await response.json()).invocation, _logging_enabled: true };
@@ -560,7 +555,7 @@ async function fetchSpec(env, ns, worker, version) {
   if (version !== undefined && version !== null) path += "&version=" + encodeURIComponent(version);
   try {
     const r = await fetch(env.CELL_URL + path, {
-      headers: { "x-cellhive-internal-token": env.CELL_TOKEN },
+      headers: await internalHeaders(env.CELL_TOKEN),
     });
     if (!r.ok) return { ok: false, bindings: {}, vars: {} };
     const j = await r.json();
@@ -580,7 +575,7 @@ async function readJSON(req) {
 
 async function fetchBundle(env, sha) {
   const q = "?sha=" + encodeURIComponent(sha);
-  const headers = { "x-cellhive-internal-token": env.CELL_TOKEN };
+  const headers = await internalHeaders(env.CELL_TOKEN);
   const signed = await fetch(env.CELL_URL + "/v1/internal/bundle-url" + q, { headers });
   if (signed.ok) {
     const { url } = await signed.json();

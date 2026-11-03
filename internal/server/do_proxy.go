@@ -75,28 +75,8 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	// and class. Verify that the selected worker's active version actually
 	// declares this binding for this class; otherwise a token for one DO
 	// binding could load another worker's binding spec in the same namespace.
-	if name := s.scopeName(r); name != "" && s.Control != nil {
-		tw, ok, err := s.doWorkerFromOwner(r.Context(), req.Namespace, req.Worker)
-		if err != nil {
-			writeErr(w, http.StatusServiceUnavailable, "control_unavailable", err.Error())
-			return
-		}
-		if !ok {
-			writeErr(w, http.StatusForbidden, "scope_binding_mismatch", "worker has no such Durable Object binding")
-			return
-		}
-		matched := false
-		for _, b := range tw.Bindings {
-			if b.Type == "do" && b.Name == name && (b.ID == req.Class || (b.ID == "" && b.Name == req.Class)) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			writeErr(w, http.StatusForbidden, "scope_binding_mismatch",
-				"request worker/class does not match the scoped DO binding")
-			return
-		}
+	if !s.authorizeDOExecution(w, r, &req) {
+		return
 	}
 	if len(req.RPC) > 0 {
 		if req.Request != nil {
@@ -114,8 +94,9 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		shardClass = req.Class
 	}
 	shard := cell.DOShard(req.Namespace, req.Worker, shardClass, req.ID)
-	if req.Shard != nil {
-		shard = *req.Shard
+	if req.Shard != nil && *req.Shard != shard {
+		writeErr(w, http.StatusForbidden, "shard_mismatch", "shard must match object identity")
+		return
 	}
 	out := map[string]any{
 		"namespace": req.Namespace, "worker": req.Worker, "class": req.Class,
@@ -165,7 +146,7 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case herr == nil && !doRetryable(res.status, res.body):
 			s.setDOOwner(key, res.owner)
-			ticket, exp := s.doTicket(req.Namespace, req.Worker, shardClass, shard)
+			ticket, exp := s.doTicket(req, shardClass, shard, r)
 			writeDO(w, res, ticket, exp)
 			return
 		case herr == nil || isDialError(herr):
@@ -190,7 +171,7 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.setDOOwner(key, res.owner)
-		ticket, exp := s.doTicket(req.Namespace, req.Worker, shardClass, shard)
+		ticket, exp := s.doTicket(req, shardClass, shard, r)
 		writeDO(w, res, ticket, exp)
 		return
 	}
@@ -215,12 +196,22 @@ func (s *Server) handleDOConnectLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	storageClass := q.Get("storage_class")
+	version, err := strconv.Atoi(q.Get("version"))
+	if q.Get("version") != "" && (err != nil || version < 0) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid version")
+		return
+	}
+	req := doInvokeReq{Namespace: ns, Worker: worker, Class: class, ID: id, BundleSHA: q.Get("bundle_sha"), StorageID: q.Get("storage_id"), StorageClass: storageClass, Version: version}
+	if !s.authorizeDOExecution(w, r, &req) {
+		return
+	}
+	storageClass = req.StorageClass
 	if storageClass == "" {
 		storageClass = class
 	}
 	shard := cell.DOShard(ns, worker, storageClass, id)
 	addr := strings.TrimRight(s.Cfg.DoRuntimes[shard%len(s.Cfg.DoRuntimes)], "/")
-	ticket, exp := s.doTicket(ns, worker, storageClass, shard)
+	ticket, exp := s.doTicket(req, storageClass, shard, r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"owner": addr, "ticket": ticket, "exp_ms": exp, "shard": shard,
 	})
@@ -245,7 +236,9 @@ func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, b
 		return doResult{}, err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	if err := s.setInternalAuthorization(req, "internal"); err != nil {
+		return doResult{}, err
+	}
 	// A tenant redirect is a response, not another platform invocation.
 	forwardClient := *client
 	forwardClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -316,17 +309,28 @@ func writeDO(w http.ResponseWriter, res doResult, ticket string, exp int64) {
 
 // doTicket mints a short-lived ticket authorizing POST /v1/do/invoke for one DO
 // shard (ADR-105). Empty string means tickets are disabled (no secret).
-func (s *Server) doTicket(ns, worker, storageClass string, shard int) (string, int64) {
-	secret := s.Cfg.DoTicketSecret
-	if secret == "" {
-		secret = s.Cfg.ScopeSecret
-	}
-	if secret == "" {
+func (s *Server) doTicket(req doInvokeReq, storageClass string, shard int, parents ...*http.Request) (string, int64) {
+	secret, err := s.jwtKey("token/do-ticket")
+	if err != nil {
 		return "", 0
 	}
 	exp := time.Now().Add(doOwnerHintTTL).UnixMilli()
-	tok, err := doticket.Mint([]byte(secret), doticket.Claims{
-		NS: ns, Worker: worker, StorageClass: storageClass, Shard: shard, Exp: exp,
+	if len(parents) > 0 && parents[0].Header.Get("Authorization") != "" {
+		_, claims, err := s.verifyBearer(parents[0])
+		if err != nil {
+			return "", 0
+		}
+		if claims.ExpiresAt*1000 < exp {
+			exp = claims.ExpiresAt * 1000
+		}
+	}
+	limits, err := json.Marshal(req.Limits)
+	if err != nil {
+		return "", 0
+	}
+	tok, err := doticket.Mint(secret, doticket.Claims{
+		NS: req.Namespace, Worker: req.Worker, StorageClass: storageClass, Shard: shard, Exp: exp,
+		Class: req.Class, BundleSHA: req.BundleSHA, StorageID: req.StorageID, Version: req.Version, Limits: string(limits),
 	})
 	if err != nil {
 		return "", 0
@@ -390,7 +394,7 @@ func doRetryable(status int, body []byte) bool {
 // doWorkerFromOwner authorizes against the active worker on the control owner.
 // Only the read is forwarded: forwarding the invocation would change its
 // response limits and introduce another transport with an ambiguous outcome.
-func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (control.WorkerView, bool, error) {
+func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string, versions ...int) (control.WorkerView, bool, error) {
 	if s.Owner != nil {
 		o, _, err := s.Owner.ResolveRoute(ctx, control.Scope())
 		if err != nil || !s.routeLive(ctx, control.Scope(), o, time.Now()) {
@@ -401,6 +405,11 @@ func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (cont
 		}
 	}
 	q := url.Values{"ns": {ns}, "worker": {worker}}
+	version := 0
+	if len(versions) > 0 {
+		version = versions[0]
+		q.Set("version", strconv.Itoa(version))
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://cellhive.internal/v1/control/worker?"+q.Encode(), http.NoBody)
 	if err != nil {
 		return control.WorkerView{}, false, err
@@ -432,5 +441,49 @@ func (s *Server) doWorkerFromOwner(ctx context.Context, ns, worker string) (cont
 			return control.WorkerView{}, false, fmt.Errorf("control owner unavailable")
 		}
 	}
-	return s.Control.WorkerEnv(ctx, ns, worker)
+	return s.Control.VersionEnv(ctx, ns, worker, version)
+}
+
+func (s *Server) authorizeDOExecution(w http.ResponseWriter, r *http.Request, req *doInvokeReq) bool {
+	if req.Kind != "" && req.Kind != "fetch" && req.Kind != "rpc" {
+		writeErr(w, http.StatusForbidden, "operation_forbidden", "alarm delivery requires internal dispatch")
+		return false
+	}
+	if s.Control == nil {
+		if s.scopeNS(r) != "" {
+			writeErr(w, http.StatusServiceUnavailable, "control_unavailable", "worker authorization unavailable")
+			return false
+		}
+		return true // In-process callers without scoped HTTP auth supply trusted metadata.
+	}
+	view, ok, err := s.doWorkerFromOwner(r.Context(), req.Namespace, req.Worker, req.Version)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "control_unavailable", err.Error())
+		return false
+	}
+	matched := false
+	for _, b := range view.Bindings {
+		if b.Type == "do" && (s.scopeName(r) == "" || b.Name == s.scopeName(r)) && (b.ID == req.Class || b.ID == "" && b.Name == req.Class) {
+			matched = true
+		}
+	}
+	for _, cls := range view.DeletedClasses {
+		if cls == req.Class {
+			matched = false
+		}
+	}
+	storageClass := view.ClassStorage[req.Class]
+	if storageClass == "" {
+		storageClass = req.Class
+	}
+	if !ok || !matched || req.BundleSHA != "" && req.BundleSHA != view.BundleSHA || req.StorageID != "" && req.StorageID != view.StorageID || req.StorageClass != "" && req.StorageClass != storageClass {
+		writeErr(w, http.StatusForbidden, "scope_binding_mismatch", "request execution identity does not match authorized worker version")
+		return false
+	}
+	req.BundleSHA = view.BundleSHA
+	req.StorageID = view.StorageID
+	req.StorageClass = storageClass
+	req.Version = view.Version
+	req.Limits = view.Limits
+	return true
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
@@ -29,10 +30,10 @@ func newScopeServer(t *testing.T) *Server {
 	env, _ := control.NewEnvelope(bytes.Repeat([]byte{0x3}, 32))
 	b, _ := bucket.NewFSBucket(t.TempDir())
 	return New(Deps{
-		Cfg: config.Config{
+		Cfg: testAuthConfig(config.Config{
 			NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok",
 			ScopeSecret: "scope-secret",
-		},
+		}),
 		Store:   cs,
 		Bucket:  b,
 		Control: control.New(cs, env),
@@ -46,11 +47,7 @@ func newScopeServer(t *testing.T) *Server {
 // mint computes a binding token locally (ADR-074); no server round trip.
 func mint(t *testing.T, s *Server, ns, kind, name string) string {
 	t.Helper()
-	tok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name})
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	return tok
+	return jwtTestToken(t, s, "token/scope", bearertoken.Claims{Type: "binding", Namespace: ns, Kind: kind, Name: name})
 }
 
 // kvReq sends a binding request WITHOUT the internal token, proving binding
@@ -59,7 +56,7 @@ func kvReq(t *testing.T, s *Server, method, path, token string, body []byte) int
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	if token != "" {
-		req.Header.Set("x-cellhive-scope-token", token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -134,13 +131,13 @@ func TestScopeAuthEnforcesResourceName(t *testing.T) {
 		tok := mint(t, s, "acme", tc.kind, tc.name)
 
 		matching := httptest.NewRequest(http.MethodPost, "/x?ns=acme&"+tc.param+"="+tc.name, nil)
-		matching.Header.Set("x-cellhive-scope-token", tok)
+		matching.Header.Set("Authorization", "Bearer "+tok)
 		if rr := httptest.NewRecorder(); func() int { handler(rr, matching); return rr.Code }() != http.StatusOK {
 			t.Fatalf("%s matching resource = %d, want 200", tc.kind, rr.Code)
 		}
 
 		cross := httptest.NewRequest(http.MethodPost, "/x?ns=acme&"+tc.param+"="+tc.other, nil)
-		cross.Header.Set("x-cellhive-scope-token", tok)
+		cross.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		handler(rr, cross)
 		if rr.Code != http.StatusForbidden {
@@ -183,20 +180,6 @@ func TestScopeResourceMismatchDeniedViaHandler(t *testing.T) {
 	}
 }
 
-// mintIssuer signs a token as a delegated issuer (ADR-181).
-func mintIssuer(t *testing.T, s *Server, iss string, c scopedtoken.Claims) string {
-	t.Helper()
-	key, err := scopedtoken.IssuerKey([]byte(s.Cfg.ScopeSecret), iss)
-	if err != nil {
-		t.Fatalf("issuer key: %v", err)
-	}
-	tok, err := scopedtoken.Mint(key, c)
-	if err != nil {
-		t.Fatalf("mint issuer: %v", err)
-	}
-	return tok
-}
-
 // scopeAuthCode runs the middleware alone (no handler) and returns its status.
 func scopeAuthCode(s *Server, kind, token, query string) int {
 	handler := s.scopeAuth(kind)(func(w http.ResponseWriter, r *http.Request) {
@@ -204,25 +187,23 @@ func scopeAuthCode(s *Server, kind, token, query string) int {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/x?"+query, nil)
 	if token != "" {
-		req.Header.Set("x-cellhive-scope-token", token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 	return rr.Code
 }
 
-// TestScopeAuthDelegated covers ADR-181 delegated tokens: segment globs, the
-// mandatory expiry, ns as the isolation boundary, and the token-derived-resource
-// wildcard rejection.
+// TestScopeAuthDelegated covers registered issuer binding capabilities and
+// rejects the retired wildcard/expiry-free delegated format.
 func TestScopeAuthDelegated(t *testing.T) {
 	s := newScopeServer(t)
-	exp := time.Now().Add(time.Minute).UnixMilli()
-
-	// Glob resource name: matches any d1 db under acme, no registered binding
-	// required (ACL is the ns/scope for delegated tokens).
-	tok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
-		Namespace: "acme", Kind: "d1", Name: "user*", Iss: "vwork", ExpiresMs: exp,
-	})
+	issuer, err := s.Control.CreateIssuer(t.Context(), "vwork", []string{"acme"}, 120, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid := "issuer/" + issuer.ID
+	tok := jwtTestToken(t, s, kid, bearertoken.Claims{Type: "binding", Namespace: "acme", Kind: "d1", Name: "user42"})
 	if code := scopeAuthCode(s, "d1", tok, "ns=acme&db=user42"); code != http.StatusOK {
 		t.Fatalf("glob match = %d, want 200", code)
 	}
@@ -233,31 +214,30 @@ func TestScopeAuthDelegated(t *testing.T) {
 	if code := scopeAuthCode(s, "d1", tok, "ns=evil&db=user42"); code != http.StatusForbidden {
 		t.Fatalf("cross-ns = %d, want 403", code)
 	}
-	// Kind glob.
-	ktok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
-		Namespace: "acme", Kind: "*", Name: "main", Iss: "vwork", ExpiresMs: exp,
-	})
-	if code := scopeAuthCode(s, "queue", ktok, "ns=acme&queue=main"); code != http.StatusOK {
-		t.Fatalf("kind glob = %d, want 200", code)
+	if code := scopeAuthCode(s, "queue", tok, "ns=acme&queue=user42"); code != 403 {
+		t.Fatalf("wrong kind = %d", code)
 	}
-	// A delegated token without an expiry is rejected.
-	notok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
-		Namespace: "acme", Kind: "d1", Name: "a", Iss: "vwork",
-	})
+	key, _ := s.jwtKey(kid)
+	for _, c := range []bearertoken.Claims{
+		{Ver: 1, Type: "binding", Subject: "test", Audience: "cellhive", IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + 60, Namespace: "acme", Kind: "*", Name: "main"},
+		{Ver: 1, Type: "binding", Subject: "test", Audience: "cellhive", IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + 60, Namespace: "acme", Kind: "kv", Name: "*"},
+	} {
+		wild, err := bearertoken.Mint(key, kid, c)
+		if err != nil {
+			continue
+		}
+		if code := scopeAuthCode(s, "queue", wild, "ns=acme&queue=main"); code != 403 {
+			t.Fatalf("wildcard binding accepted: %d", code)
+		}
+	}
+	notok, _ := scopedtoken.Mint([]byte("old-secret"), scopedtoken.Claims{Namespace: "acme", Kind: "d1", Name: "a"})
 	if code := scopeAuthCode(s, "d1", notok, "ns=acme&db=a"); code != http.StatusForbidden {
 		t.Fatalf("no-exp delegated = %d, want 403", code)
 	}
-	// A wildcard name for a token-derived resource (kv) cannot resolve a cell.
-	kvtok := mintIssuer(t, s, "vwork", scopedtoken.Claims{
-		Namespace: "acme", Kind: "kv", Name: "*", Iss: "vwork", ExpiresMs: exp,
-	})
-	if code := scopeAuthCode(s, "kv", kvtok, "ns=acme"); code != http.StatusForbidden {
-		t.Fatalf("wildcard kv = %d, want 403", code)
+	wrong, err := bearertoken.Mint(bytes.Repeat([]byte{3}, 32), kid, bearertoken.Claims{Ver: 1, Type: "binding", Subject: "test", Audience: "cellhive", IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + 60, Namespace: "acme", Kind: "d1", Name: "a"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A token signed by a different issuer key does not verify.
-	wrong := mintIssuer(t, s, "other", scopedtoken.Claims{
-		Namespace: "acme", Kind: "d1", Name: "a", Iss: "vwork", ExpiresMs: exp,
-	})
 	if code := scopeAuthCode(s, "d1", wrong, "ns=acme&db=a"); code != http.StatusForbidden {
 		t.Fatalf("wrong issuer = %d, want 403", code)
 	}

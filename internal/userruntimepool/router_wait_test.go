@@ -38,7 +38,7 @@ func TestHostViewExpiredFlight(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(404) }))
 	defer srv.Close()
-	r := NewRouter(srv.URL, "", "")
+	r := NewRouter(srv.URL, testJWTKey, testJWTKey)
 	defer r.Close()
 	flight := make(chan struct{})
 	r.inflight["app.test"] = flight
@@ -93,7 +93,7 @@ func TestHostViewConcurrentSingleFlight(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	r := NewRouter(srv.URL, "", "")
+	r := NewRouter(srv.URL, testJWTKey, testJWTKey)
 	defer r.Close()
 	var wg sync.WaitGroup
 	for range 32 {

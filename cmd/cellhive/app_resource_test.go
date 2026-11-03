@@ -39,7 +39,7 @@ func adminTestServer(t *testing.T, wantMethod, wantPath string, wantQuery map[st
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 }
 
 func TestAppCommandsUseAdminAPI(t *testing.T) {

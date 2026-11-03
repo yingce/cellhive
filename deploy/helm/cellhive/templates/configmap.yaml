@@ -42,9 +42,6 @@ data:
   CELLHIVE_PROXYSQL_SAVE: {{ ternary "1" "0" .Values.proxysql.save | quote }}
   CELLHIVE_REST_ADDR: ":7001"
   CELLHIVE_ADMIN_ADDR: ":8082"
-  {{- if .Values.cfApi.enabled }}
-  CELLHIVE_CF_API_ADDR: ":{{ .Values.cfApi.port }}"
-  {{- end }}
   CELLHIVE_BUCKET_DIR: {{ .Values.config.bucketDir | quote }}
   {{- if .Values.config.bucket }}
   CELLHIVE_BUCKET: {{ .Values.config.bucket | quote }}

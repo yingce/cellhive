@@ -54,7 +54,7 @@ func TestOldWorkflowCallbackAfterRestart(t *testing.T) {
 				method = http.MethodPost
 			}
 			req := httptest.NewRequest(method, "/v1/internal/workflow/"+endpoint+"?ns=acme&workflow=wf&id=i&name=a&run="+token, b)
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 			rr := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rr, req)
 			in, err := s.Workflows.Get(ctx, "acme", "wf", "i")

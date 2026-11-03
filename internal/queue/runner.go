@@ -2,6 +2,7 @@ package queue
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -495,7 +496,9 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 		}
 		req.Header.Set("content-type", "application/json")
 		if d.Token != "" {
-			req.Header.Set("x-cellhive-internal-token", d.Token)
+			if err := bearertoken.SetInternal(req, d.Token, "dispatch"); err != nil {
+				return DispatchResult{}, err
+			}
 		}
 		resp, err = d.Client.Do(req)
 		if err != nil {

@@ -24,7 +24,7 @@ func TestDOAlarmUpsertEndpoint(t *testing.T) {
 	}
 	b, _ := bucket.NewFSBucket(t.TempDir())
 	s := New(Deps{
-		Cfg:     config.Config{NodeID: "cell", TokenInternal: "tok", ScopeSecret: "s"},
+		Cfg:     testAuthConfig(config.Config{NodeID: "cell", TokenInternal: "tok", ScopeSecret: "s"}),
 		Bucket:  b,
 		Control: control.New(cs, nil),
 		Timers:  timer.NewRegistry(),

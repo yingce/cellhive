@@ -304,10 +304,7 @@ type Config struct {
 	// restore, owner forwarding) is HTTP on RESTAddr; there is no separate gRPC
 	// plane (ADR-136).
 	RESTAddr  string // :7001 internal workerd bindings + Go<->Go
-	AdminAddr string // :8082 admin/control
-	// CFAPIAddr optionally exposes the Cloudflare-compatible API on a separate
-	// listener (no /v1/control routes). Empty disables it. See docs/wrangler-compat.md.
-	CFAPIAddr string
+	AdminAddr string // :8082 admin/control (native + Cloudflare-compatible routes)
 
 	// RootKey is the single platform root secret (base64 or hex, >=16 bytes;
 	// 32 recommended). Every role credential below is HKDF-derived from it, so
@@ -324,24 +321,20 @@ type Config struct {
 	// it is exposed to loaded workers (low blast radius) unlike the other tokens.
 	TokenLog string
 
-	// AdminToken is the single ops credential for the control plane (:8082,
-	// ADR-036). Derived from RootKey by default; CELLHIVE_ADMIN_TOKEN overrides
-	// it so an operator can rotate/attach an external credential independently.
+	// AdminToken is the root-derived bootstrap admin JWT signing key (ADR-304),
+	// not a static bearer credential and never sent directly on a request.
 	AdminToken string
-
-	// OIDC admin auth (ADR-036): when OIDCJWKSURL is set, admin requests may
-	// present a verified JWT bearer in addition to the static AdminToken.
-	OIDCJWKSURL  string
-	OIDCIssuer   string
-	OIDCAudience string
 
 	// AuditRetention is how long control-plane audit records are kept (0 keeps
 	// forever). Pruning runs hourly in the background.
 	AuditRetention time.Duration
 
-	// ScopeSecret is the HMAC key for binding scoped tokens (ADR-074); derived
-	// from RootKey.
+	// ScopeSecret retains the legacy derivation used by persistent Hyperdrive
+	// credentials. New JWTs use BindingSigningKey, not this value.
 	ScopeSecret string
+	// BindingSigningKey signs platform binding JWTs; ScopeSecret retains its
+	// existing derivation for persisted database credentials.
+	BindingSigningKey string
 
 	// SecretKey is the control-plane secret root key (base64/hex, 32 bytes),
 	// derived from RootKey. It lives outside the cell and wraps per-secret data
@@ -364,6 +357,7 @@ type Credentials struct {
 	Log       string
 	Admin     string
 	Scope     string
+	Binding   string
 	DoTicket  string
 	SecretKey string
 }
@@ -373,6 +367,10 @@ type Credentials struct {
 // (e.g. a token that no longer matches, or rate limiting that stays off), so
 // every component warns about them at startup.
 var legacyEnv = map[string]string{
+	"CELLHIVE_ADMIN_TOKEN":            "removed: use a root-derived admin JWT or registered issuer JWT (ADR-304)",
+	"CELLHIVE_OIDC_JWKS_URL":          "removed: use registered issuer JWTs (ADR-304)",
+	"CELLHIVE_OIDC_ISSUER":            "removed: use registered issuer JWTs (ADR-304)",
+	"CELLHIVE_OIDC_AUDIENCE":          "removed: JWT audience is cellhive (ADR-304)",
 	"CELLHIVE_GRPC_ADDR":              "removed: internal traffic is HTTP on CELLHIVE_REST_ADDR (ADR-136)",
 	"CELLHIVE_CELL_AGENTS":            "removed: peer discovery uses the nodes/* lease peer_url",
 	"CELLHIVE_COMMIT_MODE":            "use CELLHIVE_BUCKET_WAIT",
@@ -473,14 +471,22 @@ func DeriveCredentials(root string) Credentials {
 		}
 		return base64.StdEncoding.EncodeToString(out)
 	}
+	deriveJWT := func(role string) string {
+		out, err := (Config{RootKey: root}).JWTKey("token/" + role)
+		if err != nil {
+			return ""
+		}
+		return base64.RawURLEncoding.EncodeToString(out)
+	}
 	return Credentials{
-		Peer:      derive("token/peer"),
-		Internal:  derive("token/internal"),
-		Dispatch:  derive("token/dispatch"),
-		Log:       derive("token/log"),
-		Admin:     derive("token/admin"),
+		Peer:      deriveJWT("peer"),
+		Internal:  deriveJWT("internal"),
+		Dispatch:  deriveJWT("dispatch"),
+		Log:       deriveJWT("log"),
+		Admin:     deriveJWT("admin"),
 		Scope:     derive("token/scope"),
-		DoTicket:  derive("token/do-ticket"),
+		Binding:   deriveJWT("scope"),
+		DoTicket:  deriveJWT("do-ticket"),
 		SecretKey: deriveStd("secrets-root"),
 	}
 }
@@ -517,9 +523,6 @@ func FromEnv() Config {
 	// One root secret derives every role credential (ADR-137).
 	rootKey := LoadRootKey()
 	creds := DeriveCredentials(rootKey)
-	if v := strings.TrimSpace(os.Getenv("CELLHIVE_ADMIN_TOKEN")); v != "" {
-		creds.Admin = v
-	}
 	wakerInterval := envDuration("CELLHIVE_WAKER_INTERVAL", 5*time.Second)
 	drainTTL := envDuration("CELLHIVE_DRAIN_TTL", 30*time.Second)
 	logEntries, logWorkers := envPair("CELLHIVE_LOG_BUFFER", 1000, 200)
@@ -614,7 +617,6 @@ func FromEnv() Config {
 		BundleGCGrace:                envDuration("CELLHIVE_BUNDLE_GC_GRACE", 24*time.Hour),
 		RESTAddr:                     env("CELLHIVE_REST_ADDR", ":7001"),
 		AdminAddr:                    env("CELLHIVE_ADMIN_ADDR", ":8082"),
-		CFAPIAddr:                    env("CELLHIVE_CF_API_ADDR", ""),
 		RootKey:                      rootKey,
 		TokenPeer:                    creds.Peer,
 		TokenInternal:                creds.Internal,
@@ -623,6 +625,7 @@ func FromEnv() Config {
 		AdminToken:                   creds.Admin,
 		SecretKey:                    creds.SecretKey,
 		ScopeSecret:                  creds.Scope,
+		BindingSigningKey:            creds.Binding,
 		UploadShards:                 envInt("CELLHIVE_UPLOAD_SHARDS", 0),
 		MetricsNSMax:                 envInt("CELLHIVE_METRICS_NS_MAX", 1000),
 		BindingCacheTTL:              envDuration("CELLHIVE_BINDING_CACHE", time.Second),
@@ -650,9 +653,6 @@ func FromEnv() Config {
 		EpochGCInitial:               envDuration("CELLHIVE_EPOCH_GC_INITIAL", time.Minute),
 		EpochGCKeepPrevious:          envInt("CELLHIVE_EPOCH_GC_KEEP", 1),
 		CaptureSnapshotPartBytes:     envInt("CELLHIVE_CAPTURE_SNAPSHOT_PART", 0),
-		OIDCJWKSURL:                  env("CELLHIVE_OIDC_JWKS_URL", ""),
-		OIDCIssuer:                   env("CELLHIVE_OIDC_ISSUER", ""),
-		OIDCAudience:                 env("CELLHIVE_OIDC_AUDIENCE", ""),
 		AuditRetention:               envDuration("CELLHIVE_AUDIT_RETENTION", 720*time.Hour),
 	}
 }
@@ -875,6 +875,8 @@ func (c Config) Validate() error {
 			{"derived dispatch token", c.TokenDispatch},
 			{"derived log token", c.TokenLog},
 			{"derived scope secret", c.ScopeSecret},
+			{"derived binding JWT signing key", c.BindingSigningKey},
+			{"derived DO ticket JWT signing key", c.DoTicketSecret},
 		} {
 			if t.val == "" {
 				return fmt.Errorf("CELLHIVE_ROOT_KEY produced an empty %s", t.name)

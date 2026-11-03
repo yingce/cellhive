@@ -1,5 +1,26 @@
 # Test Strategy
 
+## ADR-304 Acceptance Gate (Implemented, Local Acceptance Passed, Not Deployed)
+
+Bearer HS256 JWT and persisted issuers are implemented, local acceptance passed, not deployed. Final coordinated evidence supplied on 2026-11-03 follows; this docs task did not rerun these tests, and production cutover is not complete.
+
+- Final `make build`, `make vet`, and `make test` passed after metadata/durability fixes (`bgp_1a10b8cbe0017e91RBThcXEZvP`).
+- Full `make js-test`: 111 JS tests and real runtime validation passed.
+- Full bearer/doticket/server/userruntime/doruntime race and final complete tests passed after DO hardening.
+- Full runtime baseline rebuilt from current source after hardening: `RUNTIME-BASELINE-E2E: PASS`, no skips (task `ses_e5f2d5b08ffedpOXNeUkHqPnUC`).
+- Stock Wrangler 4.133.0 assets/control/vectorize: 3/3 passed in 18.332 seconds, no skips.
+- VWork TS: 1706 passed, 19 skipped; Rust: 369 passed, 1 ignored; real Docker publication/assets/issuer lifecycle/direct binding: 3/3 passed, no skips.
+
+New DO grants recheck the parent, and execution metadata is signed. Already-issued tickets have an at-most-30-second revocation bound; uncached issuer reads do not imply instant global revocation. See control-plane notes for HTTP issuer metadata limits and `outcome_unknown` recovery. Legacy OIDC/JWKS/static/scope test records are historical evidence, not compatibility promises.
+
+Additional gates: current issuer authority reads are uncached. Explicit `ns=["*"]` allows global operational reads/GC/full metrics, not issuer CRUD (bootstrap admin only). Private unauthenticated `:7001/metrics` full scraping is an exception; `:8082/v1/control/metrics` authenticates/filters. Verify durable `bundle_grants` namespace/SHA authority, explicit namespace on native namespace uploads, equivalent CF grants and cross-namespace SHA rejection.
+
+- Shared Go/JS/vwork TS/Rust vectors: headers, Unix-second claims, default `aud=cellhive`, `HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`; reject invalid algorithm/type/audience/signature/time, ambiguous headers and old headers/OIDC.
+- Bootstrap admin JWT creates the registry, never a missing-business-issuer bypass. Test captured durability, owner-authoritative reads, disable/soft-delete/same-name fresh ID without revival, TTL<=86400 and whole-token ceiling rejection, no actions/key_version. Optional caches: at most5 seconds from read start, no error renewal/stale refill.
+- Namespace `ns` arrays support exact/prefix `*`/`*` for all business including CF data/filtered monitoring, not global admin. Binding `ns` string and kind/name are exact; pinned fields are platform-only, retaining ADR-302/resource fences.
+- Real stock Wrangler deploy/assets/Tail, owner forwarding original authority and destination revalidation, CF bridges retaining ceilings; CF only8082, not7001/8083. Tail session query exception must not become ordinary user-header fallback; issuer revocation applies to sessions.
+- Metrics cannot leak unlabeled/platform/other aggregates; test private full-scrape exception separately. Verify long-running JWT refresh and scoped root/purpose-key distribution; Hyperdrive non-HTTP credentials retain old ScopeSecret derivation.
+
 > **Mirror notice:** this English page may lag the Chinese source. See [`../testing.md`](../testing.md) for the latest gates and evidence.
 
 

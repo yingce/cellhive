@@ -19,7 +19,7 @@ import (
 func cfDo(t *testing.T, h http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -170,7 +170,7 @@ func TestCloudflarePublishSeesNamespaceCreatedThroughFollower(t *testing.T) {
 		t.Fatalf("multipart: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	follower.AdminHandler().ServeHTTP(rr, req)

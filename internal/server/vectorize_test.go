@@ -32,7 +32,7 @@ func newVectorizeServer(t *testing.T) *Server {
 // mux auth) and a freshly minted scoped token.
 func vectorizeDo(t *testing.T, s *Server, method, path, ns, index, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	tok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{
+	tok, err := testBindingJWT(s, scopedtoken.Claims{
 		Namespace: ns, Kind: "vectorize", Name: index,
 		ExpiresMs: time.Now().Add(time.Minute).UnixMilli(),
 	})
@@ -42,7 +42,7 @@ func vectorizeDo(t *testing.T, s *Server, method, path, ns, index, body string) 
 	// The binding data plane needs ONLY the scoped token (like KV/D1/R2/Queue):
 	// sending the broad internal token is neither required nor expected.
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	if body != "" {
 		req.Header.Set("content-type", "application/json")
 	}
@@ -160,11 +160,11 @@ func TestVectorizeEndpoints(t *testing.T) {
 		t.Fatalf("revoked query = %d %s", rr.Code, rr.Body.String())
 	}
 	// A token for another namespace cannot read the index.
-	tok, _ := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{
+	tok, _ := testBindingJWT(s, scopedtoken.Claims{
 		Namespace: "other", Kind: "vectorize", Name: "DOCS", ExpiresMs: time.Now().Add(time.Minute).UnixMilli(),
 	})
 	req := httptest.NewRequest(http.MethodGet, base+"describe?ns=acme&index=DOCS", nil)
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rrr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rrr, req)
 	if rrr.Code != http.StatusForbidden {

@@ -53,7 +53,7 @@ const adminHTML = `<!doctype html>
 <script>
 async function call(path) {
   const token = document.getElementById('tok').value;
-  const r = await fetch(path, { headers: { 'x-cellhive-admin-token': token } });
+  const r = await fetch(path, { headers: { 'Authorization': 'Bearer ' + token } });
   return r.status + ' ' + (await r.text());
 }
 async function show(id, path) {

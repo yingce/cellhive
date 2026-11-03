@@ -386,7 +386,7 @@ func TestDoRuntimeBindingInsideDO(t *testing.T) {
 			_, _ = w.Write([]byte(doBindingTenant))
 		case "/v1/internal/do/bindings":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "demo", "name": "KV", "token": "t"}},
+				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "demo", "name": "KV", "authorization": map[string]any{"ns": "demo", "kind": "kv", "name": "KV"}}},
 				"vars":     map[string]any{"CH_PLATFORM": "user-value"},
 			})
 		case "/v1/internal/do/claim":
@@ -416,7 +416,7 @@ func TestDoRuntimeBindingInsideDO(t *testing.T) {
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-bind", PreventEviction: true,
 	})
 	if err != nil {
@@ -533,7 +533,7 @@ export default { async fetch() { return new Response("tenant"); } };
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-env-user-owned", PreventEviction: true,
 	})
 	if err != nil {
@@ -636,9 +636,9 @@ func TestDoRuntimeD1R2QueueInsideDO(t *testing.T) {
 		case "/v1/internal/do/bindings":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bindings": map[string]any{
-					"DB":     map[string]any{"kind": "d1", "ns": "demo", "name": "DB", "token": "t"},
-					"BUCKET": map[string]any{"kind": "r2", "ns": "demo", "name": "BUCKET", "token": "t"},
-					"QUEUE":  map[string]any{"kind": "queue", "ns": "demo", "name": "QUEUE", "token": "t"},
+					"DB":     map[string]any{"kind": "d1", "ns": "demo", "name": "DB", "authorization": map[string]any{"ns": "demo", "kind": "d1", "name": "DB"}},
+					"BUCKET": map[string]any{"kind": "r2", "ns": "demo", "name": "BUCKET", "authorization": map[string]any{"ns": "demo", "kind": "r2", "name": "BUCKET"}},
+					"QUEUE":  map[string]any{"kind": "queue", "ns": "demo", "name": "QUEUE", "authorization": map[string]any{"ns": "demo", "kind": "queue", "name": "QUEUE"}},
 				},
 				"vars": map[string]any{},
 			})
@@ -678,7 +678,7 @@ func TestDoRuntimeD1R2QueueInsideDO(t *testing.T) {
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-bind2", PreventEviction: true,
 	})
 	if err != nil {
@@ -760,7 +760,7 @@ func TestDoRuntimeDoInsideDO(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bindings": map[string]any{"ROOM": map[string]any{
 					"kind": "do", "ns": "demo", "worker": "w", "bundle_sha": "sha1",
-					"storage_id": "ds_inner", "class": "Other", "storage_class": "Other", "token": "t", "name": "ROOM",
+					"storage_id": "ds_inner", "class": "Other", "storage_class": "Other", "authorization": map[string]any{"ns": "demo", "kind": "do", "name": "ROOM"}, "name": "ROOM",
 				}},
 				"vars": map[string]any{},
 			})
@@ -778,7 +778,7 @@ func TestDoRuntimeDoInsideDO(t *testing.T) {
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-do", PreventEviction: true,
 	})
 	if err != nil {
@@ -847,7 +847,7 @@ func TestDoRuntimeWorkflowInsideDO(t *testing.T) {
 			_, _ = w.Write([]byte(doWorkflowTenant))
 		case "/v1/internal/do/bindings":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"bindings": map[string]any{"WF": map[string]any{"kind": "workflow", "ns": "demo", "name": "WF", "token": "t"}},
+				"bindings": map[string]any{"WF": map[string]any{"kind": "workflow", "ns": "demo", "name": "WF", "authorization": map[string]any{"ns": "demo", "kind": "workflow", "name": "WF"}}},
 				"vars":     map[string]any{},
 			})
 		case "/v1/internal/do/claim":
@@ -864,7 +864,7 @@ func TestDoRuntimeWorkflowInsideDO(t *testing.T) {
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-wf", PreventEviction: true,
 	})
 	if err != nil {
@@ -950,7 +950,7 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 			defer stub.Close()
 			port := freePort(t)
 			capnpPath, err := Render(t.TempDir(), Config{
-				CellURL: stub.URL, CellToken: "tok", LogToken: "log-tok", Addr: fmt.Sprintf("*:%d", port),
+				CellURL: stub.URL, CellToken: testJWTKey("internal"), LogToken: testJWTKey("log"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 				DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-log", PreventEviction: true,
 				DisableTenantLogs: !tc.enabled,
 			})
@@ -966,7 +966,7 @@ func TestDoRuntimeTenantLogCaptureModes(t *testing.T) {
 			client := noProxyClient()
 			readTail := func() {
 				req, _ := http.NewRequest(http.MethodGet, base+"/v1/internal/logs/events?ns=demo&worker=w", nil)
-				req.Header.Set("x-cellhive-internal-token", "log-tok")
+				req.Header.Set("Authorization", testJWTAuthorization("log"))
 				res, err := client.Do(req)
 				if err != nil {
 					t.Fatal(err)
@@ -1119,7 +1119,7 @@ func TestDoRuntimeSameShaRedeployRefreshesFacet(t *testing.T) {
 
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", port),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-ver", PreventEviction: true,
 	})
 	if err != nil {
@@ -1252,7 +1252,7 @@ func TestDoRuntimeHoldsConnectionAcrossRequests(t *testing.T) {
 
 	doPort := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
-		CellURL: stub.URL, CellToken: "tok", Addr: fmt.Sprintf("*:%d", doPort),
+		CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", doPort),
 		DiskDir: t.TempDir(), PlatformJS: "../../workerd/do-runtime", NodeID: "do-pool",
 		PreventEviction: true,
 		// Loopback is "local": allow it for the test (production default is public).
@@ -1342,7 +1342,7 @@ func TestDoRuntimeConnectMatchesInvokeIdentity(t *testing.T) {
 	}
 	getVia := func(query string) string {
 		req, _ := http.NewRequest(http.MethodGet, base+"/v1/do/connect?"+query, nil)
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("internal"))
 		resp, err := noProxyClient().Do(req)
 		if err != nil {
 			t.Fatalf("connect: %v", err)

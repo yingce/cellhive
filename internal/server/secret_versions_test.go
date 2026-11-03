@@ -33,7 +33,7 @@ func TestWorkerExecutionViewUsesVersionSecretSnapshot(t *testing.T) {
 		{"1", ""}, {"2", "first"}, {"3", "second"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/v1/control/worker?ns=acme&worker=api&version="+tc.version, nil)
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -47,7 +47,7 @@ func TestWorkerExecutionViewUsesVersionSecretSnapshot(t *testing.T) {
 			t.Fatalf("version %s TOKEN=%q, want %q", tc.version, got, tc.want)
 		}
 		bindingReq := httptest.NewRequest(http.MethodGet, "/v1/internal/worker/bindings?ns=acme&worker=api&version="+tc.version, nil)
-		bindingReq.Header.Set("x-cellhive-internal-token", "tok")
+		bindingReq.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 		bindingRec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(bindingRec, bindingReq)
 		if bindingRec.Code != http.StatusOK {
@@ -75,7 +75,7 @@ func TestCloudflareSecretPutDeploysNewWorkerVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/api/secrets", bytes.NewBufferString(`{"name":"TOKEN","text":"new","type":"secret_text"}`))
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	rec := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -86,7 +86,7 @@ func TestCloudflareSecretPutDeploysNewWorkerVersion(t *testing.T) {
 		t.Fatalf("secret publication: %+v ok=%v err=%v", view, ok, err)
 	}
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/client/v4/accounts/acme/workers/scripts/api/secrets/TOKEN", nil)
-	deleteReq.Header.Set("Authorization", "Bearer admin-tok")
+	deleteReq.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	deleteRec := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {

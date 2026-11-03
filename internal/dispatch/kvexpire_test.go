@@ -15,7 +15,8 @@ func TestKVExpireDispatcherRoutesToOwner(t *testing.T) {
 	var gotPath, gotTok string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path + "?" + r.URL.RawQuery
-		gotTok = r.Header.Get("x-cellhive-internal-token")
+		gotTok = r.Header.Get("Authorization")
+		assertJWT(t, r, "internal")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -23,7 +24,7 @@ func TestKVExpireDispatcherRoutesToOwner(t *testing.T) {
 
 	d := &KVExpireDispatcher{
 		Next:  timer.NoopDispatcher{},
-		Token: "tok",
+		Token: jwtTestKey,
 		Resolve: func(context.Context, cell.Scope) (cell.Owner, string, error) {
 			return cell.Owner{Node: "n1", Address: addr}, "", nil
 		},
@@ -34,7 +35,7 @@ func TestKVExpireDispatcherRoutesToOwner(t *testing.T) {
 	if gotPath != "/v1/internal/kv/expire?scope=acme%2F__kv__%2Fdefault" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if gotTok != "tok" {
+	if gotTok == "" {
 		t.Fatalf("token = %q", gotTok)
 	}
 	// Other kinds pass through to Next.

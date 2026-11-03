@@ -40,7 +40,7 @@ func TestDeployCaptureFailureReconcilesWithSameKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Deps{Cfg: config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok"},
+	s := New(Deps{Cfg: testAuthConfig(config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok"}),
 		Bucket: b, Store: cs, Control: control.New(cs, env), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	rep := replica.New(b)
 	admin := s.AdminHandler()

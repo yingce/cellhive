@@ -30,6 +30,12 @@ compose() {
   docker compose --project-name "$PROJECT" -f "$COMPOSE_BASE" -f "$COMPOSE_OVERRIDE" "$@"
 }
 
+# The container owns the synthetic root; pipe only its derived role key to the
+# local harness signer and refresh the 300-second JWT for every request.
+runtime_token() {
+  compose exec -T cell-agent cellhive creds "$1" | node "$ROOT/scripts/e2e/jwt.cjs" "$1" --stdin
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -301,10 +307,11 @@ READY=""
 retry_capture READY compose exec -T cell-agent curl -fsS http://user-runtime:8081/ready \
   || fail "user-runtime did not become ready"
 retry_capture READY compose exec -T cell-agent curl -fsS http://do-runtime-gated:8788/ready \
-  || fail "gated do-runtime did not become ready"
+  || { compose logs --tail=40 do-runtime-gated >&2; fail "gated do-runtime did not become ready"; }
 
 echo "== deploy TypeScript source with in-image CLI/esbuild =="
 compose exec -T cell-agent sh -c 'rm -rf /tmp/runtime-baseline-app && mkdir -p /tmp/runtime-baseline-app'
+chmod -R a+rX "$TMP/app"
 compose cp "$TMP/app/." cell-agent:/tmp/runtime-baseline-app
 compose exec -T -w /tmp/runtime-baseline-app cell-agent cellhive app create e2e >/dev/null
 compose exec -T -w /tmp/runtime-baseline-app cell-agent \
@@ -328,12 +335,11 @@ compose exec -T cell-agent cellhive secret put e2e api MANAGED_SECRET --value cz
 
 # Force the batch to contend for a single execution lease. Queued instances
 # must wait durably rather than blocking each other or losing their wake.
-ADMIN_TOKEN=$(compose exec -T cell-agent cellhive creds admin | tr -d '\r\n')
-CONSUMER_SETTINGS=$(compose exec -T cell-agent curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+CONSUMER_SETTINGS=$(compose exec -T cell-agent curl -fsS -H "Authorization: Bearer $(runtime_token admin)" \
   http://127.0.0.1:8082/client/v4/accounts/e2e/queues/JOBS/consumers)
 [[ "$CONSUMER_SETTINGS" == *'"retry_delay":1'* && "$CONSUMER_SETTINGS" == *'"max_wait_time_ms":2000'* ]] \
   || fail "Queue consumer timeout/retry config was not persisted: $CONSUMER_SETTINGS"
-compose exec -T cell-agent curl -fsS -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
+compose exec -T cell-agent curl -fsS -X PUT -H "Authorization: Bearer $(runtime_token admin)" \
   -H 'Content-Type: application/json' --data '{"script_name":"api","class_name":"ReportBuilder","concurrency":{"limit":1}}' \
   http://127.0.0.1:8082/client/v4/accounts/e2e/workflows/REPORTS >/dev/null
 
@@ -420,7 +426,7 @@ retry_capture DLQ_STATUS compose exec -T cell-agent sh -c \
   "out=\$(cellhive queue status e2e JOBS); echo \"\$out\" | grep -E '\"dead_letter_depth\"[[:space:]]*:[[:space:]]*[1-9]' >/dev/null && printf '%s' \"\$out\"" \
   || { compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose exec -T cell-agent cellhive queue status e2e DLQ >&2 || true; compose logs --tail=80 cell-agent user-runtime >&2 || true; fail "poison message did not reach the DLQ"; }
 admin_api() {
-  compose exec -T cell-agent curl -fsS -H "x-cellhive-admin-token: $ADMIN_TOKEN" "$@"
+  compose exec -T cell-agent curl -fsS -H "Authorization: Bearer $(runtime_token admin)" "$@"
 }
 echo "== read-only DLQ preview and selected idempotent ack =="
 DLQ_PREVIEW=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=e2e&queue=JOBS&limit=1')
@@ -523,9 +529,9 @@ retry_capture META_RECEIPT compose exec -T cell-agent sh -c \
 META_JSON=$(fetch_path /receipt?id=native-idempotent)
 [[ "$META_JSON" == *'"metadata":"{\"trace\":\"native-trace\",\"n\":\"9007199254740993\"}"'* ]] || fail "native queue metadata was not preserved: $META_JSON"
 
-INTERNAL_TOKEN=$(compose exec -T cell-agent cellhive creds internal | tr -d '\r\n')
-[[ -n "$INTERNAL_TOKEN" ]] || fail "could not derive host internal token"
-assert_not_contains "$ENV_JSON" "$INTERNAL_TOKEN" "tenant env"
+INTERNAL_SIGNING_KEY=$(compose exec -T cell-agent cellhive creds internal | tr -d '\r\n')
+[[ -n "$INTERNAL_SIGNING_KEY" ]] || fail "could not derive host internal signing key"
+assert_not_contains "$ENV_JSON" "$INTERNAL_SIGNING_KEY" "tenant env"
 
 echo "== durable Queue/Cron invocation ID, outcomes and console query =="
 fetch_path '/queue?id=invocation-fail' >/dev/null
@@ -547,10 +553,10 @@ admin_api -X PUT --data 'kv-cleanup-payload' \
 assert_eq kv-cleanup-payload "$(admin_api 'http://127.0.0.1:8082/client/v4/accounts/cleanup/storage/kv/namespaces/KV/values/secret')" "KV cleanup seed"
 # The Worker journey above proves scoped data-plane execution; internal transfer
 # seeds delayed data for a separate resource without an attached consumer.
-compose exec -T cell-agent curl -fsS -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+compose exec -T cell-agent curl -fsS -X POST -H "Authorization: Bearer $(runtime_token internal)" -H 'Content-Type: application/json' \
   --data '{"id":"cleanup-seed","body":"cGF5bG9hZA==","content_type":"text"}' \
   'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=JOBS' >/dev/null
-compose exec -T cell-agent curl -fsS -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+compose exec -T cell-agent curl -fsS -X POST -H "Authorization: Bearer $(runtime_token internal)" -H 'Content-Type: application/json' \
   --data '{"id":"dlq-seed","body":"a2VlcA==","content_type":"text"}' \
   'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=DLQ' >/dev/null
 compose exec -T cell-agent sh -c 'test -f /data/state/cells/cleanup/__kv__/physical.db && test -f /data/state/cells/cleanup/__queue__/JOBS.db' \
@@ -560,15 +566,15 @@ admin_api -X DELETE 'http://127.0.0.1:8082/v1/queue/resources?namespace=cleanup&
 CLEANUP_STATE=""
 for resource in kv:KV queue:JOBS; do
   kind=${resource%%:*}; name=${resource##*:}
-  retry_capture CLEANUP_STATE compose exec -T cell-agent sh -c \
-    "curl -fsS -H 'x-cellhive-admin-token: $ADMIN_TOKEN' 'http://127.0.0.1:8082/v1/control/resource/cleanup?namespace=cleanup&kind=$kind&name=$name' | grep -F '\"state\":\"complete\"'" \
+  cleanup_complete() { admin_api "http://127.0.0.1:8082/v1/control/resource/cleanup?namespace=cleanup&kind=$kind&name=$name" | grep -F '"state":"complete"'; }
+  retry_capture CLEANUP_STATE cleanup_complete \
     || { compose logs --tail=100 cell-agent >&2 || true; fail "resource cleanup did not complete: $resource"; }
 done
 compose exec -T cell-agent sh -c 'test ! -e /data/state/cells/cleanup/__kv__/physical.db && test ! -e /data/state/cells/cleanup/__queue__/JOBS.db && test -z "$(find /data/bucket/cells/cleanup/__kv__/physical/ltx /data/bucket/cells/cleanup/__queue__/JOBS/ltx -type f -print 2>/dev/null)"' \
   || fail "completed cleanup retained local SQLite or authoritative replica payloads"
 PRESERVED_DLQ=$(admin_api 'http://127.0.0.1:8082/v1/queue/dead-letters?namespace=cleanup&queue=DLQ&direct=1')
 bun "$ROOT/scripts/runtime-operations-check.mjs" preserved "$PRESERVED_DLQ"
-DELETED_TRANSFER_CODE=$(compose exec -T cell-agent curl -sS -o /dev/null -w '%{http_code}' -X POST -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'Content-Type: application/json' \
+DELETED_TRANSFER_CODE=$(compose exec -T cell-agent curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(runtime_token internal)" -H 'Content-Type: application/json' \
   --data '{"id":"late","body":"eA==","content_type":"text"}' 'http://127.0.0.1:7001/v1/internal/queue/transfer?ns=cleanup&queue=JOBS')
 assert_eq 410 "$DELETED_TRANSFER_CODE" "deleted queue rejects late writes"
 
@@ -700,10 +706,10 @@ retry_capture DELETED compose exec -T cell-agent sh -c \
   || fail "deleted worker route continued serving traffic"
 
 echo "== rendered config and live boundary scans =="
-if compose exec -T user-runtime grep -R -F -e "$HOST_URL_CANARY" -e "$CELLHIVE_ROOT_KEY" -e "$INTERNAL_TOKEN" /data/runtime; then
+if compose exec -T user-runtime grep -R -F -e "$HOST_URL_CANARY" -e "$CELLHIVE_ROOT_KEY" -e "$INTERNAL_SIGNING_KEY" /data/runtime; then
   fail "rendered runtime files contain a host-only canary"
 fi
-if compose exec -T do-runtime-gated grep -R -F -e "$HOST_URL_CANARY" -e "$CELLHIVE_ROOT_KEY" -e "$INTERNAL_TOKEN" /data/runtime; then
+if compose exec -T do-runtime-gated grep -R -F -e "$HOST_URL_CANARY" -e "$CELLHIVE_ROOT_KEY" -e "$INTERNAL_SIGNING_KEY" /data/runtime; then
   fail "rendered gated runtime files contain a host-only canary"
 fi
 

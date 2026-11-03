@@ -1,5 +1,17 @@
 # Known Issues and Release Status (Review Closure)
 
+## 2026-11-03 ADR-304 Authorization Redesign (Implemented, Local Acceptance Passed, Not Deployed)
+
+**Not a validated cutover.** Unified Bearer HS256 JWT, default audience `cellhive`, no static-header/OIDC compatibility. One vwork issuer key signs namespace and restricted binding JWTs, no actions/key_version. Namespace `ns` is an exact/prefix `*`/`*` array; binding uses exact `ns` string and kind/name, with platform-only pinned fields.
+
+Issuers persist in the existing control cell, `kid=issuer/<immutable-id>`, enforcing namespace ceilings and TTL<=86400. Missing/disabled/irreversibly soft-deleted records fail closed; same-name recreation gets a fresh ID. Owner-authoritative reads may be uncached; caches last at most5 seconds from read start, errors never renew, local writes prevent stale refill. Bootstrap admin JWT creates the registry, never a missing-business-issuer bypass. JWTs use the separate `cellhive/jwt/v1/` HKDF domain; old ScopeSecret remains only for Hyperdrive non-HTTP credentials.
+
+Namespace JWTs cover all business including CF data/filtered monitoring; global admin is separate. CF only8082, not7001/8083; forwarding preserves authority. Real Wrangler Tail session query tokens remain a protocol exception, not ordinary user-header fallback. Private full metrics scraping may remain an explicit exception. Scope root/key distribution, separate internal-role purposes and refresh long-running JWTs.
+
+**Implemented, local acceptance passed, not deployed:** final build/vet/test passed after metadata/durability fixes; 111 JS tests and real runtime, full relevant DO-hardening race/tests, and the full runtime baseline rebuilt from current source passed. Stock Wrangler4.133.0 assets/control/vectorize passed3/3 (18.332 seconds, no skips); VWork TS1706 passed/19 skipped, Rust369 passed/1 ignored, Docker3/3 passed without skips. See [testing](testing.md) for evidence; this docs task did not rerun these tests. Production cutover is not complete.
+
+**Validated revocation boundary:** new DO grants recheck the parent and execution metadata is signed; already-issued tickets expire within30 seconds, not instant global revocation. Current issuer authority reads are uncached; create returns keys once. See control-plane notes for HTTP metadata limits and `outcome_unknown` recovery. Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD (bootstrap admin only). Private unauthenticated `:7001/metrics` full scraping is an exception; `:8082/v1/control/metrics` authenticates/filters. Durable `bundle_grants` binds namespace/SHA authority; native namespace uploads require explicit namespace, CF grants likewise. Knowing a SHA does not authorize deployment. Historical OIDC/static/unbounded-issuer entries are not compatibility promises.
+
 > **Mirror notice:** this English mirror may lag the Chinese source. For the latest release status and entries, see [`../known-issues.md`](../known-issues.md).
 
 
@@ -16,7 +28,7 @@ Shipped in `20261031-02` (source `7be1102`) and `20261031-03` (source `c9ba0fd`)
 - Control: `resource_cleanups` due indexes, 7-day completed-job retention, and `deployment_events` purge with app/worker deletion.
 - Validation: `make test`, `make vet`, `make js-test`, affected race tests and the full in-repo e2e suite pass; both regions run the new digest with Ready pods and zero restarts. Evidence: [release-2026-10-31-03](../archive/release-2026-10-31-03.md).
 - Residual: objgc recheck→Delete microsecond window, legacy scopes without `owner-gen`, waker `Due` per-key Get, DO envelope double JSON encode/decode.
-- CF-API: Wrangler 4 `assets` bindings (including assets-only and repeat deploys inheriting the active asset token) are accepted; metadata errors use `unsupported_binding`/`invalid_binding`/`invalid_multipart`/`payload_too_large`; the optional `CELLHIVE_CF_API_ADDR` listener exposes only `/client/v4/**` and authorizes JWT `cellhive_ns` by `account_id`, filtering `/accounts` and `/memberships`.
+- CF-API (historical acceptance record): Wrangler 4 `assets` bindings (including assets-only and repeat deploys inheriting the active asset token) are accepted; metadata errors use `unsupported_binding`/`invalid_binding`/`invalid_multipart`/`payload_too_large`. The then-supported separate CF listener and JWT `cellhive_ns` authorization are historical contracts. ADR-304 replaces them with admin `:8082` only and registered-issuer HS256 namespace JWTs (`ns` array) or bootstrap admin JWTs, without static/OIDC fallback. See the status above; production cutover is not complete.
 - The `vwork-40/vlog-daily-report` cron 500 is a tenant `sendFeishu` error (`Feishu send failed with HTTP 200`), not a platform dispatch fix; fix the response check or call `controller.noRetry()`.
 
 ## 2026-10-24 COS cell latency, restore, and Cron recovery (ADR-276–278)
@@ -96,8 +108,8 @@ Coincident Cron expressions have distinct persisted identities; scheduled `noRet
 - **The primary line of defense is network isolation** (see I-09): tenant Workers **cannot** access internal cell-agent :7001.
 - Platform role tokens **exist only between the host adapter (platform code) and cell-agent** and are **never injected into tenant env**; tenants receive only binding facades.
 - The host adapter generates a resource-scoped token for each binding; cell-agent validates its signature, namespace, binding kind/name, and registered ACL, rejecting missing or elevated access (ADR-074/181).
-- External delegated issuer tokens must expire; issuer keys are not currently narrowed by namespace. See [`security.md`](security.md) for the full boundary.
-- The admin plane supports a static admin token or OIDC/JWT `cellhive_ns` authorization (ADR-131), separate from the binding data plane.
+- ADR-304 requires persisted issuer ceilings, expiry and disable/soft-delete revocation; implementation and acceptance are in progress. See [`security.md`](security.md).
+- Management/business bindings use Bearer HS256 JWT; namespace business authority is separate from platform admin, with no static/OIDC fallback.
 
 ## I-03 WAL Checkpoint/Truncation (Finalized)
 

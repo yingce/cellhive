@@ -477,7 +477,9 @@ func TestRestoreViaAgentNoBucketCreds(t *testing.T) {
 	}
 	rep := replica.New(fsb)
 	srv, _ := agentStub(t, rep, fsb)
-	agent := func() *HTTPStore { return &HTTPStore{Base: srv.URL, Token: "tok"} }
+	agent := func() *HTTPStore {
+		return &HTTPStore{Base: srv.URL, Token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+	}
 
 	supA := &Supervisor{
 		Dir: dirA, Committer: &bucketCommitter{rep: rep, epoch: 1},
@@ -529,7 +531,9 @@ func TestAgentPagedRestoreUsesRangedReads(t *testing.T) {
 	}
 	rep := replica.New(fsb)
 	srv, ranged := agentStub(t, rep, fsb)
-	agent := func() *HTTPStore { return &HTTPStore{Base: srv.URL, Token: "tok"} }
+	agent := func() *HTTPStore {
+		return &HTTPStore{Base: srv.URL, Token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+	}
 
 	supA := &Supervisor{
 		Dir: dirA, Committer: &bucketCommitter{rep: rep, epoch: 1},

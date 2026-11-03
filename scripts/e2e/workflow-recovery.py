@@ -51,7 +51,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if '/v1/internal/workflow/' in self.path and q.get('run'):
             with seen_lock:
-                seen[q['id'][0]] = (q['run'][0], self.headers.get('x-cellhive-internal-token'), q['workflow'][0])
+                seen[q['id'][0]] = (q['run'][0], q['workflow'][0])
         try:
             code, body = request(agent, self.path, self.command, data,
                                  {k:v for k,v in self.headers.items() if k.lower() not in ('host','connection','transfer-encoding')})
@@ -126,13 +126,14 @@ try:
     # Real runtime callback fencing: capture the superseded run identity.
     call('/create', id='fence')
     wait_for(lambda: status('fence')['status'] == 'waiting', 'initial park')
-    with seen_lock: old_token, auth, workflow_name = seen['fence']
+    with seen_lock: old_token, workflow_name = seen['fence']
     call('/restart', id='fence')
     wait_for(lambda: status('fence')['status'] == 'waiting', 'restarted park')
     for op, method in [('step','PUT'), ('finish','POST')]:
         q = urllib.parse.urlencode(dict(ns=ns, workflow=workflow_name, id='fence', name='ready', run=old_token))
+        auth = subprocess.check_output(['node', str(root/'scripts/e2e/jwt.cjs'), 'internal'], text=True)
         code, body = request(agent, '/v1/internal/workflow/'+op+'?'+q, method,
-                             base64.b64encode(b'"old"'), {'x-cellhive-internal-token':auth})
+                             base64.b64encode(b'"old"'), {'Authorization':'Bearer '+auth})
         assert code == 409, (op,code,body)
     call('/event', id='fence', n=7)
     result = wait_for(lambda: (s if (s:=status('fence'))['status']=='complete' else None), 'new execution completion')

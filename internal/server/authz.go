@@ -11,26 +11,25 @@ import (
 	"strings"
 
 	"cellhive/internal/auth"
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 )
 
 type principalCtxKey struct{}
 
-// adminPrincipal resolves the caller's principal from the admin credential. The
-// configured AdminAuth wins; otherwise the static admin token is used (full
-// access, kind=static).
+// adminPrincipal accepts bootstrap admin or active issuer namespace JWTs only.
 func (s *Server) adminPrincipal(r *http.Request) (auth.Principal, bool) {
-	a := s.adminAuthenticator()
-	if a == nil {
+	_, c, err := s.verifyBearer(r)
+	if err != nil || (c.Type != "admin" && c.Type != "namespace") {
 		return auth.Principal{}, false
 	}
-	if ra, ok := a.(auth.RequestAuthenticator); ok {
-		return ra.AuthenticateRequest(r)
+	p := auth.Principal{Sub: c.Subject, Kind: c.Type, NS: c.Namespaces, All: c.Type == "admin"}
+	for _, ns := range c.Namespaces {
+		if ns == "*" {
+			p.All = true
+		}
 	}
-	if a.Authenticate(r) {
-		return auth.Principal{Sub: "static-admin", Kind: "static", All: true}, true
-	}
-	return auth.Principal{}, false
+	return p, true
 }
 
 // principalFrom returns the authenticated principal attached by adminAuth.
@@ -62,7 +61,9 @@ func withPrincipal(r *http.Request, p auth.Principal) *http.Request {
 // nslessListPaths are admin control paths that may legitimately run without a
 // namespace parameter: the handler filters the result with allowedNS.
 var nslessListPaths = map[string]bool{
-	"/v1/control/apps": true,
+	"/v1/control/apps":    true,
+	"/v1/control/status":  true,
+	"/v1/control/metrics": true,
 }
 
 // controlTargetNS resolves the namespace a control request targets, preferring
@@ -103,9 +104,8 @@ func controlTargetNS(r *http.Request) (ns string, body []byte, err error) {
 func (s *Server) authorizeControlPath(w http.ResponseWriter, r *http.Request) bool {
 	p, ok := principalFrom(r.Context())
 	if !ok {
-		// Internal plane (no admin principal): the internal token is the
-		// credential and the network is trusted.
-		return true
+		writeErr(w, http.StatusForbidden, "principal_required", "authenticated principal required")
+		return false
 	}
 	ns, body, err := controlTargetNS(r)
 	if err != nil {
@@ -117,7 +117,7 @@ func (s *Server) authorizeControlPath(w http.ResponseWriter, r *http.Request) bo
 	}
 	switch {
 	case ns != "":
-		if !p.Allows(ns) {
+		if !principalAllows(p, ns) {
 			writeErr(w, http.StatusForbidden, "namespace_forbidden", "credential is not granted namespace "+ns)
 			return false
 		}
@@ -139,8 +139,8 @@ func (s *Server) authorizeControlPath(w http.ResponseWriter, r *http.Request) bo
 func (s *Server) authorizeNS(w http.ResponseWriter, r *http.Request, ns string) bool {
 	p, ok := principalFrom(r.Context())
 	if !ok {
-		// No principal (e.g. internal-token path): the internal plane is trusted.
-		return true
+		writeErr(w, http.StatusForbidden, "principal_required", "authenticated principal required")
+		return false
 	}
 	if ns == "" {
 		if p.All {
@@ -149,7 +149,7 @@ func (s *Server) authorizeNS(w http.ResponseWriter, r *http.Request, ns string) 
 		writeErr(w, http.StatusForbidden, "namespace_required", "an explicit namespace is required for this credential")
 		return false
 	}
-	if !p.Allows(ns) {
+	if !principalAllows(p, ns) {
 		writeErr(w, http.StatusForbidden, "namespace_forbidden", "credential is not granted namespace "+ns)
 		return false
 	}
@@ -160,7 +160,7 @@ func (s *Server) authorizeNS(w http.ResponseWriter, r *http.Request, ns string) 
 // which cannot be scoped to a namespace: they need a "*" grant.
 func (s *Server) requireAll(w http.ResponseWriter, r *http.Request) bool {
 	p, ok := principalFrom(r.Context())
-	if !ok || p.All {
+	if ok && p.All {
 		return true
 	}
 	writeErr(w, http.StatusForbidden, "platform_forbidden", "credential needs platform-wide (*) access")
@@ -171,7 +171,7 @@ func (s *Server) requireAll(w http.ResponseWriter, r *http.Request) bool {
 // granted namespaces for list endpoints to filter by.
 func allowedNS(ctx context.Context) map[string]bool {
 	p, ok := principalFrom(ctx)
-	if !ok || p.All {
+	if ok && p.All {
 		return nil
 	}
 	out := map[string]bool{}
@@ -190,11 +190,25 @@ func filterByNS[T any](allow map[string]bool, items []T, nsOf func(T) string) []
 	}
 	out := make([]T, 0, len(items))
 	for _, it := range items {
-		if allow[nsOf(it)] {
+		if allowedPattern(allow, nsOf(it)) {
 			out = append(out, it)
 		}
 	}
 	return out
+}
+
+func principalAllows(p auth.Principal, ns string) bool { return p.Allows(ns) }
+
+func allowedPattern(allow map[string]bool, ns string) bool {
+	if allow == nil {
+		return true
+	}
+	for pattern := range allow {
+		if bearertoken.Allows([]string{pattern}, ns) {
+			return true
+		}
+	}
+	return false
 }
 
 // actorFor returns the audit actor label for a handler.

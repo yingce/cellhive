@@ -41,7 +41,7 @@ func TestQueueConsumerCommands(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 
 	if _, _, err := executeRoot(t, "queue", "consumer", "add", "acme", "JOBS", "api",
 		"--batch-size", "10", "--max-retries", "2", "--max-concurrency", "3", "--dead-letter-queue", "DLQ"); err != nil {

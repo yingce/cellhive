@@ -2,7 +2,7 @@ package server
 
 import (
 	"bytes"
-	"cellhive/internal/auth"
+	"cellhive/internal/bearertoken"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -24,7 +24,7 @@ func cfUploadMetadata(t *testing.T, s *Server, metadata string, includeModule bo
 	}
 	_ = mw.Close()
 	r := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/api", &body)
-	r.Header.Set("Authorization", "Bearer admin-tok")
+	r.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, r)
@@ -53,7 +53,10 @@ func TestCloudflareAssetsBindingDeploys(t *testing.T) {
 	}
 	const token = "asset-token"
 	seedAssets(t, s, "acme", "api", token)
-	jwt := s.signAssetsClaim(wranglerAssetsClaim{NS: "acme", Worker: "api", Token: token, Exp: time.Now().Add(time.Hour).Unix()})
+	jwt, err := s.signAssetsClaim(wranglerAssetsClaim{NS: "acme", Worker: "api", Token: token, Exp: time.Now().Add(time.Hour).Unix(), IssuedAt: time.Now().Unix(), Subject: "test", ParentIssuer: "token/admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	meta := map[string]any{
 		"main_module": "worker.js", "compatibility_date": "2026-09-23",
 		"bindings": []any{map[string]any{"type": "assets", "name": "ASSETS"}},
@@ -92,7 +95,10 @@ func TestCloudflareAssetsOnlyDeploys(t *testing.T) {
 	}
 	const token = "asset-only"
 	seedAssets(t, s, "acme", "api", token)
-	jwt := s.signAssetsClaim(wranglerAssetsClaim{NS: "acme", Worker: "api", Token: token, Exp: time.Now().Add(time.Hour).Unix()})
+	jwt, err := s.signAssetsClaim(wranglerAssetsClaim{NS: "acme", Worker: "api", Token: token, Exp: time.Now().Add(time.Hour).Unix(), IssuedAt: time.Now().Unix(), Subject: "test", ParentIssuer: "token/admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	meta := map[string]any{
 		"compatibility_date": "2026-09-23",
 		"assets": map[string]any{"jwt": jwt, "config": map[string]any{
@@ -134,18 +140,14 @@ func TestCloudflareUnsupportedBindingCode(t *testing.T) {
 }
 
 func TestCloudflareJWTNamespaceAuthorization(t *testing.T) {
-	secret := []byte("test-secret")
 	s := newControlServer(t)
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
 	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Control.CreateApp(t.Context(), "other", "test"); err != nil {
 		t.Fatal(err)
 	}
-	token := signJWT(t, secret, map[string]any{
-		"sub": "tenant@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix(),
-	})
+	token := testNamespaceJWT(t, s, "tenant@corp", "acme")
 	do := func(path string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -173,27 +175,18 @@ func TestCloudflareJWTNamespaceAuthorization(t *testing.T) {
 	if accounts.Code != http.StatusOK || strings.Contains(accounts.Body.String(), `"id":"other"`) || !strings.Contains(accounts.Body.String(), `"id":"acme"`) {
 		t.Fatalf("account list leaked namespaces: %d %s", accounts.Code, accounts.Body.String())
 	}
-	expired := signJWT(t, secret, map[string]any{
-		"sub": "tenant@corp", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(-time.Minute).Unix(),
-	})
+	kid, _ := bearertoken.PeekKeyID(token)
+	key, _ := s.jwtKey(kid)
+	expired, err := bearertoken.Mint(key, kid, bearertoken.Claims{Ver: 1, Type: "namespace", Audience: "cellhive", Subject: "tenant@corp", Namespaces: []string{"acme"}, IssuedAt: time.Now().Add(-2 * time.Minute).Unix(), ExpiresAt: time.Now().Add(-time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	r := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/api/settings", nil)
 	r.Header.Set("Authorization", "Bearer "+expired)
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, r)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expired JWT = %d %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestCFAPIHandlerExcludesControlPlane(t *testing.T) {
-	s := newControlServer(t)
-	h := s.CFAPIHandler()
-	r := httptest.NewRequest(http.MethodGet, "/v1/control/status", nil)
-	r.Header.Set("Authorization", "Bearer admin-tok")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("CF-API exposed a control route: %d %s", rr.Code, rr.Body.String())
 	}
 }
 

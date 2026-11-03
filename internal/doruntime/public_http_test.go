@@ -29,7 +29,7 @@ func TestPublicDOHTTPRoundTrip(t *testing.T) {
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme = target.Scheme
 		r.URL.Host = target.Host
-		r.Header.Set("x-cellhive-internal-token", "tok")
+		r.Header.Set("Authorization", testJWTAuthorization("internal"))
 	}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -49,7 +49,7 @@ func TestPublicDOHTTPRoundTrip(t *testing.T) {
 	}))
 	defer agent.Close()
 	port := freePort(t)
-	cfg, err := userruntime.Render(t.TempDir(), userruntime.Config{CellURL: agent.URL, CellToken: "tok", ScopeSecret: "test-scope-secret", InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js"})
+	cfg, err := userruntime.Render(t.TempDir(), userruntime.Config{CellURL: agent.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js"})
 	if err != nil {
 		t.Fatal(err)
 	}

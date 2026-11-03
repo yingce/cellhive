@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"cellhive/internal/control"
-	"cellhive/internal/scopedtoken"
 )
 
 // bindingSpecFor builds the tenant binding spec (SCOPE_SPEC) and vars a loaded
@@ -29,15 +28,11 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 	}
 	spec := map[string]any{}
 	for _, b := range v.Bindings {
-		claims := scopedtoken.Claims{Namespace: ns, Kind: b.Type, Name: b.Name}
+		claims := map[string]any{"ns": ns, "kind": b.Type, "name": b.Name}
 		if b.Type == "kv" && b.ID != "" {
-			claims.Worker = worker
-			claims.Version = v.Version
-			claims.Resource = b.ID
-		}
-		token, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), claims)
-		if err != nil {
-			continue
+			claims["worker"] = worker
+			claims["version"] = v.Version
+			claims["resource"] = b.ID
 		}
 		switch b.Type {
 		case "do":
@@ -54,7 +49,7 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 				"compat_date": v.CompatDate, "compat_flags": v.CompatFlags,
 				"limits":     v.Limits,
 				"storage_id": v.StorageID, "class": cls, "storage_class": storageClass,
-				"deleted": deleted[cls], "name": b.Name, "token": token,
+				"deleted": deleted[cls], "name": b.Name, "authorization": claims,
 			}
 		case "vectorize":
 			// The resource is the index name; the binding name is the env key.
@@ -62,14 +57,9 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			if index == "" {
 				index = b.Name
 			}
-			itok, err := scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{
-				Namespace: ns, Kind: "vectorize", Name: index,
-			})
-			if err != nil {
-				continue
-			}
+			claims["name"] = index
 			spec[b.Name] = map[string]any{
-				"kind": "vectorize", "ns": ns, "name": b.Name, "index": index, "token": itok,
+				"kind": "vectorize", "ns": ns, "name": b.Name, "index": index, "authorization": claims,
 			}
 		case "queue":
 			// A queue binding's name is arbitrary; the actual queue is the
@@ -79,16 +69,10 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			if qname == "" {
 				qname = b.Name
 			}
-			qtok := token
-			if qname != b.Name {
-				qtok, err = scopedtoken.Mint([]byte(s.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: ns, Kind: "queue", Name: qname})
-				if err != nil {
-					continue
-				}
-			}
-			spec[b.Name] = map[string]any{"kind": "queue", "ns": ns, "name": qname, "token": qtok}
+			claims["name"] = qname
+			spec[b.Name] = map[string]any{"kind": "queue", "ns": ns, "name": qname, "authorization": claims}
 		case "kv", "d1", "r2", "workflow":
-			spec[b.Name] = map[string]any{"kind": b.Type, "ns": ns, "name": b.Name, "token": token}
+			spec[b.Name] = map[string]any{"kind": b.Type, "ns": ns, "name": b.Name, "authorization": claims}
 		case "ai":
 			spec[b.Name] = map[string]any{"kind": "ai", "ns": ns, "name": b.Name}
 		case "hyperdrive":
@@ -106,7 +90,7 @@ func (s *Server) bindingSpecFor(ctx context.Context, ns, worker string, version 
 			if i := strings.Index(target, "/"); i > 0 && i < len(target)-1 {
 				targetNS, target = target[:i], target[i+1:]
 			}
-			spec[b.Name] = map[string]any{"kind": "service", "ns": targetNS, "caller_ns": ns, "name": b.Name, "target": target, "entrypoint": b.Entrypoint, "token": token}
+			spec[b.Name] = map[string]any{"kind": "service", "ns": targetNS, "caller_ns": ns, "name": b.Name, "target": target, "entrypoint": b.Entrypoint, "authorization": claims}
 		}
 	}
 	vars, err := s.runtimeVars(ctx, ns, worker, v.Version, v.Vars)

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cellhive/internal/bearertoken"
 )
 
 // RenewEvery is how often a do-runtime renews its owner leases with the local
@@ -25,7 +27,9 @@ func PostLocal(ctx context.Context, base, token, path, body string) error {
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", token)
+	if err := bearertoken.SetInternal(req, token, "internal"); err != nil {
+		return err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

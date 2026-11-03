@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/queue"
-	"cellhive/internal/scopedtoken"
 	"github.com/gorilla/websocket"
 )
 
@@ -32,7 +32,7 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	_, _ = part.Write([]byte("export default { fetch() { return new Response('ok') } }"))
 	_ = w.Close()
 	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, req)
@@ -52,7 +52,7 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 	}
 	if rr := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions", nil)
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		out := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(out, req)
 		return out
@@ -60,7 +60,7 @@ func TestCloudflareWorkerVersionsUploadDeploys(t *testing.T) {
 		t.Fatalf("versions list %d %s", rr.Code, rr.Body.String())
 	}
 	get := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/web/versions/1", nil)
-	get.Header.Set("Authorization", "Bearer admin-tok")
+	get.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	getResult := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(getResult, get)
 	if getResult.Code != 200 || !bytes.Contains(getResult.Body.Bytes(), []byte(`"cpu_ms":50`)) {
@@ -89,7 +89,7 @@ func TestCloudflareRepeatUploadPreservesSeparateTriggers(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/web", &body)
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", w.FormDataContentType())
 		rr := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(rr, req)
@@ -107,7 +107,7 @@ func TestCloudflareRepeatUploadPreservesSeparateTriggers(t *testing.T) {
 	}
 	upload(`{"main_module":"worker.js","triggers":{"crons":["* * * * *"]},"bindings":[{"name":"JOBS","type":"queue","queue_name":"JOBS"}]}`)
 	consumer := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/queues/JOBS/consumers", strings.NewReader(`{"type":"worker","script_name":"web","settings":{"batch_size":1}}`))
-	consumer.Header.Set("Authorization", "Bearer admin-tok")
+	consumer.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	consumer.Header.Set("Content-Type", "application/json")
 	cr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(cr, consumer)
@@ -131,7 +131,7 @@ func TestCloudflareResourcesSecretsAndRoutes(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -171,7 +171,7 @@ func TestCloudflareAccountsDeleteAndVersionDeploy(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -216,7 +216,7 @@ func TestCloudflareDeploymentsReflectCommittedActivations(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -264,7 +264,7 @@ func TestCloudflareWorkflowInstancesReadPersistedStepsAndPages(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -298,7 +298,7 @@ func TestCloudflareVectorizeManagement(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -341,7 +341,7 @@ func TestCloudflareQueuePurgeClearsPersistedMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/queues/jobs/purge", nil)
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, req)
 	if rr.Code != 200 {
@@ -357,7 +357,7 @@ func TestCloudflareSecretBulkPatch(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPatch, "/client/v4/accounts/acme/workers/scripts/web/secrets-bulk", bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
@@ -390,7 +390,7 @@ func TestCloudflareQueueConsumerLifecycle(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -433,7 +433,7 @@ func TestCloudflareTailSessionLifecycle(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -458,11 +458,10 @@ func TestCloudflareTailSessionLifecycle(t *testing.T) {
 
 func TestCloudflareTailWebSocket(t *testing.T) {
 	s := newControlServer(t)
-	s.Cfg.TokenLog = "tok"
 	s.Logs = logbuf.New(16, 4)
 	const event = `{"events":[{"scriptName":"untrusted","scriptVersion":{"id":"7","name":"web","tags":[]},"outcome":"exception","exceptions":[{"name":"Error","message":"boom","timestamp":42}],"logs":[{"message":["hello",{"a":1}],"level":"warn","timestamp":41}],"eventTimestamp":40,"event_type":"fetch","event":{"request":{"method":"GET","url":"https://example.com/"}},"requestId":"req-1"}]}`
 	ingest := httptest.NewRequest(http.MethodPost, "/v1/internal/logs?ns=acme&worker=web", strings.NewReader(event))
-	ingest.Header.Set("x-cellhive-internal-token", "tok")
+	ingest.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "log"))
 	ingested := httptest.NewRecorder()
 	s.Handler().ServeHTTP(ingested, ingest)
 	if ingested.Code != http.StatusOK {
@@ -472,7 +471,7 @@ func TestCloudflareTailWebSocket(t *testing.T) {
 	defer h.Close()
 	base, _ := url.Parse(h.URL)
 	req, _ := http.NewRequest(http.MethodPost, h.URL+"/client/v4/accounts/acme/workers/scripts/web/tails", bytes.NewBufferString("{}"))
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -574,7 +573,7 @@ func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
 	a, _ := newTestServer(t)
 	a.Logs = logbuf.New(16, 4)
 	b := New(Deps{
-		Cfg:  config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"},
+		Cfg:  testAuthConfig(config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"}),
 		Logs: logbuf.New(16, 4),
 	})
 	peerHTTP := httptest.NewServer(b.Handler())
@@ -598,7 +597,7 @@ func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
 	adminHTTP := httptest.NewServer(a.AdminHandler())
 	defer adminHTTP.Close()
 	create, _ := http.NewRequest(http.MethodPost, adminHTTP.URL+"/client/v4/accounts/acme/workers/scripts/web/tails", strings.NewReader("{}"))
-	create.Header.Set("Authorization", "Bearer admin-tok")
+	create.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	resp, err := http.DefaultClient.Do(create)
 	if err != nil {
 		t.Fatal(err)
@@ -645,7 +644,7 @@ func TestCloudflareTailReadsPeerNodeEvents(t *testing.T) {
 	// Restart node-2 with a fresh lease session and a new ring whose first seq
 	// is 1. The stream must reset its peer cursor when discovery refreshes.
 	restarted := New(Deps{
-		Cfg:  config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"},
+		Cfg:  testAuthConfig(config.Config{NodeID: "node-2", TokenPeer: "tok", ScopeSecret: "tok"}),
 		Logs: logbuf.New(16, 4),
 	})
 	restarted.Logs.AddEvent(logbuf.TailEvent{Namespace: "acme", Worker: "web", ScriptName: "web", Outcome: "ok", EventType: "scheduled", EventTimestamp: 43, Logs: []logbuf.TailLog{}})
@@ -672,7 +671,7 @@ func TestCloudflareTailTokenIsScopedExpiresAndWorksAcrossNodes(t *testing.T) {
 	second := httptest.NewServer(listener.AdminHandler())
 	defer second.Close()
 	create := httptest.NewRequest(http.MethodPost, "/client/v4/accounts/acme/workers/scripts/web/tails", strings.NewReader(`{"search":"needle"}`))
-	create.Header.Set("Authorization", "Bearer admin-tok")
+	create.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	created := httptest.NewRecorder()
 	issuer.AdminHandler().ServeHTTP(created, create)
 	if created.Code != 200 {
@@ -716,7 +715,7 @@ func TestCloudflareTailTokenIsScopedExpiresAndWorksAcrossNodes(t *testing.T) {
 	bad := *stream
 	bad.Scheme = "http"
 	query := bad.Query()
-	query.Set("token", "admin-tok")
+	query.Set("token", testRoleJWT(t, "admin"))
 	bad.RawQuery = query.Encode()
 	resp, err := http.Get(bad.String())
 	if err != nil {
@@ -726,11 +725,11 @@ func TestCloudflareTailTokenIsScopedExpiresAndWorksAcrossNodes(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("admin token accepted as stream token: %d", resp.StatusCode)
 	}
-	key, err := scopedtoken.IssuerKey([]byte(listener.Cfg.ScopeSecret), tailTokenIssuer)
+	key, err := listener.jwtKey("token/tail")
 	if err != nil {
 		t.Fatal(err)
 	}
-	expired, err := scopedtoken.Mint(key, scopedtoken.Claims{Namespace: "acme", Kind: tailTokenIssuer, Name: "web#id#", Iss: tailTokenIssuer, ExpiresMs: time.Now().Add(-time.Second).UnixMilli()})
+	expired, err := bearertoken.Mint(key, "token/tail", bearertoken.Claims{Ver: 1, Type: "tail", Subject: "test", Audience: "cellhive", IssuedAt: time.Now().Add(-time.Minute).Unix(), ExpiresAt: time.Now().Add(-time.Second).Unix(), Namespace: "acme", Worker: "web", Session: "id", ParentIssuer: "token/admin"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +754,7 @@ func TestCloudflareAssetsAndWorkflows(t *testing.T) {
 	h := s.AdminHandler()
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)

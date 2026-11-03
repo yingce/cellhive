@@ -18,7 +18,7 @@ func TestRenewLoopPostsWithToken(t *testing.T) {
 	pathCh := make(chan string, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pathCh <- r.URL.Path
-		token <- r.Header.Get("x-cellhive-internal-token")
+		token <- r.Header.Get("Authorization")
 		calls.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -28,17 +28,18 @@ func TestRenewLoopPostsWithToken(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RenewLoop(ctx, srv.URL, "tok", 10*time.Millisecond, func(err error) {
+		RenewLoop(ctx, srv.URL, testJWTKey("internal"), 10*time.Millisecond, func(err error) {
 			if ctx.Err() == nil {
 				t.Errorf("renew: %v", err)
 			}
 		})
 	}()
+	defer func() { cancel(); <-done }()
 
 	select {
 	case got := <-token:
-		if got != "tok" {
-			t.Fatalf("token = %q, want tok", got)
+		if verifyTestJWTAuthorization(got, "internal") != nil {
+			t.Fatalf("invalid internal JWT = %q", got)
 		}
 	case <-time.After(2 * time.Second):
 		cancel()
@@ -47,8 +48,6 @@ func TestRenewLoopPostsWithToken(t *testing.T) {
 	if p := <-pathCh; p != "/v1/do/renew" {
 		t.Fatalf("path = %q, want /v1/do/renew", p)
 	}
-	cancel()
-	<-done
 }
 
 // TestRenewLoopReportsErrors: a failing endpoint must reach onErr, not be lost.
@@ -60,7 +59,7 @@ func TestRenewLoopReportsErrors(t *testing.T) {
 	errs := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go RenewLoop(ctx, srv.URL, "tok", 10*time.Millisecond, func(err error) {
+	go RenewLoop(ctx, srv.URL, testJWTKey("internal"), 10*time.Millisecond, func(err error) {
 		select {
 		case errs <- err:
 		default:
@@ -79,17 +78,17 @@ func TestDrain(t *testing.T) {
 	var path, tok atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path.Store(r.URL.Path)
-		tok.Store(r.Header.Get("x-cellhive-internal-token"))
+		tok.Store(r.Header.Get("Authorization"))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	if err := Drain(srv.URL, "tok"); err != nil {
+	if err := Drain(srv.URL, testJWTKey("internal")); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
 	if got, _ := path.Load().(string); got != "/v1/do/drain" {
 		t.Fatalf("path = %q", got)
 	}
-	if got, _ := tok.Load().(string); got != "tok" {
+	if got, _ := tok.Load().(string); verifyTestJWTAuthorization(got, "internal") != nil {
 		t.Fatalf("token = %q", got)
 	}
 }
@@ -116,7 +115,7 @@ func TestRenewLoopRecoversHungRequest(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RenewLoop(ctx, srv.URL, "tok", 10*time.Millisecond, func(err error) {
+		RenewLoop(ctx, srv.URL, testJWTKey("internal"), 10*time.Millisecond, func(err error) {
 			select {
 			case errorsSeen <- err:
 			default:

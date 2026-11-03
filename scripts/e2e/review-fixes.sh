@@ -14,7 +14,7 @@ SHA=$(e2e_upload "$E2E_ROOT/scripts/e2e/fixtures/review-fixes.js")
 cat > "$E2E_BASE/deploy.json" <<JSON
 {"namespace":"review","worker":"review","bundle_sha":"$SHA","bindings":[{"type":"d1","name":"DB","id":"DB"},{"type":"r2","name":"BUCKET","id":"BUCKET"}],"consumers":[{"queue":"jobs","max_concurrency":101}]}
 JSON
-code=$(curl -sS -o "$E2E_BASE/rejected.json" -w '%{http_code}' -X POST   -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" -H 'content-type: application/json'   --data-binary @"$E2E_BASE/deploy.json" "http://127.0.0.1:$E2E_ADMIN_PORT/v1/control/deploy")
+code=$(curl -sS -o "$E2E_BASE/rejected.json" -w '%{http_code}' -X POST   -H "Authorization: Bearer $(e2e_token admin)" -H 'content-type: application/json'   --data-binary @"$E2E_BASE/deploy.json" "http://127.0.0.1:$E2E_ADMIN_PORT/v1/control/deploy")
 e2e_need "$code" 400 "oversized queue concurrency must be rejected"
 jq '.consumers[0].max_concurrency = 100' "$E2E_BASE/deploy.json" > "$E2E_BASE/valid.json"
 out=$(e2e_deploy "$E2E_BASE/valid.json")

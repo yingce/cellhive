@@ -166,8 +166,8 @@ kubectl -n cellhive exec cell-agent-0 -- sh -c 'cd /tmp/k3d-e2e-app && cellhive 
 retry 60 public_get / >/dev/null || fail "deployed Worker route did not become live"
 
 echo "== owner routing and cold takeover =="
-INTERNAL_TOKEN=$(node -e 'const c=require("crypto"); const k=Buffer.from(process.env.CELLHIVE_ROOT_KEY,"hex"); const p=c.createHmac("sha256",Buffer.alloc(32)).update(k).digest(); process.stdout.write(c.createHmac("sha256",p).update(Buffer.concat([Buffer.from("cellhive/token/internal"),Buffer.from([1])])).digest("base64url"))')
-VIEW=$(kubectl -n cellhive exec cell-agent-0 -- curl --fail-with-body -sS -H "x-cellhive-internal-token: $INTERNAL_TOKEN" 'http://127.0.0.1:7001/v1/control/worker?ns=e2e&worker=api')
+internal_jwt() { kubectl -n cellhive exec cell-agent-0 -- cellhive creds internal | node "$ROOT/scripts/e2e/jwt.cjs" internal --stdin; }
+VIEW=$(kubectl -n cellhive exec cell-agent-0 -- curl --fail-with-body -sS -H "Authorization: Bearer $(internal_jwt)" 'http://127.0.0.1:7001/v1/control/worker?ns=e2e&worker=api')
 BUNDLE_SHA=$(jq -r .bundle_sha <<<"$VIEW")
 STORAGE_ID=$(jq -r .storage_id <<<"$VIEW")
 VERSION=$(jq -r .version <<<"$VIEW")
@@ -181,7 +181,7 @@ invoke_pod() {
   body=$(jq -nc --arg sha "$BUNDLE_SHA" --arg storage "$STORAGE_ID" --argjson version "$VERSION" \
     '{namespace:"e2e",worker:"api",bundle_sha:$sha,version:$version,storage_id:$storage,class:"Counter",storage_class:"Counter",id:"counter-1",request:{method:"GET",path:"/"}}')
   kubectl -n cellhive exec cell-agent-0 -- curl --fail-with-body -sS --max-time 20 \
-    -H "x-cellhive-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' \
+    -H "Authorization: Bearer $(internal_jwt)" -H 'content-type: application/json' \
     -d "$body" "http://$ip:8788/v1/do/invoke"
 }
 assert_owner() {

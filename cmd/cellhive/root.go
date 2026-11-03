@@ -59,6 +59,7 @@ func newRoot() *cobra.Command {
 		newTailCommand(),
 
 		newCredsCommand(),
+		newIssuerCommand(),
 		newTokenCommand(),
 		newStatusCommand(),
 		newCapacityCommand(),

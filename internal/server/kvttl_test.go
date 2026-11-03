@@ -180,7 +180,7 @@ func TestKVTTLAndMetadataE2E(t *testing.T) {
 	do := func(method, target, token string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, bytes.NewReader(body))
 		if token != "" {
-			req.Header.Set("x-cellhive-scope-token", token)
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -211,7 +211,7 @@ func TestKVTTLAndMetadataE2E(t *testing.T) {
 
 	// The internal cleanup endpoint deletes the expired row (captured write).
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/kv/expire?scope=acme/__kv__/default", nil)
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -235,7 +235,7 @@ func TestKVValidationLimits(t *testing.T) {
 	h := s.Handler()
 	do := func(target string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr

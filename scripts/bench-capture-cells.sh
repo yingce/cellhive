@@ -11,7 +11,7 @@
 #   scripts/bench-capture-cells.sh
 #   CONCS="1 4 16 32 64 128" DUR=10s scripts/bench-capture-cells.sh
 #
-# Env: BUCKET_DIR DATA_DIR ADDR CONCS DUR SINGLE DUAL MODE OUT INTERNAL ADMIN_TOKEN
+# Env: BUCKET_DIR DATA_DIR ADDR CONCS DUR SINGLE DUAL MODE OUT CELLHIVE_ROOT_KEY
 #      BUCKET_MODE=fs|s3  S3_BUCKET_URI S3_ENDPOINT S3_ACCESS S3_SECRET
 set -euo pipefail
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
@@ -30,8 +30,8 @@ DUR=${DUR:-10s}
 MODE=${MODE:-put}
 SINGLE=${SINGLE:-capA}
 DUAL=${DUAL:-"capB1 capB2"}
-INTERNAL=${INTERNAL:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds internal)}
-ADMIN_TOKEN=${ADMIN_TOKEN:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds admin)}
+export E2E_BIN="$ROOT/bin"
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$1"; }
 OUT=${OUT:-docs/archive/bench/single-vs-dual-capture.txt}
 CAPTURE=${CAPTURE:-on}
 BINDING_CACHE=${BINDING_CACHE:-}
@@ -48,15 +48,15 @@ cleanup() { [[ -n "$AGENT_PID" ]] && kill "$AGENT_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
 claim() {
-  curl -s -o /dev/null -w "%{http_code}" -H "x-cellhive-internal-token: $INTERNAL" \
+  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $(auth internal)" \
     -X POST "$ADDR/v1/internal/claim" -d "{\"scope\":\"$1\"}"
 }
 setup_cell() {
   local ns=$1
   claim "$ns/__control__/main" >/dev/null
   claim "$ns/__kv__/default" >/dev/null
-  curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$ADMIN/v1/control/app" -d "{\"namespace\":\"$ns\"}"
-  curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$ADMIN/v1/control/resource" \
+  curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$ADMIN/v1/control/app" -d "{\"namespace\":\"$ns\"}"
+  curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$ADMIN/v1/control/resource" \
     -d "{\"namespace\":\"$ns\",\"kind\":\"kv\",\"name\":\"KV\",\"scope\":\"default\"}"
 }
 scan() { # label, space-separated namespaces

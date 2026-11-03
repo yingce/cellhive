@@ -1,6 +1,7 @@
 package runtimelog
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -13,7 +14,7 @@ func TestRegisterLoopAdvertisesEveryAgent(t *testing.T) {
 	hits := make(chan string, 2)
 	serve := func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/internal/logs/runtime" || r.Header.Get("x-cellhive-internal-token") != "internal" {
+			if r.URL.Path != "/v1/internal/logs/runtime" || bearertoken.VerifyInternal(r.Header, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "internal", time.Now()) != nil {
 				http.Error(w, "unauthorized", 401)
 				return
 			}
@@ -34,7 +35,7 @@ func TestRegisterLoopAdvertisesEveryAgent(t *testing.T) {
 	defer b.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go RegisterLoop(ctx, a.URL+","+b.URL, "internal", []string{"http://runtime:8081"})
+	go RegisterLoop(ctx, a.URL+","+b.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", []string{"http://runtime:8081"})
 	seen := map[string]bool{}
 	for len(seen) < 2 {
 		select {

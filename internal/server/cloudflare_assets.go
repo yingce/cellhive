@@ -1,7 +1,7 @@
 package server
 
 import (
-	"crypto/hmac"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cellhive/internal/artifacts"
+	"cellhive/internal/bearertoken"
 )
 
 const wranglerManifestPath = "__cellhive_wrangler_manifest.json"
@@ -22,42 +23,97 @@ type wranglerAsset struct {
 	Size int64  `json:"size"`
 }
 type wranglerAssetsClaim struct {
-	NS     string `json:"ns"`
-	Worker string `json:"worker"`
-	Token  string `json:"token"`
-	Exp    int64  `json:"exp"`
-	Single bool   `json:"wrangler_single_asset_uploads"`
+	NS           string `json:"ns"`
+	Worker       string `json:"worker"`
+	Token        string `json:"token"`
+	Exp          int64  `json:"exp"`
+	Single       bool   `json:"wrangler_single_asset_uploads"`
+	ParentIssuer string `json:"parent_issuer"`
+	Subject      string `json:"sub"`
+	IssuedAt     int64  `json:"iat"`
 }
 
-func (s *Server) signAssetsClaim(c wranglerAssetsClaim) string {
-	head := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	payload, _ := json.Marshal(c)
-	unsigned := head + "." + base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, []byte(s.Cfg.AdminToken))
-	mac.Write([]byte(unsigned))
-	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+func (s *Server) signAssetsClaim(c wranglerAssetsClaim) (string, error) {
+	key, err := s.jwtKey("token/assets")
+	if err != nil {
+		return "", err
+	}
+	return bearertoken.Mint(key, "token/assets", bearertoken.Claims{
+		Ver: 1, Type: "assets", Subject: c.Subject, Audience: "cellhive", IssuedAt: c.IssuedAt, ExpiresAt: c.Exp,
+		Namespace: c.NS, Worker: c.Worker, Session: c.Token, ParentIssuer: c.ParentIssuer, WranglerSingleAssetUploads: c.Single,
+	})
 }
 
-func (s *Server) verifyAssetsClaim(token string) (wranglerAssetsClaim, error) {
-	var c wranglerAssetsClaim
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 || s.Cfg.AdminToken == "" {
-		return c, errors.New("invalid upload token")
+func (s *Server) verifyAssetsClaim(ctx context.Context, token string) (wranglerAssetsClaim, error) {
+	c, err := s.verifySessionJWT(ctx, token, "assets")
+	if err != nil {
+		return wranglerAssetsClaim{}, err
 	}
-	mac := hmac.New(sha256.New, []byte(s.Cfg.AdminToken))
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || !hmac.Equal(mac.Sum(nil), sig) {
-		return c, errors.New("invalid upload token")
+	return wranglerAssetsClaim{NS: c.Namespace, Worker: c.Worker, Token: c.Session, Exp: c.ExpiresAt, Single: c.WranglerSingleAssetUploads, ParentIssuer: c.ParentIssuer, Subject: c.Subject, IssuedAt: c.IssuedAt}, nil
+}
+
+// Session credentials never outlive their parent and never widen its namespace.
+func (s *Server) sessionClaims(r *http.Request, purpose, ns, worker, session string, ttl time.Duration) (bearertoken.Claims, error) {
+	kid, parent, err := s.verifyBearer(r)
+	if err != nil {
+		return bearertoken.Claims{}, err
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || json.Unmarshal(payload, &c) != nil || c.Exp < time.Now().Unix() || c.NS == "" || c.Worker == "" || c.Token == "" {
-		return c, errors.New("expired or malformed upload token")
+	issuer := strings.TrimPrefix(kid, "issuer/")
+	if kid == "token/admin" && parent.Type == "admin" {
+		issuer = kid
+	} else if !strings.HasPrefix(kid, "issuer/") || parent.Type != "namespace" || !bearertoken.Allows(parent.Namespaces, ns) {
+		return bearertoken.Claims{}, errors.New("session parent not authorized")
+	}
+	now := time.Now()
+	exp := min(parent.ExpiresAt, now.Add(ttl).Unix())
+	if exp <= now.Unix() {
+		return bearertoken.Claims{}, errors.New("session parent expired")
+	}
+	return bearertoken.Claims{Ver: 1, Type: purpose, Subject: parent.Subject, Audience: "cellhive", IssuedAt: now.Unix(), ExpiresAt: exp, Namespace: ns, Worker: worker, Session: session, ParentIssuer: issuer}, nil
+}
+
+func (s *Server) verifySessionJWT(ctx context.Context, token, purpose string) (bearertoken.Claims, error) {
+	key, err := s.jwtKey("token/" + purpose)
+	if err != nil {
+		return bearertoken.Claims{}, err
+	}
+	kid, c, err := bearertoken.Verify(key, token, time.Now())
+	if err != nil {
+		return bearertoken.Claims{}, err
+	}
+	if kid != "token/"+purpose || c.Type != purpose {
+		return bearertoken.Claims{}, errors.New("invalid session purpose")
+	}
+	if err := s.checkSessionIssuer(ctx, c); err != nil {
+		return bearertoken.Claims{}, err
 	}
 	return c, nil
 }
 
+func (s *Server) checkSessionIssuer(ctx context.Context, c bearertoken.Claims) error {
+	if c.ExpiresAt <= time.Now().Unix() {
+		return errors.New("session expired")
+	}
+	if c.ParentIssuer == "token/admin" {
+		return nil
+	}
+	i, err := s.issuerFromOwner(ctx, c.ParentIssuer)
+	if err != nil {
+		return err
+	}
+	if !i.Enabled || i.DeletedMs != 0 || c.ExpiresAt-c.IssuedAt > i.MaxTokenTTLSeconds || !bearertoken.Allows(i.Namespaces, c.Namespace) {
+		return errors.New("session issuer not authorized")
+	}
+	return nil
+}
+
 func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Request) {
+	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
+	claims, err := s.sessionClaims(r, "assets", ns, worker, "pending", time.Hour)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid session parent required")
+		return
+	}
 	st := s.artifactStore()
 	if st == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no_bucket", "object store not configured")
@@ -90,7 +146,6 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 	data, _ := json.Marshal(in.Manifest)
 	sum := sha256.Sum256(data)
 	token := hex.EncodeToString(sum[:])
-	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
 	if _, err := st.PutAssetAt(r.Context(), ns, worker, token, wranglerManifestPath, data); err != nil {
 		writeErr(w, http.StatusInternalServerError, "session_failed", err.Error())
 		return
@@ -103,13 +158,22 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 			seen[asset.Hash] = true
 		}
 	}
-	claim := wranglerAssetsClaim{NS: ns, Worker: worker, Token: token, Exp: time.Now().Add(time.Hour).Unix(), Single: true}
-	cloudflareResult(w, map[string]any{"jwt": s.signAssetsClaim(claim), "buckets": [][]string{missing}})
+	claim := wranglerAssetsClaim{NS: ns, Worker: worker, Token: token, Exp: claims.ExpiresAt, Single: true, ParentIssuer: claims.ParentIssuer, Subject: claims.Subject, IssuedAt: claims.IssuedAt}
+	jwt, err := s.signAssetsClaim(claim)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "session_failed", "session signing unavailable")
+		return
+	}
+	cloudflareResult(w, map[string]any{"jwt": jwt, "buckets": [][]string{missing}})
 }
 
 func (s *Server) handleCloudflareAssetsUpload(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claim, err := s.verifyAssetsClaim(token)
+	token, err := bearertoken.Bearer(r.Header)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid asset upload token required")
+		return
+	}
+	claim, err := s.verifyAssetsClaim(r.Context(), token)
 	if err != nil || claim.NS != r.PathValue("account_id") {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid asset upload token required")
 		return
@@ -181,6 +245,13 @@ func (s *Server) storeCloudflareAsset(r *http.Request, st *artifacts.Store, clai
 			return e
 		}
 		body = decoded
+	}
+	// Reading a client body is unbounded in time; the handshake authorization
+	// must not let a slow upload outlive its issuer or session expiry.
+	if err := s.checkSessionIssuer(r.Context(), bearertoken.Claims{
+		Namespace: claim.NS, ParentIssuer: claim.ParentIssuer, IssuedAt: claim.IssuedAt, ExpiresAt: claim.Exp,
+	}); err != nil {
+		return err
 	}
 	for _, path := range paths {
 		if int64(len(body)) != manifest[path].Size {

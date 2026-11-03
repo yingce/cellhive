@@ -12,7 +12,7 @@ import (
 type cliProfile struct {
 	AdminURL   string `json:"admin_url,omitempty"`
 	AdminToken string `json:"admin_token,omitempty"`
-	AdminJWT   string `json:"admin_jwt,omitempty"`
+	Token      string `json:"token,omitempty"`
 }
 type cliConfig struct {
 	Profiles map[string]cliProfile `json:"profiles"`

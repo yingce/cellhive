@@ -335,7 +335,9 @@ func (s *Server) handleDOObjects(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+		if err := s.setInternalAuthorization(req, "internal"); err != nil {
+			continue
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			continue

@@ -54,7 +54,7 @@ func TestStreamHandshakeCancellation(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		s, e := dialRawStream(ctx, url, "", "", 1)
+		s, e := dialRawStream(ctx, url, jwtTestKey, "", 1)
 		if s != nil {
 			s.fail(io.EOF)
 		}
@@ -71,7 +71,7 @@ func TestStreamHandshakeCancellation(t *testing.T) {
 }
 func TestStreamDialDoesNotBlockOtherTargetOrClose(t *testing.T) {
 	url, accepted := stalledPeer(t, false, false)
-	tr := NewStreamTransport("", 1, 1)
+	tr := NewStreamTransport(jwtTestKey, 1, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dialDone := make(chan struct{})
@@ -103,7 +103,7 @@ func TestStreamDialDoesNotBlockOtherTargetOrClose(t *testing.T) {
 
 func TestStreamWriteCancellation(t *testing.T) {
 	url, _ := stalledPeer(t, true, false)
-	s, e := dialRawStream(context.Background(), url, "", "", 1)
+	s, e := dialRawStream(context.Background(), url, jwtTestKey, "", 1)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -120,7 +120,7 @@ func TestStreamWriteCancellation(t *testing.T) {
 }
 func TestStreamAsyncCancellation(t *testing.T) {
 	url, _ := stalledPeer(t, true, true)
-	s, e := dialRawStream(context.Background(), url, "", "", 1)
+	s, e := dialRawStream(context.Background(), url, jwtTestKey, "", 1)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -140,7 +140,7 @@ func TestStreamAsyncCancellation(t *testing.T) {
 
 func TestStreamAckStallRetiresLane(t *testing.T) {
 	url, _ := stalledPeer(t, true, true)
-	s, err := dialRawStream(context.Background(), url, "", "", 2)
+	s, err := dialRawStream(context.Background(), url, jwtTestKey, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestStreamCancelDoesNotAbortOtherAcknowledgements(t *testing.T) {
 		c.Write([]byte{1, 1})
 		io.Copy(io.Discard, r)
 	}()
-	s, err := dialRawStream(context.Background(), "http://"+l.Addr().String(), "", "", 2)
+	s, err := dialRawStream(context.Background(), "http://"+l.Addr().String(), jwtTestKey, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestStreamRetiredLaneReconnects(t *testing.T) {
 			c.Close()
 		}
 	}()
-	tr := NewStreamTransport("", 1, 1)
+	tr := NewStreamTransport(jwtTestKey, 1, 1)
 	defer func() { tr.Close(); l.Close(); <-done }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -293,7 +293,7 @@ func TestStreamConcurrentAckOrder(t *testing.T) {
 			}
 		}
 	}()
-	s, err := dialRawStream(context.Background(), "http://"+l.Addr().String(), "", "", 8)
+	s, err := dialRawStream(context.Background(), "http://"+l.Addr().String(), jwtTestKey, "", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestStreamConcurrentAckOrder(t *testing.T) {
 
 func TestStreamCoalescedDialFailureDoesNotSerializeRetries(t *testing.T) {
 	url, accepted := stalledPeer(t, false, false)
-	tr := NewStreamTransport("", 1, 1)
+	tr := NewStreamTransport(jwtTestKey, 1, 1)
 	defer tr.Close()
 	leader, cancelLeader := context.WithCancel(context.Background())
 	defer cancelLeader()

@@ -62,7 +62,8 @@ INTERNAL_PORT=${INTERNAL_PORT:-18088}
 REST="127.0.0.1:$REST_PORT"
 ADMIN="127.0.0.1:$ADMIN_PORT"
 PUB="127.0.0.1:$PUBLIC_PORT"
-TOKEN=e2e-admin-token
+export E2E_BIN="$BINDIR"
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$1"; }
 
 fail() { echo "DEPLOY-E2E: FAIL: $*" >&2; [[ -f ${TMP:-}/agent.log ]] && tail -20 "$TMP/agent.log" >&2; [[ -f ${TMP:-}/runtime.log ]] && tail -20 "$TMP/runtime.log" >&2; exit 1; }
 
@@ -73,6 +74,7 @@ if [[ ${SKIP_BUILD:-0} != 1 ]]; then
   echo "== building cell-agent + user-runtime into $BINDIR =="
   go build -tags "$TAGS" -o "$BINDIR/cell-agent" ./cmd/cell-agent || fail "go build cell-agent"
   go build -tags "$TAGS" -o "$BINDIR/user-runtime" ./cmd/user-runtime || fail "go build user-runtime"
+  go build -tags "$TAGS" -o "$BINDIR/cellhive" ./cmd/cellhive || fail "go build cellhive"
 fi
 [[ -x $BINDIR/cell-agent && -x $BINDIR/user-runtime ]] || fail "missing binaries in $BINDIR"
 [[ -x $WORKERD ]] || fail "workerd not found at $WORKERD (run deploy/build-workerd-fork.sh)"
@@ -80,7 +82,7 @@ fi
 TMP=$(mktemp -d "/tmp/cellhive-${LABEL}.XXXXXX")
 export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32)
 export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
-export CELLHIVE_ADMIN_TOKEN=$TOKEN
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
 export CELLHIVE_NODE_ID="deploy-e2e-$LABEL"
 export CELLHIVE_SESSION_ID="deploy-e2e-$LABEL-$$"
 export CELLHIVE_DATA_DIR="$TMP/data"
@@ -140,35 +142,35 @@ curl -s -o /dev/null "http://$PUB/" 2>/dev/null || fail "user-runtime not listen
 adm() {
   local m=$1 p=$2 b=${3:-}
   if [[ -n $b ]]; then
-    curl -sS -m 60 -X "$m" -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' --data-binary "$b" "http://$ADMIN$p"
+    curl -sS -m 60 -X "$m" -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/json' --data-binary "$b" "http://$ADMIN$p"
   else
-    curl -sS -m 60 -X "$m" -H "x-cellhive-admin-token: $TOKEN" "http://$ADMIN$p"
+    curl -sS -m 60 -X "$m" -H "Authorization: Bearer $(auth admin)" "http://$ADMIN$p"
   fi
 }
 # adm_time METHOD PATH BODY -> writes time_total to stdout and body to $TMP/last.body
 adm_time() {
   curl -sS -m 60 -o "$TMP/last.body" -w '%{time_total}' -X "$1" \
-    -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' \
+    -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/json' \
     --data-binary "$3" "http://$ADMIN$2"
 }
 proofs() { # durability proofs attributed to the single control cell
   local v
-  v=$(curl -sS -m 10 "http://$REST/metrics" | awk -F' ' '/^cellhive_durability_proof_seconds_count\{ns="__platform__"\}/{print $2}')
+  v=$(curl -sS -m 10 -H "Authorization: Bearer $(auth internal)" "http://$REST/metrics" | awk -F' ' '/^cellhive_durability_proof_seconds_count\{ns="__platform__"\}/{print $2}')
   echo "${v:-0}"
 }
 ensure_mode() { # MODE -> capture.Ensure counter for the control cell
   local m=$1 v
-  v=$(curl -sS -m 10 "http://$REST/metrics" |
+  v=$(curl -sS -m 10 -H "Authorization: Bearer $(auth internal)" "http://$REST/metrics" |
     awk -v pat="cellhive_capture_ensure_total{ns=\"__platform__\",mode=\"$m\"}" 'index($0, pat)==1 {print $NF}')
   echo "${v:-0}"
 }
 active_ver() {
-  curl -sS -m 10 -H "x-cellhive-admin-token: $TOKEN" \
+  curl -sS -m 10 -H "Authorization: Bearer $(auth admin)" \
     "http://$ADMIN/v1/control/releases?namespace=e2e&worker=app" |
     python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((r["version"] for r in d.get("releases") or [] if r.get("active")), 0))'
 }
 upload() {
-  curl -sS -m 30 -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/javascript' \
+  curl -sS -m 30 -X POST -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/javascript' \
     --data-binary "$1" "http://$ADMIN/v1/control/bundle" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
 }

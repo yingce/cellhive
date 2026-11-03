@@ -8,6 +8,7 @@
 package plangen
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,14 +27,15 @@ import (
 
 // Config points the builder at the cell-agent projection endpoints.
 type Config struct {
-	CellURL    string
-	CellToken  string
-	Client     *http.Client
-	PlatformJS string // dir with queue-wrapper.js and rpc-codec.js
-	FacadesJS  string // path to facades.js
-	AIURL      string
-	AIKey      string
-	LogToken   string
+	CellURL           string
+	CellToken         string
+	BindingSigningKey string
+	Client            *http.Client
+	PlatformJS        string // dir with queue-wrapper.js and rpc-codec.js
+	FacadesJS         string // path to facades.js
+	AIURL             string
+	AIKey             string
+	LogToken          string
 	// MinimalMode selects the static entry module for bound workers:
 	//   "off"  - always render the trusted wrapper (full facades/quota);
 	//   "on"   - always render the tenant bundle directly;
@@ -405,10 +407,15 @@ func (b *Builder) platformService() (staticgen.Service, error) {
 	if err != nil {
 		return staticgen.Service{}, err
 	}
+	jwt, err := b.readModule(filepath.Join(b.cfg.PlatformJS, "..", "platform", "jwt.js"))
+	if err != nil {
+		return staticgen.Service{}, err
+	}
 	svc := staticgen.Service{
 		Name: platformService,
 		Modules: []staticgen.Module{
 			{Name: "bindings.js", Source: bindings},
+			{Name: "jwt.js", Source: jwt},
 			{Name: "facades.js", Source: facades},
 			{Name: "rpc-codec.js", Source: rpc},
 		},
@@ -417,6 +424,7 @@ func (b *Builder) platformService() (staticgen.Service, error) {
 		Bindings: []staticgen.Binding{
 			{Name: "CELL_URL", Text: b.cfg.CellURL},
 			{Name: "CELL_TOKEN", Text: b.cfg.CellToken},
+			{Name: "BINDING_SIGNING_KEY", Text: b.cfg.BindingSigningKey},
 			{Name: "PLATFORM", Service: "cap-egress"},
 		},
 	}
@@ -434,7 +442,9 @@ func (b *Builder) getJSON(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", b.cfg.CellToken)
+	if err := bearertoken.SetInternal(req, b.cfg.CellToken, "internal"); err != nil {
+		return err
+	}
 	req.Header.Set("accept", "application/json")
 	res, err := b.cfg.Client.Do(req)
 	if err != nil {
@@ -455,7 +465,9 @@ func (b *Builder) getBundle(ctx context.Context, sha string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("x-cellhive-internal-token", b.cfg.CellToken)
+	if err := bearertoken.SetInternal(req, b.cfg.CellToken, "internal"); err != nil {
+		return "", err
+	}
 	res, err := b.cfg.Client.Do(req)
 	if err != nil {
 		return "", err

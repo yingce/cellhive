@@ -6,7 +6,7 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"cellhive/internal/scopedtoken"
+	"cellhive/internal/bearertoken"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -82,18 +82,18 @@ func registeredResources(ns string) (func(kind, name string) bool, error) {
 
 // bundleFromConfig builds and uploads the config's `main` (esbuild in-process,
 // --no-bundle uploads the file as-is).
-func bundleFromConfig(m *wrangler.Deploy) (string, error) {
+func bundleFromConfig(m *wrangler.Deploy, ns string) (string, error) {
 	if m.Main == "" {
-		return uploadBundleBytes([]byte(`export default { fetch() { return new Response(null, { status: 404 }); } };`))
+		return uploadBundleBytes([]byte(`export default { fetch() { return new Response(null, { status: 404 }); } };`), ns)
 	}
 	if m.NoBundle {
-		return uploadBundle(m.Main)
+		return uploadBundle(m.Main, ns)
 	}
 	out, err := buildBundle(m)
 	if err != nil {
 		return "", err
 	}
-	return uploadBundleBytes(out)
+	return uploadBundleBytes(out, ns)
 }
 
 // buildBundle runs esbuild with a per-build temp OutFile so concurrent deploys
@@ -115,18 +115,18 @@ func buildBundle(m *wrangler.Deploy) ([]byte, error) {
 	})
 }
 
-func uploadBundle(path string) (string, error) {
+func uploadBundle(path, ns string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	return uploadBundleBytes(data)
+	return uploadBundleBytes(data, ns)
 }
 
-func uploadBundleBytes(data []byte) (string, error) {
+func uploadBundleBytes(data []byte, ns string) (string, error) {
 	sum := sha256.Sum256(data)
 	local := hex.EncodeToString(sum[:])
-	if _, err := adminCallRaw("/v1/control/bundle", data); err != nil {
+	if _, err := adminCallRaw("/v1/control/bundle?namespace="+url.QueryEscape(ns), data); err != nil {
 		return "", err
 	}
 	fmt.Fprintln(os.Stderr, "uploaded bundle", local, "(", len(data), "bytes )")
@@ -274,14 +274,7 @@ func scopeCall(method, path, ns, index string, body any, extra ...url.Values) (j
 // scopeCallKind is the shared data-plane client for operator commands. It
 // mints a narrowly scoped token for exactly one namespace/resource pair.
 func scopeCallKind(method, path, ns, kind, name string, body any, extra ...url.Values) (json.RawMessage, error) {
-	creds := config.DeriveCredentials(config.LoadRootKey())
-	if creds.Scope == "" {
-		return nil, fmt.Errorf("CELLHIVE_ROOT_KEY is required to mint a scoped token")
-	}
-	token, err := scopedtoken.Mint([]byte(creds.Scope), scopedtoken.Claims{
-		Namespace: ns, Kind: kind, Name: name,
-		ExpiresMs: time.Now().Add(5 * time.Minute).UnixMilli(),
-	})
+	token, err := bindingToken(ns, kind, name)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +301,7 @@ func scopeCallKind(method, path, ns, kind, name string, body any, extra ...url.V
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-scope-token", token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
 		req.Header.Set("content-type", "application/json")
 	}
@@ -510,11 +503,7 @@ func scopeRawCall(method, path, ns, kind, name string, raw []byte, q url.Values)
 }
 
 func scopeRawCallHeaders(method, path, ns, kind, name string, raw []byte, q url.Values, headers http.Header) ([]byte, error) {
-	creds := config.DeriveCredentials(config.LoadRootKey())
-	if creds.Scope == "" {
-		return nil, fmt.Errorf("CELLHIVE_ROOT_KEY is required to mint a scoped token")
-	}
-	tok, err := scopedtoken.Mint([]byte(creds.Scope), scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name, ExpiresMs: time.Now().Add(5 * time.Minute).UnixMilli()})
+	tok, err := bindingToken(ns, kind, name)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +515,7 @@ func scopeRawCallHeaders(method, path, ns, kind, name string, raw []byte, q url.
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	if method == http.MethodPost || method == http.MethodPut {
 		req.Header.Set("content-type", "application/json")
 	}
@@ -693,45 +682,34 @@ func printWorkerCrons(ns, worker string) error {
 	return nil
 }
 
-// cmdCreds prints the role credentials derived from CELLHIVE_ROOT_KEY, so
-// scripts and operators never hand-copy per-role secrets (ADR-137).
-// mintScopeToken mints a scoped binding token from one place (ADR-181). keyB64
-// (raw base64url) overrides root derivation so a delegated holder can mint
-// without holding the root key.
+func bindingToken(ns, kind, name string) (string, error) {
+	if explicitToken() != "" {
+		return adminToken()
+	}
+	return mintRootToken("token/scope", bearertoken.Claims{Type: "binding", Namespace: ns, Kind: kind, Name: name})
+}
+
+// Issuer holders mint offline; only the server can enforce the authoritative ceiling.
 func mintScopeToken(ns, kind, name, iss string, ttl time.Duration, keyB64 string) (string, error) {
-	if ns == "" || kind == "" || name == "" {
-		return "", fmt.Errorf("namespace, kind and name are required")
+	if !validIssuerID(iss) {
+		return "", fmt.Errorf("--issuer requires an immutable 32-character lowercase hex ID")
 	}
-	var key []byte
-	if keyB64 != "" {
-		b, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(keyB64))
-		if err != nil || len(b) == 0 {
-			return "", fmt.Errorf("invalid key (want raw base64url)")
-		}
-		key = b
-	} else {
-		scope := config.DeriveCredentials(config.LoadRootKey()).Scope
-		if scope == "" {
-			return "", fmt.Errorf("CELLHIVE_ROOT_KEY is required (or pass --key)")
-		}
-		k, err := scopedtoken.IssuerKey([]byte(scope), iss)
-		if err != nil {
-			return "", err
-		}
-		key = k
+	key, err := base64.RawURLEncoding.Strict().DecodeString(keyB64)
+	if err != nil || len(key) != 32 || base64.RawURLEncoding.EncodeToString(key) != keyB64 {
+		return "", fmt.Errorf("--key requires canonical raw base64url encoding of 32 bytes")
 	}
-	var exp int64
-	switch {
-	case ttl > 0:
-		exp = time.Now().Add(ttl).UnixMilli()
-	case ttl < 0:
-		return "", fmt.Errorf("ttl must be positive")
-	case iss != "":
-		return "", fmt.Errorf("delegated tokens (--iss) require --ttl > 0")
+	if ttl < time.Second || ttl%time.Second != 0 {
+		return "", fmt.Errorf("--ttl must be positive whole seconds within the issuer maximum")
 	}
-	return scopedtoken.Mint(key, scopedtoken.Claims{
-		Namespace: ns, Kind: kind, Name: name, Iss: iss, ExpiresMs: exp,
-	})
+	now := time.Now().Unix()
+	c := bearertoken.Claims{Ver: 1, Type: "namespace", Subject: "CLI", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + int64(ttl/time.Second), Namespaces: strings.Split(ns, ",")}
+	if kind != "" || name != "" {
+		if strings.ContainsAny(kind+name, "*,") {
+			return "", fmt.Errorf("binding kind/name must be exact; omit both for namespace-wide access")
+		}
+		c.Type, c.Namespaces, c.Namespace, c.Kind, c.Name = "binding", nil, ns, kind, name
+	}
+	return bearertoken.Mint(key, "issuer/"+iss, c)
 }
 
 func diagnose() error {
@@ -739,7 +717,9 @@ func diagnose() error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", internalToken())
+	if err := authorizeInternal(req); err != nil {
+		return err
+	}
 	data, err := doJSON(req)
 	if err != nil {
 		return err

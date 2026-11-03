@@ -75,7 +75,7 @@ for index, (script, original_ns) in enumerate(suites[args.suite]):
   local port code cleaned=0
   for port in "$E2E_ADMIN_PORT" "$((E2E_PORT_BASE + 5))"; do
     code=$(curl -s -m 120 -o "$E2E_BASE/cleanup.json" -w '%{http_code}' -X DELETE \\
-      -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" \\
+      -H "Authorization: Bearer $(e2e_token admin)" \\
       "http://127.0.0.1:$port/v1/control/app?namespace=$HK_REVIEW_NS" || true)
     if [[ "$code" = 200 ]]; then cleaned=1; break; fi
   done

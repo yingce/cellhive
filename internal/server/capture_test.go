@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/owner"
 	"context"
@@ -22,6 +23,15 @@ import (
 )
 
 func bytesReader(s string) *bytes.Reader { return bytes.NewReader([]byte(s)) }
+
+func testBindingJWT(s *Server, c scopedtoken.Claims) (string, error) {
+	key, err := s.Cfg.JWTKey("token/scope")
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().Unix()
+	return bearertoken.Mint(key, "token/scope", bearertoken.Claims{Ver: 1, Type: "binding", Subject: "test", Audience: "cellhive", IssuedAt: now, ExpiresAt: now + 300, Namespace: c.Namespace, Kind: c.Kind, Name: c.Name, Worker: c.Worker, Version: c.Version, Resource: c.Resource})
+}
 
 type replicaCommitter struct{ rep *replica.Manager }
 
@@ -50,12 +60,12 @@ func TestKVCaptureReplicatesAndRestores(t *testing.T) {
 		Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
 	}
 	h := srv.Handler()
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "kv", Name: "KV"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/kv/put?ns=acme&key=k", bytesReader("hello"))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

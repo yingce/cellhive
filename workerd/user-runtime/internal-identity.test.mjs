@@ -2,16 +2,18 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { internalHeaders, authorized as verifyInternal } from '../platform/jwt.js';
+const signingKey=Buffer.alloc(32,7).toString('base64url');
 const source = readFileSync(new URL('./internal.js', import.meta.url), 'utf8');
 function harness(metadata) {
-  const context = vm.createContext({ Request, Response, URL, TextEncoder, console, crypto: { randomUUID: ()=>'test' },
+  const context = vm.createContext({ internalHeaders, verifyInternal, Request, Response, URL, TextEncoder, console, crypto: { randomUUID: ()=>'test' },
     bindingStub(){}, workerLimits:()=>({}), quotaSource:()=>'', invocationSource:()=>'',
     checkedWorkerGet: async (_loader,id,code)=>({id,code,getEntrypoint:()=>({handleFetch:async()=>new Response('ok'),callMethod:async()=> 'ok'})}),
     budgetErrorBody:()=>null,
     fetch:async url=>url.includes('/worker/bindings') ? new Response(JSON.stringify(metadata())) : url.includes('/bundle-url') ? new Response('',{status:404}) : url.includes('/log-capture') ? new Response('{"mode":"off"}') : new Response('export default {}') });
   vm.runInContext(readFileSync(new URL('../platform/lifecycle.js', import.meta.url),'utf8').replace(/^export /gm,''), context);
   vm.runInContext(source.replace(/^import .*;$/gm,'').replace(/^export \{.*;$/gm,'').replace('export default {','const entry = {')+'\nglobalThis.entry = entry;', context);
-  context.env={CELL_URL:'http://local',DISPATCH_TOKEN:'tok',CH_LOG_CAPTURE:'0'};
+  context.env={CELL_URL:'http://local',CELL_TOKEN:signingKey,DISPATCH_TOKEN:signingKey,CH_LOG_CAPTURE:'0'};
   return context;
 }
 const body={namespace:'ns',worker:'fn',version:1,bundle_sha:'same'};
@@ -56,6 +58,6 @@ for(const endpoint of ['fetch','run'])test(`service ${endpoint} retains supplied
 });
 for(const [target,provided,status] of [['new','old',403],['new',undefined,403],['new','new',404],[undefined,'',404],['',undefined,404]])test(`pool incarnation ${target}/${provided}`,async()=>{
  const c=harness(()=>spec('new'));c.env.CH_POOL_TARGET=JSON.stringify({...body,storage_id:target});
- const response=await c.entry.fetch(new Request('http://local/unknown',{method:'POST',headers:{'x-cellhive-internal-token':'tok'},body:JSON.stringify({...body,storage_id:provided})}),c.env,{});
+  const response=await c.entry.fetch(new Request('http://local/unknown',{method:'POST',headers:await internalHeaders(signingKey,'dispatch'),body:JSON.stringify({...body,storage_id:provided})}),c.env,{});
  assert.equal(response.status,status);
 });

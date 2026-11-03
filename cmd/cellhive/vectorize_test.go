@@ -21,7 +21,7 @@ func TestVectorizeCreateUsesTypedFlags(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 
 	if _, _, err := executeRoot(t, "vectorize", "create", "acme", "IDX", "--dimensions", "3", "--metric", "cosine"); err != nil {
 		t.Fatal(err)

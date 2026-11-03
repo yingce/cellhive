@@ -1,6 +1,6 @@
 # 配置与环境变量
 
-权威来源是代码：`internal/config/config.go`（cell-agent）、`cmd/user-runtime/main.go`、`cmd/do-runtime/main.go`、`cmd/cellhive/main.go`（CLI）、`internal/workerdbin`、`internal/bundler`。本文档按子系统列出**全部**环境变量、默认值与作用；与代码冲突时以代码为准。
+配置实现见 `internal/config/config.go`、runtime/CLI 入口。**ADR-304 已实现，本地验收通过，未部署**；DO ticket 授权收紧与完整 baseline 已通过，生产切换未完成。部署必须同步迁移，不提供旧 header 双接受过渡。
 
 ## 解析规则
 
@@ -13,14 +13,14 @@
 | 列表 | 逗号分隔，逐项去空白，空项忽略 |
 | 成对/速率 | `a:b`（如 `CELLHIVE_LOG_BUFFER=1000:200`）或 `rps/burst`（如 `CELLHIVE_NS_RATE=100/200`） |
 
-**凭据模型（ADR-137）**：只设**一个** `CELLHIVE_ROOT_KEY`，各角色令牌用 HKDF-SHA256 按域分离派生，因此所有组件只要共享同一个 root 就自动一致，无需逐个配置：
+**凭据模型（ADR-304）**：root 仅在受信平台派生环境使用，不要求所有组件共享 root。向调用方分发所需短期 JWT；可信本地签发组件只获必要用途 key：
 
 ```
-peer / internal / dispatch / log / admin / scope / do-ticket / secrets-root
-     = HKDF-SHA256(ROOT_KEY, "cellhive/token/<role>")
+JWT key = HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)
+kid = issuer/<immutable-id> or token/<purpose>
 ```
 
-`CELLHIVE_ADMIN_TOKEN` 仍可单独覆盖 admin 凭据（便于运维独立轮换）。未设 root 且未开 `CELLHIVE_ALLOW_INSECURE_DEFAULTS` 时启动失败。
+普通 HTTP 仅 `Authorization: Bearer <HS256 JWT>`，默认 audience `cellhive`。`token/admin` 签 bootstrap admin JWT，不直接传 key；业务 issuer 必须有有效持久化记录。旧 `ScopeSecret` 派生保留给 Hyperdrive 非 HTTP 凭据，不用于 JWT；不要顺带重派生存量 secret 加密 key。长期组件必须刷新 JWT。
 
 **迁移提醒**：ADR-136/137 删除或改名的变量（如 `CELLHIVE_TOKEN_*`、`CELLHIVE_S3_*`、`CELLHIVE_NS_RPS`、`CELLHIVE_*_MS`/`_S`）如果仍被设置，各组件启动时会打印 WARN 并给出替代名（`config.LegacyEnvWarnings`），不会静默生效。
 
@@ -58,12 +58,11 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_ROOT_KEY` | 空 | 平台根密钥（base64 或 hex，≥16 字节，建议 32）；派生全部角色凭据。生产**只配这一个**（无文件时的首选） |
+| `CELLHIVE_ROOT_KEY` | 空 | 平台根密钥（base64 或 hex，≥16 字节，建议 32）；仅受信派生环境持有，不分发到普通客户端/租户 |
 | `CELLHIVE_ROOT_KEY_FILE` | 空 | 根密钥**文件**路径（Docker/K8s secret 挂载；读取后 trim）。优先于 dev 回退、低于内联 `CELLHIVE_ROOT_KEY`；文件不可读/为空则**失败关闭**（ADR-150） |
-| `CELLHIVE_ADMIN_TOKEN` | 空→派生 | 可选：单独覆盖控制面 admin 凭据 |
 | `CELLHIVE_ALLOW_INSECURE_DEFAULTS` | `false` | 允许本地开发根（`DevRootKey`）。生产必须 false |
-| `CELLHIVE_OIDC_JWKS_URL` | 空 | 设置后 admin 可额外用已验证 JWT bearer（ADR-036/131） |
-| `CELLHIVE_OIDC_ISSUER` / `_AUDIENCE` | 空 | JWT iss/aud 校验（JWT 必须含 `exp`） |
+
+`CELLHIVE_ADMIN_TOKEN` 静态覆盖与 `CELLHIVE_OIDC_*` 认证已从目标契约移除，不是兼容配置。issuer 上限和 `max token TTL <= 86400` 存控制 cell，不靠客户端环境声明；禁用/软删除 fail closed，同名重建新 ID。若有授权缓存最多 5 秒，也可初版不缓存。
 
 ## 对象存储
 
@@ -90,8 +89,7 @@ cellhive wrangler deploy --name web
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | 本地工作目录根（spool、DO 盘等由此派生） |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 一次性运行目录根；各 runtime 用其子目录 |
 | `CELLHIVE_REST_ADDR` | `:7001` | 内部 REST（Go↔Go 与 workerd bindings 共用，无 gRPC） |
-| `CELLHIVE_ADMIN_ADDR` | `:8082` | admin/控制面监听 |
-| `CELLHIVE_CF_API_ADDR` | 空 | 可选独立 Cloudflare 兼容 API 监听（只挂 `/client/v4/**`，不挂 `/v1/control`）；供 Wrangler 直连，JWT/静态 token 鉴权 |
+| `CELLHIVE_ADMIN_ADDR` | `:8082` | admin/控制面监听；同时提供 Cloudflare 兼容 API（`/client/v4/**`） |
 | `CELLHIVE_DO_RUNTIMES` | 空 | do-runtime 列表（DO 放置）；空则禁用 `/v1/do/invoke` |
 
 ## 持久性 / 复制 / RPO
@@ -225,7 +223,7 @@ CELLHIVE_CELL_IDLE=5m
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `CELLHIVE_CELL_URL` | `http://127.0.0.1:7001` | cell-agent REST |
-| `CELLHIVE_ROOT_KEY` | 必填 | 派生 internal/scope/dispatch/log 凭据 |
+| `CELLHIVE_ROOT_KEY` | 仅受信派生环境 | 历史 runtime 启动配置迁移中；目标只交付所需用途凭据，不要求所有 runtime 共享 root |
 | `CELLHIVE_USER_RUNTIME_PORT` | `8081` | 公开入口 |
 | `CELLHIVE_USER_RUNTIME_INTERNAL_PORT` | `8088` | 内部派发 |
 | `CELLHIVE_USER_RUNTIME_JS` | `workerd/user-runtime` | loader JS |
@@ -286,11 +284,15 @@ CELLHIVE_CELL_IDLE=5m
 |---|---|---|
 | `CELLHIVE_ADMIN_URL` | `http://127.0.0.1:8082` | admin 端点 |
 | `CELLHIVE_CONTROL_URL` | `http://127.0.0.1:7001` | 内部端点 |
-| `CELLHIVE_ROOT_KEY` | 必填 | 派生 admin（`CELLHIVE_ADMIN_TOKEN` 可覆盖）与 internal 令牌 |
-| `CELLHIVE_ADMIN_JWT` | 空 | 有值则改用 `Bearer`（ns 级授权） |
+| `CELLHIVE_ROOT_KEY` | 普通客户端不需要 | 仅平台 bootstrap/受信派生操作使用；业务客户端使用 JWT 或获授权的 issuer key |
+| `CELLHIVE_TOKEN` | 空 | CLI JWT 首选；其次 `CELLHIVE_ADMIN_TOKEN`（仅 JWT），再 profile token/adminToken；无显式 token 时可信 CLI 从 root 签5分钟 admin JWT |
 | `CELLHIVE_BIN` | 自动 | dev `--strict-build` 用的打包器 |
 
 ## 测试 / CI（非运行时）
+
+ADR-304 已实现，本地验收含 DO ticket/完整 baseline 已通过，未部署。CLI 不读取 `CELLHIVE_ADMIN_JWT`；`CELLHIVE_ADMIN_TOKEN` 仅为 CLI JWT 输入别名，不是服务端静态覆盖或旧 header 回退。issuer create 的 `--max-token-ttl` 必填、无默认、最大24h；token `--ttl` 默认5m，见 [控制面示例](control-plane.md)。当前 issuer owner 权威点读无缓存；未来缓存上限5秒不是当前撤销延迟。
+
+显式 `ns=["*"]` 允许全局运维读/GC/全量指标，不允许 issuer CRUD。私网免鉴权 `:7001/metrics` 与鉴权过滤的 `:8082/v1/control/metrics` 分离。
 
 | 变量 | 默认 | 作用 |
 |---|---|---|

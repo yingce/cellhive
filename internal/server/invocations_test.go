@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"cellhive/internal/auth"
 	"cellhive/internal/invocation"
 )
 
@@ -35,9 +34,7 @@ func TestInvocationQueryFiltersAndNamespaceAuthorization(t *testing.T) {
 	if len(out.Items) != 1 || out.Items[0].ID != "id-1" || out.Items[0].Logs[0].Message != "line-1" {
 		t.Fatalf("filter/query association failed: %s", rr.Body.String())
 	}
-	secret := []byte("invocation-namespace-test-secret")
-	s.AdminAuth = auth.Any{&auth.JWTBearer{HS256Secret: secret}}
-	token := signJWT(t, secret, map[string]any{"sub": "alice", "cellhive_ns": []string{"acme"}, "exp": time.Now().Add(time.Hour).Unix()})
+	token := testNamespaceJWT(t, s, "alice", "acme")
 	own := adminTokenDo(t, s, http.MethodGet, "/v1/control/invocations?namespace=acme&invocation_id=id-0", token, "")
 	if own.Code != 200 || !strings.Contains(own.Body.String(), "line-0") || strings.Contains(own.Body.String(), "line-3") {
 		t.Fatalf("own record query=%d %s", own.Code, own.Body.String())

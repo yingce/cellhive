@@ -18,6 +18,15 @@ import (
 	"cellhive/internal/server"
 )
 
+const recoveryTestRoot = "0123456789abcdef0123456789abcdef"
+
+func recoveryTestConfig(node string) config.Config {
+	c := config.DeriveCredentials(recoveryTestRoot)
+	return config.Config{NodeID: node, RootKey: recoveryTestRoot, TokenPeer: c.Peer, TokenInternal: c.Internal, TokenDispatch: c.Dispatch}
+}
+
+func recoveryPeerKey() string { return config.DeriveCredentials(recoveryTestRoot).Peer }
+
 // TestRecoverUnuploadedAck simulates a node that acknowledged a fleet write
 // (follower fsynced) but crashed before uploading it to the bucket. A new owner
 // must recover the acknowledged write from the follower.
@@ -36,12 +45,12 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool: %v", err)
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
 
 	// Owner acknowledges the write to the follower but does not upload it.
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("s1")
 	peerMgr := peer.NewManager(transport)
 	nl := nodelog.New(shared, "node-1")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
@@ -104,10 +113,10 @@ func TestRecoverLiveScopeLeavesOtherCellWritable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	f := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	fh := httptest.NewServer(f.Handler())
 	defer fh.Close()
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("shared")
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("shared")
 	nl := nodelog.New(b, "agent-a")
 	target := cell.Scope{Namespace: "demo", Class: "__do__", ID: "facet-a"}
 	other := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "other"}
@@ -152,11 +161,11 @@ func TestRecoverOneSessionAcrossCellEpochs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	http := httptest.NewServer(follower.Handler())
 	defer http.Close()
 	nl := nodelog.New(shared, "dead-owner")
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("multi-cell")
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("multi-cell")
 	for _, tc := range []struct {
 		id    string
 		epoch uint64
@@ -211,14 +220,14 @@ func TestRecoverySkipsDeletedResourcesButRecoversLiveScopes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok"}, Spool: spool})
+			follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 			http := httptest.NewServer(follower.Handler())
 			defer http.Close()
 			rep := replica.New(shared)
 			if err := rep.BlockResource(ctx, deleted, "delete-job"); err != nil {
 				t.Fatal(err)
 			}
-			rec := recovery.New(rep, peer.NewHTTPTransport("tok", nil))
+			rec := recovery.New(rep, peer.NewHTTPTransport(recoveryPeerKey(), nil))
 			var n int
 			if mode == "sealed" {
 				nl := nodelog.New(shared, "dead")
@@ -260,7 +269,7 @@ func TestRecoverLegacyNodeLogUsesHeldSpool(t *testing.T) {
 	if _, _, err := spool.AppendBatch(ctx, sc, 1, [][]byte{seg}); err != nil {
 		t.Fatalf("legacy spool append: %v", err)
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
 
@@ -270,7 +279,7 @@ func TestRecoverLegacyNodeLogUsesHeldSpool(t *testing.T) {
 	if _, err := shared.ConditionalCreate(ctx, nodelog.Key("node-1", "legacy-session"), data); err != nil {
 		t.Fatalf("seed legacy node-log: %v", err)
 	}
-	transport := peer.NewHTTPTransport("tok", nil)
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil)
 	rep := replica.New(shared)
 	rec := recovery.New(rep, transport)
 	if n, err := rec.Recover(ctx, nl, "node-1", "legacy-session"); err != nil || n != 1 {
@@ -299,14 +308,14 @@ func TestRecoverSessionTailAcrossPages(t *testing.T) {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
 	nl := nodelog.New(shared, "node-1")
 	if _, err := nl.Open(ctx, "paged-session", 1, []string{fh.URL}); err != nil {
 		t.Fatalf("node-log open: %v", err)
 	}
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("paged-session")
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("paged-session")
 	rep := replica.New(shared)
 	// The crashed owner may already have published an overlapping batch.
 	// Recovery must preserve immutable bytes and restore each logical tx once.
@@ -348,10 +357,10 @@ func TestRecoverNodeListsAndSkipsSealed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool: %v", err)
 	}
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	follower := server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
+	transport := peer.NewHTTPTransport(recoveryPeerKey(), nil).WithSession("s1")
 	peerMgr := peer.NewManager(transport)
 	nl := nodelog.New(shared, "node-1")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}

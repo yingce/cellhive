@@ -94,7 +94,7 @@ func TestOwnerRouteHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("x-cellhive-scope-token", token)
+		req.Header.Set("Authorization", "Bearer "+token)
 		start := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {

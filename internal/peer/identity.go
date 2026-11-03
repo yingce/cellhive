@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"fmt"
 	"net/http"
@@ -69,6 +70,9 @@ func verifyIdentity(h http.Header, id cell.PeerIdentity) error {
 	return nil
 }
 func (t *HTTPTransport) do(req *http.Request, addr string) (*http.Response, error) {
+	if err := bearertoken.SetInternal(req, t.Token, "peer"); err != nil {
+		return nil, err
+	}
 	id := targetIdentity(req.Context(), t.Targets, addr)
 	setIdentity(req.Header, id)
 	resp, err := t.Client.Do(req)
@@ -87,7 +91,6 @@ func (t *HTTPTransport) Prepare(ctx context.Context, addr, session string) error
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", t.Token)
 	resp, err := t.do(req, addr)
 	if err != nil {
 		return err

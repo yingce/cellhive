@@ -8,7 +8,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,8 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/logbuf"
-	"cellhive/internal/scopedtoken"
 	"cellhive/internal/telemetry"
 	"github.com/gorilla/websocket"
 )
@@ -78,7 +77,9 @@ func (s *Server) fetchPeerLogEvents(ctx context.Context, advert, ns, worker stri
 	if err != nil {
 		return peerTailPage{}, err
 	}
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenPeer)
+	if err := s.setInternalAuthorization(req, "peer"); err != nil {
+		return peerTailPage{}, err
+	}
 	client := &http.Client{Timeout: 400 * time.Millisecond}
 	if s.ForwardClient != nil {
 		copy := *s.ForwardClient
@@ -129,14 +130,19 @@ func (s *Server) handleCloudflareTailCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	id := newCloudflareTailID()
-	expires := time.Now().Add(10 * time.Minute)
-	key, err := scopedtoken.IssuerKey([]byte(s.Cfg.ScopeSecret), tailTokenIssuer)
+	claims, err := s.sessionClaims(r, "tail", ns, worker, id, 10*time.Minute)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid session parent required")
+		return
+	}
+	claims.Search = filters.Search
+	expires := time.Unix(claims.ExpiresAt, 0)
+	key, err := s.jwtKey("token/tail")
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "tail_token_unavailable", err.Error())
 		return
 	}
-	name := worker + "#" + id + "#" + base64.RawURLEncoding.EncodeToString([]byte(filters.Search))
-	token, err := scopedtoken.Mint(key, scopedtoken.Claims{Namespace: ns, Kind: tailTokenIssuer, Name: name, Iss: tailTokenIssuer, ExpiresMs: expires.UnixMilli()})
+	token, err := bearertoken.Mint(key, "token/tail", claims)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "tail_token_unavailable", err.Error())
 		return
@@ -159,21 +165,19 @@ func (s *Server) handleCloudflareTailDelete(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Request) {
-	claims, err := scopedtoken.VerifyIssuer([]byte(s.Cfg.ScopeSecret), r.URL.Query().Get("token"), time.Now())
-	if err != nil || claims.Iss != tailTokenIssuer || claims.Kind != tailTokenIssuer || claims.Namespace != r.PathValue("account_id") {
+	// Stock Wrangler does not send Authorization on the WebSocket handshake.
+	// Accept exactly one query credential only on this endpoint.
+	tokens := r.URL.Query()["token"]
+	if len(tokens) != 1 || tokens[0] == "" || len(r.Header.Values("Authorization")) != 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	prefix := r.PathValue("script_name") + "#" + r.PathValue("tail_id") + "#"
-	if !strings.HasPrefix(claims.Name, prefix) {
+	claims, err := s.verifySessionJWT(r.Context(), tokens[0], "tail")
+	if err != nil || claims.Namespace != r.PathValue("account_id") || claims.Worker != r.PathValue("script_name") || claims.Session != r.PathValue("tail_id") {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	search, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(claims.Name, prefix))
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+	search := claims.Search
 	conn, err := cloudflareTailUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -229,7 +233,7 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 		case <-readDone:
 			return
 		case <-tick.C:
-			if time.Now().UnixMilli() >= claims.ExpiresMs {
+			if err := s.checkSessionIssuer(r.Context(), claims); err != nil {
 				return
 			}
 			telemetry.Subscribe(claims.Namespace, worker, 60*time.Second)
@@ -260,7 +264,7 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 					return
 				}
 			}
-			if s.Lease == nil || s.Cfg.TokenPeer == "" {
+			if s.Lease == nil {
 				continue
 			}
 			for _, peer := range s.Lease.SampleCached(r.Context(), 15*time.Second) {

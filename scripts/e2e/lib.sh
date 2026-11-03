@@ -23,8 +23,10 @@ for c in curl jq node openssl; do
   command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 2; }
 done
 
-CELLHIVE_ADMIN_TOKEN="$(node --input-type=module -e 'import {hkdfSync} from "node:crypto";const k=Buffer.from(process.env.CELLHIVE_ROOT_KEY,"hex");process.stdout.write(Buffer.from(hkdfSync("sha256",k,Buffer.alloc(0),"cellhive/token/admin",32)).toString("base64url"))')"
-export CELLHIVE_ADMIN_TOKEN
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_ADMIN_JWT CELLHIVE_TOKEN
+export E2E_BIN
+# Generate a fresh, bounded JWT for each control/data request, not at startup.
+e2e_token() { node "$E2E_ROOT/scripts/e2e/jwt.cjs" "$@"; }
 export PATH="$E2E_BIN:$PATH"
 
 E2E_BASE="$(mktemp -d "${TMPDIR:-/tmp}/cellhive-e2e.XXXXXX")"
@@ -105,12 +107,12 @@ e2e_start_runtime() { # name cell-url public-port internal-port
 }
 
 e2e_upload() { # file -> sha
-  curl -sS -X POST -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" --data-binary @"$1" \
+  curl -fsS -X POST -H "Authorization: Bearer $(e2e_token admin)" --data-binary @"$1" \
     "http://127.0.0.1:$E2E_ADMIN_PORT/v1/control/bundle" | jq -r '.sha'
 }
 
 e2e_deploy() { # json-file
-  curl -sS -X POST -H "x-cellhive-admin-token: $CELLHIVE_ADMIN_TOKEN" -H 'content-type: application/json' \
+  curl -fsS -X POST -H "Authorization: Bearer $(e2e_token admin)" -H 'content-type: application/json' \
     --data-binary @"$1" "http://127.0.0.1:$E2E_ADMIN_PORT/v1/control/deploy"
 }
 

@@ -128,6 +128,10 @@ func (s *Server) validateServiceBindings(ctx context.Context, ns string, binding
 		if tns == ns {
 			continue // same namespace: always allowed
 		}
+		if p, ok := principalFrom(ctx); ok && p.Kind == "namespace" && !principalAllows(p, tns) {
+			out = append(out, wranglercompat.Finding{Severity: wranglercompat.SeverityError, Code: "namespace_forbidden", FieldPath: path, Message: "service target exceeds caller namespace grants"})
+			continue
+		}
 		if s.Control == nil {
 			out = append(out, wranglercompat.Finding{
 				Severity: wranglercompat.SeverityError, Code: "service_acl_check_failed", FieldPath: path,

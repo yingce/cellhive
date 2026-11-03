@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/cell"
 )
 
@@ -113,7 +114,9 @@ func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint
 		return err
 	}
 	req.Header.Set("content-type", "application/octet-stream")
-	req.Header.Set("x-cellhive-internal-token", c.token)
+	if err := bearertoken.SetInternal(req, c.token, "internal"); err != nil {
+		return err
+	}
 	req.Header.Set("x-cellhive-followers", strings.Join(c.followers, ","))
 	doOwner, hasDOOwner := ctx.Value(doOwnerContextKey{}).(DOOwnerIdentity)
 	if hasDOOwner && doOwner.Epoch != 0 {
@@ -170,7 +173,9 @@ func (c *HTTPCommitter) post(ctx context.Context, path string, body []byte) (int
 		return 0, nil, err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", c.token)
+	if err := bearertoken.SetInternal(req, c.token, "internal"); err != nil {
+		return 0, nil, err
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -204,7 +209,9 @@ func (c *HTTPCommitter) captureEpoch(ctx context.Context, scope cell.Scope) (uin
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("x-cellhive-internal-token", c.token)
+	if err := bearertoken.SetInternal(req, c.token, "internal"); err != nil {
+		return 0, err
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return 0, err

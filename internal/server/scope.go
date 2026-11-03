@@ -34,9 +34,6 @@ const (
 	ctxResolvedResource
 )
 
-// scopeSecret is the HMAC key for binding scoped tokens (ADR-074). Required.
-func (s *Server) scopeSecret() []byte { return []byte(s.Cfg.ScopeSecret) }
-
 // scopeResourceParam maps a binding kind to the query parameter that carries
 // the resource name. The middleware compares it against the token's Resource
 // when present (otherwise Name), so binding names and backend IDs can differ.
@@ -61,7 +58,10 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			// namespace (empty until then, which maps to ns="platform").
 			nsForMetrics := ""
 			defer func() { s.recordBindingCall(nsForMetrics, kind, rec.code()) }()
-			claims, ok := s.authenticateBindingToken(w, r)
+			claims, ok := s.authenticateBindingToken(w, r, kind)
+			if !ok {
+				return
+			}
 			resolved, ok := s.authorizeBinding(w, r, kind, claims)
 			if !ok {
 				return

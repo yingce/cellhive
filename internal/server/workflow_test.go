@@ -19,16 +19,19 @@ import (
 // (scoped) and the internal step/sleep/finish callbacks the running workflow uses.
 func TestWorkflowEndpoints(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if err := registerTestBinding(srv, "acme", "workflow", "MY_WF", "acme/__workflow__/MY_WF"); err != nil {
+		t.Fatal(err)
+	}
 	h := srv.Handler()
 
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	scopeDo := func(method, target, token string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, bytes.NewReader(body))
 		if token != "" {
-			req.Header.Set("x-cellhive-scope-token", token)
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -172,13 +175,16 @@ func TestWorkflowResultDecodedBudget(t *testing.T) {
 
 func TestWorkflowCreateBatchCreatesEveryInstance(t *testing.T) {
 	srv, _ := newTestServer(t)
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
+	if err := registerTestBinding(srv, "acme", "workflow", "MY_WF", "acme/__workflow__/MY_WF"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := []byte(`[{"id":"b1","params":{"n":1}},{"id":"b2","params":{"n":2}}]`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/workflow/create-batch?ns=acme&workflow=MY_WF", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-scope-token", tok)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -206,15 +212,18 @@ func TestWorkflowCreateBatchCreatesEveryInstance(t *testing.T) {
 // rate gets 429 on a tenant write endpoint.
 func TestAdmissionRateLimit(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if err := registerTestBinding(srv, "acme", "workflow", "MY_WF", "acme/__workflow__/MY_WF"); err != nil {
+		t.Fatal(err)
+	}
 	srv.Admission = admission.New(0.0001, 1) // burst 1, effectively no refill
 	h := srv.Handler()
-	tok, err := scopedtoken.Mint([]byte(srv.Cfg.ScopeSecret), scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
+	tok, err := testBindingJWT(srv, scopedtoken.Claims{Namespace: "acme", Kind: "workflow", Name: "MY_WF"})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	post := func(id string) int {
 		req := httptest.NewRequest(http.MethodPost, "/v1/workflow/create?ns=acme&workflow=MY_WF&id="+id, bytes.NewReader(nil))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr.Code

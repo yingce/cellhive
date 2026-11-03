@@ -4,7 +4,6 @@ package userruntimepool
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 	"cellhive/internal/workerdpool"
 )
@@ -140,7 +140,9 @@ func (r *Router) fetchHost(req *http.Request, host string) (control.HostView, bo
 	if err != nil {
 		return control.HostView{}, false, err
 	}
-	lookup.Header.Set("x-cellhive-internal-token", r.internalToken)
+	if err := bearertoken.SetInternal(lookup, r.internalToken, "internal"); err != nil {
+		return control.HostView{}, false, err
+	}
 	resp, err := r.client.Do(lookup)
 	if err != nil {
 		return control.HostView{}, false, reject(503, "control unavailable")
@@ -188,7 +190,7 @@ func (r *Router) routeView(req *http.Request, view control.HostView) (workerdpoo
 		for _, value := range out.Header.Values("Connection") {
 			for _, token := range strings.Split(value, ",") {
 				token = strings.TrimSpace(token)
-				if token != "" && !strings.HasPrefix(strings.ToLower(token), "x-cellhive-") {
+				if token != "" && !strings.HasPrefix(strings.ToLower(token), "x-cellhive-") && !strings.EqualFold(token, "Authorization") {
 					connection = append(connection, token)
 				}
 			}
@@ -202,7 +204,12 @@ func (r *Router) routeView(req *http.Request, view control.HostView) (workerdpoo
 				out.Header.Del(name)
 			}
 		}
-		out.Header.Set("x-cellhive-internal-token", r.internalToken)
+		if auth := out.Header.Get("Authorization"); auth != "" {
+			out.Header.Set("x-cellhive-app-authorization", auth)
+		}
+		if err := bearertoken.SetInternal(out, r.internalToken, "internal"); err != nil {
+			return err
+		}
 		out.Header.Set("x-cellhive-pool-namespace", key.Namespace)
 		out.Header.Set("x-cellhive-pool-worker", key.Worker)
 		out.Header.Set("x-cellhive-pool-version", strconv.Itoa(key.Version))
@@ -226,7 +233,7 @@ func (r *Router) Internal(req *http.Request) (workerdpool.Route, error) {
 	if req.Method != "POST" {
 		return workerdpool.Route{}, reject(405, "POST required")
 	}
-	if r.dispatchToken == "" || subtle.ConstantTimeCompare([]byte(req.Header.Get("x-cellhive-internal-token")), []byte(r.dispatchToken)) != 1 {
+	if bearertoken.VerifyInternal(req.Header, r.dispatchToken, "dispatch", time.Now()) != nil {
 		return workerdpool.Route{}, reject(401, "dispatch authentication required")
 	}
 	switch req.URL.Path {

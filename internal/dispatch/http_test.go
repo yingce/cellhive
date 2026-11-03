@@ -1,27 +1,42 @@
 package dispatch
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"cellhive/internal/timer"
 )
+
+const jwtTestKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+func assertJWT(t *testing.T, r *http.Request, role string) {
+	t.Helper()
+	if err := bearertoken.VerifyInternal(r.Header, jwtTestKey, role, time.Now()); err != nil {
+		t.Error(err)
+	}
+	if r.Header.Get("x-cellhive-internal-token") != "" {
+		t.Error("legacy auth header emitted")
+	}
+}
 
 func TestHTTPDispatcherPostsTimer(t *testing.T) {
 	var gotPath, gotToken string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotToken = r.Header.Get("x-cellhive-internal-token")
+		gotToken = r.Header.Get("Authorization")
+		assertJWT(t, r, "dispatch")
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	d := NewHTTP(srv.URL, "tok")
+	d := NewHTTP(srv.URL, jwtTestKey)
 	if d == nil {
 		t.Fatalf("NewHTTP returned nil for a non-empty URL")
 	}
@@ -33,7 +48,7 @@ func TestHTTPDispatcherPostsTimer(t *testing.T) {
 	if gotPath != "/v1/timers/dispatch" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if gotToken != "tok" {
+	if gotToken == "" {
 		t.Fatalf("token header = %q", gotToken)
 	}
 	if gotBody["token"] != tm.Token || gotBody["kind"] != "cron" || gotBody["scope"] != tm.Scope {
@@ -77,7 +92,7 @@ func TestHTTPDispatcherSendsNamespace(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	d := NewHTTP(srv.URL, "tok")
+	d := NewHTTP(srv.URL, jwtTestKey)
 	if err := d.Dispatch(context.Background(), timer.Timer{
 		Kind: "cron", Scope: "acme/__timer__/do", Worker: "web", BundleSHA: "sha", Version: 2,
 		DueAtMs: 123, Occurrence: "oc",

@@ -1,5 +1,7 @@
 # Module: Control Plane and Release
 
+> ADR-304 is **implemented, local acceptance passed, not deployed**. Bearer HS256 JWT, default audience `cellhive`, no static-header/OIDC compatibility. Explicit `ns=["*"]` permits global operational reads/GC/full metrics; issuer CRUD requires bootstrap admin. CF only on `:8082`, never `:7001/:8083`.
+
 Applications/versions/routes/domains/resources/secrets/audit and release pipelines; single control database (`app` is the `ns` in the table), immutable versions, atomic releases, resources are registered before deploy.
 
 > For the authoritative configuration source, see [`../configuration.md`](../configuration.md) and the code; the table below is the subset relevant to this module.
@@ -11,16 +13,13 @@ Applications/versions/routes/domains/resources/secrets/audit and release pipelin
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_ADMIN_JWT` | empty | If set, switch to `Bearer` (ns-level authorization) |
-| `CELLHIVE_ADMIN_TOKEN` | empty→derived | Optional: separately override control-plane admin credentials |
+| `CELLHIVE_TOKEN` | empty | CLI Bearer JWT, refresh before expiry; see configuration for input precedence |
 | `CELLHIVE_AUDIT_RETENTION` | `720h` (0 permanent) | Audit retention |
 | `CELLHIVE_AUTO_CREATE_APP` | `true` | Automatically create app on first deploy |
 | `CELLHIVE_BASE_DOMAIN` | empty | Built-in domain `<ns>-<worker>.<base>`; empty=disabled |
 | `CELLHIVE_DISPATCH_URL` | empty | Timer/queue/cron/workflow dispatch target — must be the **user-runtime internal privileged endpoint** (`http://user-runtime:8088`). If empty, the dispatch loop does not start (set by default in compose/k8s/Helm) |
 | `CELLHIVE_DO_EAGER_RESTART` | `false` | Eagerly restart DO on deploy |
 | `CELLHIVE_NS_RATE` | empty (off) | Per-ns write admission `rps[/burst]` (default burst=rps) |
-| `CELLHIVE_OIDC_ISSUER` / `_AUDIENCE` | empty | JWT iss/aud validation (JWT must contain `exp`) |
-| `CELLHIVE_OIDC_JWKS_URL` | empty | When set, admin can additionally use a verified JWT bearer (ADR-036/131) |
 | `CELLHIVE_WORKFLOW_RETENTION` | `0` permanent | Prune terminal instances |
 
 
@@ -28,6 +27,8 @@ Applications/versions/routes/domains/resources/secrets/audit and release pipelin
 
 ## Key Invariants
 
+- ADR-304 implemented, local acceptance including DO ticket/full baseline passed, not deployed. Explicit `ns=["*"]` permits global operational reads/GC/full metrics, not issuer CRUD (bootstrap admin only). Current issuer authority reads are uncached; create returns keys once. Durable `bundle_grants` binds namespace/SHA; native namespace uploads require explicit namespace, CF grants likewise. `:7001/metrics` is the private unauthenticated exception; `:8082/v1/control/metrics` authenticates/filters.
+- Issuers live in the existing control cell, `kid=issuer/<immutable-id>`, with namespace ceiling and max TTL (<=86400 seconds), no actions/key_version. Same-name recreation gets a new ID; missing/disabled/soft-deleted records reject. Reads are authoritative, optionally uncached; caches last at most 5 seconds. Bootstrap admin JWT registry creation is not a missing-business-record bypass.
 - Automatic provisioning is **rejected**: bindings must reference registered resources.
 - Domain registration grants authorization (no DNS validation, ADR-133); host must be unique.
 - Versions are immutable; rollback/promote are atomic switches.

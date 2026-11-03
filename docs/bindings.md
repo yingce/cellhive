@@ -29,7 +29,10 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 - 每个 binding 在加载期生成一个 **binding-scoped facade**，props 不可变（`ns` + binding 类型/id）；
 - 租户代码只拿到 facade；**拿不到** internal token、后端地址、通用 Fetcher；
 - facade 由平台侧 RPC entrypoint stub 持有可信 private transport（ADR-184），调用 `cell-agent`（`:7001` REST/JSON）；租户 loaded worker 的 `globalOutbound` 仍为 public-only；
-- facade 只带 **`x-cellhive-scope-token`**（平台加载期本地 HMAC 计算、无过期，ADR-074）；`ns/kind/name` 在同一 token 内，cell-agent 校验签名 + `HasBinding`。**不再带**广权限 internal token。
+- **ADR-304 已实现，本地验收通过，未部署**：facade 使用短期 `Authorization: Bearer <HS256 JWT>`，可信 host 负责刷新；不接受旧 scope header/静态凭据，不带广权限 internal token。binding claims 为精确 `ns` 字符串与 `kind/name`，默认 audience `cellhive`；固定 `worker/version/resource` 字段仅平台签发，继续执行 ADR-302 版本授权和 resource fence。
+- 同一持久化 issuer key 可签 namespace 与受限 binding JWT，无 actions/key_version；验证 issuer 上限与 TTL（<=86400 秒），缺失/禁用/软删 fail closed。同名重建新 ID；当前权威读无缓存，未来若缓存最多5秒。namespace JWT 调 binding 也须明确资源并经注册表/生命周期保护。
+- JWT 与 DO ticket 收紧已实现、本地验收通过、未部署。显式 `ns=["*"]` 可全局运维读/GC/全量指标，不可 issuer CRUD。新 DO grant 重验 parent，执行 metadata 纳入签名；已签发 ticket 的撤销边界最多30秒，issuer 无缓存不代表即时全局撤销。
+- JWT key 使用 `HKDF-SHA256(decoded_root_key, nil, "cellhive/jwt/v1/" + kid, 32)`；旧 `ScopeSecret` 派生仅保留给 Hyperdrive 非 HTTP 凭据，不用于 JWT。见 [安全模型](security.md)。
 - KV `get()`/`getWithMetadata()` 在同一个 stub、同一 microtask 内自然并发时合并为一次 `POST /v1/kv/get-batch`（每批最多 256 key）；不设置等待定时器，单次读取只延后到 microtask checkpoint。cell-agent 只做一次 owner 路由，并在同一 SQLite 连接/只读事务内按输入顺序点查；缺失、重复、metadata 与 `text/json/arrayBuffer` 语义保持不变。
 
 ## 同步 vs 异步

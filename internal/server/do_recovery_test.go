@@ -21,7 +21,7 @@ import (
 func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newTestServer(t)
-	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport("tok", nil))
+	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil))
 	if err := s.Lease.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower := New(Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	follower := New(Deps{Cfg: testAuthConfig(config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}), Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 	defer fh.Close()
 	capture := cell.Scope{Namespace: "workerd", Class: "__do__", ID: "facet"}
@@ -51,7 +51,7 @@ func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("do-write"))
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
+	transport := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).WithSession("s1")
 	if err := transport.Append(ctx, fh.URL, capture, 1, seg); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 func TestDORecoveryPointerABARoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newTestServer(t)
-	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport("tok", nil))
+	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil))
 	if err := s.Lease.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatal(err)
 	}
@@ -90,12 +90,12 @@ func TestDORecoveryPointerABARoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fh := httptest.NewServer(New(Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool}).Handler())
+	fh := httptest.NewServer(New(Deps{Cfg: testAuthConfig(config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}), Spool: spool}).Handler())
 	defer fh.Close()
 	if _, err := s.NodeLog.Open(ctx, "s1", 1, []string{fh.URL}); err != nil {
 		t.Fatal(err)
 	}
-	transport := peer.NewHTTPTransport("tok", nil).WithSession("s1")
+	transport := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).WithSession("s1")
 	sc := cell.Scope{Namespace: "workerd", Class: "__do__", ID: "same-facet"}
 	for i, node := range []string{"do-a", "do-b", "do-a"} {
 		epoch := uint64(i + 1)

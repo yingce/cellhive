@@ -71,7 +71,8 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 		NodeID: "node-1", TokenPeer: creds.Peer, TokenInternal: creds.Internal,
 		TokenDispatch: creds.Dispatch, ScopeSecret: creds.Scope, TokenLog: creds.Log,
 		AdminToken: creds.Admin, RootKey: rootKey,
-		BucketDir: dir, Durability: "bucket", BucketWait: true,
+		BindingSigningKey: creds.Binding,
+		BucketDir:         dir, Durability: "bucket", BucketWait: true,
 	}
 	om := &owner.Manager{B: b, NodeID: "node-1", Session: "s1", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
 	// Root key for envelope-encrypted secrets / resource configs (ADR-129).
@@ -144,7 +145,8 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 	internalPort, publicPort := freePort(t), freePort(t)
 	userCfg := userruntime.Config{
 		CellURL: internal.URL, CellToken: creds.Internal, ScopeSecret: creds.Scope,
-		InternalPort: internalPort, PublicPort: publicPort,
+		BindingSigningKey: creds.Binding,
+		InternalPort:      internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	}
 	capnpPath, err := userruntime.Render(t.TempDir(), userCfg)

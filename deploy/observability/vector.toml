@@ -35,8 +35,10 @@ address = "0.0.0.0:4317"
 [sources.cellhive_otlp.http]
 address = "0.0.0.0:4318"
 
-# CellHive /metrics is unauthenticated Prometheus text. Keep it reachable only
-# from this Vector pod over the cluster network.
+# ADR-178: private :7001 /metrics remains unauthenticated Prometheus pull.
+# Restrict access to trusted collectors using private networking/firewalls;
+# never expose it through public ingress or tenant egress. No JWT, signing key,
+# token refresher or auth proxy is needed for this explicit exception.
 [sources.cellhive_metrics]
 type = "prometheus_scrape"
 endpoints = ["${CELLHIVE_METRICS_URL}"]

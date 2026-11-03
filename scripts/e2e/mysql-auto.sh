@@ -17,7 +17,9 @@ fi
 for c in docker curl jq node openssl; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 2; }; done
 [[ -x "$BIN/cell-agent" && -x "$BIN/user-runtime" && -x "$BIN/cellhive" ]] || { echo "run make build first" >&2; exit 2; }
 export CELLHIVE_ROOT_KEY="${CELLHIVE_ROOT_KEY:-$(openssl rand -hex 32)}"
-ADMIN_TOKEN="$(node --input-type=module -e 'import {hkdfSync} from "node:crypto";const k=Buffer.from(process.env.CELLHIVE_ROOT_KEY,"hex");process.stdout.write(Buffer.from(hkdfSync("sha256",k,Buffer.alloc(0),"cellhive/token/admin",32)).toString("base64url"))')"
+export E2E_BIN="$BIN"
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" admin; }
 cleanup() {
   kill -9 "$(cat "$BASE/agent.pid" 2>/dev/null)" "$(cat "$BASE/runtime.pid" 2>/dev/null)" 2>/dev/null || true
   pkill -9 -f "workerd serve --experimental $BASE" 2>/dev/null || true
@@ -53,7 +55,7 @@ env CELLHIVE_CELL_URL="http://127.0.0.1:$PORT" CELLHIVE_USER_RUNTIME_PORT="$RT_P
 echo $! >"$BASE/runtime.pid"
 for i in $(seq 1 120); do [[ "$(curl -s -o /dev/null -m1 -w '%{http_code}' "http://127.0.0.1:$RT_PORT/ready" || true)" == 200 ]] && break; sleep .25; done
 
-export CELLHIVE_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" CELLHIVE_ADMIN_TOKEN="$ADMIN_TOKEN"
+export CELLHIVE_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT"
 "$BIN/cellhive" app create mysqlauto >/dev/null
 "$BIN/cellhive" domain add mysqlauto mysqlauto.test >/dev/null
 "$BIN/cellhive" resource create mysqlauto hyperdrive hd1 \
@@ -68,12 +70,12 @@ roles=$(docker exec "$MYSQL_NAME" mysql -uroot -proot -N -e "SELECT user FROM my
 [[ -n "$roles" ]] || { echo "generated role missing on MySQL origin" >&2; exit 1; }
 echo "proxysql servers=$servers users=$users origin_roles=$roles"
 
-SHA=$(curl -s -X POST -H "x-cellhive-admin-token: $ADMIN_TOKEN" --data-binary @"$BUNDLE" "http://127.0.0.1:$ADMIN_PORT/v1/control/bundle" | jq -r .sha)
+SHA=$(curl -s -X POST -H "Authorization: Bearer $(auth)" --data-binary @"$BUNDLE" "http://127.0.0.1:$ADMIN_PORT/v1/control/bundle" | jq -r .sha)
 [[ -n "$SHA" && "$SHA" != null ]] || { echo "bundle upload failed" >&2; exit 1; }
 cat >"$BASE/deploy.json" <<JSON
 {"namespace":"mysqlauto","worker":"mysqlworker","bundle_sha":"$SHA","bindings":[{"type":"hyperdrive","name":"HYPERDRIVE","id":"hd1"}],"compatibility_flags":["nodejs_compat"]}
 JSON
-curl -s -X POST -H "x-cellhive-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
+curl -s -X POST -H "Authorization: Bearer $(auth)" -H 'content-type: application/json' \
   --data-binary @"$BASE/deploy.json" "http://127.0.0.1:$ADMIN_PORT/v1/control/deploy" >/dev/null
 "$BIN/cellhive" route add mysqlauto mysqlauto.test mysqlworker >/dev/null
 out=""

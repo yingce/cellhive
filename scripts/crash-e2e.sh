@@ -37,7 +37,8 @@ REST_PORT=${REST_PORT:-17101}
 ADMIN_PORT=${ADMIN_PORT:-18182}
 REST="127.0.0.1:$REST_PORT"
 ADMIN="127.0.0.1:$ADMIN_PORT"
-TOKEN=e2e-admin-token
+export E2E_BIN="$BINDIR"
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" admin; }
 N=${N:-40}
 DELAY_MS=${DELAY_MS:-15}
 
@@ -47,13 +48,14 @@ mkdir -p "$BINDIR"
 if [[ ${SKIP_BUILD:-0} != 1 ]]; then
   echo "== building cell-agent =="
   go build -tags "$TAGS" -o "$BINDIR/cell-agent" ./cmd/cell-agent || fail "build"
+  go build -tags "$TAGS" -o "$BINDIR/cellhive" ./cmd/cellhive || fail "build cellhive"
 fi
 [[ -x $BINDIR/cell-agent ]] || fail "missing cell-agent"
 
 TMP=$(mktemp -d "/tmp/cellhive-crash-${LABEL}.XXXXXX")
 export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32)
 export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
-export CELLHIVE_ADMIN_TOKEN=$TOKEN
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
 export CELLHIVE_NODE_ID="crash-e2e-$LABEL"
 export CELLHIVE_SESSION_ID="crash-e2e-$LABEL-$$"
 export CELLHIVE_DATA_DIR="$TMP/data"
@@ -87,8 +89,8 @@ start_agent() {
   disown "$AGENT" 2>/dev/null || true
   for _ in $(seq 1 200); do
     if curl -sf "http://$REST/healthz" >/dev/null 2>&1 &&
-       curl -sf -H "x-cellhive-admin-token: $TOKEN" \
-         "http://$ADMIN/v1/control/releases?namespace=__startup__&worker=__startup__" >/dev/null 2>&1; then
+       curl -sf -H "Authorization: Bearer $(auth)" \
+         "http://$ADMIN/v1/control/releases?namespace=startup-probe&worker=startup-probe" >/dev/null 2>&1; then
       return 0
     fi
     kill -0 "$AGENT" 2>/dev/null || fail "cell-agent exited at startup"
@@ -96,9 +98,9 @@ start_agent() {
   done
   fail "cell-agent not healthy"
 }
-adm() { curl -sS -m 30 -X "$1" -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' --data-binary "${3:-}" "http://$ADMIN$2"; }
+adm() { curl -sS -m 30 -X "$1" -H "Authorization: Bearer $(auth)" -H 'content-type: application/json' --data-binary "${3:-}" "http://$ADMIN$2"; }
 upload() {
-  curl -sS -m 30 -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/javascript' \
+  curl -sS -m 30 -X POST -H "Authorization: Bearer $(auth)" -H 'content-type: application/javascript' \
     --data-binary "$1" "http://$ADMIN/v1/control/bundle" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
 }
@@ -107,7 +109,7 @@ deploy_one() {
   local round=$1 idx=$2 body code
   body="{\"namespace\":\"stress\",\"worker\":\"w${round}_${idx}\",\"bundle_sha\":\"$SHA\",\"idempotency_key\":\"k-${round}-${idx}\"}"
   code=$(curl -sS -m 15 -o "$TMP/results/r${round}.${idx}.body" -w '%{http_code}' \
-    -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' \
+    -X POST -H "Authorization: Bearer $(auth)" -H 'content-type: application/json' \
     --data-binary "$body" "http://$ADMIN/v1/control/deploy" 2>/dev/null) || code=000
   echo "$code" >"$TMP/results/r${round}.${idx}.code"
 }
@@ -118,13 +120,13 @@ launch_round() {
 }
 versions() { # WORKER -> number of versions
   local w=$1
-  curl -sS -m 10 -H "x-cellhive-admin-token: $TOKEN" \
+  curl -sS -m 10 -H "Authorization: Bearer $(auth)" \
     "http://$ADMIN/v1/control/releases?namespace=stress&worker=$w" |
     python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("releases") or []))'
 }
 active() {
   local w=$1
-  curl -sS -m 10 -H "x-cellhive-admin-token: $TOKEN" \
+  curl -sS -m 10 -H "Authorization: Bearer $(auth)" \
     "http://$ADMIN/v1/control/releases?namespace=stress&worker=$w" |
     python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((r["version"] for r in d.get("releases") or [] if r.get("active")), 0))'
 }

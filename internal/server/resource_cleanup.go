@@ -407,7 +407,9 @@ func (s *Server) cleanupRPC(ctx context.Context, address, path string, payload, 
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	if err := s.setInternalAuthorization(req, "internal"); err != nil {
+		return err
+	}
 	client := s.ForwardClient
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}

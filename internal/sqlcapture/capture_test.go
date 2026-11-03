@@ -1,6 +1,7 @@
 package sqlcapture
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"errors"
 	"fmt"
@@ -135,7 +136,7 @@ func TestHTTPCommitterDurabilityProofs(t *testing.T) {
 	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("payload"))
 	claimed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-cellhive-internal-token") != "tok" {
+		if bearertoken.VerifyInternal(r.Header, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "internal", time.Now()) != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -157,7 +158,7 @@ func TestHTTPCommitterDurabilityProofs(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewHTTPCommitter(server.URL, "tok", []string{"http://follower"}, nil)
+	client := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", []string{"http://follower"}, nil)
 	scope := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http"}
 	if err := client.Claim(context.Background(), scope); err != nil {
 		t.Fatalf("claim: %v", err)
@@ -176,7 +177,7 @@ func TestHTTPCommitterRequireBucketProof(t *testing.T) {
 		_, _ = w.Write([]byte(`{"mode":"bucket"}`))
 	}))
 	defer server.Close()
-	client := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	client := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil, nil)
 	client.RequireBucket = true
 	if err := client.Commit(context.Background(), cell.Scope{Namespace: "demo", Class: "__do__", ID: "host"}, 1, []byte("segment")); err != nil {
 		t.Fatal(err)
@@ -204,7 +205,7 @@ func TestHTTPCommitterDOOwnerProofOrBucketFallback(t *testing.T) {
 		_, _ = w.Write([]byte(`{"mode":"bucket"}`))
 	}))
 	defer server.Close()
-	client := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	client := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil, nil)
 	client.RequireDOOwner = true
 	scope := cell.Scope{Namespace: "workerd", Class: "__do__", ID: "facet"}
 	if err := client.Commit(context.Background(), scope, 1, []byte("segment")); err != nil {
@@ -774,7 +775,7 @@ func TestHTTPCommitterProofModes(t *testing.T) {
 				http.NotFound(w, r)
 			}
 		}))
-		client := NewHTTPCommitter(server.URL, "tok", []string{"http://follower"}, nil)
+		client := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", []string{"http://follower"}, nil)
 		scope := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "proofs"}
 		if err := client.Claim(context.Background(), scope); err != nil {
 			t.Fatalf("mode %q claim: %v", c.mode, err)
@@ -814,7 +815,7 @@ func TestHTTPCommitterDOEpochConflictDoesNotReplay(t *testing.T) {
 		w.Write([]byte(`{"mode":"bucket"}`))
 	}))
 	defer server.Close()
-	c := NewHTTPCommitter(server.URL, "tok", nil, nil)
+	c := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil, nil)
 	c.RequireDOOwner = true
 	sc := cell.Scope{Namespace: "workerd", Class: "C", ID: "object"}
 	ctx := WithDOOwner(context.Background(), DOOwnerIdentity{Scope: cell.Scope{Namespace: "app", Class: "__do__", ID: "w~C~shard0"}, Node: "do", Epoch: 1})

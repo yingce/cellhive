@@ -25,7 +25,7 @@ func (s *Server) handleCloudflareAccounts(w http.ResponseWriter, r *http.Request
 	allowed := allowedNS(r.Context())
 	out := make([]any, 0, len(apps))
 	for _, app := range apps {
-		if allowed != nil && !allowed[app.Namespace] {
+		if !allowedPattern(allowed, app.Namespace) {
 			continue
 		}
 		out = append(out, map[string]any{"id": app.Namespace, "name": app.Namespace, "status": "active"})
@@ -45,7 +45,7 @@ func (s *Server) handleCloudflareMemberships(w http.ResponseWriter, r *http.Requ
 	allowed := allowedNS(r.Context())
 	out := make([]any, 0, len(apps))
 	for _, app := range apps {
-		if allowed != nil && !allowed[app.Namespace] {
+		if !allowedPattern(allowed, app.Namespace) {
 			continue
 		}
 		out = append(out, map[string]any{"id": app.Namespace, "account": map[string]any{"id": app.Namespace, "name": app.Namespace}})
@@ -101,9 +101,8 @@ func (s *Server) cloudflarePromote(w http.ResponseWriter, r *http.Request, ns, w
 	req.URL.RawPath = ""
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, req)
+	s.AdminHandler().ServeHTTP(rec, req)
 	return !cloudflareBridgeError(w, rec, nil)
 }
 
@@ -297,9 +296,8 @@ func (s *Server) handleCloudflareWorkerSecretBulk(w http.ResponseWriter, r *http
 	req.URL.RawPath = ""
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, req)
+	s.AdminHandler().ServeHTTP(rec, req)
 	if cloudflareBridgeError(w, rec, nil) {
 		return
 	}

@@ -245,6 +245,24 @@ CREATE TABLE IF NOT EXISTS audit (
   target TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS audit_ns ON audit(ns, at_ms);
+CREATE TABLE IF NOT EXISTS issuers (
+  id                    TEXT PRIMARY KEY,
+  name                  TEXT NOT NULL,
+  namespaces            TEXT NOT NULL,
+  enabled               INTEGER NOT NULL CHECK(enabled IN (0,1)),
+  max_token_ttl_seconds INTEGER NOT NULL CHECK(max_token_ttl_seconds > 0 AND max_token_ttl_seconds <= 86400),
+  created_ms            INTEGER NOT NULL,
+  updated_ms            INTEGER NOT NULL,
+  deleted_ms            INTEGER NOT NULL DEFAULT 0,
+  CHECK(deleted_ms = 0 OR enabled = 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS issuers_active_name ON issuers(name) WHERE deleted_ms=0;
+CREATE TABLE IF NOT EXISTS bundle_grants (
+  ns         TEXT NOT NULL,
+  sha        TEXT NOT NULL,
+  created_ms INTEGER NOT NULL,
+  PRIMARY KEY (ns, sha)
+);
 CREATE TABLE IF NOT EXISTS do_classes (
   ns            TEXT NOT NULL,
   worker        TEXT NOT NULL,

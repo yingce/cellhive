@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -103,20 +104,21 @@ func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, str
 
 	// Follower node: spool only.
 	spool, _ := peer.NewSpool(filepath.Join(dir, "follower-spool"))
-	follower := server.New(server.Deps{Cfg: config.Config{TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok"}, Spool: spool})
+	creds := config.DeriveCredentials("0123456789abcdef0123456789abcdef")
+	follower := server.New(server.Deps{Cfg: config.Config{RootKey: "0123456789abcdef0123456789abcdef", TokenPeer: creds.Peer, TokenInternal: creds.Internal, TokenDispatch: creds.Dispatch}, Spool: spool})
 	fh := httptest.NewServer(follower.Handler())
 
 	// Owner node: full deps, sharing the fleet bucket.
 	lm := lease.NewManager(shared, "owner", "s-owner", "127.0.0.1:7001", "http://127.0.0.1:7001", 10*time.Second)
 	om := &owner.Manager{B: shared, NodeID: "owner", Session: "s-owner", Advertise: "127.0.0.1:7001", Role: cell.RoleCellAgent, OwnerTTL: 60 * time.Second}
 	ownerSpool, _ := peer.NewSpool(filepath.Join(dir, "owner-spool"))
-	pm := peer.NewManager(peer.NewHTTPTransport("tok", nil))
+	pm := peer.NewManager(peer.NewHTTPTransport(creds.Peer, nil))
 	nl := nodelog.New(shared, "owner")
 	rep := replica.New(shared)
 	up := upload.New(rep, log, 64, 1<<20, 10*time.Millisecond)
 	up.Start(context.Background())
 	ownerSrv := server.New(server.Deps{
-		Cfg:      config.Config{NodeID: "owner", SessionID: "s-owner", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", BucketDir: filepath.Join(dir, "bucket")},
+		Cfg:      config.Config{RootKey: "0123456789abcdef0123456789abcdef", NodeID: "owner", SessionID: "s-owner", TokenPeer: creds.Peer, TokenInternal: creds.Internal, TokenDispatch: creds.Dispatch, BucketDir: filepath.Join(dir, "bucket")},
 		Bucket:   shared,
 		Lease:    lm,
 		Owner:    om,
@@ -134,7 +136,9 @@ func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, str
 func claim(srv *server.Server, sc cell.Scope) {
 	body, _ := json.Marshal(map[string]any{"scope": sc.String()})
 	req, _ := http.NewRequest(http.MethodPost, "/v1/internal/claim", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	if err := bearertoken.SetInternal(req, srv.Cfg.TokenInternal, "internal"); err != nil {
+		panic(err)
+	}
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -184,7 +188,10 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 					"segment": base64.StdEncoding.EncodeToString(seg), "followers": followers,
 				})
 				req, _ := http.NewRequest(http.MethodPost, "/v1/internal/commit", bytes.NewReader(body))
-				req.Header.Set("x-cellhive-internal-token", "tok")
+				if err := bearertoken.SetInternal(req, srv.Cfg.TokenInternal, "internal"); err != nil {
+					fails[w]++
+					continue
+				}
 				rr := httptest.NewRecorder()
 				t0 := time.Now()
 				h.ServeHTTP(rr, req)

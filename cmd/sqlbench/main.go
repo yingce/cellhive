@@ -60,7 +60,7 @@ func main() {
 	n := flag.Int("n", 1000, "SQL transactions")
 	concurrency := flag.Int("c", 8, "concurrent SQL callers")
 	valueBytes := flag.Int("value-bytes", 64, "UPSERT value bytes")
-	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
+	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
 	durable := flag.Bool("durable", true, "wait for fleet durability proof; false isolates pure SQL")
 	unique := flag.Bool("unique", false, "write a distinct key/value per transaction (for data-accuracy verification)")
 	checkpointBytes := flag.Int64("checkpoint-bytes", 0, "auto WAL checkpoint threshold in bytes (0 disables)")

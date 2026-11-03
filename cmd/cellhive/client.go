@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/config"
 )
 
@@ -23,21 +22,62 @@ func adminURL() string {
 	return "http://127.0.0.1:8082"
 }
 
-// adminToken prefers the explicit CELLHIVE_ADMIN_TOKEN (rotatable separately)
-// and otherwise uses the root-derived credential (ADR-137).
-func adminToken() string {
+func explicitToken() string {
+	if v := getenv("CELLHIVE_TOKEN", ""); v != "" {
+		return v
+	}
 	if v := getenv("CELLHIVE_ADMIN_TOKEN", ""); v != "" {
+		return v
+	}
+	if v := activeProfile().Token; v != "" {
 		return v
 	}
 	if v := activeProfile().AdminToken; v != "" {
 		return v
 	}
-	return config.DeriveCredentials(config.LoadRootKey()).Admin
+	return ""
+}
+
+func adminToken() (string, error) {
+	if token := explicitToken(); token != "" {
+		if _, err := bearertoken.PeekKeyID(token); err != nil {
+			return "", fmt.Errorf("CELLHIVE_TOKEN/profile token must be a CellHive JWT: %w", err)
+		}
+		return token, nil
+	}
+	return mintRootToken("token/admin", bearertoken.Claims{Type: "admin"})
+}
+
+func mintRootToken(kid string, claims bearertoken.Claims) (string, error) {
+	key, err := (config.Config{RootKey: config.LoadRootKey()}).JWTKey(kid)
+	if err != nil {
+		return "", err
+	}
+	claims.Ver, claims.Subject, claims.Audience = 1, "CLI", "cellhive"
+	claims.IssuedAt = time.Now().Unix()
+	claims.ExpiresAt = claims.IssuedAt + 300
+	return bearertoken.Mint(key, kid, claims)
+}
+
+func authorizeAdmin(req *http.Request) error {
+	token, err := adminToken()
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 func internalURL() string { return getenv("CELLHIVE_CONTROL_URL", "http://127.0.0.1:7001") }
 
-func internalToken() string { return config.DeriveCredentials(config.LoadRootKey()).Internal }
+func authorizeInternal(req *http.Request) error {
+	token, err := mintRootToken("token/internal", bearertoken.Claims{Type: "internal"})
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
+}
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
@@ -54,15 +94,8 @@ func adminCall(method, path string, body any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	jwt := strings.TrimSpace(os.Getenv("CELLHIVE_ADMIN_JWT"))
-	if jwt == "" {
-		jwt = activeProfile().AdminJWT
-	}
-	if jwt != "" {
-		// Namespace-scoped OIDC/JWT credential (ADR-131).
-		req.Header.Set("Authorization", "Bearer "+jwt)
-	} else {
-		req.Header.Set("x-cellhive-admin-token", adminToken())
+	if err := authorizeAdmin(req); err != nil {
+		return nil, err
 	}
 	if body != nil {
 		req.Header.Set("content-type", "application/json")
@@ -77,7 +110,9 @@ func internalGet(path string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-internal-token", internalToken())
+	if err := authorizeInternal(req); err != nil {
+		return nil, err
+	}
 	return doJSON(req)
 }
 
@@ -87,7 +122,9 @@ func adminCallRaw(path string, data []byte) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-cellhive-admin-token", adminToken())
+	if err := authorizeAdmin(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("content-type", "application/octet-stream")
 	return doJSON(req)
 }

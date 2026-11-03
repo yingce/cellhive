@@ -30,7 +30,7 @@ func reviewCFUpload(t *testing.T, s *Server, metadata string, deploy ...bool) *h
 		method, path = http.MethodPut, "/client/v4/accounts/acme/workers/scripts/api"
 	}
 	r := httptest.NewRequest(method, path, &body)
-	r.Header.Set("Authorization", "Bearer admin-tok")
+	r.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, r)
@@ -95,7 +95,7 @@ func TestReviewWranglerSettingsMustReflectWorker(t *testing.T) {
 	}
 	_ = v
 	r := httptest.NewRequest(http.MethodGet, "/client/v4/accounts/acme/workers/scripts/api/settings", nil)
-	r.Header.Set("Authorization", "Bearer admin-tok")
+	r.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, r)
 	t.Logf("settings HTTP=%d body=%s", rr.Code, rr.Body.String())
@@ -127,7 +127,7 @@ func TestReviewWranglerRealCLI(t *testing.T) {
 			env = append(env, v)
 		}
 	}
-	env = append(env, "CLOUDFLARE_API_BASE_URL="+httpServer.URL+"/client/v4", "CLOUDFLARE_API_TOKEN=admin-tok", "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false", "CI=true", "NO_PROXY=*")
+	env = append(env, "CLOUDFLARE_API_BASE_URL="+httpServer.URL+"/client/v4", "CLOUDFLARE_API_TOKEN="+testRoleJWT(t, "admin"), "CLOUDFLARE_ACCOUNT_ID=acme", "WRANGLER_SEND_METRICS=false", "CI=true", "NO_PROXY=*")
 	for _, args := range [][]string{{"versions", "upload"}, {"secret", "put", "TOKEN"}, {"secret", "list"}, {"versions", "secret", "list"}, {"versions", "secret", "put", "TOKEN"}, {"versions", "deploy", "4@100%", "--yes"}, {"deploy"}} {
 		runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		cmd := exec.CommandContext(runCtx, "node", append([]string{cli}, args...)...)
@@ -182,7 +182,7 @@ func TestCloudflareVersionSecretMetadataIsolation(t *testing.T) {
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "/client/v4/accounts/acme/workers/scripts/api"+path, strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer admin-tok")
+		r.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(rr, r)
 		return rr
@@ -223,7 +223,7 @@ func TestWranglerStagingRejectsMigrationAndInvalidSecretPatch(t *testing.T) {
 	}
 	for _, body := range []string{`{"env":{"TOKEN":{"type":"plain_text","text":"bad"}}}`, `{"env":{"TOKEN":{"type":"secret_text"}}}`, `{"env":{}}`} {
 		r := httptest.NewRequest("PATCH", "/client/v4/accounts/acme/workers/workers/api/versions/latest", strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer admin-tok")
+		r.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(rr, r)
 		if rr.Code != 400 {

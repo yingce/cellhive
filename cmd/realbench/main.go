@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/config"
 	"context"
 	"encoding/base64"
@@ -38,7 +39,7 @@ func main() {
 	epoch := flag.Uint64("epoch", 1, "owner epoch")
 	n := flag.Int("n", 1000, "iterations")
 	c := flag.Int("c", 1, "concurrency")
-	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
+	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
 	flag.Parse()
 
 	client := &http.Client{
@@ -56,7 +57,10 @@ func main() {
 func mustClaim(c *http.Client, owner, token, scope string) {
 	body, _ := json.Marshal(map[string]any{"scope": scope})
 	req, _ := http.NewRequest(http.MethodPost, owner+"/v1/internal/claim", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-internal-token", token)
+	if err := bearertoken.SetInternal(req, token, "internal"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "claim error:", err)
@@ -94,7 +98,10 @@ func bench(c *http.Client, owner, token, scope string, epoch uint64, n, conc int
 					"segment": base64.StdEncoding.EncodeToString(seg), "followers": followers,
 				})
 				req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, owner+"/v1/internal/commit", bytes.NewReader(body))
-				req.Header.Set("x-cellhive-internal-token", token)
+				if err := bearertoken.SetInternal(req, token, "internal"); err != nil {
+					fails[w]++
+					continue
+				}
 				t0 := time.Now()
 				resp, err := c.Do(req)
 				if err != nil {

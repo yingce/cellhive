@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"cellhive/internal/auth"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
@@ -26,16 +25,7 @@ import (
 	"cellhive/internal/wranglercompat"
 )
 
-// adminAuthenticator returns the configured admin authenticator, or a static
-// token built from the ops credential (ADR-036). Empty credentials fail closed.
-func (s *Server) adminAuthenticator() auth.Authenticator {
-	if s.AdminAuth != nil {
-		return s.AdminAuth
-	}
-	return auth.StaticToken{Token: s.Cfg.AdminToken}
-}
-
-// adminAuth authenticates control-plane requests (static token or OIDC/JWT) and
+// adminAuth authenticates control-plane Bearer JWT requests and
 // attaches the caller's principal for namespace authorization + audit (ADR-131).
 func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -139,24 +129,14 @@ func (s *Server) AdminHandler() http.Handler {
 	return s.adminHandler
 }
 
-// CFAPIHandler exposes only the Cloudflare-compatible surface (no admin or
-// /v1/control routes) on the optional CFAPIAddr listener.
-func (s *Server) CFAPIHandler() http.Handler {
-	s.cfAPIOnce.Do(func() {
-		mux := http.NewServeMux()
-		s.registerCloudflareWorkerRoutes(mux)
-		// CF-API is control-plane traffic: owner forwarding must use the admin
-		// listener, not the data-plane REST listener.
-		s.cfAPIHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mux.ServeHTTP(w, r.WithContext(withAdminForward(r.Context())))
-		})
-	})
-	return s.cfAPIHandler
-}
-
 func (s *Server) buildAdminHandler() http.Handler {
 	s.adminBuilds.Add(1)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /metrics", s.adminAuth(func(w http.ResponseWriter, r *http.Request) {
+		if s.requireAll(w, r) {
+			s.handleMetrics(w, r)
+		}
+	}))
 	// Cloudflare API shaped routes used by the stock Wrangler client. These
 	// translate into the native CellHive control plane; account_id is the
 	// CellHive namespace for this compatibility surface.
@@ -165,6 +145,12 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("GET /v1/control/logs", s.adminAuth(s.handleLogQuery))
 	mux.HandleFunc("POST /v1/control/logs/subscribe", s.adminAuth(s.handleLogSubscribe))
 	mux.HandleFunc("GET /v1/control/status", s.adminAuth(s.handleControlStatus))
+	mux.HandleFunc("GET /v1/control/metrics", s.adminAuth(s.handleNamespaceMetrics))
+	mux.HandleFunc("POST /v1/control/issuers", s.adminAuth(s.handleIssuers))
+	mux.HandleFunc("GET /v1/control/issuers", s.adminAuth(s.handleIssuers))
+	mux.HandleFunc("GET /v1/control/issuers/{id}", s.adminAuth(s.handleIssuer))
+	mux.HandleFunc("PATCH /v1/control/issuers/{id}", s.adminAuth(s.handleIssuer))
+	mux.HandleFunc("DELETE /v1/control/issuers/{id}", s.adminAuth(s.handleIssuer))
 	mux.HandleFunc("GET /v1/control/hyperdrive/proxy", s.adminAuth(s.handleHyperdriveProxyStatus))
 	mux.HandleFunc("POST /v1/control/app", s.adminAuth(s.handleControlApp))
 	mux.HandleFunc("POST /v1/control/resource", s.adminAuth(s.handleControlResource))
@@ -180,6 +166,7 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/domain", s.adminAuth(s.handleControlDomainDelete))
 	mux.HandleFunc("DELETE /v1/control/route", s.adminAuth(s.handleControlRouteDelete))
 	mux.HandleFunc("POST /v1/control/secret", s.adminAuth(s.handleControlSecretPut))
+	mux.HandleFunc("PATCH /v1/control/secrets/bulk", s.adminAuth(s.handleControlSecretsBulk))
 	mux.HandleFunc("GET /v1/control/secret", s.adminAuth(s.handleControlSecretGet))
 	mux.HandleFunc("DELETE /v1/control/secret", s.adminAuth(s.handleControlSecretDelete))
 	mux.HandleFunc("GET /v1/control/secrets", s.adminAuth(s.handleControlSecretList))
@@ -216,6 +203,9 @@ func (s *Server) buildAdminHandler() http.Handler {
 }
 
 func (s *Server) handleHyperdriveProxyStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAll(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, s.HyperdriveProxyStatus())
 }
 
@@ -223,15 +213,13 @@ func (s *Server) handleControlStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.requireControl(w) {
 		return
 	}
-	if !s.requireAll(w, r) {
-		return
-	}
-	p, err := s.Control.Projection(r.Context())
+	apps, err := s.appsForRequest(r)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "projection_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "apps": len(p.Apps), "etag": p.ETag})
+	apps = filterByNS(allowedNS(r.Context()), apps, func(a control.App) string { return a.Namespace })
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "apps": len(apps)})
 }
 
 // handleControlWorkerDelete removes a worker: control metadata, its assets, its
@@ -450,7 +438,11 @@ func (s *Server) appsForRequest(r *http.Request) ([]control.App, error) {
 	if err := s.claimForRead(r.Context(), control.Scope()); err != nil {
 		return nil, err
 	}
-	resp, forwarded, err := s.fetchViaOwner(r, control.Scope())
+	request := r.Clone(r.Context())
+	request.URL.Path = "/v1/control/apps"
+	request.URL.RawPath = ""
+	request.URL.RawQuery = ""
+	resp, forwarded, err := s.fetchViaOwner(request, control.Scope())
 	if !forwarded {
 		return s.Control.Apps(r.Context())
 	}
@@ -881,10 +873,10 @@ func (s *Server) validateDeploy(ctx context.Context, req deployReq) (wranglercom
 
 // controlFixedRuntimeCodeBytes is a conservative manifest for every fixed
 // source/name byte that any current user-runtime, workflow or do-runtime
-// WorkerCode path can inject. Checked-in sources currently total about 67 KiB;
+// WorkerCode path can inject. Checked-in sources currently total about 85 KiB;
 // keep explicit headroom while generated binding metadata and facet classes are
 // charged separately below.
-const controlFixedRuntimeCodeBytes int64 = 84 * 1024
+const controlFixedRuntimeCodeBytes int64 = 96 * 1024
 
 func deployPlatformConsts(bindings []control.Binding) string {
 	kvNames := make([]string, 0)
@@ -1016,6 +1008,17 @@ func (s *Server) handleControlDeploy(w http.ResponseWriter, r *http.Request) {
 	// probe another namespace for existence.
 	if !s.authorizeNS(w, r, req.Namespace) {
 		return
+	}
+	if p, ok := principalFrom(r.Context()); ok && p.Kind == "namespace" && req.BundleSHA != "" {
+		allowed, err := s.Control.HasBundleGrant(r.Context(), req.Namespace, req.BundleSHA)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "bundle_authorization_failed", err.Error())
+			return
+		}
+		if !allowed {
+			writeErr(w, http.StatusForbidden, "bundle_forbidden", "bundle has not been uploaded for this namespace")
+			return
+		}
 	}
 	if req.Assets != nil && req.Assets.Binding != "" {
 		found := false
@@ -1526,7 +1529,10 @@ func (s *Server) restartDurableObjects(ctx context.Context, storageID string) {
 			continue
 		}
 		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+		if err := s.setInternalAuthorization(req, "internal"); err != nil {
+			failed++
+			continue
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			failed++

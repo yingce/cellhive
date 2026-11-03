@@ -31,7 +31,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 必须遵守的决策
 
-见 `docs/decisions.md`（最新 ADR-303，持续追加）。改设计要先改文档。
+见 `docs/decisions.md`（最新 ADR-304，持续追加；Bearer JWT、持久化 issuer 与 DO ticket 授权收紧已实现，本地验收含完整 baseline 已通过，未部署；不得宣称生产切换完成）。改设计要先改文档。
 
 ## 命令
 

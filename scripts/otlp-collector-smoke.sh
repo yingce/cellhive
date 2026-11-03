@@ -12,8 +12,9 @@ export PATH="$PATH:/usr/local/go/bin"
 make -C "$SRC" build >/dev/null   # smoke must exercise the current source, not a stale bin/
 TMP="$(mktemp -d)"
 RK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
-REST=18001; ADMIN=18002; UPUB=18081; UINT=18088
-COLL=4318; NS=otlp; HOST="otlp.test"
+REST=${CELLHIVE_OTLP_REST_PORT:-18001}; ADMIN=${CELLHIVE_OTLP_ADMIN_PORT:-18002}
+UPUB=${CELLHIVE_OTLP_PUBLIC_PORT:-18081}; UINT=${CELLHIVE_OTLP_INTERNAL_PORT:-18088}
+COLL=${CELLHIVE_OTLP_COLLECTOR_PORT:-4318}; NS=otlp; HOST="otlp.test"
 cleanup() {
   set +e
   for f in cell-agent user-runtime; do [ -f "$TMP/$f.pid" ] && kill "$(cat "$TMP/$f.pid")" 2>/dev/null; done
@@ -91,5 +92,5 @@ check "otlp-smoke log" "tenant log line"
 # ADR-178 correlation: the exported log record inherits the caller's trace id.
 grep -qF '"traceId":"4bf92f3577b34da6a3ce929d0e0e4736"' "$TMP/collector.out" && echo "  ok: traceparent propagated to exported span/log" || { echo "  MISSING: traceparent trace id"; FAIL=1; }
 echo "=== ns metric ==="
-curl -s http://127.0.0.1:$REST/metrics | grep -E "cellhive_binding_calls_total\{ns=\"$NS\"" || { echo "  MISSING ns label"; FAIL=1; }
+curl -s -H "Authorization: Bearer $(node "$SRC/scripts/e2e/jwt.cjs" internal)" http://127.0.0.1:$REST/metrics | grep -E "cellhive_binding_calls_total\{ns=\"$NS\"" || { echo "  MISSING ns label"; FAIL=1; }
 if [ "$FAIL" = 0 ]; then echo "OTLP-SMOKE: PASS"; else echo "OTLP-SMOKE: FAIL"; tail -30 "$TMP/collector.out" 2>/dev/null; exit 1; fi

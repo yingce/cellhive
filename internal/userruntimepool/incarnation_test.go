@@ -1,6 +1,7 @@
 package userruntimepool
 
 import (
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 	"encoding/json"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIncarnationPinSurvivesConnectionNominations(t *testing.T) {
@@ -16,8 +18,8 @@ func TestIncarnationPinSurvivesConnectionNominations(t *testing.T) {
 		if got := r.Header.Get("x-cellhive-pool-storage-id"); got != "new" {
 			t.Errorf("wire storage_id=%q", got)
 		}
-		if got := r.Header.Get("x-cellhive-internal-token"); got != "internal" {
-			t.Errorf("wire auth=%q", got)
+		if err := bearertoken.VerifyInternal(r.Header, testJWTKey, "internal", time.Now()); err != nil {
+			t.Errorf("wire auth=%v", err)
 		}
 		w.WriteHeader(200)
 	}))
@@ -27,7 +29,7 @@ func TestIncarnationPinSurvivesConnectionNominations(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://app.test/", nil)
 	req.Header.Add("Connection", "keep-alive, X-Cellhive-Pool-Storage-Id")
 	req.Header.Add("Connection", "x-cellhive-internal-token")
-	router := NewRouter("http://unused", "internal", "dispatch")
+	router := NewRouter("http://unused", testJWTKey, testJWTKey)
 	view := control.HostView{Routes: []control.HostRoute{{Namespace: "n", Worker: "api"}}, Workers: map[string]control.HostWorkerPtr{"n/api": {Version: 1, BundleSHA: "same", StorageID: "new"}}}
 	route, err := router.routeView(req, view)
 	if err != nil {
@@ -40,9 +42,11 @@ func TestIncarnationPinSurvivesConnectionNominations(t *testing.T) {
 }
 
 func TestInternalRoutePreservesWorkerIncarnation(t *testing.T) {
-	router := NewRouter("http://unused", "internal", "dispatch")
+	router := NewRouter("http://unused", testJWTKey, testJWTKey)
 	req := httptest.NewRequest("POST", "http://internal/v1/queues/dispatch", strings.NewReader(`{"namespace":"n","worker":"api","version":1,"bundle_sha":"same","storage_id":"new"}`))
-	req.Header.Set("x-cellhive-internal-token", "dispatch")
+	if err := bearertoken.SetInternal(req, testJWTKey, "dispatch"); err != nil {
+		t.Fatal(err)
+	}
 	route, err := router.Internal(req)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +57,7 @@ func TestInternalRoutePreservesWorkerIncarnation(t *testing.T) {
 }
 
 func TestPublicRoutePinsWorkerIncarnation(t *testing.T) {
-	router := NewRouter("http://unused", "internal", "dispatch")
+	router := NewRouter("http://unused", testJWTKey, testJWTKey)
 	req := httptest.NewRequest("GET", "http://app.test/", nil)
 	var view control.HostView
 	if err := json.Unmarshal([]byte(`{"routes":[{"ns":"n","worker":"api"}],"workers":{"n/api":{"version":1,"bundle_sha":"same","storage_id":"first"}}}`), &view); err != nil {

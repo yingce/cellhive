@@ -5,13 +5,12 @@
 package doticket
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"strings"
 	"time"
+
+	"cellhive/internal/bearertoken"
 )
 
 // Claims scope a ticket to one DO shard.
@@ -21,6 +20,11 @@ type Claims struct {
 	StorageClass string `json:"storage_class"`
 	Shard        int    `json:"shard"`
 	Exp          int64  `json:"exp"` // unix millis
+	Class        string `json:"class"`
+	BundleSHA    string `json:"bundle_sha"`
+	StorageID    string `json:"storage_id"`
+	Version      int    `json:"version"`
+	Limits       string `json:"limits"`
 }
 
 var (
@@ -29,56 +33,57 @@ var (
 	ErrExpired   = errors.New("doticket: expired")
 )
 
-// Mint signs claims with secret (HMAC-SHA256), base64url(payload).base64url(sig).
+// Mint signs a purpose-isolated JWT with a decoded 32-byte signing key.
+// Exp remains milliseconds at the caller boundary; JWT time is Unix seconds.
 func Mint(secret []byte, c Claims) (string, error) {
-	if len(secret) == 0 {
-		return "", fmt.Errorf("doticket: empty secret")
+	if len(secret) != 32 || c.Shard < 0 || c.Shard >= 16 || c.Class == "" || c.BundleSHA == "" || c.Version < 0 || !json.Valid([]byte(c.Limits)) {
+		return "", ErrMalformed
 	}
-	payload, err := json.Marshal(c)
+	execution, err := json.Marshal(struct {
+		Class     string          `json:"class"`
+		BundleSHA string          `json:"bundle_sha"`
+		StorageID string          `json:"storage_id"`
+		Version   int             `json:"version"`
+		Limits    json.RawMessage `json:"limits"`
+	}{c.Class, c.BundleSHA, c.StorageID, c.Version, json.RawMessage(c.Limits)})
 	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sign(secret, payload)), nil
+	return bearertoken.Mint(secret, "token/do-ticket", bearertoken.Claims{
+		Ver: 1, Type: "internal", Subject: "do-ticket", Audience: "cellhive",
+		IssuedAt: time.Now().Unix(), ExpiresAt: c.Exp / 1000,
+		Namespace: c.NS, Worker: c.Worker, StorageClass: c.StorageClass, Shard: &c.Shard,
+		Execution: string(execution),
+	})
 }
 
 // Verify checks the signature and expiry and returns the claims.
 func Verify(secret []byte, token string, now time.Time) (Claims, error) {
-	if len(secret) == 0 {
-		return Claims{}, fmt.Errorf("doticket: empty secret")
+	if len(secret) != 32 {
+		return Claims{}, ErrMalformed
 	}
-	dot := -1
-	for i := len(token) - 1; i >= 0; i-- {
-		if token[i] == '.' {
-			dot = i
-			break
+	if len(strings.Split(token, ".")) != 3 {
+		return Claims{}, ErrMalformed
+	}
+	kid, c, err := bearertoken.Verify(secret, token, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "expired") {
+			return Claims{}, ErrExpired
 		}
-	}
-	if dot <= 0 || dot == len(token)-1 {
-		return Claims{}, ErrMalformed
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(token[:dot])
-	if err != nil {
-		return Claims{}, ErrMalformed
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(token[dot+1:])
-	if err != nil {
-		return Claims{}, ErrMalformed
-	}
-	if !hmac.Equal(sig, sign(secret, payload)) {
 		return Claims{}, ErrSignature
 	}
-	var c Claims
-	if err := json.Unmarshal(payload, &c); err != nil {
+	if kid != "token/do-ticket" || c.Type != "internal" || c.Shard == nil || *c.Shard < 0 || *c.Shard >= 16 {
 		return Claims{}, ErrMalformed
 	}
-	if c.Exp <= now.UnixMilli() {
-		return Claims{}, ErrExpired
+	var execution struct {
+		Class     string          `json:"class"`
+		BundleSHA string          `json:"bundle_sha"`
+		StorageID string          `json:"storage_id"`
+		Version   int             `json:"version"`
+		Limits    json.RawMessage `json:"limits"`
 	}
-	return c, nil
-}
-
-func sign(secret, payload []byte) []byte {
-	m := hmac.New(sha256.New, secret)
-	m.Write(payload)
-	return m.Sum(nil)
+	if json.Unmarshal([]byte(c.Execution), &execution) != nil || execution.Class == "" || execution.BundleSHA == "" || execution.Version < 0 || len(execution.Limits) == 0 {
+		return Claims{}, ErrMalformed
+	}
+	return Claims{NS: c.Namespace, Worker: c.Worker, StorageClass: c.StorageClass, Shard: *c.Shard, Exp: c.ExpiresAt * 1000, Class: execution.Class, BundleSHA: execution.BundleSHA, StorageID: execution.StorageID, Version: execution.Version, Limits: string(execution.Limits)}, nil
 }

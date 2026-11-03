@@ -8,7 +8,7 @@
 #   scripts/bench-fleet.sh
 #   CONCS="1 16 32 64" DUR=10s scripts/bench-fleet.sh
 #
-# Env: BUCKET_DIR D1 D2 CONCS DUR OUT INTERNAL ADMIN_TOKEN LEASE_TTL
+# Env: BUCKET_DIR D1 D2 CONCS DUR OUT CELLHIVE_ROOT_KEY LEASE_TTL
 set -euo pipefail
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$ROOT"
@@ -23,8 +23,8 @@ D2=${D2:-/tmp/fleet/d2}
 CONCS=${CONCS:-"1 16 32 64"}
 DUR=${DUR:-10s}
 OUT=${OUT:-docs/archive/bench/fleet-2node.txt}
-INTERNAL=${INTERNAL:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds internal)}
-ADMIN_TOKEN=${ADMIN_TOKEN:-$(CELLHIVE_ALLOW_INSECURE_DEFAULTS=1 "$BIN/cellhive" creds admin)}
+export E2E_BIN="$ROOT/bin"
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$1"; }
 LEASE_TTL=${LEASE_TTL:-10s}
 NS=${NS:-capA}
 
@@ -60,13 +60,13 @@ CELLHIVE_NODE_ID=b CELLHIVE_REST_ADDR=$B_REST CELLHIVE_ADMIN_ADDR=$B_ADMIN \
   "$BIN/cell-agent" > "$(dirname "$BUCKET_DIR")/b.log" 2>&1 &
 BP=$!
 
-claim() { curl -s -o /dev/null -w "%{http_code}" -H "x-cellhive-internal-token: $INTERNAL" \
+claim() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $(auth internal)" \
   -X POST "$A_URL/v1/internal/claim" -d "{\"scope\":\"$1\"}"; }
 for i in $(seq 1 40); do [[ "$(claim __platform__/__control__/main)" == "200" ]] && break; sleep 0.25; done
 claim "$NS/__control__/main" >/dev/null
 claim "$NS/__kv__/default" >/dev/null
-curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$A_CTL/v1/control/app" -d "{\"namespace\":\"$NS\"}"
-curl -s -o /dev/null -H "x-cellhive-admin-token: $ADMIN_TOKEN" -X POST "$A_CTL/v1/control/resource" \
+curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$A_CTL/v1/control/app" -d "{\"namespace\":\"$NS\"}"
+curl -s -o /dev/null -H "Authorization: Bearer $(auth admin)" -X POST "$A_CTL/v1/control/resource" \
   -d "{\"namespace\":\"$NS\",\"kind\":\"kv\",\"name\":\"KV\",\"scope\":\"default\"}"
 # Let both leases settle so the owner sees the follower.
 sleep 6

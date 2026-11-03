@@ -5,8 +5,8 @@ package main
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -69,6 +69,7 @@ func main() {
 	runtimeCfg := userruntime.Config{
 		CellURL:           cellURL,
 		CellToken:         cellToken,
+		BindingSigningKey: creds.Binding,
 		AIURL:             getenv("CELLHIVE_AI_URL", ""),
 		AIKey:             getenv("CELLHIVE_AI_KEY", ""),
 		InternalPort:      internalPort,
@@ -279,7 +280,7 @@ func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.
 			return
 		case "/drain":
 			if r.Method == http.MethodPost {
-				if cfg.CellToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("x-cellhive-internal-token")), []byte(cfg.CellToken)) != 1 {
+				if bearertoken.VerifyInternal(r.Header, cfg.CellToken, "internal", time.Now()) != nil {
 					http.Error(w, "unauthorized", 401)
 					return
 				}
@@ -352,7 +353,9 @@ func drainLocal(port int, token string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-cellhive-internal-token", token)
+	if err := bearertoken.SetInternal(req, token, "internal"); err != nil {
+		return err
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -469,13 +472,14 @@ func splitCSV(raw string) []string {
 func newPlanBuilder(cellURL, cellToken, logToken string) *plangen.Builder {
 	return plangen.New(plangen.Config{
 		CellURL: cellURL, CellToken: cellToken,
-		PlatformJS:   getenv("CELLHIVE_USER_RUNTIME_JS", "workerd/user-runtime"),
-		FacadesJS:    getenv("CELLHIVE_FACADES_JS", "workerd/platform/facades.js"),
-		AIURL:        getenv("CELLHIVE_AI_URL", ""),
-		AIKey:        getenv("CELLHIVE_AI_KEY", ""),
-		LogToken:     logToken,
-		MinimalMode:  staticMinimalMode(getenv("CELLHIVE_STATIC_MINIMAL", "")),
-		TenantEgress: outboundAllow(),
+		BindingSigningKey: config.DeriveCredentials(config.LoadRootKey()).Binding,
+		PlatformJS:        getenv("CELLHIVE_USER_RUNTIME_JS", "workerd/user-runtime"),
+		FacadesJS:         getenv("CELLHIVE_FACADES_JS", "workerd/platform/facades.js"),
+		AIURL:             getenv("CELLHIVE_AI_URL", ""),
+		AIKey:             getenv("CELLHIVE_AI_KEY", ""),
+		LogToken:          logToken,
+		MinimalMode:       staticMinimalMode(getenv("CELLHIVE_STATIC_MINIMAL", "")),
+		TenantEgress:      outboundAllow(),
 	})
 }
 

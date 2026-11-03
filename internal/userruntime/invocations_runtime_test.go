@@ -39,7 +39,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		case "/v1/internal/worker/bindings":
 			io.WriteString(w, `{"bindings":{},"vars":{}}`)
 		case "/v1/internal/invocations":
-			if r.Header.Get("x-cellhive-internal-token") != "tok" {
+			if verifyTestJWTAuthorization(r.Header.Get("Authorization"), "internal") != nil {
 				http.Error(w, "auth", 401)
 				return
 			}
@@ -65,7 +65,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 	}))
 	defer agent.Close()
 	internal, public := freePort(t), freePort(t)
-	path, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: "tok", DispatchToken: "tok", InternalPort: internal, PublicPort: public, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", InvocationLogging: true, DisableTenantLogs: true})
+	path, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"), InternalPort: internal, PublicPort: public, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", InvocationLogging: true, DisableTenantLogs: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 			}
 			raw, _ := json.Marshal(body)
 			req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(raw))
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 			res, err := client.Do(req)
 			if err != nil {
 				t.Error(err)
@@ -140,7 +140,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 		}
 		raw, _ := json.Marshal(map[string]any{"namespace": "acme", "worker": "web", "bundle_sha": "sha", "version": 1, "queue": "queue-partial", "messages": messages})
 		req, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(raw))
-		req.Header.Set("x-cellhive-internal-token", "tok")
+		req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 		res, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -210,7 +210,7 @@ func TestQueueCronInvocationLogsAreDurableAndIsolated(t *testing.T) {
 	}
 	quietBody, _ := json.Marshal(map[string]any{"namespace": "acme", "worker": "quiet", "bundle_sha": "sha", "version": 1, "queue": "queue-ok", "messages": []any{map[string]any{"id": "quiet-message", "body": "eA==", "content_type": "text", "attempts": 1}}})
 	quietReq, _ := http.NewRequest(http.MethodPost, base+"/v1/queues/dispatch", bytes.NewReader(quietBody))
-	quietReq.Header.Set("x-cellhive-internal-token", "tok")
+	quietReq.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	quietRes, err := client.Do(quietReq)
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestCronSuccessSurvivesInvocationPersistenceFailure(t *testing.T) {
 	defer agent.Close()
 	internal, public := freePort(t), freePort(t)
 	path, err := Render(t.TempDir(), Config{
-		CellURL: agent.URL, CellToken: "tok", DispatchToken: "tok",
+		CellURL: agent.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
 		InternalPort: internal, PublicPort: public,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 		InvocationLogging: true, DisableTenantLogs: true,
@@ -290,7 +290,7 @@ func TestCronSuccessSurvivesInvocationPersistenceFailure(t *testing.T) {
 		"cron": "* * * * *", "scheduled_time_ms": int64(1000),
 	})
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/timers/dispatch", bytes.NewReader(body))
-	req.Header.Set("x-cellhive-internal-token", "tok")
+	req.Header.Set("Authorization", testJWTAuthorization("dispatch"))
 	res, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)

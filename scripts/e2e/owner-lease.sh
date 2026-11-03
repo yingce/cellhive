@@ -23,7 +23,7 @@ REST_PORT=${REST_PORT:-17011}
 ADMIN_PORT=${ADMIN_PORT:-17012}
 ADMIN="127.0.0.1:$ADMIN_PORT"
 REST="127.0.0.1:$REST_PORT"
-TOKEN=e2e-admin-token
+auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$1"; }
 TMP=$(mktemp -d /tmp/cellhive-owner-e2e.XXXXXX)
 FAILED=0
 fail(){ echo "OWNER-E2E: FAIL: $*" >&2; [[ -f $TMP/agent.log ]] && tail -30 "$TMP/agent.log" >&2; FAILED=1; }
@@ -32,9 +32,11 @@ trap cleanup EXIT INT TERM
 
 mkdir -p "$(dirname "$BIN")"
 go build -tags "$TAGS" -o "$BIN" ./cmd/cell-agent || { fail "build"; exit 1; }
+export E2E_BIN="${E2E_BIN:-$ROOT/bin}"
+go build -tags "$TAGS" -o "$E2E_BIN/cellhive" ./cmd/cellhive || exit 1
 export CELLHIVE_ROOT_KEY=$(openssl rand -hex 32)
 export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
-export CELLHIVE_ADMIN_TOKEN=$TOKEN
+unset CELLHIVE_ADMIN_TOKEN CELLHIVE_TOKEN CELLHIVE_ADMIN_JWT
 export CELLHIVE_NODE_ID=owner-e2e
 export CELLHIVE_DATA_DIR=$TMP/data
 export CELLHIVE_BUCKET_DIR=$TMP/bucket
@@ -61,16 +63,16 @@ start_agent(){ # SESSION
   done
   fail "agent not healthy"; return 1
 }
-adm(){ local m=$1 p=$2 b=${3:-}; if [[ -n $b ]]; then curl -sS -m 30 -X "$m" -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' --data-binary "$b" "http://$ADMIN$p"; else curl -sS -m 30 -X "$m" -H "x-cellhive-admin-token: $TOKEN" "http://$ADMIN$p"; fi; }
-upload(){ curl -sS -m 20 -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/javascript' --data-binary "$1" "http://$ADMIN/v1/control/bundle"; }
+adm(){ local m=$1 p=$2 b=${3:-}; if [[ -n $b ]]; then curl -sS -m 30 -X "$m" -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/json' --data-binary "$b" "http://$ADMIN$p"; else curl -sS -m 30 -X "$m" -H "Authorization: Bearer $(auth admin)" "http://$ADMIN$p"; fi; }
+upload(){ curl -sS -m 20 -X POST -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/javascript' --data-binary "$1" "http://$ADMIN/v1/control/bundle"; }
 deploy(){ # KEY BODY -> status:seconds
   local key=$1 js=$2 sha t
   sha=$(upload "$js" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha"])') || return 1
-  t=$(curl -sS -m 30 -o "$TMP/deploy.out" -w '%{time_total} %{http_code}' -X POST -H "x-cellhive-admin-token: $TOKEN" -H 'content-type: application/json' \
+  t=$(curl -sS -m 30 -o "$TMP/deploy.out" -w '%{time_total} %{http_code}' -X POST -H "Authorization: Bearer $(auth admin)" -H 'content-type: application/json' \
       --data-binary "{\"namespace\":\"e2e\",\"worker\":\"owner\",\"bundle_sha\":\"$sha\",\"idempotency_key\":\"$key\",\"compatibility_date\":\"2026-06-15\",\"bindings\":[],\"crons\":[],\"consumers\":[]}" "http://$ADMIN/v1/control/deploy")
   echo "$t"
 }
-metric(){ curl -sS -m 5 "http://$REST/metrics" | awk -v k="cellhive_$1" 'index($0,k)==1 {print $NF}'; }
+metric(){ curl -sS -m 5 -H "Authorization: Bearer $(auth internal)" "http://$REST/metrics" | awk -v k="cellhive_$1" 'index($0,k)==1 {print $NF}'; }
 epochs(){ metric owner_epoch_changes_total; }
 
 start_agent owner-e2e-s1 || exit 1
@@ -110,7 +112,7 @@ sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)
 PY
 
 
-listops(){ curl -sS -m 5 "http://$REST/metrics" | awk '/^cellhive_bucket_ops_total\{op="list"\}/{print $NF}'; }
+listops(){ curl -sS -m 5 -H "Authorization: Bearer $(auth internal)" "http://$REST/metrics" | awk '/^cellhive_bucket_ops_total\{op="list"\}/{print $NF}'; }
 
 # A5: wipe the local cell directory and force the control cell to hydrate from
 # the bucket. Hydration must be one scope listing at most (RestoreChain) plus

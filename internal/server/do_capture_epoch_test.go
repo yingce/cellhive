@@ -38,7 +38,7 @@ func TestDOCaptureSurvivesAgentEpochChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := sqlcapture.DOOwnerIdentity{Scope: doScope, Node: dob.Node, Epoch: dob.Epoch}
-	committer := sqlcapture.NewHTTPCommitter(hs.URL, "tok", nil, nil)
+	committer := sqlcapture.NewHTTPCommitter(hs.URL, s.Cfg.TokenInternal, nil, nil)
 	committer.RequireDOOwner = true
 	committer.RequireBucket = true
 	if err := committer.Claim(ctx, sc); err != nil {
@@ -66,7 +66,7 @@ func TestDOCaptureSurvivesAgentEpochChange(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/v1/internal/commit_binary?scope=%s&epoch=1", sc.String()), bytes.NewReader(segment))
-			req.Header.Set("x-cellhive-internal-token", "tok")
+			req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 			req.Header.Set("x-cellhive-capture-owner-epoch", fmt.Sprint(tc.capture))
 			if tc.withDO {
 				req.Header.Set("x-cellhive-do-owner-scope", doScope.String())

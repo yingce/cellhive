@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"bytes"
+	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,7 +97,9 @@ func (d *DoAlarmDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	}
 	req.Header.Set("content-type", "application/json")
 	if d.Token != "" {
-		req.Header.Set("x-cellhive-internal-token", d.Token)
+		if err := bearertoken.SetInternal(req, d.Token, "internal"); err != nil {
+			return err
+		}
 	}
 	resp, err := d.client().Do(req)
 	if err != nil {

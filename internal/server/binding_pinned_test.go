@@ -1,11 +1,11 @@
 package server
 
 import (
+	"cellhive/internal/bearertoken"
 	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
@@ -25,11 +25,9 @@ func TestPinnedKVVersionMappingAndRevocation(t *testing.T) {
 	}
 	for version, want := range map[int]string{1: "old-cell", 2: "new-cell"} {
 		spec, _ := s.bindingSpecFor(ctx, "acme", "web", version)
-		token := spec["KV"].(map[string]any)["token"].(string)
-		claims, err := scopedtoken.VerifyIssuer(s.scopeSecret(), token, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
+		a := spec["KV"].(map[string]any)["authorization"].(map[string]any)
+		claims := bearertoken.Claims{Type: "binding", Namespace: a["ns"].(string), Kind: a["kind"].(string), Name: a["name"].(string), Worker: a["worker"].(string), Version: a["version"].(int), Resource: a["resource"].(string)}
+		token := jwtTestToken(t, s, "token/scope", claims)
 		if claims.Resource != want || claims.Version != version || claims.Worker != "web" {
 			t.Fatalf("claims: %+v", claims)
 		}
@@ -46,7 +44,8 @@ func TestPinnedKVVersionMappingAndRevocation(t *testing.T) {
 		}
 	}
 	spec, _ := s.bindingSpecFor(ctx, "acme", "web", 1)
-	token := spec["KV"].(map[string]any)["token"].(string)
+	a := spec["KV"].(map[string]any)["authorization"].(map[string]any)
+	token := jwtTestToken(t, s, "token/scope", bearertoken.Claims{Type: "binding", Namespace: "acme", Kind: "kv", Name: "KV", Worker: "web", Version: 1, Resource: a["resource"].(string)})
 	if err := s.resourceReplica().BlockResource(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "old-cell"}, "delete-old"); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +57,7 @@ func TestPinnedKVVersionMappingAndRevocation(t *testing.T) {
 	}
 	s.invalidateBindings("acme")
 	req := httptest.NewRequest("POST", "/v1/kv/put?ns=acme&key=revoked", strings.NewReader("bad"))
-	req.Header.Set("x-cellhive-scope-token", token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "binding_not_registered") {

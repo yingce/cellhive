@@ -9,31 +9,31 @@ import (
 	"path/filepath"
 	"strings"
 
+	"cellhive/internal/bearertoken"
 	"github.com/spf13/cobra"
 )
 
 func newLoginCommand() *cobra.Command {
-	var profile, adminURL, token, jwt string
+	var profile, adminURL, token string
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "log in to a CellHive admin endpoint and save a profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogin(profile, adminURL, token, jwt)
+			return runLogin(profile, adminURL, token)
 		},
 	}
 	cmd.Flags().StringVar(&profile, "profile", "default", "profile name")
 	cmd.Flags().StringVar(&adminURL, "url", "", "CellHive admin URL")
-	cmd.Flags().StringVar(&token, "token", "", "admin token")
-	cmd.Flags().StringVar(&jwt, "jwt", "", "admin JWT")
+	cmd.Flags().StringVar(&token, "token", "", "CellHive namespace or admin Bearer JWT")
 	return cmd
 }
 
-func runLogin(profile, adminURL, token, jwt string) error {
+func runLogin(profile, adminURL, token string) error {
 	if adminURL == "" {
 		return fmt.Errorf("login requires --url")
 	}
-	if token == "" && jwt == "" {
+	if token == "" {
 		fmt.Fprint(os.Stderr, "Admin token: ")
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil {
@@ -46,7 +46,10 @@ func runLogin(profile, adminURL, token, jwt string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Profiles[profile] = cliProfile{AdminURL: strings.TrimRight(adminURL, "/"), AdminToken: token, AdminJWT: jwt}
+	if _, err := bearertoken.PeekKeyID(token); err != nil {
+		return fmt.Errorf("--token must be a CellHive JWT: %w", err)
+	}
+	cfg.Profiles[profile] = cliProfile{AdminURL: strings.TrimRight(adminURL, "/"), Token: token}
 	if err := saveCLIConfig(path, cfg); err != nil {
 		return err
 	}
@@ -194,9 +197,9 @@ func runEnv(w io.Writer) error {
 	if !strings.HasSuffix(base, "/client/v4") {
 		base += "/client/v4"
 	}
-	token := p.AdminToken
-	if token == "" {
-		token = p.AdminJWT
+	token, err := adminToken()
+	if err != nil {
+		return err
 	}
 	for _, kv := range []string{"CLOUDFLARE_API_BASE_URL=" + base, "CLOUDFLARE_API_TOKEN=" + token, "CLOUDFLARE_ACCOUNT_ID=" + namespace, "WRANGLER_SEND_METRICS=false"} {
 		fmt.Fprintf(w, "export %s\n", shellQuote(kv))

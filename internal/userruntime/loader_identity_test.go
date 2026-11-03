@@ -48,7 +48,7 @@ func TestUserRuntimeRecreatedWorkerIdentity(t *testing.T) {
 	}))
 	defer stub.Close()
 	port := freePort(t)
-	path, err := Render(t.TempDir(), Config{CellURL: stub.URL, CellToken: "tok", InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", HostCacheTTLMs: 25, RevPollMs: 25})
+	path, err := Render(t.TempDir(), Config{CellURL: stub.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", HostCacheTTLMs: 25, RevPollMs: 25})
 	if err != nil {
 		t.Fatal(err)
 	}

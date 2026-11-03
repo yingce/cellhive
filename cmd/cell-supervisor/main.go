@@ -52,7 +52,7 @@ func main() {
 	epoch := flag.Uint64("epoch", 1, "epoch")
 	owner := flag.String("owner", "http://127.0.0.1:7001", "owner cell-agent URL")
 	follower := flag.String("follower", "", "comma-separated follower URLs")
-	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "internal-role token (default derived from CELLHIVE_ROOT_KEY)")
+	token := flag.String("token", config.DeriveCredentials(config.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
 	flag.Parse()
 
 	if *dbPath == "" && *actorDir == "" {

@@ -13,7 +13,7 @@ func TestCloudflareTokenVerifyAndBetaWorker(t *testing.T) {
 	s := newControlServer(t)
 	do := func(method, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		rr := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(rr, req)
 		return rr
@@ -32,7 +32,7 @@ func TestCloudflareHyperdriveCRUD(t *testing.T) {
 	s := newControlServer(t)
 	doJSON := func(method, path string, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer admin-tok")
+		req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		s.AdminHandler().ServeHTTP(rr, req)
@@ -78,7 +78,7 @@ func TestCloudflareLegacyScriptUploadAndPreviewMetadata(t *testing.T) {
 	_, _ = part.Write([]byte("export default { fetch() { return new Response('legacy-ok') } }"))
 	_ = w.Close()
 	req := httptest.NewRequest(http.MethodPut, "/client/v4/accounts/acme/workers/scripts/legacy", &body)
-	req.Header.Set("Authorization", "Bearer admin-tok")
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "admin"))
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	rr := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rr, req)

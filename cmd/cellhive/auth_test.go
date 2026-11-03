@@ -9,18 +9,23 @@ import (
 )
 
 func TestLoginAuthProjectEnv(t *testing.T) {
+	jwtCLIEnv(t)
+	token, err := adminToken()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	t.Setenv("CELLHIVE_CLI_CONFIG", filepath.Join(dir, "config.json"))
 	t.Setenv("CELLHIVE_PROFILE", "staging")
 
-	if _, _, err := executeRoot(t, "login", "--profile", "staging", "--url", "https://admin.example", "--token", "tok"); err != nil {
+	if _, _, err := executeRoot(t, "login", "--profile", "staging", "--url", "https://admin.example", "--token", token); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadCLIConfig(filepath.Join(dir, "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Profiles["staging"].AdminURL != "https://admin.example" || cfg.Profiles["staging"].AdminToken != "tok" {
+	if cfg.Profiles["staging"].AdminURL != "https://admin.example" || cfg.Profiles["staging"].Token != token {
 		t.Fatalf("profile = %#v", cfg.Profiles["staging"])
 	}
 
@@ -53,7 +58,7 @@ func TestLoginAuthProjectEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "CLOUDFLARE_ACCOUNT_ID=acme") || !strings.Contains(out, "CLOUDFLARE_API_TOKEN=tok") {
+	if !strings.Contains(out, "CLOUDFLARE_ACCOUNT_ID=acme") || !strings.Contains(out, "CLOUDFLARE_API_TOKEN="+token) {
 		t.Fatalf("env output = %q", out)
 	}
 

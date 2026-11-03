@@ -80,7 +80,7 @@ func TestDynamicLoadMemoryPressure(t *testing.T) {
 	}))
 	defer agent.Close()
 	port := freePort(t)
-	path, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: "tok", InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true})
+	path, err := Render(t.TempDir(), Config{CellURL: agent.URL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), InternalPort: freePort(t), PublicPort: port, PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js", DisableTenantLogs: true})
 	if err != nil {
 		t.Fatal(err)
 	}

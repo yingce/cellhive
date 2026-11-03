@@ -2,30 +2,47 @@ package server
 
 import (
 	"net/http"
-	"time"
+	"strings"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/scopedtoken"
 )
 
 // authenticateBindingToken verifies only credential integrity and lifetime.
 // It deliberately performs no control-plane or resource access.
-func (s *Server) authenticateBindingToken(w http.ResponseWriter, r *http.Request) (scopedtoken.Claims, bool) {
-	tok := r.Header.Get("x-cellhive-scope-token")
-	if tok == "" {
-		writeErr(w, http.StatusForbidden, "scope_required", "a scoped token is required for binding calls")
-		return scopedtoken.Claims{}, false
-	}
-	claims, err := scopedtoken.VerifyIssuer(s.scopeSecret(), tok, time.Now())
+func (s *Server) authenticateBindingToken(w http.ResponseWriter, r *http.Request, kind string) (scopedtoken.Claims, bool) {
+	kid, c, err := s.verifyBearer(r)
 	if err != nil {
 		writeErr(w, http.StatusForbidden, "scope_invalid", err.Error())
 		return scopedtoken.Claims{}, false
 	}
-	delegated := claims.Iss != ""
-	// A delegated (external) token must expire: without an expiry it
-	// cannot be bounded by the issuer's own lifetime (ADR-181).
-	if delegated && claims.ExpiresMs == 0 {
-		writeErr(w, http.StatusForbidden, "scope_exp_required", "a delegated token must carry an expiry")
+	if c.Type == "namespace" || c.Type == "admin" {
+		ns := r.URL.Query().Get("ns")
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			name = r.URL.Query().Get(scopeResourceParam[kind])
+		}
+		if ns == "" || name == "" || (c.Type == "namespace" && !bearertoken.Allows(c.Namespaces, ns)) {
+			writeErr(w, http.StatusForbidden, "scope_mismatch", "explicit authorized namespace and binding required")
+			return scopedtoken.Claims{}, false
+		}
+		if target := r.URL.Query().Get("target_ns"); kind == "service" && target != "" && c.Type == "namespace" && !bearertoken.Allows(c.Namespaces, target) {
+			writeErr(w, http.StatusForbidden, "namespace_forbidden", "service target exceeds namespace grants")
+			return scopedtoken.Claims{}, false
+		}
+		return scopedtoken.Claims{Namespace: ns, Kind: kind, Name: name, ExpiresMs: c.ExpiresAt * 1000}, true
+	}
+	if c.Type != "binding" {
+		writeErr(w, http.StatusForbidden, "scope_required", "binding or namespace JWT required")
 		return scopedtoken.Claims{}, false
+	}
+	if scopedtoken.HasWildcard(c.Kind) || scopedtoken.HasWildcard(c.Name) {
+		writeErr(w, http.StatusForbidden, "scope_invalid", "binding JWT requires concrete kind and name")
+		return scopedtoken.Claims{}, false
+	}
+	claims := scopedtoken.Claims{Namespace: c.Namespace, Kind: c.Kind, Name: c.Name, Worker: c.Worker, Version: c.Version, Resource: c.Resource, ExpiresMs: c.ExpiresAt * 1000}
+	if strings.HasPrefix(kid, "issuer/") {
+		claims.Iss = kid
 	}
 	return claims, true
 }
@@ -61,7 +78,11 @@ func (s *Server) authorizeBinding(w http.ResponseWriter, r *http.Request, kind s
 		return "", false
 	}
 	resolved := claims.Resource
-	if claims.Iss == "" && s.Control != nil {
+	if claims.Iss == "" || kind == "service" {
+		if s.Control == nil {
+			writeErr(w, http.StatusServiceUnavailable, "scope_check_failed", "control registry unavailable")
+			return "", false
+		}
 		// Internal tokens are bounded by the registered-binding ACL;
 		// delegated tokens are authorized by their ns/scope (ADR-181).
 		var ok bool

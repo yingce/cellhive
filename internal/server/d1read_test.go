@@ -26,7 +26,7 @@ func TestD1ReadSkipsCapture(t *testing.T) {
 	do := func(path, sqlText string) int {
 		body, _ := json.Marshal(map[string]any{"sql": sqlText})
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
-		req.Header.Set("x-cellhive-scope-token", tok)
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr.Code

@@ -1,5 +1,26 @@
 # 测试策略
 
+## ADR-304 验收门（已实现，本地验收通过，未部署）
+
+Bearer HS256 JWT 与持久化 issuer 已实现，本地验收通过，未部署。2026-11-03 最终协调验证证据如下；这些不是本次文档任务重新执行所得，也不代表生产切换完成。
+
+- metadata/durability 修复后的最终 `make build`、`make vet`、`make test` 全部通过（`bgp_1a10b8cbe0017e91RBThcXEZvP`）。
+- 完整 `make js-test`：111 项 JS 测试及真实 runtime 验证通过。
+- DO 授权收紧后的 bearer/doticket/server/userruntime/doruntime 完整 race 与最终完整测试通过。
+- 收紧后重建当前源码的完整 runtime baseline：`RUNTIME-BASELINE-E2E: PASS`，无跳过（任务 `ses_e5f2d5b08ffedpOXNeUkHqPnUC`）。
+- 原版 Wrangler 4.133.0 assets/control/vectorize：3/3通过，18.332秒，无跳过。
+- VWork TS：1706通过、19跳过；Rust：369通过、1忽略；真实 Docker publication/assets/issuer lifecycle/direct binding：3/3通过，无跳过。
+
+DO ticket 新授权重新检查 parent，执行 metadata 纳入签名；已签发 ticket 的撤销边界最多30秒，不以 issuer 当前无缓存点读推导即时全局撤销。HTTP issuer metadata 限制和 `outcome_unknown` 恢复规则见控制面说明。旧 OIDC/JWKS/静态/scope 测试仅为历史证据，无兼容承诺。
+
+补充验收边界：当前 issuer 权威读无缓存；显式 `ns=["*"]` 可全局运维读/GC/全量指标，但 issuer CRUD 仅 bootstrap admin。`:7001/metrics` 私网免鉴权全量 scrape 是例外，`:8082/v1/control/metrics` 必须鉴权过滤。验证持久化 `bundle_grants` 的 namespace/SHA 授权、原生 namespace 上传显式 namespace、CF 同等 grant 与跨 namespace SHA 拒绝。
+
+- Go/JS/vwork TS/Rust 共同向量：header、Unix 秒 claims、默认 `aud=cellhive`、`HKDF-SHA256(decoded_root_key,nil,"cellhive/jwt/v1/"+kid,32)`；拒绝错误算法/类型/audience/签名/时间、歧义 header、旧静态 header/OIDC。
+- bootstrap admin JWT 创建 registry，业务缺记录拒绝；捕获写持久化、owner 权威点读、禁用/软删/同名新 ID 不复活、TTL<=86400、超上限整张拒绝，无 actions/key_version。若缓存，验证从读开始最多5秒、错误不续期、旧在途读不回填。
+- namespace `ns` 数组精确/前缀 `*`/`*` 覆盖发布、CF 数据、secret、日志、监控，但不是全局 admin；binding `ns` 字符串和 `kind/name` 精确，固定字段仅平台签发，保留 ADR-302 和 resource fence。
+- 真实 stock Wrangler deploy/assets/Tail、owner 转发原授权与目标重验、CF bridge 保留上限；CF 仅8082，不在7001/8083。Tail 会话 query 例外不得成为普通用户 header 回退，issuer 撤销约束会话。
+- 指标过滤不得泄漏无 ns/平台/other 聚合；私网全量 scrape 例外单独验证。长期 runtime/CLI/采集器 JWT 刷新、root/用途 key 限定分发；Hyperdrive 非 HTTP 凭据保留旧 ScopeSecret 派生。
+
 ## DLQ / 资源清理 / Queue-Cron 调用记录（ADR-205）
 
 验收记录：[resource-operations-invocations-2026-10-15.md](archive/resource-operations-invocations-2026-10-15.md)。包含无副作用分页 preview/幂等 ack、物理 SQLite/LTX 删除、远程 owner 路由、bucket 故障 retry、重建/异步上传/恢复栅栏，以及真实 pinned workerd 并发日志和结果关联。Docker 启动/部署验收为 `bash scripts/runtime-baseline-e2e.sh`，JSON 断言由 `scripts/runtime-operations-check.mjs` 执行。

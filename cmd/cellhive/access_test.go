@@ -86,7 +86,7 @@ func TestSecretBulkJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CELLHIVE_ADMIN_URL", srv.URL)
-	t.Setenv("CELLHIVE_ADMIN_TOKEN", "test-token")
+	jwtCLIEnv(t)
 
 	file := filepath.Join(t.TempDir(), "secrets.json")
 	if err := os.WriteFile(file, []byte(`{"A":"1","B":null}`), 0o600); err != nil {

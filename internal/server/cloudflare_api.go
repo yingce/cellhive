@@ -8,7 +8,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -21,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"cellhive/internal/auth"
 	"cellhive/internal/control"
 	queuepkg "cellhive/internal/queue"
 )
@@ -249,26 +247,10 @@ func (s *Server) handleCloudflareWorkerSettings(w http.ResponseWriter, r *http.R
 	cloudflareResult(w, map[string]any{"bindings": bindings, "compatibility_date": view.CompatDate, "compatibility_flags": flags})
 }
 
-// cloudflareAuth accepts either the configured AdminAuth (JWT/static) or the
-// legacy static token in x-cellhive-admin-token / Bearer form, and attaches the
-// authenticated principal to the request context. It deliberately does not
-// rewrite x-cellhive-admin-token: a tenant JWT must never become an internal
-// admin credential.
+// cloudflareAuth preserves the namespace JWT and its principal across bridges.
 func (s *Server) cloudflareAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := s.adminPrincipal(r)
-		if !ok {
-			token := r.Header.Get("x-cellhive-admin-token")
-			if token == "" {
-				if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
-					token = strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-				}
-			}
-			if token != "" && s.Cfg.AdminToken != "" && hmac.Equal([]byte(token), []byte(s.Cfg.AdminToken)) {
-				p = auth.Principal{Sub: "static-admin", Kind: "static", All: true}
-				ok = true
-			}
-		}
 		if !ok {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "Cloudflare API token required")
 			return
@@ -328,7 +310,7 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if metadata.AssetsJWT != "" {
-		claim, err := s.verifyAssetsClaim(metadata.AssetsJWT)
+		claim, err := s.verifyAssetsClaim(r.Context(), metadata.AssetsJWT)
 		if err != nil || claim.NS != ns || claim.Worker != worker {
 			writeErr(w, http.StatusBadRequest, "invalid_assets", "assets token does not belong to this worker")
 			return
@@ -354,6 +336,13 @@ func (s *Server) handleCloudflareWorkerUpload(w http.ResponseWriter, r *http.Req
 	sha, _, err := st.PutBundle(r.Context(), module)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "bundle_upload_failed", err.Error())
+		return
+	}
+	if !s.requireControl(w) {
+		return
+	}
+	if err := s.capturedWrite(r.Context(), control.Scope(), func() error { return s.Control.GrantBundle(r.Context(), ns, sha, actorFor(r.Context())) }); err != nil {
+		writeErr(w, http.StatusInternalServerError, "bundle_grant_failed", err.Error())
 		return
 	}
 
@@ -764,9 +753,8 @@ func (s *Server) handleCloudflareWorkerSecretPut(w http.ResponseWriter, r *http.
 	req.URL.RawPath = ""
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, req)
+	s.AdminHandler().ServeHTTP(rec, req)
 	if cloudflareBridgeError(w, rec, nil) {
 		return
 	}
@@ -796,7 +784,6 @@ func (s *Server) handleCloudflareWorkerSecretDelete(w http.ResponseWriter, r *ht
 	req.URL.Path = "/v1/control/secret"
 	req.URL.RawPath = ""
 	req.URL.RawQuery = url.Values{"namespace": {ns}, "worker": {worker}, "key": {key}}.Encode()
-	req.Header.Set("x-cellhive-admin-token", s.Cfg.AdminToken)
 	rec := httptest.NewRecorder()
 	s.AdminHandler().ServeHTTP(rec, req)
 	if cloudflareBridgeError(w, rec, nil) {

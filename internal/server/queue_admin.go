@@ -401,7 +401,9 @@ func (s *Server) enqueueToQueueOwner(ctx context.Context, ns, queue string, m qu
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenInternal)
+	if err := s.setInternalAuthorization(req, "internal"); err != nil {
+		return err
+	}
 	client := s.ForwardClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}

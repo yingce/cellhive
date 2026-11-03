@@ -142,7 +142,10 @@ func (s *Server) pullRuntimeSource(ctx context.Context, source *runtimeLogSource
 			cancel()
 			return
 		}
-		req.Header.Set("x-cellhive-internal-token", s.Cfg.TokenLog)
+		if err := s.setInternalAuthorization(req, "log"); err != nil {
+			cancel()
+			return
+		}
 		resp, err := copyClient.Do(req)
 		if err != nil {
 			cancel()

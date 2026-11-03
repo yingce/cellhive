@@ -8,7 +8,7 @@
 #
 # CellHive side (any node):
 #   CELLHIVE_OTLP_ENDPOINT=http://otel-collector:4318
-#   CELLHIVE_OTLP_HEADERS=authorization=Bearer <internal-token>   # optional
+#   CELLHIVE_OTLP_HEADERS=<collector-specific headers>   # optional, not CellHive role keys
 #   CELLHIVE_OTLP_LOGS=tail          # off | tail | all
 #   CELLHIVE_TRACES_SAMPLE_RATIO=0.01
 #
@@ -25,6 +25,9 @@ receivers:
   # Optional: also scrape CellHive's Prometheus-format metrics and forward them
   # as OTLP, if you want a single pipeline instead of an internal Prometheus.
   # Leave disabled (and keep /metrics internal-only) if you already run Prometheus.
+  # ADR-178: private :7001 /metrics is an explicit unauthenticated exception.
+  # Restrict it to trusted collectors at the network layer; never public ingress
+  # or tenant egress. No JWT/refresher/proxy or signing key is needed here.
   prometheus:
     config:
       scrape_configs:
