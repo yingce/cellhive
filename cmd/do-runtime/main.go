@@ -60,7 +60,11 @@ func main() {
 	gateURL := getenv("CELLHIVE_DO_GATE_URL", "")
 
 	runtimeCfg := doruntime.Config{
-		CellURL:           cellURL,
+		CellURL: cellURL,
+		// DO facets 每次 facade 调用都要现签 binding JWT；漏了这个字段，
+		// workerd 的 CELLHIVE_HOST_BINDING_SIGNING_KEY 就是空串，mintJWT 抛
+		// "invalid base64url"，DO 内的 binding 调用（如 SessionDO → SchedulerDO）全 500。
+		BindingSigningKey: creds.Binding,
 		DoTicketSecret:    creds.DoTicket,
 		DoLeaseS:          doLeaseSeconds(),
 		DOObjectIndex:     envTrue("CELLHIVE_DO_OBJECT_INDEX"),
