@@ -126,6 +126,8 @@ export class CellHiveHost extends WorkerEntrypoint {
       if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
         queue: typeof payload?.queue === "string" ? payload.queue : "",
         batchSize: Array.isArray(payload?.messages) ? payload.messages.length : 0,
+        started_ms: Date.now(),
+        request_id: typeof payload?.request_id === "string" ? payload.request_id : "",
       });
       return await loggedInvocation(() => this.handleQueueBody(payload, ctx), ctx);
     } finally { release(); }
@@ -188,6 +190,8 @@ export class CellHiveHost extends WorkerEntrypoint {
       if (__cellhiveTailKey) dispatchDebug("__cellhive_dispatch_v1__", __cellhiveTailKey, {
         cron: typeof event?.cron === "string" ? event.cron : "",
         scheduledTime: Number(event?.scheduledTime) || 0,
+        started_ms: Date.now(),
+        request_id: typeof event?.request_id === "string" ? event.request_id : "",
       });
       return await loggedInvocation(() => this.handleScheduledBody(event, ctx), ctx);
     } finally { release(); }

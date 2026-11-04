@@ -87,7 +87,7 @@ func TestLogExportTimingAttributes(t *testing.T) {
 		{"negative", -1, -2, map[string]int64{}},
 	}
 	for _, tc := range tests {
-		ExportLogWithMetadata("app", "worker", "info", tc.name, 200, "", "", LogMetadata{StartedMs: tc.started, FinishedMs: tc.finished, RequestID: "req-7"})
+		ExportLogWithMetadata("app", "worker", "info", tc.name, 200, "", "", LogMetadata{StartedMs: tc.started, FinishedMs: tc.finished, RequestID: "req-7", Resource: "30 3 * * *"})
 	}
 	ExportLog("app", "worker", "info", "plain-console", 200, "", "")
 	shutdownTel(t, tel)
@@ -108,6 +108,10 @@ func TestLogExportTimingAttributes(t *testing.T) {
 				case "cellhive.request_id":
 					if kv.Value.GetStringValue() != "req-7" {
 						t.Error("request ID changed")
+					}
+				case "cellhive.resource":
+					if kv.Value.GetStringValue() != "30 3 * * *" {
+						t.Error("resource changed")
 					}
 				}
 			}

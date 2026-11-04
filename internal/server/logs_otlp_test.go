@@ -127,7 +127,7 @@ func TestLogIngestExportsInvocationWithoutConsole(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	s.Invocations = invocation.New(cs)
-	const event = `{"events":[{"outcome":"exception","exceptions":[{"name":"Error","message":"boom","timestamp":42}],"logs":[],"eventTimestamp":41,"event_type":"scheduled","scriptVersion":{"id":"v2"},"requestId":"req-42"}]}`
+	const event = `{"events":[{"outcome":"exception","exceptions":[{"name":"Error","message":"boom","timestamp":42}],"logs":[],"eventTimestamp":41,"started_ms":40,"finished_ms":41,"event_type":"scheduled","scriptVersion":{"id":"v2"},"requestId":"req-42"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/logs?ns=acme&worker=cron", bytes.NewBufferString(event))
 	resp := httptest.NewRecorder()
 	s.handleLogIngest(resp, req)
@@ -165,6 +165,13 @@ func TestLogIngestExportsInvocationWithoutConsole(t *testing.T) {
 							continue
 						}
 						t.Fatalf("invocation attributes = %#v", attrs)
+					}
+					ints := map[string]int64{}
+					for _, attr := range rec.Attributes {
+						ints[attr.Key] = attr.Value.GetIntValue()
+					}
+					if ints["cellhive.started_ms"] != 40 || ints["cellhive.finished_ms"] != 41 || ints["cellhive.duration_ms"] != 1 {
+						t.Fatalf("tail timing attributes = %#v", ints)
 					}
 					found = true
 				}

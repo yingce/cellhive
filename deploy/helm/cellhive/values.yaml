@@ -100,6 +100,8 @@ runtimeHostAliases: []
 userRuntime:
   # Optional image fields merged over global image; leaves DO runtimes unchanged.
   image: {}
+  # Node-wide Queue/Cron/Workflow invocation records and OTLP invocation logs.
+  invocationLogs: "on"
   replicas: 2
   minReplicas: 2
   maxReplicas: 10

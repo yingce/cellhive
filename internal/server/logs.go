@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,55 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(entries) + len(batch.Events)})
 }
 
+// routeFromTailEvent reads the tenant request metadata that workerd puts in
+// the tail event. Cron/queue events have no HTTP request and stay empty.
+func routeFromTailEvent(event logbuf.TailEvent) (method, path, route string, status int) {
+	var details struct {
+		Request *struct {
+			Method  string            `json:"method"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"request"`
+		Response *struct {
+			Status int `json:"status"`
+		} `json:"response"`
+	}
+	if len(event.Event) > 0 {
+		_ = json.Unmarshal(event.Event, &details)
+	}
+	if details.Request != nil {
+		method = details.Request.Method
+		if parsed, err := url.Parse(details.Request.URL); err == nil {
+			path = parsed.Path
+		} else {
+			path = details.Request.URL
+		}
+		// APISIX rewrites the upstream path to "/" but passes the public prefix
+		// as a trusted header; prefer it for the stored route/path.
+		if prefix := headerValue(details.Request.Headers, "x-vwork-path-prefix"); prefix != "" {
+			path = prefix
+		}
+		if strings.HasPrefix(path, "/functions/") {
+			route = "functions"
+		}
+	}
+	if details.Response != nil && details.Response.Status > 0 {
+		status = details.Response.Status
+	} else if event.Outcome != "" && event.Outcome != "ok" {
+		status = 500
+	}
+	return method, path, route, status
+}
+
+func headerValue(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Server) recordTailEvent(ns, worker string, event logbuf.TailEvent, reqTP string) {
 	s.recordTailEventWithExport(ns, worker, event, reqTP, true)
 }
@@ -100,7 +150,12 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 	if tid == "" {
 		tid, sid = telemetry.TraceIDs(reqTP)
 	}
-	meta := telemetry.LogMetadata{EventType: event.EventType, ScriptVersion: event.ScriptVersion, RequestID: event.RequestID, Outcome: event.Outcome}
+	finishedMs := event.FinishedMs
+	if finishedMs == 0 {
+		finishedMs = event.EventTimestamp
+	}
+	method, path, route, status := routeFromTailEvent(event)
+	meta := telemetry.LogMetadata{EventType: event.EventType, ScriptVersion: event.ScriptVersion, RequestID: event.RequestID, Method: method, Path: path, Route: route, Status: status, StartedMs: event.StartedMs, FinishedMs: finishedMs, Outcome: event.Outcome}
 	if len(event.Exceptions) > 0 {
 		if raw, err := json.Marshal(event.Exceptions); err == nil {
 			meta.Exceptions = raw
@@ -144,10 +199,10 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 			at = event.EventTimestamp
 		}
 		message := fmt.Sprintf("%s: %s", exception.Name, exception.Message)
-		added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
-		if export {
-			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, meta)
-		}
+		// Keep the exception line in the live tail ring, but do not export a
+		// second OTLP log: the invocation export already carries the full
+		// exception list and one request must produce one stored log row.
+		_ = s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
 	}
 }
 

@@ -87,6 +87,8 @@ spec:
             {{- end }}
             - name: CELLHIVE_ROOT_KEY
               valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_ROOT_KEY}}
+            - name: CELLHIVE_INVOCATION_LOGS
+              value: {{ .Values.userRuntime.invocationLogs | default "on" | quote }}
           ports:
             - {name: public, containerPort: 8081}
             - {name: internal, containerPort: 8088}

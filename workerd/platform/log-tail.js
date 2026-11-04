@@ -53,13 +53,15 @@ function dispatchMetadata(item, tailKey) {
     if (!Array.isArray(args) || args[0] !== "__cellhive_dispatch_v1__" || args[1] !== tailKey) continue;
     const value = args[2];
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const startedMs = Number.isSafeInteger(value.started_ms) && value.started_ms > 0 ? value.started_ms : null;
+    const requestId = typeof value.request_id === "string" ? value.request_id : "";
     if (method === "handleQueue" && typeof value.queue === "string" && value.queue &&
         Number.isSafeInteger(value.batchSize) && value.batchSize >= 0) {
-      return { line, event: { rpcMethod: method, queue: value.queue, batchSize: value.batchSize } };
+      return { line, startedMs, requestId, event: { rpcMethod: method, queue: value.queue, batchSize: value.batchSize } };
     }
     if (method === "handleScheduled" && typeof value.cron === "string" && value.cron &&
         Number.isSafeInteger(value.scheduledTime) && value.scheduledTime > 0) {
-      return { line, event: { rpcMethod: method, cron: value.cron, scheduledTime: value.scheduledTime } };
+      return { line, startedMs, requestId, event: { rpcMethod: method, cron: value.cron, scheduledTime: value.scheduledTime } };
     }
   }
   return null;
@@ -77,7 +79,7 @@ function eventInfo(info) {
     return { request: { method: request.method, url: request.url, headers },
       ...(info.response ? { response: { status: info.response.status } } : {}) };
   }
-  if (typeof info.cron === "string") return { cron: info.cron, ...(info.scheduledTime ? { scheduledTime: info.scheduledTime } : {}), ...(info.rpcMethod ? { rpcMethod: info.rpcMethod } : {}) };
+  if (typeof info.cron === "string") return { cron: info.cron, ...(info.scheduledTime ? { scheduledTime: info.scheduledTime } : {}), ...(typeof info.request_id === "string" && info.request_id ? { request_id: info.request_id } : {}), ...(info.rpcMethod ? { rpcMethod: info.rpcMethod } : {}) };
   if (typeof info.queue === "string") return { queue: info.queue, batchSize: info.batchSize, ...(info.rpcMethod ? { rpcMethod: info.rpcMethod } : {}) };
   if (typeof info.rpcMethod === "string") return { rpcMethod: info.rpcMethod };
   return null;
@@ -110,7 +112,12 @@ function eventRecords(events, props) {
     const info = eventInfo(dispatch?.event || item.event);
     const headers = info?.request?.headers || {};
     const traceparent = headers.traceparent || headers.Traceparent || "";
-    const requestId = headers["x-request-id"] || headers["X-Request-Id"] || headers["cf-ray"] || "";
+    const requestId = dispatch?.requestId || info?.request_id || headers["x-request-id"] || headers["X-Request-Id"] || headers["cf-ray"] || "";
+    const startedMs = dispatch?.startedMs ?? null;
+    // For scheduled/queue the native eventTimestamp is the dispatch time, not
+    // the handler finish. The tail record is stored when the invocation ends,
+    // so use the observation time for the completion timestamp.
+    const finishedMs = startedMs !== null ? Math.max(startedMs + 1, Date.now()) : (item.eventTimestamp || Date.now());
     const nativeVersion = item.scriptVersion;
     const version = nativeVersion
       ? { id: String(nativeVersion.id), name: props.worker, tags: nativeVersion.tag ? [nativeVersion.tag] : [] }
@@ -128,6 +135,8 @@ function eventRecords(events, props) {
         timestamp: line.timestamp || item.eventTimestamp || Date.now(),
       })),
       eventTimestamp: item.eventTimestamp || Date.now(),
+      ...(startedMs !== null ? { started_ms: startedMs } : {}),
+      ...(startedMs !== null ? { finished_ms: finishedMs } : {}),
       ...(info ? { event: info } : {}),
       event_type: eventKind(dispatch?.event || item.event),
       ...(item.dispatchNamespace ? { dispatchNamespace: item.dispatchNamespace } : {}),

@@ -61,6 +61,8 @@ type TailEvent struct {
 	Exceptions               []TailException `json:"exceptions"`
 	Logs                     []TailLog       `json:"logs"`
 	EventTimestamp           int64           `json:"eventTimestamp"`
+	StartedMs                int64           `json:"started_ms,omitempty"`
+	FinishedMs               int64           `json:"finished_ms,omitempty"`
 	Event                    json.RawMessage `json:"event,omitempty"`
 	EventType                string          `json:"event_type,omitempty"`
 	DispatchNamespace        string          `json:"dispatchNamespace,omitempty"`

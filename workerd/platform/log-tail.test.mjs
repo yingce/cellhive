@@ -51,11 +51,30 @@ test('lifecycle filtering falls back to rpcMethod only without an entrypoint', (
 test('queue and scheduled dispatch records are still exported', () => {
   const c = harness();
   const tailKey = 'tail-1';
-  const line = { message: ['__cellhive_dispatch_v1__', tailKey, { queue: 'jobs', batchSize: 1 }], level: 'log' };
+  const line = { message: ['__cellhive_dispatch_v1__', tailKey, { queue: 'jobs', batchSize: 1, started_ms: 100, request_id: 'req-queue' }], level: 'log' };
   const records = c.eventRecords([
-    { event: { rpcMethod: 'handleQueue' }, logs: [line], outcome: 'ok', eventTimestamp: 1 },
+    { event: { rpcMethod: 'handleQueue' }, logs: [line], outcome: 'ok', eventTimestamp: 137 },
   ], { ...props, tailKey });
   assert.equal(records.length, 1);
   assert.equal(records[0].event_type, 'queue');
   assert.equal(records[0].event.queue, 'jobs');
+  assert.equal(records[0].requestId, 'req-queue');
+  assert.equal(records[0].started_ms, 100);
+  assert.equal(records[0].finished_ms >= 101, true);
+  assert.equal(records[0].eventTimestamp, 137);
+});
+
+test('scheduled dispatch records carry started/finished and the invocation request id', () => {
+  const c = harness();
+  const tailKey = 'tail-2';
+  const line = { message: ['__cellhive_dispatch_v1__', tailKey, { cron: '*/5 * * * *', scheduledTime: 1000, started_ms: 200, request_id: 'req-cron' }], level: 'log' };
+  const records = c.eventRecords([
+    { event: { rpcMethod: 'handleScheduled' }, logs: [line], outcome: 'ok', eventTimestamp: 245 },
+  ], { ...props, tailKey });
+  assert.equal(records.length, 1);
+  assert.equal(records[0].event_type, 'scheduled');
+  assert.equal(records[0].requestId, 'req-cron');
+  assert.equal(records[0].started_ms, 200);
+  assert.equal(records[0].finished_ms >= 201, true);
+  assert.equal(records[0].eventTimestamp, 245);
 });

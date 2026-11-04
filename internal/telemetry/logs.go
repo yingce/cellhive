@@ -28,6 +28,11 @@ type LogMetadata struct {
 	MessageArgs   []json.RawMessage
 	ScriptVersion json.RawMessage
 	RequestID     string
+	Resource      string
+	Method        string
+	Path          string
+	Route         string
+	Status        int
 	StartedMs     int64
 	FinishedMs    int64
 	Outcome       string
@@ -235,6 +240,21 @@ func ExportLogWithMetadata(ns, worker, level, message string, atMs int64, traceI
 	}
 	if meta.RequestID != "" {
 		rec.AddAttributes(attribute.String("cellhive.request_id", meta.RequestID))
+	}
+	if meta.Resource != "" {
+		rec.AddAttributes(attribute.String("cellhive.resource", meta.Resource))
+	}
+	if meta.Method != "" {
+		rec.AddAttributes(attribute.String("cellhive.method", meta.Method))
+	}
+	if meta.Path != "" {
+		rec.AddAttributes(attribute.String("cellhive.path", meta.Path))
+	}
+	if meta.Route != "" {
+		rec.AddAttributes(attribute.String("cellhive.route", meta.Route))
+	}
+	if meta.Status > 0 {
+		rec.AddAttributes(attribute.Int64("cellhive.status", int64(meta.Status)))
 	}
 	if meta.StartedMs > 0 {
 		rec.AddAttributes(attribute.Int64("cellhive.started_ms", meta.StartedMs))

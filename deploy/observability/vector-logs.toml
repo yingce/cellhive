@@ -46,8 +46,18 @@ event_type = string(get(attrs, ["cellhive.event_type"]) ?? "") ?? ""
 request_id = string(get(attrs, ["cellhive.request_id"]) ?? "") ?? ""
 outcome = string(get(attrs, ["cellhive.outcome"]) ?? "") ?? ""
 script_version = string(get(attrs, ["cellhive.script_version"]) ?? "") ?? ""
+resource = string(get(attrs, ["cellhive.resource"]) ?? "") ?? ""
+method = string(get(attrs, ["cellhive.method"]) ?? "") ?? ""
+path = string(get(attrs, ["cellhive.path"]) ?? "") ?? ""
+route = string(get(attrs, ["cellhive.route"]) ?? "") ?? ""
 invocation = get(attrs, ["cellhive.invocation"]) ?? false
 if request_id == "" { request_id = ns + ":" + worker }
+started_ms = to_int(get(attrs, ["cellhive.started_ms"]) ?? null) ?? null
+finished_ms = to_int(get(attrs, ["cellhive.finished_ms"]) ?? null) ?? null
+duration_ms = to_int(get(attrs, ["cellhive.duration_ms"]) ?? null) ?? null
+if duration_ms == null && started_ms != null && finished_ms != null {
+  duration_ms = int!(finished_ms) - int!(started_ms)
+}
 
 .schema_version = "vwork.log.v1"
 .source_service = "cellhive"
@@ -64,11 +74,17 @@ parsed_app, app_err = parse_regex(ns, r'^vwork-(?P<app_id>[0-9]+)$')
 if app_err == null { .app_id = parsed_app.app_id }
 .function_id = null
 .function_name = worker
+.method = method
+.path = path
 .route_id = null
-.route = null
+.route = route
 .status = null
 .severity = string(.severity_text) ?? "info"
 .message = message
+.started_ms = started_ms
+.finished_ms = finished_ms
+.duration_ms = duration_ms
+.resource = resource
 exceptions_raw = get(attrs, ["cellhive.exceptions"]) ?? null
 parsed_exceptions = if is_string(exceptions_raw) { parse_json(exceptions_raw) ?? null } else { null }
 exceptions = if is_array(parsed_exceptions) { parsed_exceptions } else { null }
@@ -83,6 +99,12 @@ detail = if exc_name != "" && exc_message != "" {
   exc_name
 }
 invocation_failed = invocation == true && (outcome == "exception" || is_object(first_exception))
+status_attr = to_int(get(attrs, ["cellhive.status"]) ?? null) ?? null
+if status_attr != null {
+  .status = status_attr
+} else if invocation_failed {
+  .status = 500
+}
 .error_code = null
 .error_message = null
 if invocation_failed {
@@ -103,10 +125,17 @@ span_id = if exists(.span_id) { string!(.span_id) } else { "" }
   "event_type": event_type,
   "outcome": outcome,
   "script_version": script_version,
+  "resource": resource,
+  "method": method,
+  "path": path,
+  "route": route,
   "namespace": ns,
   "worker": worker,
   "args": get(attrs, ["cellhive.message_args"]) ?? null,
-  "exceptions": exceptions
+  "exceptions": exceptions,
+  "started_ms": started_ms,
+  "finished_ms": finished_ms,
+  "duration_ms": duration_ms
 }
 del(.attributes)
 del(.resources)
