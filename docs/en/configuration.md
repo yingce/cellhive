@@ -115,6 +115,7 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 |---|---|---|
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 off) | Expiration timer dispatch |
 | `CELLHIVE_TIMER_BATCH` / `_FIRED_TTL` | `256` / `24h` | Expiration limit per pass / fired marker retention |
+| `CELLHIVE_CRON_MAX_ATTEMPTS` | `10` | Terminal retry budget for one cron occurrence; consumes the slot when reached (ADR-305). `0` keeps unbounded retries |
 | `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 off) | queue consumption |
 | `CELLHIVE_QUEUE_BATCH` / `_LEASE` | `0` (store default) | Messages per batch / visibility lease |
 | `CELLHIVE_QUEUE_RETRY_DELAY` | `30s` | Redelivery delay for failed batches (retry limit/DLQ are configured per consumer) |

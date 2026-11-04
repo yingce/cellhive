@@ -30,14 +30,15 @@ type Runner struct {
 	Open     func(ctx context.Context, scope string) (*Store, error)
 	// Own confirms this process owns the scope before opening its local SQLite.
 	// It may claim an unowned scope and restore its authoritative state.
-	Own        func(ctx context.Context, scope string) (bool, error)
-	Commit     func(ctx context.Context, scope string, fn func() error) error
-	Dispatcher Dispatcher
-	Interval   time.Duration
-	Batch      int
-	FiredTTL   time.Duration
-	Log        *slog.Logger
-	Now        func() time.Time
+	Own             func(ctx context.Context, scope string) (bool, error)
+	Commit          func(ctx context.Context, scope string, fn func() error) error
+	Dispatcher      Dispatcher
+	Interval        time.Duration
+	Batch           int
+	FiredTTL        time.Duration
+	CronMaxAttempts int
+	Log             *slog.Logger
+	Now             func() time.Time
 }
 
 func (r *Runner) nowMs() int64 {
@@ -125,7 +126,7 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 		if r.Commit != nil {
 			commit = func(cctx context.Context, fn func() error) error { return r.Commit(cctx, scope, fn) }
 		}
-		n, err := DispatchDueWithCommit(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.log(), commit)
+		n, err := DispatchDueWithCommit(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.CronMaxAttempts, r.log(), commit)
 		if err != nil {
 			r.log().Warn("timer dispatch pass failed", "scope", scope, "err", err)
 			continue

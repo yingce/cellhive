@@ -29,7 +29,7 @@ Shipped in `20261031-02` (source `7be1102`) and `20261031-03` (source `c9ba0fd`)
 - Validation: `make test`, `make vet`, `make js-test`, affected race tests and the full in-repo e2e suite pass; both regions run the new digest with Ready pods and zero restarts. Evidence: [release-2026-10-31-03](../archive/release-2026-10-31-03.md).
 - Residual: objgc recheck→Delete microsecond window, legacy scopes without `owner-gen`, waker `Due` per-key Get, DO envelope double JSON encode/decode.
 - CF-API (historical acceptance record): Wrangler 4 `assets` bindings (including assets-only and repeat deploys inheriting the active asset token) are accepted; metadata errors use `unsupported_binding`/`invalid_binding`/`invalid_multipart`/`payload_too_large`. The then-supported separate CF listener and `cellhive_ns` authorization are historical contracts. The current ADR-304 stateless amendment requires admin `:8082` only and pattern-issuer HS256 namespace JWTs (`ns` array) or bootstrap admin JWTs, without static/OIDC fallback. This history does not validate the amendment or production cutover.
-- The `vwork-40/vlog-daily-report` cron 500 is a tenant `sendFeishu` error (`Feishu send failed with HTTP 200`), not a platform dispatch fix; fix the response check or call `controller.noRetry()`.
+- The `vwork-40/vlog-daily-report` cron 500 is a tenant `sendFeishu` error (`Feishu send failed with HTTP 200`), not a platform dispatch fix; fix the response check or call `controller.noRetry()`. ADR-305's `CELLHIVE_CRON_MAX_ATTEMPTS` only stops unbounded retries; it does not replace fixing the webhook or calling `noRetry()`.
 
 ## 2026-10-24 COS cell latency, restore, and Cron recovery (ADR-276–278)
 

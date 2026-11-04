@@ -73,6 +73,7 @@ Timing/dispatch is unified in `cell-agent` (ADR-009): it is consistent with cell
 **Timer (Dispatch)**
 - Polling `CELLHIVE_TIMER_INTERVAL` (default 1s, 0=off); per-pass due limit `CELLHIVE_TIMER_BATCH` (default **256**); fired marker retention `CELLHIVE_TIMER_FIRED_TTL` (default **24h**, prevents duplicate dispatch).
 - Dispatch is at-least-once: mark as fired only after success; crashes/failures are left for the next round.
+- One cron occurrence gets at most `CELLHIVE_CRON_MAX_ATTEMPTS` (default **10**) attempts. On exhaustion the cell writes a fired marker, removes the timer/retry rows, and logs `timer dispatch exhausted` with `retry_scheduled=false`; `0` keeps the legacy unbounded behavior. Tenants can still stop permanent errors early with `controller.noRetry()` (ADR-305).
 
 **Waker (Single fleet wake + dead-node recovery)**
 - Polling `CELLHIVE_WAKER_INTERVAL` (default 5s, 0=off); lease TTL = **2×interval**; per-pass `CELLHIVE_WAKER_BATCH` (default 256); fired TTL `CELLHIVE_WAKER_FIRED_TTL` (default 24h).

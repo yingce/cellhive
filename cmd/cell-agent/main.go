@@ -526,7 +526,8 @@ func main() {
 		timerRunner = &timer.Runner{
 			Registry: timerReg, Open: openTimerScope, Dispatcher: dispatcher,
 			Interval: cfg.TimerInterval, Batch: cfg.TimerBatch, FiredTTL: cfg.TimerFiredTTL,
-			Log: log,
+			CronMaxAttempts: cfg.CronMaxAttempts,
+			Log:             log,
 		}
 	}
 	// Leader-only automatic recovery of dead nodes (ADR-066): the waker, on the
@@ -543,10 +544,11 @@ func main() {
 	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
 		wakerRunner = &waker.Waker{
-			Election:   waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL),
-			Batch:      cfg.WakerBatch,
-			FiredTTL:   cfg.WakerFiredTTL,
-			BackoffMax: cfg.WakerBackoffMax,
+			Election:        waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL),
+			Batch:           cfg.WakerBatch,
+			FiredTTL:        cfg.WakerFiredTTL,
+			CronMaxAttempts: cfg.CronMaxAttempts,
+			BackoffMax:      cfg.WakerBackoffMax,
 			// DeadScopes reads the bucket wake index (scopes with a pending
 			// timer) and keeps only those whose owner is gone, so the waker covers
 			// timers/alarms after an owner dies without listing every cell.

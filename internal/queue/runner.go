@@ -304,8 +304,9 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 				r.log().Warn("queue retry failed", "ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "err", rerr)
 			}
 		}
-		r.log().Warn("queue dispatch failed; batch retried",
-			"ns", ref.Namespace, "queue", ref.Name, "batch", len(msgs), "err", derr)
+		attrs := []slog.Attr{slog.String("ns", ref.Namespace), slog.String("queue", ref.Name), slog.Int("batch", len(msgs))}
+		attrs = append(attrs, dispatchFailureAttrs(derr, ref.Worker)...)
+		r.log().LogAttrs(ctx, slog.LevelWarn, "queue dispatch failed; batch retried", attrs...)
 		return 0
 	}
 	// Per-message outcomes (ADR-155): retried ids first (honoring retry()
@@ -384,8 +385,9 @@ func (r *Runner) deadLetter(ctx context.Context, ref Ref, m Message, cause error
 			r.log().Warn("queue ack after dead-letter failed", "ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "err", err)
 			return
 		}
-		r.log().Warn("queue message dead-lettered", "ns", ref.Namespace, "queue", ref.Name,
-			"dlq", ref.DeadLetterQueue, "id", m.ID, "attempts", m.Attempts, "err", cause)
+		attrs := []slog.Attr{slog.String("ns", ref.Namespace), slog.String("queue", ref.Name), slog.String("dlq", ref.DeadLetterQueue), slog.String("id", m.ID), slog.Int("attempts", m.Attempts)}
+		attrs = append(attrs, dispatchFailureAttrs(cause, ref.Worker)...)
+		r.log().LogAttrs(ctx, slog.LevelWarn, "queue message dead-lettered", attrs...)
 		return
 	}
 	if err := r.commit(ctx, ref.Namespace, ref.Name, func() error {
@@ -394,8 +396,9 @@ func (r *Runner) deadLetter(ctx context.Context, ref Ref, m Message, cause error
 		r.log().Warn("queue drop-ack failed", "ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "err", err)
 		return
 	}
-	r.log().Warn("queue message dropped (retries exhausted, no dead-letter queue)",
-		"ns", ref.Namespace, "queue", ref.Name, "id", m.ID, "attempts", m.Attempts, "err", cause)
+	attrs := []slog.Attr{slog.String("ns", ref.Namespace), slog.String("queue", ref.Name), slog.String("id", m.ID), slog.Int("attempts", m.Attempts)}
+	attrs = append(attrs, dispatchFailureAttrs(cause, ref.Worker)...)
+	r.log().LogAttrs(ctx, slog.LevelWarn, "queue message dropped (retries exhausted, no dead-letter queue)", attrs...)
 }
 
 // HTTPDispatcher POSTs claimed batches to user-runtime (/v1/queues/dispatch).
@@ -516,9 +519,9 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 			break
 		}
 		if !retryableDispatchStatus(resp.StatusCode) || attempt+1 == dispatchAttempts {
-			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, dispatchErrorBodyLimit))
 			resp.Body.Close()
-			return DispatchResult{}, fmt.Errorf("queue dispatch: %s body=%q", resp.Status, string(data))
+			return DispatchResult{}, dispatchResponseError(d.URL, ref, resp.StatusCode, data)
 		}
 		resp.Body.Close()
 		select {

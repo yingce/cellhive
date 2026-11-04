@@ -1,19 +1,64 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"cellhive/internal/cell"
+	"cellhive/internal/cellstore"
 	"cellhive/internal/control"
 	"cellhive/internal/cron"
 	"cellhive/internal/dispatch"
 	"cellhive/internal/timer"
 )
+
+func TestCronEnrichedFailureReachesTimerLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = io.WriteString(w, `{"error":"handler_failed","message":"secret-business-result"}`)
+	}))
+	defer srv.Close()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Open(t.Context(), cell.Scope{Namespace: "acme", Class: "__cron__", ID: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	st, err := timer.NewStore(t.Context(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm := timer.New(1000, timer.KindCron, c.Scope.String(), "slot")
+	if err := st.Upsert(t.Context(), tm); err != nil {
+		t.Fatal(err)
+	}
+	e := &cronEnricher{next: dispatch.NewHTTP(srv.URL, ""), at: time.Now(), targets: map[string][]control.CronTarget{"acme\x00web": {{Worker: "resolved-web", BundleSHA: "sha", Version: 1}}}}
+	var buf bytes.Buffer
+	if n, err := timer.DispatchDue(t.Context(), st, e, 1000, 1, time.Hour, slog.New(slog.NewJSONHandler(&buf, nil))); n != 0 || err != nil {
+		t.Fatalf("dispatch: %d %v", n, err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["ns"] != "acme" || got["worker"] != "resolved-web" || got["scope"] != tm.Scope || got["error_code"] != "handler_failed" || got["http_status"] != float64(500) {
+		t.Fatalf("lost enriched identity: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "secret-business-result") {
+		t.Fatalf("leaked response: %s", buf.String())
+	}
+}
 
 type recordingCronDispatcher struct {
 	called bool

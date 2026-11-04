@@ -8,7 +8,6 @@ import (
 	"cellhive/internal/cell"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,25 +52,25 @@ func (d *HTTPDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 		"scheduled_time_ms": t.DueAtMs, "cron": t.Cron,
 	})
 	if err != nil {
-		return err
+		return dispatchFailure(d.URL, "/v1/timers/dispatch", t.Worker, "encode", err, nil)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL+"/v1/timers/dispatch", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return dispatchFailure(d.URL, "/v1/timers/dispatch", t.Worker, "request", err, nil)
 	}
 	req.Header.Set("content-type", "application/json")
 	if d.Token != "" {
 		if err := bearertoken.SetInternal(req, d.Token, "dispatch"); err != nil {
-			return err
+			return dispatchFailure(d.URL, "/v1/timers/dispatch", t.Worker, "auth", err, nil)
 		}
 	}
 	resp, err := d.Client.Do(req)
 	if err != nil {
-		return err
+		return dispatchFailure(d.URL, "/v1/timers/dispatch", t.Worker, "transport", err, nil)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("dispatch: status %d", resp.StatusCode)
+		return dispatchFailure(d.URL, "/v1/timers/dispatch", t.Worker, "response", nil, resp)
 	}
 	// scheduled() may call controller.noRetry() and then fail. The runtime
 	// returns a successful transport response with no_retry=true so the timer

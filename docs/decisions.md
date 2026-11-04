@@ -3708,3 +3708,9 @@ DO 直连票据使用 `token/do-ticket` 用途隔离的 JWT，除 namespace/work
 以下保留历史有状态版本验收记录，不作为本次无状态修订的通过证据：
 
 本地验收：`make build`、`make vet`、全量 `make test`、`make js-test` 通过（后者包含 111 项 JS 测试与真实 workerd runtime 套件）；DO 票据收紧后重建镜像的完整 `runtime-baseline-e2e.sh` 输出 PASS，无跳过。真实 Wrangler 4.133.0 assets/control/vectorize 三项通过；VWork Docker publication/assets/issuer lifecycle 三项通过且无跳过。另通过 issuer/control/server race、元数据大小跨节点一致性及持久化确认失败注入。云 COS、k3d、MySQL 等外部环境脚本仅完成格式迁移与语法检查，未执行；不宣称已部署或完成生产切换。
+
+## ADR-305 Cron 重试终止预算（2026-11-04）
+
+ADR-211 的指数退避只限制重试频率，没有次数上限。租户 handler 的永久错误（例如飞书 webhook token 失效）会让同一 occurrence 每 5 分钟重试一次，长期占用 timer/SQLite/日志，并掩盖真正的失败原因。Cloudflare 的公开契约是 `ScheduledController.noRetry()`：租户可把本次标记为不可重试；CellHive 已支持该路径（`no_retry=true` 直接消费 slot）。
+
+本次补充平台侧安全网：新增 `CELLHIVE_CRON_MAX_ATTEMPTS`（默认 **10**，0=保持无上限）。`ScheduleRetryBounded` 在同一个 cell 事务内递增 attempt；达到预算时不写新的 retry 行，而是写 fired 标记、删除 timer 和 retry 行，`DispatchDueWithCommit` 输出 `timer dispatch exhausted`（含 `attempt`、`max_attempts`、`retry_scheduled=false`）并记录 `cron|exhausted` 指标。成功、`noRetry()` 和未达预算的失败仍沿用 ADR-211 的 5 秒→5 分钟退避；原 slot/due_ms 不变，cron 调度器会在下一个匹配分钟重新物化新的 slot。该预算只在平台侧兜底，不替代租户对永久错误的 `noRetry()` 处理。

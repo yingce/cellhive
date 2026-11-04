@@ -170,6 +170,7 @@ CELLHIVE_CELL_IDLE=5m
 |---|---|---|
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 关) | 到期计时派发 |
 | `CELLHIVE_TIMER_BATCH` / `_FIRED_TTL` | `256` / `24h` | 单 pass 到期上限 / fired 标记保留 |
+| `CELLHIVE_CRON_MAX_ATTEMPTS` | `10` | 单个 cron occurrence 的终止重试预算；达到后消费 slot（ADR-305）。0=保持旧的无上限行为 |
 | `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 关) | queue 消费 |
 | `CELLHIVE_QUEUE_BATCH` / `_LEASE` | `0`（store 默认） | 单批消息数 / 可见性租约 |
 | `CELLHIVE_QUEUE_RETRY_DELAY` | `30s` | 失败批次的重投延迟（重试上限/DLQ 由 per-consumer 配置） |
@@ -180,6 +181,7 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_WAKE_REPAIR_INTERVAL` | `5m` (0 关) | 本地 wake 索引修复扫描（ADR-177）；启动先跑一次 |
 | `CELLHIVE_WAKE_REPAIR_BATCH` | `256` | 单 pass 检查的本地 cell 数（轮转窗口，几趟覆盖全部） |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
+| `CELLHIVE_RESTORE_PARALLEL` | 整数，默认 `4` | 每次恢复的对象读取并发；整库恢复与分页探测未覆盖的 L0 共用。Helm 可选 `cellAgent.restoreParallel`（默认 `null`，不注入环境变量）；提高前须按并发 hydrate 槽位和解码尾页内存评估，不会改变超时或槽位数 |
 | `CELLHIVE_PAGED_RESTORE` | bool，默认 `true` | cell-agent：冷恢复时对"已 compaction 且链 ≥ MIN_BYTES"的 cell 用 fault-in VFS 按页加载（ADR-160） |
 | `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `32MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且存在 L1 页索引才分页，否则整库克隆；`0` = 有页索引时一律分页 |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | 整数，默认 `16` | paged cell 后台补齐速率（MiB/s，每节点同时一个）；`0` = 保持稀疏、每个冷页读桶 |

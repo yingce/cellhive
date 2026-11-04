@@ -233,6 +233,17 @@ func (s *Store) MarkFired(ctx context.Context, token string, expiresMs int64) er
 // ScheduleRetry keeps the timer's original due time while deferring the next
 // attempt. The retry state is durable in the same cell as the timer itself.
 func (s *Store) ScheduleRetry(ctx context.Context, token string, nowMs int64) (retryAfterMs int64, attempt int, err error) {
+	retryAfterMs, attempt, _, err = s.ScheduleRetryBounded(ctx, token, nowMs, 0, 0)
+	return retryAfterMs, attempt, err
+}
+
+// ScheduleRetryBounded is ScheduleRetry with a terminal retry budget.
+// maxAttempts <= 0 keeps the legacy unbounded behavior. When the budget is
+// reached, the occurrence is consumed (fired marker) and its timer/retry rows
+// are removed atomically, so a permanently failing cron handler cannot retry
+// forever. firedUntilMs is the fired-marker expiry used for that terminal
+// state.
+func (s *Store) ScheduleRetryBounded(ctx context.Context, token string, nowMs int64, maxAttempts int, firedUntilMs int64) (retryAfterMs int64, attempt int, exhausted bool, err error) {
 	_, err = s.cell.Tx(ctx, func(tx *sql.Tx) error {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM timers WHERE token=?`, token).Scan(&exists); err != nil {
@@ -243,6 +254,20 @@ func (s *Store) ScheduleRetry(ctx context.Context, token string, nowMs int64) (r
 			return err
 		}
 		attempt++
+		if maxAttempts > 0 && attempt >= maxAttempts {
+			exhausted = true
+			if _, err := tx.ExecContext(ctx, `INSERT INTO fired(token, expires_ms) VALUES(?,?)
+				ON CONFLICT(token) DO UPDATE SET expires_ms=excluded.expires_ms`, token, firedUntilMs); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE token = ?`, token); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM timer_retry WHERE token = ?`, token); err != nil {
+				return err
+			}
+			return nil
+		}
 		delay := 5 * time.Second
 		for n := 1; n < attempt && delay < 5*time.Minute; n++ {
 			delay *= 2
@@ -256,10 +281,10 @@ func (s *Store) ScheduleRetry(ctx context.Context, token string, nowMs int64) (r
 		return err
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	_ = s.syncIndex(ctx)
-	return retryAfterMs, attempt, nil
+	return retryAfterMs, attempt, exhausted, nil
 }
 
 // IsFired reports whether a token was fired and its TTL has not expired.

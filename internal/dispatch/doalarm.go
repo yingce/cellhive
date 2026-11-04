@@ -93,21 +93,21 @@ func (d *DoAlarmDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(addr, "/")+"/v1/do/invoke", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return dispatchFailure(addr, "/v1/do/invoke", worker, "request", err, nil)
 	}
 	req.Header.Set("content-type", "application/json")
 	if d.Token != "" {
 		if err := bearertoken.SetInternal(req, d.Token, "internal"); err != nil {
-			return err
+			return dispatchFailure(addr, "/v1/do/invoke", worker, "auth", err, nil)
 		}
 	}
 	resp, err := d.client().Do(req)
 	if err != nil {
-		return err
+		return dispatchFailure(addr, "/v1/do/invoke", worker, "transport", err, nil)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("do alarm: invoke -> %s", resp.Status)
+		return dispatchFailure(addr, "/v1/do/invoke", worker, "response", nil, resp)
 	}
 	return nil
 }

@@ -81,19 +81,19 @@ func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken str
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(d.URL, "/")+"/v1/workflows/run", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return dispatchFailure(d.URL, "/v1/workflows/run", t.Worker, "request", err, nil)
 	}
 	req.Header.Set("content-type", "application/json")
 	if err := bearertoken.SetInternal(req, d.Token, "dispatch"); err != nil {
-		return err
+		return dispatchFailure(d.URL, "/v1/workflows/run", t.Worker, "auth", err, nil)
 	}
 	resp, err := d.client().Do(req)
 	if err != nil {
-		return fmt.Errorf("workflow: dispatch: %w", err)
+		return dispatchFailure(d.URL, "/v1/workflows/run", t.Worker, "transport", err, nil)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("workflow: dispatch status %d", resp.StatusCode)
+		return dispatchFailure(d.URL, "/v1/workflows/run", t.Worker, "response", nil, resp)
 	}
 	return nil
 }

@@ -52,6 +52,32 @@ func TestFailedTimerRetryBackoffKeepsOriginalDue(t *testing.T) {
 	}
 }
 
+func TestCronRetryBoundedConsumesSlot(t *testing.T) {
+	ctx := t.Context()
+	st := newStore(t)
+	tm := New(1000, KindCron, "demo/__cron__/worker", "slot")
+	if err := st.Upsert(ctx, tm); err != nil {
+		t.Fatal(err)
+	}
+	// A budget of 3 means the third failed attempt consumes the occurrence.
+	for attempt := 1; attempt <= 2; attempt++ {
+		next, got, exhausted, err := st.ScheduleRetryBounded(ctx, tm.Token, 2000, 3, 100_000)
+		if err != nil || exhausted || got != attempt || next <= 2000 {
+			t.Fatalf("retry %d = next:%d attempt:%d exhausted:%v err:%v", attempt, next, got, exhausted, err)
+		}
+	}
+	_, got, exhausted, err := st.ScheduleRetryBounded(ctx, tm.Token, 2000, 3, 100_000)
+	if err != nil || !exhausted || got != 3 {
+		t.Fatalf("exhaustion = attempt:%d exhausted:%v err:%v", got, exhausted, err)
+	}
+	if fired, err := st.IsFired(ctx, tm.Token, 2000); err != nil || !fired {
+		t.Fatalf("fired marker = %v %v", fired, err)
+	}
+	if due, err := st.Due(ctx, 100_000, 10); err != nil || len(due) != 0 {
+		t.Fatalf("exhausted timer still due: %+v %v", due, err)
+	}
+}
+
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	cs, err := cellstore.New(t.TempDir())

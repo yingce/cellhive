@@ -73,7 +73,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: user-runtime
-          image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
+          image: {{ include "cellhive.image" (dict "image" (mergeOverwrite (deepCopy .Values.image) (.Values.userRuntime.image | default dict))) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["user-runtime"]
           envFrom:

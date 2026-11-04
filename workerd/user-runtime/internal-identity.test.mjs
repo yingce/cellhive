@@ -61,3 +61,27 @@ for(const [target,provided,status] of [['new','old',403],['new',undefined,403],[
   const response=await c.entry.fetch(new Request('http://local/unknown',{method:'POST',headers:await internalHeaders(signingKey,'dispatch'),body:JSON.stringify({...body,storage_id:provided})}),c.env,{});
  assert.equal(response.status,status);
 });
+
+test('timer handler failure diagnostics keep only sanitized name and first frame',async()=>{
+ const c=harness(()=>spec('new'));
+ c.startInvocation=async()=>({invocation_id:'inv'});
+ c.finishInvocationBestEffort=async()=>{};
+ const call=async execution=>{
+  c.loadWorker=async()=>({getEntrypoint:()=>({handleScheduled:async()=>{if(execution.errorObject)throw execution.errorObject;return execution;}})});
+  const res=await c.dispatchTimers({json:async()=>({...body})},c.env,{});
+  return {status:res.status,body:await res.json()};
+ };
+ const stack=['TypeError: business-secret?token=message-secret','    at handler (https://user:password@app.test/app/src/index.js?token=query-secret:12:7)','    at runner (/app/src/runner.js:20:3)'].join('\n');
+ let got=await call({error:'business-secret',error_stack:stack});
+ assert.equal(got.status,500);assert.equal(got.body.error,'handler_failed');assert.equal(got.body.message,'business-secret');
+ assert.equal(got.body.error_name,'TypeError');assert.equal(got.body.error_frame,'index.js:12:7');
+ assert.ok(!JSON.stringify({name:got.body.error_name,frame:got.body.error_frame}).match(/business|secret|password|query/));
+
+ got=await call({error:'minified',error_stack:'Error: minified\n    at <anonymous>:1:1'});
+ assert.equal(got.body.error_name,'Error');assert.equal('error_frame' in got.body,false);
+
+ const bad=new Error('business-secret');bad.name='bad name!';bad.stack='bad name!\n    at handler (/app/src/worker.js:5:2)';
+ got=await call({errorObject:bad});
+ assert.ok(got.body.message.includes('business-secret'));assert.equal(got.body.error_name,'Error');assert.equal(got.body.error_frame,'worker.js:5:2');
+ assert.ok(!JSON.stringify({name:got.body.error_name,frame:got.body.error_frame}).match(/business|secret|bad name/));
+});

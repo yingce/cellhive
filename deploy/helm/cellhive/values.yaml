@@ -55,6 +55,9 @@ config:
   # tenant console output and uncaught exceptions.
   tenantLogCapture: "on"
   tenantOutbound: "public,private,local"
+  # Terminal retry budget for one cron occurrence. 0 keeps unbounded retries
+  # (legacy behavior); the default consumes the slot after 10 failed attempts.
+  cronMaxAttempts: 10
   # Multiple cell-agent replicas require a shared bucket. Supported schemes:
   # s3://, oss://, cos://. Put endpoint and credentials below or in existingSecret.
   bucket: s3://cellhive
@@ -72,6 +75,9 @@ config:
 cellAgent:
   # Optional image fields merged over global image for agent-first upgrades.
   image: {}
+  # Optional per-restore object-read concurrency; null leaves the process default (4).
+  # Size against concurrent hydrate slots and decoded-tail memory before increasing.
+  restoreParallel: null
   replicas: 2
   storage: 20Gi
   # Bound cached SQLite cell handles and close idle handles. 0 disables
@@ -92,6 +98,8 @@ cellAgent:
 runtimeHostAliases: []
 
 userRuntime:
+  # Optional image fields merged over global image; leaves DO runtimes unchanged.
+  image: {}
   replicas: 2
   minReplicas: 2
   maxReplicas: 10

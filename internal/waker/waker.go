@@ -15,14 +15,15 @@ type Waker struct {
 	Election *Election
 	// DeadScopes returns the timer scopes whose owner is dead/unowned. It is a
 	// cold-path provider (leader only; may list owner records).
-	DeadScopes func(ctx context.Context) ([]string, error)
-	Open       func(ctx context.Context, scope string) (*timer.Store, error)
-	Own        func(ctx context.Context, scope string) (bool, error)
-	Commit     func(ctx context.Context, scope string, fn func() error) error
-	Dispatcher timer.Dispatcher
-	Interval   time.Duration
-	Batch      int
-	FiredTTL   time.Duration
+	DeadScopes      func(ctx context.Context) ([]string, error)
+	Open            func(ctx context.Context, scope string) (*timer.Store, error)
+	Own             func(ctx context.Context, scope string) (bool, error)
+	Commit          func(ctx context.Context, scope string, fn func() error) error
+	Dispatcher      timer.Dispatcher
+	Interval        time.Duration
+	Batch           int
+	FiredTTL        time.Duration
+	CronMaxAttempts int
 	// BackoffMax caps the loop delay after consecutive errors (ADR-152). The
 	// base delay is Interval; 0 or <= Interval disables extra backoff.
 	BackoffMax time.Duration
@@ -162,7 +163,7 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 		if w.Commit != nil {
 			commit = func(cctx context.Context, fn func() error) error { return w.Commit(cctx, scope, fn) }
 		}
-		n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.log(), commit)
+		n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.CronMaxAttempts, w.log(), commit)
 		if err != nil {
 			w.log().Warn("waker dispatch pass failed", "scope", scope, "err", err)
 			continue

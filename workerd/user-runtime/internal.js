@@ -130,11 +130,12 @@ async function dispatchTimers(req, env, ctx) {
   try {
     const execution = await stub.getEntrypoint("CellHiveHost").handleScheduled(event);
     await finishInvocationBestEffort(env, invocation, execution);
-    if (execution.error) return json({error:"handler_failed",message:execution.error,invocation_id:invocation.invocation_id},500);
+    if (execution.error) return json({error:"handler_failed",message:execution.error,invocation_id:invocation.invocation_id,...errorDiagnostics(stackErrorName(execution.error_stack),execution.error_stack)},500);
     return json({ ...execution.value,result:publicInvocationResult(execution.value?.result), kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime,invocation_id:invocation.invocation_id });
   } catch (e) {
     await finishInvocationBestEffort(env, invocation, {error:String(e)});
-    return json({ error: "handler_failed", message: String(e) }, 500);
+    let name="",stack="";try{name=e&&e.name;stack=e&&e.stack;}catch{}
+    return json({ error: "handler_failed", message: String(e), ...errorDiagnostics(name,stack) }, 500);
   }
 }
 
@@ -624,6 +625,67 @@ function json(o, status) {
     status: status || 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+const errorNamePattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+const errorBasenamePattern = /^[A-Za-z0-9_.-]{1,80}$/;
+
+function safeErrorName(name) {
+  try {
+    if (typeof name === "string" && errorNamePattern.test(name)) return name;
+  } catch {}
+  return "Error";
+}
+
+function stackErrorName(stack) {
+  try {
+    const first = typeof stack === "string" ? stack.split("\n", 1)[0] : "";
+    const i = first.indexOf(":");
+    return i > 0 ? first.slice(0, i) : "";
+  } catch {
+    return "";
+  }
+}
+
+function safeErrorFrame(stack) {
+  try {
+    if (typeof stack !== "string") return "";
+    for (const raw of stack.split("\n")) {
+      const line = raw.trim();
+      if (!line.startsWith("at ")) continue;
+      let location = line.slice(3).trim();
+      if (location.endsWith(")")) {
+        const open = location.lastIndexOf("(");
+        if (open >= 0) location = location.slice(open + 1, -1).trim();
+      }
+      const match = /^(.*):([0-9]{1,6}):([0-9]{1,6})$/.exec(location);
+      if (!match) continue;
+      const lineNo = Number(match[2]);
+      const colNo = Number(match[3]);
+      if (lineNo < 1 || lineNo > 999999 || colNo < 1 || colNo > 999999) continue;
+      let path = match[1];
+      const stop = path.search(/[?#]/);
+      if (stop >= 0) path = path.slice(0, stop);
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path) || path.startsWith("//")) {
+        try {
+          path = new URL(path.startsWith("//") ? "http:" + path : path).pathname;
+        } catch {
+          path = "";
+        }
+      }
+      path = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+      if (!errorBasenamePattern.test(path)) continue;
+      return path + ":" + lineNo + ":" + colNo;
+    }
+  } catch {}
+  return "";
+}
+
+function errorDiagnostics(name, stack) {
+  const out = { error_name: safeErrorName(name) };
+  const frame = safeErrorFrame(stack);
+  if (frame) out.error_frame = frame;
+  return out;
 }
 
 function workerLoadFailure(error) {

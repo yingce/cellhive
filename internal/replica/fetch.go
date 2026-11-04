@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
+	"sync"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
@@ -80,37 +82,94 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 	}
 	var deltas []l0delta
 	seen := map[string]bool{}
+	keys := make([]string, 0, len(l0keys))
 	for _, k := range l0keys {
-		raw, err := m.ReadSegment(ctx, k)
-		if err != nil {
+		name := k
+		if i := strings.LastIndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		}
+		// A plain delta or a batch whose suffix proves it contains only deltas
+		// can be skipped when its range ends at or below the index watermark.
+		// Snapshot batches, mixed, legacy, and malformed names still need decoding.
+		if strings.HasSuffix(name, ".ltx") || (batchSpanKnown(name) && strings.HasSuffix(name, ".d.batch")) {
+			rangeName := strings.TrimSuffix(name, ".ltx")
+			if strings.HasSuffix(name, ".batch") {
+				rangeName = strings.TrimSuffix(name, ".d.batch")
+			}
+			if span, ok := parseSegmentRange(rangeName); ok && span.end <= idx.Watermark {
+				continue
+			}
+		}
+		keys = append(keys, k)
+	}
+	// Match restore's configured read concurrency and default. Decode each
+	// bounded batch in key order, retaining at most one batch of raw objects
+	// in addition to the decoded tail. Never start a goroutine per listed key.
+	parallel := m.RestoreParallel
+	if parallel <= 0 {
+		parallel = 4
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	for base := 0; base < len(keys); {
+		n := min(parallel, len(keys)-base)
+		raws := make([][]byte, n)
+		var wg sync.WaitGroup
+		for i := range raws {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				raw, err := m.ReadSegment(ctx, keys[base+i])
+				if err != nil {
+					cancel(err)
+					return
+				}
+				raws[i] = raw
+			}(i)
+		}
+		wg.Wait()
+		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
-		parts, err := ltx.Split(raw)
-		if err != nil {
-			return nil, fmt.Errorf("replica: corrupt L0 object %s: %w", k, err)
-		}
-		for _, part := range parts {
-			h, payload, err := ltx.Decode(part)
+		for i, raw := range raws {
+			k := keys[base+i]
+			parts, err := ltx.Split(raw)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("replica: corrupt L0 object %s: %w", k, err)
 			}
-			// Recovery re-uploads a follower's single segments, which may also be
-			// present inside an owner-uploaded batch. Keep one logical copy so the
-			// contiguity check below does not reject an otherwise valid chain.
-			if id := h.ID(); seen[id] {
-				continue
-			} else {
-				seen[id] = true
+			for _, part := range parts {
+				h, payload, err := ltx.Decode(part)
+				if err != nil {
+					return nil, err
+				}
+				// Recovery re-uploads a follower's single segments, which may also be
+				// present inside an owner-uploaded batch. Keep one logical copy so the
+				// contiguity check below does not reject an otherwise valid chain.
+				if id := h.ID(); seen[id] {
+					continue
+				} else {
+					seen[id] = true
+				}
+				if h.Kind != ltx.KindDelta || h.EndTxID <= idx.Watermark {
+					continue
+				}
+				ps, commit, _, pages, err := ltx.DecodeWALPageMap(payload)
+				if err != nil {
+					return nil, fmt.Errorf("replica: decode L0 delta: %w", err)
+				}
+				deltas = append(deltas, l0delta{start: h.StartTxID, end: h.EndTxID, pageSize: ps, commit: commit, pages: pages})
 			}
-			if h.Kind != ltx.KindDelta || h.StartTxID <= idx.Watermark {
-				continue
-			}
-			ps, commit, _, pages, err := ltx.DecodeWALPageMap(payload)
-			if err != nil {
-				return nil, fmt.Errorf("replica: decode L0 delta: %w", err)
-			}
-			deltas = append(deltas, l0delta{start: h.StartTxID, end: h.EndTxID, pageSize: ps, commit: commit, pages: pages})
 		}
+		base += n
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
 	}
 	sort.SliceStable(deltas, func(i, j int) bool { return deltas[i].start < deltas[j].start })
 	expected := idx.Watermark + 1

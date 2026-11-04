@@ -28,7 +28,7 @@ _最后更新：2026-11-01_
 - 验证：`make test`、`make vet`、`make js-test`、受影响包 race 和全量 in-repo e2e 通过；两区 Pod 新 digest、Ready、`restartCount=0`。详见 [release-2026-10-31-03](archive/release-2026-10-31-03.md) 和 [release-2026-10-31](archive/release-2026-10-31.md)。
 - 残余：objgc recheck→Delete 微秒窗口、legacy scope 缺 `owner-gen` 时仍可能从 1 开始、waker `Due` 的逐 key Get、DO envelope 二次 JSON 编解码。
 - CF-API（历史验收记录）：Wrangler 4 的 `assets` binding 已支持（4.133 可能省略 `assets.config.binding`，采用 bindings 里的名字；含 assets-only、重复部署继承 active asset token）；Wrangler 4.133 真实 CLI 的 Worker+assets、重复部署、assets-only、租户 JWT 部署均已通过；错误码区分 `unsupported_binding`/`invalid_binding`/`invalid_multipart`。当时独立 CF 监听与 `cellhive_ns` 属于旧契约；现行 ADR-304 无状态修订要求仅 admin `:8082`、pattern issuer HS256 namespace JWT（`ns` 数组）或 bootstrap admin JWT，无静态/OIDC 回退。见顶部状态，不证明本次修订通过或生产切换完成。
-- `vwork-40/vlog-daily-report` 的 cron 500 是租户 `sendFeishu` 错误（`Feishu send failed with HTTP 200`），不是平台 dispatch 修复项；需租户修响应解析或调用 `controller.noRetry()`。
+- `vwork-40/vlog-daily-report` 的 cron 500 是租户 `sendFeishu` 错误（`Feishu send failed with HTTP 200`），不是平台 dispatch 修复项；需租户修响应解析或调用 `controller.noRetry()`。ADR-305 的 `CELLHIVE_CRON_MAX_ATTEMPTS` 只负责终止无限重试，不能替代修复 webhook 或 `noRetry()`。
 
 ## 2026-10-27 COS并发创建空读（已随 48216e7 发布：SG rev71 / USW rev56）
 

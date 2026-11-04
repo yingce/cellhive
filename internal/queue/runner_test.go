@@ -1,13 +1,17 @@
 package queue_test
 
 import (
+	"bytes"
 	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,6 +186,204 @@ func TestHTTPDispatcherDoesNotRetryHandler500(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("calls=%d, want 1", got)
+	}
+}
+
+func TestHTTPDispatcherFailureAllowlistedDiagnostic(t *testing.T) {
+	const token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"handler_failed","message":"business-secret","invocation_id":"secret-id"}`)
+	}))
+	defer srv.Close()
+
+	d := queue.NewHTTP(srv.URL+"?secret=query-secret", token)
+	err := d.Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q", Worker: "consumer", BundleSHA: "sha1"}, []queue.Message{{ID: "m1", Body: []byte("payload-secret")}})
+	var diagnostic *queue.DispatchError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("missing typed diagnostic: %v", err)
+	}
+	if diagnostic.StatusCode != http.StatusInternalServerError || diagnostic.Code != "handler_failed" || diagnostic.Phase != "response" || diagnostic.Host != strings.TrimPrefix(srv.URL, "http://") || diagnostic.Path != "/v1/queues/dispatch" || diagnostic.Worker != "consumer" {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls = %d, want 1 (handler 500 is final)", got)
+	}
+	for _, secret := range []string{"business-secret", "query-secret", "secret-id", "payload-secret", token} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("leaked %q in %q", secret, err.Error())
+		}
+	}
+}
+
+func TestHTTPDispatcherFailureHidesArbitraryBody(t *testing.T) {
+	for _, body := range []string{
+		`<html>business-secret</html>`,
+		`business-secret`,
+		`{"error":"business-secret","message":"business-secret"}`,
+		`{"code":"business-secret"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			err := queue.NewHTTP(srv.URL, "").Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q", Worker: "consumer"}, nil)
+			var diagnostic *queue.DispatchError
+			if !errors.As(err, &diagnostic) {
+				t.Fatalf("missing typed diagnostic: %v", err)
+			}
+			if diagnostic.StatusCode != http.StatusInternalServerError || diagnostic.Code != "http_error" || diagnostic.Phase != "response" {
+				t.Fatalf("diagnostic = %+v", diagnostic)
+			}
+			if strings.Contains(err.Error(), "business-secret") || strings.Contains(diagnostic.Error(), body) {
+				t.Fatalf("leaked arbitrary body: %q", err.Error())
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+type boundedResponseBody struct {
+	read   int
+	closed bool
+}
+
+func (b *boundedResponseBody) Read(p []byte) (int, error) {
+	const total = 8192
+	if b.read >= total {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if b.read+n > total {
+		n = total - b.read
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'x'
+	}
+	b.read += n
+	return n, nil
+}
+
+func (b *boundedResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type dispatchRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f dispatchRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestHTTPDispatcherFailureBodyReadBounded(t *testing.T) {
+	body := &boundedResponseBody{}
+	d := queue.NewHTTP("http://user:password@runtime/base-secret?secret=query-secret", "")
+	d.Client = &http.Client{Transport: dispatchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusInternalServerError, Body: body, Header: make(http.Header)}, nil
+	})}
+
+	err := d.Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q", Worker: "consumer"}, nil)
+	var diagnostic *queue.DispatchError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("missing typed diagnostic: %v", err)
+	}
+	if diagnostic.Host != "runtime" || diagnostic.Path != "/v1/queues/dispatch" || diagnostic.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+	if body.read == 0 || body.read > 4096 || !body.closed {
+		t.Fatalf("read = %d, closed = %v", body.read, body.closed)
+	}
+	for _, secret := range []string{"password", "base-secret", "query-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("leaked %q in %q", secret, err.Error())
+		}
+	}
+}
+
+func TestHTTPDispatcherFailureFinalAfterRetry(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"code":"bundle_fetch_failed","message":"business-secret"}`)
+	}))
+	defer srv.Close()
+
+	err := queue.NewHTTP(srv.URL, "").Dispatch(context.Background(), queue.Ref{Namespace: "demo", Name: "q", Worker: "consumer"}, nil)
+	var diagnostic *queue.DispatchError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("missing typed diagnostic: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2 retries", got)
+	}
+	if diagnostic.StatusCode != http.StatusServiceUnavailable || diagnostic.Code != "bundle_fetch_failed" || diagnostic.Phase != "response" {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+	if strings.Contains(err.Error(), "business-secret") {
+		t.Fatalf("leaked body: %q", err.Error())
+	}
+}
+
+func TestRunnerDispatchFailureLogsSafeDiagnostics(t *testing.T) {
+	const token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	ctx := context.Background()
+	st := newStore(t)
+	if _, err := st.Send(ctx, "demo", "q", []byte("payload-secret"), "text/plain", 0, ""); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"handler_failed","message":"business-secret","invocation_id":"secret-id"}`)
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	r := &queue.Runner{
+		Store: st, Dispatch: queue.NewHTTP(srv.URL+"?secret=query-secret", token), Batch: 1,
+		Queues: staticRefs("demo", "q"),
+		Log:    slog.New(slog.NewJSONHandler(&buf, nil)),
+	}
+	n, err := r.Pass(ctx)
+	if err != nil || n != 0 {
+		t.Fatalf("pass = %d, %v", n, err)
+	}
+	if depth, err := st.Depth(ctx, "demo", "q"); err != nil || depth != 1 {
+		t.Fatalf("depth = %d, %v; want retained retry", depth, err)
+	}
+	line := bytes.TrimSpace(buf.Bytes())
+	if i := bytes.LastIndexByte(line, '\n'); i >= 0 {
+		line = line[i+1:]
+	}
+	var got map[string]any
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatalf("log = %s: %v", buf.String(), err)
+	}
+	want := map[string]any{
+		"ns": "demo", "queue": "q", "batch": float64(1),
+		"error_code": "handler_failed", "phase": "response",
+		"target_host": strings.TrimPrefix(srv.URL, "http://"), "target_path": "/v1/queues/dispatch",
+		"http_status": float64(500), "worker": "consumer",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v; log=%s", k, got[k], v, buf.String())
+		}
+	}
+	for _, secret := range []string{"business-secret", "query-secret", "secret-id", "payload-secret", token} {
+		if strings.Contains(buf.String(), secret) {
+			t.Fatalf("leaked %q: %s", secret, buf.String())
+		}
 	}
 }
 

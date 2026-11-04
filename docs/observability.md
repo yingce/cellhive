@@ -70,6 +70,19 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - **禁止**记录：secrets 明文、internal token、原始桶响应体；
 - 关键事件：`owner_acquired`、`epoch_bumped`、`takeover_started/finished`、`drain_started/finished`、`waker_fire`、`do_restore_started/finished`、`output_gate_timeout`。
 
+### Timer 派发失败诊断
+
+- `timer dispatch failed` 保留去重 ID `token`（不是鉴权 token）及 `kind`，增加可解析的 `ns`/完整 `scope`、已知的 `worker`、持久 timer 的原始 `scheduled_time_ms` 和本次派发 `duration_ms`。不记录 occurrence、事件 payload、JWT、Authorization 或业务返回值。
+- HTTP cron、workflow 和 DO alarm 失败增加 `target_host`（无 userinfo）、`target_path`（固定端点名，不含配置路径前缀、query、fragment）、`http_status`（收到响应时）、`error_code` 和 `phase`。只识别受控错误码 `handler_failed`、`workflow_failed`、`bundle_fetch_failed`、`unauthorized`、`bad_json`、`bad_request`、`dedicated_target_mismatch`；其他响应统一 `http_error`。忽略下游 message、invocation ID 和所有未知字段，HTML/纯文本不入日志。错误响应最多读取 4096 字节，小响应读完后可复用连接，大响应直接关闭，不无限 drain。
+- 网络错误只输出 `canceled`/`timeout`/`transport_error` 与可判定的 `dns`/`dial`/`read`/`write` 阶段；未判定则保留 `transport`。请求构造和鉴权失败阶段为 `request`/`auth`，不输出原始错误字符串。其他 dispatcher 错误仅输出通用分类。
+- Cron 成功写入重试状态后输出 `attempt`（现有累计失败次数）、`retry_scheduled=true`、`retry_at_ms` 和 `retry_delay_ms`；写入失败输出 `retry_scheduled=false` 与 `retry_error_code=retry_schedule_failed`，不伪造 attempt。达到 `CELLHIVE_CRON_MAX_ATTEMPTS` 时输出 `timer dispatch exhausted`，带 `attempt`、`max_attempts` 和 `retry_scheduled=false`，并在同一事务消费 slot。其他 kind 输出 `retry_policy=next_poll`，不臆造未存储的尝试次数。重试、fired 和持久化 gate 语义不变。
+- 这些是 cell-agent 的 slog stderr 字段（当前入口使用 TextHandler），不是租户 OTLP invocation schema 的新增字段。仓库内无外部 `vworklog`/`log_context` 固定 schema；部署后须另验采集器是否保留新增键。本次诊断增强不代表 HTTP 500 根因已修复。
+
+### Queue 派发失败诊断
+
+- Queue 批次派发失败同样只输出 `error_code`、`phase`、`target_host`（无 userinfo）、固定 `target_path=/v1/queues/dispatch`、收到响应时的 `http_status` 和已知 `worker`。错误码只接受与 timer 相同的受控集合，其他响应统一 `http_error`；不透传下游 body、message、invocation ID、配置路径、query、token 或消息 payload。
+- 非 2xx 响应最多读取 4096 字节后关闭；重试状态判定不变：仅 502/503/504 自动重试一次，其他状态（含处理器 500）保留原有最终失败与队列重试/死信语义。
+
 ### 平台日志：内存 tail + 可选 OTLP 导出（ADR-172）
 
 - `workerd/platform/log-tail.js` 是可信宿主导出的 `TenantTail extends WorkerEntrypoint`。user-runtime、内部 dispatch/service target 与 do-runtime facet 在 `workerLoader` 的 `WorkerCode.tails` 中传入宿主 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 生成的真实 `Fetcher`。Tail 捕获每次调用事件（包括没有 `console.*` 的成功调用）、console 与未捕获异常，保存在所在 workerd service 的有界内存 ring；有人 Tail 订阅时，cell-agent 经受保护的 `/v1/internal/logs/events` 按游标拉取。`OTLP_LOGS=all` 时则后台持续拉取。租户身份取不可伪造的 host-bound props，不取动态事件中为 null 的 `scriptName`。log-role token 和查询能力仅在可信宿主，tenant env 仍为零平台键。runtime 重启、ring 溢出或短暂失联可能丢失实时日志。

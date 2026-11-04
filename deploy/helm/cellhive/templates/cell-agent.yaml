@@ -54,6 +54,10 @@ spec:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            {{- with .Values.cellAgent.restoreParallel }}
+            - name: CELLHIVE_RESTORE_PARALLEL
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.proxysql.existingSecret }}
             - name: CELLHIVE_PROXYSQL_ADMIN
               valueFrom: {secretKeyRef: {name: {{ .Values.proxysql.existingSecret }}, key: CELLHIVE_PROXYSQL_ADMIN}}
