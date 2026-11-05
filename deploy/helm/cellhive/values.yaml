@@ -79,6 +79,10 @@ cellAgent:
   # Size against concurrent hydrate slots and decoded-tail memory before increasing.
   restoreParallel: null
   replicas: 2
+  # Pin cell-agent to the node pool that satisfies its PVC zone. Keep these
+  # empty unless the operator explicitly selects eligible nodes.
+  nodeSelector: {}
+  tolerations: []
   storage: 20Gi
   # Bound cached SQLite cell handles and close idle handles. 0 disables
   # the respective cap/TTL; lower these when the container memory is tight.
@@ -103,6 +107,10 @@ userRuntime:
   # Node-wide Queue/Cron/Workflow invocation records and OTLP invocation logs.
   invocationLogs: "on"
   replicas: 2
+  # user-runtime is stateless; pin it to normal nodes when the Region uses
+  # serverless Eklet nodes for burst capacity.
+  nodeSelector: {}
+  tolerations: []
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
