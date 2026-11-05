@@ -40,6 +40,11 @@ func (m *Manager) resourceObjects() *objectstore.Objects {
 
 const resourceFenceCacheTTL = 1 * time.Second
 
+// maxFenceCache bounds absent-fence entries. Evicting one only costs a point
+// read; without the bound every scoped KV/queue cell visited by this node would
+// retain an entry for the process lifetime.
+const maxFenceCache = 4096
+
 type fenceCacheEntry struct {
 	f    resourceFence
 	etag string
@@ -141,6 +146,20 @@ func (m *Manager) cacheReadFence(key string, f resourceFence, etag string, rev u
 	}
 	if m.fenceCache == nil {
 		m.fenceCache = make(map[string]fenceCacheEntry)
+	}
+	if _, exists := m.fenceCache[key]; !exists && len(m.fenceCache) >= maxFenceCache {
+		now := time.Now()
+		for k, e := range m.fenceCache {
+			if now.Sub(e.at) >= resourceFenceCacheTTL {
+				delete(m.fenceCache, k)
+			}
+		}
+		for k := range m.fenceCache {
+			if len(m.fenceCache) < maxFenceCache {
+				break
+			}
+			delete(m.fenceCache, k)
+		}
 	}
 	m.fenceCache[key] = fenceCacheEntry{f: f, etag: etag, at: time.Now()}
 }

@@ -275,6 +275,7 @@ type Config struct {
 
 	// Background L0->L1 compaction (cold path). Zero interval disables it.
 	CompactionInterval    time.Duration
+	CompactionTimeout     time.Duration
 	CompactionMinSegments int
 	CompactionMinBytes    int64
 	CompactionMinObjects  int
@@ -607,6 +608,7 @@ func FromEnv() Config {
 		DrainTTL:                     drainTTL,
 		DrainWait:                    drainTTL,
 		CompactionInterval:           envDuration("CELLHIVE_COMPACTION_INTERVAL", 30*time.Second),
+		CompactionTimeout:            envDuration("CELLHIVE_COMPACTION_TIMEOUT", 5*time.Minute),
 		CompactionMinSegments:        envInt("CELLHIVE_COMPACTION_MIN_SEGMENTS", 64),
 		CompactionMinBytes:           envBytes("CELLHIVE_COMPACTION_MIN_BYTES", 64<<20),
 		CompactionMinObjects:         envInt("CELLHIVE_COMPACTION_MIN_OBJECTS", 8),

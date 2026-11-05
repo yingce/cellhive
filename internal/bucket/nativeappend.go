@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,7 +13,10 @@ import (
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
-type OSSAppender struct{ bucket *oss.Bucket }
+type OSSAppender struct {
+	bucket  *oss.Bucket
+	maxRead int64
+}
 
 // conditionalObjectCreator creates immutable ordinary objects, including
 // empty assets. Native forbid-overwrite is atomic; append-at-zero is not
@@ -43,7 +45,7 @@ func NewOSSAppender(endpoint, name, access, secret string) (*OSSAppender, error)
 	if !strings.HasPrefix(endpoint, "https://") {
 		return nil, fmt.Errorf("OSS endpoint must use HTTPS")
 	}
-	client, err := oss.New(endpoint, access, secret)
+	client, err := oss.New(endpoint, access, secret, oss.HTTPClient(newBoundedHTTPClient()))
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +61,14 @@ func (o *OSSAppender) Read(ctx context.Context, key string) ([]byte, error) {
 		return nil, nativeOSSError(err)
 	}
 	defer result.Close()
-	return io.ReadAll(result)
+	return readAllBounded(key, result, -1, o.readLimit())
+}
+
+func (o *OSSAppender) readLimit() int64 {
+	if o.maxRead > 0 {
+		return o.maxRead
+	}
+	return DefaultMaxObjectBytes
 }
 func (o *OSSAppender) Append(ctx context.Context, key string, position int64, data []byte) error {
 	_, err := o.bucket.AppendObject(key, bytes.NewReader(data), position, oss.WithContext(ctx))
@@ -81,7 +90,10 @@ func nativeOSSError(err error) error {
 	return err
 }
 
-type COSAppender struct{ client *cos.Client }
+type COSAppender struct {
+	client  *cos.Client
+	maxRead int64
+}
 
 func (c *COSAppender) CreateObject(ctx context.Context, key string, data []byte) (string, error) {
 	headers := http.Header{}
@@ -107,8 +119,14 @@ func NewCOSAppender(endpoint, access, secret string) (*COSAppender, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, fmt.Errorf("COS endpoint must be an HTTPS bucket URL")
 	}
-	c := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: &cos.AuthorizationTransport{SecretID: access, SecretKey: secret}})
-	return &COSAppender{client: c}, nil
+	c := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{
+		Transport: &cos.AuthorizationTransport{
+			SecretID:  access,
+			SecretKey: secret,
+			Transport: newBoundedHTTPTransport(),
+		},
+	})
+	return &COSAppender{client: c, maxRead: DefaultMaxObjectBytes}, nil
 }
 
 func (c *COSAppender) checkAZ(ctx context.Context) error {
@@ -146,7 +164,14 @@ func (c *COSAppender) Read(ctx context.Context, key string) ([]byte, error) {
 		return nil, nativeCOSError(err)
 	}
 	defer r.Body.Close()
-	return io.ReadAll(r.Body)
+	return readAllBounded(key, r.Body, r.ContentLength, c.readLimit())
+}
+
+func (c *COSAppender) readLimit() int64 {
+	if c.maxRead > 0 {
+		return c.maxRead
+	}
+	return DefaultMaxObjectBytes
 }
 func (c *COSAppender) Append(ctx context.Context, key string, position int64, data []byte) error {
 	_, err := c.AppendWithETag(ctx, key, position, data)

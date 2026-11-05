@@ -1,5 +1,28 @@
 # 评审问题与发布状态（Known Issues / Review Closure）
 
+## 2026-11-04 复制 GC 正确性边界（ADR-307，契约先行，实施与验收中，未部署）
+
+最终 epoch 审查不能证明跨对象 owner 检查/删除原子性，也不能证明 pinned readers 或 lineage cut 安全。保守决策：compaction 继续发布，covered L0/旧 L1/`RetireEpochs` payload 自动物理删除默认 DEFERRED；`Options.GC` 不足以授权。显式 Go option `OfflineQuiescent bool` 默认 `false`，只有调用者外部停止并排空 writers **和 readers** 且全过程保持静默才可设 `true`。生产后台永不启用，interval 不能绕过；无 owner、nil `Verify` 不是许可。离线逐次 Delete 前配置的 `Verify` 只停止观察到的丢失，不是原子 fence；可选 payload ETag 不能证明 owner。
+
+所有模式保留 marker/link/epoch-cut/snapshot-started/done/未知名称；`ReportDeferredGC`/`GCSkipped` 确定性报告延后，不伪报删除成功。不可变 epoch-cut、manifest/index 完整证明、cut-before-prune、大 marker 持久化-before-Serve 修复仍在实施与验收，不能沿用此前“未修改”描述，也不能宣称已全部通过。无 pending-deletion registry，bundle/assets 运维 GC 不变。桶增长与历史 List 开销是明确代价；完整在线 GC 的 generation descriptor、单调 epoch reference 与 reader pinning 尚未解决，仍不得宣称线上 GC 安全。下节 ADR-306 验收不覆盖本次修订，无部署声明。
+
+## 2026-11-04 性能与资源边界批次（增量本地验收通过，未提交、未部署）
+
+本节记录当前工作树，不是发布记录。初始审计中的可疑热点、源码确认的重复读取/无界保留，以及确定性回归确认的缺陷须分开；不能把所有候选统称为 P0 或宣称全部修复。决策与限额见 ADR-306、[配置](configuration.md)、[存储](storage-and-s3.md) 和 [可观测性](observability.md)。
+
+- 分页探测跳过页索引水位已覆盖的严格 canonical snapshot/part；未知、混合或 snapshot batch 仍解码。`MinBytes` 的索引提前退出仅允许 **零 L0 对象**，不能从压缩后的 L0 字节推断 SQLite image 大小。
+- compaction 预检可避免确定不需要的正文读取；仅对名称可证明完全覆盖的 L0 做清理，先要求持久页索引 `Watermark >= manifest.MaxTxID` 并复核 owner。缺索引/落后索引延后 GC，读取失败不删除；未知/混合/跨水位对象不走该快捷 GC。每 scope 默认 5 分钟 deadline，不是整个后台系统的超时修复。
+- 原生 COS/OSS 与 S3 默认单对象读取上限 512 MiB；supervisor blob/segment 为 64 MiB；blob 写入超限明确 413、不截断后成功。默认 peer HTTP 总超时 30 秒，supervisor HTTPStore 60 秒，慢链路的大 body 可能被中断；provider body 仍依赖调用 context。
+- 控制投影批量查询减少逐 worker 查询，列表复用投影；派发回调共享 5 秒 TTL/single-flight。所有 mutator 已改用 `projectionStrict`，不继承 stale 配置；owner 原子 read-fence guard 与 `cacheEpoch` 防止 trim 后 `0==0` 误判，相关增量回归已本地通过。
+- invocation 清理改为每 namespace 首次写、随后 1 分钟或 256 次写触发；每条清理查询最多 1000 行，7 天/10000 条为软保留目标，旧记录写入可强制触发。timer 增加 `(kind, occurrence)` / `(due_ms, token)` 索引；撤回了省略提交后 `NextDue` 对账的优化，不能描述为最终单查询路径。
+- Go logbuf 的 entries/events 各有每 worker 1 MiB 预算，记录截断/拒绝/淘汰仅影响可观测数据，不表示业务失败。JS response 流式转发只覆盖 workerd hops；Go DO proxy 仍缓冲至 8.25 MiB。DO `seen` 为 10000 项 CountLRU，原生 facet/version 身份仍保留 Map，不能为内存回收丢弃身份。bundle 源码缓存预算 65 MiB；超预算有效源码旁路缓存继续加载，不新增缓存准入拒绝。
+
+**增量审查结论：ACCEPT**（reviewer `ses_e5926bc28`）：四个本批引入的阻塞项已修复并本地验证，包括恢复 native facet/version Maps、恢复 timer 提交后 fresh `syncIndex`、owner 原子 fence/`cacheEpoch`、全部 mutator 的 strict projection。timer 保留 pre-Put 崩溃安全顺序与新索引；失败 Delete 与并发 publish 的既有窄窗口仍可能存在，不是本批新引入或已修复的问题。facet Maps 的无界保留也是既有边界，相应内存优化已撤回。
+
+**最终本地验证**：Node **141/141**、全量 Go、vet、timer/owner race、focused server 及真实 pinned user-runtime/do-runtime 测试通过。这是本批最终结果，不是较早的 134 项 Node 结果；本次文档校正未重新运行这些测试。仅接受该增量批次，不表示 GA、生产验收或所有问题完成。
+
+**仍为发布门禁/残余**：六项 epoch/lineage 协议缺陷的后续修订按 ADR-307 实施与验收中，仍阻止发布；上文早期水位/owner GC 检查不构成在线删除许可。完整恢复内存/流式化、旧 epoch GC 成本、Range/后台读取超时覆盖及慢链路风险保留。有效源码按 UTF-16 权重超过 65MiB 时旁路缓存而不拒绝，反复加载的 cache thrash 未解决；Go DO sharding hop 仍缓冲至 8.25MiB。无提交、无部署。
+
 ## 2026-11-03 ADR-304 授权重设计（无状态修订实施与验收中，未部署）
 
 统一 Bearer HS256 JWT，默认 audience `cellhive`，无静态 header/OIDC 兼容。单个 vwork issuer key 签 namespace 与受限 binding，无 actions/key_version；namespace `ns` 为精确/前缀 `*`/`*` 数组，binding 为精确 `ns` 字符串与 kind/name，固定字段仅平台签发。

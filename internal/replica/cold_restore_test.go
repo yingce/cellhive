@@ -219,7 +219,7 @@ func TestRestoreChainKeepsCompactedEpochWithOnlyL1Manifest(t *testing.T) {
 		t.Fatalf("L0 before GC: %v %v", l0, err)
 	}
 	for _, key := range l0 {
-		if err := m.DeleteObject(ctx, key); err != nil {
+		if _, err := m.DeleteObjectWithOptions(ctx, sc, 1, key, RetireOptions{OfflineQuiescent: true}); err != nil {
 			t.Fatal(err)
 		}
 	}

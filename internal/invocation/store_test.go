@@ -93,6 +93,8 @@ func TestInvocationRetryIdentityAndHistoryBounds(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Retention cleanup is now time/write-gated; advance past the interval.
+	now = now.Add(2 * time.Minute)
 	r.ID = "newest"
 	r.StartedMs = now.Add(time.Second).UnixMilli()
 	r.Status = "success"

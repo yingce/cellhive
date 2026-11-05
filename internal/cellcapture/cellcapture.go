@@ -355,24 +355,23 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 		return false, false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
 	}
 	crossEpoch := false
-	if !exists {
+	if !exists && durable == baseline && durable == local {
 		size := int64(0)
 		if st, serr := os.Stat(c.Path); serr == nil {
 			size = st.Size()
 		}
-		if m.EpochSnapshotMaxBytes <= 0 || size <= m.EpochSnapshotMaxBytes {
-			if m.WriteMarker == nil {
-				m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
-				return false, false, nil
+		if m.WriteMarker == nil {
+			if m.EpochSnapshotMaxBytes > 0 && size > m.EpochSnapshotMaxBytes {
+				return false, false, fmt.Errorf("cellcapture: large cross-epoch resume requires epoch marker writer")
 			}
-			if err := m.WriteMarker(ctx, scope, epoch, local); err != nil {
-				return false, false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
-			}
-			m.log().Info("capture continues cross-epoch chain with marker", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
-			crossEpoch = true
-		} else {
-			m.log().Info("capture continues large cross-epoch chain", "scope", scope.String(), "epoch", epoch, "bytes", size)
+			m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
+			return false, false, nil
 		}
+		if err := m.WriteMarker(ctx, scope, epoch, local); err != nil {
+			return false, false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
+		}
+		m.log().Info("capture continues cross-epoch chain with marker", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
+		crossEpoch = true
 	}
 	if durable == baseline && durable == local {
 		return true, crossEpoch, nil

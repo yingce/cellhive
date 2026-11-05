@@ -4,6 +4,7 @@ package userruntimepool
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,6 +24,8 @@ type Router struct {
 	client                                *http.Client
 	mu                                    sync.Mutex
 	hosts                                 map[string]hostEntry
+	hostLRU                               map[string]*list.Element
+	hostOrder                             *list.List
 	inflight                              map[string]chan struct{}
 	lookupAt                              time.Time
 	lookupCount                           int
@@ -40,7 +43,7 @@ type hostEntry struct {
 const maxCachedHosts = 10000
 
 func NewRouter(cellURL, internalToken, dispatchToken string) *Router {
-	return &Router{cellURL: strings.TrimRight(cellURL, "/"), internalToken: internalToken, dispatchToken: dispatchToken, client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 64}}, hosts: map[string]hostEntry{}, inflight: map[string]chan struct{}{}}
+	return &Router{cellURL: strings.TrimRight(cellURL, "/"), internalToken: internalToken, dispatchToken: dispatchToken, client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 64}}, hosts: map[string]hostEntry{}, hostLRU: map[string]*list.Element{}, hostOrder: list.New(), inflight: map[string]chan struct{}{}}
 }
 func (r *Router) Close() { r.client.CloseIdleConnections() }
 func matches(prefix, path string) bool {
@@ -72,6 +75,7 @@ func (r *Router) hostView(req *http.Request, host string) (control.HostView, boo
 		now := time.Now()
 		r.mu.Lock()
 		if e, ok := r.hosts[host]; ok && now.Before(e.expires) {
+			r.touchLocked(host)
 			r.mu.Unlock()
 			return e.view, e.found, e.err
 		}
@@ -114,26 +118,53 @@ func (r *Router) hostView(req *http.Request, host string) (control.HostView, boo
 	return view, found, err
 }
 
-// storeLocked inserts a host entry and evicts expired/oldest entries when the
-// cache is full. Caller holds r.mu.
+func (r *Router) initLRULocked() {
+	if r.hostLRU == nil {
+		r.hostLRU = map[string]*list.Element{}
+	}
+	if r.hostOrder == nil {
+		r.hostOrder = list.New()
+	}
+}
+
+func (r *Router) touchLocked(host string) {
+	r.initLRULocked()
+	if el, ok := r.hostLRU[host]; ok {
+		r.hostOrder.MoveToFront(el)
+		return
+	}
+	r.hostLRU[host] = r.hostOrder.PushFront(host)
+}
+
+// storeLocked inserts a host entry and evicts the least-recently-used entry
+// when the cache is full. A full scan on every insert made a 10k-entry cache an
+// O(n) operation under the routing mutex; the LRU list keeps this O(1).
+// Caller holds r.mu.
 func (r *Router) storeLocked(host string, e hostEntry) {
-	if _, ok := r.hosts[host]; !ok && len(r.hosts) >= maxCachedHosts {
-		now := time.Now()
-		oldest := ""
-		for k, v := range r.hosts {
-			if !now.Before(v.expires) {
+	r.touchLocked(host)
+	r.hosts[host] = e
+	for len(r.hosts) > maxCachedHosts {
+		if back := r.hostOrder.Back(); back != nil {
+			key := back.Value.(string)
+			r.hostOrder.Remove(back)
+			delete(r.hostLRU, key)
+			delete(r.hosts, key)
+			continue
+		}
+		// Entries inserted directly (tests/legacy) have no LRU element. Drop one
+		// so the cache still converges to the bound.
+		dropped := false
+		for k := range r.hosts {
+			if k != host {
 				delete(r.hosts, k)
-				continue
-			}
-			if oldest == "" || v.expires.Before(r.hosts[oldest].expires) {
-				oldest = k
+				dropped = true
+				break
 			}
 		}
-		if len(r.hosts) >= maxCachedHosts && oldest != "" {
-			delete(r.hosts, oldest)
+		if !dropped {
+			return
 		}
 	}
-	r.hosts[host] = e
 }
 func (r *Router) fetchHost(req *http.Request, host string) (control.HostView, bool, error) {
 	lookup, err := http.NewRequestWithContext(req.Context(), "GET", r.cellURL+"/v1/control/host?host="+url.QueryEscape(host), nil)

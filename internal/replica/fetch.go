@@ -46,30 +46,83 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 	if !ok {
 		return nil, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
 	}
-	pf := &PageFetcher{
-		m: m, scope: s, epoch: epoch, idx: idx, watermark: idx.Watermark,
-		entryOf: map[uint32]int{}, l0: map[uint32][]byte{},
-	}
-	for ei, e := range idx.Entries {
-		if e.PageSize == 0 {
-			return nil, fmt.Errorf("replica: index entry %d has zero page size", ei)
-		}
-		if pf.pageSize == 0 {
-			pf.pageSize = e.PageSize
-		} else if e.PageSize != pf.pageSize {
-			return nil, fmt.Errorf("replica: index page size mismatch")
-		}
-		if e.Commit > pf.commit {
-			pf.commit = e.Commit
-		}
-		for _, p := range e.Pages {
-			pf.entryOf[p] = ei
-		}
-	}
-
 	l0keys, err := m.ListL0Segments(ctx, s, epoch)
 	if err != nil {
 		return nil, err
+	}
+	return m.newPageFetcher(ctx, s, epoch, idx, l0keys)
+}
+
+// NewPageFetcherMinBytes is NewPageFetcher with an index-only early-out for
+// clearly small images. When the L1 index's page-size*commit is already below
+// minBytes and the scope/epoch has no L0 objects at all, it returns
+// (nil, false, nil) without reading any L0 payload, so the caller can take the
+// full-restore path without downloading a tail it will discard.
+//
+// Any L0 object makes the early-out unsafe: the index does not record an L0
+// page map's decoded commit, and compressed L0 bytes can grow the decoded
+// image above the index bound. In that case the fetcher is built normally and
+// the caller must compare Commit() as before.
+func (m *Manager) NewPageFetcherMinBytes(ctx context.Context, s cell.Scope, epoch uint64, minBytes int64) (*PageFetcher, bool, error) {
+	idx, ok, err := m.ReadIndex(ctx, s, epoch)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
+	}
+	l0keys, err := m.ListL0Segments(ctx, s, epoch)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(l0keys) == 0 {
+		pageSize, commit, err := pageIndexShape(idx)
+		if err != nil {
+			return nil, false, err
+		}
+		if pageSize > 0 && commit > 0 && minBytes > 0 &&
+			uint64(pageSize)*uint64(commit) < uint64(minBytes) {
+			return nil, false, nil
+		}
+	}
+	pf, err := m.newPageFetcher(ctx, s, epoch, idx, l0keys)
+	if err != nil {
+		return nil, false, err
+	}
+	return pf, true, nil
+}
+
+func pageIndexShape(idx PageIndex) (pageSize, commit uint32, err error) {
+	for ei, e := range idx.Entries {
+		if e.PageSize == 0 {
+			return 0, 0, fmt.Errorf("replica: index entry %d has zero page size", ei)
+		}
+		if pageSize == 0 {
+			pageSize = e.PageSize
+		} else if e.PageSize != pageSize {
+			return 0, 0, fmt.Errorf("replica: index page size mismatch")
+		}
+		if e.Commit > commit {
+			commit = e.Commit
+		}
+	}
+	return pageSize, commit, nil
+}
+
+func (m *Manager) newPageFetcher(ctx context.Context, s cell.Scope, epoch uint64, idx PageIndex, l0keys []string) (*PageFetcher, error) {
+	pageSize, commit, err := pageIndexShape(idx)
+	if err != nil {
+		return nil, err
+	}
+	pf := &PageFetcher{
+		m: m, scope: s, epoch: epoch, idx: idx, watermark: idx.Watermark,
+		entryOf: map[uint32]int{}, l0: map[uint32][]byte{},
+		commit: commit, pageSize: pageSize,
+	}
+	for ei, e := range idx.Entries {
+		for _, p := range e.Pages {
+			pf.entryOf[p] = ei
+		}
 	}
 	// Collect the L0 deltas first and require a contiguous chain from the index
 	// watermark before applying any of them: a missing (not yet uploaded) delta
@@ -88,9 +141,14 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 		if i := strings.LastIndexByte(name, '/'); i >= 0 {
 			name = name[i+1:]
 		}
-		// A plain delta or a batch whose suffix proves it contains only deltas
-		// can be skipped when its range ends at or below the index watermark.
-		// Snapshot batches, mixed, legacy, and malformed names still need decoding.
+		// A plain delta, a delta-only batch, or a strictly canonical snapshot
+		// (or snapshot part) can be skipped when its txid is at or below the
+		// index watermark. Snapshot batches, mixed, legacy, and malformed names
+		// still need decoding: ".s.batch" does not prove which parts it holds,
+		// so it stays on the read path.
+		if txid, ok := canonicalSnapshotTxID(name); ok && txid <= idx.Watermark {
+			continue
+		}
 		if strings.HasSuffix(name, ".ltx") || (batchSpanKnown(name) && strings.HasSuffix(name, ".d.batch")) {
 			rangeName := strings.TrimSuffix(name, ".ltx")
 			if strings.HasSuffix(name, ".batch") {

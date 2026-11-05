@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +16,32 @@ import (
 
 func (s *Server) workflowResult(r *http.Request, name string) (map[string]any, error) {
 	ns := r.PathValue("account_id")
-	res, err := s.Control.GetResource(r.Context(), ns, "workflow", name)
+	var proj *control.Projection
+	if p, err := s.projectionCached(r.Context()); err == nil {
+		proj = &p
+	}
+	return s.workflowResultWithProjection(r.Context(), ns, name, proj)
+}
+
+// workflowResultStrict is for write responses: a stale projection must not make
+// a successful mutation report or inherit an old binding target.
+func (s *Server) workflowResultStrict(r *http.Request, name string) (map[string]any, error) {
+	p, err := s.projectionStrict(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	return s.workflowResultWithProjection(r.Context(), r.PathValue("account_id"), name, &p)
+}
+
+// workflowResultWithProjection builds one workflow result from an already
+// fetched projection so list handlers do not rebuild it per item.
+func (s *Server) workflowResultWithProjection(ctx context.Context, ns, name string, p *control.Projection) (map[string]any, error) {
+	res, err := s.Control.GetResource(ctx, ns, "workflow", name)
 	if err != nil {
 		return nil, err
 	}
 	result := map[string]any{"name": res.Name, "id": res.Name, "created_on": res.CreatedMs, "modified_on": res.CreatedMs}
-	p, err := s.Control.Projection(r.Context())
-	if err == nil {
+	if p != nil {
 		for _, app := range p.Apps {
 			if app.Namespace != ns {
 				continue
@@ -63,9 +83,13 @@ func (s *Server) handleCloudflareWorkflowList(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusInternalServerError, "workflows_failed", err.Error())
 		return
 	}
+	var proj *control.Projection
+	if p, perr := s.projectionCached(r.Context()); perr == nil {
+		proj = &p
+	}
 	out := make([]any, 0, len(items))
 	for _, item := range items {
-		result, err := s.workflowResult(r, item.Name)
+		result, err := s.workflowResultWithProjection(r.Context(), r.PathValue("account_id"), item.Name, proj)
 		if err == nil {
 			out = append(out, result)
 		}
@@ -155,7 +179,7 @@ func (s *Server) handleCloudflareWorkflowPut(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusBadRequest, "workflow_put_failed", err.Error())
 		return
 	}
-	result, err := s.workflowResult(r, name)
+	result, err := s.workflowResultStrict(r, name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "workflow_get_failed", err.Error())
 		return

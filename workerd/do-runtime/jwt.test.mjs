@@ -19,18 +19,27 @@ test('owner gate accepts dedicated ticket and rejects legacy, wrong purpose and 
   assert.equal((await c.authorize(new Request('http://local',{headers}),env)).ok,false);
  }
 });
-test('WebSocket tenant request restores encapsulated auth and strips platform credentials',()=>{
- const c=harness();
- const req=c.tenantRequest(new Request('http://local',{headers:{authorization:'Bearer host-jwt','x-cellhive-app-authorization':'Bearer tenant-token','x-cellhive-extra':'private'}}));
+test('WebSocket tenant request restores encapsulated auth and strips platform credentials',async()=>{
+  const c=harness();
+  const req=c.tenantRequest(new Request('http://local',{headers:{authorization:'Bearer host-jwt','x-cellhive-app-authorization':'Bearer tenant-token','x-cellhive-extra':'private'}}));
  assert.equal(req.headers.get('authorization'),'Bearer tenant-token');
  assert.equal(req.headers.has('x-cellhive-app-authorization'),false);
  assert.equal(req.headers.has('x-cellhive-extra'),false);
- const absent=c.tenantRequest(new Request('http://local',{headers:{authorization:'Bearer host-jwt'}}));
- assert.equal(absent.headers.has('authorization'),false);
+  const absent=c.tenantRequest(new Request('http://local',{headers:{authorization:'Bearer host-jwt'}}));
+  assert.equal(absent.headers.has('authorization'),false);
+  const websocket = c.tenantRequest(new Request('http://local/socket',{
+   method:'POST', body:'payload', headers:{authorization:'Bearer host-jwt','x-cellhive-app-authorization':'Bearer tenant-token','x-cellhive-extra':'private',upgrade:'websocket','sec-websocket-protocol':'tenant-v1'},
+  }));
+  assert.equal(websocket.method,'POST');
+  assert.equal(await websocket.text(),'payload');
+  assert.equal(websocket.headers.get('authorization'),'Bearer tenant-token');
+  assert.equal(websocket.headers.get('sec-websocket-protocol'),'tenant-v1');
+  assert.equal(websocket.headers.get('upgrade'),'websocket');
+  assert.equal(websocket.headers.has('x-cellhive-extra'),false);
 });
 test('wrong shard ticket cannot publish object index side effects',async()=>{
  let published=0;
- const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{published++},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100});
+ const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{published++},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100,readEnvelope:async req=>({value:await req.json()})});
  vm.runInContext(source.slice(source.indexOf('function ticketSpec('),source.indexOf('async function forward(')),c);
  const response=await c.invoke({json:async()=>({namespace:'acme',worker:'web',class:'Room',id:'object',bundle_sha:'bundle'})},{},{ns:'other',worker:'web',storage_class:'Room',shard:3});
  assert.equal(response.status,403);assert.equal(published,0);assert.equal(c.seen.size,0);
@@ -41,7 +50,7 @@ test('ticket cannot substitute executable identity or dispatch alarms before for
  const ticket={ns:'acme',worker:'web',storage_class:'Room',shard:3,execution:JSON.stringify({class:'Room',bundle_sha:'bundle',storage_id:'incarnation',version:2,limits:null})};
  for(const change of [{class:'Other',storage_class:'Room'},{bundle_sha:'other'},{storage_id:'other'},{version:3},{version:'2e0'},{kind:'alarm'},{compat_flags:['nodejs_compat']}]){
   let sideEffects=0;
-  const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{sideEffects++},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100,hints:new Map([['acme/web/Room/shard3',{expiry:Date.now()+10000,address:'other'}]]),Date,forward:async()=>{sideEffects++;return {status:200}}});
+  const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{sideEffects++},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100,readEnvelope:async req=>({value:await req.json()}),hints:new Map([['acme/web/Room/shard3',{expiry:Date.now()+10000,address:'other'}]]),Date,forward:async()=>{sideEffects++;return {status:200}}});
   vm.runInContext(source.slice(source.indexOf('function ticketSpec('),source.indexOf('async function forward(')),c);
   const result=await c.invoke({json:async()=>({...base,...change})},{},ticket);
   assert.equal(result.status,403,JSON.stringify(change));assert.equal(sideEffects,0);
@@ -50,7 +59,7 @@ test('ticket cannot substitute executable identity or dispatch alarms before for
 
 test('matching shard cache ticket keeps signed limits when forwarding a different object',async()=>{
  const forwarded=[];
- const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100,hints:new Map([['acme/web/Room/shard3',{expiry:Date.now()+10000,address:'other'}]]),Date,forward:async(_env,_address,spec)=>{forwarded.push(spec);return {status:200}}});
+ const c=vm.createContext({draining:false,fnv1a:()=>3,SHARD_COUNT:16,indexObject:async()=>{},json:(body,status)=>({body,status}),seen:new Map(),SEEN_MAX:100,readEnvelope:async req=>({value:await req.json()}),hints:new Map([['acme/web/Room/shard3',{expiry:Date.now()+10000,address:'other'}]]),Date,forward:async(_env,_address,spec)=>{forwarded.push(spec);return {status:200}}});
  vm.runInContext(source.slice(source.indexOf('function ticketSpec('),source.indexOf('async function forward(')),c);
  const ticket={ns:'acme',worker:'web',storage_class:'Room',shard:3,execution:JSON.stringify({class:'Room',bundle_sha:'bundle',storage_id:'incarnation',version:2,limits:{subrequests:4}})};
  for(const id of ['object-a','object-b']){

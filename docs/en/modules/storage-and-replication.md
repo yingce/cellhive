@@ -26,6 +26,8 @@ Bucket abstraction (FS / S3 compatible); `POST /v1/internal/commit(_binary)`; pe
 - Takeover control first restores the dead owner’s open log.
 - The local disk is never the only replica; acknowledged data that has not been uploaded must not be deleted.
 - No List operations on the hot path.
+- With `OfflineQuiescent=false` (the production default), compaction performs only a bounded metadata listing for observation and reports epoch, object/byte totals, and covered/deferred/unknown classifications. It does not read payloads or delete objects. If listing metadata has no sizes, byte totals are marked unknown; objects beyond the observation bound are also counted as unknown only.
+- Physical GC of historical epochs still requires an external maintenance window that stops and drains writers/readers before explicitly enabling it. Online compaction never deletes historical objects, so deferred storage growth and object-store cost require capacity monitoring and an offline maintenance plan.
 
 ## Source Locations
 

@@ -1,5 +1,7 @@
 # Timers and Dispatch
 
+**Incrementally locally accepted, uncommitted and not deployed (ADR-306):** dispatch projections share 5s TTL/single-flight; this is not strict mutation authority or synchronous deployment visibility. Workflow prefers the instance's pinned target before legacy active-definition lookup. Timer indexes cover `(kind, occurrence)` and `(due_ms, token)`; post-commit fresh `syncIndex` remains for pre-Put crash safety, and its removal was reverted. Strict mutation and owner read-fence changes are locally verified. The six confirmed epoch/lineage defects remain release gates. See [current timer contract](../timers-and-dispatch.md).
+
 ## Scheduling correctness update (2026-10-15)
 
 The current contract is described in [the Chinese source](../timers-and-dispatch.md). Cron persists `{slot,cron}` identities and constructs `noRetry()` in the tenant isolate. Workflow mutations atomically enqueue `workflow-run` outbox timers, while wait/sleep park transitions release the run lease atomically. DO `setAlarm()` pre-publishes a durable generation-bearing timer through a per-object capability before writing object state; active/pending delivery state prevents stale execution and preserves retries/rearms. The bucket `wake/` index is advisory scope discovery; SQLite remains authoritative and timer cells need not be pinned. DO retry timing/caps are not identical to Cloudflare native alarms.

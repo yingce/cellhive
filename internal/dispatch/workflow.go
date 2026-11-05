@@ -52,19 +52,31 @@ func (d *WorkflowDispatcher) client() *http.Client {
 
 // Run dispatches one attempt of a workflow instance.
 func (d *WorkflowDispatcher) Run(ctx context.Context, ns, name, id, runToken string) error {
-	if d.URL == "" || d.Target == nil {
+	if d.URL == "" || (d.Target == nil && d.TargetForInstance == nil) {
 		return fmt.Errorf("workflow: dispatcher not configured")
 	}
-	t, ok := d.Target(ctx, ns, name)
-	if !ok {
-		return fmt.Errorf("workflow: no active definition %s/%s", ns, name)
-	}
+	// A pinned target is immutable for the instance's lifetime. Only consult the
+	// mutable active definition when no pin was captured (legacy instances).
+	var t control.WorkflowTarget
+	pinnedOK := false
 	if d.TargetForInstance != nil {
-		if pinned, pok, err := d.TargetForInstance(ctx, ns, name, id); err != nil {
+		pinned, pok, err := d.TargetForInstance(ctx, ns, name, id)
+		if err != nil {
 			return err
-		} else if pok {
-			t = pinned
 		}
+		if pok {
+			t, pinnedOK = pinned, true
+		}
+	}
+	if !pinnedOK {
+		if d.Target == nil {
+			return fmt.Errorf("workflow: no active definition %s/%s", ns, name)
+		}
+		active, ok := d.Target(ctx, ns, name)
+		if !ok {
+			return fmt.Errorf("workflow: no active definition %s/%s", ns, name)
+		}
+		t = active
 	}
 	if d.Params == nil {
 		return fmt.Errorf("workflow: instance params reader not configured")

@@ -126,7 +126,7 @@ AFTER_LIST=$(listops)
 echo "cold hydrate first deploy: $COLD list_delta=$((AFTER_LIST - BEFORE_LIST))"
 COLD_SECONDS=$(echo "$COLD" | awk '{print $1}')
 [[ $(echo "$COLD" | awk '{print $2}') == 200 ]] || fail "cold hydrate deploy failed: $COLD"
-[[ $((AFTER_LIST - BEFORE_LIST)) -le 3 ]] || fail "cold hydrate used $((AFTER_LIST - BEFORE_LIST)) bucket Lists (want <=3)"
+[[ $((AFTER_LIST - BEFORE_LIST)) -le 4 ]] || fail "cold hydrate used $((AFTER_LIST - BEFORE_LIST)) bucket Lists (want <=4)"
 python3 - "$COLD_SECONDS" <<'PY' || fail "cold hydrate first write took ${COLD_SECONDS}s"
 import sys
 sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)

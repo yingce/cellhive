@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cellhive/internal/cell"
@@ -56,6 +57,7 @@ type Store struct {
 
 	mu         sync.Mutex
 	migrated   map[*cellstore.Cell]bool
+	projBuilds atomic.Int64
 	resourceMu sync.Mutex
 	// Set only by fault tests to stop after all deploy rows are
 	// written but before Cell.Tx commits them.
@@ -1023,47 +1025,77 @@ func (s *Store) Binding(ctx context.Context, ns, kind, name string) (string, boo
 
 // --- workers / versions ------------------------------------------------------
 
-func scanVersion(scan func(dest ...any) error) (Version, error) {
-	var v Version
-	var bindings, vars, consumers, crons string
-	var assets sql.NullString
-	var flags, limits string
-	var number int
-	if err := scan(&number, &v.BundleSHA, &v.AssetsSHA, &v.StorageID, &v.SessionPolicy,
-		&bindings, &vars, &consumers, &crons, &assets, &v.CompatDate, &flags, &limits, &v.CreatedMs, &v.Actor); err != nil {
-		return Version{}, err
+type versionScanRow struct {
+	number    int
+	bindings  string
+	vars      string
+	consumers string
+	crons     string
+	assets    sql.NullString
+	flags     string
+	limits    string
+}
+
+func (r *versionScanRow) dest(v *Version) []any {
+	return []any{&r.number, &v.BundleSHA, &v.AssetsSHA, &v.StorageID, &v.SessionPolicy,
+		&r.bindings, &r.vars, &r.consumers, &r.crons, &r.assets, &v.CompatDate, &r.flags, &r.limits, &v.CreatedMs, &v.Actor}
+}
+
+func (r *versionScanRow) finish(v *Version) (Version, error) {
+	if r.flags != "" {
+		_ = unmarshal([]byte(r.flags), &v.CompatFlags)
 	}
-	if flags != "" {
-		_ = unmarshal([]byte(flags), &v.CompatFlags)
-	}
-	if limits != "" && limits != "{}" {
+	if r.limits != "" && r.limits != "{}" {
 		var l WorkerLimits
-		if err := unmarshal([]byte(limits), &l); err != nil {
+		if err := unmarshal([]byte(r.limits), &l); err != nil {
 			return Version{}, err
 		}
 		v.Limits = &l
 	}
-	v.Number = number
-	if err := unmarshal([]byte(bindings), &v.Bindings); err != nil {
+	v.Number = r.number
+	if err := unmarshal([]byte(r.bindings), &v.Bindings); err != nil {
 		return Version{}, err
 	}
-	if err := unmarshal([]byte(vars), &v.Vars); err != nil {
+	if err := unmarshal([]byte(r.vars), &v.Vars); err != nil {
 		return Version{}, err
 	}
-	if err := unmarshal([]byte(consumers), &v.Consumers); err != nil {
+	if err := unmarshal([]byte(r.consumers), &v.Consumers); err != nil {
 		return Version{}, err
 	}
-	if err := unmarshal([]byte(crons), &v.Crons); err != nil {
+	if err := unmarshal([]byte(r.crons), &v.Crons); err != nil {
 		return Version{}, err
 	}
-	if assets.Valid && assets.String != "" && assets.String != "null" {
+	if r.assets.Valid && r.assets.String != "" && r.assets.String != "null" {
 		var a AssetsConfig
-		if err := unmarshal([]byte(assets.String), &a); err != nil {
+		if err := unmarshal([]byte(r.assets.String), &a); err != nil {
 			return Version{}, err
 		}
 		v.Assets = &a
 	}
-	return v, nil
+	return *v, nil
+}
+
+func scanVersion(scan func(dest ...any) error) (Version, error) {
+	var v Version
+	var row versionScanRow
+	if err := scan(row.dest(&v)...); err != nil {
+		return Version{}, err
+	}
+	return row.finish(&v)
+}
+
+// scanVersionWithPrefix scans leading columns (e.g. a joined worker name)
+// before the standard version columns.
+func scanVersionWithPrefix(scan func(dest ...any) error, prefix ...any) (Version, error) {
+	var v Version
+	var row versionScanRow
+	dest := make([]any, 0, len(prefix)+15)
+	dest = append(dest, prefix...)
+	dest = append(dest, row.dest(&v)...)
+	if err := scan(dest...); err != nil {
+		return Version{}, err
+	}
+	return row.finish(&v)
 }
 
 const versionCols = `number, bundle_sha, assets_sha, storage_id, session_policy, bindings, vars, consumers, crons, assets, compat_date, compat_flags, limits, created_ms, actor`
@@ -2056,41 +2088,77 @@ func (s *Store) Projection(ctx context.Context) (Projection, error) {
 		if err := routes.Err(); err != nil {
 			return Projection{}, err
 		}
-		workers, err := c.DB.QueryContext(ctx, `SELECT name, active FROM workers WHERE ns=? AND deleted_ms=0 ORDER BY name`, app.Namespace)
+		workers, err := c.DB.QueryContext(ctx,
+			`SELECT w.name, w.active, `+versionColsAliased+` FROM workers w
+			   JOIN versions v ON v.ns=w.ns AND v.worker=w.name AND v.number=w.active
+			  WHERE w.ns=? AND w.deleted_ms=0 ORDER BY w.name`, app.Namespace)
 		if err != nil {
 			return Projection{}, err
 		}
 		type wrow struct {
 			name   string
 			active int
+			ver    Version
 		}
 		var list []wrow
 		for workers.Next() {
 			var w wrow
-			if err := workers.Scan(&w.name, &w.active); err != nil {
+			v, err := scanVersionWithPrefix(workers.Scan, &w.name, &w.active)
+			if err != nil {
 				workers.Close()
 				return Projection{}, err
 			}
+			w.ver = v
 			list = append(list, w)
 		}
 		workers.Close()
 		if err := workers.Err(); err != nil {
 			return Projection{}, err
 		}
+		// Class aliases for the whole app in one query instead of one query per
+		// worker. The projection is rebuilt on every control revision/TTL and is
+		// served to every request, so this stays O(apps) rather than O(workers).
+		classRows, err := c.DB.QueryContext(ctx,
+			`SELECT worker, code_class, storage_class, deleted FROM do_classes WHERE ns=? ORDER BY worker, code_class`,
+			app.Namespace)
+		if err != nil {
+			return Projection{}, err
+		}
+		type classState struct {
+			aliases map[string]string
+			deleted []string
+		}
+		classes := map[string]*classState{}
+		for classRows.Next() {
+			var worker, code, storage string
+			var deleted int
+			if err := classRows.Scan(&worker, &code, &storage, &deleted); err != nil {
+				classRows.Close()
+				return Projection{}, err
+			}
+			st := classes[worker]
+			if st == nil {
+				st = &classState{aliases: map[string]string{}}
+				classes[worker] = st
+			}
+			if storage != "" {
+				st.aliases[code] = storage
+			}
+			if deleted != 0 {
+				st.deleted = append(st.deleted, code)
+			}
+		}
+		classRows.Close()
+		if err := classRows.Err(); err != nil {
+			return Projection{}, err
+		}
 		for _, w := range list {
-			v, ok, err := s.getVersion(ctx, c, app.Namespace, w.name, w.active)
-			if err != nil {
-				return Projection{}, err
-			}
-			if !ok {
-				continue
-			}
-			aliases, deleted, err := s.DOClassState(ctx, app.Namespace, w.name)
-			if err != nil {
-				return Projection{}, err
+			aliases, deleted := map[string]string{}, []string(nil)
+			if st := classes[w.name]; st != nil {
+				aliases, deleted = st.aliases, st.deleted
 			}
 			pa.Workers = append(pa.Workers, ProjectionWorker{
-				Worker: w.name, Active: w.active, Version: v,
+				Worker: w.name, Active: w.active, Version: w.ver,
 				ClassStorage: aliases, DeletedClasses: deleted,
 			})
 		}
@@ -2103,8 +2171,14 @@ func (s *Store) Projection(ctx context.Context) (Projection, error) {
 	proj.ETag = fmt.Sprintf(`"r%d"`, rev)
 	proj.AtMs = s.now().UnixMilli()
 	proj.buildHostIndex()
+	s.projBuilds.Add(1)
 	return proj, nil
 }
+
+// ProjectionBuilds reports how many routing projections this store has built.
+// It is diagnostic instrumentation used to assert list handlers share one
+// projection instead of rebuilding it per item.
+func (s *Store) ProjectionBuilds() int64 { return s.projBuilds.Load() }
 
 // WorkerEnv returns the immutable execution environment of a worker's active
 // version by point reads (ADR-115).

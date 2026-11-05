@@ -36,6 +36,12 @@
 - Workflow 回调通过 dispatcher-bound `WorkflowBridgeTarget extends RpcTarget` 作为 JSRPC 参数越过 `workerLoader`；不使用 `ServiceStub`，也不进入 tenant env。默认由 host-bound 原生 Tail Fetcher 捕获租户 Worker 与 service target 的 `console.*`/异常，日志身份和凭据留在可信宿主；`CELLHIVE_TENANT_LOG_CAPTURE=off` 可按 runtime 关闭。
 - 最终 WorkerCode（64 MiB）和估算 workerLoader env（1016 KiB）在每次动态加载前经共享 `workerd/platform/budget.js` 复核；控制面检查不能替代运行时防御。
 
+## 当前工作树边界（2026-11-04，未部署）
+
+公共 loader 合并退休 sweep，并重新查询 pinned Worker 的 live WebSocket 状态，避免 socket 关闭后永久保留 pinned 标记；这不是所有 isolate/长连接已可回收的保证。源码缓存使用 65MiB 计量预算，public/internal 的条数上限分别为 2000/256；internal 原始与重写源码共享预算。有效源码超过缓存预算时仍加载，只是不缓存；最终 WorkerCode/env 校验及独立 runtime capacity 准入继续存在，缓存预算不能成为新的部署大小限制。
+
+DO response 的 JS hops 可传递 stream，但 Go DO proxy 仍有 8.25MiB 缓冲限制，不能宣称端到端流式 DO fetch。整合后的真实 pinned workerd/长连接/大源码回归与压力验收仍需单独确认，见 [当前问题](../known-issues.md)。
+
 ## 源码位置
 
 `cmd/user-runtime/`；`internal/userruntime/`；`workerd/user-runtime/{loader.js,internal.js,queue-wrapper.js,workflow-wrapper.js,cellhive-workflow.js}`；`workerd/platform/{facades.js,bindings.js,bindings-wrapper.js,telemetry.js,rpc-codec.js,budget.js}`。

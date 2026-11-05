@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cellhive/internal/cell"
@@ -71,13 +72,70 @@ type Filter struct {
 	FromMs, ToMs                        int64
 	Limit                               int
 }
+
+// pruneInterval bounds how often a namespace pays for retention cleanup.
+// Without it every Put/Start scanned the 10k-row retention window.
+const pruneInterval = time.Minute
+
+// pruneBatch bounds rows removed per cleanup pass so a large backlog cannot
+// stall one write. Later writes (after pruneInterval) continue catching up.
+const pruneBatch = 1000
+
+// pruneWriteTrigger is a safety net for write bursts: even inside pruneInterval,
+// a namespace pays for cleanup at most once per this many writes.
+const pruneWriteTrigger = 256
+
 type Store struct {
 	cs       *cellstore.Store
 	migrated sync.Map
 	now      func() time.Time
+
+	pruneMu       sync.Mutex
+	pruneAt       map[string]time.Time
+	pruneWrites   map[string]int
+	pruneRuns     atomic.Int64
+	pruneSkips    atomic.Int64
+	parentQueries atomic.Int64
 }
 
 func New(cs *cellstore.Store) *Store { return &Store{cs: cs, now: time.Now} }
+
+// pruneAllowed gates retention cleanup per namespace. It reports true when the
+// caller should run pruneTx; the timestamp is recorded even if the following
+// transaction fails so a failing namespace cannot scan on every write.
+func (s *Store) pruneAllowed(ns string, force bool) bool {
+	now := s.now()
+	s.pruneMu.Lock()
+	if s.pruneAt == nil {
+		s.pruneAt = map[string]time.Time{}
+	}
+	if !force {
+		writes := s.pruneWrites[ns] + 1
+		if last, ok := s.pruneAt[ns]; ok && !now.Before(last) && now.Sub(last) < pruneInterval && writes < pruneWriteTrigger {
+			s.pruneWrites[ns] = writes
+			s.pruneMu.Unlock()
+			s.pruneSkips.Add(1)
+			return false
+		}
+	}
+	// Keep the gate map bounded when callers touch many short-lived namespaces.
+	if len(s.pruneAt) >= 4096 {
+		for k, at := range s.pruneAt {
+			if now.Sub(at) >= pruneInterval {
+				delete(s.pruneAt, k)
+				delete(s.pruneWrites, k)
+			}
+		}
+	}
+	if s.pruneWrites == nil {
+		s.pruneWrites = map[string]int{}
+	}
+	s.pruneWrites[ns] = 0
+	s.pruneAt[ns] = now
+	s.pruneMu.Unlock()
+	s.pruneRuns.Add(1)
+	return true
+}
 func Scope(ns string) cell.Scope {
 	return cell.Scope{Namespace: ns, Class: "__invocations__", ID: "main"}
 }
@@ -184,7 +242,10 @@ func (s *Store) Put(ctx context.Context, r Record) error {
 		if err != nil {
 			return err
 		}
-		return s.pruneTx(ctx, tx)
+		if s.pruneAllowed(r.Namespace, r.StartedMs < s.now().Add(-7*24*time.Hour).UnixMilli()) {
+			return s.pruneTx(ctx, tx)
+		}
+		return nil
 	})
 	return err
 }
@@ -224,17 +285,49 @@ func (s *Store) Start(ctx context.Context, r Record) (Record, error) {
 			r.Attempt = next
 		}
 		parents := map[string]bool{}
-		for _, message := range r.Messages {
-			var parent string
-			err := tx.QueryRowContext(ctx, `SELECT m.invocation_id FROM invocation_messages m JOIN invocations i ON i.id=m.invocation_id WHERE m.logical_id=? ORDER BY i.started_ms DESC,i.id DESC LIMIT 1`, message.LogicalID).Scan(&parent)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if len(r.Messages) > 0 {
+			// Resolve every distinct message lineage in one query instead of one
+			// lookup per message (a batch may carry 100 messages).
+			seen := make(map[string]bool, len(r.Messages))
+			logicalIDs := make([]string, 0, len(r.Messages))
+			for _, message := range r.Messages {
+				if !seen[message.LogicalID] {
+					seen[message.LogicalID] = true
+					logicalIDs = append(logicalIDs, message.LogicalID)
+				}
+			}
+			ph := strings.TrimSuffix(strings.Repeat("?,", len(logicalIDs)), ",")
+			args := make([]any, len(logicalIDs))
+			for i, id := range logicalIDs {
+				args[i] = id
+			}
+			s.parentQueries.Add(1)
+			rows, err := tx.QueryContext(ctx, `SELECT logical_id, invocation_id FROM (
+					SELECT m.logical_id AS logical_id, m.invocation_id AS invocation_id,
+					       ROW_NUMBER() OVER (PARTITION BY m.logical_id ORDER BY i.started_ms DESC, i.id DESC) AS rn
+					  FROM invocation_messages m JOIN invocations i ON i.id=m.invocation_id
+					 WHERE m.logical_id IN (`+ph+`))
+				WHERE rn=1`, args...)
+			if err != nil {
 				return err
 			}
-			if err == nil {
+			for rows.Next() {
+				var logicalID, parent string
+				if err := rows.Scan(&logicalID, &parent); err != nil {
+					rows.Close()
+					return err
+				}
 				parents[parent] = true
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO invocation_messages(invocation_id,message_id,logical_id,attempt) VALUES(?,?,?,?)`, r.ID, message.ID, message.LogicalID, message.Attempt); err != nil {
+			if err := rows.Err(); err != nil {
+				rows.Close()
 				return err
+			}
+			rows.Close()
+			for _, message := range r.Messages {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO invocation_messages(invocation_id,message_id,logical_id,attempt) VALUES(?,?,?,?)`, r.ID, message.ID, message.LogicalID, message.Attempt); err != nil {
+					return err
+				}
 			}
 		}
 		r.Parents = nil
@@ -247,19 +340,23 @@ func (s *Store) Start(ctx context.Context, r Record) (Record, error) {
 		if err != nil {
 			return err
 		}
-		return s.pruneTx(ctx, tx)
+		if s.pruneAllowed(r.Namespace, r.StartedMs < s.now().Add(-7*24*time.Hour).UnixMilli()) {
+			return s.pruneTx(ctx, tx)
+		}
+		return nil
 	})
 	return r, err
 }
 
 func (s *Store) pruneTx(ctx context.Context, tx *sql.Tx) error {
 	// Keep at most 10,000 attempts per namespace and seven days of history.
-	// Cleanup is bounded per mutation so retention cannot stall a busy namespace.
+	// The caller gates this pass by time, and each pass is batch-bounded, so
+	// retention cleanup no longer scans the retention window on every write.
 	cutoff := s.now().Add(-7 * 24 * time.Hour).UnixMilli()
-	if err := pruneInvocations(ctx, tx, `SELECT id FROM invocations WHERE started_ms<? ORDER BY started_ms,id LIMIT 100`, cutoff); err != nil {
+	if err := pruneInvocations(ctx, tx, `SELECT id FROM invocations WHERE started_ms<? ORDER BY started_ms,id LIMIT ?`, cutoff, pruneBatch); err != nil {
 		return err
 	}
-	return pruneInvocations(ctx, tx, `SELECT id FROM invocations ORDER BY started_ms DESC,id DESC LIMIT 100 OFFSET 10000`)
+	return pruneInvocations(ctx, tx, `SELECT id FROM invocations ORDER BY started_ms DESC,id DESC LIMIT ? OFFSET 10000`, pruneBatch)
 }
 
 // pruneInvocations deletes the selected invocations and only their message

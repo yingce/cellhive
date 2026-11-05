@@ -132,10 +132,24 @@ func Subscribe(ns, worker string, ttl time.Duration) time.Time {
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
-	exp := time.Now().Add(ttl)
+	now := time.Now()
+	exp := now.Add(ttl)
 	logs.mu.Lock()
 	if logs.subs == nil {
 		logs.subs = map[string]time.Time{}
+	}
+	if len(logs.subs) >= 4096 {
+		for key, e := range logs.subs {
+			if now.After(e) {
+				delete(logs.subs, key)
+			}
+		}
+		for key := range logs.subs {
+			if len(logs.subs) < 4096 {
+				break
+			}
+			delete(logs.subs, key)
+		}
 	}
 	logs.subs[ns+"/"+worker] = exp
 	logs.mu.Unlock()

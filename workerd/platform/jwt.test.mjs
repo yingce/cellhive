@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto, createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 if (!globalThis.crypto) Object.defineProperty(globalThis, 'crypto', {value:webcrypto});
 const key = Buffer.from(Array.from({length:32}, (_,i)=>i)).toString('base64url');
 async function module() {
@@ -51,4 +53,32 @@ test('JWT verification rejects duplicate claims and header properties',async()=>
   const token=input+'.'+createHmac('sha256',Buffer.from(key,'base64url')).update(input).digest('base64url');
   assert.equal(await verifyJWT(key,token,'token/internal','internal',1700000001),null);
  }
+});
+
+test('CryptoKey import is memoized per canonical key within the isolate', async () => {
+  const source = readFileSync(new URL('./jwt.js', import.meta.url), 'utf8').replace(/^export /gm, '');
+  let imports = 0;
+  const subtle = {
+    importKey(...args) { imports++; return webcrypto.subtle.importKey(...args); },
+    sign: webcrypto.subtle.sign.bind(webcrypto.subtle),
+    verify: webcrypto.subtle.verify.bind(webcrypto.subtle),
+  };
+  const context = vm.createContext({
+    crypto: { subtle }, TextEncoder, TextDecoder, JSON, btoa: s => Buffer.from(s, 'binary').toString('base64'),
+    atob: s => Buffer.from(s, 'base64').toString('binary'), Date,
+  });
+  vm.runInContext(source + '\nglobalThis.api={mintJWT,verifyJWT,internalHeaders};', context);
+  const { mintJWT, verifyJWT, internalHeaders } = context.api;
+  const prefix = Buffer.alloc(32, 9).toString('base64url');
+  for (let i = 0; i < 3; i++) {
+    const token = await mintJWT(prefix, 'token/internal', { type: 'internal', sub: 'workerd' }, 1700000000);
+    assert.ok(await verifyJWT(prefix, token, 'token/internal', 'internal', 1700000001));
+    await internalHeaders(prefix);
+  }
+  assert.equal(imports, 1);
+  const other = Buffer.alloc(32, 10).toString('base64url');
+  await mintJWT(other, 'token/internal', { type: 'internal', sub: 'workerd' }, 1700000000);
+  assert.equal(imports, 2);
+  await assert.rejects(mintJWT(prefix + '=', 'token/internal', { type: 'internal', sub: 'workerd' }));
+  assert.equal(imports, 2);
 });

@@ -67,7 +67,7 @@ func (s *Server) handleServiceRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "no_dispatch", "control plane or dispatch URL not configured")
 		return
 	}
-	proj, err := s.Control.Projection(r.Context())
+	proj, err := s.projectionCached(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "projection_failed", err.Error())
 		return
@@ -158,7 +158,7 @@ func (s *Server) handleServiceFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "no_dispatch", "control plane or dispatch URL not configured")
 		return
 	}
-	proj, err := s.Control.Projection(r.Context())
+	proj, err := s.projectionCached(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "projection_failed", err.Error())
 		return

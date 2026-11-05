@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,8 @@ const (
 	doRPCBodyLimit   = 8<<20 + 256<<10
 	doProxyRespLimit = 8<<20 + 256<<10
 )
+
+var errDOResponseTooLarge = errors.New("do-runtime response exceeds the buffered envelope limit")
 
 // doInvokeReq is the tenant-facing DO invoke request (via the client binding).
 type doInvokeReq struct {
@@ -135,6 +138,7 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	// The caller's request context propagates so a disconnected client stops the
 	// proxy instead of leaving it to time out on its own.
 	ctx := r.Context()
+	stream := supportsDOStreaming(w)
 
 	// Owner hint (ADR-103): a previously learned owner is tried directly, which
 	// skips the sharding router hop. Only a failure that proves the invoke did
@@ -142,15 +146,18 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	// failure is ambiguous and must not be replayed (ADR-080 at-most-once).
 	key := ownerKey(req, shardClass, shard)
 	if hint, ok := s.getDOOwner(key); ok {
-		res, herr := s.postDO(ctx, client, hint, body)
+		res, herr := s.postDO(ctx, client, hint, body, stream)
 		switch {
-		case herr == nil && !doRetryable(res.status, res.body):
+		case herr == nil && !doRetryable(res.status, res.body, res.app):
 			s.setDOOwner(key, res.owner)
 			ticket, exp := s.doTicket(req, shardClass, shard, r)
 			writeDO(w, res, ticket, exp)
 			return
 		case herr == nil || isDialError(herr):
 			s.clearDOOwner(key)
+		case errors.Is(herr, errDOResponseTooLarge):
+			writeErr(w, http.StatusRequestEntityTooLarge, "response_too_large", "do-runtime response exceeds the buffered envelope limit")
+			return
 		default:
 			writeErr(w, http.StatusConflict, "result_unknown", fmt.Sprintf("do-runtime invoke outcome unknown: %v", herr))
 			return
@@ -161,8 +168,12 @@ func (s *Server) handleDOProxy(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for i := 0; i < len(s.Cfg.DoRuntimes); i++ {
 		addr := strings.TrimRight(s.Cfg.DoRuntimes[(start+i)%len(s.Cfg.DoRuntimes)], "/")
-		res, herr := s.postDO(ctx, client, addr, body)
+		res, herr := s.postDO(ctx, client, addr, body, stream)
 		if herr != nil {
+			if errors.Is(herr, errDOResponseTooLarge) {
+				writeErr(w, http.StatusRequestEntityTooLarge, "response_too_large", "do-runtime response exceeds the buffered envelope limit")
+				return
+			}
 			lastErr = herr
 			if !isDialError(herr) {
 				writeErr(w, http.StatusConflict, "result_unknown", fmt.Sprintf("do-runtime invoke outcome unknown: %v", herr))
@@ -221,13 +232,15 @@ func (s *Server) handleDOConnectLookup(w http.ResponseWriter, r *http.Request) {
 type doResult struct {
 	status  int
 	body    []byte
+	stream  io.ReadCloser
+	ctx     context.Context
 	owner   string
 	app     bool   // tenant-produced response (x-cellhive-do-app), any status
 	ctype   string // tenant/platform content-type
 	headers http.Header
 }
 
-func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, body []byte) (doResult, error) {
+func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, body []byte, stream bool) (doResult, error) {
 	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
 		addr = "http://" + addr // do-runtime addresses are advertised as host:port
 	}
@@ -246,19 +259,31 @@ func (s *Server) postDO(ctx context.Context, client *http.Client, addr string, b
 	if err != nil {
 		return doResult{}, err
 	}
+	app := resp.Header.Get("x-cellhive-do-app") == "1"
+	if app && stream {
+		return doResult{
+			status:  resp.StatusCode,
+			stream:  resp.Body,
+			ctx:     ctx,
+			owner:   resp.Header.Get("x-cellhive-do-owner"),
+			app:     true,
+			ctype:   resp.Header.Get("Content-Type"),
+			headers: resp.Header.Clone(),
+		}, nil
+	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, doProxyRespLimit+1))
 	if err != nil {
 		return doResult{}, err
 	}
 	if len(respBody) > doProxyRespLimit {
-		return doResult{}, fmt.Errorf("do-runtime response exceeds %d bytes", doProxyRespLimit)
+		return doResult{}, fmt.Errorf("%w: %d bytes", errDOResponseTooLarge, doProxyRespLimit)
 	}
 	return doResult{
 		status:  resp.StatusCode,
 		body:    respBody,
 		owner:   resp.Header.Get("x-cellhive-do-owner"),
-		app:     resp.Header.Get("x-cellhive-do-app") == "1",
+		app:     app,
 		ctype:   resp.Header.Get("Content-Type"),
 		headers: resp.Header.Clone(),
 	}, nil
@@ -272,6 +297,9 @@ func ownerKey(req doInvokeReq, shardClass string, shard int) string {
 // writeDO forwards a do-runtime response, passing the owner hint and a fresh
 // owner ticket through so clients may call the owner directly (ADR-105).
 func writeDO(w http.ResponseWriter, res doResult, ticket string, exp int64) {
+	if res.stream != nil {
+		defer res.stream.Close()
+	}
 	nominated := make(map[string]bool)
 	for _, value := range res.headers.Values("Connection") {
 		for _, token := range strings.Split(value, ",") {
@@ -304,7 +332,30 @@ func writeDO(w http.ResponseWriter, res doResult, ticket string, exp int64) {
 		w.Header().Set("x-cellhive-do-owner-exp", strconv.FormatInt(exp, 10))
 	}
 	w.WriteHeader(res.status)
+	if res.stream != nil {
+		_, _ = io.Copy(w, contextReader{ctx: res.ctx, reader: res.stream})
+		return
+	}
 	_, _ = w.Write(res.body)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
+}
+
+func supportsDOStreaming(w http.ResponseWriter) bool {
+	_, ok := w.(http.Flusher)
+	return ok
 }
 
 // doTicket mints a short-lived ticket authorizing POST /v1/do/invoke for one DO
@@ -382,9 +433,12 @@ func (s *Server) clearDOOwner(key string) {
 }
 
 // doRetryable reports whether a do-runtime response proves the invoke did not
-// start, so the caller may safely retry elsewhere. result_unknown (409) does
-// not: the handler may have run (ADR-080).
-func doRetryable(status int, body []byte) bool {
+// start, so the caller may safely retry elsewhere. Tenant responses are never
+// retryable because the handler may have run, regardless of status.
+func doRetryable(status int, body []byte, app bool) bool {
+	if app {
+		return false
+	}
 	if status == http.StatusServiceUnavailable {
 		return true
 	}

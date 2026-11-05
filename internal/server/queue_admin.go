@@ -24,10 +24,27 @@ func (s *Server) queueConsumerTarget(ctx context.Context, ns, queue string) (con
 	if s.Control == nil {
 		return control.Consumer{}, false
 	}
-	proj, err := s.Control.Projection(ctx)
+	proj, err := s.projectionCached(ctx)
 	if err != nil {
 		return control.Consumer{}, false
 	}
+	return queueConsumerFromProjection(proj, ns, queue)
+}
+
+// queueConsumerTargetStrict resolves a consumer for a mutation (DLQ replay/ack)
+// where a stale projection could send work to the wrong dead-letter queue.
+func (s *Server) queueConsumerTargetStrict(ctx context.Context, ns, queue string) (control.Consumer, bool) {
+	if s.Control == nil {
+		return control.Consumer{}, false
+	}
+	proj, err := s.projectionStrict(ctx)
+	if err != nil {
+		return control.Consumer{}, false
+	}
+	return queueConsumerFromProjection(proj, ns, queue)
+}
+
+func queueConsumerFromProjection(proj control.Projection, ns, queue string) (control.Consumer, bool) {
 	for _, t := range proj.QueueTargets() {
 		if t.Namespace == ns && t.Queue == queue {
 			return t.Consumer, true
@@ -75,13 +92,16 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 // handleControlQueueDLQPreview reads DLQ messages without Claim: attempts,
 // leases and visibility remain unchanged. The queue query names the main queue;
 // its configured independent DLQ is resolved from the projection.
-func (s *Server) deadLetterConsumer(r *http.Request, ns, name string) (control.Consumer, bool) {
+func (s *Server) deadLetterConsumer(r *http.Request, ns, name string, strict bool) (control.Consumer, bool) {
 	if r.URL.Query().Get("direct") == "1" {
 		if s.Control == nil {
 			return control.Consumer{}, false
 		}
 		_, ok, err := s.Control.Binding(r.Context(), ns, "queue", name)
 		return control.Consumer{DeadLetterQueue: name}, ok && err == nil
+	}
+	if strict {
+		return s.queueConsumerTargetStrict(r.Context(), ns, name)
 	}
 	return s.queueConsumerTarget(r.Context(), ns, name)
 }
@@ -99,7 +119,7 @@ func (s *Server) handleControlQueueDLQPreview(w http.ResponseWriter, r *http.Req
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
-	consumer, ok := s.deadLetterConsumer(r, ns, name)
+	consumer, ok := s.deadLetterConsumer(r, ns, name, false)
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
 		return
@@ -158,7 +178,7 @@ func (s *Server) handleControlQueueDLQAck(w http.ResponseWriter, r *http.Request
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
-	consumer, ok := s.deadLetterConsumer(r, ns, name)
+	consumer, ok := s.deadLetterConsumer(r, ns, name, true)
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
 		return
@@ -274,7 +294,7 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 			limit = n
 		}
 	}
-	consumer, ok := s.queueConsumerTarget(r.Context(), ns, name)
+	consumer, ok := s.queueConsumerTargetStrict(r.Context(), ns, name)
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, http.StatusBadRequest, "no_dead_letter_queue",
 			"queue "+ns+"/"+name+" has no consumer with a dead_letter_queue")

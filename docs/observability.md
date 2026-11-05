@@ -65,6 +65,14 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 
 ## 日志
 
+### 当前工作树的 Go 缓冲边界（2026-11-04，未部署）
+
+`internal/logbuf` 在条数/worker 数限制之外，为每个 `(namespace, worker)` 的 entries 和 events **分别**设置 1MiB 保留预算。Entry 的 Message 与 MessageArgs 各最多 64KiB；异常最多 16 个，每个 message 8KiB、stack 16KiB。Entry 先限字段，仍超预算则拒绝；TailEvent 按序列化字节计量，过大或无法序列化则整体拒绝，不冒充完整保留。预算是保留载荷计量，不等于 RSS 或瞬时解码内存上限。
+
+成功保留才推进本进程共享 seq；拒绝返回 `Seq=0` 且不消耗 seq，因此无 seq 缺口不能证明没有丢日志。容量淘汰最旧数据，worker 淘汰及重启也会损失历史。`Stats` 的 Added/Dropped/Truncated/Evicted 是内存 API 计数，不是新增 Prometheus family；Dropped 表示拒绝保留，Evicted 表示保留期损失，均不代表业务执行失败或持久数据丢失。派生 console 的 OTLP 参数使用限幅后的值；旁路导出与 Tail 保留不是同一成功保证。
+
+持久 invocation 的 7 天/10000 条为软目标：按 namespace 在首次写及随后 1 分钟或 256 次写触发清理，每条年龄/数量清理查询最多 1000 行，旧时间戳写入可强制触发。积压、无后续写入和失败事务会延迟收敛；不是独立后台定时清理或硬行数上限。
+
 - 结构化 JSON（Go `log/slog`；workerd 侧结构化 stdout）；
 - 必备字段：`ts`、`level`、`service`、`node`、`request_id`（可用时）、`trace_id`/`span_id`（请求内触发时）、`ns`/`worker`/`scope`（可用时）、`event`；
 - **禁止**记录：secrets 明文、internal token、原始桶响应体；

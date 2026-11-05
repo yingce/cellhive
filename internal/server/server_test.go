@@ -714,6 +714,30 @@ func TestInternalBlobRoundTrip(t *testing.T) {
 	}
 }
 
+type zeroFillReader struct{}
+
+func (zeroFillReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func TestInternalBlobRejectsOversizedBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	key := "dosupervisor/workerd___do__/oversized.json"
+	req := httptest.NewRequest(http.MethodPut, "/v1/internal/blob?key="+key,
+		io.LimitReader(zeroFillReader{}, maxArtifactBytes+1))
+	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rr.Body.String(), "too_large") {
+		t.Fatalf("oversized blob: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := do(t, h, http.MethodGet, "/v1/internal/blob?key="+key, "tok", nil); got.Code != http.StatusNotFound {
+		t.Fatalf("oversized blob was stored: code=%d body=%s", got.Code, got.Body.String())
+	}
+}
+
 func TestReadSegmentRange(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()

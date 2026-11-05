@@ -798,7 +798,7 @@ func (s *Server) handleCloudflareRoutes(w http.ResponseWriter, r *http.Request) 
 	if s.forwardRead(w, r, control.Scope(), nil) {
 		return
 	}
-	p, err := s.Control.Projection(r.Context())
+	p, err := s.projectionCached(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "routes_failed", err.Error())
 		return
@@ -1019,7 +1019,24 @@ func (s *Server) handleCloudflareR2List(w http.ResponseWriter, r *http.Request) 
 	cloudflareResult(w, map[string]any{"buckets": out})
 }
 func (s *Server) handleCloudflareQueueList(w http.ResponseWriter, r *http.Request) {
-	s.cloudflareResourceList(w, r, "queue", func(x control.ResourceRef) any { return s.cloudflareQueueResult(r, x.Name) })
+	if s.forwardRead(w, r, control.Scope(), nil) {
+		return
+	}
+	items, err := s.Control.Resources(r.Context(), r.PathValue("account_id"), "queue")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resources_failed", err.Error())
+		return
+	}
+	var targets []control.QueueTarget
+	if p, perr := s.projectionCached(r.Context()); perr == nil {
+		targets = p.QueueTargets()
+	}
+	ns := r.PathValue("account_id")
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, cloudflareQueueResultFromTargets(ns, item.Name, targets))
+	}
+	cloudflareResult(w, out)
 }
 func (s *Server) handleCloudflareResourceDelete(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1061,20 +1078,28 @@ func (s *Server) handleCloudflareQueueGet(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) cloudflareQueueResult(r *http.Request, queue string) map[string]any {
+	var targets []control.QueueTarget
+	if p, err := s.projectionCached(r.Context()); err == nil {
+		targets = p.QueueTargets()
+	}
+	return cloudflareQueueResultFromTargets(r.PathValue("account_id"), queue, targets)
+}
+
+func cloudflareQueueResultFromTargets(ns, queue string, targets []control.QueueTarget) map[string]any {
 	out := map[string]any{"queue_id": queue, "queue_name": queue, "consumers": []any{}}
-	if p, err := s.Control.Projection(r.Context()); err == nil {
-		items := make([]any, 0)
-		for _, target := range p.QueueTargets() {
-			if target.Namespace != r.PathValue("account_id") || target.Queue != queue {
-				continue
-			}
-			items = append(items, map[string]any{
-				"consumer_id": target.Worker,
-				"type":        "worker", "script": target.Worker,
-				"settings":          map[string]any{"batch_size": target.Consumer.MaxBatchSize, "max_retries": effectiveQueueRetries(target.Consumer.MaxRetries), "max_concurrency": target.Consumer.MaxConcurrency, "max_wait_time_ms": target.Consumer.MaxBatchTimeoutSeconds * 1000, "retry_delay": target.Consumer.RetryDelaySeconds},
-				"dead_letter_queue": target.Consumer.DeadLetterQueue,
-			})
+	items := make([]any, 0)
+	for _, target := range targets {
+		if target.Namespace != ns || target.Queue != queue {
+			continue
 		}
+		items = append(items, map[string]any{
+			"consumer_id": target.Worker,
+			"type":        "worker", "script": target.Worker,
+			"settings":          map[string]any{"batch_size": target.Consumer.MaxBatchSize, "max_retries": effectiveQueueRetries(target.Consumer.MaxRetries), "max_concurrency": target.Consumer.MaxConcurrency, "max_wait_time_ms": target.Consumer.MaxBatchTimeoutSeconds * 1000, "retry_delay": target.Consumer.RetryDelaySeconds},
+			"dead_letter_queue": target.Consumer.DeadLetterQueue,
+		})
+	}
+	if len(items) > 0 {
 		out["consumers"] = items
 	}
 	return out
@@ -1169,7 +1194,7 @@ func (s *Server) cloudflareQueueConsumerApply(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) activeCloudflareVersionForWorker(ctx context.Context, ns, worker string) (control.Version, error) {
-	p, err := s.Control.Projection(ctx)
+	p, err := s.projectionStrict(ctx)
 	if err != nil {
 		return control.Version{}, err
 	}

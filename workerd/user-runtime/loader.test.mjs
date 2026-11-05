@@ -3,7 +3,7 @@ import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Lifetime } from '../platform/lifecycle.js';
+import { Lifetime, RuntimeCapacity } from '../platform/lifecycle.js';
 const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 function harness(fetch) {
@@ -152,4 +152,72 @@ test('non-fetch entrypoints keep the isolate alive until the handler settles', a
 
   c.tenantMod.default.nullValue = () => null;
   assert.equal(await host.callMethod('', 'nullValue', [], undefined), null);
+});
+
+test('retire sweeper is throttled to one run per interval across requests', async () => {
+  const c = vm.createContext({ retiringCount: 1, Date: { now: () => c.now }, setTimeout, clearTimeout });
+  vm.runInContext(extract('const SWEEP_INTERVAL_MS', 'async function residentWorker(') +
+    '\nglobalThis.scheduleSweep=scheduleSweep;globalThis.SWEEP_INTERVAL_MS=SWEEP_INTERVAL_MS;', c);
+  c.now = 1000;
+  c.sweeps = 0;
+  c.sweepResidents = async () => { c.sweeps++; c.retiringCount = 0; };
+  const waits = [];
+  const ctx = { waitUntil: p => waits.push(p) };
+  const first = c.scheduleSweep({}, ctx);
+  assert.equal(typeof first.then, 'function');
+  await first;
+  assert.equal(c.sweeps, 1);
+  assert.equal(waits.length, 1);
+  c.retiringCount = 1;
+  assert.equal(c.scheduleSweep({}, ctx), null);
+  assert.equal(c.sweeps, 1);
+  c.now += c.SWEEP_INTERVAL_MS + 1;
+  c.retiringCount = 1;
+  const later = c.scheduleSweep({}, ctx);
+  await later;
+  assert.equal(c.sweeps, 2);
+});
+
+test('hot fetch path schedules retirement instead of awaiting the sweep', () => {
+  const resident = extract('async function residentWorker(', 'export default');
+  assert.doesNotMatch(resident, /await sweepResidents\(env,ctx\)/);
+  assert.match(resident, /scheduleSweep\(env,ctx\)/);
+});
+
+test('bundle cache uses the conservative source budget and admits oversized sources', () => {
+  assert.match(source, /const bundleCache = sourceCache\(2000\)/);
+  assert.match(source, /cacheSource\(bundleCache, sha, src\)/);
+});
+
+test('loader sweep queries a pinned resident and reclaims capacity after the socket closes', async () => {
+  const ws = new EventTarget();
+  const parentLife = new Lifetime();
+  const childLife = new Lifetime();
+  await childLife.response({status: 101, webSocket: ws});
+  assert.equal(childLife.idle(), false);
+  const capacity = new RuntimeCapacity(1, 32);
+  assert.equal(capacity.reserve('resident', 16), true);
+  let retired = 0;
+  const entry = { key: 'resident', versionKey: 'ns/w@1-sha', family: 'ns/w', nonce: 'nonce', life: parentLife, retiring: true, cleaning: null, pinned: false };
+  const c = vm.createContext({
+    residents: new Map([['resident', entry]]), retiringCount: 1,
+    preparedCache: new Map(), latestVersionByFamily: new Map([['ns/w', 1]]),
+    managedStub: () => ({ getEntrypoint: () => ({
+      status: async () => ({ nonce: 'nonce', idle: childLife.idle(), pinned: childLife.pinned, sockets: childLife.sockets }),
+      retire: async () => { retired++; return true; },
+    }) }),
+    isolateCapacity: () => capacity,
+  });
+  vm.runInContext(extract('async function sweepResidents(', '// One module-level sweeper'), c);
+  assert.equal(await c.sweepResidents({}, {}), true);
+  assert.equal(entry.pinned, true);
+  assert.equal(c.residents.has('resident'), true);
+  assert.equal(capacity.reserve('other', 16), false);
+  ws.dispatchEvent(new Event('close'));
+  assert.equal(childLife.idle(), true);
+  assert.equal(await c.sweepResidents({}, {}), false);
+  assert.equal(retired, 1);
+  assert.equal(c.residents.has('resident'), false);
+  assert.equal(c.retiringCount, 0);
+  assert.equal(capacity.reserve('other', 16), true);
 });

@@ -1,5 +1,7 @@
 # Observability
 
+**Current uncommitted batch, not deployed (ADR-306):** Go logbuf retains at most 1MiB of entries and separately 1MiB of events per worker, in addition to count limits. Entry message/args each cap at 64KiB; at most 16 exceptions, each message 8KiB and stack 16KiB. Rejected entries/events return seq zero without advancing the shared sequence; eviction loses retained history, not business data. Stats are in-memory counters, not newly exported Prometheus families. Invocation retention is a soft 7-day/10000-row target, checked on writes at 1 minute or 256 writes, at most 1000 rows per age/count query; old timestamps may force cleanup. See [current observability contract](../observability.md).
+
 ## Metrics (Prometheus text; exposed independently by each service)
 
 > Format: Prometheus text exposition **0.0.4** (`content-type: text/plain; version=0.0.4`), rendered by hand. Label values escape only `\`, `"`, and newline (`escapeLabel`); do **not** use Go `%q` (it emits `\t`/`\xNN`/`\uNNNN`, which scrapers reject). Histograms use cumulative buckets + `le="+Inf"` + `_sum`/`_count`. Register new metric names and data sources here first.

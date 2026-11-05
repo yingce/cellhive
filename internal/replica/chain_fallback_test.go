@@ -52,7 +52,7 @@ func TestRestoreChainFallsBackAcrossEpochBoundary(t *testing.T) {
 }
 func TestRetireEpochsPreservesRequiredFallback(t *testing.T) {
 	m, sc := overlapFixture(t)
-	n, _ := m.RetireEpochs(context.Background(), sc, 23, 0)
+	n, _ := m.RetireEpochsWithOptions(context.Background(), sc, 23, 0, RetireOptions{OfflineQuiescent: true})
 	if n != 0 {
 		t.Fatalf("deleted %d required predecessor objects", n)
 	}
@@ -71,7 +71,7 @@ func TestRestoreChainFallbackRejectsMissingPredecessorDelta(t *testing.T) {
 	if _, e := m.RestoreChain(ctx, sc, 23); e == nil {
 		t.Fatal("fallback silently accepted missing transactions")
 	}
-	if n, _ := m.RetireEpochs(ctx, sc, 23, 0); n != 0 {
+	if n, _ := m.RetireEpochsWithOptions(ctx, sc, 23, 0, RetireOptions{OfflineQuiescent: true}); n != 0 {
 		t.Fatalf("GC removed %d objects after invalid chain", n)
 	}
 }

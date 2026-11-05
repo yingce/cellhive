@@ -23,6 +23,15 @@ type HTTPDispatcher struct {
 	Client *http.Client
 }
 
+// maxDispatchResponseBody bounds the successful no_retry envelope. Timer
+// dispatch replies are tiny; an unbounded ReadAll lets a compromised or broken
+// runtime force arbitrary allocation.
+const maxDispatchResponseBody = 64 << 10
+
+func readSuccessBody(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxDispatchResponseBody))
+}
+
 // NewHTTP builds a dispatcher for the given base URL. An empty URL yields nil so
 // callers can fall back to the no-op dispatcher.
 func NewHTTP(url, token string) *HTTPDispatcher {
@@ -78,7 +87,7 @@ func (d *HTTPDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
 	var result struct {
 		NoRetry bool `json:"no_retry"`
 	}
-	if b, e := io.ReadAll(resp.Body); e == nil && len(b) != 0 {
+	if b, e := readSuccessBody(resp.Body); e == nil && len(b) != 0 {
 		_ = json.Unmarshal(b, &result)
 	}
 	return nil

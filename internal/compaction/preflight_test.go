@@ -82,7 +82,7 @@ func TestCompactThresholdCountsOnlyNewBytes(t *testing.T) {
 	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatal(err)
 	}
-	first, err := Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true})
+	first, err := Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
 	if err != nil || !first.Compacted {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
@@ -96,8 +96,10 @@ func TestCompactThresholdCountsOnlyNewBytes(t *testing.T) {
 		t.Fatalf("result=%+v err=%v L1 GET=%d", result, err, b.l1Gets)
 	}
 	// Exact threshold still triggers and validates the baseline.
-	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta)), GC: true})
-	if err != nil || !result.Compacted || result.MaxTxID != 1 || b.l1Gets != 1 {
+	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta)), GC: true, OfflineQuiescent: true})
+	// Offline GC revalidates complete persisted baseline/index proofs and the
+	// superseded payload. This is deliberately not the zero-read online path.
+	if err != nil || !result.Compacted || result.MaxTxID != 1 || b.l1Gets != 9 {
 		t.Fatalf("threshold result=%+v err=%v gets=%d", result, err, b.l1Gets)
 	}
 }
@@ -113,7 +115,7 @@ func TestCompactPreflightRejectsCorruptTail(t *testing.T) {
 	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true}); err != nil {
+	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true}); err != nil {
 		t.Fatal(err)
 	}
 	before, _, err := fs.Get(ctx, replica.ManifestName(sc, 1))
@@ -123,7 +125,7 @@ func TestCompactPreflightRejectsCorruptTail(t *testing.T) {
 	if _, err = fs.Put(ctx, replica.Prefix(sc, 1)+"1-1.ltx", []byte("broken")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: 1 << 30, GC: true}); err == nil {
+	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: 1 << 30, GC: true, OfflineQuiescent: true}); err == nil {
 		t.Fatal("accepted corrupt tail")
 	}
 	after, _, err := fs.Get(ctx, replica.ManifestName(sc, 1))
@@ -143,7 +145,7 @@ func TestCompactPreflightBatchCountsLogicalSegments(t *testing.T) {
 	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true}); err != nil {
+	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true}); err != nil {
 		t.Fatal(err)
 	}
 	batch := [][]byte{
@@ -153,7 +155,7 @@ func TestCompactPreflightBatchCountsLogicalSegments(t *testing.T) {
 	if _, _, err = m.AppendBatch(ctx, sc, 1, batch); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Compact(ctx, m, sc, 1, Options{MinSegments: 2, MinBytes: 1 << 30, MinObjects: 8, GC: true})
+	result, err := Compact(ctx, m, sc, 1, Options{MinSegments: 2, MinBytes: 1 << 30, MinObjects: 8, GC: true, OfflineQuiescent: true})
 	if err != nil || !result.Compacted || result.NewL0 != 2 || result.MaxTxID != 2 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}

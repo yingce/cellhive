@@ -115,7 +115,7 @@ func cloudflareDeploymentResult(event control.DeploymentEvent) map[string]any {
 }
 
 func (s *Server) activeCloudflareVersion(r *http.Request) (control.Version, error) {
-	p, err := s.Control.Projection(r.Context())
+	p, err := s.projectionStrict(r.Context())
 	if err != nil {
 		return control.Version{}, err
 	}

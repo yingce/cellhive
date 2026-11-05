@@ -12,6 +12,18 @@ import (
 	"cellhive/internal/ltx"
 )
 
+func TestChainRejectsConflictingEpochMarkers(t *testing.T) {
+	for _, cuts := range [][]uint64{{5, 7}, {7, 5}} {
+		headers := []ltx.Header{{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}}
+		for _, cut := range cuts {
+			headers = append(headers, ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: cut + 1, EndTxID: cut})
+		}
+		if _, _, _, err := selectChain(headers); err == nil {
+			t.Fatalf("accepted conflicting cuts %v", cuts)
+		}
+	}
+}
+
 func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
 	page := func(value byte) map[uint32][]byte {
 		return map[uint32][]byte{1: bytes.Repeat([]byte{value}, 64)}

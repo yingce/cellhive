@@ -26,6 +26,8 @@ bucket 抽象（FS / S3 兼容）；`POST /v1/internal/commit(_binary)`；peer `
 - 接管控先恢复死 owner 的 open log。
 - 本地盘永不作为唯一副本；未上传的已 ack 数据不可删。
 - 热路径禁 List。
+- `OfflineQuiescent=false`（生产默认）时，compaction 只做有界的元数据 listing 观测并报告 epoch、对象数/字节数及 covered/deferred/unknown 分类；不会读取 payload，也不会删除对象。无法从 listing 得到大小时字节数标记为 unknown，超出观测上限的对象同样只计入 unknown。
+- 历史 epoch 的物理 GC 仍需要外部停止并排空 writers/readers 后显式维护窗口；在线 compaction 不删除历史对象，因此 deferred storage growth 和对象存储费用需要容量监控与离线维护计划。
 
 ## 源码位置
 

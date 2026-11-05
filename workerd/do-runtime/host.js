@@ -21,11 +21,12 @@ import { bindingStub } from "bindings.js";
 import { authorized, bearer, verifyJWT, internalHeaders } from "jwt.js";
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
+  MAX_DO_ENVELOPE_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans, traceparentForSpan } from "telemetry.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
-import { quotaSource } from "lifecycle.js";
+import { CountLRU, cacheSource, sourceCache, quotaSource } from "lifecycle.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
@@ -56,7 +57,7 @@ const pendingClaims = new Map(); // scopeKey -> claim and cold restore promise
 const hints = new Map(); // scopeKey -> { address, expiry } (owner hint, ADR-080)
 const boundRouters = new Set(); // host_id reported to the supervisor (per isolate)
 const boundActors = new Set(); // host_hash reported to the supervisor (per isolate)
-const seen = new Map(); // objectKey -> { namespace, worker, class, storage_class, storage_id, shard, id } (registry, ADR-082)
+const seen = new CountLRU(SEEN_MAX); // objectKey -> { namespace, worker, class, storage_class, storage_id, shard, id } (registry, ADR-082)
 let inflight = 0;
 let draining = false;
 
@@ -258,6 +259,67 @@ function responseHeaders(res, tenant = false) {
 }
 function emptyHTTPBody(status, method) { return method === "HEAD" || [204, 205, 304].includes(status); }
 
+// Relay the facet's body as a stream instead of buffering it through every
+// sharding hop. Empty responses still need the upstream stream cancelled so the
+// facet can release it.
+function relayResponse(res, method, tenant = false) {
+  let body = res.body || null;
+  if (emptyHTTPBody(res.status, method) || !body) {
+    try {
+      const pending = body && body.cancel();
+      if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    } catch (e) { /* already consumed */ }
+    body = null;
+  }
+  return new Response(body, { status: res.status, headers: responseHeaders(res, tenant) });
+}
+
+// The invoke wire is JSON, so its size must be bounded before parsing; ordinary
+// fetch response bodies are streams and are not capped here.
+async function readBoundedText(req, max) {
+  let text = "";
+  if (!req.body || typeof req.body.getReader !== "function") {
+    text = await req.text();
+    return new TextEncoder().encode(text).byteLength > max ? { tooLarge: true } : { text };
+  }
+  const reader = req.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > max) {
+        try { await reader.cancel(); } catch (e) { /* already closed */ }
+        return { tooLarge: true };
+      }
+      text += decoder.decode(part.value, { stream: true });
+    }
+    text += decoder.decode();
+    return { text };
+  } catch (error) {
+    try { await reader.cancel(); } catch (e) { /* already closed */ }
+    return { error };
+  }
+}
+
+async function readEnvelope(req, max = MAX_DO_ENVELOPE_BYTES) {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    try { const pending = req.body && req.body.cancel(); if (pending && pending.catch) pending.catch(() => {}); } catch (e) { /* closed */ }
+    return { tooLarge: true };
+  }
+  const read = await readBoundedText(req, max);
+  if (read.tooLarge) return { tooLarge: true };
+  if (read.error) return { error: read.error };
+  try { return { value: JSON.parse(read.text) }; } catch (error) { return { error }; }
+}
+
+function tooLargeResponse(max) {
+  return json({ error: "body_too_large", message: "invoke envelope exceeds " + max + " bytes" }, 413);
+}
+
 function ticketSpec(ticket, spec) {
   try {
     const fixed = JSON.parse(ticket.execution);
@@ -275,12 +337,10 @@ function ticketSpec(ticket, spec) {
 
 async function invoke(req, env, ticket) {
   if (draining) return json({ error: "draining" }, 503);
-  let spec;
-  try {
-    spec = await req.json();
-  } catch (e) {
-    return json({ error: "bad_json", message: String(e) }, 400);
-  }
+  const envelope = await readEnvelope(req);
+  if (envelope.tooLarge) return tooLargeResponse(MAX_DO_ENVELOPE_BYTES);
+  if (envelope.error) return json({ error: "bad_json", message: String(envelope.error) }, 400);
+  const spec = envelope.value;
   const { namespace, worker, class: cls, id, bundle_sha } = spec;
   if (!namespace || !worker || !cls || !id || !bundle_sha) {
     return json({ error: "bad_request", message: "namespace, worker, class, id, bundle_sha are required" }, 400);
@@ -292,13 +352,9 @@ async function invoke(req, env, ticket) {
     return json({ error: "forbidden", scope: "ticket_mismatch" }, 403);
   }
   const indexKey = `${spec.storage_id || `${namespace}/${worker}`}/${spec.storage_class || cls}/${shard}/${id}`;
+  // The registry LRU bounds itself; the durable index (/v1/internal/do/objects)
+  // remains the authority for cold enumeration.
   const firstSight = !seen.has(indexKey);
-  if (firstSight && seen.size >= SEEN_MAX) {
-    // Bound the in-memory object registry; the durable index
-    // (/v1/internal/do/objects) is the authority for cold enumeration.
-    const oldest = seen.keys().next().value;
-    seen.delete(oldest);
-  }
   seen.set(indexKey, {
     namespace, worker, class: cls, storage_class: spec.storage_class || cls,
     storage_id: spec.storage_id || "", shard, id,
@@ -347,17 +403,20 @@ async function invoke(req, env, ticket) {
     // unknown to the caller (do not blindly replay) — ADR-080.
     const c = claims.get(key);
     if (!c || c.expiryMs < Date.now()) {
+      try {
+        const pending = res.body && res.body.cancel();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      } catch (e) { /* already consumed */ }
       return json({ error: "result_unknown", reason: "ownership_lost_after_dispatch" }, 409);
     }
-    const body = await res.arrayBuffer();
-    const hdrs = responseHeaders(res);
+    const out = relayResponse(res, spec.request?.method, false);
     // Preserve the tenant-response marker through the sharding wrapper so the
     // caller facade can return 4xx/5xx Durable Object responses.
-    if (res.headers.get("x-cellhive-do-app") === "1") hdrs.set("x-cellhive-do-app", "1");
+    if (res.headers.get("x-cellhive-do-app") === "1") out.headers.set("x-cellhive-do-app", "1");
     // Tell upstreams that this runtime is the owner, so they can cache a hint
     // and skip the sharding router next time (ADR-103).
-    if (env.ADVERTISE) hdrs.set("x-cellhive-do-owner", String(env.ADVERTISE));
-    return new Response(emptyHTTPBody(res.status, spec.request?.method) ? null : body, { status: res.status, headers: hdrs });
+    if (env.ADVERTISE) out.headers.set("x-cellhive-do-owner", String(env.ADVERTISE));
+    return out;
   } catch (e) {
     const budget = budgetErrorBody(e);
     if (budget) return json(budget, 500);
@@ -376,12 +435,11 @@ async function forward(env, address, spec) {
       headers: { ...await internalHeaders(env.CELL_TOKEN), "content-type": "application/json" },
       body: JSON.stringify(spec), redirect: "manual",
     });
-    const hdrs = responseHeaders(r);
-    if (r.headers.get("x-cellhive-do-app") === "1") hdrs.set("x-cellhive-do-app", "1");
+    const out = relayResponse(r, spec.request?.method, false);
+    if (r.headers.get("x-cellhive-do-app") === "1") out.headers.set("x-cellhive-do-app", "1");
     const owner = r.headers.get("x-cellhive-do-owner");
-    if (owner) hdrs.set("x-cellhive-do-owner", owner); // propagate the owner hint
-    const bytes = await r.arrayBuffer();
-    return new Response(emptyHTTPBody(r.status, spec.request?.method) ? null : bytes, { status: r.status, headers: hdrs });
+    if (owner) out.headers.set("x-cellhive-do-owner", owner); // propagate the owner hint
+    return out;
   } catch (e) {
     return json({ error: "result_unknown", reason: "forward_transport_failed" }, 409);
   }
@@ -776,6 +834,10 @@ async function dispatchRPC(facet, rpc) {
   if (RPC_RESERVED_METHODS.has(method)) {
     return rpcErrorResponse(400, "do_rpc_reserved_method", "rpc.method is reserved");
   }
+  if (encodedSize(rpc.args) > MAX_RPC_BYTES) {
+    return rpcErrorResponse(413, "do_rpc_args_too_large",
+      "RPC arguments exceed " + MAX_RPC_BYTES + " bytes");
+  }
   let args;
   try {
     args = decode(rpc.args);
@@ -802,11 +864,12 @@ async function dispatchRPC(facet, rpc) {
   let encoded;
   try {
     encoded = encode(result);
-    if (encodedSize(encoded) > MAX_RPC_BYTES) {
-      throw new Error("RPC result exceeds " + MAX_RPC_BYTES + " bytes");
-    }
   } catch (e) {
     return rpcErrorResponse(500, e && e.code ? e.code : "do_rpc_result_invalid", errMessage(e));
+  }
+  if (encodedSize(encoded) > MAX_RPC_BYTES) {
+    return rpcErrorResponse(413, "do_rpc_result_too_large",
+      "RPC result exceeds " + MAX_RPC_BYTES + " bytes");
   }
   return Response.json({ ok: true, result: encoded });
 }
@@ -873,7 +936,12 @@ function tenantRequest(req) {
   for (const k of [...headers.keys()]) {
     if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
   }
-  return new Request(req, { headers });
+  const init = { method: req.method, headers };
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    init.body = req.body;
+    init.duplex = "half";
+  }
+  return new Request(req.url, init);
 }
 
 export class Host extends DurableObject {
@@ -992,16 +1060,17 @@ export class Host extends DurableObject {
     // proven durability; unknown => result_unknown (do not silently ack).
     const gate = await gateSync(this.env, span, this.ctx.id.name, this.ctx.id.toString(), spec);
     if (gate) {
+      try {
+        const pending = res.body && res.body.cancel();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      } catch (e) { /* already consumed */ }
       endSpan(span, { code: 2, message: "gate_failed" });
       await flushSpans(this.env);
       return gate;
     }
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     await flushSpans(this.env);
-    const bytes = await res.arrayBuffer();
-    const out = new Response(emptyHTTPBody(res.status, spec.request?.method) ? null : bytes, {
-      status: res.status, headers: responseHeaders(res, true),
-    });
+    const out = relayResponse(res, spec.request?.method, true);
     // Mark a tenant-produced response so the caller facade returns its status
     // rather than treating every non-2xx as a transport failure: Cloudflare's
     // DurableObjectStub.fetch() resolves with the object's Response (4xx/5xx
@@ -1017,20 +1086,13 @@ export class Host extends DurableObject {
     const ver = spec.version !== undefined && spec.version !== null ? `${spec.version}-` : "";
     const buildKey = `${ver}${spec.bundle_sha}`;
     const loaderId = `${spec.namespace}/${spec.worker}@${buildKey}`;
-    if (!this.#bundles.has(spec.bundle_sha)) {
+    let bundle = this.#bundles.get(spec.bundle_sha);
+    if (bundle === undefined) {
       const raw = await fetchBundle(this.env, spec.bundle_sha);
       // Route the tenant's `cloudflare:workers` import to the platform base
       // class that installs the alarm shim (ADR-079).
-      this.#bundles.set(
-        spec.bundle_sha,
-        raw.replaceAll('"cloudflare:workers"', '"cellhive-do.js"').replaceAll("'cloudflare:workers'", "'cellhive-do.js'"),
-      );
-    }
-    const bundle = this.#bundles.get(spec.bundle_sha);
-    this.#bundles.delete(spec.bundle_sha);
-    this.#bundles.set(spec.bundle_sha, bundle); // refresh LRU position
-    if (this.#bundles.size > BUNDLE_CACHE_MAX) {
-      this.#bundles.delete(this.#bundles.keys().next().value);
+      bundle = raw.replaceAll('"cloudflare:workers"', '"cellhive-do.js"').replaceAll("'cloudflare:workers'", "'cellhive-do.js'");
+      cacheSource(this.#bundles, spec.bundle_sha, bundle);
     }
     // Facet id is class-scoped within the host so distinct classes never collide.
     const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
@@ -1132,7 +1194,11 @@ export class Host extends DurableObject {
     await reportHostBinding(this.env, { host_id: this.ctx.id.name, host_hash: hash });
   }
 
-  #bundles = new Map();
+  #bundles = sourceCache(BUNDLE_CACHE_MAX);
+  // Facet identity must survive cache pressure: workerd's facet build callback
+  // runs only on first get(), so dropping this entry would reuse a resident
+  // facet after a version change (ADR-081). Keep the original maps; the bundle
+  // cache remains byte-bounded.
   #facetVersion = new Map();
   #facets = new Map();
 }

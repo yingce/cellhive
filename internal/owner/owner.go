@@ -33,6 +33,14 @@ type cachedOwner struct {
 	at    time.Time
 }
 
+const (
+	// Bounds keep per-scope caches from growing without limit when a node sees
+	// many one-off cells. Eviction only causes an extra point read.
+	maxOwnerCache    = 4096
+	maxOwnerCacheRev = 8192
+	ownerCacheIdle   = 10 * time.Minute
+)
+
 // LeaseView supplies node liveness for ADR-273 owner records.
 type LeaseView interface {
 	NodeLease(ctx context.Context, node string) (lease.NodeLease, bool, error)
@@ -119,6 +127,10 @@ type Manager struct {
 	mu             sync.Mutex
 	cache          map[string]cachedOwner
 	cacheRev       map[string]uint64
+	cacheRevAt     map[string]time.Time
+	cacheEpoch     uint64
+	cachePending   map[string]int
+	guards         map[string]int
 	routes         map[string]ownerRoute
 	routeFlights   map[string]*routeFlight
 	releasing      map[string]int
@@ -176,10 +188,17 @@ func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Dura
 		m.mu.Unlock()
 		return c.owner, c.etag, nil
 	}
+	if m.cachePending == nil {
+		m.cachePending = make(map[string]int)
+	}
+	m.cachePending[key]++
 	m.mu.Unlock()
 
 	o, e, err := m.Resolve(ctx, s)
 	if err != nil {
+		m.mu.Lock()
+		m.finishResolveLocked(key)
+		m.mu.Unlock()
 		return o, e, err
 	}
 	m.mu.Lock()
@@ -189,8 +208,79 @@ func (m *Manager) ResolveCached(ctx context.Context, s cell.Scope, ttl time.Dura
 		}
 		m.cache[key] = cachedOwner{owner: o, etag: e, at: time.Now()}
 	}
+	m.finishResolveLocked(key)
+	m.trimCachesLocked(time.Now())
 	m.mu.Unlock()
 	return o, e, nil
+}
+
+func (m *Manager) finishResolveLocked(key string) {
+	if n := m.cachePending[key] - 1; n > 0 {
+		m.cachePending[key] = n
+	} else {
+		delete(m.cachePending, key)
+	}
+}
+
+func (m *Manager) cacheKeyActiveLocked(key string) bool {
+	if _, ok := m.cache[key]; ok {
+		return true
+	}
+	if _, ok := m.routes[key]; ok {
+		return true
+	}
+	if _, ok := m.routeFlights[key]; ok {
+		return true
+	}
+	if m.releasing[key] > 0 || m.cachePending[key] > 0 || m.guards[key] > 0 {
+		return true
+	}
+	return false
+}
+
+// trimCachesLocked bounds the owner caches. A key with no cached record, route,
+// in-flight lookup or active read fence cannot be observed by a concurrent
+// caller, so dropping its revision is safe; it only loses a race token.
+func (m *Manager) trimCachesLocked(now time.Time) {
+	if len(m.cache) > maxOwnerCache {
+		for key, c := range m.cache {
+			if now.Sub(c.at) >= ownerCacheIdle {
+				delete(m.cache, key)
+			}
+		}
+		for key := range m.cache {
+			if len(m.cache) <= maxOwnerCache {
+				break
+			}
+			delete(m.cache, key)
+		}
+	}
+	if len(m.cacheRev) > maxOwnerCacheRev {
+		for key := range m.cacheRev {
+			if m.cacheKeyActiveLocked(key) {
+				continue
+			}
+			if now.Sub(m.cacheRevAt[key]) >= ownerCacheIdle {
+				m.dropRevLocked(key)
+			}
+		}
+		for key := range m.cacheRev {
+			if len(m.cacheRev) <= maxOwnerCacheRev {
+				break
+			}
+			if !m.cacheKeyActiveLocked(key) {
+				m.dropRevLocked(key)
+			}
+		}
+	}
+}
+
+// dropRevLocked discards a revision and advances the epoch so reusable read
+// fences captured before the trim cannot compare 0==0 and accept a stale read.
+func (m *Manager) dropRevLocked(key string) {
+	delete(m.cacheRev, key)
+	delete(m.cacheRevAt, key)
+	m.cacheEpoch++
 }
 
 // Invalidate drops a cached owner record (after claim/release).
@@ -207,6 +297,11 @@ func (m *Manager) invalidateLocked(key string) {
 		m.cacheRev = make(map[string]uint64)
 	}
 	m.cacheRev[key]++
+	if m.cacheRevAt == nil {
+		m.cacheRevAt = make(map[string]time.Time)
+	}
+	m.cacheRevAt[key] = time.Now()
+	m.trimCachesLocked(time.Now())
 }
 
 // Resolve returns the current owner record and its etag, or ErrUnowned.

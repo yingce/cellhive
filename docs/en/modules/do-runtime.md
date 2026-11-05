@@ -5,6 +5,8 @@ Use a fixed **host actor + facets** to host native Durable Objects (per-object S
 > See [`../configuration.md`](../configuration.md) and the code for the authoritative configuration source; the table below is the relevant subset for this module.
 ## Key Interfaces
 
+**Incrementally locally accepted, uncommitted and not deployed (ADR-306):** response streaming applies only to workerd hops; the Go DO proxy still buffers up to 8.25MiB. Invoke envelopes cap at 8.25MiB and encoded RPC results at 8MiB, with explicit oversized errors. DO seen is CountLRU(10000); native facet/version identity remains in Maps, not an LRU. Each Host source cache has 64 entries/65MiB retention budget; valid UTF-16-weight oversized sources bypass caching, so cache thrash is not fixed. Supervisor HTTPStore has a default 60s total timeout and 64MiB blob/segment read limits, with ranges also bounded by requested length. The real pinned do-runtime check passed locally; this is not production/GA acceptance. Six confirmed epoch/lineage defects remain release gates. See [current module boundaries](../../modules/do-runtime.md); no full restore streaming or aggregate RSS guarantee.
+
 do-runtime `:8788`: `/v1/do/invoke`, `/v1/do/connect` (WS), `/v1/do/{claim,renew,drain,abort,delete,restart,objects}`, `/v1/internal/do/alarm/upsert`, `/ready`. do-supervisor `:18901`: `/metrics`.
 
 ## Configuration (Environment Variables)

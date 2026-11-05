@@ -6,6 +6,7 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -339,7 +340,7 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 			g = &epochData{}
 			groups[n] = g
 		}
-		if strings.HasSuffix(name, "L1/manifest.json") {
+		if name == "L1/manifest.json" {
 			g.manifest = key
 			continue
 		}
@@ -363,9 +364,10 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 	for e, g := range groups {
 		for _, sp := range g.spans {
 			if sp.marker {
-				if c, ok := cuts[e]; !ok || sp.end < c {
-					cuts[e] = sp.end
+				if c, ok := cuts[e]; ok && sp.end != c {
+					return 0, fmt.Errorf("%w: epoch %d", ErrEpochMarkerConflict, e)
 				}
+				cuts[e] = sp.end
 			}
 		}
 	}
@@ -396,7 +398,16 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 				return 0, merr
 			}
 			if ok {
-				g.spans = append(g.spans, segmentSpan{start: 1, end: man.MaxTxID, snapshot: true})
+				if lim, limited := deadAbove(epoch); limited && man.MaxTxID > lim {
+					return 0, fmt.Errorf("replica: epoch %d manifest watermark %d exceeds marker cut %d", epoch, man.MaxTxID, lim)
+				}
+				complete, err := m.completeBaseline(ctx, s, epoch, man)
+				if err != nil {
+					return 0, err
+				}
+				if complete && (!haveBase || man.MaxTxID > floor) {
+					floor, haveBase = man.MaxTxID, true
+				}
 			}
 		}
 		var snapEnds []uint64
@@ -424,7 +435,7 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 			return g.spans[i].start < g.spans[j].start
 		})
 		for _, sp := range g.spans {
-			if sp.snapshot || sp.end <= floor || sp.start > floor+1 {
+			if sp.marker || sp.snapshot || sp.end <= floor || sp.start > floor+1 {
 				continue
 			}
 			floor = sp.end
@@ -436,10 +447,106 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 	return floor, nil
 }
 
-// HasCompleteSnapshot reports whether an epoch has at least one snapshot
-// completion marker. Only then may older epochs be retired: a restore of the
-// newest epoch starts from this snapshot.
+// completeBaseline requires the index and manifest to identify the same durable
+// L1 snapshot, including its full page set. A manifest alone (or an unrelated
+// snapshot-done) is not proof: publication may have stopped before completion.
+func (m *Manager) completeBaseline(ctx context.Context, s cell.Scope, epoch uint64, man Manifest) (bool, error) {
+	if man.Epoch != epoch || len(man.Objects) == 0 || man.PageSize == 0 || man.Commit == 0 {
+		return false, nil
+	}
+	idx, ok, err := m.ReadIndex(ctx, s, epoch)
+	if err != nil || !ok {
+		return false, err
+	}
+	if idx.Watermark != man.MaxTxID || len(idx.Entries) != len(man.Objects) {
+		return false, nil
+	}
+	entries := make(map[string]PageIndexEntry, len(idx.Entries))
+	for _, e := range idx.Entries {
+		if _, exists := entries[e.Key]; exists {
+			return false, nil
+		}
+		entries[e.Key] = e
+	}
+	var raws [][]byte
+	for _, key := range man.Objects {
+		e, ok := entries[key]
+		if !ok || !strings.HasPrefix(key, L1Prefix(s, epoch)) || e.PageSize != man.PageSize || e.Commit != man.Commit {
+			return false, nil
+		}
+		delete(entries, key)
+		raw, err := m.ReadSegment(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		h, payload, err := ltx.Decode(raw)
+		if err != nil {
+			return false, err
+		}
+		if h.Kind != ltx.KindSnapshot || h.Epoch != epoch || h.StartTxID != man.MaxTxID || h.EndTxID != man.MaxTxID || key != L1Prefix(s, epoch)+ltx.SegmentName(h) {
+			return false, nil
+		}
+		ps, commit, _, _, err := ltx.DecodeWALPageMap(payload)
+		if err != nil {
+			return false, err
+		}
+		nums, err := ltx.PageMapNumbers(payload)
+		if err != nil {
+			return false, err
+		}
+		if ps != e.PageSize || commit != e.Commit || !reflect.DeepEqual(nums, e.Pages) {
+			return false, nil
+		}
+		locs, err := ltx.PageLocs(payload)
+		if err != nil {
+			return false, err
+		}
+		if len(e.Locs) > 0 {
+			if !reflect.DeepEqual(locs, e.Locs) {
+				return false, nil
+			}
+		} else {
+			// Legacy indexes are safe only for their fixed-width raw frames.
+			for i, loc := range locs {
+				if loc.Codec != ltx.CodecRaw || loc.Stored != int(ps) || loc.Off != int64(ltx.PageEntryOffset(ps, i)+4) {
+					return false, nil
+				}
+			}
+		}
+		raws = append(raws, raw)
+	}
+	proof, err := restore.IndexChain(raws)
+	if err != nil {
+		return false, err
+	}
+	return proof.Watermark == man.MaxTxID && proof.Commit == man.Commit && proof.PageSize == man.PageSize, nil
+}
+
+// HasCompleteSnapshot requires either a fully proven L1 baseline or a snapshot
+// completion marker, plus an independently restorable current-epoch chain.
 func (m *Manager) HasCompleteSnapshot(ctx context.Context, s cell.Scope, epoch uint64) (bool, error) {
+	man, haveMan, err := m.ReadManifest(ctx, s, epoch)
+	if err != nil {
+		return false, err
+	}
+	if haveMan {
+		complete, err := m.completeBaseline(ctx, s, epoch, man)
+		if err != nil || !complete {
+			return false, err
+		}
+		segs, err := m.Restore(ctx, s, epoch)
+		if err != nil {
+			return false, err
+		}
+		raws := make([][]byte, len(segs))
+		for i, seg := range segs {
+			raws[i] = seg.Raw
+		}
+		if err := restore.ValidateChain(raws); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	keys, err := m.B.List(ctx, Prefix(s, epoch))
 	if err != nil {
 		return false, err
@@ -463,11 +570,18 @@ func (m *Manager) HasCompleteSnapshot(ctx context.Context, s cell.Scope, epoch u
 	return false, nil
 }
 
-// RetireEpochs deletes epoch prefixes older than current-keepPrevious after the
-// current epoch has opened with a complete snapshot (celld epoch GC). Restore
-// only ever reads the newest snapshot base, so older prefixes are dead weight;
-// keeping the previous epoch makes an in-flight restore or a rollback safe.
+// RetireEpochs defers physical deletion (ADR-307). A snapshot/retention proof
+// alone cannot protect live readers. Explicit offline callers use options.
 func (m *Manager) RetireEpochs(ctx context.Context, s cell.Scope, current uint64, keepPrevious int) (int, error) {
+	return m.RetireEpochsWithOptions(ctx, s, current, keepPrevious, RetireOptions{})
+}
+
+// RetireEpochsWithOptions retires proven old payloads only under externally
+// maintained quiescence. All lineage/proof metadata and unknown objects remain.
+func (m *Manager) RetireEpochsWithOptions(ctx context.Context, s cell.Scope, current uint64, keepPrevious int, opts RetireOptions) (int, error) {
+	if !opts.OfflineQuiescent {
+		return 0, ErrGCDeferred
+	}
 	ok, err := m.HasCompleteSnapshot(ctx, s, current)
 	if err != nil || !ok {
 		return 0, err
@@ -493,10 +607,13 @@ func (m *Manager) RetireEpochs(ctx context.Context, s cell.Scope, current uint64
 			return deleted, lerr
 		}
 		for _, key := range keys {
-			if derr := m.B.Delete(ctx, key); derr != nil && !errors.Is(derr, bucket.ErrNotFound) {
+			didDelete, derr := m.DeleteObjectWithOptions(ctx, s, epoch, key, opts)
+			if derr != nil {
 				return deleted, derr
 			}
-			deleted++
+			if didDelete {
+				deleted++
+			}
 		}
 	}
 	return deleted, nil
@@ -683,6 +800,58 @@ func parseSegmentSpan(name string) (segmentSpan, bool) {
 	return out, false
 }
 
+// canonicalSnapshotTxID returns the txid of a snapshot object name only when
+// the name is exactly what ltx.SegmentName emits for a snapshot or a paged
+// snapshot part: "<txid>.snapshot" or "<txid>.p<part>.snapshot". The decimal
+// fields must be canonical (no sign, leading zero, or extra suffix) and the
+// part index must fit the 15-bit field. Legacy, mixed, and malformed names
+// return ok=false so callers keep the decode path.
+func canonicalSnapshotTxID(name string) (uint64, bool) {
+	base, ok := strings.CutSuffix(name, ".snapshot")
+	if !ok || base == "" {
+		return 0, false
+	}
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		txid, part := base[:dot], base[dot+1:]
+		if !strings.HasPrefix(part, "p") {
+			return 0, false
+		}
+		part = part[1:]
+		if !canonicalDecimal(txid) || !canonicalDecimal(part) {
+			return 0, false
+		}
+		n, err := strconv.ParseUint(txid, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		p, err := strconv.ParseUint(part, 10, 32)
+		if err != nil || p >= ltx.MaxSnapshotParts {
+			return 0, false
+		}
+		return n, true
+	}
+	if !canonicalDecimal(base) {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(base, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func canonicalDecimal(s string) bool {
+	if s == "" || (len(s) > 1 && s[0] == '0') {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // batchSpanKnown reports whether a .batch object's name alone says what it
 // holds: ".d.batch" is all deltas and ".s.batch" is snapshot parts of one
 // watermark. Legacy and ".m.batch" names need their headers decoded.
@@ -798,14 +967,61 @@ func (m *Manager) AppendBatch(ctx context.Context, s cell.Scope, epoch uint64, s
 	return key, etag, nil
 }
 
+// ErrEpochMarkerConflict means an epoch already has a different immutable cut.
+var ErrEpochMarkerConflict = errors.New("replica: conflicting epoch marker cut")
+
 // MarkEpoch durably records that epoch starts at cut+1. It is idempotent and
 // written before the new epoch's capture can serve (ADR-275).
 func (m *Manager) MarkEpoch(ctx context.Context, s cell.Scope, epoch, cut uint64) (string, error) {
+	if cut == ^uint64(0) {
+		return "", fmt.Errorf("%w: cut overflow", ErrEpochMarkerConflict)
+	}
+	release, err := m.resourceWriteGuard(ctx, s, epoch)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	h := ltx.Header{Kind: ltx.KindMarker, Epoch: epoch, StartTxID: cut + 1, EndTxID: cut}
 	seg := ltx.Encode(h, nil)
 	key := Prefix(s, epoch) + ltx.SegmentName(h)
-	if _, err := m.B.Put(ctx, key, seg); err != nil {
+	// Legacy markers predate the fixed-key claim. Never replace or remove them.
+	keys, err := m.B.List(ctx, Prefix(s, epoch))
+	if err != nil {
 		return "", err
+	}
+	for _, existing := range keys {
+		name := strings.TrimPrefix(existing, Prefix(s, epoch))
+		if strings.HasSuffix(name, ".marker") {
+			sp, ok := parseSegmentSpan(name)
+			if !ok || !sp.marker || sp.end != cut {
+				return "", fmt.Errorf("%w: epoch %d", ErrEpochMarkerConflict, epoch)
+			}
+		}
+	}
+	// One immutable claim serializes different-cut writers across Managers and
+	// nodes. A crash before the canonical marker is repaired by a same-cut retry.
+	objects := m.resourceObjects()
+	for _, target := range []string{Prefix(s, epoch) + "epoch-cut", key} {
+		if _, err := objects.ConditionalCreate(ctx, target, seg); err != nil {
+			if !errors.Is(err, bucket.ErrPrecondition) {
+				return "", err
+			}
+			raw, _, err := objects.GetVersion(ctx, target)
+			if err != nil {
+				return "", err
+			}
+			if !bytes.Equal(raw, seg) {
+				return "", fmt.Errorf("%w: epoch %d", ErrEpochMarkerConflict, epoch)
+			}
+		}
+	}
+	// A late fence blocks service, but never removes lineage evidence.
+	fence, _, err := m.readResourceFence(ctx, s)
+	if err != nil {
+		return "", err
+	}
+	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
+		return "", ErrResourceDeleted
 	}
 	return key, nil
 }
@@ -895,10 +1111,10 @@ func (m *Manager) ReadManifest(ctx context.Context, s cell.Scope, epoch uint64) 
 	return man, true, nil
 }
 
-// DeleteObject removes a replication object (GC of superseded L0/L1 objects). A
-// missing key is not an error.
+// DeleteObject defers physical replication GC. Offline callers must explicitly
+// authorize quiescent deletion with DeleteObjectWithOptions.
 func (m *Manager) DeleteObject(ctx context.Context, key string) error {
-	return m.B.Delete(ctx, key)
+	return ErrGCDeferred
 }
 
 // ReadSegment returns the raw bytes of a segment.
@@ -1101,6 +1317,7 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 	segs := make([]Segment, 0, len(keys))
 	seen := map[string]bool{}
 	partialSnapshots := map[uint64]bool{}
+	checkedL1, completeL1 := false, false
 	for i, k := range keys {
 		raw := raws[i]
 		parts, err := ltx.Split(raw)
@@ -1119,7 +1336,19 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 					return nil, serr
 				}
 				if skip {
-					continue
+					// A completed compaction can replace an interrupted L0
+					// snapshot at the same txid. Only its full durability proof
+					// may supersede the stale snapshot-started marker.
+					if l1Set[k] && !checkedL1 {
+						completeL1, serr = m.completeBaseline(ctx, s, epoch, man)
+						if serr != nil {
+							return nil, serr
+						}
+						checkedL1 = true
+					}
+					if !l1Set[k] || !completeL1 {
+						continue
+					}
 				}
 			}
 			// Recovery re-uploads a follower's single segments, which may also be

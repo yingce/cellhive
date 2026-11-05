@@ -256,7 +256,7 @@ func (s *Server) handleControlWorkerDelete(w http.ResponseWriter, r *http.Reques
 	}()
 	// Capture bindings before deleting control metadata.
 	var classes, workflows []string
-	if proj, err := s.Control.Projection(r.Context()); err == nil {
+	if proj, err := s.projectionStrict(r.Context()); err == nil {
 		if pw, ok := proj.WorkerFor(ns, worker); ok {
 			for _, b := range pw.Version.Bindings {
 				if b.Type == "do" {
@@ -344,7 +344,7 @@ func (s *Server) handleControlAppDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var workflows []string
-	if proj, err := s.Control.Projection(r.Context()); err == nil {
+	if proj, err := s.projectionStrict(r.Context()); err == nil {
 		for _, wt := range proj.WorkflowTargets() {
 			if wt.Namespace == ns {
 				workflows = append(workflows, wt.Name)
@@ -581,6 +581,16 @@ func (s *Server) projectionCached(ctx context.Context) (control.Projection, erro
 		s.projRev.Store(rev)
 		return p, nil
 	}
+}
+
+// projectionStrict builds an authoritative projection for write paths. Unlike
+// projectionCached it never serves a stale copy on a revision read failure: a
+// mutation must fail rather than overwrite state derived from an old version.
+func (s *Server) projectionStrict(ctx context.Context) (control.Projection, error) {
+	if s.Control == nil {
+		return control.Projection{}, errors.New("control plane not configured")
+	}
+	return s.Control.Projection(ctx)
 }
 
 // controlEtag hashes a canonical view body. Callers store it opaquely and send

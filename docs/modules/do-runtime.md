@@ -37,6 +37,14 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 - facet 的 tenant env 遵循 ADR-185：只有用户 vars、当前 managed secrets 与用户命名 binding stub，零平台键；secret 在 control cell 信封加密并由 cell-agent 在加载视图中解密注入。默认由宿主创建 host-bound 原生 Tail Fetcher 捕获 facet `console.*`/异常，日志身份和凭据不进入 tenant env；`CELLHIVE_TENANT_LOG_CAPTURE=off` 可按 runtime 关闭。
 - facet WorkerCode（64 MiB）与估算 env（1016 KiB）在 `workerLoader.get()` 前复核；跨 DO 边界丢失自定义 Error 字段时，仅解析并重新校验平台规范 LimitError，再返回 code/actual/max。
 
+## 当前工作树边界（2026-11-04，未部署）
+
+host/facade 的 HTTP response 使用 stream 转发，保留空响应、状态和多值头规则；Go cell-agent DO proxy 仍缓冲至 **8MiB + 256KiB**，所以不是端到端流式。invoke JSON envelope 同为 8.25MiB 上限，fetch 请求还须给 base64 膨胀与 metadata 留余量；RPC 编码结果上限 8MiB，超限明确 413，不截断成功。输出门与未知结果不重放规则不变。
+
+`seen` 使用 10000 项 CountLRU；每 Host 源码 cache 最多 64 项且计量预算 65MiB，有效超预算源码旁路缓存继续加载。`#facetVersion` / `#facets` 仍为原生 Map，**不是 LRU**：丢弃版本身份会让原生 resident facet 错误沿用旧代码/环境。这些限额不是整个 runtime 的内存上限，facet 长期增长仍是边界。
+
+supervisor 默认 HTTPStore 总请求期限 60s（慢大 body 可能超时）；blob/segment 读取最多 64MiB，Range 还受请求长度约束；blob 写入超限返回 413。完整恢复仍持有 segment 数据，不是全程流式恢复。见 ADR-306 与 [当前问题](../known-issues.md)。
+
 ## 源码位置
 
 `cmd/do-runtime/`、`cmd/do-supervisor/`；`internal/doruntime/`、`internal/dosupervisor/`；`workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`；`workerd/platform/budget.js`。

@@ -233,7 +233,7 @@ func TestEnsureSnapshotsNewEpochForSmallCell(t *testing.T) {
 	}
 }
 
-func TestEnsureResumesLargeNewEpoch(t *testing.T) {
+func TestEnsureRejectsLargeNewEpochWithoutMarker(t *testing.T) {
 	ctx := context.Background()
 	cs, err := cellstore.New(t.TempDir())
 	if err != nil {
@@ -256,8 +256,8 @@ func TestEnsureResumesLargeNewEpoch(t *testing.T) {
 	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil }
 	m.EpochSnapshotMaxBytes = 1 // DB is larger
 	defer m.Stop()
-	if _, err := m.Ensure(ctx, sc); err != nil {
-		t.Fatal(err)
+	if _, err := m.Ensure(ctx, sc); err == nil {
+		t.Fatal("large cross-epoch capture started without a marker writer")
 	}
 	if commits != 0 {
 		t.Fatalf("large new epoch committed %d snapshot segments, want resume", commits)

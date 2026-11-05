@@ -189,16 +189,26 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
 | `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
 | `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 关) | L0→L1 压实 |
+| `CELLHIVE_COMPACTION_TIMEOUT` | `5m` | 每个 scope 单独的 compaction deadline；非正值在循环中回退 5m，不是关闭超时 |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 触发段数 |
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | 触发字节 |
+| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `8` | 新 L0 对象数触发阈值，与段数/存储字节阈值为 OR |
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` 关 | bundle/assets GC |
 | `CELLHIVE_BUNDLE_GC_GRACE` | `24h` | 未引用保留期 |
 | `CELLHIVE_AUDIT_RETENTION` | `720h` (0 永久) | 审计保留 |
 | `CELLHIVE_WORKFLOW_RETENTION` | `0` 永久 | 终态实例修剪 |
-| `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
+| `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`；另有每 worker entries/events 各 1MiB 字节预算，不是进程 RSS 上限 |
 | `CELLHIVE_METRICS_NS_MAX` | `1000` | `/metrics` 上租户可归因指标的 ns 标签上限：超出记 `other`，空 ns 记 `platform`，0=不限（ADR-179） |
 | `CELLHIVE_BINDING_CACHE` | `1s` (0 关) | binding 声明缓存 |
 | `CELLHIVE_NS_RATE` | 空（关） | 每 ns 写准入 `rps[/burst]`（缺省 burst=rps） |
+
+### 当前工作树的固定 I/O 边界（未部署）
+
+**复制 GC 契约（ADR-307，实施与验收中）**：compaction 继续发布，物理删除 covered L0/旧 L1/`RetireEpochs` payload 默认 DEFERRED。Go option `OfflineQuiescent bool` 默认 `false`，不是环境变量；`Options.GC` 仅表示清理意图。仅调用者外部停止并排空 writers **和 readers** 且持续保持静默时才可显式启用离线破坏性删除。生产后台不得启用，compaction interval/timeout/阈值不能绕过；无 owner 或 nil `Verify` 不是许可。配置的逐次删除前 `Verify` 只停止已观察到的 owner 丢失，不是原子 fence；可选 payload ETag 也不能证明 owner。保护对象、完整证明及确定性 `ReportDeferredGC`/`GCSkipped` 见 [存储](storage-and-s3.md)。桶增长与历史 List 成本保留，不新增 pending-deletion registry；bundle/assets GC 配置与运维语义不变，无新增生产/env 开关，未部署。
+
+原生 COS/OSS 与 S3 的对象读取默认 **512MiB**，S3 可通过 Go `S3Options.MaxReadBytes` 覆盖（不是环境变量）。provider 默认连接/响应头各 30s、TLS 10s，无统一 body 总超时，正文依赖调用 context。默认 peer HTTP client **30s 总超时**，do-supervisor `HTTPStore` **60s 总超时**（包括 body）；注入自定义 client 可改变默认值，慢链路的大传输仍可能超时。
+
+supervisor blob/segment 读取 **64MiB**，Range 按请求长度且不超过 segment 上限；blob PUT 超过 64MiB 返回 **413**，不得静默截断成功。分页 `MinBytes` 按 SQLite image 判断，索引提前退出仅适用于零 L0；不是任意小压缩尾部都可跳过。详见 ADR-306 与 [存储](storage-and-s3.md)。
 
 ## cell-agent：控制面 / 域名 / DO
 

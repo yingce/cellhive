@@ -68,14 +68,18 @@ func (s *Server) handleLogIngest(w http.ResponseWriter, r *http.Request) {
 		if tid == "" {
 			tid, sid = telemetry.TraceIDs(reqTP)
 		}
-		added := s.Logs.Add(logbuf.Entry{
+		result := s.Logs.AddEntry(logbuf.Entry{
 			Namespace: ns, Worker: worker, Level: e.Level, Message: e.Message,
 			MessageArgs: e.MessageArgs,
 			RequestID:   e.RequestID, TraceID: tid, SpanID: sid, AtMs: e.AtMs,
 		})
+		if !result.Stored {
+			continue
+		}
+		added := result.Entry
 		// Optional OTLP export (ADR-172): off by default, and "tail" mode only
 		// exports workers with an active subscription. Best-effort/non-blocking.
-		telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, telemetry.LogMetadata{MessageArgs: e.MessageArgs, RequestID: e.RequestID})
+		telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, telemetry.LogMetadata{MessageArgs: added.MessageArgs, RequestID: e.RequestID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(entries) + len(batch.Events)})
 }
@@ -145,7 +149,7 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 	if event.Exceptions == nil {
 		event.Exceptions = []logbuf.TailException{}
 	}
-	s.Logs.AddEvent(event)
+	_, stored := s.Logs.AddEventResult(event)
 	tid, sid := telemetry.TraceIDs(event.Traceparent)
 	if tid == "" {
 		tid, sid = telemetry.TraceIDs(reqTP)
@@ -170,6 +174,9 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 	if export {
 		telemetry.ExportLogWithMetadata(ns, worker, level, "invocation", event.EventTimestamp, tid, sid, invocation)
 	}
+	if !stored {
+		return
+	}
 	for _, line := range event.Logs {
 		parts := make([]string, 0, len(line.Message))
 		for _, arg := range line.Message {
@@ -186,9 +193,13 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 		if at == 0 {
 			at = event.EventTimestamp
 		}
-		added := s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: line.Level, Message: strings.Join(parts, " "), MessageArgs: line.Message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
+		result := s.Logs.AddEntry(logbuf.Entry{Namespace: ns, Worker: worker, Level: line.Level, Message: strings.Join(parts, " "), MessageArgs: line.Message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
+		if !result.Stored {
+			continue
+		}
+		added := result.Entry
 		lineMeta := meta
-		lineMeta.MessageArgs = line.Message
+		lineMeta.MessageArgs = added.MessageArgs
 		if export {
 			telemetry.ExportLogWithMetadata(ns, worker, added.Level, added.Message, added.AtMs, added.TraceID, added.SpanID, lineMeta)
 		}
@@ -202,7 +213,7 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 		// Keep the exception line in the live tail ring, but do not export a
 		// second OTLP log: the invocation export already carries the full
 		// exception list and one request must produce one stored log row.
-		_ = s.Logs.Add(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
+		_ = s.Logs.AddEntry(logbuf.Entry{Namespace: ns, Worker: worker, Level: "error", Message: message, RequestID: event.RequestID, EventType: event.EventType, Outcome: event.Outcome, ScriptVersion: event.ScriptVersion, Exceptions: event.Exceptions, TraceID: tid, SpanID: sid, AtMs: at})
 	}
 }
 
@@ -276,6 +287,22 @@ func (s *Server) fanOutLogSubscribe(ctx context.Context, ns, worker string, ttl 
 	if last, ok := s.logFan[key]; ok && now.Sub(last) < logFanoutEvery {
 		s.logFanMu.Unlock()
 		return
+	}
+	// Entries older than the throttle window no longer suppress anything, so
+	// they can be dropped. Bounding the map prevents an authenticated tail of
+	// many distinct workers from growing it without limit.
+	if len(s.logFan) >= 4096 {
+		for k, last := range s.logFan {
+			if now.Sub(last) >= logFanoutEvery {
+				delete(s.logFan, k)
+			}
+		}
+		for k := range s.logFan {
+			if len(s.logFan) < 4096 {
+				break
+			}
+			delete(s.logFan, k)
+		}
 	}
 	s.logFan[key] = now
 	s.logFanMu.Unlock()

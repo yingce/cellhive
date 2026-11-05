@@ -11,6 +11,12 @@
 // structured clone's observable behaviour for prototypes.
 
 export const MAX_RPC_BYTES = 8 * 1024 * 1024;
+// The DO invoke envelope and RPC are JSON, not streams. Keep them within the
+// same wire budget the Go sharding proxy enforces (8 MiB + 256 KiB). A fetch
+// request body is base64-expanded inside that envelope, so its raw limit leaves
+// headroom for identity fields, headers and JSON punctuation.
+export const MAX_DO_ENVELOPE_BYTES = 8 * 1024 * 1024 + 256 * 1024;
+export const MAX_DO_REQUEST_BYTES = Math.floor((MAX_DO_ENVELOPE_BYTES - 64 * 1024) * 3 / 4);
 const MAX_RPC_DEPTH = 256;
 
 // Method names allowed over RPC: identifiers only. Reserved names cover the DO

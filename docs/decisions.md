@@ -3714,3 +3714,33 @@ DO 直连票据使用 `token/do-ticket` 用途隔离的 JWT，除 namespace/work
 ADR-211 的指数退避只限制重试频率，没有次数上限。租户 handler 的永久错误（例如飞书 webhook token 失效）会让同一 occurrence 每 5 分钟重试一次，长期占用 timer/SQLite/日志，并掩盖真正的失败原因。Cloudflare 的公开契约是 `ScheduledController.noRetry()`：租户可把本次标记为不可重试；CellHive 已支持该路径（`no_retry=true` 直接消费 slot）。
 
 本次补充平台侧安全网：新增 `CELLHIVE_CRON_MAX_ATTEMPTS`（默认 **10**，0=保持无上限）。`ScheduleRetryBounded` 在同一个 cell 事务内递增 attempt；达到预算时不写新的 retry 行，而是写 fired 标记、删除 timer 和 retry 行，`DispatchDueWithCommit` 输出 `timer dispatch exhausted`（含 `attempt`、`max_attempts`、`retry_scheduled=false`）并记录 `cron|exhausted` 指标。成功、`noRetry()` 和未达预算的失败仍沿用 ADR-211 的 5 秒→5 分钟退避；原 slot/due_ms 不变，cron 调度器会在下一个匹配分钟重新物化新的 slot。该预算只在平台侧兜底，不替代租户对永久错误的 `noRetry()` 处理。
+
+## ADR-306 性能缓存与有界 I/O 的安全边界（2026-11-04，增量本地验收通过，未提交、未部署）
+
+本批增加资源限额及缓存可见性边界，不改变 owner/epoch/lineage 或 RPO=0 确认协议。源码实现、局部回归和整合验收分开记录，最新状态见 [known-issues](known-issues.md)。初始审计候选不是已经复现的性能缺陷，更不是统一的 P0。
+
+- 对象读取默认 512MiB（原生 COS/OSS、S3；S3 可由 `S3Options.MaxReadBytes` 覆盖）；超限明确失败、不返回截断数据。supervisor blob/segment 为 64MiB，blob PUT 超限 413。provider 默认连接/响应头各 30s、TLS 10s，body 仍由调用 context 约束；默认 peer HTTP 总期限 30s、supervisor HTTPStore 总期限 60s。慢链路大 body 可能失败，不把这些默认值描述为完整恢复/后台 Range 的统一超时修复。
+- compaction 每 scope 独立 deadline 默认 5m，失败不无限占住这一 scope 的本轮工作。名称预检只信严格 canonical 范围；covered-L0 快捷 GC 要求持久 index 水位不低于 manifest 水位并复核 owner。缺失/落后 index 延后 GC、读错不删；未知/混合/跨水位输入不走快捷 GC。分页小 image 提前退出只允许零 L0，不能由压缩字节数证明解码 image 小。
+- 读/派发投影可复用 5s TTL/single-flight 视图，不能据此宣称发布同步可见；涉及 mutation 的派生配置必须用 strict 权威读取，失败不得用旧视图覆盖新状态。全部 mutator 的 `projectionStrict`、owner 原子 read-fence guard 与防止 trim 后 `0==0` 的 `cacheEpoch` 已完成本地增量验证，不因引入缓存而放松检查。
+- invocation 的 7 天/10000 条为软保留目标，清理由写入触发，首次及随后 1 分钟或 256 次写运行，每条年龄/数量清理查询至多 1000 行；旧时间戳记录可强制清理。timer 只记录已保留的索引优化，不采用省掉提交后 `NextDue` 对账的方案。
+- Go logbuf 每 worker entries/events 各 1MiB；Entry message/args 各 64KiB，异常最多 16 个、message 8KiB/stack 16KiB。拒绝记录不分配 seq，已保留记录可因容量淘汰。截断/拒绝/淘汰是可观测数据损失，不是业务失败或持久确认。该预算不等于进程 RSS 上限。
+- bundle 源码 cache 65MiB 是保留预算而非准入限额；有效超预算源码旁路缓存继续加载，WorkerCode/env/runtime capacity 校验仍独立生效。DO `seen` 可用 10000 项 CountLRU，但 native facet/version 身份 Map 不得以普通 LRU 丢弃，以免 resident 沿用旧版本。WS pinned 状态须重新查询，不能永久锁存。
+- HTTP response stream 转发仅覆盖 workerd JS hops，Go DO proxy 仍缓冲到 8.25MiB；invoke JSON envelope 同为 8.25MiB，RPC 编码结果 8MiB，超限明确错误。不得把这一改动宣传为端到端 DO fetch 或完整恢复流式化。
+
+增量审查 ACCEPT：本批引入的四个阻塞项已修复，native facet/version Maps 与 timer 提交后 fresh `syncIndex` 已恢复，保留 pre-Put 崩溃安全顺序及新索引；owner fence 与 strict mutation 如上。最终本地 Node 141/141、全量 Go、vet、timer/owner race、focused server 与真实 pinned user-runtime/do-runtime 测试通过，详见 [known-issues](known-issues.md)；不是早期 134 项结果，也不是生产验收或 GA。
+
+未纳入完成声明：完整恢复内存/流式化、旧 epoch GC 成本、所有 Range/后台超时覆盖、慢链路风险。有效源码按 UTF-16 权重超过 65MiB 时旁路缓存，仍可能 thrash；native facet Maps 无界保留的既有内存边界未消除，该优化已撤回。timer 失败 Delete 与并发 publish 的既有窄窗口仍可能存在。用户提出的六项 epoch/lineage 协议缺陷仍是发布门禁；后续修订状态与 GC 边界以 ADR-307 为准，本批增量接受不解除该门禁。
+
+## ADR-307 复制物理 GC 默认延后与离线静默边界（2026-11-04，契约先行，实施与验收中，未部署）
+
+数据正确性优先。最终 epoch 审查确认：跨 owner 对象与待删 payload 的检查/删除没有原子性，现有协议也不能证明 pinned readers 已退出或 lineage cut 对所有读者安全。owner 复核、索引水位及 payload ETag 均不能单独构成在线删除证明。本决策收紧 ADR-306 及此前复制 GC 描述；不改变 bundle/assets 运维 GC，不新增 pending-deletion registry。
+
+- **默认 DEFERRED**：compaction 继续生成并发布 L1、manifest/index；自动物理复制 GC 不删除 covered L0、旧 L1 或 `RetireEpochs` payload。`Options.GC` 只表达清理意图，不构成删除授权。
+- **唯一显式离线开关**：相关删除 options 使用 `OfflineQuiescent bool`，零值/default 为 `false`。只有调用者在外部停止并排空该范围的所有 writers **和 readers**、并在整个删除期间保持静默，才可显式设为 `true` 执行破坏性清理。此布尔值是调用者承担的前提，不是系统自动取得的锁或证明；缺少 owner、`Verify == nil` 都不是删除许可。生产后台不得启用；调整 interval、timeout 或阈值不能绕过默认延后，不新增生产环境变量开关。
+- 离线破坏性模式仍逐次 Delete 前执行配置的 `Verify`；观察到 owner 丢失立即停止，不继续后续删除。检查成功到 Delete 之间仍有窗口，不能称为原子 owner fence。可选 payload ETag 只约束该对象版本，不证明 owner、reader 或 lineage 安全；无 ETag 不能放宽静默前提。
+- 所有模式都保留 marker、link、不可变 epoch-cut、snapshot-started/done 以及未知名称对象；不得用名称猜测或宽前缀删除绕过保护。离线许可也不豁免 manifest/index 完整覆盖证明、对象分类与错误时不删的要求。
+- `ReportDeferredGC` / `GCSkipped` 必须确定性报告延后与原因：相同输入和模式得到相同结果，不受枚举顺序影响，不把未执行的 Delete 记成成功。默认延后不得阻断压实发布，也不得伪报已回收字节；已观察到的读取/验证错误不能伪装成清理成功。
+
+同步的 epoch/lineage 修复契约仍在实施与验收：新增 **不可变 epoch-cut** 记录确定的继承截止点，不以可变 manifest 代替历史 cut；manifest/index 必须提供完整 baseline/覆盖证明，仅水位相等或更高不足以证明完整；cut 必须在 prune 前持久化，不能先删除再补 lineage；大 marker 所需持久化必须在 Serve 前完成。marker/link 与 snapshot-started/done 的恢复语义继续保留。这些修复不等于读者已 pin generation，也不解除默认物理 GC 延后。
+
+代价：桶中历史 payload 持续增长，历史 List/扫描开销保留，不能宣传为存储空间有界。完整在线 GC 仍需未来的 generation descriptor、单调 epoch reference 与 reader pinning 协议及并发/崩溃证明，目前未解决。验收需覆盖默认不删、显式离线删除、每次删除前观察 owner 丢失后停止、所有保护对象保留、确定性延后输出以及压实继续发布。此处仅记录目标契约，不宣称实现完成、测试通过、已提交或已部署。

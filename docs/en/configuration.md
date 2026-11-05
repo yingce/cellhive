@@ -4,6 +4,10 @@ Configuration implementation lives in `internal/config/config.go` and runtime/CL
 
 ## Parsing Rules
 
+**Replication GC contract (ADR-307, implementation and acceptance in progress, not deployed):** compaction keeps publishing, while physical covered-L0/old-L1/`RetireEpochs` payload deletion defaults to DEFERRED. Go option `OfflineQuiescent bool` defaults to `false`; it is not an environment variable. `Options.GC` expresses intent only. Explicit offline deletion requires callers to externally quiesce all writers AND readers throughout deletion. Production background never opts in; intervals/timeouts/thresholds cannot bypass. Absent owner and nil `Verify` are not permission. Configured per-delete `Verify` stops observed loss, not the check/delete race; optional payload ETag does not prove ownership. Protected objects, complete proofs and deterministic `ReportDeferredGC`/`GCSkipped` follow [storage](storage-and-s3.md). Bucket growth and historical List costs remain; no pending-deletion registry or new production/env switch. Bundle/assets ops GC settings are unchanged.
+
+**Current uncommitted performance batch, not deployed (ADR-306):** `CELLHIVE_COMPACTION_TIMEOUT` defaults to 5m per scope; nonpositive values fall back to 5m. `CELLHIVE_COMPACTION_MIN_OBJECTS=8` is an OR trigger alongside segment/stored-byte thresholds. Go logbuf adds independent 1MiB entry/event retention budgets per worker. Native COS/OSS and S3 object reads default to 512MiB (`S3Options.MaxReadBytes` is a Go override, not an environment variable). Supervisor blobs/segments are capped at 64MiB; oversized blob PUT returns 413. Default peer/HTTPStore total timeouts are 30s/60s; provider connect/header limits are 30s, TLS 10s, with bodies governed by caller context. See [current configuration](../configuration.md) for exact boundaries and unresolved slow-link risks.
+
 | Type | Rule |
 |---|---|
 | String | Unset or empty string → default value |

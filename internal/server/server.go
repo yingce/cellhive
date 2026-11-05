@@ -1814,9 +1814,13 @@ func (s *Server) handlePutBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "no_bucket", "object store not configured")
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxArtifactBytes))
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxArtifactBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+		return
+	}
+	if len(data) > maxArtifactBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "too_large", "blob exceeds cap")
 		return
 	}
 	if _, err := st.Put(r.Context(), r.URL.Query().Get("key"), data); err != nil {

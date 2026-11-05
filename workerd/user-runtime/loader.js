@@ -14,7 +14,7 @@
 import { bindingStub, setServiceLoader } from "bindings.js";
 import { authorized, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
-import { ByteLRU, Lifetime, RuntimeCapacity, textWeight, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
+import { ByteLRU, Lifetime, RuntimeCapacity, cacheSource, sourceCache, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 import { tailQuery, readLogCapture } from "log-tail.js";
@@ -53,7 +53,7 @@ const hostCache = new LRU(10000);
 // envCache: disjoint active-pointer and immutable-incarnation query identities.
 const envCache = new ByteLRU(2000, 16*1024*1024, jsonWeight);
 const envInflight = new Map(); // "ns/worker@version" -> Promise
-const bundleCache = new ByteLRU(2000, 32*1024*1024, textWeight); // sha -> source
+const bundleCache = sourceCache(2000); // sha -> source
 const bundleInflight = new Map(); // sha -> Promise
 const assetCache = new ByteLRU(4000, 32*1024*1024, v=>v?v.byteLength:0, 1024*1024+1024);
 const metaCache = new ByteLRU(4000, 4*1024*1024, jsonWeight);
@@ -68,7 +68,9 @@ let retiringCount = 0; // entries with retiring=true and !pinned
 function markRetiring(e){
   if(e.retiring)return;
   e.retiring=true;
-  if(!e.pinned)retiringCount++;
+  // Pinned entries remain counted so the sweeper keeps querying the child for
+  // the live-socket state instead of latching them forever.
+  retiringCount++;
 }
 // Warm-isolate bounds are deployment-configurable (CH_ISOLATE_MAX/BYTES); the
 // Go supervisor derives defaults from the node/cgroup memory limit.
@@ -105,13 +107,20 @@ function managedStub(env,ctx,entry) {
   }));
 }
 async function sweepResidents(env,ctx) {
+  let pinnedRemain=false;
   for(const [key,e] of residents){
-    if(!e.retiring||e.cleaning||!e.life.idle()||e.pinned)continue;
+    if(!e.retiring||e.cleaning)continue;
+    // A pinned entry is intentionally still queried: only the child knows when
+    // its last WebSocket closed. Active non-pinned work still needs no status
+    // round trip.
+    if(!e.pinned&&!e.life.idle())continue;
     e.cleaning=(async()=>{
       try{
         const ctl=managedStub(env,ctx,e).getEntrypoint('CellHiveLifecycle');
         const status=await ctl.status();
-        if(status.pinned){if(e.retiring&&!e.pinned)retiringCount--;e.pinned=true;return;}
+        const liveSockets=Number.isSafeInteger(status.sockets)?status.sockets:null;
+        if(status.pinned||liveSockets>0){e.pinned=true;pinnedRemain=true;return;}
+        if(e.pinned)e.pinned=false;
         // The host lease is taken in residentWorker(), not here. Re-check it
         // after the async status() round trip: a request may have acquired the
         // entry while we were waiting, and retiring it would abort that request.
@@ -120,7 +129,7 @@ async function sweepResidents(env,ctx) {
         catch(err){if(!/internal error; reference =|execution.*abort|disconnected/i.test(String(err)))throw err;}
         if(residents.get(key)===e){
           residents.delete(key);
-          if(e.retiring&&!e.pinned)retiringCount--;
+          if(e.retiring)retiringCount--;
           latestVersionByFamily.delete(e.family);
           isolateCapacity(env).release(key);
         }
@@ -132,17 +141,35 @@ async function sweepResidents(env,ctx) {
     await e.cleaning;
     e.cleaning=null;
   }
+  return pinnedRemain;
 }
-function scheduleSweep(env,ctx){
-  if(retiringCount<=0)return;
-  ctx.waitUntil((async()=>{
-    // Bounded retry for waitUntil/stream teardown; later requests also sweep.
-    for(let i=0;i<100;i++){
-      await sweepResidents(env,ctx);
-      if(retiringCount<=0)return;
-      await new Promise(resolve=>setTimeout(resolve,50));
-    }
-  })());
+// One module-level sweeper for the isolate instead of a per-request fanout.
+// Requests only schedule it via ctx.waitUntil; the hot path never awaits it.
+// Capacity-pressure admission may force/await the same in-flight promise.
+const SWEEP_INTERVAL_MS = 500;
+const SWEEP_PINNED_INTERVAL_MS = 1000;
+let sweepInflight = null;
+let sweepStartedAt = 0;
+function scheduleSweep(env,ctx,force=false){
+  if(retiringCount<=0)return null;
+  if(sweepInflight)return sweepInflight;
+  const now=Date.now();
+  if(!force&&now-sweepStartedAt<SWEEP_INTERVAL_MS)return null;
+  sweepStartedAt=now;
+  const p=(async()=>{
+    try{
+      // Bounded retry for waitUntil/stream teardown; later requests also sweep.
+      // While a WebSocket is live (pinned) keep querying, but at a lower rate.
+      for(let i=0;i<100;i++){
+        const pinned=await sweepResidents(env,ctx);
+        if(retiringCount<=0)return;
+        await new Promise(resolve=>setTimeout(resolve,pinned?SWEEP_PINNED_INTERVAL_MS:50));
+      }
+    }finally{sweepInflight=null;}
+  })();
+  sweepInflight=p;
+  if(ctx&&typeof ctx.waitUntil==="function")ctx.waitUntil(p.catch(()=>{}));
+  return p;
 }
 async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
   const capacity = isolateCapacity(env);
@@ -160,9 +187,9 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
       // loaded. Keep both resident; the capacity sweep can reclaim them later.
     }
   }
-  // Avoid an async suspension on the steady-state fetch path. Existing
-  // retirement candidates still get swept before a new resident is used.
-  if(retiringCount>0)await sweepResidents(env,ctx);
+  // Avoid an async suspension on the steady-state fetch path: schedule at most
+  // one module-level sweep via waitUntil instead of sweeping per request.
+  scheduleSweep(env,ctx);
   let e=residents.get(key);
   if(e?.cleaning){await e.cleaning;e=residents.get(key);}
   if(!e){
@@ -174,7 +201,10 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
     const weight=3*estimateWorkerCode(e.code)+2*1024*1024+jsonWeight(version)+jsonWeight(plan.spec);
     if(!capacity.reserve(key,weight)){
       for(const old of residents.values())if(old.life.idle())markRetiring(old);
-      await sweepResidents(env,ctx);
+      // Admission is a cold path; it may force/await the shared sweeper so the
+      // new resident either fits or fails closed without a per-request fanout.
+      const sweep=scheduleSweep(env,ctx,true);
+      if(sweep)await sweep;
       if(!capacity.reserve(key,weight))throw new Error('runtime_capacity');
       e=residents.get(key)||e;
     }
@@ -1194,8 +1224,7 @@ async function bundle(env, sha) {
       if (!r) r = await fetch(env.CELL_URL + "/v1/internal/bundle" + q, { headers });
       if (!r.ok) throw new Error("GET bundle " + sha + " -> " + r.status);
       const src = await r.text();
-      bundleCache.set(sha, src);
-      return src;
+      return cacheSource(bundleCache, sha, src);
     } finally {
       bundleInflight.delete(sha);
     }

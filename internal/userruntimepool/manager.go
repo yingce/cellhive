@@ -109,6 +109,16 @@ func (m *Manager) keyLaunch(key workerdpool.FunctionKey) *sync.Mutex {
 	return launch
 }
 
+func (m *Manager) pruneLaunches(keep map[workerdpool.FunctionKey]struct{}) {
+	m.launchMu.Lock()
+	for key := range m.launches {
+		if _, ok := keep[key]; !ok {
+			delete(m.launches, key)
+		}
+	}
+	m.launchMu.Unlock()
+}
+
 func (m *Manager) control() {
 	defer close(m.done)
 	ticker := time.NewTicker(time.Second)
@@ -135,14 +145,19 @@ func (m *Manager) reconcile() {
 	counts := m.counts
 	m.counts = map[workerdpool.FunctionKey]int{}
 	keys := make([]workerdpool.FunctionKey, 0, len(m.last))
+	keep := make(map[workerdpool.FunctionKey]struct{}, len(m.last))
 	for key, last := range m.last {
 		if now.Sub(last) > 10*time.Minute {
 			delete(m.last, key)
 		} else {
 			keys = append(keys, key)
+			keep[key] = struct{}{}
 		}
 	}
 	m.mu.Unlock()
+	// Launch mutexes are only needed while a key is active. Drop idle ones so a
+	// long-lived process with churning functions does not grow this map forever.
+	m.pruneLaunches(keep)
 	for _, key := range keys {
 		// Requests/sec is a first measured signal, not CPU attribution. Production
 		// promotion also needs queue wait/capability placement validation.

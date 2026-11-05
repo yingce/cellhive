@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -29,6 +29,13 @@ type S3Options struct {
 	Debug     bool
 	// Legacy provider S3 gateways do not accept SDK trailer checksums.
 	DisableOptionalChecksums bool
+	// HTTPClient overrides the transport. Nil uses a bounded default with
+	// connect/TLS/response-header timeouts and no whole-request timeout, so
+	// large bodies stream under the caller's context.
+	HTTPClient *http.Client
+	// MaxReadBytes bounds one whole-object read (Get/TailGet) and one ranged
+	// read. Zero uses DefaultMaxObjectBytes.
+	MaxReadBytes int64
 }
 
 // S3Bucket is an S3-compatible Bucket implementation (AWS S3 / R2 / MinIO).
@@ -39,6 +46,7 @@ type S3Bucket struct {
 	client  *s3.Client
 	presign *s3.PresignClient
 	bucket  string
+	maxRead int64
 
 	puts    atomic.Uint64
 	gets    atomic.Uint64
@@ -53,8 +61,15 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 	if o.Region == "" {
 		o.Region = "us-east-1"
 	}
+	if o.HTTPClient == nil {
+		o.HTTPClient = newBoundedHTTPClient()
+	}
+	if o.MaxReadBytes <= 0 {
+		o.MaxReadBytes = DefaultMaxObjectBytes
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(o.Region),
+		awsconfig.WithHTTPClient(o.HTTPClient),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(o.AccessKey, o.SecretKey, "")),
 	)
 	if err != nil {
@@ -76,7 +91,7 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 			opts.UsePathStyle = o.PathStyle
 		}
 	})
-	return &S3Bucket{client: client, presign: s3.NewPresignClient(client), bucket: o.Bucket}, nil
+	return &S3Bucket{client: client, presign: s3.NewPresignClient(client), bucket: o.Bucket, maxRead: o.MaxReadBytes}, nil
 }
 
 func unquote(etag string) string { return strings.Trim(etag, `"`) }
@@ -116,7 +131,7 @@ func (b *S3Bucket) Get(ctx context.Context, key string) ([]byte, string, error) 
 		return nil, "", err
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	data, err := readAllBounded(key, out.Body, readContentLength(out.ContentLength), b.maxRead)
 	if err != nil {
 		return nil, "", err
 	}
@@ -125,6 +140,12 @@ func (b *S3Bucket) Get(ctx context.Context, key string) ([]byte, string, error) 
 
 // RangedGet implements Bucket.
 func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	if off < 0 || length <= 0 {
+		return nil, "", fmt.Errorf("bucket: invalid range off=%d length=%d", off, length)
+	}
+	if length > b.maxRead {
+		return nil, "", objectTooLarge(key, length, b.maxRead)
+	}
 	b.gets.Add(1)
 	rng := fmt.Sprintf("bytes=%d-%d", off, off+length-1)
 	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng})
@@ -135,7 +156,7 @@ func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64)
 		return nil, "", err
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	data, err := readAllBounded(key, out.Body, readContentLength(out.ContentLength), length)
 	if err != nil {
 		return nil, "", err
 	}
@@ -181,7 +202,7 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		return data, size, etag, nil
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	data, err := readTailBounded(key, out.Body, n, readContentLength(out.ContentLength), b.maxRead)
 	if err != nil {
 		return nil, 0, "", err
 	}

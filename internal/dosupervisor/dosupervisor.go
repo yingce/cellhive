@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -188,12 +189,56 @@ type BlobStore interface {
 	PutBlob(ctx context.Context, key string, data []byte) error
 }
 
+const (
+	defaultHTTPTimeout = 60 * time.Second
+	// maxBlobBytes matches cell-agent's /v1/internal/blob write cap
+	// (maxArtifactBytes) and its supervisor metadata role.
+	maxBlobBytes int64 = 64 << 20
+	// maxSegmentBytes matches cell-agent's replication segment cap; restore
+	// ranges are bounded by the requested range instead.
+	maxSegmentBytes int64 = 64 << 20
+)
+
+var errBodyTooLarge = errors.New("dosupervisor: response body exceeds limit")
+
+func newDefaultHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: defaultHTTPTimeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   16,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
+
+func readBodyBounded(body io.Reader, contentLength, max int64) ([]byte, error) {
+	if contentLength > max {
+		return nil, fmt.Errorf("%w: content length %d > %d", errBodyTooLarge, contentLength, max)
+	}
+	limit := max
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	data, err := io.ReadAll(io.LimitReader(body, limit))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("%w: read %d > %d", errBodyTooLarge, len(data), max)
+	}
+	return data, nil
+}
+
 // GetBlob/PutBlob implement BlobStore over cell-agent's /v1/internal/blob.
 func (h *HTTPStore) GetBlob(ctx context.Context, key string) ([]byte, error) {
-	cl := h.Client
-	if cl == nil {
-		cl = http.DefaultClient
-	}
+	cl := h.client()
 	u := fmt.Sprintf("%s/v1/internal/blob?key=%s", strings.TrimRight(h.Base, "/"), url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -213,14 +258,14 @@ func (h *HTTPStore) GetBlob(ctx context.Context, key string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("dosupervisor: get blob %s: status %d", key, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return readBodyBounded(resp.Body, resp.ContentLength, maxBlobBytes)
 }
 
 func (h *HTTPStore) PutBlob(ctx context.Context, key string, data []byte) error {
-	cl := h.Client
-	if cl == nil {
-		cl = http.DefaultClient
+	if int64(len(data)) > maxBlobBytes {
+		return fmt.Errorf("%w: blob %s is %d bytes > %d", errBodyTooLarge, key, len(data), maxBlobBytes)
 	}
+	cl := h.client()
 	u := fmt.Sprintf("%s/v1/internal/blob?key=%s", strings.TrimRight(h.Base, "/"), url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(data))
 	if err != nil {
@@ -329,7 +374,7 @@ func (h *HTTPStore) listKeys(ctx context.Context, cl *http.Client, scope cell.Sc
 	return body.Keys, nil
 }
 
-func (h *HTTPStore) readSegment(ctx context.Context, cl *http.Client, key string, rng string) ([]byte, int, error) {
+func (h *HTTPStore) readSegment(ctx context.Context, cl *http.Client, key string, rng string, max int64) ([]byte, int, error) {
 	u := fmt.Sprintf("%s/v1/internal/segment?key=%s", strings.TrimRight(h.Base, "/"), url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -352,15 +397,17 @@ func (h *HTTPStore) readSegment(ctx context.Context, cl *http.Client, key string
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, resp.StatusCode, fmt.Errorf("dosupervisor: read segment %s: status %d", key, resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := readBodyBounded(resp.Body, resp.ContentLength, max)
 	return data, resp.StatusCode, err
 }
+
+var defaultStoreHTTPClient = newDefaultHTTPClient()
 
 func (h *HTTPStore) client() *http.Client {
 	if h.Client != nil {
 		return h.Client
 	}
-	return http.DefaultClient
+	return defaultStoreHTTPClient
 }
 
 // httpBucket is a read-only bucket view over cell-agent's segment endpoints. Its
@@ -391,13 +438,20 @@ func (b *httpBucket) ensureKeys(ctx context.Context) error {
 }
 
 func (b *httpBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	data, _, err := b.store.readSegment(ctx, b.store.client(), key, "")
+	data, _, err := b.store.readSegment(ctx, b.store.client(), key, "", maxSegmentBytes)
 	return data, "", err
 }
 
 func (b *httpBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	if length <= 0 {
+		return nil, "", fmt.Errorf("dosupervisor: invalid range length %d", length)
+	}
 	end := off + length - 1
-	data, _, err := b.store.readSegment(ctx, b.store.client(), key, fmt.Sprintf("bytes=%d-%d", off, end))
+	max := length
+	if max > maxSegmentBytes {
+		max = maxSegmentBytes
+	}
+	data, _, err := b.store.readSegment(ctx, b.store.client(), key, fmt.Sprintf("bytes=%d-%d", off, end), max)
 	if err != nil {
 		return nil, "", err
 	}

@@ -5,6 +5,7 @@
 
 import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
+  MAX_DO_ENVELOPE_BYTES, MAX_DO_REQUEST_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 
@@ -222,6 +223,67 @@ export function makeKV(platform, ns, scopeToken) {
   };
 }
 
+function tooLarge(kind, max) {
+  const err = new Error("do: " + kind + " exceeds " + max + " bytes");
+  err.name = "RangeError";
+  err.code = "do_body_too_large";
+  err.status = 413;
+  return err;
+}
+
+function concatBytes(chunks, total) {
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+  return out;
+}
+
+// Request bodies become base64 inside a JSON envelope, so they cannot stream to
+// the owner. Read with the cap enforced chunk-by-chunk and cancel at max+1
+// instead of buffering an arbitrarily large chunked body before rejecting it.
+async function boundedBody(req, max) {
+  if (!req.body || typeof req.body.getReader !== "function") {
+    const bytes = await req.arrayBuffer();
+    if (bytes.byteLength > max) throw tooLarge("request body", max);
+    return bytes;
+  }
+  const reader = req.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > max) {
+        try { await reader.cancel(); } catch (e) { /* already closed */ }
+        throw tooLarge("request body", max);
+      }
+      chunks.push(part.value);
+    }
+    return concatBytes(chunks, total);
+  } catch (err) {
+    if (!err || err.code !== "do_body_too_large") {
+      try { await reader.cancel(); } catch (e) { /* already closed */ }
+    }
+    throw err;
+  }
+}
+
+// DO fetch responses are relayed as streams. For HEAD/204/205/304 the body must
+// be empty; cancel the upstream stream so the owner can release it.
+function relayBody(res, method) {
+  if (method === "HEAD" || [204, 205, 304].includes(res.status) || !res.body) {
+    try {
+      const pending = res.body && res.body.cancel();
+      if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    } catch (e) { /* already locked or consumed */ }
+    return null;
+  }
+  return res.body;
+}
+
 // Durable Object binding (ADR-080): env.DO.get(id).fetch(...) is placed by
 // cell-agent onto a do-runtime by shard. HTTP bodies use a byte-safe envelope.
 export function makeDO(platform, spec) {
@@ -260,8 +322,8 @@ export function makeDO(platform, spec) {
         throw new Error("do: direct invoke failed: " + (e && e.message ? e.message : e));
       }
       if (direct.ok || direct.headers.get("x-cellhive-do-app") === "1") return direct;
-      if (direct.status === 409 || direct.status >= 500) {
-        // 409 result_unknown and 5xx may have executed; never replay.
+      if (direct.status === 409 || direct.status === 413 || direct.status >= 500) {
+        // 409 result_unknown, 413 oversize and 5xx may have executed; never replay.
         if (allowErrorResponse) return direct;
         throw new Error("do: " + direct.status + " " + (await direct.text()));
       }
@@ -331,7 +393,13 @@ export function makeDO(platform, spec) {
     const url = new URL(req.url);
     let body_base64;
     if (method !== "GET" && method !== "HEAD" && req.body !== null) {
-      body_base64 = base64Queue(await req.arrayBuffer());
+      const declared = Number(req.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_DO_REQUEST_BYTES) {
+        try { const pending = req.body && req.body.cancel(); if (pending && pending.catch) pending.catch(() => {}); } catch (e) { /* closed */ }
+        throw tooLarge("request body", MAX_DO_REQUEST_BYTES);
+      }
+      const bytes = await boundedBody(req, MAX_DO_REQUEST_BYTES);
+      body_base64 = base64Queue(bytes);
     }
     const hdrs = {};
     req.headers.forEach((v, k) => {
@@ -341,6 +409,9 @@ export function makeDO(platform, spec) {
       ...identity(id),
       request: { method, path: url.pathname + url.search, headers: hdrs, body_base64 },
     });
+    if (new TextEncoder().encode(payload).byteLength > MAX_DO_ENVELOPE_BYTES) {
+      throw tooLarge("request envelope", MAX_DO_ENVELOPE_BYTES);
+    }
     const r = await invoke(id, payload, false);
     // A DO fetch resolves with the object's Response, including 4xx/5xx; only a
     // platform error envelope (no x-cellhive-do-app marker) is thrown.
@@ -351,8 +422,7 @@ export function makeDO(platform, spec) {
     for (const key of [...responseHeaders.keys()]) {
       if (key.toLowerCase().startsWith("x-cellhive-") || key.toLowerCase() === "content-length") responseHeaders.delete(key);
     }
-    const bytes = await r.arrayBuffer();
-    return new Response(method === "HEAD" || [204, 205, 304].includes(r.status) ? null : bytes, {
+    return new Response(relayBody(r, method), {
       status: r.status, statusText: r.statusText, headers: responseHeaders,
     });
   }
@@ -367,11 +437,18 @@ export function makeDO(platform, spec) {
     }
     const encodedArgs = encode(args);
     if (encodedSize(encodedArgs) > MAX_RPC_BYTES) {
-      throw new Error("do: rpc args exceed " + MAX_RPC_BYTES + " bytes");
+      const err = tooLarge("rpc arguments", MAX_RPC_BYTES);
+      err.code = "do_rpc_args_too_large";
+      throw err;
     }
     const payload = JSON.stringify({
       ...identity(id), kind: "rpc", rpc: { method, args: encodedArgs },
     });
+    if (new TextEncoder().encode(payload).byteLength > MAX_DO_ENVELOPE_BYTES) {
+      const err = tooLarge("rpc envelope", MAX_DO_ENVELOPE_BYTES);
+      err.code = "do_rpc_args_too_large";
+      throw err;
+    }
     const r = await invoke(id, payload, true);
     const text = await r.text();
     let envl = null;

@@ -5,6 +5,8 @@ Public entry `:8081` + internal privileged dispatch `:8088`: resolves routes by 
 > See [`../configuration.md`](../configuration.md) and the code for the authoritative configuration source; the table below is the subset relevant to this module.
 ## Key Interfaces
 
+**Incrementally locally accepted, uncommitted and not deployed (ADR-306):** shared retirement sweeping rechecks live WebSockets instead of permanently latching pinned state. Source caches use a 65MiB retention budget (public/internal counts 2000/256; internal original/rewritten sources share it). Valid UTF-16-weight oversized sources bypass caching and remain accepted subject to independent WorkerCode/env/capacity checks, so cache thrash is not fixed. JS-hop streaming does not remove the Go DO proxy's 8.25MiB buffer. The real pinned user-runtime check passed locally; this is not production/GA acceptance. Six confirmed epoch/lineage defects remain release gates. See [current module boundaries](../../modules/user-runtime.md).
+
 `:8081` public (Host→worker; `/ready`, `/healthz`); `:8088` internal (`/v1/timers/dispatch`, queue dispatch, `/drain`).
 
 ## Configuration (Environment Variables)

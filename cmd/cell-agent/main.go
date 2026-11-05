@@ -331,13 +331,20 @@ func main() {
 			if !ok {
 				return nil, false, nil
 			}
-			pf, perr := rep.NewPageFetcher(pctx, sc, ep)
+			// The index-only early-out avoids downloading an L0 tail for a cell
+			// whose compacted image is already below the paged threshold. It is
+			// deliberately conservative: any L0 object disables it because L0
+			// decoded commits are not in the index and may grow the image.
+			pf, usePaged, perr := rep.NewPageFetcherMinBytes(pctx, sc, ep, cfg.PagedMinBytes)
 			if errors.Is(perr, replica.ErrNoPageIndex) {
 				// No compacted L1 page index yet: clone the chain whole.
 				return nil, false, nil
 			}
 			if perr != nil {
 				return nil, false, perr
+			}
+			if !usePaged {
+				return nil, false, nil
 			}
 			imageBytes := int64(pf.PageSize()) * int64(pf.Commit())
 			if imageBytes < cfg.PagedMinBytes {
@@ -444,6 +451,10 @@ func main() {
 	workflowStore.Register = timerReg.Add
 	const workflowLeaseMs = int64(60_000)
 	var ctrlRef *control.Store
+	// One short-TTL projection cache serves every control-derived dispatch
+	// callback (queue consumers, cron targets, workflow targets, DO alarm
+	// bundles). Its source is wired once the control store exists.
+	projCache := &projectionCache{ttl: projectionCacheTTL}
 	wfDisp := &dispatch.WorkflowDispatcher{
 		URL: cfg.DispatchURL, Token: cfg.TokenDispatch, Log: log, Next: dispatcher,
 		Skip: workflowStore.SkipWake,
@@ -481,11 +492,10 @@ func main() {
 			if ctrlRef == nil {
 				return "", fmt.Errorf("workflow control unavailable")
 			}
-			proj, err := ctrlRef.Projection(cctx)
+			target, ok, err := projCache.workflowTarget(cctx, ns, name)
 			if err != nil {
 				return "", err
 			}
-			target, ok := proj.WorkflowTargetFor(ns, name)
 			if !ok {
 				return "", fmt.Errorf("workflow target not found")
 			}
@@ -500,11 +510,11 @@ func main() {
 			if ctrlRef == nil {
 				return control.WorkflowTarget{}, false
 			}
-			proj, err := ctrlRef.Projection(tctx)
+			target, ok, err := projCache.workflowTarget(tctx, ns, name)
 			if err != nil {
 				return control.WorkflowTarget{}, false
 			}
-			return proj.WorkflowTargetFor(ns, name)
+			return target, ok
 		},
 	}
 	dispatcher = wfDisp
@@ -606,6 +616,8 @@ func main() {
 	}
 	ctrlRef = ctrl
 	enricher.ctrl = ctrl
+	projCache.src = ctrl
+	enricher.proj = projCache
 
 	// Object GC (ADR-110/111): delete bundles and asset versions no longer
 	// referenced by any worker version, after a grace period. Cold path; disabled
@@ -651,11 +663,10 @@ func main() {
 		}()
 	}
 	alarmDisp.Bundle = func(bctx context.Context, ns, worker string) (string, int, bool) {
-		proj, err := ctrl.Projection(bctx)
+		v, ok, err := projCache.activeVersion(bctx, ns, worker)
 		if err != nil {
 			return "", 0, false
 		}
-		v, ok := proj.ActiveVersion(ns, worker)
 		return v.BundleSHA, v.Number, ok
 	}
 
@@ -669,11 +680,10 @@ func main() {
 			Open:     openTimer,
 			Register: func(scope string) { timerReg.Add(scope) },
 			Targets: func(cctx context.Context) ([]cron.Target, error) {
-				proj, err := ctrl.Projection(cctx)
+				ct, err := projCache.cronTargets(cctx)
 				if err != nil {
 					return nil, err
 				}
-				ct := proj.CronTargets()
 				out := make([]cron.Target, 0, len(ct))
 				for _, t := range ct {
 					out = append(out, cron.Target{Namespace: t.Namespace, Worker: t.Worker, Cron: t.Cron})
@@ -681,7 +691,7 @@ func main() {
 				return out, nil
 			},
 			WorkflowTargets: func(cctx context.Context) ([]cron.WorkflowTarget, error) {
-				proj, err := ctrl.Projection(cctx)
+				proj, err := projCache.Projection(cctx)
 				if err != nil {
 					return nil, err
 				}
@@ -908,14 +918,14 @@ func main() {
 						if err != nil {
 							return nil, err
 						}
-						proj, err := ctrl.Projection(qctx)
+						targets, err := projCache.queueTargets(qctx)
 						if err != nil {
 							return nil, err
 						}
 						// Map a queue to the worker that consumes it (and its active
 						// bundle) so user-runtime can load the handler directly.
 						consumers := map[string]queue.Ref{}
-						for _, t := range proj.QueueTargets() {
+						for _, t := range targets {
 							consumers[t.Namespace+"\x00"+t.Queue] = queue.Ref{
 								Namespace: t.Namespace, Name: t.Queue,
 								Worker: t.Worker, BundleSHA: t.BundleSHA, Version: t.Version,
@@ -1157,10 +1167,8 @@ func main() {
 	log.Info("cell-agent stopped")
 }
 
-// runEpochGCLoop runs celld-style epoch GC: after a small cell opened its new
-// epoch with a full snapshot, older epoch prefixes are dead weight. It only
-// deletes epochs older than the current and previous one, and only when the
-// current epoch has a completion marker.
+// runEpochGCLoop reports deferred replication GC. Production never asserts
+// external writer/reader quiescence, even when an existing interval is nonzero.
 func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm *cellcapture.Manager, interval, initial time.Duration) {
 	if interval <= 0 {
 		return
@@ -1168,6 +1176,10 @@ func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm
 	pass := func() {
 		for _, o := range om.OwnedScopes() {
 			n, err := cm.RetireEpochs(ctx, o.Scope, o.Epoch)
+			if errors.Is(err, replica.ErrGCDeferred) {
+				log.Info("epoch gc deferred", "scope", o.Scope.String(), "reason", err)
+				continue
+			}
 			if err != nil {
 				log.Warn("epoch gc failed", "scope", o.Scope.String(), "err", err)
 				continue
@@ -1196,6 +1208,14 @@ func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm
 	}
 }
 
+const defaultCompactionTimeout = 5 * time.Minute
+
+type compactionScope struct {
+	scope  cell.Scope
+	epoch  uint64
+	verify func(context.Context) error
+}
+
 // runCompactionLoop periodically folds each owned scope's L0 chain into an L1
 // snapshot so a takeover restore reads a bounded set of objects. It re-checks
 // ownership (node + epoch) immediately before writing, so a node that lost the
@@ -1208,7 +1228,9 @@ func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager,
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, owned := range om.OwnedScopes() {
+			ownedScopes := om.OwnedScopes()
+			scopes := make([]compactionScope, 0, len(ownedScopes))
+			for _, owned := range ownedScopes {
 				sc, epoch := owned.Scope, owned.Epoch
 				verify := func(vctx context.Context) error {
 					o, _, err := om.Resolve(vctx, sc)
@@ -1220,22 +1242,49 @@ func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager,
 					}
 					return nil
 				}
-				res, err := compaction.Compact(ctx, rep, sc, epoch, compaction.Options{
-					MinSegments: cfg.CompactionMinSegments,
-					MinBytes:    cfg.CompactionMinBytes,
-					MinObjects:  cfg.CompactionMinObjects,
-					Verify:      verify,
-					GC:          true,
-				})
-				if err != nil {
-					log.Warn("compaction failed", "scope", sc.String(), "err", err)
-				} else if res.Compacted {
-					log.Info("compacted", "scope", sc.String(), "inputs", res.Inputs,
-						"parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID,
-						"deleted_l1", res.DeletedL1, "deleted_l0", res.DeletedL0,
-						"stored_bytes", res.InputBytes)
-				}
+				scopes = append(scopes, compactionScope{scope: sc, epoch: epoch, verify: verify})
 			}
+			compactScopes(ctx, log, rep, cfg, scopes)
+		}
+	}
+}
+
+// compactScopes bounds each scope independently so one hung bucket operation
+// cannot delay every later owned scope. Ownership and epoch checks stay in the
+// per-scope Verify callback.
+func compactScopes(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, scopes []compactionScope) {
+	timeout := cfg.CompactionTimeout
+	if timeout <= 0 {
+		timeout = defaultCompactionTimeout
+	}
+	for _, owned := range scopes {
+		sctx, cancel := context.WithTimeout(ctx, timeout)
+		res, err := compaction.Compact(sctx, rep, owned.scope, owned.epoch, compaction.Options{
+			MinSegments: cfg.CompactionMinSegments,
+			MinBytes:    cfg.CompactionMinBytes,
+			MinObjects:  cfg.CompactionMinObjects,
+			Verify:      owned.verify,
+			GC:          true,
+			// OfflineQuiescent intentionally remains false (ADR-307).
+		})
+		cancel()
+		if err != nil {
+			// Do not emit scope/key names or backend error text; those can contain
+			// tenant identifiers and object names.
+			log.Warn("compaction failed", "epoch", owned.epoch)
+		} else if res.Compacted {
+			log.Info("compacted", "epoch", owned.epoch, "inputs", res.Inputs,
+				"parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID,
+				"deleted_l1", res.DeletedL1, "deleted_l0", res.DeletedL0,
+				"stored_bytes", res.InputBytes, "objects", res.ObjectCount,
+				"object_bytes", res.ObjectBytes, "object_bytes_known", res.ObjectBytesKnown,
+				"covered", res.Covered, "deferred", res.Deferred, "unknown", res.Unknown,
+				"retained_bytes", res.RetainedBytes)
+		}
+		if err == nil && res.GCSkipped != "" {
+			log.Info("compaction gc deferred", "epoch", owned.epoch, "objects", res.DeferredGC,
+				"covered", res.Covered, "deferred", res.Deferred, "unknown", res.Unknown,
+				"retained_bytes", res.RetainedBytes, "retained_bytes_known", res.RetainedBytesKnown)
 		}
 	}
 }
@@ -1727,12 +1776,129 @@ func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
 	return nil, fmt.Errorf("unsupported bucket scheme %q: authority storage must implement atomic create, CAS, and conditional delete", scheme)
 }
 
+// projectionCacheTTL bounds how long a dispatch callback may reuse a routing
+// projection built on this node. Ownership is still resolved per dispatch, so a
+// stale entry can only select an older worker/bundle/queue/cron view. Five
+// seconds matches the pre-existing cron enrichment cache and keeps the default
+// one-second queue poll from rebuilding on every pass.
+const projectionCacheTTL = 5 * time.Second
+
+type projectionSource interface {
+	Projection(context.Context) (control.Projection, error)
+}
+
+// projectionCache is a short-TTL, single-flight cache of the routing projection.
+// The queue runner, cron scheduler, workflow dispatcher and DO alarm dispatcher
+// all resolve through it, so a batch of N callbacks performs at most one build
+// per TTL instead of one per item.
+type projectionCache struct {
+	src projectionSource
+	ttl time.Duration
+	now func() time.Time
+
+	mu       sync.Mutex
+	proj     *control.Projection
+	at       time.Time
+	building chan struct{} // non-nil while one rebuild is in flight
+}
+
+// Projection returns the cached projection, rebuilding it on expiry or on the
+// first call. Concurrent callers wait for the in-flight build instead of
+// stampeding the control cell. Errors are never cached.
+func (c *projectionCache) Projection(ctx context.Context) (control.Projection, error) {
+	if c == nil || c.src == nil {
+		return control.Projection{}, errors.New("control plane unavailable")
+	}
+	ttl := c.ttl
+	if ttl <= 0 {
+		ttl = projectionCacheTTL
+	}
+	now := c.now
+	if now == nil {
+		now = time.Now
+	}
+	for {
+		c.mu.Lock()
+		cached := c.proj
+		if cached != nil && now().Sub(c.at) < ttl {
+			p := *cached
+			c.mu.Unlock()
+			return p, nil
+		}
+		if c.building != nil {
+			wait := c.building
+			c.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				if cached != nil {
+					return *cached, nil
+				}
+				return control.Projection{}, ctx.Err()
+			}
+		}
+		c.building = make(chan struct{})
+		c.mu.Unlock()
+
+		p, err := c.src.Projection(ctx)
+
+		c.mu.Lock()
+		if err == nil {
+			c.proj = &p
+			c.at = now()
+		}
+		close(c.building)
+		c.building = nil
+		c.mu.Unlock()
+		if err != nil {
+			return control.Projection{}, err
+		}
+		return p, nil
+	}
+}
+
+func (c *projectionCache) activeVersion(ctx context.Context, ns, worker string) (control.Version, bool, error) {
+	p, err := c.Projection(ctx)
+	if err != nil {
+		return control.Version{}, false, err
+	}
+	v, ok := p.ActiveVersion(ns, worker)
+	return v, ok, nil
+}
+
+func (c *projectionCache) workflowTarget(ctx context.Context, ns, name string) (control.WorkflowTarget, bool, error) {
+	p, err := c.Projection(ctx)
+	if err != nil {
+		return control.WorkflowTarget{}, false, err
+	}
+	t, ok := p.WorkflowTargetFor(ns, name)
+	return t, ok, nil
+}
+
+func (c *projectionCache) queueTargets(ctx context.Context) ([]control.QueueTarget, error) {
+	p, err := c.Projection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return p.QueueTargets(), nil
+}
+
+func (c *projectionCache) cronTargets(ctx context.Context) ([]control.CronTarget, error) {
+	p, err := c.Projection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return p.CronTargets(), nil
+}
+
 // cronEnricher resolves a cron timer's dispatch target (worker + active bundle)
 // from the routing projection, so cell-agent can hand user-runtime everything it
 // needs to run the scheduled() handler. The projection is cached briefly.
 type cronEnricher struct {
 	next timer.Dispatcher
 	ctrl *control.Store
+	proj *projectionCache
 
 	mu      sync.Mutex
 	targets map[string][]control.CronTarget // ns\x00worker -> targets (one per cron)
@@ -1788,10 +1954,16 @@ func (e *cronEnricher) lookup(ctx context.Context, ns, worker string) ([]control
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.targets == nil || time.Since(e.at) > 5*time.Second {
-		if e.ctrl == nil {
+		var proj control.Projection
+		var err error
+		switch {
+		case e.proj != nil:
+			proj, err = e.proj.Projection(ctx)
+		case e.ctrl != nil:
+			proj, err = e.ctrl.Projection(ctx)
+		default:
 			return nil, errors.New("control plane unavailable")
 		}
-		proj, err := e.ctrl.Projection(ctx)
 		if err != nil {
 			return nil, err
 		}

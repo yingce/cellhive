@@ -1,4 +1,39 @@
 // Plain-data caches and lifecycle primitives; capabilities stay request-local.
+
+// Source caches are intentionally conservative and per-isolate. 65 MiB of
+// UTF-16 weight accepts 32 Mi-char bundles (64 MiB weight) plus key/rewrite
+// headroom; internal dispatch shares one budget between original and rewritten
+// sources. Larger but valid sources bypass the cache (and may be re-fetched);
+// they are never rejected by cache admission.
+export const SOURCE_CACHE_BYTES = 65 * 1024 * 1024;
+
+// Count-bounded insertion-order LRU. Used for the DO object registry where the
+// key count (not payload bytes) is the memory boundary.
+export class CountLRU {
+  constructor(max) {
+    this.max = Math.max(1, Math.floor(max));
+    this.m = new Map();
+  }
+  has(k) { return this.m.has(k); }
+  get(k) {
+    const v = this.m.get(k);
+    if (v === undefined) return undefined;
+    this.m.delete(k);
+    this.m.set(k, v);
+    return v;
+  }
+  set(k, v) {
+    if (this.m.has(k)) this.m.delete(k);
+    this.m.set(k, v);
+    while (this.m.size > this.max) this.m.delete(this.m.keys().next().value);
+    return v;
+  }
+  delete(k) { return this.m.delete(k); }
+  keys() { return this.m.keys(); }
+  values() { return this.m.values(); }
+  get size() { return this.m.size; }
+}
+
 export class ByteLRU {
   constructor(max, maxBytes, sizeOf, maxEntry = maxBytes) {
     this.max=max; this.maxBytes=maxBytes; this.sizeOf=sizeOf; this.maxEntry=maxEntry;
@@ -18,11 +53,48 @@ export class ByteLRU {
 export const textWeight = v => typeof v==='string' ? v.length*2 : 0;
 export const jsonWeight = v => JSON.stringify(v).length*2;
 
+export function sourceCache(max) {
+  return new ByteLRU(max, SOURCE_CACHE_BYTES, textWeight, SOURCE_CACHE_BYTES);
+}
+
+// ByteLRU silently skips entries above maxEntry. Bundle admission must not
+// turn a valid (deployable) source into a runtime failure, so an oversized
+// source simply bypasses the bounded cache and is returned to the caller.
+// Such large bundles may be re-fetched per load; that partial behavior is
+// preferable to rejecting code the platform still accepts.
+export function cacheSource(cache, key, value) {
+  const weight = textWeight(value) + key.length * 2;
+  if (!Number.isFinite(weight) || weight > SOURCE_CACHE_BYTES) return value;
+  cache.set(key, value);
+  return value;
+}
+
 export class Lifetime {
-  constructor(){this.active=0;this.pinned=false;}
+  constructor(){this.active=0;this.pinned=false;this.sockets=0;}
   hold(){this.active++;let held=true;return ()=>{if(held){held=false;this.active--;}};}
   idle(){return this.active===0&&!this.pinned;}
   background(p){const release=this.hold();return Promise.resolve(p).finally(release);}
+  // A WebSocket keeps the isolate resident while it is live, not forever. Track
+  // each accepted socket so close/error (whichever comes first) can clear the
+  // pin and let retirement release the capacity reservation.
+  pinSocket(ws,onDone=()=>{}){
+    // A 101 without a usable socket must not pin the isolate forever.
+    if(!ws||typeof ws.addEventListener!=="function"){onDone();return;}
+    this.pinned=true;
+    this.sockets++;
+    let done=false;
+    const release=()=>{
+      if(done)return;
+      done=true;
+      this.sockets=Math.max(0,this.sockets-1);
+      if(this.sockets===0)this.pinned=false;
+      onDone();
+    };
+    try{
+      ws.addEventListener("close",release);
+      ws.addEventListener("error",release);
+    }catch(e){release();}
+  }
   context(ctx){
     // Preserve the actual native ExecutionContext identity: WorkerEntrypoint
     // constructors unwrap it and would lose a JS Proxy's waitUntil override.
@@ -45,7 +117,7 @@ export class Lifetime {
     return out;
   }
   async response(res,onDone=()=>{}){
-    if(res.webSocket||res.status===101){this.pinned=true;onDone();return res;}
+    if(res.webSocket||res.status===101){this.pinSocket(res.webSocket,onDone);return res;}
     if(!res.body){onDone();return res;}
     const release=this.hold();const reader=res.body.getReader();let finished=false;
     const finish=()=>{if(!finished){finished=true;release();onDone();}};
@@ -119,7 +191,7 @@ export function managedModules(code, target, nonce, specs = {}){
         }
       }
       export class CellHiveLifecycle extends WorkerEntrypoint {
-        status(){return {nonce,idle:life.idle(),pinned:life.pinned};}
+        status(){return {nonce,idle:life.idle(),pinned:life.pinned,sockets:life.sockets};}
         retire(expected){if(expected!==nonce||!life.idle())return false;abortIsolate('cellhive: retired');}
       }
     `,

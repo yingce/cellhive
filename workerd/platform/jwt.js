@@ -11,10 +11,25 @@ function unb64(value) {
   if (b64(bytes) !== value) throw new Error("noncanonical base64url");
   return bytes;
 }
-async function signingKey(value) {
-  const bytes = unb64(value);
-  if (bytes.length !== 32) throw new Error("JWT key must contain 32 bytes");
-  return crypto.subtle.importKey("raw", bytes, {name: "HMAC", hash: "SHA-256"}, false, ["sign", "verify"]);
+// Importing a CryptoKey is asynchronous and relatively expensive; every mint
+// and verify call otherwise repeats it. The cache is keyed by the canonical
+// base64url string and lives for the isolate, so credentials are never copied
+// into tenant-visible state. Store the promise to coalesce concurrent imports.
+const signingKeys = new Map();
+function signingKey(value) {
+  const cached = signingKeys.get(value);
+  if (cached !== undefined) return cached;
+  let pending;
+  try {
+    const bytes = unb64(value);
+    if (bytes.length !== 32) throw new Error("JWT key must contain 32 bytes");
+    pending = crypto.subtle.importKey("raw", bytes, {name: "HMAC", hash: "SHA-256"}, false, ["sign", "verify"]);
+  } catch (e) {
+    pending = Promise.reject(e);
+  }
+  signingKeys.set(value, pending);
+  pending.catch(() => { if (signingKeys.get(value) === pending) signingKeys.delete(value); });
+  return pending;
 }
 function claimsObject(segment) {
   const text = new TextDecoder("utf-8", {fatal: true}).decode(unb64(segment));

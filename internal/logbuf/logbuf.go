@@ -5,8 +5,10 @@ package logbuf
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry is one captured log line (tenant console output or a platform event).
@@ -93,19 +95,68 @@ func (e *TailEvent) UnmarshalJSON(data []byte) error {
 
 type ring struct {
 	entries    []Entry
+	entrySizes []int
+	entryBytes int
 	events     []TailEvent
 	eventSizes []int
 	eventBytes int
 }
 
-const maxTailBytesPerWorker = 1 << 20
+const (
+	maxTailBytesPerWorker = 1 << 20
+	// DefaultMaxBytesPerWorker is the default byte budget for the retained line
+	// view and, separately, the retained invocation-event view of one worker.
+	DefaultMaxBytesPerWorker = maxTailBytesPerWorker
+	// MaxEntryMessageBytes caps a flattened console message.
+	MaxEntryMessageBytes = 64 << 10
+	// MaxEntryMessageArgsBytes caps the total serialized MessageArgs payload.
+	MaxEntryMessageArgsBytes = 64 << 10
+	// MaxEntryExceptions caps how many exceptions are retained per entry.
+	MaxEntryExceptions = 16
+	// MaxExceptionMessageBytes and MaxExceptionStackBytes cap each exception.
+	MaxExceptionMessageBytes = 8 << 10
+	MaxExceptionStackBytes   = 16 << 10
+)
+
+// AddResult reports whether an entry was retained and whether its unbounded
+// fields were truncated to fit the per-entry caps.
+type AddResult struct {
+	Entry     Entry
+	Stored    bool
+	Truncated bool
+	Bytes     int
+}
+
+// Stats is a point-in-time snapshot of buffer counters and retained bytes.
+// Added counts stored entries and events; Dropped counts rejected ones.
+type Stats struct {
+	Added      uint64
+	Dropped    uint64
+	Truncated  uint64
+	Evicted    uint64
+	Entries    int
+	Events     int
+	EntryBytes int
+	EventBytes int
+}
 
 // AddEvent stores an invocation in the same bounded per-worker ring as the
-// legacy line view. Callers append any derived CLI lines separately.
+// legacy line view. Callers append any derived CLI lines separately. A Seq of
+// zero means the event exceeded the per-key byte budget and was dropped.
 func (b *Buffer) AddEvent(e TailEvent) TailEvent {
+	out, _ := b.AddEventResult(e)
+	return out
+}
+
+// AddEventResult stores an invocation and reports whether it was retained.
+func (b *Buffer) AddEventResult(e TailEvent) (TailEvent, bool) {
 	encoded, err := json.Marshal(e)
-	if err != nil || len(encoded) > maxTailBytesPerWorker {
-		return e
+	if err != nil || len(encoded) > b.maxBytes {
+		b.mu.Lock()
+		b.dropped++
+		b.mu.Unlock()
+		e.Seq = 0
+		return e, false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -116,12 +167,14 @@ func (b *Buffer) AddEvent(e TailEvent) TailEvent {
 	r.events = append(r.events, e)
 	r.eventSizes = append(r.eventSizes, len(encoded))
 	r.eventBytes += len(encoded)
-	for len(r.events) > b.maxPerKey || r.eventBytes > maxTailBytesPerWorker {
+	b.added++
+	for len(r.events) > b.maxPerKey || r.eventBytes > b.maxBytes {
 		r.eventBytes -= r.eventSizes[0]
 		r.eventSizes = r.eventSizes[1:]
 		r.events = r.events[1:]
+		b.evicted++
 	}
-	return e
+	return e, true
 }
 
 // EventsSince returns bounded invocation events with seq > after.
@@ -168,41 +221,193 @@ type Buffer struct {
 	mu        sync.Mutex
 	maxPerKey int
 	maxKeys   int
+	maxBytes  int
 	seq       uint64
+	added     uint64
+	dropped   uint64
+	truncated uint64
+	evicted   uint64
 	rings     map[string]*ring
 	lru       []string
 	now       func() time.Time
 }
 
-// New creates a buffer. maxPerKey/maxKeys are clamped to sane minimums.
+// New creates a buffer with the default per-key byte budget.
 func New(maxPerKey, maxKeys int) *Buffer {
+	return NewWithBudget(maxPerKey, maxKeys, DefaultMaxBytesPerWorker)
+}
+
+// NewWithBudget creates a buffer with an explicit per-key byte budget. The
+// budget applies to the retained line view and, separately, the retained
+// invocation-event view of each worker.
+func NewWithBudget(maxPerKey, maxKeys, maxBytes int) *Buffer {
 	if maxPerKey < 1 {
 		maxPerKey = 1
 	}
 	if maxKeys < 1 {
 		maxKeys = 1
 	}
-	return &Buffer{maxPerKey: maxPerKey, maxKeys: maxKeys, rings: map[string]*ring{}, now: time.Now}
+	if maxBytes < 1 {
+		maxBytes = DefaultMaxBytesPerWorker
+	}
+	return &Buffer{maxPerKey: maxPerKey, maxKeys: maxKeys, maxBytes: maxBytes, rings: map[string]*ring{}, now: time.Now}
 }
 
 func key(ns, worker string) string { return ns + "/" + worker }
 
-// Add appends an entry, assigning seq/at if unset.
+// Add appends an entry and returns what was stored. Use AddEntry to see whether
+// the entry was dropped or truncated.
 func (b *Buffer) Add(e Entry) Entry {
+	return b.AddEntry(e).Entry
+}
+
+// AddEntry caps unbounded fields, appends the entry, and evicts the oldest
+// entries until the count and byte budgets hold. An entry that still exceeds
+// the per-key byte budget is dropped without advancing the sequence.
+func (b *Buffer) AddEntry(e Entry) AddResult {
+	capped, truncated := capEntry(e)
+	size := entrySize(capped)
+	if size > b.maxBytes {
+		b.mu.Lock()
+		b.dropped++
+		b.mu.Unlock()
+		capped.Seq = 0
+		return AddResult{Entry: capped, Stored: false, Truncated: truncated, Bytes: size}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.seq++
-	e.Seq = b.seq
-	if e.AtMs == 0 {
-		e.AtMs = b.now().UnixMilli()
+	capped.Seq = b.seq
+	if capped.AtMs == 0 {
+		capped.AtMs = b.now().UnixMilli()
 	}
-	k := key(e.Namespace, e.Worker)
+	k := key(capped.Namespace, capped.Worker)
 	r := b.ensureRing(k)
-	r.entries = append(r.entries, e)
-	if len(r.entries) > b.maxPerKey {
-		r.entries = r.entries[len(r.entries)-b.maxPerKey:]
+	r.entries = append(r.entries, capped)
+	r.entrySizes = append(r.entrySizes, size)
+	r.entryBytes += size
+	b.added++
+	if truncated {
+		b.truncated++
 	}
-	return e
+	for len(r.entries) > b.maxPerKey || r.entryBytes > b.maxBytes {
+		r.entryBytes -= r.entrySizes[0]
+		r.entrySizes = r.entrySizes[1:]
+		r.entries = r.entries[1:]
+		b.evicted++
+	}
+	return AddResult{Entry: capped, Stored: true, Truncated: truncated, Bytes: size}
+}
+
+// Stats returns counters and retained sizes across all keys.
+func (b *Buffer) Stats() Stats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	stats := Stats{Added: b.added, Dropped: b.dropped, Truncated: b.truncated, Evicted: b.evicted}
+	for _, r := range b.rings {
+		stats.Entries += len(r.entries)
+		stats.Events += len(r.events)
+		stats.EntryBytes += r.entryBytes
+		stats.EventBytes += r.eventBytes
+	}
+	return stats
+}
+
+func entrySize(e Entry) int {
+	size := 256 + len(e.Namespace) + len(e.Worker) + len(e.Level) + len(e.Message) +
+		len(e.RequestID) + len(e.EventType) + len(e.Outcome) + len(e.TraceID) + len(e.SpanID) +
+		len(e.ScriptVersion)
+	for _, arg := range e.MessageArgs {
+		size += len(arg) + 16
+	}
+	for _, exception := range e.Exceptions {
+		size += len(exception.Name) + len(exception.Message) + len(exception.Stack) + 32
+	}
+	return size
+}
+
+func capEntry(e Entry) (Entry, bool) {
+	truncated := false
+	if len(e.Message) > MaxEntryMessageBytes {
+		e.Message, _ = truncateUTF8(e.Message, MaxEntryMessageBytes)
+		truncated = true
+	}
+	if args, changed := capMessageArgs(e.MessageArgs, MaxEntryMessageArgsBytes); changed {
+		e.MessageArgs = args
+		truncated = true
+	}
+	if exceptions, changed := capExceptions(e.Exceptions); changed {
+		e.Exceptions = exceptions
+		truncated = true
+	}
+	return e, truncated
+}
+
+func capMessageArgs(args []json.RawMessage, max int) ([]json.RawMessage, bool) {
+	total := 0
+	for i, arg := range args {
+		if total+len(arg) <= max {
+			total += len(arg)
+			continue
+		}
+		remaining := 0
+		for _, rest := range args[i:] {
+			remaining += len(rest)
+		}
+		out := append([]json.RawMessage(nil), args[:i]...)
+		marker, err := json.Marshal(fmt.Sprintf("...(%d args, %d bytes omitted)", len(args)-i, remaining))
+		if err == nil && total+len(marker) <= max {
+			out = append(out, marker)
+		}
+		return out, true
+	}
+	return args, false
+}
+
+func capExceptions(exceptions []TailException) ([]TailException, bool) {
+	if len(exceptions) == 0 {
+		return exceptions, false
+	}
+	changed := len(exceptions) > MaxEntryExceptions
+	if !changed {
+		for _, exception := range exceptions {
+			if len(exception.Message) > MaxExceptionMessageBytes || len(exception.Stack) > MaxExceptionStackBytes {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return exceptions, false
+	}
+	limit := len(exceptions)
+	if limit > MaxEntryExceptions {
+		limit = MaxEntryExceptions
+	}
+	out := make([]TailException, limit)
+	copy(out, exceptions[:limit])
+	for i := range out {
+		out[i].Message, _ = truncateUTF8(out[i].Message, MaxExceptionMessageBytes)
+		out[i].Stack, _ = truncateUTF8(out[i].Stack, MaxExceptionStackBytes)
+	}
+	return out, true
+}
+
+func truncateUTF8(value string, max int) (string, bool) {
+	if len(value) <= max {
+		return value, false
+	}
+	if max <= 0 {
+		return "", true
+	}
+	if max <= 3 {
+		return value[:max], true
+	}
+	limit := max - 3
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
+	return value[:limit] + "...", true
 }
 
 // Since returns entries for a worker with seq > after (bounded by limit).

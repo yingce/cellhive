@@ -246,7 +246,7 @@ resume_after=$(ensure_mode resume)
 # GC retire the predecessor.
 sleep 3
 old_epoch_objects=$(find "$CELLHIVE_BUCKET_DIR" -type f -path '*__control__*/ltx/e1/*' 2>/dev/null | wc -l)
-echo "  old control epoch e1 objects: $old_epoch_objects (want 0 after background baseline + GC)"
+echo "  old control epoch e1 objects: $old_epoch_objects (retained by ADR-307 deferred online GC)"
 
 echo "RESULT[$LABEL]"
 echo "  deploy v1 (fresh ns):  ${t1}s  proof_delta=$d1"
@@ -270,6 +270,6 @@ fail=0
 [[ $snap_after == "$snap_before" ]] || { echo "ASSERT: marker epoch unexpectedly snapshotted ($snap_before -> $snap_after)" >&2; fail=1; }
 [[ $resume_after -gt $resume_before ]] || { echo "ASSERT: marker epoch did not resume (resume $resume_before -> $resume_after)" >&2; fail=1; }
 [[ $body3 == *v3* ]] || { echo "ASSERT: invoke after restart = '$body3'" >&2; fail=1; }
-[[ $old_epoch_objects == 0 ]] || { echo "ASSERT: old epoch e1 not GC'd after background baseline ($old_epoch_objects objects)" >&2; fail=1; }
+[[ $old_epoch_objects -gt 0 ]] || { echo "ASSERT: online epoch GC deleted e1 unexpectedly; offline quiescent cleanup is required by ADR-307" >&2; fail=1; }
 [[ $fail == 0 ]] || exit 1
 echo "DEPLOY-E2E: PASS"

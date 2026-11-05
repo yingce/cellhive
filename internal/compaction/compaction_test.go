@@ -57,6 +57,42 @@ func raws(segs []replica.Segment) [][]byte {
 	return out
 }
 
+func TestDeferredAccountingUsesBoundedMetadataOnly(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	rawBucket, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &l0CountingBucket{Bucket: rawBucket}
+	sc := cell.Scope{Namespace: "acct", Class: "worker", ID: "one"}
+	base := replica.Prefix(sc, 7)
+	for key, body := range map[string][]byte{
+		base + "0-1.ltx":          bytes.Repeat([]byte{'a'}, 11),
+		base + "2-3.ltx":          bytes.Repeat([]byte{'b'}, 13),
+		base + "opaque.metadata":  bytes.Repeat([]byte{'c'}, 17),
+		base + "L1/manifest.json": bytes.Repeat([]byte{'d'}, 19),
+	} {
+		if _, err := b.Put(ctx, key, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := deferredMetadataAccounting(ctx, replica.New(b), sc, 7, 1)
+	if got := b.gets(); got != 0 {
+		t.Fatalf("metadata accounting read %d payloads", got)
+	}
+	if res.ObjectCount != 4 || res.ObjectBytes != 60 || !res.ObjectBytesKnown {
+		t.Fatalf("accounting = %+v", res)
+	}
+	if res.Covered != 1 || res.Deferred != 1 || res.Unknown != 2 {
+		t.Fatalf("classification = %+v", res)
+	}
+	if res.CoveredBytes != 11 || res.DeferredBytes != 13 || res.RetainedBytes != 24 || !res.RetainedBytesKnown {
+		t.Fatalf("retained bytes = %+v", res)
+	}
+}
+
 func applyAndCheck(t *testing.T, segs []replica.Segment, dest, key, want string) {
 	t.Helper()
 	if _, err := restore.ApplyFile(dest, raws(segs)); err != nil {
@@ -406,7 +442,7 @@ func TestCompactGarbageCollectsSupersededObjects(t *testing.T) {
 	l1v1 := man1.Objects[0]
 
 	d2Key := appendSeg(deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)}))
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true})
+	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
 	if err != nil {
 		t.Fatalf("compact2: %v", err)
 	}
@@ -542,7 +578,7 @@ func TestCompactFoldsLegacyV1AndGCsCompressedL1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true})
+	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
 	if err != nil {
 		t.Fatalf("compact2: %v", err)
 	}

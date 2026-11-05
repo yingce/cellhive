@@ -9,6 +9,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/cellhive-cf-tail.XXXXXX")
 ROOT_KEY=$(openssl rand -base64 32)
 RUNTIME_CELL_AGENT=agent-a
 if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then RUNTIME_CELL_AGENT=agent-b; fi
+export RUNTIME_CELL_AGENT
 # Docker reallocates anonymous published ports on restart. Wrangler retains
 # the URL of the B endpoint, so keep this test endpoint stable across restart.
 B_PORT=$(python3 - <<'PY'
@@ -108,7 +109,7 @@ services:
     command: ["user-runtime"]
     environment:
       CELLHIVE_ROOT_KEY: $ROOT_KEY
-      CELLHIVE_CELL_URL: http://$RUNTIME_CELL_AGENT:7001
+      CELLHIVE_CELL_URL: http://\${RUNTIME_CELL_AGENT}:7001
       CELLHIVE_USER_RUNTIME_PORT: '8081'
       CELLHIVE_USER_RUNTIME_INTERNAL_PORT: '8088'
       CELLHIVE_USER_RUNTIME_ADVERTISE: user-runtime
@@ -314,7 +315,18 @@ if rg -q 'cf-tail-e2e-admin-token' "$TMP/tail.log"; then
   exit 1
 fi
 if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then
-  echo '== Cron UTC minute while control owner A is stopped =='
+  cron_owner_node() {
+    compose exec -T agent-a cat /data/bucket/cells/e2e/__cron__/web/owner.json \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])'
+  }
+  select_cron_targets() {
+    case $1 in
+      cf-tail-a) OWNER_SERVICE=agent-a; SURVIVOR_SERVICE=agent-b; SURVIVOR_PORT=$B_PORT ;;
+      cf-tail-b) OWNER_SERVICE=agent-b; SURVIVOR_SERVICE=agent-a; SURVIVOR_PORT=$A_PORT ;;
+      *) fail "unexpected Cron owner $1" ;;
+    esac
+  }
+  echo '== Cron UTC minute while the actual control owner is stopped =='
   curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
     >"$TMP/cron-invocations.json"
@@ -327,8 +339,24 @@ ids=[r['logical_id'] for r in successes]
 assert len(ids)==len(set(ids)), {'duplicate_successes':ids}
 print('cron normal owner: unique successful slots', len(ids))
 PY
-  # Stop A after a completed slot, leaving enough of the minute for its 10s
-  # owner lease to expire and B to claim before the next UTC slot.
+  OWNER_NODE=$(cron_owner_node)
+  select_cron_targets "$OWNER_NODE"
+  echo "cron owner before failover: $OWNER_NODE; surviving node: $SURVIVOR_SERVICE"
+  # user-runtime records invocations and loads bundles through CELLHIVE_CELL_URL.
+  # Retarget it at the survivor so an owner stop does not also take down the
+  # runtime's cell-agent endpoint. The application function still runs in the
+  # surviving cluster; only the control API used by the test moves.
+  if [[ $RUNTIME_CELL_AGENT != $SURVIVOR_SERVICE ]]; then
+    export RUNTIME_CELL_AGENT=$SURVIVOR_SERVICE
+    compose up -d --force-recreate user-runtime >/dev/null
+  fi
+  for _ in $(seq 1 60); do
+    if compose exec -T user-runtime curl -fsS http://127.0.0.1:8088/healthz >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  compose exec -T user-runtime curl -fsS http://127.0.0.1:8088/healthz >/dev/null
+  # Stop the actual owner after a completed slot, leaving enough of the minute
+  # for its 10s owner lease to expire and the survivor to claim the next UTC slot.
   for _ in $(seq 1 120); do
     SEC=$(date -u +%S)
     if ((10#$SEC >= 35 && 10#$SEC <= 38)); then break; fi
@@ -336,10 +364,11 @@ PY
   done
   SEC=$(date -u +%S)
   ((10#$SEC >= 35 && 10#$SEC <= 38)) || fail 'could not align Cron owner stop near a UTC minute'
-  OWNER_NODE=$(compose exec -T agent-a cat /data/bucket/cells/e2e/__cron__/web/owner.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
-  [[ $OWNER_NODE == cf-tail-a ]] || fail "Cron owner before stop is $OWNER_NODE, expected A"
+  OWNER_NODE_AT_STOP=$(cron_owner_node)
+  [[ $OWNER_NODE_AT_STOP == "$OWNER_NODE" ]] \
+    || fail "Cron owner changed from $OWNER_NODE to $OWNER_NODE_AT_STOP during failover setup"
   CRON_SLOT_MS=$(python3 -c 'import time; print((int(time.time())//60+1)*60000)')
-  compose stop -t 1 agent-a >/dev/null
+  compose stop -t 1 "$OWNER_SERVICE" >/dev/null
   cron_slot_count() {
     python3 - "$TMP/cron-invocations.json" "$CRON_SLOT_MS" <<'PY'
 import json,sys
@@ -354,33 +383,33 @@ PY
   CRON_PROOF=''
   for _ in $(seq 1 90); do
     if curl -fsS -H "Authorization: Bearer $(auth)" \
-      "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
+      "http://127.0.0.1:$SURVIVOR_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
       >"$TMP/cron-invocations.json" 2>/dev/null; then
       if CRON_PROOF=$(cron_slot_count); then break; fi
     fi
     sleep 1
   done
-  [[ -n $CRON_PROOF ]] || fail "B did not complete the Cron slot $CRON_SLOT_MS while A was stopped"
+  [[ -n $CRON_PROOF ]] || fail "$SURVIVOR_SERVICE did not complete the Cron slot $CRON_SLOT_MS while $OWNER_SERVICE was stopped"
   curl -fsS -H "Authorization: Bearer $(auth)" \
-    "http://127.0.0.1:$B_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
-    >"$TMP/versions-after-a-stop.json"
-  python3 - "$TMP/versions-b.json" "$TMP/versions-after-a-stop.json" <<'PY'
+    "http://127.0.0.1:$SURVIVOR_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
+    >"$TMP/versions-after-owner-stop.json"
+  python3 - "$TMP/versions-b.json" "$TMP/versions-after-owner-stop.json" <<'PY'
 import json,sys
 before={v['id'] for v in json.load(open(sys.argv[1]))['result']['items']}
 after={v['id'] for v in json.load(open(sys.argv[2]))['result']['items']}
 assert before <= after, {'versions_lost_after_owner_stop':sorted(before-after)}
 PY
-  compose start agent-a >/dev/null
+  compose start "$OWNER_SERVICE" >/dev/null
   for _ in $(seq 1 30); do
-    if compose exec -T agent-a curl -fsS http://127.0.0.1:7001/readyz >/dev/null 2>&1; then break; fi
+    if compose exec -T "$OWNER_SERVICE" curl -fsS http://127.0.0.1:7001/readyz >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  compose exec -T agent-a curl -fsS http://127.0.0.1:7001/readyz >/dev/null
+  compose exec -T "$OWNER_SERVICE" curl -fsS http://127.0.0.1:7001/readyz >/dev/null
   sleep 8
   curl -fsS -H "Authorization: Bearer $(auth)" \
-    "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
+    "http://127.0.0.1:$SURVIVOR_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
     >"$TMP/cron-invocations.json"
-  CRON_PROOF=$(cron_slot_count) || fail 'Cron slot disappeared after A returned'
+  CRON_PROOF=$(cron_slot_count) || fail "Cron slot disappeared after $OWNER_SERVICE returned"
   python3 - "$CRON_PROOF" <<'PY'
 import json,sys
 proof=json.loads(sys.argv[1])

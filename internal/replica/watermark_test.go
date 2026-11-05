@@ -2,12 +2,27 @@ package replica
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 )
+
+type retireLossBucket struct {
+	bucket.Bucket
+	afterDelete func()
+	deletes     int
+}
+
+func (b *retireLossBucket) Delete(ctx context.Context, key string) error {
+	b.deletes++
+	err := b.Bucket.Delete(ctx, key)
+	b.afterDelete()
+	return err
+}
 
 func TestDurableWatermark(t *testing.T) {
 	ctx := context.Background()
@@ -165,6 +180,29 @@ func TestDurableWatermarkChainAcrossEpochs(t *testing.T) {
 	}
 }
 
+func TestDurableWatermarkChainRejectsManifestAboveMarkerCut(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	s := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "manifest-cut"}
+	putSeg(t, b, s, 1, "5.snapshot", ltx.KindSnapshot, 5, 5)
+	if err := m.MarkSnapshotDone(ctx, s, 1, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutManifest(ctx, s, 1, Manifest{Epoch: 1, MinTxID: 1, MaxTxID: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.MarkEpoch(ctx, s, 2, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DurableWatermarkChain(ctx, s, 2); err == nil {
+		t.Fatal("manifest above marker cut was accepted")
+	}
+}
+
 func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 	ctx := context.Background()
 	b, err := bucket.NewFSBucket(t.TempDir())
@@ -174,14 +212,19 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 	m := New(b)
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc"}
 	put := func(epoch uint64, name string) {
-		if _, err := b.Put(ctx, Prefix(sc, epoch)+name, []byte("x")); err != nil {
+		kind := ltx.KindDelta
+		if name == "1.snapshot" {
+			kind = ltx.KindSnapshot
+		}
+		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: epoch, EndTxID: epoch}, []byte("x"))
+		if _, err := b.Put(ctx, Prefix(sc, epoch)+name, raw); err != nil {
 			t.Fatal(err)
 		}
 	}
 	put(1, "1.snapshot")
 	put(2, "2-2.ltx")
 	// No snapshot-done in epoch 2: nothing may be deleted.
-	if n, err := m.RetireEpochs(ctx, sc, 2, 1); err != nil || n != 0 {
+	if n, err := m.RetireEpochsWithOptions(ctx, sc, 2, 1, RetireOptions{OfflineQuiescent: true}); err != nil || n != 0 {
 		t.Fatalf("retire without snapshot = %d, %v; want 0", n, err)
 	}
 	if err := m.MarkSnapshotDone(ctx, sc, 2, 2); err != nil {
@@ -195,7 +238,7 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Keep current (3) and previous (2); delete epoch 1.
-	if n, err := m.RetireEpochs(ctx, sc, 3, 1); err != nil || n == 0 {
+	if n, err := m.RetireEpochsWithOptions(ctx, sc, 3, 1, RetireOptions{OfflineQuiescent: true}); err != nil || n == 0 {
 		t.Fatalf("retire = %d, %v; want deletes", n, err)
 	}
 	keys, err := b.List(ctx, Prefix(sc, 1))
@@ -210,6 +253,93 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 		if len(keys) == 0 {
 			t.Fatalf("epoch %d was deleted", e)
 		}
+	}
+}
+
+func TestRetireEpochsStopsAfterOwnershipLossBetweenDeletes(t *testing.T) {
+	ctx := context.Background()
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &retireLossBucket{Bucket: base}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc-race"}
+	ownerKey := sc.Key() + "/owner.json"
+	initial, err := cell.MarshalOwner(cell.Owner{Node: "old", Epoch: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := base.Put(ctx, ownerKey, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.afterDelete = func() {
+		if b.deletes != 1 {
+			return
+		}
+		next, err := cell.MarshalOwner(cell.Owner{Node: "new", Epoch: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := base.CAS(ctx, ownerKey, next, token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"1.snapshot", "2-2.ltx"} {
+		kind, tx := ltx.KindSnapshot, uint64(1)
+		if name == "2-2.ltx" {
+			kind, tx = ltx.KindDelta, 2
+		}
+		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: 1, StartTxID: tx, EndTxID: tx}, []byte("x"))
+		if _, err := b.Put(ctx, Prefix(sc, 1)+name, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 2, StartTxID: 2, EndTxID: 2}, []byte("snapshot"))
+	if _, err := b.Put(ctx, Prefix(sc, 2)+"2.snapshot", raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSnapshotDone(ctx, sc, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.RetireEpochsWithOptions(ctx, sc, 2, 0, RetireOptions{OfflineQuiescent: true, Verify: func(context.Context) error {
+		if b.deletes >= 1 {
+			return fmt.Errorf("owner epoch lost")
+		}
+		return nil
+	}})
+	if b.deletes != 1 {
+		t.Fatalf("deleted %d objects after ownership loss, want exactly one", b.deletes)
+	}
+	if err == nil {
+		t.Fatal("ownership loss must stop epoch GC")
+	}
+}
+
+func TestRetireEpochsDefaultDefersDeletes(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc-default"}
+	for _, epoch := range []uint64{1, 2} {
+		raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: epoch, EndTxID: epoch}, []byte("snapshot"))
+		if _, err := b.Put(ctx, Prefix(sc, epoch)+fmt.Sprintf("%d.snapshot", epoch), raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.MarkSnapshotDone(ctx, sc, epoch, epoch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := m.RetireEpochs(ctx, sc, 2, 0); !errors.Is(err, ErrGCDeferred) || n != 0 {
+		t.Fatalf("default retire = %d, %v; want deferred", n, err)
+	}
+	keys, err := b.List(ctx, Prefix(sc, 1))
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("default retire deleted old epoch: %v %v", keys, err)
 	}
 }
 

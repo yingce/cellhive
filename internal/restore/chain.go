@@ -22,6 +22,12 @@ func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint6
 	cut := map[uint64]uint64{}
 	for _, h := range headers {
 		if h.Kind == ltx.KindMarker {
+			if h.StartTxID == 0 || h.StartTxID-1 != h.EndTxID {
+				return nil, nil, 0, fmt.Errorf("restore: invalid epoch marker")
+			}
+			if prev, ok := cut[h.Epoch]; ok && prev != h.EndTxID {
+				return nil, nil, 0, fmt.Errorf("restore: conflicting marker cuts for epoch %d", h.Epoch)
+			}
 			cut[h.Epoch] = h.EndTxID
 		}
 	}

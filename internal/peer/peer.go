@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/nodelog"
@@ -63,10 +65,33 @@ type HTTPTransport struct {
 	Client  *http.Client
 }
 
-// NewHTTPTransport builds an HTTP transport.
+const (
+	defaultPeerHTTPTimeout           = 30 * time.Second
+	defaultPeerResponseHeaderTimeout = 30 * time.Second
+)
+
+func newDefaultHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: defaultPeerHTTPTimeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   16,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: defaultPeerResponseHeaderTimeout,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
+
+// NewHTTPTransport builds an HTTP transport. A nil client yields an explicit
+// bounded default instead of http.DefaultClient (which has no timeout).
 func NewHTTPTransport(token string, client *http.Client) *HTTPTransport {
 	if client == nil {
-		client = http.DefaultClient
+		client = newDefaultHTTPClient()
 	}
 	return &HTTPTransport{Token: token, Client: client}
 }

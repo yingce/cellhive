@@ -142,6 +142,73 @@ func TestDOOwnerHintSkipsShardingRouter(t *testing.T) {
 	}
 }
 
+func TestDOOwnerHintDoesNotRetryTenantServiceUnavailable(t *testing.T) {
+	var routerHits, ownerHits atomic.Int64
+	var owner *httptest.Server
+	owner = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ownerHits.Add(1)
+		w.Header().Set("x-cellhive-do-app", "1")
+		w.Header().Set("content-type", "text/plain")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("tenant unavailable"))
+	}))
+	defer owner.Close()
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routerHits.Add(1)
+		w.Header().Set("x-cellhive-do-owner", strings.TrimPrefix(owner.URL, "http://"))
+		_, _ = w.Write([]byte(`{"ok":"primed"}`))
+	}))
+	defer router.Close()
+
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{router.URL, owner.URL}})})
+	id := pickShardID(t, 2, 0)
+	invoke := func() *httptest.ResponseRecorder { return invokeDO(t, srv, id) }
+	if got := invoke(); got.Code != http.StatusOK || got.Body.String() != `{"ok":"primed"}` {
+		t.Fatalf("prime = %d %s", got.Code, got.Body.String())
+	}
+
+	got := invoke()
+	if got.Code != http.StatusServiceUnavailable || got.Body.String() != "tenant unavailable" {
+		t.Fatalf("tenant response = %d %s", got.Code, got.Body.String())
+	}
+	if got.Header().Get("x-cellhive-do-app") != "1" {
+		t.Fatalf("tenant marker = %q, want 1", got.Header().Get("x-cellhive-do-app"))
+	}
+	if routerHits.Load() != 1 || ownerHits.Load() != 1 {
+		t.Fatalf("tenant response was retried: router=%d owner=%d", routerHits.Load(), ownerHits.Load())
+	}
+}
+
+func TestDOOwnerHintRetriesUnmarkedServiceUnavailable(t *testing.T) {
+	var routerHits, ownerHits atomic.Int64
+	var owner *httptest.Server
+	owner = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ownerHits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("runtime unavailable"))
+	}))
+	defer owner.Close()
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routerHits.Add(1)
+		w.Header().Set("x-cellhive-do-owner", strings.TrimPrefix(owner.URL, "http://"))
+		_, _ = w.Write([]byte(`{"ok":"primed"}`))
+	}))
+	defer router.Close()
+
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{router.URL, owner.URL}})})
+	id := pickShardID(t, 2, 0)
+	if got := invokeDO(t, srv, id); got.Code != http.StatusOK {
+		t.Fatalf("prime = %d %s", got.Code, got.Body.String())
+	}
+	got := invokeDO(t, srv, id)
+	if got.Code != http.StatusOK || got.Body.String() != `{"ok":"primed"}` {
+		t.Fatalf("fallback = %d %s", got.Code, got.Body.String())
+	}
+	if routerHits.Load() != 2 || ownerHits.Load() != 1 {
+		t.Fatalf("unmarked 503 was not retried: router=%d owner=%d", routerHits.Load(), ownerHits.Load())
+	}
+}
+
 // TestDOInvokePropagatesTraceparent: the caller's W3C trace context travels in
 // the do-runtime invoke body, which the host actor merges into the tenant DO's
 // request (ADR-146).
@@ -253,6 +320,99 @@ func TestDOProxyForwardsTenantResponse(t *testing.T) {
 	if rr.Body.String() != "websocket upgrade required" {
 		t.Fatalf("body = %q", rr.Body.String())
 	}
+}
+
+func TestDOProxyStreamsLargeTenantResponse(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), doProxyRespLimit+2<<20)
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-cellhive-do-app", "1")
+		w.Header().Set("content-type", "application/octet-stream")
+		w.Header().Set("x-result", "kept")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload)
+	}))
+	defer runtime.Close()
+
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{runtime.URL}})})
+	got := invokeDO(t, srv, "large")
+	if got.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206: %s", got.Code, got.Body.String())
+	}
+	if !bytes.Equal(got.Body.Bytes(), payload) || got.Header().Get("x-result") != "kept" {
+		t.Fatalf("streamed response changed: size=%d want=%d headers=%v", got.Body.Len(), len(payload), got.Header())
+	}
+}
+
+func TestDOProxyRejectsLargeTenantResponseWithoutStreaming(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), doProxyRespLimit+1)
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-cellhive-do-app", "1")
+		_, _ = w.Write(payload)
+	}))
+	defer runtime.Close()
+
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{runtime.URL}})})
+	body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: "large", BundleSHA: "sha"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body))
+	got := &nonFlushingResponseWriter{header: make(http.Header)}
+	srv.handleDOProxy(got, req)
+	if got.status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413: %s", got.status, got.body.String())
+	}
+}
+
+func TestDOProxyCancellationStopsRuntimeRequest(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		w.Header().Set("x-cellhive-do-app", "1")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer runtime.Close()
+
+	srv := New(Deps{Cfg: testAuthConfig(config.Config{TokenInternal: "tok", ScopeSecret: "s", DoRuntimes: []string{runtime.URL}})})
+	body, _ := json.Marshal(doInvokeReq{Namespace: "acme", Worker: "web", Class: "Room", ID: "cancel", BundleSHA: "sha"})
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/do/invoke", bytes.NewReader(body)).WithContext(ctx)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		srv.handleDOProxy(rr, req)
+		result <- rr
+	}()
+	<-started
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime request was not canceled")
+	}
+	select {
+	case <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not return after cancellation")
+	}
+}
+
+type nonFlushingResponseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (w *nonFlushingResponseWriter) Header() http.Header    { return w.header }
+func (w *nonFlushingResponseWriter) WriteHeader(status int) { w.status = status }
+func (w *nonFlushingResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
 }
 
 // TestDOProxyAmbiguousTransportIsNotRetried is the regression for retrying any

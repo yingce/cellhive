@@ -184,20 +184,41 @@ func (m *Manager) LocalReadGuard(sc cell.Scope) (func() bool, bool) {
 	m.mu.Lock()
 	c, ok := m.routes[key]
 	rev := m.cacheRev[key]
+	epoch := m.cacheEpoch
 	lm := m.localLease(c.owner)
 	now := time.Now()
 	valid := ok && c.local && lm != nil && m.releasing[key] == 0 && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+	if valid {
+		if m.guards == nil {
+			m.guards = make(map[string]int)
+		}
+		m.guards[key]++
+	}
 	m.mu.Unlock()
 	if !valid {
 		return nil, false
 	}
+	released := false
 	return func() bool {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		current, exists := m.routes[key]
 		now := time.Now()
-		return exists && current.owner == c.owner && m.cacheRev[key] == rev && m.releasing[key] == 0 && m.localLease(c.owner) == lm && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+		valid := m.cacheEpoch == epoch && exists && current.owner == c.owner && m.cacheRev[key] == rev && m.releasing[key] == 0 && m.localLease(c.owner) == lm && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+		if !released {
+			m.releaseGuardLocked(key)
+			released = true
+		}
+		return valid
 	}, true
+}
+
+func (m *Manager) releaseGuardLocked(key string) {
+	if n := m.guards[key] - 1; n > 0 {
+		m.guards[key] = n
+	} else {
+		delete(m.guards, key)
+	}
 }
 
 // ReadFence detects local ownership transitions while a caller obtains fresh
@@ -206,12 +227,29 @@ func (m *Manager) ReadFence(sc cell.Scope) (func() bool, bool) {
 	key := sc.String()
 	m.mu.Lock()
 	rev := m.cacheRev[key]
+	epoch := m.cacheEpoch
 	busy := m.releasing[key] > 0
+	if !busy {
+		if m.guards == nil {
+			m.guards = make(map[string]int)
+		}
+		m.guards[key]++
+	}
 	m.mu.Unlock()
 	if busy {
 		return nil, false
 	}
-	return func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.releasing[key] == 0 && m.cacheRev[key] == rev }, true
+	released := false
+	return func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		valid := m.cacheEpoch == epoch && m.releasing[key] == 0 && m.cacheRev[key] == rev
+		if !released {
+			m.releaseGuardLocked(key)
+			released = true
+		}
+		return valid
+	}, true
 }
 
 // ResolveForwardRoute is only a destination hint. A peer's renewed node lease

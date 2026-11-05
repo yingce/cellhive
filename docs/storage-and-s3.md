@@ -64,6 +64,10 @@ r2/<ns>/<bucket_name>/<object-key>
 
 ## 生命周期与 GC
 
+**ADR-307 优先于下文早期 GC 描述（契约先行，实施与验收中，未部署）**：压实继续发布，自动物理复制删除默认 **DEFERRED**。`Options.GC` 仅表示意图；删除 covered L0、旧 L1 或 `RetireEpochs` payload 必须显式设置 `OfflineQuiescent bool=true`（默认 `false`），由调用者在外部停止并排空所有 writers 和 readers，并在整个删除期间保持静默。生产后台不得启用，interval/timeout 不能绕过；无 owner 或 nil `Verify` 不是许可。离线模式逐次 Delete 前执行配置的 `Verify`，观察到丢失即停止，但检查与删除并非跨对象原子 fence；可选 payload ETag 也不能证明 owner 安全。
+
+所有模式保留 marker/link/不可变 epoch-cut/snapshot-started/done/未知名称。manifest/index 完整覆盖证明仍必需，不能仅以水位判断；不可变 cut、cut-before-prune、大 marker 持久化-before-Serve 修复仍在实施与验收。`ReportDeferredGC`/`GCSkipped` 确定性报告延后，不把未删算成功；不新增 pending-deletion registry。代价是桶增长与历史 List 开销；完整在线 GC 所需 generation descriptor、单调 epoch reference、reader pinning 尚未解决。此边界仅针对复制物理 GC，bundle/assets 运维 GC 不变。
+
 - **保留版本**：bundle 按内容寻址去重；版本删除走 lifecycle（引用计数/`deploys` 指针清理）；
 - **LTX**：L0 段后台 **compaction → L1**（`min_txids`/`min_mb`）；大 cell **paging**（稀疏文件按需）；
 - **快照**：接管/大库使用 L9 快照；checkpoint 对齐时产生；
@@ -71,6 +75,15 @@ r2/<ns>/<bucket_name>/<object-key>
 - **枚举**：仅运维命令，有界分页；**热路径禁止 LIST**（ADR-266 的唯一例外是：某个权威逻辑 key 当前窗口点查 miss 时，对**该单 key 前缀**做一次有界查找，用于找回上一窗口或长时间未写的最后一段；这不是 bucket 级 LIST）。
 
 ## 性能
+
+### 当前工作树的预检与读取边界（2026-11-04，未部署）
+
+- PageFetcher 仅跳过严格 canonical snapshot/part 且水位不高于页索引的对象；未知、混合、snapshot batch 保留解码。`NewPageFetcherMinBytes` 只在零 L0 且索引 image 小于阈值时提前回退整库恢复；任何 L0 都可能增加解码后的 commit，须照常构建并比较。
+- compaction 仅在名称/大小能证明低于阈值时省正文读取；旧 L1 和完全覆盖的 L0 不作为新增触发量。快捷 covered-L0 GC 要求持久 index 水位不低于 manifest，随后复核 owner/epoch；缺失/落后 index 延后，读错误失败关闭。未知、混合、跨水位对象不由此快捷路径删除，也不重写 manifest/index。
+- `CELLHIVE_COMPACTION_TIMEOUT=5m` 按 scope 独立计时；串行扫描仍可能被多个慢 scope 累积拖延。这不消除整库恢复的 segment 缓冲、旧 epoch GC 扫描或所有后台/Range 超时缺口。
+- 原生 COS/OSS 与 S3 默认读取上限 512MiB（S3 的 Go option `MaxReadBytes` 可覆盖），不是总恢复内存预算。超限返回错误而非截断数据；provider 默认只有连接/TLS/响应头期限，body 依赖调用 context。peer 30s、supervisor HTTPStore 60s 是总请求期限，慢链路仍可能失败。
+
+ADR-306 增量已通过本地审查与测试，详见 [当前问题](known-issues.md)；后续 epoch/lineage 修复按 ADR-307 实施与验收中，仍是发布门禁。上述水位/owner 检查不是在线删除授权，物理 GC 必须遵循本页 ADR-307 默认延后边界。本地增量接受不能作为完整恢复流式化、全部 GC 安全或已部署的证据。
 
 - 桶**同区/就近**；fleet 模式下 S3 **后台合批上传，不在写 ack 路径**；
 - 每 ack 的对象 PUT 数应远小于 1（group commit）；

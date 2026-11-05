@@ -13,6 +13,8 @@
 
 ## 统一定时器抽象
 
+**当前工作树性能改动（2026-11-04，未部署）**：queue/cron/workflow/DO alarm 的控制投影回调共用 5s TTL 与 single-flight，可能在刷新前选择旧的路由/版本；不是强一致发布或 mutation 授权缓存。Workflow 先用实例固定 target，只有未固定的旧实例才查询 active 定义。timer 新增 `(kind, occurrence)` 与 `(due_ms, token)` 索引；保留提交后按实际 timer 集合对账 wake 索引，失败也要修正预发布的 phantom。省掉 pre/post `NextDue` 的方案已撤回，不能以“每次仅一条查询”描述最终实现。strict mutation 投影及 owner read-fence 并发验证仍在收口，见 [当前问题](known-issues.md)。
+
 所有定时事件统一为：
 
 ```

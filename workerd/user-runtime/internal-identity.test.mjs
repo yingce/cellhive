@@ -3,16 +3,18 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { internalHeaders, authorized as verifyInternal } from '../platform/jwt.js';
+import { SOURCE_CACHE_BYTES } from '../platform/lifecycle.js';
 const signingKey=Buffer.alloc(32,7).toString('base64url');
 const source = readFileSync(new URL('./internal.js', import.meta.url), 'utf8');
-function harness(metadata) {
+function harness(metadata, bundle='export default {}') {
   const context = vm.createContext({ internalHeaders, verifyInternal, Request, Response, URL, TextEncoder, console, crypto: { randomUUID: ()=>'test' },
     bindingStub(){}, workerLimits:()=>({}), quotaSource:()=>'', invocationSource:()=>'',
     checkedWorkerGet: async (_loader,id,code)=>({id,code,getEntrypoint:()=>({handleFetch:async()=>new Response('ok'),callMethod:async()=> 'ok'})}),
     budgetErrorBody:()=>null,
-    fetch:async url=>url.includes('/worker/bindings') ? new Response(JSON.stringify(metadata())) : url.includes('/bundle-url') ? new Response('',{status:404}) : url.includes('/log-capture') ? new Response('{"mode":"off"}') : new Response('export default {}') });
+    fetch:async url=>url.includes('/worker/bindings') ? new Response(JSON.stringify(metadata())) : url.includes('/bundle-url') ? new Response('',{status:404}) : url.includes('/log-capture') ? new Response('{"mode":"off"}') : new Response(bundle) });
   vm.runInContext(readFileSync(new URL('../platform/lifecycle.js', import.meta.url),'utf8').replace(/^export /gm,''), context);
-  vm.runInContext(source.replace(/^import .*;$/gm,'').replace(/^export \{.*;$/gm,'').replace('export default {','const entry = {')+'\nglobalThis.entry = entry;', context);
+  vm.runInContext('globalThis.__rewrites=0;{const original=String.prototype.replaceAll;String.prototype.replaceAll=function(...args){globalThis.__rewrites++;return original.apply(this,args);};}', context);
+  vm.runInContext(source.replace(/^import .*;$/gm,'').replace(/^export \{.*;$/gm,'').replace('export default {','const entry = {')+'\nglobalThis.entry = entry;globalThis.loadSource = loadSource;globalThis.bundleCache = bundleCache;', context);
   context.env={CELL_URL:'http://local',CELL_TOKEN:signingKey,DISPATCH_TOKEN:signingKey,CH_LOG_CAPTURE:'0'};
   return context;
 }
@@ -84,4 +86,35 @@ test('timer handler failure diagnostics keep only sanitized name and first frame
  got=await call({errorObject:bad});
  assert.ok(got.body.message.includes('business-secret'));assert.equal(got.body.error_name,'Error');assert.equal(got.body.error_frame,'worker.js:5:2');
  assert.ok(!JSON.stringify({name:got.body.error_name,frame:got.body.error_frame}).match(/business|secret|bad name/));
+});
+
+test('dispatch bundle rewrite is cached once per sha and variant', async () => {
+  const c = harness(() => spec('one'));
+  await c.loadWorker(c.env, {}, body);
+  const workerRewrites = c.__rewrites;
+  assert.equal(workerRewrites, 2);
+  await c.loadWorker(c.env, {}, body);
+  assert.equal(c.__rewrites, workerRewrites);
+  await c.loadWorkflowWorker(c.env, {}, body);
+  assert.equal(c.__rewrites, workerRewrites + 4);
+  await c.loadWorkflowWorker(c.env, {}, body);
+  assert.equal(c.__rewrites, workerRewrites + 4);
+});
+
+test('dispatch source caches share one conservative budget and admit oversized sources', () => {
+  assert.match(source, /const bundleCache = sourceCache\(BUNDLE_CACHE_MAX\)/);
+  assert.match(source, /const rewrittenCache = bundleCache/);
+  assert.match(source, /cacheSource\(bundleCache, sha, text\)/);
+  assert.match(source, /cacheSource\(rewrittenCache, key, out\)/);
+  assert.match(source, /const cached = rewrittenCache\.get\(key\);[\s\S]*const source = await loadSource/);
+});
+
+test('oversized valid bundle is returned without cache admission failure', async () => {
+  const oversized = 'x'.repeat(Math.ceil(SOURCE_CACHE_BYTES / 2) + 1);
+  const big = harness(() => spec('one'), oversized);
+  assert.equal(await big.loadSource(big.env, 'oversized-sha'), oversized);
+  assert.equal(big.bundleCache.has('oversized-sha'), false);
+  const ordinary = harness(() => spec('one'), 'export default {}');
+  assert.equal(await ordinary.loadSource(ordinary.env, 'ordinary-sha'), 'export default {}');
+  assert.equal(ordinary.bundleCache.has('ordinary-sha'), true);
 });

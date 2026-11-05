@@ -2,7 +2,7 @@
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { authorized as verifyInternal, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
-import { ByteLRU, textWeight, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
+import { ByteLRU, cacheSource, sourceCache, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
 import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
@@ -375,12 +375,7 @@ function variantSuffix(tailOn) {
 // platform WorkflowEntrypoint base and loads the workflow wrapper (P2 workflows).
 async function loadWorkflowWorker(env, ctx, body) {
   await refreshLogCapture(env);
-  let source = await loadSource(env, body.bundle_sha);
-  source = source
-    .replaceAll('"cloudflare:workers"', '"cellhive-workflow.js"')
-    .replaceAll("'cloudflare:workers'", "'cellhive-workflow.js'")
-    .replaceAll('"cloudflare:workflows"', '"cellhive-workflow.js"')
-    .replaceAll("'cloudflare:workflows'", "'cellhive-workflow.js'");
+  const source = await rewrittenSource(env, body.bundle_sha, "workflow");
   // Include the version when given: a binding/vars-only redeploy keeps the sha
   // but must not reuse the old isolate/env (see loader.js workerStub).
   const spec = await specFor(env, body);
@@ -446,9 +441,7 @@ function tenantEnv(env, ctx, spec, vars) {
 
 async function loadWorker(env, ctx, body) {
   await refreshLogCapture(env);
-  const source = (await loadSource(env, body.bundle_sha))
-    .replaceAll('"cloudflare:workers"','"__cellhive-invocation-workers.js"')
-    .replaceAll("'cloudflare:workers'","'__cellhive-invocation-workers.js'");
+  const source = await rewrittenSource(env, body.bundle_sha, "worker");
   const spec = await specFor(env, body);
   const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
   // Separate delete/recreate incarnations even when version and SHA are reused.
@@ -492,7 +485,11 @@ async function loadWorker(env, ctx, body) {
 // (interval 1s) would re-download the bundle. Bounded FIFO maps.
 const BUNDLE_CACHE_MAX = 256;
 const SPEC_CACHE_MAX = 64;
-const bundleCache = new ByteLRU(BUNDLE_CACHE_MAX,32*1024*1024,textWeight);
+const bundleCache = sourceCache(BUNDLE_CACHE_MAX);
+// Original and rewritten sources share one budget: an isolate must not hold two
+// copies of a large immutable bundle. A rewritten hit is checked before the
+// original is loaded, so steady-state dispatch never re-downloads.
+const rewrittenCache = bundleCache;
 const bundleInflight = new Map(); // bundle sha -> Promise (single-flight)
 const specCache = new ByteLRU(SPEC_CACHE_MAX,8*1024*1024,jsonWeight);
 
@@ -508,14 +505,33 @@ async function loadSource(env, sha) {
   const p = (async () => {
     try {
       const text = await fetchBundle(env, sha);
-      cachePut(bundleCache, sha, text, BUNDLE_CACHE_MAX);
-      return text;
+      return cacheSource(bundleCache, sha, text);
     } finally {
       bundleInflight.delete(sha);
     }
   })();
   bundleInflight.set(sha, p);
   return p;
+}
+
+// Queue/cron dispatch re-loads the immutable bundle source every call. The
+// platform import rewrites are deterministic per sha and module variant, so
+// cache the rewritten text instead of running four replaceAll scans per batch.
+async function rewrittenSource(env, sha, variant) {
+  const key = sha + "~" + variant;
+  const cached = rewrittenCache.get(key);
+  if (cached !== undefined) return cached;
+  const source = await loadSource(env, sha);
+  const out = variant === "workflow"
+    ? source
+      .replaceAll('"cloudflare:workers"', '"cellhive-workflow.js"')
+      .replaceAll("'cloudflare:workers'", "'cellhive-workflow.js'")
+      .replaceAll('"cloudflare:workflows"', '"cellhive-workflow.js"')
+      .replaceAll("'cloudflare:workflows'", "'cellhive-workflow.js'")
+    : source
+      .replaceAll('"cloudflare:workers"', '"__cellhive-invocation-workers.js"')
+      .replaceAll("'cloudflare:workers'", "'__cellhive-invocation-workers.js'");
+  return cacheSource(rewrittenCache, key, out);
 }
 
 // specFor resolves the binding spec + vars for a dispatch body. An explicit

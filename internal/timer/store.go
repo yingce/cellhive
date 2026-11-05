@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS timers (
   occurrence TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS timers_due ON timers(due_ms);
+CREATE INDEX IF NOT EXISTS timers_kind_occurrence ON timers(kind, occurrence);
+CREATE INDEX IF NOT EXISTS timers_due_token ON timers(due_ms, token);
 CREATE TABLE IF NOT EXISTS timer_retry (
   token          TEXT PRIMARY KEY,
   attempt        INTEGER NOT NULL,
@@ -62,11 +64,11 @@ func NewStore(ctx context.Context, c *cellstore.Cell) (*Store, error) {
 	// Timer stores are opened on every due poll. Re-running the idempotent DDL
 	// inside Cell.Tx would still advance its capture txid on every read.
 	var objects int
-	err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name IN ('timers','timers_due','timer_retry','fired','fired_expires')`).Scan(&objects)
+	err := c.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name IN ('timers','timers_due','timers_kind_occurrence','timers_due_token','timer_retry','fired','fired_expires')`).Scan(&objects)
 	if err != nil {
 		return nil, fmt.Errorf("timer: check schema: %w", err)
 	}
-	if objects != 5 {
+	if objects != 7 {
 		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, schema)
 			return err
@@ -154,8 +156,10 @@ func (s *Store) Upsert(ctx context.Context, t Timer) error {
 	_, err := s.cell.Tx(ctx, func(tx *sql.Tx) error {
 		return InsertTx(ctx, tx, t)
 	})
-	// Correct the entry after the commit, and also on failure (the pre-published
-	// entry may name a timer that never committed).
+	// Correct the entry from the committed timer set, and also on failure (a
+	// pre-published entry may name a timer that never committed, and a concurrent
+	// earlier timer may have committed after our pre-read). Index.Delete(0) on an
+	// empty set prevents a phantom entry from surviving a failed transaction.
 	_ = s.syncIndex(ctx)
 	return err
 }

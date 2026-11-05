@@ -59,7 +59,7 @@ func (s *Server) workflowTarget(ctx context.Context, ns, name string) workflow.T
 	if s.Control == nil {
 		return workflow.Target{}
 	}
-	proj, err := s.Control.Projection(ctx)
+	proj, err := s.projectionStrict(ctx)
 	if err != nil {
 		return workflow.Target{}
 	}

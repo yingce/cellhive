@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ByteLRU, Lifetime, RuntimeCapacity, quotaSource } from './lifecycle.js';
+import { ByteLRU, CountLRU, Lifetime, RuntimeCapacity, SOURCE_CACHE_BYTES, cacheSource, sourceCache, quotaSource, managedModules } from './lifecycle.js';
 
 test('quota wrapper invokes binding methods without RPC apply lookup', () => {
   const source = quotaSource(10, { CACHE: { kind: 'kv' } });
@@ -93,4 +93,62 @@ test('capacity reserves synchronously across concurrent cold requests', () => {
   assert.equal(c.reserve('a', 6), true); assert.equal(c.reserve('a', 6), true);
   assert.equal(c.reserve('b', 5), false); assert.equal(c.reserve('b', 4), true);
   assert.equal(c.reserve('c', 1), false); c.release('a'); assert.equal(c.reserve('c', 1), true);
+});
+
+test('count LRU bounds N>cap entries and refreshes recency on get', () => {
+  const c = new CountLRU(3);
+  c.set('a', 1); c.set('b', 2); c.set('c', 3);
+  c.get('a');
+  c.set('d', 4);
+  assert.equal(c.size, 3);
+  assert.equal(c.has('a'), true);
+  assert.equal(c.has('b'), false);
+  assert.deepEqual([...c.values()], [3, 1, 4]);
+  c.delete('a');
+  assert.equal(c.has('a'), false);
+});
+
+test('cacheable sources are retained and oversized valid sources bypass the cache', () => {
+  const c = sourceCache(2000);
+  const source = 'x'.repeat(20 * 1024 * 1024);
+  cacheSource(c, 'sha', source);
+  assert.equal(c.get('sha'), source);
+  const oversized = 'x'.repeat(Math.ceil(SOURCE_CACHE_BYTES / 2) + 1);
+  assert.equal(cacheSource(c, 'too-big', oversized), oversized);
+  assert.equal(c.has('too-big'), false);
+});
+
+test('a 101 without a usable websocket does not pin the isolate', async () => {
+  const life = new Lifetime();
+  const res = {status: 101};
+  assert.equal(await life.response(res), res);
+  assert.equal(life.pinned, false);
+  assert.equal(life.sockets, 0);
+  assert.equal(life.idle(), true);
+});
+
+test('websocket pin clears on close or error and releases its reservation', async () => {
+  for (const event of ['close', 'error']) {
+    const life = new Lifetime();
+    const capacity = new RuntimeCapacity(1, 32);
+    assert.equal(capacity.reserve('resident', 16), true);
+    const socket = new EventTarget();
+    const res = { status: 101, webSocket: socket };
+    const out = await life.response(res, () => capacity.release('resident'));
+    assert.equal(out, res);
+    assert.equal(life.pinned, true);
+    assert.equal(life.sockets, 1);
+    assert.equal(life.idle(), false);
+    assert.equal(capacity.reserve('other', 16), false);
+    socket.dispatchEvent(new Event(event));
+    assert.equal(life.pinned, false);
+    assert.equal(life.sockets, 0);
+    assert.equal(life.idle(), true);
+    assert.equal(capacity.reserve('other', 16), true);
+  }
+});
+
+test('lifecycle status reports live websocket count', () => {
+  const code = managedModules({ mainModule: 'tenant.js', compatibilityFlags: [] }, 'default', 'nonce')['__cellhive-managed.js'];
+  assert.match(code, /sockets:life\.sockets/);
 });

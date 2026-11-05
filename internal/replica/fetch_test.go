@@ -235,6 +235,105 @@ func TestPageFetcherSkipsThousandsOfCoveredL0Objects(t *testing.T) {
 	}
 }
 
+func TestPageFetcherSkipsThousandsOfCoveredSnapshotObjects(t *testing.T) {
+	const watermark = 3000
+	m, b, sc := newFetchFixture(t, watermark)
+	for tx := uint64(1); tx <= watermark; tx++ {
+		b.objects[Prefix(sc, 1)+fmt.Sprintf("%d.snapshot", tx)] = []byte("covered snapshot must not be read")
+		b.objects[Prefix(sc, 1)+fmt.Sprintf("%d.p0.snapshot", tx)] = []byte("covered snapshot part must not be read")
+	}
+	newKey := Prefix(sc, 1) + "3001-3001.ltx"
+	b.objects[newKey] = fetchDelta(t, watermark+1, 2)
+	pf, err := m.NewPageFetcher(t.Context(), sc, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := pf.Page(t.Context(), 1)
+	if err != nil || !bytes.Equal(page, bytes.Repeat([]byte{2}, 64)) || pf.TxID() != watermark+1 {
+		t.Fatalf("new delta not applied: txid=%d err=%v", pf.TxID(), err)
+	}
+	if len(b.gets) != 2 || b.gets[IndexName(sc, 1)] != 1 || b.gets[newKey] != 1 {
+		t.Fatalf("GETs touched %d objects, want only index and new delta", len(b.gets))
+	}
+}
+
+func TestPageFetcherSnapshotWatermarkBoundary(t *testing.T) {
+	m, b, sc := newFetchFixture(t, 10)
+	covered := Prefix(sc, 1) + "10.snapshot"
+	newer := Prefix(sc, 1) + "11.p0.snapshot"
+	b.objects[covered] = []byte("covered snapshot must not be read")
+	b.objects[newer] = []byte("newer snapshot must be decoded")
+	if _, err := m.NewPageFetcher(t.Context(), sc, 1); err == nil {
+		t.Fatal("newer malformed snapshot silently skipped")
+	}
+	if b.gets[covered] != 0 || b.gets[newer] != 1 {
+		t.Fatalf("gets covered=%d newer=%d, want 0 and 1", b.gets[covered], b.gets[newer])
+	}
+}
+
+func TestPageFetcherMinBytesSkipsL0WhenIndexTooSmall(t *testing.T) {
+	m, b, sc := newFetchFixture(t, 10)
+	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1<<20)
+	if err != nil || use || pf != nil {
+		t.Fatalf("small index: pf=%v use=%v err=%v", pf, use, err)
+	}
+	if len(b.gets) != 1 || b.gets[IndexName(sc, 1)] != 1 {
+		t.Fatalf("GETs touched %d objects, want only the index", len(b.gets))
+	}
+}
+
+func TestPageFetcherMinBytesKeepsThresholdBoundary(t *testing.T) {
+	m, b, sc := newFetchFixture(t, 10)
+	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 64)
+	if err != nil || !use || pf == nil {
+		t.Fatalf("exact threshold: pf=%v use=%v err=%v", pf, use, err)
+	}
+	if pf.Commit() != 1 || pf.PageSize() != 64 {
+		t.Fatalf("image shape = %dx%d", pf.Commit(), pf.PageSize())
+	}
+	if len(b.gets) != 1 || b.gets[IndexName(sc, 1)] != 1 {
+		t.Fatalf("GETs touched %d objects, want only the index", len(b.gets))
+	}
+}
+
+func TestPageFetcherMinBytesCannotSkipWithL0Tail(t *testing.T) {
+	m, b, sc := newFetchFixture(t, 10)
+	tailKey := Prefix(sc, 1) + "11-11.ltx"
+	b.objects[tailKey] = fetchDelta(t, 11, 3)
+	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1<<20)
+	if err != nil || !use || pf == nil {
+		t.Fatalf("L0 tail: pf=%v use=%v err=%v", pf, use, err)
+	}
+	if pf.TxID() != 11 || b.gets[tailKey] != 1 {
+		t.Fatalf("tail not loaded: txid=%d gets=%d", pf.TxID(), b.gets[tailKey])
+	}
+}
+
+func TestPageFetcherMinBytesNoOverflow(t *testing.T) {
+	idx, err := EncodeIndex(PageIndex{Watermark: 1, Entries: []PageIndexEntry{{
+		Key:      L1Prefix(cell.Scope{Namespace: "acme", Class: "__kv__", ID: "runs"}, 1) + "base.snapshot",
+		PageSize: ^uint32(0), Commit: ^uint32(0),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "runs"}
+	m := New(&fetchCountingBucket{objects: map[string][]byte{IndexName(sc, 1): idx}, gets: map[string]int{}})
+	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1<<20)
+	if err != nil || !use || pf == nil {
+		t.Fatalf("huge index overflowed below threshold: pf=%v use=%v err=%v", pf, use, err)
+	}
+}
+
+func TestPageFetcherMinBytesRequiresIndex(t *testing.T) {
+	m := New(&fetchCountingBucket{objects: map[string][]byte{}, gets: map[string]int{}})
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "runs"}
+	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1)
+	if !errors.Is(err, ErrNoPageIndex) || use || pf != nil {
+		t.Fatalf("no index: pf=%v use=%v err=%v", pf, use, err)
+	}
+}
+
 func TestPageFetcherCoveredNameFiltering(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -243,9 +342,21 @@ func TestPageFetcherCoveredNameFiltering(t *testing.T) {
 		{"1-10.ltx", true},
 		{"10-10.ltx", true},
 		{"1-10.d.batch", true},
+		{"10.snapshot", true},
+		{"9.snapshot", true},
+		{"10.p0.snapshot", true},
+		{"10.p32767.snapshot", true},
 		{"1-10.batch", false},
 		{"1-10.m.batch", false},
 		{"10.p0-p1.s.batch", false}, // Keep snapshot batches on the existing decode path.
+		{"11.snapshot", false},
+		{"10.p32768.snapshot", false},
+		{"10.p01.snapshot", false},
+		{"10.p0x.snapshot", false},
+		{"10.p.snapshot", false},
+		{"10.p-1.snapshot", false},
+		{"010.snapshot", false},
+		{"10..snapshot", false},
 		{"1-11.d.batch", false},
 		{"1-10junk.ltx", false},
 		{"11-10.ltx", false},
