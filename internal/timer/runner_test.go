@@ -56,6 +56,44 @@ func newRunner(t *testing.T, d Dispatcher) (*Runner, *Registry, *Store) {
 	return r, reg, st
 }
 
+func TestRunnerForgetsDeletedResourceScope(t *testing.T) {
+	ctx := context.Background()
+	const scope = "demo/__kv__/deleted"
+	reg := NewRegistry()
+	reg.Add(scope)
+	openCalls := 0
+	forgotten := ""
+	r := &Runner{
+		Registry:   reg,
+		Dispatcher: &recordingDispatcher{},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:        func() time.Time { return time.UnixMilli(2000) },
+		Open: func(context.Context, string) (*Store, error) {
+			openCalls++
+			return nil, cell.ErrResourceDeleted
+		},
+		Forget: func(_ context.Context, s string) error {
+			forgotten = s
+			return nil
+		},
+	}
+	if n, err := r.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("pass = %d, %v", n, err)
+	}
+	if openCalls != 1 || forgotten != scope {
+		t.Fatalf("openCalls=%d forgotten=%q", openCalls, forgotten)
+	}
+	if _, _, ok := reg.snapshot(scope); ok {
+		t.Fatal("deleted scope still registered")
+	}
+	if _, err := r.Pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if openCalls != 1 {
+		t.Fatalf("deleted scope reopened: openCalls=%d", openCalls)
+	}
+}
+
 func TestRunnerDispatchesDueExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	d := &recordingDispatcher{}

@@ -2,8 +2,11 @@ package timer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
+
+	"cellhive/internal/cell"
 )
 
 // Dispatcher delivers one due timer. The production implementation calls
@@ -30,8 +33,11 @@ type Runner struct {
 	Open     func(ctx context.Context, scope string) (*Store, error)
 	// Own confirms this process owns the scope before opening its local SQLite.
 	// It may claim an unowned scope and restore its authoritative state.
-	Own             func(ctx context.Context, scope string) (bool, error)
-	Commit          func(ctx context.Context, scope string, fn func() error) error
+	Own    func(ctx context.Context, scope string) (bool, error)
+	Commit func(ctx context.Context, scope string, fn func() error) error
+	// Forget removes a terminal scope (for example a deleted resource
+	// incarnation) from the persistent wake index.
+	Forget          func(ctx context.Context, scope string) error
 	Dispatcher      Dispatcher
 	Interval        time.Duration
 	Batch           int
@@ -119,6 +125,18 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 		}
 		st, err := r.Open(ctx, scope)
 		if err != nil {
+			if errors.Is(err, cell.ErrResourceDeleted) {
+				// The resource incarnation is intentionally gone. Stop local
+				// polling and remove its wake-index pointer so every node does
+				// not keep rediscovering the same orphan.
+				r.Registry.removeIf(scope, gen)
+				if r.Forget != nil {
+					if ferr := r.Forget(ctx, scope); ferr != nil {
+						r.log().Warn("timer forget deleted scope failed", "scope", scope, "err", ferr)
+					}
+				}
+				continue
+			}
 			r.log().Warn("timer open store failed", "scope", scope, "err", err)
 			continue
 		}

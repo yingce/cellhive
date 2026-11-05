@@ -537,7 +537,10 @@ func main() {
 			Registry: timerReg, Open: openTimerScope, Dispatcher: dispatcher,
 			Interval: cfg.TimerInterval, Batch: cfg.TimerBatch, FiredTTL: cfg.TimerFiredTTL,
 			CronMaxAttempts: cfg.CronMaxAttempts,
-			Log:             log,
+			Forget: func(fctx context.Context, scope string) error {
+				return wakeIdx.Delete(fctx, scope)
+			},
+			Log: log,
 		}
 	}
 	// Leader-only automatic recovery of dead nodes (ADR-066): the waker, on the
@@ -582,7 +585,11 @@ func main() {
 				}
 				return out, nil
 			},
-			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval, Log: log,
+			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval,
+			Forget: func(fctx context.Context, scope string) error {
+				return wakeIdx.Delete(fctx, scope)
+			},
+			Log: log,
 			Cleanup: func(cctx context.Context) (int, error) {
 				return wakeIdx.Cleanup(cctx, time.Now().Add(-time.Hour).UnixMilli(), 128)
 			},

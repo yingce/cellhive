@@ -2,9 +2,11 @@ package waker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
+	"cellhive/internal/cell"
 	"cellhive/internal/timer"
 )
 
@@ -19,6 +21,7 @@ type Waker struct {
 	Open            func(ctx context.Context, scope string) (*timer.Store, error)
 	Own             func(ctx context.Context, scope string) (bool, error)
 	Commit          func(ctx context.Context, scope string, fn func() error) error
+	Forget          func(ctx context.Context, scope string) error
 	Dispatcher      timer.Dispatcher
 	Interval        time.Duration
 	Batch           int
@@ -156,6 +159,14 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 		}
 		st, err := w.Open(ctx, scope)
 		if err != nil {
+			if errors.Is(err, cell.ErrResourceDeleted) {
+				if w.Forget != nil {
+					if ferr := w.Forget(ctx, scope); ferr != nil {
+						w.log().Warn("waker forget deleted scope failed", "scope", scope, "err", ferr)
+					}
+				}
+				continue
+			}
 			w.log().Warn("waker open store failed", "scope", scope, "err", err)
 			continue
 		}
