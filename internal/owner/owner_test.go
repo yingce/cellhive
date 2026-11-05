@@ -644,3 +644,68 @@ func TestRenewTouchesNodeLeaseSegmentAtMostPerInterval(t *testing.T) {
 		t.Fatalf("touch calls = %d, want 2", calls)
 	}
 }
+
+func TestReleaseRunsBeforeReleaseHook(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "pre-release"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var gotScope string
+	var gotEpoch uint64
+	m.BeforeRelease = func(_ context.Context, s cell.Scope, epoch uint64) error {
+		gotScope, gotEpoch = s.String(), epoch
+		return nil
+	}
+	if err := m.Release(ctx, sc, o.Epoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if gotScope != sc.String() || gotEpoch != o.Epoch {
+		t.Fatalf("hook got scope=%q epoch=%d, want %q/%d", gotScope, gotEpoch, sc.String(), o.Epoch)
+	}
+	if got := m.OwnedScopes(); len(got) != 0 {
+		t.Fatalf("owned after release = %+v", got)
+	}
+}
+
+func TestReleaseForPurgeSkipsBeforeReleaseHook(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "purge"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	called := false
+	m.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		called = true
+		return errors.New("must not run for purge")
+	}
+	if err := m.ReleaseForPurge(ctx, sc, o.Epoch); err != nil {
+		t.Fatalf("release for purge: %v", err)
+	}
+	if called {
+		t.Fatal("BeforeRelease ran for a purge release")
+	}
+}
+
+func TestReleaseBeforeReleaseErrorKeepsOwnership(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "pre-release-error"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	m.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		return errors.New("compaction failed")
+	}
+	if err := m.Release(ctx, sc, o.Epoch); err == nil {
+		t.Fatal("release succeeded despite BeforeRelease error")
+	}
+	if got := m.OwnedScopes(); len(got) != 1 || got[0].Scope.String() != sc.String() {
+		t.Fatalf("ownership not retained after hook error: %+v", got)
+	}
+}

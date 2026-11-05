@@ -106,10 +106,24 @@ function managedStub(env,ctx,entry) {
     ...(entry.tailOn?{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey}})]}:{}),
   }));
 }
+const DEFAULT_ISOLATE_IDLE_MS = 10 * 60 * 1000;
+function isolateIdleMs(env){
+  const ms=Math.floor(Number(env&&env.CH_ISOLATE_IDLE_MS));
+  return Number.isFinite(ms)&&ms>0?ms:DEFAULT_ISOLATE_IDLE_MS;
+}
 async function sweepResidents(env,ctx) {
   let pinnedRemain=false;
+  const now=Date.now(),idleMs=isolateIdleMs(env);
   for(const [key,e] of residents){
-    if(!e.retiring||e.cleaning)continue;
+    if(!e.retiring){
+      // Idle residents are not permanent. Without this, a worker/version that
+      // was loaded once stays resident until a newer version or capacity
+      // pressure appears, so workerd RSS only ever climbs.
+      if(!e.life.idle()||now-(e.lastUsed||now)<=idleMs)continue;
+      e.retiring=true;
+      retiringCount++;
+    }
+    if(e.cleaning)continue;
     // A pinned entry is intentionally still queried: only the child knows when
     // its last WebSocket closed. Active non-pinned work still needs no status
     // round trip.
@@ -151,7 +165,6 @@ const SWEEP_PINNED_INTERVAL_MS = 1000;
 let sweepInflight = null;
 let sweepStartedAt = 0;
 function scheduleSweep(env,ctx,force=false){
-  if(retiringCount<=0)return null;
   if(sweepInflight)return sweepInflight;
   const now=Date.now();
   if(!force&&now-sweepStartedAt<SWEEP_INTERVAL_MS)return null;
@@ -187,14 +200,13 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
       // loaded. Keep both resident; the capacity sweep can reclaim them later.
     }
   }
-  // Avoid an async suspension on the steady-state fetch path: schedule at most
-  // one module-level sweep via waitUntil instead of sweeping per request.
-  scheduleSweep(env,ctx);
   let e=residents.get(key);
+  if(e)e.lastUsed=Date.now();
+  scheduleSweep(env,ctx);
   if(e?.cleaning){await e.cleaning;e=residents.get(key);}
   if(!e){
     // Reserve before any further await: concurrent misses cannot exceed admission.
-    e={key,versionKey,tailOn,family,app,worker,version,plan,nonce:crypto.randomUUID(),life:new Lifetime(),retiring:false,cleaning:null,pinned:false};
+    e={key,versionKey,tailOn,family,app,worker,version,plan,nonce:crypto.randomUUID(),life:new Lifetime(),retiring:false,cleaning:null,pinned:false,lastUsed:Date.now()};
     e.id='managed-fetch/'+key+'/'+e.nonce;
     e.code=managedCode(e);
     checkWorkerBudgets(e.code,version.vars,plan.spec,'user');
@@ -215,6 +227,7 @@ async function residentWorker(env,ctx,app,worker,version,plan,tailOn){
   // The sweep skips entries with an active lease and retires them when idle.
   // Moving the descriptor refreshes the eviction order.
   residents.delete(key);residents.set(key,e);
+  e.lastUsed=Date.now();
   const release=e.life.hold();
   return {entry:e,release};
 }
@@ -223,7 +236,13 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
-    if (url.pathname === "/healthz") return new Response("ok");
+    if (url.pathname === "/healthz") {
+      // The supervisor probes this endpoint even when there is no tenant
+      // traffic. Use it to run the idle sweep so residents are reclaimed on an
+      // idle runtime instead of waiting for the next request.
+      scheduleSweep(env,ctx,true);
+      return new Response("ok");
+    }
     if (env.CH_POOL_MODE === "1" && url.pathname === "/drain") return text("not found", 404);
     // Rolling-update probes (ADR-156): /ready reports projection freshness and
     // draining so the edge can pull this instance out before it stops; /drain

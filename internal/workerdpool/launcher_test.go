@@ -1,6 +1,7 @@
 package workerdpool
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -45,5 +46,20 @@ func TestWorkerdLauncherInheritedSocketsAndReadiness(t *testing.T) {
 	case <-h.Done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("child not reaped")
+	}
+}
+
+func TestTeeWriterCopiesToBothSinks(t *testing.T) {
+	file, tee := &bytes.Buffer{}, &bytes.Buffer{}
+	w := teeWriter(file, tee)
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if file.String() != "hello" || tee.String() != "hello" {
+		t.Fatalf("file=%q tee=%q", file.String(), tee.String())
+	}
+	only := &bytes.Buffer{}
+	if teeWriter(only, nil) != only {
+		t.Fatal("nil tee must return the base writer")
 	}
 }

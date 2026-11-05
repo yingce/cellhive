@@ -202,6 +202,7 @@ test('loader sweep queries a pinned resident and reclaims capacity after the soc
   const c = vm.createContext({
     residents: new Map([['resident', entry]]), retiringCount: 1,
     preparedCache: new Map(), latestVersionByFamily: new Map([['ns/w', 1]]),
+    isolateIdleMs: () => 10 * 60 * 1000,
     managedStub: () => ({ getEntrypoint: () => ({
       status: async () => ({ nonce: 'nonce', idle: childLife.idle(), pinned: childLife.pinned, sockets: childLife.sockets }),
       retire: async () => { retired++; return true; },
@@ -220,4 +221,31 @@ test('loader sweep queries a pinned resident and reclaims capacity after the soc
   assert.equal(c.residents.has('resident'), false);
   assert.equal(c.retiringCount, 0);
   assert.equal(capacity.reserve('other', 16), true);
+});
+
+test('idle residents expire after the idle TTL, recently used ones stay', async () => {
+  let retired = 0;
+  const capacity = { release() {} };
+  const make = (key, lastUsed) => ({
+    key, versionKey: 'ns/' + key + '@1-sha', family: 'ns/' + key, nonce: 'n-' + key,
+    life: new Lifetime(), retiring: false, cleaning: null, pinned: false, lastUsed,
+  });
+  const expired = make('expired', 8000);
+  const fresh = make('fresh', 9500);
+  const c = vm.createContext({
+    residents: new Map([['expired', expired], ['fresh', fresh]]), retiringCount: 0,
+    preparedCache: new Map(), latestVersionByFamily: new Map(),
+    isolateIdleMs: () => 1000, Date: { now: () => 10000 }, console,
+    managedStub: (_env, _ctx, e) => ({ getEntrypoint: () => ({
+      status: async () => ({ nonce: e.nonce, idle: true, pinned: false, sockets: 0 }),
+      retire: async () => { retired++; return true; },
+    }) }),
+    isolateCapacity: () => capacity,
+  });
+  vm.runInContext(extract('async function sweepResidents(', '// One module-level sweeper'), c);
+  assert.equal(await c.sweepResidents({}, {}), false);
+  assert.equal(retired, 1);
+  assert.equal(c.residents.has('expired'), false);
+  assert.equal(c.residents.has('fresh'), true);
+  assert.equal(c.retiringCount, 0);
 });

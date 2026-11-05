@@ -3,6 +3,8 @@ package userruntimepool
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -12,6 +14,15 @@ import (
 )
 
 const poolDrainGrace = 35 * time.Second
+
+// workerdLogWriter copies adaptive-pool workerd logs to the container log.
+// Set CELLHIVE_WORKERD_LOG_STDOUT=0 to keep them only in the per-slot file.
+func workerdLogWriter() io.Writer {
+	if os.Getenv("CELLHIVE_WORKERD_LOG_STDOUT") == "0" {
+		return nil
+	}
+	return os.Stdout
+}
 
 // Manager owns a runtime-lifetime context. Incoming request cancellation must
 // never cancel a shared child process. Shared launches are serialized; a
@@ -38,7 +49,7 @@ func NewManager(parent context.Context, bin, dir string, cfg userruntime.Config,
 		p.UpdateResources(resources)
 	}
 	s := &workerdpool.Supervisor{Pool: p, Events: make(chan workerdpool.ProcessEvent, 64), DrainGrace: 30 * time.Second}
-	s.Launcher = workerdpool.WorkerdLauncher{Prepare: func(ctx context.Context, slot workerdpool.Slot, ports workerdpool.Ports) (workerdpool.Prepared, error) {
+	s.Launcher = workerdpool.WorkerdLauncher{LogWriter: workerdLogWriter(), Prepare: func(ctx context.Context, slot workerdpool.Slot, ports workerdpool.Ports) (workerdpool.Prepared, error) {
 		child := cfg
 		child.PublicPort = ports.Public
 		child.InternalPort = ports.Internal

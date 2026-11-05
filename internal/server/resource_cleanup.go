@@ -369,7 +369,7 @@ func (s *Server) cleanupOwnedResource(ctx context.Context, j control.ResourceCle
 		return done, err
 	}
 	if s.Owner != nil {
-		if err := s.Owner.Release(ctx, sc, epoch); err != nil {
+		if err := s.Owner.ReleaseForPurge(ctx, sc, epoch); err != nil {
 			return false, err
 		}
 	}

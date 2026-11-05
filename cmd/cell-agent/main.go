@@ -295,6 +295,45 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
+	// Fold the final L0 tail before releasing ownership. Rebalance, disk
+	// pressure, handoff, and peer drain otherwise leave an uncompacted
+	// predecessor epoch that no future owner compacts; the cell keeps its
+	// objects but restore has to read a long L0 chain forever.
+	om.BeforeRelease = func(rctx context.Context, sc cell.Scope, epoch uint64) error {
+		if cfg.CaptureEpochSnapshotMaxBytes > 0 {
+			if p, err := store.Path(sc); err == nil {
+				if fi, err := os.Stat(p); err == nil && fi.Size() > cfg.CaptureEpochSnapshotMaxBytes {
+					log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "cell exceeds epoch snapshot budget")
+					return nil
+				}
+			}
+		}
+		cctx, cancel := context.WithTimeout(rctx, 10*time.Second)
+		defer cancel()
+		cres, cerr := compaction.Compact(cctx, rep, sc, epoch, compaction.Options{
+			MinSegments: 1, MinBytes: 1, MinObjects: 1,
+			Verify: func(vctx context.Context) error {
+				o, _, rerr := om.Resolve(vctx, sc)
+				if rerr != nil {
+					return rerr
+				}
+				if o.Node != cfg.NodeID || o.Epoch != epoch {
+					return fmt.Errorf("ownership changed during pre-release compaction")
+				}
+				return nil
+			},
+			GC: false,
+		})
+		if cerr != nil {
+			log.Warn("compaction before release failed", "scope", sc.String(), "epoch", epoch, "err", cerr)
+			return nil
+		}
+		if cres.Compacted {
+			log.Info("compacted before release", "scope", sc.String(), "epoch", epoch,
+				"inputs", cres.Inputs, "parts", cres.Parts, "min_txid", cres.MinTxID, "max_txid", cres.MaxTxID)
+		}
+		return nil
+	}
 	// Claim callbacks must not wait on a request that is itself waiting for
 	// the per-scope claim gate. Retry a busy replica without publishing owner.
 	resetLocal := func(rctx context.Context, sc cell.Scope) error {

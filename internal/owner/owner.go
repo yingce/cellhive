@@ -124,16 +124,20 @@ type Manager struct {
 	// its owner record is replaced. Nil is only safe for roles with no fleet
 	// acknowledgement path.
 	BeforeTakeover func(context.Context, cell.Owner) error
-	mu             sync.Mutex
-	cache          map[string]cachedOwner
-	cacheRev       map[string]uint64
-	cacheRevAt     map[string]time.Time
-	cacheEpoch     uint64
-	cachePending   map[string]int
-	guards         map[string]int
-	routes         map[string]ownerRoute
-	routeFlights   map[string]*routeFlight
-	releasing      map[string]int
+	// BeforeRelease runs while ownership is still valid, immediately before the
+	// owner record is deleted. cell-agent uses it to fold the final L0 tail so a
+	// released/rebound cell does not leave an uncompacted predecessor epoch.
+	BeforeRelease func(context.Context, cell.Scope, uint64) error
+	mu            sync.Mutex
+	cache         map[string]cachedOwner
+	cacheRev      map[string]uint64
+	cacheRevAt    map[string]time.Time
+	cacheEpoch    uint64
+	cachePending  map[string]int
+	guards        map[string]int
+	routes        map[string]ownerRoute
+	routeFlights  map[string]*routeFlight
+	releasing     map[string]int
 
 	claimMu sync.Mutex
 	claims  map[string]chan struct{}
@@ -484,6 +488,17 @@ func (m *Manager) Renew(ctx context.Context, s cell.Scope, epoch uint64, now tim
 
 // Release removes the owner record if this node still owns the given epoch.
 func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error {
+	return m.release(ctx, s, epoch, false)
+}
+
+// ReleaseForPurge releases ownership for a resource that is being deleted. It
+// skips BeforeRelease because the cell data is fenced and purged, not handed to
+// a future owner.
+func (m *Manager) ReleaseForPurge(ctx context.Context, s cell.Scope, epoch uint64) error {
+	return m.release(ctx, s, epoch, true)
+}
+
+func (m *Manager) release(ctx context.Context, s cell.Scope, epoch uint64, skipBeforeRelease bool) error {
 	key := s.String()
 	m.mu.Lock()
 	if m.releasing == nil {
@@ -508,6 +523,12 @@ func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error
 	if cur.Node != m.NodeID || cur.Session != m.Session || cur.Epoch != epoch {
 		m.Invalidate(s)
 		return ErrEpochMismatch
+	}
+	if m.BeforeRelease != nil && !skipBeforeRelease {
+		if err := m.BeforeRelease(ctx, s, epoch); err != nil {
+			m.Invalidate(s)
+			return err
+		}
 	}
 	// Conditional delete: if the lease expired and a peer re-claimed between the
 	// resolve above and this delete, the CAS fails and the peer's claim survives

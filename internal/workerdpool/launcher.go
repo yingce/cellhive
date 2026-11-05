@@ -3,6 +3,7 @@ package workerdpool
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,16 @@ type Prepared struct {
 }
 type WorkerdLauncher struct {
 	Prepare func(context.Context, Slot, Ports) (Prepared, error)
+	// LogWriter, when set, also receives workerd stdout/stderr. The per-slot
+	// workerd.log file is always kept for post-mortem diagnostics.
+	LogWriter io.Writer
+}
+
+func teeWriter(base, tee io.Writer) io.Writer {
+	if tee == nil {
+		return base
+	}
+	return io.MultiWriter(base, tee)
 }
 
 // Both sockets are bound before rendering/exec, eliminating the free-port race.
@@ -68,8 +79,9 @@ func (l WorkerdLauncher) Start(ctx context.Context, s Slot) (*Handle, error) {
 	cmd := exec.CommandContext(ctx, prepared.Binary, "serve", "--experimental", prepared.ConfigPath, "--socket-fd", "public=3", "--socket-fd", "internal=4")
 	cmd.Env = append([]string{}, prepared.Env...)
 	cmd.ExtraFiles = []*os.File{pubFile, intFile}
-	cmd.Stdout = log
-	cmd.Stderr = log
+	logOut := teeWriter(log, l.LogWriter)
+	cmd.Stdout = logOut
+	cmd.Stderr = logOut
 	if err = cmd.Start(); err != nil {
 		log.Close()
 		return nil, err
