@@ -94,6 +94,44 @@ func TestRunnerForgetsDeletedResourceScope(t *testing.T) {
 	}
 }
 
+func TestRunnerForgetsDeletedResourceOnOwnershipCheck(t *testing.T) {
+	ctx := context.Background()
+	const scope = "demo/__kv__/deleted-owner"
+	reg := NewRegistry()
+	reg.Add(scope)
+	opened := false
+	forgotten := ""
+	r := &Runner{
+		Registry:   reg,
+		Dispatcher: &recordingDispatcher{},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:        func() time.Time { return time.UnixMilli(2000) },
+		Own: func(context.Context, string) (bool, error) {
+			return false, cell.ErrResourceDeleted
+		},
+		Open: func(context.Context, string) (*Store, error) {
+			opened = true
+			return nil, nil
+		},
+		Forget: func(_ context.Context, s string) error {
+			forgotten = s
+			return nil
+		},
+	}
+	if n, err := r.Pass(ctx); err != nil || n != 0 {
+		t.Fatalf("pass = %d, %v", n, err)
+	}
+	if opened {
+		t.Fatal("deleted scope was opened")
+	}
+	if forgotten != scope {
+		t.Fatalf("forgotten = %q, want %q", forgotten, scope)
+	}
+	if _, _, ok := reg.snapshot(scope); ok {
+		t.Fatal("deleted scope still registered")
+	}
+}
+
 func TestRunnerDispatchesDueExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	d := &recordingDispatcher{}

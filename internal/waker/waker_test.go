@@ -99,6 +99,36 @@ func TestWakerForgetsDeletedResourceScope(t *testing.T) {
 	}
 }
 
+func TestWakerForgetsDeletedResourceOnOwnershipCheck(t *testing.T) {
+	ctx := context.Background()
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "deleted-owner"}
+	forgotten := ""
+	w := &Waker{
+		Election:   NewElection(newBucket(t, t.TempDir()), "node-a", "s", 10*time.Second),
+		DeadScopes: func(context.Context) ([]string, error) { return []string{sc.String()}, nil },
+		Own: func(context.Context, string) (bool, error) {
+			return false, cell.ErrResourceDeleted
+		},
+		Open: func(context.Context, string) (*timer.Store, error) {
+			t.Fatal("deleted scope was opened")
+			return nil, nil
+		},
+		Forget: func(_ context.Context, s string) error {
+			forgotten = s
+			return nil
+		},
+		Dispatcher: &countingDispatcher{},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:        func() time.Time { return time.UnixMilli(2000) },
+	}
+	if n, leader, err := w.Pass(ctx); err != nil || !leader || n != 0 {
+		t.Fatalf("pass = %d leader=%v err=%v", n, leader, err)
+	}
+	if forgotten != sc.String() {
+		t.Fatalf("forgotten = %q, want %q", forgotten, sc.String())
+	}
+}
+
 func TestWakerOnlyLeaderDispatches(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

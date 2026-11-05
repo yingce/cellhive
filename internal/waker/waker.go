@@ -150,6 +150,14 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 		if w.Own != nil {
 			owned, oerr := w.Own(ctx, scope)
 			if oerr != nil {
+				if errors.Is(oerr, cell.ErrResourceDeleted) {
+					if w.Forget != nil {
+						if ferr := w.Forget(ctx, scope); ferr != nil {
+							w.log().Warn("waker forget deleted scope failed", "scope", scope, "err", ferr)
+						}
+					}
+					continue
+				}
 				w.log().Warn("waker ownership check failed", "scope", scope, "err", oerr)
 				continue
 			}

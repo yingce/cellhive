@@ -115,6 +115,15 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 		if r.Own != nil {
 			owned, err := r.Own(ctx, scope)
 			if err != nil {
+				if errors.Is(err, cell.ErrResourceDeleted) {
+					r.Registry.removeIf(scope, gen)
+					if r.Forget != nil {
+						if ferr := r.Forget(ctx, scope); ferr != nil {
+							r.log().Warn("timer forget deleted scope failed", "scope", scope, "err", ferr)
+						}
+					}
+					continue
+				}
 				r.log().Warn("timer ownership check failed", "scope", scope, "err", err)
 				continue
 			}
