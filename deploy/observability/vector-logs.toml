@@ -25,7 +25,7 @@ address = "0.0.0.0:8687"
 
 [sources.cellhive_otlp]
 type = "opentelemetry"
-use_otlp_decoding.logs = false
+use_otlp_decoding.logs = true
 use_otlp_decoding.metrics = false
 use_otlp_decoding.traces = true
 
