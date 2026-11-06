@@ -292,6 +292,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /v1/diagnose", s.auth(s.handleDiagnose))
 	mux.HandleFunc("POST /v1/internal/telemetry/spans", s.auth(s.handleTelemetrySpans))
 	mux.HandleFunc("POST /v1/internal/invocations", s.auth(s.handleInvocationPut))
+	mux.HandleFunc("POST /v1/internal/request-log", s.auth(s.handleRequestLog))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
 	mux.HandleFunc("POST /v1/internal/queue/remove-source", s.auth(s.handleQueueRemoveSource))
 	mux.HandleFunc("GET /v1/control/resource/cleanup", s.auth(s.handleResourceCleanupStatus))

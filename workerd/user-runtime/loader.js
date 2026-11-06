@@ -55,7 +55,12 @@ const envCache = new ByteLRU(2000, 16*1024*1024, jsonWeight);
 const envInflight = new Map(); // "ns/worker@version" -> Promise
 const bundleCache = sourceCache(2000); // sha -> source
 const bundleInflight = new Map(); // sha -> Promise
-const assetCache = new ByteLRU(4000, 32*1024*1024, v=>v?v.byteLength:0, 1024*1024+1024);
+const ASSET_CACHE_MAX_ENTRIES = 4000;
+const ASSET_CACHE_MAX_BYTES = 64*1024*1024;
+const ASSET_CACHE_MAX_ENTRY = 8*1024*1024 + 64*1024;
+const ASSET_FETCH_TIMEOUT_MS = 10000;
+const ASSET_FETCH_ATTEMPTS = 2;
+const assetCache = new ByteLRU(ASSET_CACHE_MAX_ENTRIES, ASSET_CACHE_MAX_BYTES, v=>v?v.byteLength:0, ASSET_CACHE_MAX_ENTRY);
 const metaCache = new ByteLRU(4000, 4*1024*1024, jsonWeight);
 const preparedCache = new ByteLRU(2000, 64*1024*1024, jsonWeight); // conservative plan accounting
 const preparedInflight = new Map();
@@ -368,7 +373,114 @@ function prepareRequest(req, env) {
   return { request: new Request(req, { headers }), sampled };
 }
 
+function otlpRequestLogBody(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+  let pathname = "/";
+  try { pathname = new URL(req.url).pathname; } catch (e) { /* keep fallback */ }
+  const publicPath = req.headers.get("x-vwork-path-prefix") || pathname;
+  const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
+  const tp = req.headers.get("traceparent") || "";
+  const m = /^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-/.exec(tp);
+  const str = (key, value) => ({ key, value: { stringValue: String(value) } });
+  const int = (key, value) => ({ key, value: { intValue: String(value) } });
+  const bool = (key, value) => ({ key, value: { boolValue: !!value } });
+  const attrs = [
+    str("cellhive.namespace", app.namespace),
+    str("cellhive.worker", worker),
+    bool("cellhive.invocation", true),
+    str("cellhive.event_type", "fetch"),
+    str("cellhive.request_id", requestId),
+    str("cellhive.method", req.method),
+    str("cellhive.path", publicPath),
+    str("cellhive.route", "functions"),
+    int("cellhive.status", status),
+    int("cellhive.started_ms", startedMs),
+    int("cellhive.finished_ms", finishedMs),
+    int("cellhive.duration_ms", Math.max(0, finishedMs - startedMs)),
+    str("cellhive.outcome", outcome),
+  ];
+  const record = {
+    timeUnixNano: String(finishedMs * 1000000),
+    observedTimeUnixNano: String(finishedMs * 1000000),
+    severityNumber: status >= 500 ? 17 : 9,
+    severityText: status >= 500 ? "ERROR" : "INFO",
+    body: { stringValue: "invocation" },
+    attributes: attrs,
+  };
+  if (m) record.traceId = m[1], record.spanId = m[2];
+  return JSON.stringify({
+    resourceLogs: [{
+      resource: { attributes: [str("service.name", "cellhive-user-runtime")] },
+      scopeLogs: [{ scope: { name: "cellhive.user-runtime" }, logRecords: [record] }],
+    }],
+  });
+}
+
+async function recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+  const base = String(env.OTLP_LOGS_URL || "").trim();
+  if (base) {
+    let extra = {};
+    try { extra = JSON.parse(env.OTLP_LOGS_HEADERS || "{}"); } catch (e) { extra = {}; }
+    const headers = new Headers({ "content-type": "application/json" });
+    for (const [k, v] of Object.entries(extra)) headers.set(k, String(v));
+    const url = base.replace(/\/$/, "").replace(/\/v1\/(traces|logs)$/, "") + "/v1/logs";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("request log timeout")), 3000);
+    try {
+      const r = await fetch(url, {
+        method: "POST", headers, signal: controller.signal,
+        body: otlpRequestLogBody(env, app, worker, req, status, outcome, startedMs, finishedMs),
+      });
+      if (r.ok) return;
+      console.error(JSON.stringify({ event: "request_log_otlp_failed", status: r.status }));
+    } catch (e) {
+      console.error(JSON.stringify({ event: "request_log_otlp_failed", error: String(e) }));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!env.CELL_URL || !env.CELL_TOKEN) return;
+  const headers = new Headers(await internalHeaders(env.CELL_TOKEN));
+  headers.set("content-type", "application/json");
+  let pathname = "/";
+  try { pathname = new URL(req.url).pathname; } catch (e) { /* keep fallback */ }
+  const publicPath = req.headers.get("x-vwork-path-prefix") || pathname;
+  const body = JSON.stringify({
+    namespace: app.namespace, worker,
+    request_id: req.headers.get("x-request-id") || crypto.randomUUID(),
+    method: req.method, path: publicPath, route: "functions",
+    status, started_ms: startedMs, finished_ms: finishedMs, outcome,
+    traceparent: req.headers.get("traceparent") || "",
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("request log timeout")), 3000);
+  try {
+    await fetch(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/request-log", {
+      method: "POST", headers, body, signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
+  const startedMs = Date.now();
+  let res;
+  try {
+    res = await runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses);
+    return res;
+  } finally {
+    const finishedMs = Date.now();
+    const status = res && res.status ? res.status : 500;
+    const outcome = status >= 500 ? "error" : "ok";
+    if (env.CH_INVOCATION_LOGS === "1") {
+      const log = recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs)
+        .catch(e => console.error(JSON.stringify({ event: "request_log_failed", worker, error: String(e) })));
+      if (ctx && ctx.waitUntil) ctx.waitUntil(log);
+      else void log;
+    }
+  }
+}
+
+async function runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
   const cold=!preparedCache.has(workerVersionKey(app,worker,version));
   if(cold&&coldLoads>=16)return text('runtime cold-load capacity exhausted',503);
   if(cold)coldLoads++;
@@ -694,23 +806,51 @@ function assetCandidates(pathname) {
   return out;
 }
 
+function assetTimeout(promise, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label + " timeout")), ASSET_FETCH_TIMEOUT_MS);
+    promise.then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+async function assetFetch(hop, url, init) {
+  let last;
+  for (let attempt = 1; attempt <= ASSET_FETCH_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("asset fetch timeout")), ASSET_FETCH_TIMEOUT_MS);
+    const started = Date.now();
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (e) {
+      last = e;
+      console.error(JSON.stringify({ event: "asset_upstream_failed", hop, attempt, ms: Date.now() - started, error: String(e) }));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw last;
+}
+
 async function asset(env, app, worker, token, path) {
   const key = `${app.namespace}/${worker}/${token}/${path}`;
   if (assetCache.has(key)) return assetCache.get(key);
   const q = new URLSearchParams({ ns: app.namespace, worker, token, path });
   const headers = await internalHeaders(env.CELL_TOKEN);
-  const signed = await fetch(env.CELL_URL + "/v1/internal/asset-url?" + q, { headers });
+  const signed = await assetFetch("asset-url", env.CELL_URL + "/v1/internal/asset-url?" + q, { headers });
   let r;
   if (signed.ok) {
-    const { url } = await signed.json();
-    if (url && !url.startsWith("file:")) r = await fetch(url);
+    const { url } = await assetTimeout(signed.json(), "asset-url-json");
+    if (url && !url.startsWith("file:")) r = await assetFetch("cos", url);
   } else if (signed.status === 404) {
     assetCache.set(key, null);
     return null;
   } else if (signed.status !== 501) {
     throw new Error("GET asset URL " + path + " -> " + signed.status);
   }
-  if (!r) r = await fetch(env.CELL_URL + "/v1/internal/asset?" + q, { headers });
+  if (!r) r = await assetFetch("asset-fallback", env.CELL_URL + "/v1/internal/asset?" + q, { headers });
   if (r.status === 404) {
     assetCache.set(key, null);
     return null;
@@ -718,18 +858,27 @@ async function asset(env, app, worker, token, path) {
   if (!r.ok) throw new Error("GET asset " + path + " -> " + r.status);
   const metadata=path==='_headers'||path==='_redirects';
   const length=Number(r.headers.get('content-length')||NaN);
-  if(!metadata&&(!Number.isFinite(length)||length>1024*1024))return r;
+  if(!metadata&&(!Number.isFinite(length)||length>ASSET_CACHE_MAX_ENTRY))return r;
   if(metadata){
     const reader=r.body?.getReader();const chunks=[];let size=0;
-    if(reader)for(;;){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>64*1024){await reader.cancel();throw new Error('asset metadata too large');}chunks.push(part.value);}
+    if(reader)for(;;){
+      let part;
+      try { part=await assetTimeout(reader.read(), "asset-metadata-body"); }
+      catch(e){ await reader.cancel().catch(()=>{}); throw e; }
+      if(part.done)break;
+      size+=part.value.byteLength;
+      if(size>64*1024){await reader.cancel();throw new Error('asset metadata too large');}
+      chunks.push(part.value);
+    }
     const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
     assetCache.set(key,bytes);return bytes;
   }
-  const bytes = new Uint8Array(await r.arrayBuffer());
+  let bytes;
+  try { bytes = new Uint8Array(await assetTimeout(r.arrayBuffer(), "asset-body")); }
+  catch(e){ r.body?.cancel?.().catch(()=>{}); throw e; }
   assetCache.set(key, bytes);
   return bytes;
 }
-
 async function redirectRules(env, app, worker, token) {
   const key = `${app.namespace}/${worker}/${token}/_redirects`;
   if (metaCache.has(key)) return metaCache.get(key);

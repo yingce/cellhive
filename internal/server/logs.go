@@ -172,7 +172,14 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 		level = "error"
 	}
 	if export {
-		telemetry.ExportLogWithMetadata(ns, worker, level, "invocation", event.EventTimestamp, tid, sid, invocation)
+		// HTTP request summaries are exported directly from the user-runtime to
+		// OTLP when an endpoint is configured. Keep the cell-agent path for
+		// console lines and for queue/cron/workflow, but do not duplicate the
+		// request row here.
+		directRequestLog := s.Cfg.OTLPEndpoint != "" && event.EventType == "fetch"
+		if !directRequestLog {
+			telemetry.ExportLogWithMetadata(ns, worker, level, "invocation", event.EventTimestamp, tid, sid, invocation)
+		}
 	}
 	if !stored {
 		return

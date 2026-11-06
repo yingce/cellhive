@@ -137,6 +137,14 @@ type Config struct {
 	// CELLHIVE_ISOLATE_MAX / CELLHIVE_ISOLATE_BYTES instead of probing the host.
 	IsolateMax   int
 	IsolateBytes int64
+	// OTLPLogsURL is the OTLP/HTTP base URL for direct request-log export from
+	// the runtime (e.g. http://collector:4318). Empty keeps the cell-agent
+	// fallback endpoint.
+	OTLPLogsURL string
+	// OTLPLogsHeaders is a JSON object of headers (authorization etc.) sent with
+	// direct OTLP request logs. Keep it empty when the collector is reachable
+	// only on a trusted internal network.
+	OTLPLogsHeaders string
 }
 
 type ExecutionTarget struct {
@@ -187,6 +195,8 @@ const config :Workerd.Config = (
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
         (name = "CH_INVOCATION_LOGS", text = "{{if .InvocationLogging}}1{{else}}0{{end}}"),
+        (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
+        (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),
         (name = "CH_POOL_MODE", text = "{{if .PoolMode}}1{{else}}0{{end}}"),
         (name = "CH_POOL_TARGET", text = {{printf "%q" .PoolTargetJSON}}),
       ],
@@ -226,6 +236,8 @@ const config :Workerd.Config = (
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_TRACE_RATIO", text = "{{.TraceSampleRatio}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
+        (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),
         (name = "CH_POOL_MODE", text = "{{if .PoolMode}}1{{else}}0{{end}}"),
         (name = "CH_POOL_TARGET", text = {{printf "%q" .PoolTargetJSON}}),
         (name = "HOST_TTL_MS", text = "{{.HostCacheTTLMs}}"),
@@ -332,6 +344,8 @@ func WorkerdEnv(cfg Config) ([]string, error) {
 		"CELLHIVE_HOST_LOG_TOKEN":           cfg.LogToken,
 		"CELLHIVE_HOST_SCOPE_SECRET":        cfg.ScopeSecret,
 		"CELLHIVE_HOST_BINDING_SIGNING_KEY": cfg.BindingSigningKey,
+		"CELLHIVE_HOST_OTLP_LOGS_URL":       cfg.OTLPLogsURL,
+		"CELLHIVE_HOST_OTLP_LOGS_HEADERS":   cfg.OTLPLogsHeaders,
 	})
 }
 
@@ -357,6 +371,8 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 		"CELLHIVE_HOST_LOG_TOKEN",
 		"CELLHIVE_HOST_SCOPE_SECRET",
 		"CELLHIVE_HOST_BINDING_SIGNING_KEY",
+		"CELLHIVE_HOST_OTLP_LOGS_URL",
+		"CELLHIVE_HOST_OTLP_LOGS_HEADERS",
 	); err != nil {
 		return fmt.Errorf("userruntime: child environment: %w", err)
 	}

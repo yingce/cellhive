@@ -2,13 +2,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cacheSource, sourceCache } from '../platform/lifecycle.js';
+import { CountLRU, cacheSource, sourceCache } from '../platform/lifecycle.js';
 
 const source = readFileSync(new URL('./host.js', import.meta.url), 'utf8');
 const hostSource = source.slice(source.indexOf('export class Host'), source.indexOf('async function fetchBundle'))
   .replace(/^export /gm, '');
 
-function harness() {
+function harness(opts = {}) {
   const resident = new Map();
   const aborted = [];
   const deleted = [];
@@ -35,7 +35,7 @@ function harness() {
   const context = vm.createContext({
     DurableObject, Response, Request, Headers, URL, Uint8Array, TextEncoder, TextDecoder,
     Date, setTimeout, clearTimeout, console, crypto: { randomUUID: () => 'nonce' },
-    wsNet: 0, boundActors: new Set(), BUNDLE_CACHE_MAX: 64,
+    wsNet: 0, boundActors: new Set(), CountLRU, FACET_CACHE_MAX: 512, FACET_IDLE_MS: opts.idle ?? 60000, FACET_SWEEP_MS: opts.sweep ?? 0, BUNDLE_CACHE_MAX: 64,
     sourceCache, cacheSource,
     fetchBundle: async () => 'export default {}',
     checkedWorkerGet: () => ({ getDurableObjectClass: () => class {} }),
@@ -85,4 +85,12 @@ test('abort closes a resident facet with 1012 and decrements ws accounting', asy
   assert.equal(res.status, 200);
   assert.deepEqual(closed, [['Room/target', 1012]]);
   assert.equal(c.wsNet, 3);
+});
+
+test('idle facets are aborted after the idle TTL when no request or socket is active', async () => {
+  const { host, aborted } = harness({ idle: 1, sweep: 0 });
+  await host.fetch(invocation('idle-object'));
+  await new Promise((r) => setTimeout(r, 5));
+  await host.fetch(invocation('other-object'));
+  assert.ok(aborted.includes('Room/idle-object'));
 });

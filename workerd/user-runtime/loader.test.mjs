@@ -249,3 +249,72 @@ test('idle residents expire after the idle TTL, recently used ones stay', async 
   assert.equal(c.residents.has('fresh'), true);
   assert.equal(c.retiringCount, 0);
 });
+
+test('asset cache admits >1MiB frontend files and skips entries above 8MiB', async () => {
+  const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
+  const fn = extract('function assetTimeout(promise, label)', 'async function redirectRules(');
+  const make = (size) => {
+    const assetCache = new Map();
+    let calls = [];
+    const fetch = async (url) => {
+      calls.push(url);
+      if (url.includes('/v1/internal/asset-url')) return { ok: true, status: 200, json: async () => ({ url: 'https://cos.test/object' }) };
+      return new Response(new Uint8Array(size), { headers: { 'content-length': String(size) } });
+    };
+    const c = vm.createContext({
+      assetCache, internalHeaders: async () => ({}), fetch, console,
+      AbortController, URLSearchParams, Uint8Array, Number, JSON,
+      setTimeout, clearTimeout, Date, Headers, Response,
+      ASSET_FETCH_TIMEOUT_MS: 10000, ASSET_FETCH_ATTEMPTS: 2, ASSET_CACHE_MAX_ENTRY: 8 * 1024 * 1024 + 64 * 1024,
+    });
+    vm.runInContext(fn, c);
+    return { assetCache, calls, asset: c.asset };
+  };
+  const twoMiB = 2 * 1024 * 1024;
+  const a = make(twoMiB);
+  const first = await a.asset({ CELL_URL: 'http://cell', CELL_TOKEN: 'tok' }, { namespace: 'acme' }, 'web', 'ver', 'big.js');
+  assert.equal(first.byteLength, twoMiB);
+  assert.equal(a.assetCache.has('acme/web/ver/big.js'), true);
+  await a.asset({ CELL_URL: 'http://cell', CELL_TOKEN: 'tok' }, { namespace: 'acme' }, 'web', 'ver', 'big.js');
+  assert.equal(a.calls.length, 2);
+
+  const nineMiB = 9 * 1024 * 1024;
+  const b = make(nineMiB);
+  const res = await b.asset({ CELL_URL: 'http://cell', CELL_TOKEN: 'tok' }, { namespace: 'acme' }, 'web', 'ver', 'huge.wasm');
+  assert.equal(res.status, 200);
+  assert.equal(b.assetCache.has('acme/web/ver/huge.wasm'), false);
+});
+
+test('direct OTLP request log posts the function_request shape and headers', async () => {
+  const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('function otlpRequestLogBody('), source.indexOf('async function runWorker('));
+  const calls = [];
+  const fetch = async (url, init) => { calls.push([url, init]); return { ok: true, status: 200 }; };
+  const c = vm.createContext({
+    fetch, Headers, AbortController, URL, URLSearchParams, Uint8Array, Number, JSON, String, Object, Error,
+    setTimeout, clearTimeout, Date, console, crypto: { randomUUID: () => 'uuid' }, internalHeaders: async () => ({}),
+  });
+  vm.runInContext(fn, c);
+  const req = {
+    url: 'http://app/functions/v1/web/x', method: 'POST',
+    headers: { get: (name) => ({
+      'x-request-id': 'rid-1', 'x-vwork-path-prefix': '/functions/v1/web/x',
+      'traceparent': '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+    })[name] || null },
+  };
+  await c.recordRequestLog(
+    { OTLP_LOGS_URL: 'http://collector:4318', OTLP_LOGS_HEADERS: '{"authorization":"Bearer test"}' },
+    { namespace: 'acme' }, 'web', req, 504, 'error', 1000, 61000,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'http://collector:4318/v1/logs');
+  assert.equal(calls[0][1].headers.get('authorization'), 'Bearer test');
+  const body = JSON.parse(calls[0][1].body);
+  const record = body.resourceLogs[0].scopeLogs[0].logRecords[0];
+  const attrs = Object.fromEntries(record.attributes.map((a) => [a.key, Object.values(a.value)[0]]));
+  assert.equal(attrs['cellhive.event_type'], 'fetch');
+  assert.equal(attrs['cellhive.request_id'], 'rid-1');
+  assert.equal(attrs['cellhive.status'], '504');
+  assert.equal(attrs['cellhive.path'], '/functions/v1/web/x');
+  assert.equal(record.traceId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+});

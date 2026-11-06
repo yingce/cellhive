@@ -81,6 +81,8 @@ func main() {
 		LogToken:          logToken,
 		DisableTenantLogs: !tenantLogCapture,
 		InvocationLogging: invocationLogging,
+		OTLPLogsURL:       strings.TrimSpace(getenv("CELLHIVE_OTLP_ENDPOINT", "")),
+		OTLPLogsHeaders:   otlpHeadersJSON(),
 		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
 		TraceSampleRatio:  traceRatio(),
 		DoDirect:          getenv("CELLHIVE_DO_DIRECT", ""),
@@ -376,6 +378,28 @@ func traceRatio() float64 {
 		}
 	}
 	return 0.01
+}
+
+// otlpHeadersJSON converts the existing key=value OTLP header env into the
+// JSON object bound into the loader. An empty value means the collector is
+// reachable only on the trusted internal network.
+func otlpHeadersJSON() string {
+	v := strings.TrimSpace(getenv("CELLHIVE_OTLP_HEADERS", ""))
+	if v == "" {
+		return "{}"
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(v, ",") {
+		k, val, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if ok && strings.TrimSpace(k) != "" {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(val)
+		}
+	}
+	if len(out) == 0 {
+		return "{}"
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
 }
 
 // invocationLogging is the node-wide switch for durable Queue/Cron/Workflow

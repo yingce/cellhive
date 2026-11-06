@@ -142,8 +142,9 @@ doRuntime:
   # gate); false deploys the ungated runtime.
   gate: true
   resources:
-    requests: {cpu: 500m, memory: 512Mi}
-    # Gated runtime shares this budget with its supervisor and WAL capture.
+    # Match the live user-runtime profile while the facet lifecycle fix is
+    # validated. 4Gi is a hard ceiling, not headroom for the old leak.
+    requests: {cpu: 500m, memory: 2Gi}
     limits: {cpu: "2", memory: 4Gi}
   storage: 20Gi
   storageClassName: ""

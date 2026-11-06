@@ -13,12 +13,12 @@ test('DO seen registry is a count-bounded LRU', () => {
   assert.equal(seen.has('object-0'), false);
 });
 
-test('seen is bounded, facet identity maps are unbounded, bundles use a byte budget', () => {
+test('seen is bounded, facet version identity is retained, facet stubs are count-bounded', () => {
   assert.match(source, /const seen = new CountLRU\(SEEN_MAX\)/);
-  assert.match(source, /#facets = new Map\(\)/);
+  assert.match(source, /#facets = new CountLRU\(FACET_CACHE_MAX\)/);
   assert.match(source, /#facetVersion = new Map\(\)/);
   assert.match(source, /#bundles = sourceCache\(BUNDLE_CACHE_MAX\)/);
-  assert.match(source, /#facets\.delete\(facetId\)/);
+  assert.match(source, /#forgetFacet\(facetId\)/);
   assert.match(source, /#facetVersion\.delete\(facetId\)/);
   assert.equal(SOURCE_CACHE_BYTES, 65 * 1024 * 1024);
   assert.equal(textWeight('abc'), 6);

@@ -44,6 +44,15 @@ const GUARD_MS = 3000;
 // In-memory registry/bundle cache bounds: the durable object index and the
 // bucket bundle are the authorities; these caches only avoid re-work.
 const SEEN_MAX = 10000;
+// Facet stubs keep workerd isolates reachable from the host. The version map
+// must remain complete for ADR-081 (a dropped version would reuse a resident
+// facet after a deploy), but it is tiny strings; the stub map is the one that
+// grows with every touched object. Keep it count-bounded: dropping a stub does
+// not abort the facet, so SQLite and active WebSockets are preserved, and the
+// next access reuses the resident facet or cold-loads it via ctx.facets.get.
+const FACET_CACHE_MAX = 512;
+const FACET_IDLE_MS = 10 * 60 * 1000;
+const FACET_SWEEP_MS = 60 * 1000;
 const BUNDLE_CACHE_MAX = 64;
 const DRAIN_WAIT_MS = 8000;
 const HINT_TTL_MS = 30000;
@@ -946,6 +955,7 @@ function tenantRequest(req) {
 
 export class Host extends DurableObject {
   async fetch(req) {
+    this.#sweepFacets();
     await this.#bind();
     const url = new URL(req.url);
     if (url.pathname === "/v1/do/connect") {
@@ -959,15 +969,31 @@ export class Host extends DurableObject {
         storage_class: q.get("storage_class") || "",
         version: q.get("version") ?? undefined,
       };
-      let facet;
+      const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
+      this.#enterFacet(facetId);
       try {
-        facet = await this.#facet(spec);
-      } catch (e) {
-        const body = budgetErrorBody(e);
-        if (body) return json(body, 500);
-        throw e;
+        let facet;
+        try {
+          facet = await this.#facet(spec);
+        } catch (e) {
+          if (String(e && e.message) === "do_runtime_capacity") return json({ error: "do_runtime_capacity" }, 503);
+          const body = budgetErrorBody(e);
+          if (body) return json(body, 500);
+          throw e;
+        }
+        const res = await facet.fetch(tenantRequest(req)); // 101 + webSocket preserved
+        if (res && res.webSocket) {
+          this.#addFacetSocket(facetId);
+          const done = () => this.#removeFacetSocket(facetId);
+          try {
+            res.webSocket.addEventListener("close", done, { once: true });
+            res.webSocket.addEventListener("error", done, { once: true });
+          } catch (e) { /* socket already closed */ }
+        }
+        return res;
+      } finally {
+        this.#leaveFacet(facetId);
       }
-      return facet.fetch(tenantRequest(req)); // 101 + webSocket preserved
     }
     if (url.pathname === "/v1/do/abort") {
       const spec = await req.json();
@@ -985,7 +1011,7 @@ export class Host extends DurableObject {
         await new Promise((r) => setTimeout(r, 50));
       }
       this.#facetVersion.delete(facetId);
-      this.#facets.delete(facetId);
+      this.#forgetFacet(facetId);
       try {
         this.ctx.facets.abort(facetId, new Error("owner changed"));
       } catch (e) {
@@ -997,7 +1023,7 @@ export class Host extends DurableObject {
       const spec = await req.json();
       const facetId = spec.facet_id;
       this.#facetVersion.delete(facetId);
-      this.#facets.delete(facetId);
+      this.#forgetFacet(facetId);
       try {
         this.ctx.facets.delete(facetId);
       } catch (e) {
@@ -1006,10 +1032,14 @@ export class Host extends DurableObject {
       return new Response("ok");
     }
     const spec = await req.json();
+    const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
+    this.#enterFacet(facetId);
+    try {
     let facet;
     try {
       facet = await this.#facet(spec);
     } catch (e) {
+      if (String(e && e.message) === "do_runtime_capacity") return json({ error: "do_runtime_capacity" }, 503);
       const body = budgetErrorBody(e);
       if (body) return json(body, 500);
       throw e;
@@ -1077,6 +1107,59 @@ export class Host extends DurableObject {
     // included). Platform error envelopes do not carry this header.
     out.headers.set("x-cellhive-do-app", "1");
     return out;
+    } finally {
+      this.#leaveFacet(facetId);
+    }
+  }
+
+  #touchFacet(id) {
+    this.#facetLastUsed.set(id, Date.now());
+    this.#scheduleFacetSweep();
+  }
+  #enterFacet(id) {
+    this.#facetActive.set(id, (this.#facetActive.get(id) || 0) + 1);
+    this.#activeFacets++;
+    this.#touchFacet(id);
+  }
+  #leaveFacet(id) {
+    const n = (this.#facetActive.get(id) || 0) - 1;
+    if (n > 0) this.#facetActive.set(id, n); else this.#facetActive.delete(id);
+    this.#activeFacets = Math.max(0, this.#activeFacets - 1);
+    if (this.#facetLastUsed.has(id)) this.#touchFacet(id);
+  }
+  #addFacetSocket(id) {
+    this.#facetSockets.set(id, (this.#facetSockets.get(id) || 0) + 1);
+    this.#touchFacet(id);
+  }
+  #removeFacetSocket(id) {
+    const n = (this.#facetSockets.get(id) || 0) - 1;
+    if (n > 0) this.#facetSockets.set(id, n); else this.#facetSockets.delete(id);
+    if (this.#facetLastUsed.has(id)) this.#touchFacet(id);
+  }
+  #forgetFacet(id) {
+    this.#facets.delete(id);
+    this.#facetLastUsed.delete(id);
+    this.#facetActive.delete(id);
+    this.#facetSockets.delete(id);
+  }
+  #sweepFacets(force = false) {
+    const now = Date.now();
+    if (!force && now - this.#lastSweep < FACET_SWEEP_MS) return;
+    this.#lastSweep = now;
+    for (const [id, at] of [...this.#facetLastUsed]) {
+      if (!force && now - at <= FACET_IDLE_MS) continue;
+      if ((this.#facetActive.get(id) || 0) > 0 || (this.#facetSockets.get(id) || 0) > 0) continue;
+      this.#forgetFacet(id);
+      try { this.ctx.facets.abort(id, new Error("facet idle")); } catch (e) { /* already gone */ }
+    }
+  }
+  #scheduleFacetSweep() {
+    if (FACET_SWEEP_MS <= 0 || this.#sweepTimer !== null || this.#facetLastUsed.size === 0) return;
+    this.#sweepTimer = setTimeout(() => {
+      this.#sweepTimer = null;
+      this.#sweepFacets();
+      this.#scheduleFacetSweep();
+    }, FACET_SWEEP_MS);
   }
 
   async #facet(spec) {
@@ -1096,18 +1179,23 @@ export class Host extends DurableObject {
     }
     // Facet id is class-scoped within the host so distinct classes never collide.
     const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
+    this.#touchFacet(facetId);
     // Version-driven lazy restart (ADR-081): the facet holds the (version, sha)
     // it was built from, so a deploy that changes either must abort this facet
     // (only this one) and let the next get() construct it from the new bundle.
     // SQLite is preserved (abort, never delete).
     const built = this.#facetVersion.get(facetId);
     if (built !== undefined && built !== buildKey) {
-      this.#facets.delete(facetId);
+      this.#forgetFacet(facetId);
       try {
         this.ctx.facets.abort(facetId, new Error("cellhive: version changed"));
       } catch (e) {
         /* not resident */
       }
+    }
+    if (!this.#facets.has(facetId) && this.#activeFacets >= FACET_CACHE_MAX) {
+      this.#sweepFacets(true);
+      if (this.#activeFacets >= FACET_CACHE_MAX) throw new Error("do_runtime_capacity");
     }
     const facet = this.ctx.facets.get(facetId, async () => {
       await refreshLogCapture(this.env);
@@ -1179,6 +1267,7 @@ export class Host extends DurableObject {
     });
     this.#facetVersion.set(facetId, buildKey);
     this.#facets.set(facetId, facet);
+    this.#touchFacet(facetId);
     return facet;
   }
 
@@ -1196,11 +1285,19 @@ export class Host extends DurableObject {
 
   #bundles = sourceCache(BUNDLE_CACHE_MAX);
   // Facet identity must survive cache pressure: workerd's facet build callback
-  // runs only on first get(), so dropping this entry would reuse a resident
-  // facet after a version change (ADR-081). Keep the original maps; the bundle
-  // cache remains byte-bounded.
+  // runs only on first get(), so dropping the version entry would reuse a
+  // resident facet after a version change (ADR-081). Keep the version map
+  // complete (string keys are small); bound only the stub map. Evicting a stub
+  // never aborts the facet: SQLite and active sockets stay with workerd, and
+  // the next access either reuses the resident facet or cold-loads it.
   #facetVersion = new Map();
-  #facets = new Map();
+  #facets = new CountLRU(FACET_CACHE_MAX);
+  #facetLastUsed = new Map();
+  #facetActive = new Map();
+  #facetSockets = new Map();
+  #activeFacets = 0;
+  #lastSweep = 0;
+  #sweepTimer = null;
 }
 
 async function fetchBundle(env, sha) {
