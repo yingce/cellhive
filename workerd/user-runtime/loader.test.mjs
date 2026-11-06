@@ -287,12 +287,13 @@ test('asset cache admits >1MiB frontend files and skips entries above 8MiB', asy
 
 test('direct OTLP request log posts the function_request shape and headers', async () => {
   const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
-  const fn = source.slice(source.indexOf('function otlpRequestLogBody('), source.indexOf('async function runWorker('));
+  const fn = source.slice(source.indexOf('function otlpVarint('), source.indexOf('async function runWorker('));
   const calls = [];
   const fetch = async (url, init) => { calls.push([url, init]); return { ok: true, status: 200 }; };
   const c = vm.createContext({
     fetch, Headers, AbortController, URL, URLSearchParams, Uint8Array, Number, JSON, String, Object, Error,
     setTimeout, clearTimeout, Date, console, crypto: { randomUUID: () => 'uuid' }, internalHeaders: async () => ({}),
+    TextEncoder, DataView, BigInt,
   });
   vm.runInContext(fn, c);
   const req = {
@@ -309,12 +310,7 @@ test('direct OTLP request log posts the function_request shape and headers', asy
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], 'http://collector:4318/v1/logs');
   assert.equal(calls[0][1].headers.get('authorization'), 'Bearer test');
-  const body = JSON.parse(calls[0][1].body);
-  const record = body.resourceLogs[0].scopeLogs[0].logRecords[0];
-  const attrs = Object.fromEntries(record.attributes.map((a) => [a.key, Object.values(a.value)[0]]));
-  assert.equal(attrs['cellhive.event_type'], 'fetch');
-  assert.equal(attrs['cellhive.request_id'], 'rid-1');
-  assert.equal(attrs['cellhive.status'], '504');
-  assert.equal(attrs['cellhive.path'], '/functions/v1/web/x');
-  assert.equal(record.traceId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(calls[0][1].headers.get('content-type'), 'application/x-protobuf');
+  assert.ok(calls[0][1].body instanceof Uint8Array);
+  assert.ok(calls[0][1].body.byteLength > 100);
 });

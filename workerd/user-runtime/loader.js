@@ -373,54 +373,71 @@ function prepareRequest(req, env) {
   return { request: new Request(req, { headers }), sampled };
 }
 
-function otlpRequestLogBody(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+function otlpVarint(value) {
+  let v = BigInt(value);
+  const out = [];
+  while (v > 127n) { out.push(Number(v & 127n) | 128); v >>= 7n; }
+  out.push(Number(v));
+  return out;
+}
+function otlpTag(field, wire) { return otlpVarint((field << 3) | wire); }
+function otlpBytes(field, bytes) { return [...otlpTag(field, 2), ...otlpVarint(bytes.length), ...bytes]; }
+function otlpString(field, value) { return otlpBytes(field, new TextEncoder().encode(String(value))); }
+function otlpFixed64(field, value) {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return [...otlpTag(field, 1), ...bytes];
+}
+function otlpInt(field, value) { return [...otlpTag(field, 0), ...otlpVarint(value)]; }
+function otlpAny(value) {
+  if (typeof value === "boolean") return otlpInt(2, value ? 1 : 0);
+  if (typeof value === "number") return otlpInt(3, value);
+  return otlpString(1, value);
+}
+function otlpKeyValue(key, value) { return [...otlpString(1, key), ...otlpBytes(2, otlpAny(value))]; }
+function otlpHex(id) {
+  const out = new Uint8Array(id.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs) {
   let pathname = "/";
   try { pathname = new URL(req.url).pathname; } catch (e) { /* keep fallback */ }
   const publicPath = req.headers.get("x-vwork-path-prefix") || pathname;
   const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
   const tp = req.headers.get("traceparent") || "";
   const m = /^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-/.exec(tp);
-  const str = (key, value) => ({ key, value: { stringValue: String(value) } });
-  const int = (key, value) => ({ key, value: { intValue: String(value) } });
-  const bool = (key, value) => ({ key, value: { boolValue: !!value } });
   const attrs = [
-    str("cellhive.namespace", app.namespace),
-    str("cellhive.worker", worker),
-    bool("cellhive.invocation", true),
-    str("cellhive.event_type", "fetch"),
-    str("cellhive.request_id", requestId),
-    str("cellhive.method", req.method),
-    str("cellhive.path", publicPath),
-    str("cellhive.route", "functions"),
-    int("cellhive.status", status),
-    int("cellhive.started_ms", startedMs),
-    int("cellhive.finished_ms", finishedMs),
-    int("cellhive.duration_ms", Math.max(0, finishedMs - startedMs)),
-    str("cellhive.outcome", outcome),
+    ["cellhive.namespace", app.namespace], ["cellhive.worker", worker],
+    ["cellhive.invocation", true], ["cellhive.event_type", "fetch"],
+    ["cellhive.request_id", requestId], ["cellhive.method", req.method],
+    ["cellhive.path", publicPath], ["cellhive.route", "functions"],
+    ["cellhive.status", status], ["cellhive.started_ms", startedMs],
+    ["cellhive.finished_ms", finishedMs], ["cellhive.duration_ms", Math.max(0, finishedMs - startedMs)],
+    ["cellhive.outcome", outcome],
   ];
-  const record = {
-    timeUnixNano: String(finishedMs * 1000000),
-    observedTimeUnixNano: String(finishedMs * 1000000),
-    severityNumber: status >= 500 ? 17 : 9,
-    severityText: status >= 500 ? "ERROR" : "INFO",
-    body: { stringValue: "invocation" },
-    attributes: attrs,
-  };
-  if (m) record.traceId = m[1], record.spanId = m[2];
-  return JSON.stringify({
-    resourceLogs: [{
-      resource: { attributes: [str("service.name", "cellhive-user-runtime")] },
-      scopeLogs: [{ scope: { name: "cellhive.user-runtime" }, logRecords: [record] }],
-    }],
-  });
+  const record = [
+    ...otlpFixed64(1, BigInt(finishedMs) * 1000000n),
+    ...otlpFixed64(11, BigInt(finishedMs) * 1000000n),
+    ...otlpInt(2, status >= 500 ? 17 : 9),
+    ...otlpString(3, status >= 500 ? "ERROR" : "INFO"),
+    ...otlpBytes(5, otlpAny("invocation")),
+    ...attrs.flatMap(([k, v]) => otlpBytes(6, otlpKeyValue(k, v))),
+  ];
+  if (m) record.push(...otlpBytes(9, otlpHex(m[1])), ...otlpBytes(10, otlpHex(m[2])));
+  const scopeLogs = [...otlpBytes(1, otlpString(1, "cellhive.user-runtime")), ...otlpBytes(2, record)];
+  const resourceLogs = [
+    ...otlpBytes(1, otlpBytes(1, otlpKeyValue("service.name", "cellhive-user-runtime"))),
+    ...otlpBytes(2, scopeLogs),
+  ];
+  return new Uint8Array(otlpBytes(1, resourceLogs));
 }
-
 async function recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs) {
   const base = String(env.OTLP_LOGS_URL || "").trim();
   if (base) {
     let extra = {};
     try { extra = JSON.parse(env.OTLP_LOGS_HEADERS || "{}"); } catch (e) { extra = {}; }
-    const headers = new Headers({ "content-type": "application/json" });
+    const headers = new Headers({ "content-type": "application/x-protobuf" });
     for (const [k, v] of Object.entries(extra)) headers.set(k, String(v));
     const url = base.replace(/\/$/, "").replace(/\/v1\/(traces|logs)$/, "") + "/v1/logs";
     const controller = new AbortController();
@@ -428,7 +445,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
     try {
       const r = await fetch(url, {
         method: "POST", headers, signal: controller.signal,
-        body: otlpRequestLogBody(env, app, worker, req, status, outcome, startedMs, finishedMs),
+        body: otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs),
       });
       if (r.ok) return;
       console.error(JSON.stringify({ event: "request_log_otlp_failed", status: r.status }));
