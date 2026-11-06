@@ -236,6 +236,7 @@ const config :Workerd.Config = (
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_TRACE_RATIO", text = "{{.TraceSampleRatio}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "CH_INVOCATION_LOGS", text = "{{if .InvocationLogging}}1{{else}}0{{end}}"),
         (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
         (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),
         (name = "CH_POOL_MODE", text = "{{if .PoolMode}}1{{else}}0{{end}}"),

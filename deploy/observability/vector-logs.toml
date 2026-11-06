@@ -66,8 +66,12 @@ category = if invocation == true {
 } else { "user_console" }
 .category = category
 message = string(.message) ?? ""
-.occurred_at = format_timestamp!(.timestamp, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
-.observed_at = format_timestamp!(.observed_timestamp, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
+occurred_ts = .timestamp
+if occurred_ts == null { occurred_ts = now() }
+observed_ts = .observed_timestamp
+if observed_ts == null { observed_ts = occurred_ts }
+.occurred_at = format_timestamp!(occurred_ts, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
+.observed_at = format_timestamp!(observed_ts, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
 .request_id = request_id
 .app_id = null
 parsed_app, app_err = parse_regex(ns, r'^vwork-(?P<app_id>[0-9]+)$')
