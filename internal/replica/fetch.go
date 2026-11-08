@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 	"cellhive/internal/restore"
@@ -33,12 +34,29 @@ type PageFetcher struct {
 	commit    uint32
 	pageSize  uint32
 	watermark uint64 // highest txid included in the index/L0 cut
+
+	mu    sync.RWMutex
+	lease *ReaderLease
 }
 
 // NewPageFetcher builds a fetcher from the persisted L1 page index plus newer L0
 // deltas. It requires a page index (a compacted cell); an uncompacted cell has no
 // index and should be restored with Restore.
 func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64) (*PageFetcher, error) {
+	lease, err := m.PinReader(ctx, s, epoch, 0)
+	if err != nil {
+		return nil, err
+	}
+	pf, err := m.newPinnedPageFetcher(ctx, s, epoch)
+	if err != nil {
+		_ = lease.Release()
+		return nil, err
+	}
+	pf.lease = lease
+	return pf, nil
+}
+
+func (m *Manager) newPinnedPageFetcher(ctx context.Context, s cell.Scope, epoch uint64) (*PageFetcher, error) {
 	idx, ok, err := m.ReadIndex(ctx, s, epoch)
 	if err != nil {
 		return nil, err
@@ -64,15 +82,21 @@ func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64
 // image above the index bound. In that case the fetcher is built normally and
 // the caller must compare Commit() as before.
 func (m *Manager) NewPageFetcherMinBytes(ctx context.Context, s cell.Scope, epoch uint64, minBytes int64) (*PageFetcher, bool, error) {
+	lease, err := m.PinReader(ctx, s, epoch, 0)
+	if err != nil {
+		return nil, false, err
+	}
 	idx, ok, err := m.ReadIndex(ctx, s, epoch)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok {
+		_ = lease.Release()
 		return nil, false, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
 	}
 	l0keys, err := m.ListL0Segments(ctx, s, epoch)
 	if err != nil {
+		_ = lease.Release()
 		return nil, false, err
 	}
 	if len(l0keys) == 0 {
@@ -82,13 +106,16 @@ func (m *Manager) NewPageFetcherMinBytes(ctx context.Context, s cell.Scope, epoc
 		}
 		if pageSize > 0 && commit > 0 && minBytes > 0 &&
 			uint64(pageSize)*uint64(commit) < uint64(minBytes) {
+			_ = lease.Release()
 			return nil, false, nil
 		}
 	}
 	pf, err := m.newPageFetcher(ctx, s, epoch, idx, l0keys)
 	if err != nil {
+		_ = lease.Release()
 		return nil, false, err
 	}
+	pf.lease = lease
 	return pf, true, nil
 }
 
@@ -276,9 +303,69 @@ func (pf *PageFetcher) Watermark() uint64 { return pf.idx.Watermark }
 // local cache.
 func (pf *PageFetcher) TxID() uint64 { return pf.watermark }
 
+// rebuild re-reads the index and L0 tail under the existing pin. A generation
+// change may move the L1 object set; the caller retries against the new state.
+func (pf *PageFetcher) rebuild(ctx context.Context) error {
+	pf.mu.Lock()
+	defer pf.mu.Unlock()
+	idx, ok, err := pf.m.ReadIndex(ctx, pf.scope, pf.epoch)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNoPageIndex
+	}
+	l0keys, err := pf.m.ListL0Segments(ctx, pf.scope, pf.epoch)
+	if err != nil {
+		return err
+	}
+	next, err := pf.m.newPageFetcher(ctx, pf.scope, pf.epoch, idx, l0keys)
+	if err != nil {
+		return err
+	}
+	pf.idx, pf.entryOf, pf.l0, pf.commit, pf.pageSize, pf.watermark = next.idx, next.entryOf, next.l0, next.commit, next.pageSize, next.watermark
+	return nil
+}
+
+// Close releases the reader pin. Callers must close a fetcher when they stop
+// reading so GC can drain the epoch.
+func (pf *PageFetcher) Close() error {
+	if pf == nil {
+		return nil
+	}
+	pf.mu.Lock()
+	lease := pf.lease
+	pf.lease = nil
+	pf.mu.Unlock()
+	if lease != nil {
+		return lease.Release()
+	}
+	return nil
+}
+
 // Page returns the final version of one page. Newer L0 deltas win; otherwise the
-// page is fetched from its L1 object with a single ranged read.
+// page is fetched from its L1 object with a single ranged read. If the object
+// disappeared under GC, the fetcher rebuilds its index once and retries.
 func (pf *PageFetcher) Page(ctx context.Context, pgno uint32) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		pf.mu.Lock()
+		data, err := pf.pageLocked(ctx, pgno)
+		pf.mu.Unlock()
+		if err == nil {
+			return data, nil
+		}
+		if attempt == 0 && errors.Is(err, bucket.ErrNotFound) {
+			if rerr := pf.rebuild(ctx); rerr == nil {
+				continue
+			}
+			return nil, err
+		}
+		return nil, err
+	}
+	return nil, fmt.Errorf("replica: page %d unavailable", pgno)
+}
+
+func (pf *PageFetcher) pageLocked(ctx context.Context, pgno uint32) ([]byte, error) {
 	if data, ok := pf.l0[pgno]; ok {
 		return data, nil
 	}
@@ -331,6 +418,25 @@ func (pf *PageFetcher) Page(ctx context.Context, pgno uint32) ([]byte, error) {
 // read per window instead of one per page. Pages that fall back to an in-memory
 // L0 delta, leave the L1 entry, or exceed the byte budget end the run.
 func (pf *PageFetcher) ReadRun(ctx context.Context, pgno uint32, maxPages int) ([][]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		pf.mu.Lock()
+		out, err := pf.readRunLocked(ctx, pgno, maxPages)
+		pf.mu.Unlock()
+		if err == nil {
+			return out, nil
+		}
+		if attempt == 0 && errors.Is(err, bucket.ErrNotFound) {
+			if rerr := pf.rebuild(ctx); rerr == nil {
+				continue
+			}
+			return nil, err
+		}
+		return nil, err
+	}
+	return nil, fmt.Errorf("replica: pages %d.. unavailable", pgno)
+}
+
+func (pf *PageFetcher) readRunLocked(ctx context.Context, pgno uint32, maxPages int) ([][]byte, error) {
 	if maxPages < 1 {
 		maxPages = 1
 	}

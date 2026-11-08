@@ -1,5 +1,13 @@
 # Known Issues and Release Status (Review Closure)
 
+## 2026-11-05 ADR-309 Safe GC Operations and Cleanup Atomicity (In Progress, Not Deployed)
+
+Adds an explicit admin/CLI Safe GC action (admin, scope and owner checks; dry-run), `KeepL1Generations` defaulting to two L1 generations, backlog/lag/L1-generation/deferred/retained-epoch metrics, and a deleting-fence plus idempotent cleanup job. Production remains DEFERRED and Safe is opt-in. The real HK COS 100k run exposed a cleanup 502 leaving e1/e2 fully deleted and e3 half deleted; no online-GC safety claim is made before acceptance.
+
+## 2026-11-05 ADR-308 Restore Lower Bound and Safe Deletion (In Progress, Not Deployed)
+
+Restore now enforces marker cuts as a lower bound, monotonic cuts, cut-before-prune, full page coverage for no-L1 snapshots, and skips `gc-retired` epochs. Read paths retry a transient `ErrNotFound` after re-reading the manifest/chain, otherwise fail closed. Safe deletion adds leased reader pins, an immutable epoch seal with drain, per-key tombstones with a grace period, and explicit `RetireOptions.Safe`; the production default remains DEFERRED and background work must not enable Safe. Multi-epoch owner-switch and large-data tests are local evidence only; no deployment or full online-GC claim.
+
 ## 2026-11-04 Replication GC Safety (ADR-307, Contract First, In Progress, Not Deployed)
 
 Final epoch review cannot prove atomic owner validation across objects or pinned-reader/lineage-cut safety. Compaction keeps publishing, but physical covered-L0/old-L1/`RetireEpochs` payload deletion defaults to DEFERRED. `Options.GC` is intent only; explicit `OfflineQuiescent bool` defaults to `false` and requires externally quiesced writers AND readers throughout deletion. Production background never opts in; intervals cannot bypass. Absent owner/nil `Verify` are not permission. Configured per-delete `Verify` stops observed loss, not the race; optional payload ETag cannot prove ownership.

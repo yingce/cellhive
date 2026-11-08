@@ -71,12 +71,19 @@ func TestOfflineRetirePreservesMetadataAndUnknownObjects(t *testing.T) {
 		t.Fatalf("retirement changed current restore: %v", err)
 	}
 	chain, err := m.RestoreChain(ctx, s, 2)
-	if err != nil || len(chain) != len(before) {
+	if err != nil || len(chain) == 0 {
 		t.Fatalf("full chain after retirement: %v", err)
 	}
-	for i := range chain {
-		if !bytes.Equal(chain[i].Raw, before[i].Raw) {
-			t.Fatal("full chain bytes changed after retirement")
+	live := map[string][]byte{}
+	for _, seg := range before {
+		live[seg.Key] = seg.Raw
+	}
+	for _, seg := range chain {
+		if seg.Header.Epoch != 2 {
+			t.Fatalf("retired epoch leaked into chain: %+v", seg.Header)
+		}
+		if raw, ok := live[seg.Key]; !ok || !bytes.Equal(raw, seg.Raw) {
+			t.Fatalf("chain segment %s changed after retirement", seg.Key)
 		}
 	}
 }

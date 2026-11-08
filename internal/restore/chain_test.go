@@ -233,3 +233,33 @@ func TestMarkerWithoutPredecessorPrefixFailsClosed(t *testing.T) {
 		t.Fatal("marker gap should fail closed")
 	}
 }
+
+func TestMarkerCutIsRestoreLowerBound(t *testing.T) {
+	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
+	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}
+	if _, _, _, err := selectChain([]ltx.Header{snap, marker}); err == nil {
+		t.Fatal("marker-only chain restored below its inherited cut")
+	}
+	// A snapshot at the cut is a valid marker-only chain.
+	atCut := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 8, EndTxID: 8, CRC: 2}
+	if _, _, watermark, err := selectChain([]ltx.Header{atCut, marker}); err != nil || watermark != 8 {
+		t.Fatalf("marker-at-cut restore = %d, %v; want 8", watermark, err)
+	}
+}
+
+func TestMarkerCutsMustBeMonotonic(t *testing.T) {
+	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}
+	m2 := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 8, EndTxID: 7}
+	m3 := ltx.Header{Kind: ltx.KindMarker, Epoch: 3, StartTxID: 7, EndTxID: 6}
+	if _, _, _, err := selectChain([]ltx.Header{snap, m2, m3}); err == nil {
+		t.Fatal("accepted a regressing epoch cut")
+	}
+}
+
+func TestValidateChainRejectsMarkerOnlyGap(t *testing.T) {
+	snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}, encodePageMap(t, 64, 1, map[uint32][]byte{1: bytes.Repeat([]byte{1}, 64)}))
+	marker := ltx.Encode(ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}, nil)
+	if err := ValidateChain([][]byte{snap, marker}); err == nil {
+		t.Fatal("ValidateChain accepted a marker-only chain below the cut")
+	}
+}

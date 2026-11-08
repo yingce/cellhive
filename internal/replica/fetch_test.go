@@ -202,7 +202,9 @@ func newFetchFixture(t *testing.T, watermark uint64) (*Manager, *fetchCountingBu
 		t.Fatal(err)
 	}
 	b := &fetchCountingBucket{objects: map[string][]byte{IndexName(sc, 1): idx}, gets: map[string]int{}}
-	return New(b), b, sc
+	m := New(b)
+	m.DisableReaderPins = true
+	return m, b, sc
 }
 
 func fetchDelta(t *testing.T, tx uint64, value byte) []byte {
@@ -319,6 +321,7 @@ func TestPageFetcherMinBytesNoOverflow(t *testing.T) {
 	}
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "runs"}
 	m := New(&fetchCountingBucket{objects: map[string][]byte{IndexName(sc, 1): idx}, gets: map[string]int{}})
+	m.DisableReaderPins = true
 	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1<<20)
 	if err != nil || !use || pf == nil {
 		t.Fatalf("huge index overflowed below threshold: pf=%v use=%v err=%v", pf, use, err)
@@ -327,6 +330,7 @@ func TestPageFetcherMinBytesNoOverflow(t *testing.T) {
 
 func TestPageFetcherMinBytesRequiresIndex(t *testing.T) {
 	m := New(&fetchCountingBucket{objects: map[string][]byte{}, gets: map[string]int{}})
+	m.DisableReaderPins = true
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "runs"}
 	pf, use, err := m.NewPageFetcherMinBytes(t.Context(), sc, 1, 1)
 	if !errors.Is(err, ErrNoPageIndex) || use || pf != nil {
@@ -460,5 +464,63 @@ func TestPageFetcherParallelRejectsInvalidTail(t *testing.T) {
 				t.Fatal("enqueued next batch after decode failure")
 			}
 		})
+	}
+}
+
+type failRangedOnce struct {
+	*bucket.FSBucket
+	mu     sync.Mutex
+	failed bool
+}
+
+func (b *failRangedOnce) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	b.mu.Lock()
+	first := !b.failed
+	b.failed = true
+	b.mu.Unlock()
+	if first {
+		return nil, "", bucket.ErrNotFound
+	}
+	return b.FSBucket.RangedGet(ctx, key, off, length)
+}
+
+func TestPageFetcherRetriesAfterObjectDisappears(t *testing.T) {
+	ctx := context.Background()
+	fs, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &failRangedOnce{FSBucket: fs}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "ranged-retry"}
+	payload, err := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{7}, 64)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 1, EndTxID: 1}, payload)
+	key, _, err := m.AppendL1(ctx, sc, 1, seg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locs, err := ltx.PageLocs(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutIndex(ctx, sc, 1, PageIndex{Watermark: 1, Entries: []PageIndexEntry{{
+		Key: key, PageSize: 64, Commit: 1, Pages: []uint32{1}, Locs: locs,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	pf, err := m.NewPageFetcher(ctx, sc, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pf.Close()
+	page, err := pf.Page(ctx, 1)
+	if err != nil {
+		t.Fatalf("page after transient disappear: %v", err)
+	}
+	if !bytes.Equal(page, bytes.Repeat([]byte{7}, 64)) {
+		t.Fatalf("wrong page after rebuild")
 	}
 }

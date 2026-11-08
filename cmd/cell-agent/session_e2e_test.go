@@ -376,6 +376,22 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	if err != nil || code != 200 || string(data) != "a-value0" {
 		t.Fatalf("fresh-session read after fence: %d %q %v", code, data, err)
 	}
-	t.Log("PASS: SIGSTOP owner past TTL; peer recovered and advanced epoch; SIGCONT old owner exited 1; new session recovered and read acknowledged value")
+	// Default replication GC is DEFERRED (ADR-307/ADR-308): the predecessor
+	// epoch's payload must still exist after the takeover and restart.
+	keptEpochs := 0
+	for epoch := uint64(1); epoch < current.Epoch; epoch++ {
+		prefix := fmt.Sprintf("cells/sessiontest/__kv__/ka/ltx/e%d/", epoch)
+		keys, lerr := b.List(context.Background(), prefix)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if len(keys) > 0 {
+			keptEpochs++
+		}
+	}
+	if keptEpochs == 0 {
+		t.Fatal("default GC removed every predecessor epoch payload")
+	}
+	t.Log("PASS: SIGSTOP owner past TTL; peer recovered and advanced epoch; SIGCONT old owner exited 1; new session recovered and read acknowledged value; at least one predecessor epoch payload retained by default DEFERRED GC")
 
 }

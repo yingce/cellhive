@@ -442,7 +442,7 @@ func TestCompactGarbageCollectsSupersededObjects(t *testing.T) {
 	l1v1 := man1.Objects[0]
 
 	d2Key := appendSeg(deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)}))
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
+	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
 	if err != nil {
 		t.Fatalf("compact2: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestCompactFoldsLegacyV1AndGCsCompressedL1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
+	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
 	if err != nil {
 		t.Fatalf("compact2: %v", err)
 	}

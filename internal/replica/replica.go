@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -30,7 +31,18 @@ import (
 type Manager struct {
 	B               bucket.Bucket
 	RestoreParallel int
-	resourceLocks   [64]sync.RWMutex
+	// ReaderPinTTL bounds a reader lease. The lease renews itself in the
+	// background, so this is the crash-detection window, not a read deadline.
+	ReaderPinTTL time.Duration
+	// DisableReaderPins is a test seam for small in-memory bucket fakes that do
+	// not implement writes. Production must leave it false.
+	DisableReaderPins bool
+	// ReadOnly marks a store that cannot persist pins (for example the
+	// supervisor's peer-transport view). Reads still check the seal, but Safe GC
+	// must not run while such readers exist: use the default DEFERRED mode or an
+	// externally quiescent offline window.
+	ReadOnly      bool
+	resourceLocks [64]sync.RWMutex
 
 	fenceMu      sync.Mutex
 	fenceCache   map[string]fenceCacheEntry
@@ -317,6 +329,7 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 		manifest string
 	}
 	groups := map[uint64]*epochData{}
+	retired := map[uint64]bool{}
 	for _, key := range keys {
 		rest, ok := strings.CutPrefix(key, base)
 		if !ok {
@@ -335,6 +348,10 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 			continue
 		}
 		name := rest[slash+1:]
+		if name == "gc-retired" {
+			retired[n] = true
+			continue
+		}
 		g := groups[n]
 		if g == nil {
 			g = &epochData{}
@@ -356,6 +373,31 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 		epochs = append(epochs, e)
 	}
 	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	// Pin every epoch this scan reads. A sealed epoch is already being retired;
+	// skip it unless it is the newest epoch the caller asked about.
+	var leases []*ReaderLease
+	defer func() {
+		for _, l := range leases {
+			_ = l.Release()
+		}
+	}()
+	for _, epoch := range epochs {
+		if retired[epoch] {
+			continue
+		}
+		lease, perr := m.PinReader(ctx, s, epoch, 0)
+		if errors.Is(perr, ErrGCSealed) {
+			if epoch == maxEpoch {
+				return 0, perr
+			}
+			retired[epoch] = true
+			continue
+		}
+		if perr != nil {
+			return 0, perr
+		}
+		leases = append(leases, lease)
+	}
 	floor := uint64(0)
 	haveBase := false
 	// An epoch marker (ADR-275) kills every older-epoch object that ends above
@@ -382,6 +424,11 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 		return lim, found
 	}
 	for _, epoch := range epochs {
+		if retired[epoch] {
+			// Payload was retired after a newer baseline proved it unnecessary.
+			// Its retained manifest/index must not be read or block the scan.
+			continue
+		}
 		g := groups[epoch]
 		if lim, ok := deadAbove(epoch); ok {
 			kept := g.spans[:0]
@@ -399,8 +446,13 @@ func (m *Manager) DurableWatermarkChain(ctx context.Context, s cell.Scope, maxEp
 			}
 			if ok {
 				if lim, limited := deadAbove(epoch); limited && man.MaxTxID > lim {
-					return 0, fmt.Errorf("replica: epoch %d manifest watermark %d exceeds marker cut %d", epoch, man.MaxTxID, lim)
+					// The snapshot extends above the successor cut and cannot be
+					// used as the inherited baseline. Ignore it; L0 at or below
+					// the cut (if still present) remains the valid input.
+					ok = false
 				}
+			}
+			if ok {
 				complete, err := m.completeBaseline(ctx, s, epoch, man)
 				if err != nil {
 					return 0, err
@@ -525,6 +577,11 @@ func (m *Manager) completeBaseline(ctx context.Context, s cell.Scope, epoch uint
 // HasCompleteSnapshot requires either a fully proven L1 baseline or a snapshot
 // completion marker, plus an independently restorable current-epoch chain.
 func (m *Manager) HasCompleteSnapshot(ctx context.Context, s cell.Scope, epoch uint64) (bool, error) {
+	lease, err := m.PinReader(ctx, s, epoch, 0)
+	if err != nil {
+		return false, err
+	}
+	defer lease.Release()
 	man, haveMan, err := m.ReadManifest(ctx, s, epoch)
 	if err != nil {
 		return false, err
@@ -564,6 +621,18 @@ func (m *Manager) HasCompleteSnapshot(ctx context.Context, s cell.Scope, epoch u
 			if err := restore.ValidateChain(raws); err != nil {
 				return false, fmt.Errorf("replica: epoch GC requires independently restorable chain: %w", err)
 			}
+			// ValidateChain only proves headers and txid continuity. A snapshot
+			// with a missing tail part can still look contiguous, so build the
+			// page index: it decodes every part's page map and requires pages
+			// 1..commit to be defined.
+			idx, err := restore.IndexChain(raws)
+			if err != nil {
+				return false, fmt.Errorf("replica: epoch GC requires complete snapshot pages: %w", err)
+			}
+			doneTxID, err := strconv.ParseUint(strings.TrimSuffix(key[strings.LastIndexByte(key, '/')+1:], ".snapshot-done"), 10, 64)
+			if err != nil || idx.Watermark < doneTxID {
+				return false, nil
+			}
 			return true, nil
 		}
 	}
@@ -579,7 +648,7 @@ func (m *Manager) RetireEpochs(ctx context.Context, s cell.Scope, current uint64
 // RetireEpochsWithOptions retires proven old payloads only under externally
 // maintained quiescence. All lineage/proof metadata and unknown objects remain.
 func (m *Manager) RetireEpochsWithOptions(ctx context.Context, s cell.Scope, current uint64, keepPrevious int, opts RetireOptions) (int, error) {
-	if !opts.OfflineQuiescent {
+	if !opts.authorized() {
 		return 0, ErrGCDeferred
 	}
 	ok, err := m.HasCompleteSnapshot(ctx, s, current)
@@ -602,9 +671,69 @@ func (m *Manager) RetireEpochsWithOptions(ctx context.Context, s cell.Scope, cur
 		if epoch >= keepFrom {
 			continue
 		}
+		if opts.Safe {
+			// Seal first: a reader that wins this race is visible to the drain;
+			// one that loses sees the seal and aborts before reading.
+			if err := m.SealEpoch(ctx, s, epoch, opts.Job); err != nil {
+				return deleted, err
+			}
+			if err := m.WaitReaderPins(ctx, s, epoch, opts.DrainTimeout); err != nil {
+				return deleted, err
+			}
+		}
+		// Mark before deleting. If the process crashes mid-pass, restore and
+		// watermark scans skip the epoch instead of following a retained
+		// manifest into payload that may already be gone.
+		if err := m.MarkRetired(ctx, s, epoch, opts.Job); err != nil {
+			return deleted, err
+		}
 		keys, lerr := m.B.List(ctx, Prefix(s, epoch))
 		if lerr != nil {
 			return deleted, lerr
+		}
+		if opts.Safe {
+			// Phase 1: record every candidate tombstone in parallel. Phase 2
+			// deletes only due tombstones after one owner proof; the seal and
+			// drained pins already authorize the whole epoch, so repeating the
+			// seal/pin checks per object would multiply COS round trips.
+			var due []string
+			var mu sync.Mutex
+			if err := parallelStrings(ctx, keys, 16, func(pctx context.Context, key string) error {
+				d, terr := m.EnsureTombstone(pctx, s, epoch, key, opts)
+				if terr != nil {
+					return terr
+				}
+				if d {
+					mu.Lock()
+					due = append(due, key)
+					mu.Unlock()
+				}
+				return nil
+			}); err != nil {
+				return deleted, err
+			}
+			if opts.Verify != nil {
+				if err := opts.Verify(ctx); err != nil {
+					return deleted, err
+				}
+			}
+			authOpts := opts
+			authOpts.Verify = nil
+			var count atomic.Int64
+			if err := parallelStrings(ctx, due, 16, func(pctx context.Context, key string) error {
+				didDelete, derr := m.DeleteAuthorizedObject(pctx, s, epoch, key, authOpts)
+				if derr != nil {
+					return derr
+				}
+				if didDelete {
+					count.Add(1)
+				}
+				return m.ClearTombstone(pctx, s, epoch, key)
+			}); err != nil {
+				return deleted, err
+			}
+			deleted += int(count.Load())
+			continue
 		}
 		for _, key := range keys {
 			didDelete, derr := m.DeleteObjectWithOptions(ctx, s, epoch, key, opts)
@@ -635,6 +764,28 @@ func lastBase(epochs []uint64, hasBase map[uint64]bool) int {
 // predecessor's snapshot. Cold path; the caller's restore planner selects the
 // newest complete snapshot and validates delta contiguity.
 func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]Segment, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		segs, err := m.restoreChainOnce(ctx, s, maxEpoch)
+		if err == nil {
+			return segs, nil
+		}
+		if !errors.Is(err, ErrGCSealed) && !errors.Is(err, bucket.ErrNotFound) {
+			return nil, err
+		}
+		// A sealer may have retired an epoch that this attempt planned to read.
+		// Re-list: a newer complete baseline can move the start epoch above it.
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
+func (m *Manager) restoreChainOnce(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]Segment, error) {
 	ctx, span := telemetry.Tracer().Start(ctx, "replica.restore_chain")
 	defer span.End()
 	span.SetAttributes(attribute.String("cell.scope", s.String()))
@@ -650,6 +801,7 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 	base := s.Key() + "/ltx/e"
 	byEpoch := map[uint64][]string{}
 	hasBase := map[uint64]bool{}
+	retired := map[uint64]bool{}
 	var epochs []uint64
 	for _, key := range keys {
 		rest, ok := strings.CutPrefix(key, base)
@@ -662,6 +814,10 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		}
 		e, perr := strconv.ParseUint(rest[:slash], 10, 64)
 		if perr != nil || (maxEpoch > 0 && e > maxEpoch) {
+			continue
+		}
+		if rest[slash+1:] == "gc-retired" {
+			retired[e] = true
 			continue
 		}
 		// An epoch whose L0 was fully GC'd after compaction may contain only
@@ -690,6 +846,57 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		}
 		byEpoch[e] = append(byEpoch[e], key)
 	}
+	// Cuts are discovered from marker names before any payload is loaded, so a
+	// successor cut can constrain manifest pruning in its predecessor.
+	cuts := map[uint64]uint64{}
+	for e, ks := range byEpoch {
+		for _, key := range ks {
+			name := key[strings.LastIndexByte(key, '/')+1:]
+			sp, known := parseSegmentSpan(name)
+			if !known || !sp.marker {
+				continue
+			}
+			if prev, ok := cuts[e]; ok && prev != sp.end {
+				return nil, fmt.Errorf("%w: epoch %d", ErrEpochMarkerConflict, e)
+			}
+			cuts[e] = sp.end
+		}
+	}
+	var prevCut uint64
+	cutEpochs := make([]uint64, 0, len(cuts))
+	for e := range cuts {
+		cutEpochs = append(cutEpochs, e)
+	}
+	sort.Slice(cutEpochs, func(i, j int) bool { return cutEpochs[i] < cutEpochs[j] })
+	for _, e := range cutEpochs {
+		if cuts[e] < prevCut {
+			return nil, fmt.Errorf("replica: epoch %d cut %d regresses below %d", e, cuts[e], prevCut)
+		}
+		prevCut = cuts[e]
+	}
+	deadAbove := func(epoch uint64) (uint64, bool) {
+		var lim uint64
+		found := false
+		for e, c := range cuts {
+			if e > epoch && (!found || c < lim) {
+				lim, found = c, true
+			}
+		}
+		return lim, found
+	}
+	// A retired epoch's payload was deleted after a newer baseline was proven.
+	// Its retained manifest/index are evidence, not a restore input.
+	for e := range retired {
+		delete(byEpoch, e)
+		delete(hasBase, e)
+	}
+	keptEpochs := epochs[:0]
+	for _, e := range epochs {
+		if !retired[e] {
+			keptEpochs = append(keptEpochs, e)
+		}
+	}
+	epochs = keptEpochs
 	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
 	// Restore only needs the newest complete baseline and the epochs above it.
 	// Older epochs are dead weight; restoring every historical epoch made a
@@ -699,6 +906,12 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		start = 0
 	}
 	loaded := map[uint64][]Segment{}
+	var leases []*ReaderLease
+	defer func() {
+		for _, l := range leases {
+			_ = l.Release()
+		}
+	}()
 	var firstErr error
 	for {
 		var out []Segment
@@ -706,9 +919,24 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		for _, epoch := range epochs[start:] {
 			segs, ok := loaded[epoch]
 			if !ok {
+				lease, perr := m.PinReader(ctx, s, epoch, 0)
+				if perr != nil {
+					return nil, perr
+				}
+				leases = append(leases, lease)
+				if err := lease.Err(); err != nil {
+					return nil, err
+				}
+				limit, limited := deadAbove(epoch)
+				if !limited {
+					limit = 0
+				}
 				var err error
-				segs, err = m.restoreOnceKeys(ctx, s, epoch, byEpoch[epoch])
+				segs, err = m.restoreOnceKeys(ctx, s, epoch, byEpoch[epoch], limit)
 				if err != nil {
+					return nil, err
+				}
+				if err := lease.Err(); err != nil {
 					return nil, err
 				}
 				loaded[epoch] = segs
@@ -733,7 +961,15 @@ func (m *Manager) RestoreChain(ctx context.Context, s cell.Scope, maxEpoch uint6
 		validateErr := restore.ValidateChain(raws)
 		validateSpan.End()
 		if err := validateErr; err == nil {
-			return out, nil
+			order, _, serr := restore.SelectIndices(raws)
+			if serr != nil {
+				return nil, serr
+			}
+			live := make([]Segment, 0, len(order))
+			for _, i := range order {
+				live = append(live, out[i])
+			}
+			return live, nil
 		} else if firstErr == nil {
 			firstErr = err
 		}
@@ -1055,6 +1291,11 @@ func (m *Manager) ListL0Segments(ctx context.Context, s cell.Scope, epoch uint64
 
 // AppendL1 stores a compacted snapshot part under the L1 prefix.
 func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segment []byte) (string, string, error) {
+	if sealed, serr := m.EpochSealed(ctx, s, epoch); serr != nil {
+		return "", "", serr
+	} else if sealed {
+		return "", "", ErrGCSealed
+	}
 	release, err := m.resourceWriteGuard(ctx, s, epoch)
 	if err != nil {
 		return "", "", err
@@ -1077,6 +1318,13 @@ func (m *Manager) AppendL1(ctx context.Context, s cell.Scope, epoch uint64, segm
 
 // PutManifest writes the L1 manifest for a scope/epoch.
 func (m *Manager) PutManifest(ctx context.Context, s cell.Scope, epoch uint64, man Manifest) error {
+	// A cold compaction must not publish after the epoch was sealed for
+	// retirement. The check is on the cold path only; capture appends stay hot.
+	if sealed, serr := m.EpochSealed(ctx, s, epoch); serr != nil {
+		return serr
+	} else if sealed {
+		return ErrGCSealed
+	}
 	release, err := m.resourceWriteGuard(ctx, s, epoch)
 	if err != nil {
 		return err
@@ -1143,13 +1391,29 @@ type Segment struct {
 // the L0 listing, so a concurrent GC cannot leave the returned chain pointing at
 // a deleted L1 object.
 func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Segment, error) {
+	lease, err := m.PinReader(ctx, s, epoch, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := lease.Err(); err != nil {
+			return nil, err
+		}
 		before, beforeOK, err := m.ReadManifest(ctx, s, epoch)
 		if err != nil {
 			return nil, err
 		}
 		segs, err := m.restoreOnce(ctx, s, epoch)
 		if err != nil {
+			if errors.Is(err, bucket.ErrNotFound) {
+				// A GC or compaction may have replaced the object set between
+				// the listing and the read. Re-read the manifest and retry; a
+				// permanently missing object still fails after the attempts.
+				lastErr = err
+				continue
+			}
 			return nil, err
 		}
 		after, afterOK, err := m.ReadManifest(ctx, s, epoch)
@@ -1159,6 +1423,9 @@ func (m *Manager) Restore(ctx context.Context, s cell.Scope, epoch uint64) ([]Se
 		if beforeOK == afterOK && (!afterOK || reflect.DeepEqual(before, after)) {
 			return segs, nil
 		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return nil, fmt.Errorf("replica: manifest changed during restore")
 }
@@ -1199,10 +1466,15 @@ func (m *Manager) restoreOnce(ctx context.Context, s cell.Scope, epoch uint64) (
 	if err != nil {
 		return nil, err
 	}
-	return m.restoreOnceKeys(ctx, s, epoch, l0)
+	return m.restoreOnceKeys(ctx, s, epoch, l0, 0)
 }
 
-func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint64, l0 []string) ([]Segment, error) {
+// restoreOnceKeys loads one epoch. limit, when non-zero, is the highest txid a
+// successor epoch's cut allows this epoch to contribute. A manifest whose
+// MaxTxID exceeds that limit is a whole-database image from a dead tail: it
+// cannot be used to rebuild the inherited prefix, and must not prune the L0
+// objects that can.
+func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint64, l0 []string, limit uint64) ([]Segment, error) {
 	ctx, span := telemetry.Tracer().Start(ctx, "replica.restore_epoch")
 	defer span.End()
 	span.SetAttributes(attribute.String("cell.scope", s.String()))
@@ -1224,6 +1496,12 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 	l1Set := map[string]bool{}
 	var keys []string
 	var floor uint64
+	if ok && limit > 0 && man.MaxTxID > limit {
+		// The manifest covers transactions above the successor cut. Its page
+		// image is unusable for the prefix at or below the cut, so keep the L0
+		// chain and let selectChain enforce the marker lower bound.
+		ok = false
+	}
 	if ok {
 		for _, k := range man.Objects {
 			if l1Set[k] {
@@ -1245,6 +1523,13 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 			known = false
 		}
 		if floor > 0 && known && !span.marker && span.end <= floor {
+			continue
+		}
+		// A successor cut is authoritative even when its marker lives in an
+		// epoch this restore does not load (for example a retired marker). Drop
+		// an object whose name proves it ends above the cut; selectChain's
+		// lower-bound check rejects any resulting gap.
+		if limit > 0 && known && !span.marker && span.end > limit {
 			continue
 		}
 		keys = append(keys, key)
@@ -1329,6 +1614,11 @@ func (m *Manager) restoreOnceKeys(ctx context.Context, s cell.Scope, epoch uint6
 			h, _, err := ltx.Decode(part)
 			if err != nil {
 				return nil, fmt.Errorf("replica: corrupt segment in %s: %w", k, err)
+			}
+			if limit > 0 && h.Kind != ltx.KindMarker && h.EndTxID > limit {
+				// Unknown/mixed names may hide a dead-tail part. Drop the part;
+				// the lower-bound check fails closed if it was required.
+				continue
 			}
 			if h.Kind == ltx.KindSnapshot {
 				skip, serr := m.skipPartialSnapshot(ctx, s, epoch, h.EndTxID, partialSnapshots)

@@ -383,10 +383,12 @@ func main() {
 				return nil, false, perr
 			}
 			if !usePaged {
+				_ = pf.Close()
 				return nil, false, nil
 			}
 			imageBytes := int64(pf.PageSize()) * int64(pf.Commit())
 			if imageBytes < cfg.PagedMinBytes {
+				_ = pf.Close()
 				return nil, false, nil
 			}
 			log.Info("paged restore", "scope", sc.String(), "epoch", ep,
@@ -2056,6 +2058,8 @@ type pagedSource struct {
 func (p pagedSource) PageSize() int { return int(p.pf.PageSize()) }
 func (p pagedSource) Commit() int   { return int(p.pf.Commit()) }
 func (p pagedSource) TxID() uint64  { return p.pf.TxID() }
+
+func (p pagedSource) Close() error { return p.pf.Close() }
 
 func (p pagedSource) ReadPage(pgno uint32) ([]byte, error) {
 	return p.pf.Page(context.Background(), pgno)

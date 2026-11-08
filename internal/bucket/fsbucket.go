@@ -259,7 +259,7 @@ func (b *FSBucket) ListSizes(_ context.Context, prefix string) ([]ObjectInfo, er
 		if rerr != nil {
 			continue
 		}
-		out = append(out, ObjectInfo{Key: k, Size: info.Size(), ETag: etag(data)})
+		out = append(out, ObjectInfo{Key: k, Size: info.Size(), ETag: etag(data), LastModifiedMs: info.ModTime().UnixMilli()})
 	}
 	return out, nil
 }
@@ -340,7 +340,7 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 		if rerr != nil {
 			continue
 		}
-		out = append(out, ObjectInfo{Key: k, Size: info.Size(), ETag: etag(data)})
+		out = append(out, ObjectInfo{Key: k, Size: info.Size(), ETag: etag(data), LastModifiedMs: info.ModTime().UnixMilli()})
 	}
 	return out, next, nil
 }

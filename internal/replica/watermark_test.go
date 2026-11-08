@@ -1,9 +1,11 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"cellhive/internal/bucket"
@@ -17,7 +19,15 @@ type retireLossBucket struct {
 	deletes     int
 }
 
+func protocolKey(key string) bool {
+	return strings.Contains(key, "/gc/pins/") || strings.Contains(key, "/gc/sealed") ||
+		strings.Contains(key, "/gc/tombstones/") || strings.HasSuffix(key, "/gc-retired")
+}
+
 func (b *retireLossBucket) Delete(ctx context.Context, key string) error {
+	if protocolKey(key) {
+		return b.Bucket.Delete(ctx, key)
+	}
 	b.deletes++
 	err := b.Bucket.Delete(ctx, key)
 	b.afterDelete()
@@ -198,8 +208,8 @@ func TestDurableWatermarkChainRejectsManifestAboveMarkerCut(t *testing.T) {
 	if _, err := m.MarkEpoch(ctx, s, 2, 7); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.DurableWatermarkChain(ctx, s, 2); err == nil {
-		t.Fatal("manifest above marker cut was accepted")
+	if got, err := m.DurableWatermarkChain(ctx, s, 2); err != nil || got != 5 {
+		t.Fatalf("manifest above cut: watermark = %d, %v; want the marker-bounded 5", got, err)
 	}
 }
 
@@ -216,7 +226,11 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 		if name == "1.snapshot" {
 			kind = ltx.KindSnapshot
 		}
-		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: epoch, EndTxID: epoch}, []byte("x"))
+		payload, err := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 64)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: epoch, EndTxID: epoch}, payload)
 		if _, err := b.Put(ctx, Prefix(sc, epoch)+name, raw); err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +244,11 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 	if err := m.MarkSnapshotDone(ctx, sc, 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 3, StartTxID: 3, EndTxID: 3}, []byte("snapshot"))
+	payload, perr := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 64)}})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 3, StartTxID: 3, EndTxID: 3}, payload)
 	if _, err := b.Put(ctx, Prefix(sc, 3)+"3.snapshot", raw); err != nil {
 		t.Fatal(err)
 	}
@@ -245,8 +263,8 @@ func TestRetireEpochsRequiresCurrentSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 0 {
-		t.Fatalf("epoch 1 still has %d objects", len(keys))
+	if len(keys) != 1 || keys[0] != RetiredName(sc, 1) {
+		t.Fatalf("epoch 1 retained = %v, want only the retired marker", keys)
 	}
 	for _, e := range []uint64{2, 3} {
 		keys, _ := b.List(ctx, Prefix(sc, e))
@@ -286,17 +304,21 @@ func TestRetireEpochsStopsAfterOwnershipLossBetweenDeletes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	payload, perr := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 64)}})
+	if perr != nil {
+		t.Fatal(perr)
+	}
 	for _, name := range []string{"1.snapshot", "2-2.ltx"} {
 		kind, tx := ltx.KindSnapshot, uint64(1)
 		if name == "2-2.ltx" {
 			kind, tx = ltx.KindDelta, 2
 		}
-		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: 1, StartTxID: tx, EndTxID: tx}, []byte("x"))
+		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: 1, StartTxID: tx, EndTxID: tx}, payload)
 		if _, err := b.Put(ctx, Prefix(sc, 1)+name, raw); err != nil {
 			t.Fatal(err)
 		}
 	}
-	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 2, StartTxID: 2, EndTxID: 2}, []byte("snapshot"))
+	raw := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 2, StartTxID: 2, EndTxID: 2}, payload)
 	if _, err := b.Put(ctx, Prefix(sc, 2)+"2.snapshot", raw); err != nil {
 		t.Fatal(err)
 	}

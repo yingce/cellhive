@@ -33,6 +33,7 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/cellcapture"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/compaction"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
 	"cellhive/internal/d1"
@@ -874,6 +875,39 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			writeFmt(w, "cellhive_capture_ensure_total{ns=\"%s\",mode=\"%s\"} %d\n", escapeLabel(ns), escapeLabel(mode), v.(*atomic.Int64).Load())
 		}
 	}
+	// Replication compaction/GC diagnostics (ADR-309). These are the last
+	// recorded values from Compact, not a bucket List per scrape.
+	{
+		stats := compaction.SnapshotMetrics()
+		writeFmt(w, "# TYPE cellhive_l0_backlog_objects gauge\n")
+		writeFmt(w, "# TYPE cellhive_l0_backlog_bytes gauge\n")
+		writeFmt(w, "# TYPE cellhive_l0_backlog_bytes_known gauge\n")
+		writeFmt(w, "# TYPE cellhive_oldest_l0_age_seconds gauge\n")
+		writeFmt(w, "# TYPE cellhive_last_compaction_lag_seconds gauge\n")
+		writeFmt(w, "# TYPE cellhive_l1_generations gauge\n")
+		writeFmt(w, "# TYPE cellhive_deferred_gc_bytes gauge\n")
+		writeFmt(w, "# TYPE cellhive_retained_epochs gauge\n")
+		writeFmt(w, "# TYPE cellhive_retired_epochs gauge\n")
+		writeFmt(w, "# TYPE cellhive_gc_stats_error gauge\n")
+		for _, rec := range stats {
+			st := rec.Stats
+			label := escapeLabel(st.Scope)
+			writeFmt(w, "cellhive_l0_backlog_objects{scope=\"%s\"} %d\n", label, st.L0BacklogObjects)
+			writeFmt(w, "cellhive_l0_backlog_bytes{scope=\"%s\"} %d\n", label, st.L0BacklogBytes)
+			writeFmt(w, "cellhive_l0_backlog_bytes_known{scope=\"%s\"} %d\n", label, boolGauge(st.L0BacklogBytesKnown))
+			writeFmt(w, "cellhive_oldest_l0_age_seconds{scope=\"%s\"} %d\n", label, st.OldestL0AgeSeconds)
+			writeFmt(w, "cellhive_last_compaction_lag_seconds{scope=\"%s\"} %d\n", label, st.LastCompactionLagSeconds)
+			writeFmt(w, "cellhive_l1_generations{scope=\"%s\"} %d\n", label, st.L1Generations)
+			writeFmt(w, "cellhive_deferred_gc_bytes{scope=\"%s\"} %d\n", label, st.DeferredGCBytes)
+			writeFmt(w, "cellhive_retained_epochs{scope=\"%s\"} %d\n", label, st.RetainedEpochs)
+			writeFmt(w, "cellhive_retired_epochs{scope=\"%s\"} %d\n", label, st.RetiredEpochs)
+			errG := 0
+			if rec.Error != "" {
+				errG = 1
+			}
+			writeFmt(w, "cellhive_gc_stats_error{scope=\"%s\"} %d\n", label, errG)
+		}
+	}
 	// Owner lifecycle (ADR-165).
 	if s.Owner != nil {
 		st := s.Owner.ClaimStats()
@@ -967,6 +1001,13 @@ type resolveResp struct {
 }
 
 // ownerLive is the ADR-273 liveness check. Legacy/DO records still use Expiry.
+func boolGauge(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) ownerLive(ctx context.Context, o cell.Owner, now time.Time) bool {
 	if s.Owner == nil {
 		return !o.Expired(now)

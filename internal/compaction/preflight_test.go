@@ -96,7 +96,7 @@ func TestCompactThresholdCountsOnlyNewBytes(t *testing.T) {
 		t.Fatalf("result=%+v err=%v L1 GET=%d", result, err, b.l1Gets)
 	}
 	// Exact threshold still triggers and validates the baseline.
-	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta)), GC: true, OfflineQuiescent: true})
+	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta)), GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
 	// Offline GC revalidates complete persisted baseline/index proofs and the
 	// superseded payload. This is deliberately not the zero-read online path.
 	if err != nil || !result.Compacted || result.MaxTxID != 1 || b.l1Gets != 9 {

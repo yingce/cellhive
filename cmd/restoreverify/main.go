@@ -45,6 +45,9 @@ func main() {
 		}
 		rep := replica.New(b)
 		pf, ferr := rep.NewPageFetcher(context.Background(), scope, *epoch)
+		if ferr == nil {
+			defer pf.Close()
+		}
 		if ferr != nil {
 			// No compaction index yet: restore the L0 chain directly.
 			segs, rerr := rep.Restore(context.Background(), scope, *epoch)

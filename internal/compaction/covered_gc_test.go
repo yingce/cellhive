@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -29,8 +30,13 @@ type l0CountingBucket struct {
 	onDelete  func()
 }
 
+func isGCKey(key string) bool {
+	return strings.Contains(key, "/gc/pins/") || strings.Contains(key, "/gc/sealed") ||
+		strings.Contains(key, "/gc/tombstones/") || strings.HasSuffix(key, "/gc-retired")
+}
+
 func isL0Key(key string) bool {
-	return strings.Contains(key, "/ltx/") && !strings.Contains(key, "/L1/")
+	return strings.Contains(key, "/ltx/") && !strings.Contains(key, "/L1/") && !isGCKey(key)
 }
 
 func (b *l0CountingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
@@ -46,11 +52,13 @@ func (b *l0CountingBucket) Get(ctx context.Context, key string) ([]byte, string,
 }
 
 func (b *l0CountingBucket) Delete(ctx context.Context, key string) error {
-	b.mu.Lock()
-	b.deletes = append(b.deletes, key)
-	b.mu.Unlock()
+	if !isGCKey(key) {
+		b.mu.Lock()
+		b.deletes = append(b.deletes, key)
+		b.mu.Unlock()
+	}
 	err := b.Bucket.Delete(ctx, key)
-	if b.onDelete != nil {
+	if b.onDelete != nil && !isGCKey(key) {
 		b.onDelete()
 	}
 	return err
@@ -244,9 +252,17 @@ func TestCompactOldL1GCStopsAfterOwnershipLossBetweenDeletes(t *testing.T) {
 		t.Fatalf("need multipart baseline: %+v %v", res, err)
 	}
 	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 2, 1, pages))
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 2, 2, pages))
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 2, 3, pages))
 	lost := false
 	b.onDelete = func() { lost = true }
-	res, err = Compact(ctx, m, sc, epoch, Options{MinSegments: 1, MaxPartBytes: 5000, GC: true, OfflineQuiescent: true, Verify: func(context.Context) error {
+	res, err = Compact(ctx, m, sc, epoch, Options{MinSegments: 1, MaxPartBytes: 5000, GC: true, OfflineQuiescent: true, KeepL1Generations: 1, Verify: func(context.Context) error {
 		if lost {
 			return errors.New("owner epoch lost")
 		}
@@ -515,5 +531,290 @@ func TestCompactBelowThresholdUsesStoredBytes(t *testing.T) {
 	}
 	if decoded.Compacted || decoded.Skipped != "below threshold" || decoded.InputBytes != int64(len(delta)) {
 		t.Fatalf("decode result = %+v, want stored bytes %d", decoded, len(delta))
+	}
+}
+
+func TestCompactSafeCoveredL0UsesTombstone(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	snapKey := appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	d1Key := appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
+
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, Safe: true, Grace: -1, Job: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Compacted || res.DeletedL0 == 0 || res.DeferredGC != 0 {
+		t.Fatalf("safe covered GC = %+v", res)
+	}
+	if !b.deleted(snapKey) || !b.deleted(d1Key) {
+		t.Fatalf("safe GC did not delete covered objects: res=%+v deletes=%v", res, b.deletes)
+	}
+	if _, ok, err := m.ReadManifest(ctx, sc, epoch); err != nil || !ok {
+		t.Fatalf("manifest removed: %v %v", ok, err)
+	}
+	if _, ok, err := m.ReadIndex(ctx, sc, epoch); err != nil || !ok {
+		t.Fatalf("index removed: %v %v", ok, err)
+	}
+}
+
+func TestCompactSafeCoveredL0GraceAndResume(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+
+	now := time.Unix(1000, 0)
+	opts := Options{MinSegments: 1, GC: true, Safe: true, Grace: time.Hour, Job: "grace", Now: func() time.Time { return now }}
+	res, err := Compact(ctx, m, sc, epoch, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL0 != 0 || res.DeferredGC == 0 {
+		t.Fatalf("grace pass deleted=%d deferred=%d, want deferral", res.DeletedL0, res.DeferredGC)
+	}
+	b.reset()
+	now = now.Add(2 * time.Hour)
+	res, err = Compact(ctx, m, sc, epoch, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL0 == 0 || res.DeferredGC != 0 {
+		t.Fatalf("resume after grace = %+v", res)
+	}
+}
+
+func TestCompactDoesNotPublishAfterSeal(t *testing.T) {
+	ctx, _, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	if err := m.SealEpoch(ctx, sc, epoch, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); !errors.Is(err, replica.ErrGCSealed) {
+		t.Fatalf("compact after seal = %v, want ErrGCSealed", err)
+	}
+}
+
+func TestCompactKeepsPreviousL1GenerationByDefault(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	first, ok, err := m.ReadManifest(ctx, sc, epoch)
+	if err != nil || !ok || len(first.Objects) == 0 {
+		t.Fatalf("first manifest: %+v %v", first, err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 != 0 {
+		t.Fatalf("default retention deleted L1: %+v", res)
+	}
+	for _, key := range first.Objects {
+		if _, _, err := b.Get(ctx, key); err != nil {
+			t.Fatalf("previous L1 generation %s missing: %v", key, err)
+		}
+	}
+}
+
+func TestCompactKeepL1GenerationsOneDeletesPrevious(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	first, ok, err := m.ReadManifest(ctx, sc, epoch)
+	if err != nil || !ok || len(first.Objects) == 0 {
+		t.Fatalf("first manifest: %+v %v", first, err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 == 0 {
+		t.Fatalf("generation=1 did not delete the previous L1: %+v", res)
+	}
+	for _, key := range first.Objects {
+		if _, _, err := b.Get(ctx, key); err == nil {
+			t.Fatalf("previous L1 generation %s still present", key)
+		}
+	}
+}
+
+func TestCompactKeepL1GenerationsAboveTwoRetainsAll(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	var before []string
+	for i := uint64(1); i <= 2; i++ {
+		appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, i, map[uint32][]byte{1: make([]byte, 4096)}))
+		if i == 1 {
+			res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1})
+			if err != nil || !res.Compacted {
+				t.Fatalf("second compact: %+v %v", res, err)
+			}
+			keys, err := b.List(ctx, replica.L1Prefix(sc, epoch))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before = keys
+		}
+	}
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 != 0 {
+		t.Fatalf("generation>2 result: %+v", res)
+	}
+	for _, key := range before {
+		if _, _, err := b.Get(ctx, key); err != nil {
+			t.Fatalf("generation>2 removed %s: %v", key, err)
+		}
+	}
+}
+
+func TestDryRunReportsWithoutDeleting(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	snapKey := appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	deltaKey := appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
+
+	res, err := DryRun(ctx, m, sc, epoch, Options{Safe: true, KeepL1Generations: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Compacted || res.Skipped != "dry-run" || res.Covered == 0 || res.DeletedL0 != 0 || res.DeletedL1 != 0 {
+		t.Fatalf("dry-run result = %+v", res)
+	}
+	for _, key := range []string{snapKey, deltaKey} {
+		if _, _, err := b.Get(ctx, key); err != nil {
+			t.Fatalf("dry-run deleted %s: %v", key, err)
+		}
+	}
+	tombs, err := b.List(ctx, replica.Prefix(sc, epoch)+"gc/tombstones/")
+	if err != nil || len(tombs) != 0 {
+		t.Fatalf("dry-run wrote tombstones: %v %v", tombs, err)
+	}
+}
+
+func TestCompactKeepL1GenerationsTwoRemovesOlderGenerations(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	gen1, ok, err := m.ReadManifest(ctx, sc, epoch)
+	if err != nil || !ok || len(gen1.Objects) == 0 {
+		t.Fatalf("gen1 manifest: %+v %v", gen1, err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	gen2, ok, err := m.ReadManifest(ctx, sc, epoch)
+	if err != nil || !ok || len(gen2.Objects) == 0 {
+		t.Fatalf("gen2 manifest: %+v %v", gen2, err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 == 0 {
+		t.Fatalf("Keep=2 did not delete the generation older than previous: %+v", res)
+	}
+	for _, key := range gen1.Objects {
+		if _, _, err := b.Get(ctx, key); err == nil {
+			t.Fatalf("gen1 %s still present", key)
+		}
+	}
+	for _, key := range gen2.Objects {
+		if _, _, err := b.Get(ctx, key); err != nil {
+			t.Fatalf("previous generation %s missing: %v", key, err)
+		}
+	}
+}
+
+func TestCompactSafeKeepTwoDeletesOlderL1(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	gen1, _, _ := m.ReadManifest(ctx, sc, epoch)
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, Safe: true, Grace: -1, KeepL1Generations: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 == 0 {
+		t.Fatalf("Safe Keep=2 did not delete older L1: %+v", res)
+	}
+	for _, key := range gen1.Objects {
+		if _, _, err := b.Get(ctx, key); err == nil {
+			t.Fatalf("gen1 %s still present", key)
+		}
+	}
+}
+
+func TestAlreadyCompactedPassDeletesOlderL1(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	var gens []replica.Manifest
+	man, _, _ := m.ReadManifest(ctx, sc, epoch)
+	gens = append(gens, man)
+	for i := uint64(1); i <= 3; i++ {
+		appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, i, map[uint32][]byte{1: make([]byte, 4096)}))
+		if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+			t.Fatal(err)
+		}
+		man, _, _ := m.ReadManifest(ctx, sc, epoch)
+		gens = append(gens, man)
+	}
+	// No new L0: this pass takes the "already compacted" fast path. Keep two
+	// generations, so gen1 and gen2 must go even though no new snapshot is built.
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Skipped != "already compacted" || res.DeletedL1 == 0 {
+		t.Fatalf("already-compacted GC did not delete older L1: %+v", res)
+	}
+	for i, gen := range gens {
+		_, _, gerr := b.Get(ctx, gen.Objects[0])
+		if i < 2 && gerr == nil {
+			t.Fatalf("old generation %d still present", i+1)
+		}
+		if i >= 2 && gerr != nil {
+			t.Fatalf("retained generation %d missing: %v", i+1, gerr)
+		}
+	}
+}
+
+func TestNoGCAlreadyCompactedKeepsOlderL1(t *testing.T) {
+	ctx, b, m, sc, epoch := newCompactionFixture(t)
+	appendSegment(t, m, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	compactBaseline(t, ctx, m, sc, epoch)
+	gen1, _, _ := m.ReadManifest(ctx, sc, epoch)
+	appendSegment(t, m, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
+	if _, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Compact(ctx, m, sc, epoch, Options{MinSegments: 1, KeepL1Generations: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeletedL1 != 0 {
+		t.Fatalf("GC=false deleted L1: %+v", res)
+	}
+	for _, key := range gen1.Objects {
+		if _, _, err := b.Get(ctx, key); err != nil {
+			t.Fatalf("GC=false removed %s: %v", key, err)
+		}
 	}
 }

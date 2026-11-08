@@ -1,5 +1,15 @@
 # 评审问题与发布状态（Known Issues / Review Closure）
 
+## 2026-11-05 ADR-309 Safe GC 运营化与清理原子性（实施与验收中，未部署）
+
+新增显式 admin/CLI Safe GC（owner、admin、scope 校验，dry-run）、`KeepL1Generations` 默认保留两代 L1、backlog/lag/L1 代数/deferred/retained epoch 指标，以及 cleanup 的 deleting fence + 幂等续跑契约。生产默认仍 DEFERRED，Safe 只能显式开启；真实 HK COS 100k 测试暴露的 cleanup 502 半删（e1/e2 全删、e3 半删）由本 ADR 修复。验收未完成前不得宣称线上 GC 已安全。
+
+## 2026-11-05 ADR-308 恢复下界与安全删除协议（实施与验收中，未部署）
+
+恢复链新增下界校验：marker cut 必须由最终 watermark 达到，cut 跨 epoch 单调不减；加载 epoch 前先应用后继 cut，manifest 高于 cut 时不得用于恢复或授权 prune；无 L1 的完整快照用 `restore.IndexChain` 验证页覆盖；退休 epoch 写 `gc-retired` 并由恢复/水位扫描跳过。读端在 `ErrNotFound` 时按 manifest/epoch 变化重试，否则 fail closed。
+
+安全删除新增 reader pin（持久化 lease + 续租 + 过期）、epoch seal（阻止新 pin 后等待排空）、per-key tombstone 与宽限期、`RetireOptions.Safe`。默认仍为 DEFERRED，生产后台不得启用 Safe 或 OfflineQuiescent；桶增长与历史 List 成本继续保留。验收尚未完成，不能宣称在线 GC 已投产。
+
 ## 2026-11-04 复制 GC 正确性边界（ADR-307，契约先行，实施与验收中，未部署）
 
 最终 epoch 审查不能证明跨对象 owner 检查/删除原子性，也不能证明 pinned readers 或 lineage cut 安全。保守决策：compaction 继续发布，covered L0/旧 L1/`RetireEpochs` payload 自动物理删除默认 DEFERRED；`Options.GC` 不足以授权。显式 Go option `OfflineQuiescent bool` 默认 `false`，只有调用者外部停止并排空 writers **和 readers** 且全过程保持静默才可设 `true`。生产后台永不启用，interval 不能绕过；无 owner、nil `Verify` 不是许可。离线逐次 Delete 前配置的 `Verify` 只停止观察到的丢失，不是原子 fence；可选 payload ETag 不能证明 owner。

@@ -75,3 +75,82 @@ func TestRestoreChainFallbackRejectsMissingPredecessorDelta(t *testing.T) {
 		t.Fatalf("GC removed %d objects after invalid chain", n)
 	}
 }
+
+// A predecessor manifest above the successor cut is a dead-tail image: restore
+// must ignore it and use the L0 chain that reaches the cut, not fail because the
+// manifest's objects are unusable.
+func TestRestoreChainCutBeforeManifestPrune(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "cut-before-prune"}
+	put := func(epoch uint64, name string, h ltx.Header) {
+		t.Helper()
+		if _, _, err := m.Append(ctx, sc, epoch, ltx.Encode(h, []byte("x"))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(22, "3766.snapshot", ltx.Header{Kind: ltx.KindSnapshot, Epoch: 22, StartTxID: 3766, EndTxID: 3766})
+	put(22, "3767-3768.ltx", ltx.Header{Kind: ltx.KindDelta, Epoch: 22, StartTxID: 3767, EndTxID: 3768})
+	if err := m.MarkSnapshotDone(ctx, sc, 22, 3766); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutManifest(ctx, sc, 22, Manifest{Epoch: 22, MinTxID: 1, MaxTxID: 3770, Objects: []string{"cells/missing/L1/3770.snapshot"}}); err != nil {
+		t.Fatal(err)
+	}
+	put(23, "3769-3769.ltx", ltx.Header{Kind: ltx.KindDelta, Epoch: 23, StartTxID: 3769, EndTxID: 3769})
+	if _, err := m.MarkEpoch(ctx, sc, 23, 3768); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := m.RestoreChain(ctx, sc, 23)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if len(segs) != 3 {
+		t.Fatalf("segments = %d, want snapshot + two deltas", len(segs))
+	}
+	if got, err := m.DurableWatermarkChain(ctx, sc, 23); err != nil || got != 3769 {
+		t.Fatalf("watermark = %d, %v; want 3769", got, err)
+	}
+}
+
+func TestRestoreChainHonorsRetiredEpochCut(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(b)
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "retired-cut"}
+	putSeg(t, b, sc, 1, "5.snapshot", ltx.KindSnapshot, 5, 5)
+	putSeg(t, b, sc, 1, "6-7.ltx", ltx.KindDelta, 6, 7)
+	putSeg(t, b, sc, 1, "8-9.ltx", ltx.KindDelta, 8, 9) // fenced late tail
+	if _, err := m.MarkEpoch(ctx, sc, 2, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkRetired(ctx, sc, 2, "test"); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := m.RestoreChain(ctx, sc, 2)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	watermark := uint64(0)
+	for _, seg := range segs {
+		if seg.Header.Kind == ltx.KindMarker {
+			continue
+		}
+		if seg.Header.EndTxID > watermark {
+			watermark = seg.Header.EndTxID
+		}
+		if seg.Header.Kind == ltx.KindDelta && seg.Header.StartTxID >= 8 {
+			t.Fatalf("retired epoch cut was ignored: included %+v", seg.Header)
+		}
+	}
+	if watermark != 7 {
+		t.Fatalf("watermark = %d, want marker-bounded 7", watermark)
+	}
+}

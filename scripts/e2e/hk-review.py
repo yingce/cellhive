@@ -16,7 +16,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--credentials', required=True)
 parser.add_argument('--port-base', type=int, default=26500)
 parser.add_argument('--trace-endpoint', default='')
-parser.add_argument('--suite', choices=('review', 'workflow', 'performance', 'performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety'), default='review')
+parser.add_argument('--suite', choices=('review', 'workflow', 'performance', 'performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety', 'epoch-stress'), default='review')
+parser.add_argument('--namespace', default='', help='fixed application namespace (single-suite runs only)')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 # All suites share the bucket's platform control cells, even with unique app
@@ -42,7 +43,7 @@ env.update(CELLHIVE_BUCKET='cos://vwork-e2e-hk-1376795072',
            NO_PROXY='*', no_proxy='*', CELLHIVE_DURABILITY='bucket',
            CELLHIVE_WORKERD='/opt/cellhive/deploy/workerd-fork/workerd', E2E_KEEP='1',
            HK_REVIEW_ROOT=str(root))
-if args.suite in ('performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety'):
+if args.suite in ('performance-dual', 'performance-tail', 'batch-recovery', 'routing-safety', 'epoch-stress'):
     env.update(CELLHIVE_DURABILITY='auto', E2E_DUAL_AGENT='1')
 if args.suite == 'performance-tail':
     env['PERF_TAIL_DIAG']='1'
@@ -56,6 +57,7 @@ failed = []
 suites = {
     'batch-recovery': [('kv-batch-recovery.sh', 'e2ebatch')],
     'routing-safety': [('kv-routing-safety.sh', 'e2eroute')],
+    'epoch-stress': [('kv-epoch-stress.sh', 'e2ebatch')],
     'performance': [('kv-performance.sh', 'e2eperf')],
     'performance-dual': [('kv-performance.sh', 'e2eperf')],
     'performance-tail': [('kv-performance.sh', 'e2eperf')],
@@ -63,7 +65,7 @@ suites = {
     'workflow': [('workflow.sh', 'e2ewf'), ('workflow-recovery.sh', 'e2ewfr')],
 }
 for index, (script, original_ns) in enumerate(suites[args.suite]):
-    ns = f'{run}-{index}'
+    ns = args.namespace if args.namespace and index == 0 else f'{run}-{index}'
     case = artifacts / str(index)
     case.mkdir()
     lib = (root / 'scripts/e2e/lib.sh').read_text()

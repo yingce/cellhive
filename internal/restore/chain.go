@@ -31,6 +31,21 @@ func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint6
 			cut[h.Epoch] = h.EndTxID
 		}
 	}
+	// A later epoch inherits its predecessor at the marker cut, so cuts must be
+	// monotonic across epochs. A decreasing cut would silently drop transactions
+	// that an earlier marker already declared inherited.
+	cutEpochs := make([]uint64, 0, len(cut))
+	for e := range cut {
+		cutEpochs = append(cutEpochs, e)
+	}
+	sort.Slice(cutEpochs, func(i, j int) bool { return cutEpochs[i] < cutEpochs[j] })
+	var requiredWatermark uint64
+	for _, e := range cutEpochs {
+		if cut[e] < requiredWatermark {
+			return nil, nil, 0, fmt.Errorf("restore: epoch %d cut %d regresses below %d", e, cut[e], requiredWatermark)
+		}
+		requiredWatermark = cut[e]
+	}
 	var keep []int
 	for i, h := range headers {
 		truncated := false
@@ -119,6 +134,12 @@ func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint6
 				}
 				expected = h.EndTxID + 1
 			}
+			if chainErr == nil && expected-1 < requiredWatermark {
+				// The marker proves a higher inherited watermark. Returning an
+				// older snapshot as a successful restore would silently lose the
+				// transactions between expected-1 and the cut.
+				chainErr = fmt.Errorf("restore: chain watermark %d below epoch cut %d", expected-1, requiredWatermark)
+			}
 			if chainErr == nil {
 				return snap, tail, expected - 1, nil
 			}
@@ -172,6 +193,29 @@ func completeSnapshotSet(headers []ltx.Header, idx []int) bool {
 		}
 	}
 	return true
+}
+
+// SelectIndices returns the indices of the snapshot and delta segments that
+// form the live chain, in apply order, together with its watermark. Marker and
+// truncated dead-tail segments are excluded. It is the same selection used by
+// ApplyFile/IndexChain; callers use it to avoid returning dead segments.
+func SelectIndices(segments [][]byte) ([]int, uint64, error) {
+	headers := make([]ltx.Header, len(segments))
+	for i, raw := range segments {
+		h, _, err := ltx.Decode(raw)
+		if err != nil {
+			return nil, 0, err
+		}
+		headers[i] = h
+	}
+	snaps, deltas, watermark, err := selectChain(headers)
+	if err != nil {
+		return nil, 0, err
+	}
+	order := make([]int, 0, len(snaps)+len(deltas))
+	order = append(order, snaps...)
+	order = append(order, deltas...)
+	return order, watermark, nil
 }
 
 // ValidateChain checks checksums, complete snapshot parts and exact delta

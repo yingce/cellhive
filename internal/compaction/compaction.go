@@ -10,8 +10,12 @@ package compaction
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -44,6 +48,43 @@ type Options struct {
 	// remain stopped/drained throughout deletion. False defers physical GC even
 	// when GC is true. Production background work must leave this false.
 	OfflineQuiescent bool
+	// Safe enables the pin/tombstone protocol for same-epoch covered objects.
+	// It still requires no live reader pin and a due tombstone.
+	Safe bool
+	// Grace is the tombstone window (0 uses the replica default; negative means
+	// immediate, for tests/explicit offline maintenance only).
+	Grace time.Duration
+	// DrainTimeout bounds a reader-pin drain. 0 waits for ctx.
+	DrainTimeout time.Duration
+	// Now is a test seam for tombstone deadlines.
+	Now func() time.Time
+	// Job names the maintenance operation.
+	Job string
+	// KeepL1Generations bounds how many L1 generations survive Safe/offline
+	// cleanup. 0 means the default (2). Generations are enumerated by L1
+	// snapshot txid, so N>2 keeps the newest N generations; 1 keeps only the
+	// newest.
+	KeepL1Generations int
+}
+
+func (o Options) l1Generations() int {
+	if o.KeepL1Generations <= 0 {
+		return 2
+	}
+	return o.KeepL1Generations
+}
+
+func (o Options) retire() replica.RetireOptions {
+	return replica.RetireOptions{
+		OfflineQuiescent: o.OfflineQuiescent,
+		Safe:             o.Safe,
+		AllowUnsealed:    true,
+		Grace:            o.Grace,
+		DrainTimeout:     o.DrainTimeout,
+		Now:              o.Now,
+		Job:              o.Job,
+		Verify:           o.Verify,
+	}
 }
 
 // Result reports what a compaction did.
@@ -186,6 +227,8 @@ func listObjectMetadata(ctx context.Context, b bucket.Bucket, prefix string) ([]
 // chain has no snapshot baseline it cannot be folded into a full-page snapshot,
 // so it is skipped rather than failed.
 func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64, opts Options) (Result, error) {
+	// Compaction runs only for the current owned epoch; retirement never seals
+	// it. Pinning here would make its own covered-L0 GC see a live reader.
 	man, haveMan, err := m.ReadManifest(ctx, s, epoch)
 	if err != nil {
 		return Result{}, err
@@ -219,6 +262,17 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 				res := Result{Skipped: "already compacted"}
 				var gerr error
 				res.DeletedL0, res.DeferredGC, res.GCSkipped, gerr = gcCoveredL0(ctx, m, s, epoch, floor, opts, pre.covered)
+				d1, d2, sk, lerr := gcOldL1(ctx, m, s, epoch, opts)
+				res.DeletedL1, res.DeferredGC = d1, res.DeferredGC+d2
+				if lerr != nil {
+					return res, lerr
+				}
+				if sk != "" {
+					if res.GCSkipped != "" {
+						res.GCSkipped += "; "
+					}
+					res.GCSkipped += sk
+				}
 				if !opts.OfflineQuiescent {
 					addDeferredMetadataAccounting(ctx, m, s, epoch, floor, &res)
 				}
@@ -286,6 +340,17 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 		res := Result{Skipped: "already compacted"}
 		var gerr error
 		res.DeletedL0, res.DeferredGC, res.GCSkipped, gerr = gcCoveredL0(ctx, m, s, epoch, floor, opts, pre.covered)
+		d1, d2, sk, lerr := gcOldL1(ctx, m, s, epoch, opts)
+		res.DeletedL1, res.DeferredGC = d1, res.DeferredGC+d2
+		if lerr != nil {
+			return res, lerr
+		}
+		if sk != "" {
+			if res.GCSkipped != "" {
+				res.GCSkipped += "; "
+			}
+			res.GCSkipped += sk
+		}
 		if !opts.OfflineQuiescent {
 			addDeferredMetadataAccounting(ctx, m, s, epoch, floor, &res)
 		}
@@ -441,10 +506,20 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 		Parts: len(parts), MinTxID: minTx, MaxTxID: maxTx, Commit: commit,
 	}
 	if opts.GC {
-		if !opts.OfflineQuiescent {
+		// man.Objects is only the previous generation. To enforce
+		// KeepL1Generations we must enumerate every retained L1 generation;
+		// otherwise older generations are never candidates and accumulate
+		// forever.
+		if keys, lerr := m.B.List(ctx, replica.L1Prefix(s, epoch)); lerr == nil {
+			oldL1 = keys
+		} else {
+			return res, fmt.Errorf("compaction: list L1 generations: %w", lerr)
+		}
+		if !opts.OfflineQuiescent && !opts.Safe {
 			res.DeferredGC = len(oldL1) + len(preflightL0(ctx, m, s, epoch, l0, maxTx).covered)
 			res.GCSkipped = replica.ErrGCDeferred.Error()
 			addDeferredMetadataAccounting(ctx, m, s, epoch, maxTx, &res)
+			RecordStats(ctx, m, s, epoch)
 			return res, nil
 		}
 		complete, err := m.HasCompleteSnapshot(ctx, s, epoch)
@@ -460,28 +535,45 @@ func Compact(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64
 				return res, err
 			}
 		}
-		keep := make(map[string]bool, len(man2.Objects))
-		for _, k := range man2.Objects {
-			keep[k] = true
+		if opts.Safe {
+			live, perr := m.LiveReaderPins(ctx, s, epoch, time.Now())
+			if perr != nil {
+				return res, perr
+			}
+			if live > 0 {
+				res.DeferredGC = len(oldL1) + len(preflightL0(ctx, m, s, epoch, l0, maxTx).covered)
+				res.GCSkipped = replica.ErrGCBusy.Error()
+				return res, nil
+			}
 		}
-		for _, k := range oldL1 {
-			if keep[k] {
-				continue
+		l1Deleted, l1Deferred, l1Skipped, l1Err := gcOldL1(ctx, m, s, epoch, opts)
+		res.DeletedL1 = l1Deleted
+		res.DeferredGC += l1Deferred
+		if l1Err != nil {
+			return res, l1Err
+		}
+		if l1Skipped != "" {
+			if res.GCSkipped != "" {
+				res.GCSkipped += "; "
 			}
-			deleted, err := m.DeleteObjectWithOptions(ctx, s, epoch, k, replica.RetireOptions{OfflineQuiescent: true, Verify: opts.Verify})
-			if err != nil {
-				return res, fmt.Errorf("compaction: gc L1 %s: %w", k, err)
-			}
-			if deleted {
-				res.DeletedL1++
-			}
+			res.GCSkipped += l1Skipped
 		}
 		covered := preflightL0(ctx, m, s, epoch, l0, maxTx).covered
-		res.DeletedL0, res.DeferredGC, res.GCSkipped, err = gcCoveredL0(ctx, m, s, epoch, maxTx, opts, covered)
+		var deferredL0 int
+		var skippedL0 string
+		res.DeletedL0, deferredL0, skippedL0, err = gcCoveredL0(ctx, m, s, epoch, maxTx, opts, covered)
+		res.DeferredGC += deferredL0
+		if skippedL0 != "" {
+			if res.GCSkipped != "" {
+				res.GCSkipped += "; "
+			}
+			res.GCSkipped += skippedL0
+		}
 		if err != nil {
 			return res, err
 		}
 	}
+	RecordStats(ctx, m, s, epoch)
 	return res, nil
 }
 
@@ -681,11 +773,118 @@ func canonicalUint(s string) bool {
 // tail. Unknown, mixed, and cross-floor objects are never touched, and no
 // manifest or index is rewritten. A missing or lower index defers GC; a read
 // error fails closed without deleting anything.
+// gcOldL1 deletes L1 generations beyond the retention window. It enumerates
+// every L1 key so an "already compacted" pass (no new L0) still enforces
+// KeepL1Generations; relying on the previous manifest alone left older
+// generations permanently retained.
+func gcOldL1(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64, opts Options) (deleted, deferred int, skipped string, err error) {
+	if !opts.GC {
+		return 0, 0, "", nil
+	}
+	keys, err := m.B.List(ctx, replica.L1Prefix(s, epoch))
+	if err != nil {
+		return 0, 0, "", err
+	}
+	gens := map[uint64][]string{}
+	for _, key := range keys {
+		short := strings.TrimPrefix(key, replica.L1Prefix(s, epoch))
+		base := short
+		if i := strings.IndexByte(short, '.'); i > 0 {
+			base = short[:i]
+		}
+		gen, perr := strconv.ParseUint(base, 10, 64)
+		if perr != nil {
+			continue // unknown L1 name is never a deletion candidate
+		}
+		gens[gen] = append(gens[gen], key)
+	}
+	ordered := make([]uint64, 0, len(gens))
+	for gen := range gens {
+		ordered = append(ordered, gen)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] > ordered[j] })
+	keep := opts.l1Generations()
+	if keep < 1 {
+		keep = 2
+	}
+	var candidates []string
+	for i, gen := range ordered {
+		if i < keep {
+			continue
+		}
+		candidates = append(candidates, gens[gen]...)
+	}
+	if len(candidates) == 0 {
+		return 0, 0, "", nil
+	}
+	if !opts.OfflineQuiescent && !opts.Safe {
+		return 0, len(candidates), replica.ErrGCDeferred.Error(), nil
+	}
+	if opts.Safe {
+		live, perr := m.LiveReaderPins(ctx, s, epoch, time.Now())
+		if perr != nil {
+			return 0, 0, "", perr
+		}
+		if live > 0 {
+			return 0, len(candidates), replica.ErrGCBusy.Error(), nil
+		}
+	}
+	del := opts.retire()
+	if opts.Safe {
+		if opts.Verify != nil {
+			if err := opts.Verify(ctx); err != nil {
+				return 0, 0, "", err
+			}
+		}
+		del.Verify = nil
+		var due []string
+		var mu sync.Mutex
+		if err := parallelStrings(ctx, candidates, 16, func(pctx context.Context, key string) error {
+			d, terr := m.EnsureTombstone(pctx, s, epoch, key, del)
+			if terr != nil {
+				return terr
+			}
+			if d {
+				mu.Lock()
+				due = append(due, key)
+				mu.Unlock()
+			}
+			return nil
+		}); err != nil {
+			return 0, 0, "", err
+		}
+		var deletedN int64
+		if err := parallelStrings(ctx, due, 16, func(pctx context.Context, key string) error {
+			did, derr := m.DeleteAuthorizedObject(pctx, s, epoch, key, del)
+			if derr != nil {
+				return derr
+			}
+			if did {
+				atomic.AddInt64(&deletedN, 1)
+			}
+			return m.ClearTombstone(pctx, s, epoch, key)
+		}); err != nil {
+			return int(deletedN), 0, "", err
+		}
+		return int(deletedN), len(candidates) - len(due), "", nil
+	}
+	for _, key := range candidates {
+		did, derr := m.DeleteObjectWithOptions(ctx, s, epoch, key, del)
+		if derr != nil {
+			return deleted, deferred, "", derr
+		}
+		if did {
+			deleted++
+		}
+	}
+	return deleted, deferred, "", nil
+}
+
 func gcCoveredL0(ctx context.Context, m *replica.Manager, s cell.Scope, epoch, floor uint64, opts Options, keys []string) (deleted, deferred int, skipped string, err error) {
 	if !opts.GC || len(keys) == 0 {
 		return 0, 0, "", nil
 	}
-	if !opts.OfflineQuiescent {
+	if !opts.OfflineQuiescent && !opts.Safe {
 		return 0, len(keys), replica.ErrGCDeferred.Error(), nil
 	}
 	idx, ok, err := m.ReadIndex(ctx, s, epoch)
@@ -710,14 +909,57 @@ func gcCoveredL0(ctx context.Context, m *replica.Manager, s cell.Scope, epoch, f
 			return 0, 0, "", err
 		}
 	}
+	if opts.Safe {
+		live, perr := m.LiveReaderPins(ctx, s, epoch, time.Now())
+		if perr != nil {
+			return 0, 0, "", perr
+		}
+		if live > 0 {
+			return 0, len(keys), replica.ErrGCBusy.Error(), nil
+		}
+	}
+	if opts.Safe {
+		var due []string
+		var mu sync.Mutex
+		if err := parallelStrings(ctx, keys, 16, func(pctx context.Context, key string) error {
+			d, terr := m.EnsureTombstone(pctx, s, epoch, key, opts.retire())
+			if terr != nil {
+				return terr
+			}
+			if d {
+				mu.Lock()
+				due = append(due, key)
+				mu.Unlock()
+			}
+			return nil
+		}); err != nil {
+			return 0, 0, "", err
+		}
+		auth := opts.retire()
+		auth.Verify = nil
+		var deletedN int64
+		if err := parallelStrings(ctx, due, 16, func(pctx context.Context, key string) error {
+			did, derr := m.DeleteAuthorizedObject(pctx, s, epoch, key, auth)
+			if derr != nil {
+				return derr
+			}
+			if did {
+				atomic.AddInt64(&deletedN, 1)
+			}
+			return m.ClearTombstone(pctx, s, epoch, key)
+		}); err != nil {
+			return int(deletedN), 0, "", err
+		}
+		return int(deletedN), len(keys) - len(due), "", nil
+	}
 	for _, key := range keys {
-		didDelete, err := m.DeleteObjectWithOptions(ctx, s, epoch, key, replica.RetireOptions{OfflineQuiescent: true, Verify: opts.Verify})
+		didDelete, err := m.DeleteObjectWithOptions(ctx, s, epoch, key, opts.retire())
 		if err != nil {
-			return deleted, 0, "", fmt.Errorf("compaction: gc covered L0 %s: %w", key, err)
+			return deleted, deferred, "", fmt.Errorf("compaction: gc covered L0 %s: %w", key, err)
 		}
 		if didDelete {
 			deleted++
 		}
 	}
-	return deleted, 0, "", nil
+	return deleted, deferred, "", nil
 }

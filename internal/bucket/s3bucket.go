@@ -335,7 +335,7 @@ func (b *S3Bucket) ListSizes(ctx context.Context, prefix string) ([]ObjectInfo, 
 			return nil, err
 		}
 		for _, o := range res.Contents {
-			out = append(out, ObjectInfo{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), ETag: unquote(aws.ToString(o.ETag))})
+			out = append(out, ObjectInfo{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), ETag: unquote(aws.ToString(o.ETag)), LastModifiedMs: aws.ToTime(o.LastModified).UnixMilli()})
 		}
 		if res.IsTruncated == nil || !*res.IsTruncated {
 			break
@@ -362,7 +362,7 @@ func (b *S3Bucket) ListPage(ctx context.Context, prefix, after string, limit int
 	}
 	out := make([]ObjectInfo, 0, len(res.Contents))
 	for _, o := range res.Contents {
-		out = append(out, ObjectInfo{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), ETag: unquote(aws.ToString(o.ETag))})
+		out = append(out, ObjectInfo{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), ETag: unquote(aws.ToString(o.ETag)), LastModifiedMs: aws.ToTime(o.LastModified).UnixMilli()})
 	}
 	next := ""
 	if res.IsTruncated != nil && *res.IsTruncated && len(out) > 0 {

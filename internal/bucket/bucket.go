@@ -58,9 +58,10 @@ type PrefixLister interface {
 
 // ObjectInfo is one key with its size and etag.
 type ObjectInfo struct {
-	Key  string
-	Size int64
-	ETag string
+	Key            string
+	Size           int64
+	ETag           string
+	LastModifiedMs int64
 }
 
 // Bucket is the object storage contract required by CellHive.

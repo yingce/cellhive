@@ -62,6 +62,24 @@ platform control cells. The cold harness waits for readiness/admin startup and
 checks the target scope's owner epoch; global epoch/List counters include other
 background scopes and cannot alone establish hot-path activity.
 
+### Multi-epoch Safe GC stress
+
+`python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3 --suite epoch-stress --namespace <ns> --port-base 29000`
+runs two local agents against the real HK COS bucket, writes `E2E_STRESS_KEYS`
+(default 100000), SIGKILLs the owner at 25/50/75% to force A→B→A→B epochs, then
+verifies every acknowledged key and cold-restores after deleting only the local
+SQLite cache. Set `E2E_STRESS_SAFE_GC=1` to run `cellhive gc scope --dry-run`
+followed by two `--safe` passes (tombstone grace) and `E2E_STRESS_GC_KEEP` to
+choose how many predecessor epochs survive. This is local compute + real HK COS,
+not a cross-host fleet test.
+
+Explicit production Safe GC (never automatic by default):
+
+```bash
+cellhive gc scope <ns/__kv__/id> --dry-run
+cellhive gc scope <ns/__kv__/id> --safe --keep-previous 1 --grace 30 --keep-l1 2
+```
+
 ### HK COS performance
 
 ```bash

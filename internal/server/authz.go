@@ -89,9 +89,15 @@ func controlTargetNS(r *http.Request) (ns string, body []byte, err error) {
 	}
 	var probe struct {
 		Namespace string `json:"namespace"`
+		Scope     string `json:"scope"`
 	}
 	if jerr := json.Unmarshal(b, &probe); jerr == nil {
 		ns = probe.Namespace
+		if ns == "" {
+			if head, _, ok := strings.Cut(probe.Scope, "/"); ok {
+				ns = head
+			}
+		}
 	}
 	return ns, body, nil
 }

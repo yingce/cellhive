@@ -193,6 +193,10 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 触发段数 |
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | 触发字节 |
 | `CELLHIVE_COMPACTION_MIN_OBJECTS` | `8` | 新 L0 对象数触发阈值，与段数/存储字节阈值为 OR |
+| `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |
+
+Safe GC 不通过环境变量自动启用。运维使用 `cellhive gc scope <ns/class/id> --dry-run` 先看候选，再用 `--safe` 执行；`--keep-l1` 默认 2 代，`--grace` 默认 30s。默认后台仍是 DEFERRED。
+
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` 关 | bundle/assets GC |
 | `CELLHIVE_BUNDLE_GC_GRACE` | `24h` | 未引用保留期 |
 | `CELLHIVE_AUDIT_RETENTION` | `720h` (0 永久) | 审计保留 |

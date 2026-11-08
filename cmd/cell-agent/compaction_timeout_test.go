@@ -33,8 +33,19 @@ func TestBackgroundCompactionPublishesButDefersDeletes(t *testing.T) {
 	if err != nil || !ok || len(man.Objects) == 0 {
 		t.Fatalf("background publication failed: %+v %v", man, err)
 	}
-	if b.Stats()["delete"] != 0 {
-		t.Fatal("background GC deleted payloads")
+	keys, _ := b.List(ctx, replica.Prefix(sc, 1))
+	kept := false
+	for _, key := range keys {
+		if strings.HasSuffix(key, ".snapshot") && !strings.Contains(key, "/L1/") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("background GC deleted the L0 snapshot payload")
+	}
+	tombs, err := b.List(ctx, replica.Prefix(sc, 1)+"gc/tombstones/")
+	if err != nil || len(tombs) != 0 {
+		t.Fatalf("background GC left tombstones: %v %v", tombs, err)
 	}
 	if !strings.Contains(out.String(), "gc deferred") {
 		t.Fatalf("no deterministic GC deferral report: %s", out.String())

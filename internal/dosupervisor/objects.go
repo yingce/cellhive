@@ -483,7 +483,9 @@ func (s *Supervisor) restoreScope(ctx context.Context, scope cell.Scope, dest st
 		return fmt.Errorf("dosupervisor: no store configured for restore")
 	}
 	if pf, perr := rep.NewPageFetcher(ctx, scope, s.Epoch); perr == nil {
-		if _, merr := pf.Materialize(ctx, dest, nil); merr == nil {
+		_, merr := pf.Materialize(ctx, dest, nil)
+		_ = pf.Close()
+		if merr == nil {
 			return nil
 		}
 	}

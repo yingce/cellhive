@@ -296,7 +296,9 @@ type HTTPStore struct {
 // Restore lists the scope's segment keys and reads them through cell-agent, then
 // orders/dedupes them with the shared replica logic over an in-memory bucket view.
 func (h *HTTPStore) Restore(ctx context.Context, scope cell.Scope, epoch uint64) ([][]byte, error) {
-	segs, err := replica.New(h.bucket(scope, epoch)).Restore(ctx, scope, epoch)
+	rm := replica.New(h.bucket(scope, epoch))
+	rm.ReadOnly = true
+	segs, err := rm.Restore(ctx, scope, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +341,9 @@ func (h *HTTPStore) RecoverScope(ctx context.Context, scope cell.Scope, claim Re
 // PageFetcher builds a page-on-demand fetcher backed by cell-agent, so a paged
 // cold restore fetches only the pages it needs over ranged HTTP (ADR-084).
 func (h *HTTPStore) PageFetcher(ctx context.Context, scope cell.Scope, epoch uint64) (*replica.PageFetcher, error) {
-	return replica.New(h.bucket(scope, epoch)).NewPageFetcher(ctx, scope, epoch)
+	rm := replica.New(h.bucket(scope, epoch))
+	rm.ReadOnly = true
+	return rm.NewPageFetcher(ctx, scope, epoch)
 }
 
 func (h *HTTPStore) bucket(scope cell.Scope, epoch uint64) *httpBucket {
@@ -702,7 +706,9 @@ func (s *Supervisor) RestoreAll(ctx context.Context, outDir string) (int, error)
 		// Prefer a paged materialization (one ranged read per page) when a
 		// compacted index exists; fall back to full-chain restore otherwise.
 		if pf, perr := rep.NewPageFetcher(ctx, scope, s.Epoch); perr == nil {
-			if _, merr := pf.Materialize(ctx, dest, nil); merr == nil {
+			_, merr := pf.Materialize(ctx, dest, nil)
+			_ = pf.Close()
+			if merr == nil {
 				n++
 				s.logf("restored (paged) %s -> %s", rel, dest)
 				continue

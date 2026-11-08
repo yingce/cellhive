@@ -209,6 +209,9 @@ func Release(path string) {
 	for id, r := range regs {
 		if r.path == abs {
 			C.cellhive_paged_release(C.int(id))
+			if c, ok := r.src.(interface{ Close() error }); ok {
+				_ = c.Close()
+			}
 			delete(regs, id)
 		}
 	}

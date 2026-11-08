@@ -5,10 +5,11 @@ const {readFileSync} = require('node:fs');
 const path = require('node:path');
 
 function mint(encoded, role, scope = {}, now = Math.floor(Date.now()/1000)) {
+  const ttl = Number(process.env.E2E_TOKEN_TTL || 300);
   const key = Buffer.from(encoded, 'base64url');
   if (key.length !== 32 || key.toString('base64url') !== encoded) throw new Error('expected canonical base64url 32-byte signing key');
   if (!['admin','internal','peer','dispatch','log','scope'].includes(role)) throw new Error('unsupported JWT purpose');
-  const claims = {ver:1,type:role === 'scope' ? 'binding' : role === 'admin' ? 'admin' : 'internal',sub:'e2e',aud:'cellhive',iat:now,exp:now+300};
+  const claims = {ver:1,type:role === 'scope' ? 'binding' : role === 'admin' ? 'admin' : 'internal',sub:'e2e',aud:'cellhive',iat:now,exp:now+ttl};
   if (role === 'scope') {
     if (!/^[A-Za-z0-9_.-]+$/.test(scope.ns || '') || scope.ns.startsWith('__') || scope.ns.includes('..') || scope.ns === '.' || !scope.kind || !scope.name) throw new Error('binding requires exact namespace, kind and name');
     Object.assign(claims, {ns:scope.ns,kind:scope.kind,name:scope.name});

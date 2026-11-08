@@ -31,7 +31,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 必须遵守的决策
 
-见 `docs/decisions.md`（最新 ADR-307，持续追加；ADR-305 为 Cron 重试预算，ADR-306 为当前未提交性能批次的缓存/I/O 边界；ADR-307 为复制物理 GC 默认 DEFERRED、显式 `OfflineQuiescent bool` 默认 false 且仅外部 writers/readers 静默后离线删除，生产后台不得启用，epoch/lineage 修复实施与验收中、未部署；无状态 issuer 修订的状态仍见 ADR-304，此前有状态测试不证明本次修订通过）。issuer 使用 `kid=issuer/<pattern>`（精确/前缀 `*`/`*`），固定最大 TTL 86400 秒，无 issuer CRUD、注册表授权或 owner 点查；恰好 32 位十六进制旧 issuer ID 拒绝且无回退。保留 secret 加密、ADR-302 固定 KV 授权和 DO 最长 30 秒票据边界，不得宣称生产切换完成。改设计要先改文档。
+见 `docs/decisions.md`（最新 ADR-309，持续追加；ADR-305 为 Cron 重试预算，ADR-306 为当前未提交性能批次的缓存/I/O 边界；ADR-307 为复制物理 GC 默认 DEFERRED；ADR-308 固定恢复下界/cut-before-prune、reader pin/seal、tombstone 宽限期与 `RetireOptions.Safe`；ADR-309 增加显式 admin/CLI Safe GC、`KeepL1Generations`（默认保留 2 代）、backlog/lag 指标、cleanup 原子化，生产默认仍不删除，实施与验收中、未部署；无状态 issuer 修订的状态仍见 ADR-304，此前有状态测试不证明本次修订通过）。issuer 使用 `kid=issuer/<pattern>`（精确/前缀 `*`/`*`），固定最大 TTL 86400 秒，无 issuer CRUD、注册表授权或 owner 点查；恰好 32 位十六进制旧 issuer ID 拒绝且无回退。保留 secret 加密、ADR-302 固定 KV 授权和 DO 最长 30 秒票据边界，不得宣称生产切换完成。改设计要先改文档。
 
 ## 命令
 

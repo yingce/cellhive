@@ -1,6 +1,7 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -145,15 +146,24 @@ func TestDurableWatermarkChainRejectsConflictingMarkers(t *testing.T) {
 
 func putSeg(t *testing.T, b bucket.Bucket, sc cell.Scope, epoch uint64, name string, kind ltx.Kind, start, end uint64) {
 	t.Helper()
-	seg := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: start, EndTxID: end}, []byte("x"))
+	payload := []byte("x")
+	if kind == ltx.KindSnapshot || kind == ltx.KindDelta {
+		var err error
+		payload, err = ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 64)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seg := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: start, EndTxID: end}, payload)
 	if _, err := b.Put(context.Background(), Prefix(sc, epoch)+name, seg); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// The marker written by MarkEpoch has to come back out of RestoreChain, or
-// restore.selectChain never sees it and cannot cut a fenced owner's late tail.
-func TestMarkerReachesRestoreChain(t *testing.T) {
+// A marker in an epoch RestoreChain can see must cut a fenced owner's late tail
+// from a predecessor, even though the returned chain no longer carries the
+// marker segment itself.
+func TestMarkerCutsRestoreChain(t *testing.T) {
 	ctx := context.Background()
 	b, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
@@ -176,17 +186,20 @@ func TestMarkerReachesRestoreChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var marker bool
+	watermark := uint64(0)
 	for _, sg := range segs {
 		if sg.Header.Kind == ltx.KindMarker {
-			marker = true
-			if sg.Header.Epoch != 2 || sg.Header.StartTxID != 8 || sg.Header.EndTxID != 7 {
-				t.Fatalf("marker header = %+v", sg.Header)
-			}
+			t.Fatalf("RestoreChain should return only the live snapshot/delta chain")
+		}
+		if sg.Header.Kind == ltx.KindDelta && sg.Header.Epoch == 1 && sg.Header.StartTxID >= 8 {
+			t.Fatalf("late predecessor tail survived: %+v", sg.Header)
+		}
+		if sg.Header.EndTxID > watermark {
+			watermark = sg.Header.EndTxID
 		}
 	}
-	if !marker {
-		t.Fatalf("RestoreChain dropped the epoch marker; got %d segments", len(segs))
+	if watermark != 8 {
+		t.Fatalf("watermark = %d, want 8", watermark)
 	}
 }
 

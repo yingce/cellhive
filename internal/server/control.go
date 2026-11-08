@@ -170,6 +170,7 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/worker", s.adminAuth(s.handleControlWorkerDelete))
 	mux.HandleFunc("GET /v1/control/apps", s.adminAuth(s.handleControlApps))
 	mux.HandleFunc("GET /v1/control/resources", s.adminAuth(s.handleControlResources))
+	mux.HandleFunc("POST /v1/control/gc/scope", s.adminAuth(s.handleControlGCScope))
 	mux.HandleFunc("DELETE /v1/control/resource", s.adminAuth(s.handleControlResourceDelete))
 	mux.HandleFunc("GET /v1/control/queue/status", s.adminAuth(s.handleControlQueueStatus))
 	mux.HandleFunc("POST /v1/control/queue/replay-dlq", s.adminAuth(s.handleControlQueueReplayDLQ))
@@ -358,34 +359,12 @@ func (s *Server) handleControlAppDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.invalidateBindings(ns)
+	// Payload deletion belongs to the resumable purge job enqueued by
+	// DeleteApp. Doing a direct prefix delete here made a 502/canceled request
+	// leave a half-deleted cell (ADR-309). The job preserves resource fences and
+	// owner generations and retries until every page is gone.
 	var failed []string
 	deleted := map[string]int{}
-	if s.Bucket != nil {
-		assets := objectstore.NewOwned(s.Bucket, objectstore.PrefixAssets, objectstore.OwnerArtifacts)
-		if keys, err := assets.ListPrefix(r.Context(), "assets/"+ns+"/"); err != nil {
-			failed = append(failed, "asset list: "+err.Error())
-		} else {
-			for _, k := range keys {
-				if err := assets.Delete(r.Context(), k); err != nil {
-					failed = append(failed, "asset delete "+k+": "+err.Error())
-				} else {
-					deleted["assets"]++
-				}
-			}
-		}
-		cells := objectstore.NewOwned(s.Bucket, objectstore.PrefixCells, objectstore.OwnerReplica)
-		if keys, err := cells.ListPrefix(r.Context(), "cells/"+ns+"/"); err != nil {
-			failed = append(failed, "segment list: "+err.Error())
-		} else {
-			for _, k := range keys {
-				if err := cells.Delete(r.Context(), k); err != nil {
-					failed = append(failed, "segment delete "+k+": "+err.Error())
-				} else {
-					deleted["segments"]++
-				}
-			}
-		}
-	}
 	wfDropped := 0
 	for _, wf := range workflows {
 		if err := s.Workflows.Drop(r.Context(), ns, wf); err != nil {

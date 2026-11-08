@@ -82,6 +82,10 @@ func authorizeInternal(req *http.Request) error {
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 func adminCall(method, path string, body any) (json.RawMessage, error) {
+	return adminCallTimeout(method, path, body, 15*time.Second)
+}
+
+func adminCallTimeout(method, path string, body any, timeout time.Duration) (json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -100,7 +104,11 @@ func adminCall(method, path string, body any) (json.RawMessage, error) {
 	if body != nil {
 		req.Header.Set("content-type", "application/json")
 	}
-	return doJSON(req)
+	client := httpClient
+	if timeout != 15*time.Second {
+		client = &http.Client{Timeout: timeout}
+	}
+	return doJSONClient(req, client)
 }
 
 // cmdDomain manages custom domains (ADR-131/133): a registered domain routes
@@ -130,7 +138,11 @@ func adminCallRaw(path string, data []byte) (json.RawMessage, error) {
 }
 
 func doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := httpClient.Do(req)
+	return doJSONClient(req, httpClient)
+}
+
+func doJSONClient(req *http.Request, client *http.Client) (json.RawMessage, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

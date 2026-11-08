@@ -3744,3 +3744,33 @@ ADR-211 的指数退避只限制重试频率，没有次数上限。租户 handl
 同步的 epoch/lineage 修复契约仍在实施与验收：新增 **不可变 epoch-cut** 记录确定的继承截止点，不以可变 manifest 代替历史 cut；manifest/index 必须提供完整 baseline/覆盖证明，仅水位相等或更高不足以证明完整；cut 必须在 prune 前持久化，不能先删除再补 lineage；大 marker 所需持久化必须在 Serve 前完成。marker/link 与 snapshot-started/done 的恢复语义继续保留。这些修复不等于读者已 pin generation，也不解除默认物理 GC 延后。
 
 代价：桶中历史 payload 持续增长，历史 List/扫描开销保留，不能宣传为存储空间有界。完整在线 GC 仍需未来的 generation descriptor、单调 epoch reference 与 reader pinning 协议及并发/崩溃证明，目前未解决。验收需覆盖默认不删、显式离线删除、每次删除前观察 owner 丢失后停止、所有保护对象保留、确定性延后输出以及压实继续发布。此处仅记录目标契约，不宣称实现完成、测试通过、已提交或已部署。
+
+## ADR-308 epoch 恢复下界与 reader-pin / tombstone 删除协议（2026-11-05，实施与验收中）
+
+ADR-307 把物理删除默认延后，但恢复链本身仍存在可导致“数据在桶里却恢复失败”或“静默恢复到更旧状态”的缺陷。本 ADR 固定修复契约：先保证恢复正确，再允许受 pin/tombstone 约束的删除；生产默认仍为 DEFERRED。
+
+- **恢复下界**：epoch marker 的 cut 是继承下界。`selectChain` 选出的链必须满足 `watermark >= max(cut)`；cut 在不同 epoch 间必须单调不减。marker-only（尚无新 epoch delta）也必须校验，不能把更旧的快照视为成功。
+- **cut-before-prune**：加载任一 epoch 前先计算其后继 epoch 的最小 cut。若该 epoch 的 `manifest.max_txid > cut`，manifest 的整库快照不可用，恢复必须忽略它并保留可用于恢复到 cut 的 snapshot/L0；该 manifest 也不得授权 prune。`DurableWatermarkChain` 对这类 manifest 跳过，不得用错误阻断后续健康基线。
+- **无 L1 的完整快照证明**：除 `.snapshot-done` 外，必须用 `restore.IndexChain` 验证快照 part 的 page map 覆盖 `1..commit`、delta 连续且 watermark 达到 done txid；仅 header/CRC 通过不构成完整证明，避免离线 GC 删除唯一前驱。
+- **retired 元数据**：成功退休一个 epoch 后写不可变的 `<prefix>/gc-retired`。恢复与 watermark 扫描必须跳过该 epoch；旧 manifest/index 仍保留作为审计/血缘，但不再参与恢复。
+- **reader pin**：读者在读取前写 `<prefix>/gc/pins/<id>`（含 lease expiry），随后读取 `<prefix>/gc/sealed`；若已 sealed 则删除 pin 并失败重试。pin 由后台续租，释放时删除；崩溃靠 lease 过期。读取路径 `Restore`、`RestoreChain`、`PageFetcher`、compaction 和 watermark 扫描必须持有对应 epoch 的 pin。
+- **seal/drain**：退休整个 epoch 前写不可变 `<prefix>/gc/sealed`，阻止新 pin；随后等待该 epoch 全部 pin 过期或释放。新 pin 在 seal 后必须 fail closed。seal 只用于将被退休的旧 epoch，不用于当前正在服务的 epoch。
+- **tombstone 与宽限期**：Safe 删除必须先写 `<prefix>/gc/tombstones/<sha256(key)>`（记录 key 与 `not_before`），宽限期后再次验证 seal、无 live pin、tombstone 到期、对象仍是 canonical payload，才允许 Delete；成功后删除 tombstone。崩溃或失败保留 tombstone，下一轮幂等续跑。
+- **授权**：保留 `OfflineQuiescent bool`（外部停止 writers 和 readers 的离线断言）。新增 `RetireOptions.Safe bool`：只有 seal + 无 live pin + due tombstone 同时成立时，`DeleteObjectWithOptions` 才接受 Safe 删除。零值/default 仍返回 `ErrGCDeferred`；生产后台不得设置 Safe。`Options.GC` 仍只表达意图。
+- **同 epoch covered-L0**：Safe 删除只允许 `end <= manifest.max_txid`、index.Watermark >= manifest.max_txid、`completeBaseline` 通过、当前 epoch 无 live pin、tombstone 到期的严格 canonical 对象。新读者从已发布 manifest 读取时会跳过 covered L0；旧读者由 pin 与 404 重启语义保护。
+- **读端重启**：`Restore`/`RestoreChain`/`PageFetcher` 遇到 `bucket.ErrNotFound` 必须重读 manifest/epoch 链并按 generation/cut 变化重试；无变化则 fail closed。`RestoreChain` 遇到 sealed epoch 必须重新 List；若仍有更新的完整基线则从该基线重试。
+- **保护对象**：所有模式继续保留 marker/link/epoch-cut/manifest/index/snapshot-started/done/gc 元数据以及未知名称对象；`gc-retired` 只表示 payload 已退休，不删除血缘证据。
+- **验收**：必须覆盖 marker-only 下界、cut-before-prune、无 L1 页覆盖、悬空 manifest、pin/seal 竞态、seal 后新 pin 拒绝、lease 过期排空、tombstone 到期与崩溃续跑、Safe 删除中断、默认不删，以及多 epoch owner 来回切换和大数据量恢复。默认路径不得删除任何 payload；未运行证据不得声称通过。
+
+此决策不改变 ADR-307 的默认 DEFERRED，也不宣称在线 GC 已可投产；它只定义实现与验证的目标契约。
+
+## ADR-309 Safe GC 运营化、L1 保留代数与清理原子性（2026-11-05，实施与验收中）
+
+ADR-307/308 已定义默认 DEFERRED 与 pin/seal/tombstone 协议，但缺少可执行的运营入口、L1 代数保留和清理原子性，导致真实 100k 多 epoch 测试出现旧 L1 累积、旧 epoch 无法自动退休，以及 namespace 清理 502 后只删掉 e1/e2 和部分 e3。本 ADR 固定优化契约。
+
+- **默认不变**：生产后台仍为 DEFERRED；Safe 只能由显式运维动作启用，环境变量/interval 不得绕过。零值 `Options`/`RetireOptions` 继续返回 `ErrGCDeferred`。
+- **L1 代数**：`compaction.Options.KeepL1Generations` 默认 2，表示按 L1 snapshot txid 枚举代数后保留最近 2 代；`1` 只保留最新一代；`>2` 保留最近 N 代。README 的 "already compacted" 快路径和正常 compaction 路径都必须执行同样的代数清理。删除仍走 Safe/Offline 授权、tombstone、宽限期和 owner 检查。manifest/index 不可变语义不变。
+- **运维入口**：提供显式 admin/CLI Safe GC，参数包含 scope、keepPrevious、grace、dry-run；必须校验 admin 授权、scope、当前 owner/epoch，并且只在 owner 节点执行。返回 compaction/退休计数、保留代数与延后原因。`dry-run` 只做分类和证明检查，不写 tombstone、不删对象。
+- **指标**：暴露 `l0_backlog_objects`、`l0_backlog_bytes`、`oldest_l0_age_seconds`、`last_compaction_lag_seconds`、`l1_generations`、`deferred_gc_bytes`、`retained_epochs`。零值、未压缩、读取错误必须有确定性语义；不得把延后/未知计为已删除字节。
+- **清理原子性**：namespace/resource 删除必须先写 deleting fence，再以幂等 job 按前缀续跑；控制面记录只在 payload 删除完成后移除。502、context canceled 或进程退出不得留下“控制面仍在、数据半删”的可服务状态；重试必须收敛。
+- **验收**：单测覆盖 KeepL1Generations 1/2/>2、Safe 入口 dry-run/owner 拒绝/授权、指标、cleanup 中断续跑；race；本地 e2e；真实 HK COS 30k–50k 跨 2–3 epoch，记录 Safe GC 前后对象数/字节、保留 L1 代数、最新 epoch 全量可恢复。未运行证据不得声称通过，也不改变生产默认。

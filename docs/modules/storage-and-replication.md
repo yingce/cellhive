@@ -28,6 +28,8 @@ bucket 抽象（FS / S3 兼容）；`POST /v1/internal/commit(_binary)`；peer `
 - 热路径禁 List。
 - `OfflineQuiescent=false`（生产默认）时，compaction 只做有界的元数据 listing 观测并报告 epoch、对象数/字节数及 covered/deferred/unknown 分类；不会读取 payload，也不会删除对象。无法从 listing 得到大小时字节数标记为 unknown，超出观测上限的对象同样只计入 unknown。
 - 历史 epoch 的物理 GC 仍需要外部停止并排空 writers/readers 后显式维护窗口；在线 compaction 不删除历史对象，因此 deferred storage growth 和对象存储费用需要容量监控与离线维护计划。
+- ADR-309 增加显式 admin/CLI Safe GC、默认保留两代 L1、backlog/lag 指标，以及先写 deleting fence 的幂等清理；生产默认仍 DEFERRED。
+- ADR-308 定义了可选的 Safe 删除协议：reader 写带 lease 的 pin，退休前写不可变 seal 并等待 pin 排空，逐 key 写 tombstone 且宽限期后才能删除；成功退休的 epoch 写 `gc-retired`，恢复与水位扫描跳过它。默认仍是 DEFERRED，生产后台不得启用 Safe。
 
 ## 源码位置
 

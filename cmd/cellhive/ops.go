@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -116,6 +117,34 @@ func newGCCommand() *cobra.Command {
 		Use:   "gc",
 		Short: "garbage-collect unreferenced bundles or assets",
 	}
+	scope := &cobra.Command{
+		Use:   "scope <namespace/class/id>",
+		Short: "explicit Safe replication GC for one cell scope (owner only)",
+		Args:  cobra.ExactArgs(1),
+	}
+	var safe, dryRun bool
+	var keepPrevious, graceSeconds, keepL1 int
+	scope.Flags().BoolVar(&safe, "safe", false, "enable the pin/seal/tombstone Safe protocol (required unless --dry-run)")
+	scope.Flags().BoolVar(&dryRun, "dry-run", false, "classify candidates without writing tombstones or deleting")
+	scope.Flags().IntVar(&keepPrevious, "keep-previous", 1, "number of previous epochs to retain")
+	scope.Flags().IntVar(&graceSeconds, "grace", 30, "tombstone grace in seconds")
+	scope.Flags().IntVar(&keepL1, "keep-l1", 2, "number of L1 generations to retain")
+	scope.RunE = func(cmd *cobra.Command, args []string) error {
+		if !safe && !dryRun {
+			return fmt.Errorf("Safe GC requires --safe or --dry-run")
+		}
+		data, err := adminCallTimeout(http.MethodPost, "/v1/control/gc/scope", map[string]any{
+			"scope": args[0], "safe": safe, "dry_run": dryRun,
+			"keep_previous": keepPrevious, "grace_seconds": graceSeconds,
+			"keep_l1_generations": keepL1,
+		}, 60*time.Minute)
+		if err != nil {
+			return err
+		}
+		printJSON(data)
+		return nil
+	}
+	gc.AddCommand(scope)
 	for _, target := range []string{"bundles", "assets"} {
 		target := target
 		gc.AddCommand(&cobra.Command{
