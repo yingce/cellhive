@@ -67,8 +67,38 @@ const hints = new Map(); // scopeKey -> { address, expiry } (owner hint, ADR-080
 const boundRouters = new Set(); // host_id reported to the supervisor (per isolate)
 const boundActors = new Set(); // host_hash reported to the supervisor (per isolate)
 const seen = new CountLRU(SEEN_MAX); // objectKey -> { namespace, worker, class, storage_class, storage_id, shard, id } (registry, ADR-082)
+// A workerLoader entry can outlive the last native DO facet that used it.
+// Track those references explicitly so version churn can retire the loaded
+// Worker isolate instead of retaining one native isolate per historical build.
+const loadedWorkers = new Map(); // loader id -> { loaded, refs:Set<string> }
 let inflight = 0;
 let draining = false;
+
+function retainLoadedWorker(loaderId, ref, loaded) {
+  let state = loadedWorkers.get(loaderId);
+  if (!state) {
+    state = { loaded, refs: new Set() };
+    loadedWorkers.set(loaderId, state);
+  } else if (!state.loaded && loaded) {
+    state.loaded = loaded;
+  }
+  state.refs.add(ref);
+}
+
+function releaseLoadedWorker(loaderId, ref) {
+  const state = loadedWorkers.get(loaderId);
+  if (!state) return;
+  state.refs.delete(ref);
+  if (state.refs.size !== 0) return;
+  loadedWorkers.delete(loaderId);
+  try {
+    const control = state.loaded?.getEntrypoint?.("CellHiveLifecycle");
+    const pending = control?.retire?.();
+    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+  } catch (e) {
+    // The worker may already have been unloaded by workerd.
+  }
+}
 
 // do-runtime metrics (ADR-166), reported best-effort to the supervisor after
 // each invocation. Counters are deltas since the last report; wsNet is
@@ -909,6 +939,17 @@ const WRAP_SRC = `function __wrap(Inner) {
   return Wrapped;
 }`;
 
+// This entrypoint runs inside the dynamically loaded Worker.  abortIsolate
+// must be invoked from that isolate; calling facets.abort() from the static
+// host only terminates the native DO instance and leaves the loader isolate
+// cached by workerd.
+const LIFECYCLE_SRC = `
+import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers";
+export class CellHiveLifecycle extends WorkerEntrypoint {
+  retire() { abortIsolate("cellhive: retired"); }
+}
+`;
+
 function renderFacetModule(classes) {
   const names = (classes || []).filter((c) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(c));
   if (!names.length) return "";
@@ -1141,7 +1182,13 @@ export class Host extends DurableObject {
     this.#facetLastUsed.delete(id);
     this.#facetActive.delete(id);
     this.#facetSockets.delete(id);
+    const loaderId = this.#facetLoader.get(id);
+    if (loaderId) {
+      releaseLoadedWorker(loaderId, this.#facetRef(id));
+      this.#facetLoader.delete(id);
+    }
   }
+  #facetRef(id) { return `${this.ctx.id.toString()}/${id}`; }
   #sweepFacets(force = false) {
     const now = Date.now();
     if (!force && now - this.#lastSweep < FACET_SWEEP_MS) return;
@@ -1193,9 +1240,12 @@ export class Host extends DurableObject {
         /* not resident */
       }
     }
-    if (!this.#facets.has(facetId) && this.#activeFacets >= FACET_CACHE_MAX) {
+    // #activeFacets is only the number of in-flight requests; it is not a
+    // resident-isolate bound.  Use the loader reference set, which also
+    // includes facets whose JS stub was evicted from the CountLRU.
+    if (!this.#facets.has(facetId) && !this.#facetLoader.has(facetId) && this.#facetLoader.size >= FACET_CACHE_MAX) {
       this.#sweepFacets(true);
-      if (this.#activeFacets >= FACET_CACHE_MAX) throw new Error("do_runtime_capacity");
+      if (this.#facetLoader.size >= FACET_CACHE_MAX) throw new Error("do_runtime_capacity");
     }
     const facet = this.ctx.facets.get(facetId, async () => {
       await refreshLogCapture(this.env);
@@ -1229,14 +1279,19 @@ export class Host extends DurableObject {
       }
       const facetSrc = renderFacetModule(doClasses);
       const tailOn = policyLoaded && tailEnabled(this.env, spec.namespace, spec.worker);
+      const facetMain = facetSrc ? "cellhive-facet.js" : "bindings-wrapper.js";
       const workerCode = {
         compatibilityDate: spec.compat_date || "2026-06-15",
         compatibilityFlags: spec.limits?.subrequests ? [...new Set([...(spec.compat_flags || []), "nodejs_als"])] : (spec.compat_flags || []),
         limits: workerLimits(spec.limits),
-        mainModule: facetSrc ? "cellhive-facet.js" : "bindings-wrapper.js",
+        // Keep the lifecycle entrypoint alongside the DO exports so the host
+        // can retire the loaded Worker after its last facet is released.
+        mainModule: "cellhive-entry.js",
         modules: Object.assign(
           facetSrc ? { "cellhive-facet.js": facetSrc } : {},
           {
+            "cellhive-entry.js": `export * from ${JSON.stringify(facetMain)}; export { CellHiveLifecycle } from "__cellhive-lifecycle.js";`,
+            "__cellhive-lifecycle.js": LIFECYCLE_SRC,
             // Only binding-name metadata enters the wrapper; platform secrets
             // remain in the host worker (ADR-186).
             "bindings-wrapper.js": platformConsts(bs.bindings) + this.env.BINDINGS_WRAPPER_SRC,
@@ -1253,7 +1308,10 @@ export class Host extends DurableObject {
           props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0 },
         })] } : {}),
       };
-      const loaded = checkedWorkerGet(this.env.LOADER, loaderId + (tailOn ? "~t" : "~n"), workerCode, bs.vars, bs.bindings, "do");
+      const fullLoaderId = loaderId + (tailOn ? "~t" : "~n");
+      const loaded = checkedWorkerGet(this.env.LOADER, fullLoaderId, workerCode, bs.vars, bs.bindings, "do");
+      retainLoadedWorker(fullLoaderId, this.#facetRef(facetId), loaded);
+      this.#facetLoader.set(facetId, fullLoaderId);
       const cls = loaded.getDurableObjectClass(spec.class, {
         props: {
           namespace: spec.namespace, worker: spec.worker, class: spec.class, shard: spec.shard,
@@ -1265,6 +1323,11 @@ export class Host extends DurableObject {
       });
       return { class: cls, id: facetId };
     });
+    // The loader callback runs only on a cold load.  Re-retain here as well so
+    // a facet restored from workerd's cache is represented in the global
+    // reference set.
+    const fullLoaderId = this.#facetLoader.get(facetId);
+    if (fullLoaderId) retainLoadedWorker(fullLoaderId, this.#facetRef(facetId), loadedWorkers.get(fullLoaderId)?.loaded);
     this.#facetVersion.set(facetId, buildKey);
     this.#facets.set(facetId, facet);
     this.#touchFacet(facetId);
@@ -1292,6 +1355,7 @@ export class Host extends DurableObject {
   // the next access either reuses the resident facet or cold-loads it.
   #facetVersion = new Map();
   #facets = new CountLRU(FACET_CACHE_MAX);
+  #facetLoader = new Map();
   #facetLastUsed = new Map();
   #facetActive = new Map();
   #facetSockets = new Map();

@@ -23,3 +23,11 @@ test('seen is bounded, facet version identity is retained, facet stubs are count
   assert.equal(SOURCE_CACHE_BYTES, 65 * 1024 * 1024);
   assert.equal(textWeight('abc'), 6);
 });
+
+test('dynamic DO workers expose an explicit retirement path', () => {
+  assert.match(source, /CellHiveLifecycle/);
+  assert.match(source, /abortIsolate\(\"cellhive: retired\"\)/);
+  assert.match(source, /const loadedWorkers = new Map/);
+  assert.match(source, /releaseLoadedWorker\(/);
+  assert.match(source, /#facetLoader\.size >= FACET_CACHE_MAX/);
+});
