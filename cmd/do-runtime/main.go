@@ -74,6 +74,7 @@ func main() {
 		LogToken:          creds.Log,
 		DisableTenantLogs: !tenantLogCapture,
 		TailCapture:       strings.TrimSpace(getenv("CELLHIVE_TAIL_CAPTURE", "all")),
+		LogCaptureURLs:    splitURLs(getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL)),
 		Addr:              addr,
 		DiskDir:           diskDir,
 		PlatformJS:        platformJS,
@@ -246,6 +247,16 @@ func outboundAllow() []string {
 	for _, part := range strings.Split(raw, ",") {
 		if p := strings.TrimSpace(part); p != "" {
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func splitURLs(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
 		}
 	}
 	return out

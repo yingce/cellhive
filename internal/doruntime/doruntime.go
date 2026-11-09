@@ -6,6 +6,7 @@ package doruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -54,6 +55,9 @@ type Config struct {
 	// TailCapture separates console/Tail capture from OTLP log export:
 	// all, tail (subscription-gated), or off.
 	TailCapture string
+	// LogCaptureURLs are the cell-agent endpoints whose live subscription set
+	// must be unioned; a runtime can poll a node other than the Tail node.
+	LogCaptureURLs []string
 	// DisableTenantLogs omits native Tail Workers from loaded tenant facets.
 	// The default keeps console and exception capture enabled.
 	DisableTenantLogs bool
@@ -135,6 +139,7 @@ const config :Workerd.Config = (
         (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
         (name = "CH_TAIL_CAPTURE", text = "{{.TailCapture}}"),
+        (name = "LOG_CAPTURE_URLS", text = {{.LogCaptureURLsJSON}}),
       ],
       globalOutbound = "private-outbound",
       durableObjectNamespaces = [
@@ -152,6 +157,11 @@ const config :Workerd.Config = (
 `
 
 // Render copies the platform JS into dir and writes the workerd config.
+func (c Config) LogCaptureURLsJSON() string {
+	b, _ := json.Marshal(c.LogCaptureURLs)
+	return strconv.Quote(string(b))
+}
+
 func Render(dir string, cfg Config) (string, error) {
 	if cfg.Addr == "" || cfg.DiskDir == "" || cfg.PlatformJS == "" {
 		return "", errors.New("doruntime: Addr, DiskDir and PlatformJS are required")

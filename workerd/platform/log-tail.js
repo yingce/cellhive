@@ -4,19 +4,31 @@ import { authorized, internalHeaders } from "jwt.js";
 // A stuck control-plane read must not pin workerd's shared HTTP client's old
 // resolved address indefinitely. The budget includes response body parsing.
 export async function readLogCapture(env) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2000);
-  try {
-    const response = await fetch(String(env.CELL_URL).replace(/\/$/, "") + "/v1/internal/log-capture", {
-      headers: await internalHeaders(env.CELL_TOKEN),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error("log capture configuration unavailable");
-    return await response.json();
-  } finally {
-    controller.abort();
-    clearTimeout(timeout);
+  let urls = [];
+  try { urls = JSON.parse(env.LOG_CAPTURE_URLS || "[]"); } catch (_err) { urls = []; }
+  if (!Array.isArray(urls) || urls.length === 0) urls = [env.CELL_URL];
+  const headers = await internalHeaders(env.CELL_TOKEN);
+  const responses = await Promise.allSettled(urls.map(async (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const response = await fetch(String(url).replace(/\/$/, "") + "/v1/internal/log-capture", { headers, signal: controller.signal });
+      if (!response.ok) throw new Error("log capture configuration unavailable");
+      return await response.json();
+    } finally { clearTimeout(timer); }
+  }));
+  const workers = new Set();
+  let mode = "tail";
+  let ok = false;
+  for (const result of responses) {
+    if (result.status !== "fulfilled" || !result.value) continue;
+    ok = true;
+    if (result.value.mode === "all") mode = "all";
+    else if (result.value.mode === "off" && mode !== "all") mode = "off";
+    for (const worker of result.value.workers || []) workers.add(worker);
   }
+  if (!ok) throw new Error("log capture configuration unavailable");
+  return { mode, workers: [...workers] };
 }
 
 function formatValue(value) {

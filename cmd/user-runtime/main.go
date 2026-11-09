@@ -84,6 +84,7 @@ func main() {
 		InvocationLogging: invocationLogging,
 		OTLPLogsURL:       strings.TrimSpace(getenv("CELLHIVE_OTLP_ENDPOINT", "")),
 		TailCapture:       strings.TrimSpace(getenv("CELLHIVE_TAIL_CAPTURE", "all")),
+		LogCaptureURLs:    splitURLs(getenv("CELLHIVE_LOG_REGISTER_URLS", cellURL)),
 		OTLPLogsHeaders:   otlpHeadersJSON(),
 		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
 		TraceSampleRatio:  traceRatio(),
@@ -616,4 +617,14 @@ func staticMinimalMode(v string) string {
 	default:
 		return "auto"
 	}
+}
+
+func splitURLs(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
