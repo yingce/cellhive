@@ -25,7 +25,7 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/v1/internal/logs/events") return tailQuery(req, env);
-    if (url.pathname === "/healthz") return new Response("ok");
+    if (url.pathname === "/healthz") { scheduleDispatchSweep(env, ctx); return new Response("ok"); }
     if(env.CH_POOL_TARGET&&env.CH_POOL_TARGET!=="null"){
       if(!await authorized(req,env))return json({error:"unauthorized"},401);
       let identity;try{identity=await req.clone().json();}catch(e){return json({error:"bad_json"},400);}
@@ -382,12 +382,20 @@ async function loadWorkflowWorker(env, ctx, body) {
   const resolvedVersion = body.version > 0 ? body.version : spec.version;
   const wfVer = resolvedVersion != null ? `${resolvedVersion}-` : "";
   const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
+  const loaderId = `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}~wf${variantSuffix(tailOn)}`;
+  const cached = dispatchWorkers.get(loaderId);
+  if (cached) {
+    cached.lastUsed = Date.now();
+    return checkedWorkerGet(env.LOADER, loaderId, cached.code, spec.vars, spec.bindings, "user");
+  }
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
     limits: workerLimits(body.limits || spec.limits),
-    mainModule: "workflow-wrapper.js",
+    mainModule: "entry.js",
     modules: {
+      "entry.js": `export * from "workflow-wrapper.js"; export { CellHiveLifecycle } from "__cellhive-lifecycle.js";`,
+      "__cellhive-lifecycle.js": `import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers"; export class CellHiveLifecycle extends WorkerEntrypoint { retire() { abortIsolate("cellhive: retired"); } }`,
       "workflow-wrapper.js": platformConsts(spec && spec.bindings) + env.WF_WRAPPER_SRC,
       "cellhive-workflow.js": env.WF_BASE_SRC,
       "tenant.js": source,
@@ -401,14 +409,10 @@ async function loadWorkflowWorker(env, ctx, body) {
       props: { namespace: body.namespace, worker: body.worker, version: body.version || 0 },
     })] } : {}),
   };
-  return checkedWorkerGet(
-    env.LOADER,
-    `${body.namespace}/${body.worker}@${wfVer}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}~wf${variantSuffix(tailOn)}`,
-    workerCode,
-    spec.vars,
-    spec.bindings,
-    "user",
-  );
+  const loaded = checkedWorkerGet(env.LOADER, loaderId, workerCode, spec.vars, spec.bindings, "user");
+  dispatchWorkers.set(loaderId, { code: workerCode, lastUsed: Date.now(), idleMs: DISPATCH_WORKFLOW_IDLE_MS });
+  scheduleDispatchSweep(env, ctx);
+  return loaded;
 }
 
 // platformConsts renders binding names and a Tail-only correlation key into
@@ -441,20 +445,28 @@ function tenantEnv(env, ctx, spec, vars) {
 
 async function loadWorker(env, ctx, body) {
   await refreshLogCapture(env);
-  const source = await rewrittenSource(env, body.bundle_sha, "worker");
   const spec = await specFor(env, body);
   const tailOn = spec.ok !== false && tailEnabled(env, body.namespace, body.worker);
   // Separate delete/recreate incarnations even when version and SHA are reused.
   // Use resolved metadata so legacy producers need not supply storage_id.
   const resolvedVersion = body.version > 0 ? body.version : spec.version;
   const ver = resolvedVersion != null ? `${resolvedVersion}-` : "";
+  const loaderId = `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}${variantSuffix(tailOn)}`;
+  const cached = dispatchWorkers.get(loaderId);
+  if (cached) {
+    cached.lastUsed = Date.now();
+    return checkedWorkerGet(env.LOADER, loaderId, cached.code, spec.vars, spec.bindings, "user");
+  }
+  const source = await rewrittenSource(env, body.bundle_sha, "worker");
   const tailKey = tailOn ? crypto.randomUUID() : "";
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
     compatibilityFlags: [...new Set([...(body.compat_flags || spec.compat_flags || []).filter(f=>f!=="no_nodejs_als"), "nodejs_als"])],
     limits: workerLimits(body.limits || spec.limits),
-    mainModule: "wrapper.js",
+    mainModule: "entry.js",
     modules: {
+      "entry.js": `export * from "wrapper.js"; export { CellHiveLifecycle } from "__cellhive-lifecycle.js";`,
+      "__cellhive-lifecycle.js": `import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers"; export class CellHiveLifecycle extends WorkerEntrypoint { retire() { abortIsolate("cellhive: retired"); } }`,
       "wrapper.js": platformConsts(spec && spec.bindings, tailKey) + env.WRAPPER_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
@@ -469,14 +481,43 @@ async function loadWorker(env, ctx, body) {
       props: { namespace: body.namespace, worker: body.worker, version: body.version || 0, tailKey },
     })] } : {}),
   };
-  return checkedWorkerGet(
-    env.LOADER,
-    `${body.namespace}/${body.worker}@${ver}${body.bundle_sha}${spec.storage_id ? "~s" + encodeURIComponent(spec.storage_id) : ""}${variantSuffix(tailOn)}`,
-    workerCode,
-    spec.vars,
-    spec.bindings,
-    "user",
-  );
+  const loaded = checkedWorkerGet(env.LOADER, loaderId, workerCode, spec.vars, spec.bindings, "user");
+  dispatchWorkers.set(loaderId, { code: workerCode, lastUsed: Date.now() });
+  scheduleDispatchSweep(env, ctx);
+  return loaded;
+}
+
+function dispatchIdleMs(env) {
+  const n = Math.floor(Number(env && env.CH_INTERNAL_IDLE_MS));
+  return Number.isFinite(n) && n > 100 ? n : DISPATCH_IDLE_MS;
+}
+
+function scheduleDispatchSweep(env, ctx) {
+  const now = Date.now();
+  if (dispatchSweepInflight) return dispatchSweepInflight;
+  if (now - dispatchSweptAt < DISPATCH_SWEEP_MS) return null;
+  dispatchSweptAt = now;
+  const p = (async () => {
+    const idleMs = dispatchIdleMs(env);
+    const retired = [];
+    for (const [id, entry] of [...dispatchWorkers]) {
+      if (Date.now() - entry.lastUsed <= (entry.idleMs || idleMs)) continue;
+      dispatchWorkers.delete(id);
+      // WorkerStub objects are request-bound. Reacquire the cached worker in
+      // this request before calling its lifecycle entrypoint; calling retire
+      // on a stub created by an earlier request fails with WorkerStubChannel.
+      try {
+        const current = env.LOADER.get(id, () => entry.code);
+        retired.push(current.getEntrypoint("CellHiveLifecycle").retire());
+      } catch (e) {
+        // Already aborted/unloaded.
+      }
+    }
+    await Promise.allSettled(retired);
+  })().finally(() => { dispatchSweepInflight = null; });
+  dispatchSweepInflight = p;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p.catch(() => {}));
+  return p;
 }
 
 // --- cold-path caches -------------------------------------------------------
@@ -485,6 +526,18 @@ async function loadWorker(env, ctx, body) {
 // (interval 1s) would re-download the bundle. Bounded FIFO maps.
 const BUNDLE_CACHE_MAX = 256;
 const SPEC_CACHE_MAX = 64;
+// A workerLoader entry survives forever unless its isolate is explicitly
+// aborted. Queue/cron/service dispatch only uses a loaded worker briefly, so
+// track the loader-owned descriptors and retire variants that have been idle
+// for CH_INTERNAL_IDLE_MS. This mirrors do-runtime's loadedWorkers lifecycle.
+const dispatchWorkers = new Map(); // loader id -> { code, lastUsed }
+let dispatchSweepInflight = null;
+const DISPATCH_IDLE_MS = 10 * 60 * 1000;
+// Workflows can legitimately run for a long time; do not reuse the short
+// queue/cron idle window for their loaded worker.
+const DISPATCH_WORKFLOW_IDLE_MS = 60 * 60 * 1000;
+const DISPATCH_SWEEP_MS = 5000;
+let dispatchSweptAt = 0;
 const bundleCache = sourceCache(BUNDLE_CACHE_MAX);
 // Original and rewritten sources share one budget: an isolate must not hold two
 // copies of a large immutable bundle. A rewritten hit is checked before the
