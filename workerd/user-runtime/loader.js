@@ -108,7 +108,7 @@ function managedStub(env,ctx,entry) {
   return env.LOADER.get(entry.id,()=>Object.assign({},code,{
     env:entry.plan.directFetch?Object.assign({},entry.version.vars||{}):tenantEnv(env,ctx,entry.plan.spec,entry.version.vars),
     globalOutbound:env.OUTBOUND,
-    ...(entry.tailOn?{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey}})]}:{}),
+    ...(entry.tailOn?{tails:[ctx.exports.TenantTail({props:{namespace:entry.app.namespace,worker:entry.worker,version:entry.version.version||0,tailKey:entry.plan.tailKey,otlpLogsURL:env.OTLP_LOGS_URL,otlpLogsHeaders:env.OTLP_LOGS_HEADERS,otlpLogsService:"cellhive-user-runtime"}})]}:{}),
   }));
 }
 const DEFAULT_ISOLATE_IDLE_MS = 10 * 60 * 1000;
@@ -642,7 +642,7 @@ function fetchWorkerStub(env, ctx, app, worker, version, plan) {
     globalOutbound: env.OUTBOUND,
     env: Object.assign({}, version.vars || {}),
     ...(tailOn ? { tails: [ctx.exports.TenantTail({
-      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
+      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey, otlpLogsURL: env.OTLP_LOGS_URL, otlpLogsHeaders: env.OTLP_LOGS_HEADERS, otlpLogsService: "cellhive-user-runtime" },
     })] } : {}),
   }));
 }
@@ -654,7 +654,7 @@ function workerStub(env, ctx, app, worker, version, plan) {
     globalOutbound: env.OUTBOUND,
     env: tenantEnv(env, ctx, plan.spec, version.vars),
     ...(tailOn ? { tails: [ctx.exports.TenantTail({
-      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey },
+      props: { namespace: app.namespace, worker, version: version.version || 0, tailKey: plan.tailKey, otlpLogsURL: env.OTLP_LOGS_URL, otlpLogsHeaders: env.OTLP_LOGS_HEADERS, otlpLogsService: "cellhive-user-runtime" },
     })] } : {}),
   }));
 }

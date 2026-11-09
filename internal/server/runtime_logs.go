@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"cellhive/internal/logbuf"
-	"cellhive/internal/telemetry"
 )
 
 // Each runtime registers the individual workerd service addresses, not a
@@ -95,10 +94,12 @@ func (s *Server) PullRuntimeLogs(ctx context.Context, ns, worker string) {
 	if s.Logs == nil || s.Cfg.TokenLog == "" {
 		return
 	}
-	// Reuse one global cursor in all mode; a second filtered cursor would import
-	// the same invocation twice into the agent ring and OTLP exporter.
-	if telemetry.LogsMode() == telemetry.LogsAll {
-		ns, worker = "", ""
+	// Global (empty namespace/worker) pulls are intentionally disabled. Runtime
+	// logs are exported directly to OTLP by the runtimes; pulling every runtime's
+	// global ring from the agent both duplicates them and leaks workerd memory on
+	// the do-runtime /v1/internal/logs/events path. Tail remains per-worker.
+	if ns == "" || worker == "" {
+		return
 	}
 	var wg sync.WaitGroup
 	for _, source := range s.runtimeLogSources() {

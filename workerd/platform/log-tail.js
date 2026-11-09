@@ -220,6 +220,116 @@ export async function tailQuery(req, env) {
   return new Response(JSON.stringify(readTailEvents(ns, worker, since)), { headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+function exportVarint(value) {
+  let v = BigInt(value);
+  const out = [];
+  while (v > 127n) { out.push(Number(v & 127n) | 128); v >>= 7n; }
+  out.push(Number(v));
+  return out;
+}
+function exportTag(field, wire) { return exportVarint((field << 3) | wire); }
+function exportBytes(field, bytes) { return [...exportTag(field, 2), ...exportVarint(bytes.length), ...bytes]; }
+function exportString(field, value) { return exportBytes(field, new TextEncoder().encode(String(value))); }
+function exportFixed64(field, value) {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return [...exportTag(field, 1), ...bytes];
+}
+function exportInt(field, value) { return [...exportTag(field, 0), ...exportVarint(value)]; }
+function exportAny(value) { return exportString(1, value); }
+function exportKeyValue(key, value) { return [...exportString(1, key), ...exportBytes(2, exportAny(value))]; }
+function exportHex(id) {
+  const out = new Uint8Array(id.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function exportSeverity(level) {
+  switch (String(level || "").toLowerCase()) {
+    case "error": return [17, "ERROR"];
+    case "warn": case "warning": return [13, "WARN"];
+    case "debug": return [5, "DEBUG"];
+    default: return [9, "INFO"];
+  }
+}
+function exportBody(message) {
+  if (typeof message === "string") return message;
+  const args = Array.isArray(message) ? message : [message];
+  return args.map((arg) => {
+    if (typeof arg === "string") return arg;
+    try { return JSON.stringify(arg); } catch (_err) { return String(arg); }
+  }).join(" ");
+}
+function exportLogRecords(props, records) {
+  const out = [];
+  for (const raw of records) {
+    const event = eventRecords([raw], props)[0];
+    if (!event) continue;
+    const attrs = [
+      ["cellhive.namespace", props.namespace || ""],
+      ["cellhive.worker", props.worker || ""],
+      ["cellhive.version", String(props.version || 0)],
+      ["cellhive.event_type", event.event_type || ""],
+      ["cellhive.outcome", event.outcome || ""],
+      ["cellhive.request_id", event.requestId || ""],
+    ];
+    const m = /^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-/.exec(event.traceparent || "");
+    for (const line of event.logs || []) {
+      const [severityNumber, severityText] = exportSeverity(line.level);
+      const time = Number(line.timestamp || event.eventTimestamp || Date.now());
+      const record = [
+        ...exportFixed64(1, BigInt(time) * 1000000n),
+        ...exportFixed64(11, BigInt(time) * 1000000n),
+        ...exportInt(2, severityNumber),
+        ...exportString(3, severityText),
+        ...exportBytes(5, exportAny(exportBody(line.message))),
+        ...attrs.flatMap(([k, v]) => exportBytes(6, exportKeyValue(k, v))),
+      ];
+      if (m) record.push(...exportBytes(9, exportHex(m[1])), ...exportBytes(10, exportHex(m[2])));
+      out.push(record);
+    }
+    for (const error of event.exceptions || []) {
+      const time = Number(error.timestamp || event.eventTimestamp || Date.now());
+      out.push([
+        ...exportFixed64(1, BigInt(time) * 1000000n),
+        ...exportFixed64(11, BigInt(time) * 1000000n),
+        ...exportInt(2, 17), ...exportString(3, "ERROR"),
+        ...exportBytes(5, exportAny(String(error.message || error.name || "exception"))),
+        ...attrs.flatMap(([k, v]) => exportBytes(6, exportKeyValue(k, v))),
+      ]);
+    }
+  }
+  return out;
+}
+async function exportTailRecords(props, records) {
+  const base = String(props.otlpLogsURL || "").trim();
+  if (!base || !records.length) return;
+  const recordsOut = exportLogRecords(props, records);
+  if (!recordsOut.length) return;
+  let extra = {};
+  try { extra = JSON.parse(props.otlpLogsHeaders || "{}"); } catch (_err) { extra = {}; }
+  const headers = new Headers({ "content-type": "application/x-protobuf" });
+  for (const [key, value] of Object.entries(extra)) headers.set(key, String(value));
+  const resourceLogs = [
+    ...exportBytes(1, exportKeyValue("service.name", props.otlpLogsService || "cellhive-runtime")),
+    ...exportBytes(2, [
+      ...exportBytes(1, exportString(1, "cellhive.tail")),
+      ...recordsOut.flatMap((record) => exportBytes(2, record)),
+    ]),
+  ];
+  const body = new Uint8Array(exportBytes(1, resourceLogs));
+  const url = base.replace(/\/$/, "").replace(/\/v1\/(traces|logs)$/, "") + "/v1/logs";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("tail log timeout")), 3000);
+  try {
+    const response = await fetch(url, { method: "POST", headers, body, signal: controller.signal });
+    if (!response.ok) console.error(JSON.stringify({ event: "tail_log_otlp_failed", status: response.status }));
+  } catch (err) {
+    console.error(JSON.stringify({ event: "tail_log_otlp_failed", error: String(err) }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // TenantTail executes in the trusted host isolate. Its identity and transport
 // come from host-owned props/env; neither is visible to the loaded tenant.
 export class TenantTail extends WorkerEntrypoint {
@@ -227,6 +337,9 @@ export class TenantTail extends WorkerEntrypoint {
     const props = this.ctx.props || {};
     if (!props.namespace || !props.worker) return;
     const kept = (events || []).filter((item) => !platformLifecycleEvent(item));
-    if (kept.length) storeRecords(props.namespace, props.worker, kept, props);
+    if (!kept.length) return;
+    storeRecords(props.namespace, props.worker, kept, props);
+    const exported = exportTailRecords(props, kept);
+    if (this.ctx && typeof this.ctx.waitUntil === "function") this.ctx.waitUntil(exported);
   }
 }
