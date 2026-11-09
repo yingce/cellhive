@@ -197,11 +197,14 @@ function storeRecords(namespace, worker, records, props) {
 
 export function readTailEvents(namespace, worker, since = 0, limit = 128) {
   if (!ringSession) ringSession = crypto.randomUUID();
-  const ring = namespace && worker ? rings.get(JSON.stringify([namespace, worker])) : null;
-  const items = ring ? ring.items : globalItems;
+  const scoped = !!namespace && !!worker;
+  const ring = scoped ? rings.get(JSON.stringify([namespace, worker])) : null;
+  // A scoped Tail must never fall back to unrelated global events. Only the
+  // explicit global read (ns and worker both empty) may use globalItems.
+  const items = scoped ? (ring ? ring.items : []) : globalItems;
   const events = [];
   let bytes = 0;
-  for (let i = ring ? 0 : globalHead; i < items.length; i++) {
+  for (let i = scoped ? 0 : globalHead; i < items.length; i++) {
     const item = items[i];
     if (item.seq <= since) continue;
     if (events.length >= Math.min(limit, 128) || bytes + item.size > 512 * 1024) break;
