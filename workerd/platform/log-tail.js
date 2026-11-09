@@ -310,7 +310,7 @@ async function exportTailRecords(props, records) {
   const headers = new Headers({ "content-type": "application/x-protobuf" });
   for (const [key, value] of Object.entries(extra)) headers.set(key, String(value));
   const resourceLogs = [
-    ...exportBytes(1, exportKeyValue("service.name", props.otlpLogsService || "cellhive-runtime")),
+    ...exportBytes(1, exportBytes(1, exportKeyValue("service.name", props.otlpLogsService || "cellhive-runtime"))),
     ...exportBytes(2, [
       ...exportBytes(1, exportString(1, "cellhive.tail")),
       ...recordsOut.flatMap((record) => exportBytes(2, record)),
