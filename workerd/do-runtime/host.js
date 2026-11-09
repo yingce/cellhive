@@ -1305,9 +1305,7 @@ export class Host extends DurableObject {
         env: buildFacetEnv(this.ctx, this.env, bs, spec),
         globalOutbound: this.env.OUTBOUND, // tenant DO: public-only (I-09)
         ...(tailOn ? { tails: [this.ctx.exports.TenantTail({
-          props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0,
-            otlpLogsURL: this.env.OTLP_LOGS_URL, otlpLogsHeaders: this.env.OTLP_LOGS_HEADERS,
-            otlpLogsService: "cellhive-do-runtime" },
+          props: { namespace: spec.namespace, worker: spec.worker, version: spec.version || 0 },
         })] } : {}),
       };
       const fullLoaderId = loaderId + (tailOn ? "~t" : "~n");

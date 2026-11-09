@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -73,8 +72,6 @@ func main() {
 		AIKey:             getenv("CELLHIVE_AI_KEY", ""),
 		CellToken:         cellToken,
 		LogToken:          creds.Log,
-		OTLPLogsURL:       strings.TrimSpace(getenv("CELLHIVE_OTLP_ENDPOINT", "")),
-		OTLPLogsHeaders:   doOTLPHeadersJSON(),
 		DisableTenantLogs: !tenantLogCapture,
 		Addr:              addr,
 		DiskDir:           diskDir,
@@ -139,22 +136,6 @@ func main() {
 		log.Error("do-runtime exited", "err", err)
 		os.Exit(1)
 	}
-}
-
-// doOTLPHeadersJSON converts key=value OTLP headers into the JSON binding.
-func doOTLPHeadersJSON() string {
-	v := strings.TrimSpace(getenv("CELLHIVE_OTLP_HEADERS", ""))
-	out := map[string]string{}
-	if v != "" {
-		for _, pair := range strings.Split(v, ",") {
-			k, val, ok := strings.Cut(strings.TrimSpace(pair), "=")
-			if ok && strings.TrimSpace(k) != "" {
-				out[strings.TrimSpace(k)] = strings.TrimSpace(val)
-			}
-		}
-	}
-	b, _ := json.Marshal(out)
-	return string(b)
 }
 
 // shutdownAfter keeps workerd alive while the host actor drains in-flight work

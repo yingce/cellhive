@@ -51,10 +51,6 @@ type Config struct {
 	// LogToken is the narrow credential used only by the trusted native Tail
 	// entrypoint to ingest tenant console events.
 	LogToken string
-	// OTLPLogsURL/Headers configure direct OTLP tail-log export. Empty disables
-	// direct export.
-	OTLPLogsURL     string
-	OTLPLogsHeaders string
 	// DisableTenantLogs omits native Tail Workers from loaded tenant facets.
 	// The default keeps console and exception capture enabled.
 	DisableTenantLogs bool
@@ -134,8 +130,6 @@ const config :Workerd.Config = (
         (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
         (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
-        (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
-        (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
       ],
       globalOutbound = "private-outbound",
@@ -229,8 +223,6 @@ func WorkerdEnv(cfg Config) ([]string, error) {
 		"CELLHIVE_HOST_BINDING_SIGNING_KEY": cfg.BindingSigningKey,
 		"CELLHIVE_HOST_CELL_URL":            cfg.CellURL,
 		"CELLHIVE_HOST_LOG_TOKEN":           cfg.LogToken,
-		"CELLHIVE_HOST_OTLP_LOGS_URL":       cfg.OTLPLogsURL,
-		"CELLHIVE_HOST_OTLP_LOGS_HEADERS":   cfg.OTLPLogsHeaders,
 		"CELLHIVE_HOST_DO_TICKET_SECRET":    cfg.DoTicketSecret,
 		"CELLHIVE_HOST_GATE_URL":            cfg.GateURL,
 	})
