@@ -245,6 +245,40 @@ func main() {
 	}
 }
 
+// serveAdaptiveLogEvents probes every shared slot because the worker's Tail
+// ring is not keyed to a single slot. The first slot with events wins.
+func serveAdaptiveLogEvents(w http.ResponseWriter, r *http.Request, handles []*workerdpool.Handle, client *http.Client) {
+	for _, handle := range handles {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, handle.InternalURL+r.URL.RequestURI(), nil)
+		if err != nil {
+			continue
+		}
+		if auth := r.Header.Get("authorization"); auth != "" {
+			req.Header.Set("authorization", auth)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var page struct {
+			Events []json.RawMessage `json:"events"`
+		}
+		if json.Unmarshal(body, &page) != nil || len(page.Events) == 0 {
+			continue
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write(body)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	_, _ = w.Write([]byte(`{"session":"","events":[]}`))
+}
+
 func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -271,32 +305,7 @@ func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.
 			internalProxy.ServeHTTP(w, r)
 			return
 		}
-		// Adaptive slots bind loopback-only random ports. Forward the native
-		// Tail log-events read to the slot that owns this worker; the slot
-		// verifies the forwarded log token.
-		handle, ok := manager.Supervisor.HandleFor(r.URL.Query().Get("ns"), r.URL.Query().Get("worker"))
-		if !ok {
-			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"session":"","events":[]}`))
-			return
-		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, handle.InternalURL+r.URL.RequestURI(), nil)
-		if err != nil {
-			http.Error(w, "log query unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if auth := r.Header.Get("authorization"); auth != "" {
-			req.Header.Set("authorization", auth)
-		}
-		resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
-		if err != nil {
-			http.Error(w, "log query unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("content-type", resp.Header.Get("content-type"))
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		serveAdaptiveLogEvents(w, r, manager.Supervisor.Handles(), &http.Client{Timeout: 2 * time.Second})
 	})
 	var draining atomic.Bool
 	public := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

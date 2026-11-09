@@ -198,6 +198,21 @@ func (s *Supervisor) monitor(p *running) {
 // HandleFor returns the newest running slot for a namespace/worker. Adaptive
 // pool slots listen on loopback random ports, so the pod's internal proxy uses
 // this lookup to forward the native Tail log-events request to the right slot.
+// Handles returns a stable snapshot of running slot handles. Adaptive shared
+// slots carry an empty FunctionKey, so callers that need a worker's log ring
+// must ask every slot rather than looking up a key.
+func (s *Supervisor) Handles() []*Handle {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Handle, 0, len(s.processes))
+	for _, p := range s.processes {
+		if p != nil && p.h != nil {
+			out = append(out, p.h)
+		}
+	}
+	return out
+}
+
 func (s *Supervisor) HandleFor(namespace, worker string) (*Handle, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
