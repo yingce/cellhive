@@ -117,7 +117,12 @@ function eventRecords(events, props) {
     // For scheduled/queue the native eventTimestamp is the dispatch time, not
     // the handler finish. The tail record is stored when the invocation ends,
     // so use the observation time for the completion timestamp.
-    const finishedMs = startedMs !== null ? Math.max(startedMs + 1, Date.now()) : (item.eventTimestamp || Date.now());
+    const observedFinishedMs = Number.isSafeInteger(item.finished_ms) && item.finished_ms > 0 ? item.finished_ms : null;
+    // Never use the Tail read time as the invocation finish time: a client can
+    // read the ring much later, which inflated scheduled/queue duration_ms.
+    const finishedMs = startedMs !== null
+      ? Math.max(startedMs + 1, observedFinishedMs ?? item.eventTimestamp ?? startedMs)
+      : (observedFinishedMs ?? item.eventTimestamp ?? Date.now());
     const nativeVersion = item.scriptVersion;
     const version = nativeVersion
       ? { id: String(nativeVersion.id), name: props.worker, tags: nativeVersion.tag ? [nativeVersion.tag] : [] }
@@ -229,7 +234,11 @@ export class TenantTail extends WorkerEntrypoint {
   tail(events) {
     const props = this.ctx.props || {};
     if (!props.namespace || !props.worker) return;
-    const kept = (events || []).filter((item) => !platformLifecycleEvent(item));
+    const receivedAt = Date.now();
+    const kept = (events || []).filter((item) => !platformLifecycleEvent(item)).map((item) => ({
+      ...item,
+      ...(Number.isSafeInteger(item.finished_ms) && item.finished_ms > 0 ? {} : { finished_ms: receivedAt }),
+    }));
     if (kept.length) storeRecords(props.namespace, props.worker, kept, props);
   }
 }
