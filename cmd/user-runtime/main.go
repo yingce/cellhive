@@ -83,6 +83,7 @@ func main() {
 		DisableTenantLogs: !tenantLogCapture,
 		InvocationLogging: invocationLogging,
 		OTLPLogsURL:       strings.TrimSpace(getenv("CELLHIVE_OTLP_ENDPOINT", "")),
+		TailCapture:       strings.TrimSpace(getenv("CELLHIVE_TAIL_CAPTURE", "all")),
 		OTLPLogsHeaders:   otlpHeadersJSON(),
 		ServiceNative:     getenv("CELLHIVE_SERVICE_NATIVE", ""),
 		TraceSampleRatio:  traceRatio(),

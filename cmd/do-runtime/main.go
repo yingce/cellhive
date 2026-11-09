@@ -73,6 +73,7 @@ func main() {
 		CellToken:         cellToken,
 		LogToken:          creds.Log,
 		DisableTenantLogs: !tenantLogCapture,
+		TailCapture:       strings.TrimSpace(getenv("CELLHIVE_TAIL_CAPTURE", "all")),
 		Addr:              addr,
 		DiskDir:           diskDir,
 		PlatformJS:        platformJS,

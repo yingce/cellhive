@@ -255,6 +255,7 @@ export default {
     if (url.pathname === "/ready") return readyResponse(env);
     if (url.pathname === "/drain" && req.method === "POST") return drainRequest(req, env);
     if (env.CH_POOL_MODE === "1") {
+      maybePollLogCapture(env, ctx);
       if (draining) return text("runtime draining", 503);
       if (!await authorized(req, env.CELL_TOKEN)) return text("unauthorized", 401);
       req = new Request(req);
@@ -1175,6 +1176,13 @@ function maybePollLogCapture(env, ctx) {
 
 function tailEnabled(env, ns, worker) {
   if (env.CH_LOG_CAPTURE === "0") return false;
+  const tailCapture = String(env.CH_TAIL_CAPTURE || "all").toLowerCase();
+  if (tailCapture === "off") return false;
+  if (tailCapture === "tail") {
+    // Console/Tail capture is subscription-gated; OTLP invocation logs still
+    // flow through the all-mode exporter independently.
+    return !captureOK || captureWorkers.has(ns + "/" + worker);
+  }
   if (captureMode === "all") return true;
   if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
   return captureWorkers.has(ns + "/" + worker);

@@ -29,6 +29,7 @@ data:
   {{- if .Values.telemetry.enabled }}
   CELLHIVE_TRACES_SAMPLE_RATIO: {{ .Values.telemetry.tracesSampleRatio | quote }}
   CELLHIVE_OTLP_LOGS: {{ .Values.telemetry.logs | quote }}
+  CELLHIVE_TAIL_CAPTURE: {{ .Values.telemetry.tailCapture | default "all" | quote }}
   {{- end }}
   CELLHIVE_TENANT_OUTBOUND: {{ .Values.config.tenantOutbound | default "public" | quote }}
   {{- $hdProxy := .Values.hyperdrive.proxy | default "" -}}

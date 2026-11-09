@@ -145,6 +145,9 @@ type Config struct {
 	// direct OTLP request logs. Keep it empty when the collector is reachable
 	// only on a trusted internal network.
 	OTLPLogsHeaders string
+	// TailCaptureAllows separating console/Tail capture from OTLP log export:
+	// all, tail (subscription-gated), or off.
+	TailCapture string
 }
 
 type ExecutionTarget struct {
@@ -194,6 +197,7 @@ const config :Workerd.Config = (
         (name = "CH_SERVICE_NATIVE", text = "{{.ServiceNative}}"),
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "CH_TAIL_CAPTURE", text = "{{.TailCapture}}"),
         (name = "CH_INVOCATION_LOGS", text = "{{if .InvocationLogging}}1{{else}}0{{end}}"),
         (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
         (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),
@@ -236,6 +240,7 @@ const config :Workerd.Config = (
         (name = "CH_DO_DIRECT", text = "{{.DoDirect}}"),
         (name = "CH_TRACE_RATIO", text = "{{.TraceSampleRatio}}"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "CH_TAIL_CAPTURE", text = "{{.TailCapture}}"),
         (name = "CH_INVOCATION_LOGS", text = "{{if .InvocationLogging}}1{{else}}0{{end}}"),
         (name = "OTLP_LOGS_URL", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_URL"),
         (name = "OTLP_LOGS_HEADERS", fromEnvironment = "CELLHIVE_HOST_OTLP_LOGS_HEADERS"),

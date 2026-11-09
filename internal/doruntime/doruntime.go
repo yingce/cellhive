@@ -51,6 +51,9 @@ type Config struct {
 	// LogToken is the narrow credential used only by the trusted native Tail
 	// entrypoint to ingest tenant console events.
 	LogToken string
+	// TailCapture separates console/Tail capture from OTLP log export:
+	// all, tail (subscription-gated), or off.
+	TailCapture string
 	// DisableTenantLogs omits native Tail Workers from loaded tenant facets.
 	// The default keeps console and exception capture enabled.
 	DisableTenantLogs bool
@@ -131,6 +134,7 @@ const config :Workerd.Config = (
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
         (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
+        (name = "CH_TAIL_CAPTURE", text = "{{.TailCapture}}"),
       ],
       globalOutbound = "private-outbound",
       durableObjectNamespaces = [

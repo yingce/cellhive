@@ -23,6 +23,8 @@ telemetry:
   tracesSampleRatio: "0.01"
   # ARMS traces endpoints do not accept OTLP logs; use a logs-capable backend.
   logs: "off"
+  # all: legacy always-on Tail capture; tail: only workers with an active Tail subscription; off: none.
+  tailCapture: all
 
 # Optional ProxySQL admin reconciliation. Prefer existingSecret with key
 # CELLHIVE_PROXYSQL_ADMIN; adminDsn is for local/dev only.
