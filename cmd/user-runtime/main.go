@@ -249,31 +249,38 @@ func main() {
 // ring is not keyed to a single slot. The first slot with events wins.
 func serveAdaptiveLogEvents(w http.ResponseWriter, r *http.Request, handles []*workerdpool.Handle, client *http.Client) {
 	for _, handle := range handles {
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, handle.InternalURL+r.URL.RequestURI(), nil)
-		if err != nil {
-			continue
+		// Fetch console logs live in the public loader isolate; queue/scheduled
+		// logs live in the internal isolate. Query both for every shared slot.
+		for _, base := range []string{handle.PublicURL, handle.InternalURL} {
+			if base == "" {
+				continue
+			}
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, base+r.URL.RequestURI(), nil)
+			if err != nil {
+				continue
+			}
+			if auth := r.Header.Get("authorization"); auth != "" {
+				req.Header.Set("authorization", auth)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				continue
+			}
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			resp.Body.Close()
+			if readErr != nil || resp.StatusCode != http.StatusOK {
+				continue
+			}
+			var page struct {
+				Events []json.RawMessage `json:"events"`
+			}
+			if json.Unmarshal(body, &page) != nil || len(page.Events) == 0 {
+				continue
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write(body)
+			return
 		}
-		if auth := r.Header.Get("authorization"); auth != "" {
-			req.Header.Set("authorization", auth)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		resp.Body.Close()
-		if readErr != nil || resp.StatusCode != http.StatusOK {
-			continue
-		}
-		var page struct {
-			Events []json.RawMessage `json:"events"`
-		}
-		if json.Unmarshal(body, &page) != nil || len(page.Events) == 0 {
-			continue
-		}
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write(body)
-		return
 	}
 	w.Header().Set("content-type", "application/json")
 	_, _ = w.Write([]byte(`{"session":"","events":[]}`))
