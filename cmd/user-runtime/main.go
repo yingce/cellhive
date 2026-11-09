@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -263,8 +264,40 @@ func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.
 	defer router.Close()
 	proxy := workerdpool.NewProxy(manager.Supervisor, router.Public, manager.Acquire)
 	defer proxy.Close()
-	internal := workerdpool.NewProxy(manager.Supervisor, router.Internal, manager.Acquire)
-	defer internal.Close()
+	internalProxy := workerdpool.NewProxy(manager.Supervisor, router.Internal, manager.Acquire)
+	defer internalProxy.Close()
+	internal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/internal/logs/events" {
+			internalProxy.ServeHTTP(w, r)
+			return
+		}
+		// Adaptive slots bind loopback-only random ports. Forward the native
+		// Tail log-events read to the slot that owns this worker; the slot
+		// verifies the forwarded log token.
+		handle, ok := manager.Supervisor.HandleFor(r.URL.Query().Get("ns"), r.URL.Query().Get("worker"))
+		if !ok {
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"session":"","events":[]}`))
+			return
+		}
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, handle.InternalURL+r.URL.RequestURI(), nil)
+		if err != nil {
+			http.Error(w, "log query unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if auth := r.Header.Get("authorization"); auth != "" {
+			req.Header.Set("authorization", auth)
+		}
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+		if err != nil {
+			http.Error(w, "log query unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("content-type", resp.Header.Get("content-type"))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	})
 	var draining atomic.Bool
 	public := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -313,6 +346,13 @@ func runAdaptivePool(cfg userruntime.Config, workerd, dataDir string, log *slog.
 	errCh := make(chan error, 2)
 	go func() { errCh <- sp.Serve(lnPublic) }()
 	go func() { errCh <- si.Serve(lnInternal) }()
+	advertise := getenv("CELLHIVE_USER_RUNTIME_ADVERTISE", "")
+	if advertise == "" {
+		advertise = getenv("POD_IP", "127.0.0.1")
+	}
+	go runtimelog.RegisterLoopFunc(ctx, getenv("CELLHIVE_LOG_REGISTER_URLS", cfg.CellURL), cfg.CellToken, func() []string {
+		return []string{fmt.Sprintf("http://%s:%d", advertise, cfg.InternalPort)}
+	})
 	log.Info("adaptive user-runtime pool started", "public", cfg.PublicPort, "internal", cfg.InternalPort, "max_slots", manager.Supervisor.Pool.Config.MaxSlots)
 	select {
 	case <-ctx.Done():
