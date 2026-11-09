@@ -267,7 +267,14 @@ func (s *Server) handleCloudflareTailStream(w http.ResponseWriter, r *http.Reque
 			if s.Lease == nil {
 				continue
 			}
-			for _, peer := range s.Lease.SampleCached(r.Context(), 15*time.Second) {
+			peers := s.Lease.SampleCached(r.Context(), 15*time.Second)
+			if len(peers) == 0 {
+				// The discovery cache is cold on a node that has not served a
+				// peer request yet. Tail still has to pull sources registered on
+				// the other cell-agents, so take the explicit discovery path.
+				peers, _ = s.Lease.Sample(r.Context())
+			}
+			for _, peer := range peers {
 				if peer.Node == s.Cfg.NodeID || peer.Advertise == "" || !peer.Live(time.Now()) {
 					continue
 				}
