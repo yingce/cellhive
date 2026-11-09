@@ -26,7 +26,13 @@ metadata:
 spec:
   serviceName: {{ .Release.Name }}-cell-agent
   replicas: {{ .Values.cellAgent.replicas }}
+  # podManagementPolicy is immutable in Kubernetes and must stay Parallel.
+  # OnDelete prevents Helm from replacing both cell-agents at once; the release
+  # script deletes ordinals sequentially and waits for readiness.
   podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+    rollingUpdate: null
   selector:
     matchLabels:
       app: cell-agent
