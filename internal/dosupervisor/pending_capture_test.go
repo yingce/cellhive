@@ -2,10 +2,12 @@ package dosupervisor
 
 import (
 	"bytes"
+	"cellhive/internal/ltx"
 	"context"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -73,10 +75,20 @@ func TestFailedCaptureRetainsExactLTX(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				before := time.Now().UnixMilli()
 				fc.fail = true
 				if err := sup.syncFile(ctx, path); err == nil {
 					t.Fatal("failure acknowledged")
 				}
+				h, err := ltx.ParseNativeHeader(fc.failed)
+				if err != nil || h.Timestamp < before || h.Timestamp > time.Now().UnixMilli() {
+					t.Fatalf("timestamp=%d err=%v", h.Timestamp, err)
+				}
+				if phase == "delta" && (h.WALOffset < 32 || h.WALSize == 0) {
+					t.Fatalf("missing delta WAL span: %+v", h)
+				}
+				// Ensure the retry happens at a different wall-clock millisecond.
+				time.Sleep(2 * time.Millisecond)
 				if _, err := db.Exec("UPDATE t SET a=3"); err != nil {
 					t.Fatal(err)
 				}

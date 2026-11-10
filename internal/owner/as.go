@@ -93,9 +93,18 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 	case err != nil:
 		return cell.Owner{}, err
 	}
-	if cur.Node != node && !cur.Expired(now) {
-		m.takeoverBlocked.Add(1)
-		return cur, ErrOwnerLive
+	if cur.Retired {
+		return cur, ErrRetired
+	}
+	if cur.Node != node || cur.Liveness == "node-lease" {
+		live, err := m.liveFresh(ctx, cur, now)
+		if err != nil {
+			return cur, err
+		}
+		if live {
+			m.takeoverBlocked.Add(1)
+			return cur, ErrOwnerLive
+		}
 	}
 	takeover := cur.Node != node
 	epoch, gerr := m.nextEpoch(ctx, s, cur.Epoch)
@@ -103,6 +112,7 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 		return cell.Owner{}, gerr
 	}
 	o := m.ownerFor(epoch, now, node, advertise, role, ttl)
+	o.RetirementJob, o.RetiredEpoch = cur.RetirementJob, cur.RetiredEpoch
 	data, _ := cell.MarshalOwner(o)
 	if _, cerr := m.B.CAS(ctx, Key(s), data, e); cerr != nil {
 		if takeover {
@@ -126,7 +136,7 @@ func (m *Manager) RenewAs(ctx context.Context, s cell.Scope, node string, epoch 
 	if err != nil {
 		return cell.Owner{}, err
 	}
-	if cur.Node != node || cur.Epoch != epoch {
+	if cur.Node != node || cur.Epoch != epoch || cur.Liveness == "node-lease" {
 		return cell.Owner{}, ErrEpochMismatch
 	}
 	cur.Expiry = now.Add(ttl).UnixMilli()
@@ -146,8 +156,25 @@ func (m *Manager) ReleaseAs(ctx context.Context, s cell.Scope, node string, epoc
 	if err != nil {
 		return err
 	}
-	if cur.Node != node || cur.Epoch != epoch {
+	if cur.Node != node || cur.Epoch != epoch || cur.Liveness == "node-lease" {
 		return ErrEpochMismatch
+	}
+	// Retirement history belongs to the resource, not the released owner.
+	// Keep it in the existing owner record so offline caches and late uploads
+	// remain fenced after recreation and subsequent handoffs.
+	if cur.RetirementJob != "" {
+		cur.Node, cur.Session, cur.Role = "", "", ""
+		cur.Address, cur.AdminAddress, cur.Liveness = "", "", ""
+		cur.Expiry = 0
+		data, _ := cell.MarshalOwner(cur)
+		if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
+			if errors.Is(err, bucket.ErrPrecondition) {
+				return ErrEpochMismatch
+			}
+			return err
+		}
+		m.Invalidate(s)
+		return nil
 	}
 	if err := m.B.ConditionalDelete(ctx, Key(s), e); err != nil {
 		if errors.Is(err, bucket.ErrPrecondition) {

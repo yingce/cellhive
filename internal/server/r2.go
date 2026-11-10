@@ -209,6 +209,9 @@ func (s *Server) handleR2Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	md := r2PutMeta(r)
+	if md != nil && md.UploadedMs == 0 {
+		md.UploadedMs = time.Now().UnixMilli()
+	}
 	etag, matched, err := s.R2.PutConditional(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"), body, md, condition)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "r2_put_failed", err.Error())
@@ -219,8 +222,9 @@ func (s *Server) handleR2Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("etag", etag)
-	if stored, gerr := s.R2.GetMetaForVersion(r.Context(), s.scopeNS(r), q.Get("bucket"), q.Get("key"), int64(len(body)), etag); gerr == nil && stored != nil {
-		md = stored
+	if md != nil {
+		md.ETag = etag
+		md.Size = int64(len(body))
 	}
 	writeR2MetaHeader(w, md)
 	writeJSON(w, http.StatusOK, r2ObjectJSON(q.Get("key"), etag, int64(len(body)), md))
@@ -327,86 +331,56 @@ func (s *Server) handleR2Get(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ns, bucketName, key := s.scopeNS(r), q.Get("bucket"), q.Get("key")
-	if ok, err := s.checkR2Condition(r.Context(), r, bucketName, key); err != nil {
-		writeErr(w, http.StatusInternalServerError, "r2_condition_failed", err.Error())
+	condition, err := r2Condition(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "r2_condition_failed", err.Error())
 		return
-	} else if !ok {
+	}
+
+	v, err := s.R2.Open(r.Context(), ns, bucketName, key)
+	if err != nil {
+		if errors.Is(err, bucket.ErrNotFound) {
+			if !r2ConditionMatches(condition, false, "") {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			writeErr(w, http.StatusNotFound, "not_found", "object not found")
+		} else {
+			writeErr(w, http.StatusInternalServerError, "r2_get_failed", err.Error())
+		}
+		return
+	}
+	if !r2ConditionMatches(condition, true, v.ETag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-
-	// head=1: metadata only (R2Object), no body.
+	w.Header().Set("etag", v.ETag)
 	if q.Get("head") == "1" {
-		size, etag, err := s.R2.Stat(r.Context(), ns, bucketName, key)
-		if err != nil {
-			if errors.Is(err, bucket.ErrNotFound) {
-				writeErr(w, http.StatusNotFound, "not_found", "object not found")
-				return
-			}
-			writeErr(w, http.StatusInternalServerError, "r2_head_failed", err.Error())
-			return
-		}
-		md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, size, etag)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
-			return
-		}
-		// No content-length here: the body is the R2Object JSON, not the object
-		// bytes (the size lives in the JSON). Declaring the object size would
-		// mismatch the body and break the HTTP response.
-		w.Header().Set("etag", etag)
-		writeR2MetaHeader(w, md)
-		writeJSON(w, http.StatusOK, r2ObjectJSON(key, etag, size, md))
+		writeR2MetaHeader(w, v.Metadata)
+		writeJSON(w, http.StatusOK, r2ObjectJSON(key, v.ETag, v.Size, v.Metadata))
 		return
 	}
-
 	if off, length, ok := parseRange(r.Header.Get("Range")); ok {
-		data, etag, err := s.R2.GetRange(r.Context(), ns, bucketName, key, off, length)
+		data, err := v.GetRange(r.Context(), off, length)
 		if err != nil {
-			if errors.Is(err, bucket.ErrNotFound) {
-				writeErr(w, http.StatusNotFound, "not_found", "object not found")
-				return
-			}
 			writeErr(w, http.StatusInternalServerError, "r2_get_failed", err.Error())
 			return
 		}
-		size, statETag, err := s.R2.Stat(r.Context(), ns, bucketName, key)
-		if err != nil || statETag != etag {
-			writeErr(w, http.StatusServiceUnavailable, "r2_version_changed", "object changed during range read")
-			return
-		}
-		md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, size, etag)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
-			return
-		}
-		total := strconv.FormatInt(size, 10)
-		w.Header().Set("etag", etag)
-		w.Header().Set("content-range", "bytes "+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+int64(len(data))-1, 10)+"/"+total)
+		w.Header().Set("content-range", "bytes "+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+int64(len(data))-1, 10)+"/"+strconv.FormatInt(v.Size, 10))
 		w.Header().Set("content-type", "application/octet-stream")
-		writeR2MetaHeader(w, md)
+		writeR2MetaHeader(w, v.Metadata)
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = w.Write(data)
 		return
 	}
-	data, etag, err := s.R2.Get(r.Context(), ns, bucketName, key)
+	data, err := v.Get(r.Context())
 	if err != nil {
-		if errors.Is(err, bucket.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "not_found", "object not found")
-			return
-		}
 		writeErr(w, http.StatusInternalServerError, "r2_get_failed", err.Error())
 		return
 	}
-	md, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, key, int64(len(data)), etag)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "r2_meta_failed", err.Error())
-		return
-	}
-	w.Header().Set("etag", etag)
 	w.Header().Set("content-length", strconv.Itoa(len(data)))
 	w.Header().Set("content-type", "application/octet-stream")
-	writeR2MetaHeader(w, md)
+	writeR2MetaHeader(w, v.Metadata)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -460,8 +434,8 @@ func (s *Server) handleR2List(w http.ResponseWriter, r *http.Request) {
 	delimiter := q.Get("delimiter")
 
 	// include=... opts into per-object metadata (ADR-168): httpMetadata and
-	// customMetadata live in a per-object sidecar, so reading them costs one Get
-	// each. Cloudflare uses the same explicit opt-in for these fields.
+	// customMetadata are taken from the same publication as each listed object.
+	// Cloudflare uses explicit opt-in for these fields.
 	var includeHTTP, includeCustom bool
 	if raw := strings.TrimSpace(q.Get("include")); raw != "" {
 		for _, f := range strings.Split(raw, ",") {
@@ -484,19 +458,14 @@ func (s *Server) handleR2List(w http.ResponseWriter, r *http.Request) {
 		out := make([]map[string]any, 0, len(objs))
 		for _, o := range objs {
 			var md *r2.Metadata
-			if wantMeta {
-				m, err := s.R2.GetMetaForVersion(r.Context(), ns, bucketName, o.Key, o.Size, o.ETag)
-				if err != nil {
-					return nil, err
+			if wantMeta && o.Metadata != nil {
+				copy := *o.Metadata
+				md = &copy
+				if !includeHTTP {
+					md.HTTP = nil
 				}
-				md = m
-				if md != nil {
-					if !includeHTTP {
-						md.HTTP = nil
-					}
-					if !includeCustom {
-						md.Custom = nil
-					}
+				if !includeCustom {
+					md.Custom = nil
 				}
 			}
 			out = append(out, r2ObjectJSON(o.Key, o.ETag, o.Size, md))

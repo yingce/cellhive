@@ -26,6 +26,12 @@ old_ip=$(docker inspect "$old" --format '{{range .NetworkSettings.Networks}}{{.I
 new_ip=$(docker inspect "$new" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 mounts=()
 if [[ ${CELLHIVE_E2E_USE_IMAGE_JS:-0} != 1 ]]; then mounts=(-v "${CELLHIVE_E2E_WORKERD_SOURCE:-$PWD/workerd}:/app/workerd:ro"); fi
+# Pin current Go/workerd binaries when supplied; the image supplies only OS tools.
+if [[ -n ${E2E_BIN:-} ]]; then mounts+=(-v "$(realpath "$E2E_BIN/do-runtime"):/usr/local/bin/do-runtime:ro"); fi
+if [[ -n ${CELLHIVE_WORKERD:-} ]]; then
+  mounts+=(-v "$(realpath "$CELLHIVE_WORKERD"):/usr/local/bin/workerd:ro" -e CELLHIVE_WORKERD=/usr/local/bin/workerd)
+fi
+if [[ -n ${CELLHIVE_E2E_DOCKER_USER:-} ]]; then mounts+=(--user "$CELLHIVE_E2E_DOCKER_USER"); fi
 docker run -d --name "$runtime" --network "$net" --add-host "recovery-cell:$old_ip" \
   -p 127.0.0.1::8788 "${mounts[@]}" \
   -e CELLHIVE_ROOT_KEY=isolated-do-recovery-test-only \

@@ -16,7 +16,6 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
-	"cellhive/internal/ltx"
 )
 
 type blockedFollowerDiscovery struct {
@@ -111,7 +110,7 @@ func TestKnownFollowerHTTPWithBlockedDiscovery(t *testing.T) {
 	var txid uint64
 	for time.Now().UnixMilli() <= original.Expiry+100 {
 		txid++
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: txid, EndTxID: txid}, []byte(fmt.Sprint(txid)))
+		seg := nativeTestFile(t, txid, txid, []byte(fmt.Sprint(txid)))
 		raw := call("/v1/internal/commit", []byte(fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q}`, sc.String(), base64.StdEncoding.EncodeToString(seg))))
 		var result struct {
 			Mode    string `json:"mode"`
@@ -134,7 +133,7 @@ func TestKnownFollowerHTTPWithBlockedDiscovery(t *testing.T) {
 	publish(expired)
 	await(expired.Expiry)
 	txid++
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: txid, EndTxID: txid}, []byte("expired"))
+	seg := nativeTestFile(t, txid, txid, []byte("expired"))
 	raw := call("/v1/internal/commit", []byte(fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q}`, sc.String(), base64.StdEncoding.EncodeToString(seg))))
 	var result struct {
 		Mode    string `json:"mode"`

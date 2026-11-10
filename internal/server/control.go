@@ -170,6 +170,8 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/worker", s.adminAuth(s.handleControlWorkerDelete))
 	mux.HandleFunc("GET /v1/control/apps", s.adminAuth(s.handleControlApps))
 	mux.HandleFunc("GET /v1/control/resources", s.adminAuth(s.handleControlResources))
+	mux.HandleFunc("GET /v1/control/cell/export", s.adminAuth(s.handleCellExport))
+	mux.HandleFunc("POST /v1/control/cell/import", s.adminAuth(s.handleCellImport))
 	mux.HandleFunc("POST /v1/control/gc/scope", s.adminAuth(s.handleControlGCScope))
 	mux.HandleFunc("DELETE /v1/control/resource", s.adminAuth(s.handleControlResourceDelete))
 	mux.HandleFunc("GET /v1/control/queue/status", s.adminAuth(s.handleControlQueueStatus))

@@ -1,5 +1,5 @@
 # --- build output ---
-/bin/
+/bin
 /*.test
 /cell-agent
 /cellhive
@@ -20,6 +20,9 @@
 *.db-wal
 *.db-shm
 *.ltx
+!internal/ltx/testdata/native-snapshot.ltx
+!internal/ltx/testdata/native-delta.ltx
+!internal/ltx/testdata/native-compacted.ltx
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -59,3 +62,8 @@ coverage.txt
 scripts/e2e/mysql/worker.bundle.js
 deploy/compose/cellhive.local.env
 deploy/workerd-fork/
+
+# Local acceptance evidence and Python bytecode; curated reports remain tracked.
+/docs/reports/artifacts/
+__pycache__/
+*.py[cod]

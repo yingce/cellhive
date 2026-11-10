@@ -1,7 +1,9 @@
 package dosupervisor
 
 import (
+	"cellhive/internal/bucket"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/replica"
 	"cellhive/internal/wal"
 	"context"
 	"errors"
@@ -94,5 +96,51 @@ func TestPollStableWALCancellation(t *testing.T) {
 	_, err := pollStableWAL(ctx, func() (wal.PollResult, error) { cancel(); return wal.PollResult{}, wal.ErrChecksum })
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+// A successful gate must persist both the checkpoint image and the new WAL,
+// without depending on another request to trigger a second capture.
+func TestCheckpointGateCapturesNewWALBeforeAcknowledgment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "host.sqlite")
+	db, err := cellstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE t(a); INSERT INTO t VALUES(1)"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(b)
+	s := &Supervisor{Dir: dir, Epoch: 1, ScopePrefix: "workerd/__do__", Bucket: b, Store: rep, Committer: &bucketCommitter{rep: rep}}
+	if _, err = s.SyncAll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE); UPDATE t SET a=42"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SyncAll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	restored := t.TempDir()
+	if _, err = s.RestoreAll(t.Context(), restored); err != nil {
+		t.Fatal(err)
+	}
+	check, err := cellstore.Open(filepath.Join(restored, "host.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var got int
+	if err = check.QueryRow("SELECT a FROM t").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 42 {
+		t.Fatalf("acknowledged gate restored stale checkpoint: got %d, want 42", got)
 	}
 }

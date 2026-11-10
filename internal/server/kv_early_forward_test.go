@@ -21,7 +21,7 @@ type rejectFenceBucket struct {
 }
 
 func (b *rejectFenceBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.HasSuffix(key, "/resource-fence.v2") {
+	if strings.HasSuffix(key, "/own.json") {
 		b.reads.Add(1)
 		return nil, "", context.DeadlineExceeded
 	}
@@ -37,6 +37,7 @@ func TestKVForwardSkipsOnlyEntryResourceAdmission(t *testing.T) {
 	}
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}
 	var handled atomic.Int64
+	var entryHandled atomic.Int64
 	remote := httptest.NewServer(target.scopeAuth("kv")(func(w http.ResponseWriter, r *http.Request) { handled.Add(1); w.WriteHeader(200) }))
 	defer remote.Close()
 	raw, err := cell.MarshalOwner(cell.Owner{Node: "remote", Session: "s", Epoch: 1, Address: strings.TrimPrefix(remote.URL, "http://"), Expiry: time.Now().Add(time.Minute).UnixMilli()})
@@ -61,7 +62,7 @@ func TestKVForwardSkipsOnlyEntryResourceAdmission(t *testing.T) {
 			r.Header.Set(ownerclient.ForwardedHeader, "1")
 		}
 		rr := httptest.NewRecorder()
-		entry.scopeAuth("kv")(func(w http.ResponseWriter, r *http.Request) { t.Error("entry executed request") }).ServeHTTP(rr, r)
+		entry.scopeAuth("kv")(func(w http.ResponseWriter, r *http.Request) { entryHandled.Add(1); w.WriteHeader(200) }).ServeHTTP(rr, r)
 		if rr.Code >= 500 {
 			t.Log(rr.Body.String())
 		}
@@ -91,11 +92,16 @@ func TestKVForwardSkipsOnlyEntryResourceAdmission(t *testing.T) {
 	if handled.Load() != 1 || bad.reads.Load() != 0 {
 		t.Fatal("deleted request bypassed owner admission")
 	}
-	// A forwarded request cannot bypass local admission or create a forwarding loop.
+	// A forwarded request is handled locally after the one-hop transport guard;
+	// it must not trigger a second network hop.  The target still performs its
+	// own resource admission, so a fence read failure is surfaced as 503.
 	if got := request(token, "/v1/kv/put?ns=acme&key=k", true); got != 503 {
 		t.Fatalf("forward loop guard=%d", got)
 	}
-	if bad.reads.Load() != 1 {
-		t.Fatalf("target-side gate was skipped: %d", bad.reads.Load())
+	if bad.reads.Load() == 0 {
+		t.Fatalf("forwarded target skipped own.json admission read")
+	}
+	if entryHandled.Load() != 0 {
+		t.Fatalf("forwarded request reached local handler after admission failure: %d", entryHandled.Load())
 	}
 }

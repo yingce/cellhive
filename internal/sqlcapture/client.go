@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,12 @@ func WithDOOwner(ctx context.Context, owner DOOwnerIdentity) context.Context {
 	return context.WithValue(ctx, doOwnerContextKey{}, owner)
 }
 
+// DOOwner returns the activation identity attached by the supervisor.
+func DOOwner(ctx context.Context) (DOOwnerIdentity, bool) {
+	o, ok := ctx.Value(doOwnerContextKey{}).(DOOwnerIdentity)
+	return o, ok && o.Epoch != 0
+}
+
 func NewHTTPCommitter(owner, token string, followers []string, client *http.Client) *HTTPCommitter {
 	if client == nil {
 		client = &http.Client{
@@ -86,7 +93,9 @@ func (c *HTTPCommitter) Claim(ctx context.Context, scope cell.Scope) error {
 // AsyncCommitter is an optional Committer extension: CommitAsync writes the
 // commit request and returns a channel resolved when the fleet proof completes.
 // Concurrent calls may be in flight; the caller is responsible for ordering by
-// delivering them in txid order.
+// delivering them in txid order. The channel must yield exactly one completion
+// result (or close) after all work for that request has exited, including on
+// cancellation. Capture shutdown joins outstanding results before closing Done.
 type AsyncCommitter interface {
 	CommitAsync(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte, base uint64) <-chan error
 }
@@ -105,14 +114,53 @@ func (c *HTTPCommitter) Commit(ctx context.Context, scope cell.Scope, epoch uint
 }
 
 func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte, pipelined bool, base uint64) error {
+	return c.commitReader(ctx, scope, epoch, bytes.NewReader(segment), int64(len(segment)), pipelined, base, "")
+}
+
+func (c *HTTPCommitter) CommitSnapshotFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64) error {
+	return c.commitFile(ctx, scope, epoch, txid, path, size, "snapshot")
+}
+func (c *HTTPCommitter) CommitNativeFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64) error {
+	return c.commitFile(ctx, scope, epoch, txid, path, size, "native_file")
+}
+func (c *HTTPCommitter) commitFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64, kind string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() != size {
+		return fmt.Errorf("sqlcapture: snapshot spool size changed")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	return c.commitReader(ctx, scope, epoch, f, size, false, 0, kind)
+}
+
+func (c *HTTPCommitter) commitReader(ctx context.Context, scope cell.Scope, epoch uint64, body io.Reader, size int64, pipelined bool, base uint64, fileKind string) error {
+	id, hasIdentity := DOOwner(ctx)
+	if hasIdentity && epoch != id.Epoch {
+		return fmt.Errorf("sqlcapture: data epoch differs from DO owner epoch")
+	}
+	if c.RequireDOOwner && !scope.IsReservedClass() && !hasIdentity {
+		return fmt.Errorf("sqlcapture: native DO capture requires its owner identity")
+	}
 	path := fmt.Sprintf("/v1/internal/commit_binary?scope=%s&epoch=%d", url.QueryEscape(scope.String()), epoch)
 	if pipelined {
 		path += "&pipelined=1&base=" + strconv.FormatUint(base, 10)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.owner+path, bytes.NewReader(segment))
+	if fileKind != "" {
+		path += "&" + fileKind + "=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.owner+path, body)
 	if err != nil {
 		return err
 	}
+	req.ContentLength = size
 	req.Header.Set("content-type", "application/octet-stream")
 	if err := bearertoken.SetInternal(req, c.token, "internal"); err != nil {
 		return err
@@ -132,7 +180,13 @@ func (c *HTTPCommitter) commit(ctx context.Context, scope cell.Scope, epoch uint
 	if c.RequireBucket || (c.RequireDOOwner && (!hasDOOwner || doOwner.Epoch == 0)) {
 		req.Header.Set("x-cellhive-bucket-proof", "1")
 	}
-	resp, err := c.client.Do(req)
+	client := c.client
+	if fileKind != "" {
+		copyClient := *client
+		copyClient.Timeout = 0
+		client = &copyClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

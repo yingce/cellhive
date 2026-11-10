@@ -36,7 +36,7 @@ func TestDeployResumesCaptureWithoutSnapshot(t *testing.T) {
 	var mu sync.Mutex
 	var kinds []ltx.Kind
 	committer := testCommitterFunc(func(cctx context.Context, sc cell.Scope, epoch uint64, seg []byte) error {
-		h, _, err := ltx.Decode(seg)
+		h, err := ltx.ValidateNative(seg)
 		if err != nil {
 			return err
 		}
@@ -44,7 +44,11 @@ func TestDeployResumesCaptureWithoutSnapshot(t *testing.T) {
 			return err
 		}
 		mu.Lock()
-		kinds = append(kinds, h.Kind)
+		kind := ltx.KindDelta
+		if h.IsSnapshot() {
+			kind = ltx.KindSnapshot
+		}
+		kinds = append(kinds, kind)
 		mu.Unlock()
 		return nil
 	})
@@ -62,9 +66,6 @@ func TestDeployResumesCaptureWithoutSnapshot(t *testing.T) {
 
 	s.Capture = &cellcapture.Manager{
 		Store: s.Store, AutoSnapshot: true, Owner: owner, Committer: committer,
-		SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
-			return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
-		},
 	}
 	admin := s.AdminHandler()
 	upload := func(body string) string {
@@ -102,9 +103,6 @@ func TestDeployResumesCaptureWithoutSnapshot(t *testing.T) {
 		Store: s.Store, AutoSnapshot: true, Owner: owner, Committer: committer,
 		Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
 			return rep.DurableWatermark(cctx, sc, epoch)
-		},
-		SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
-			return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
 		},
 	}
 	sha2 := upload("export default {v:2}")

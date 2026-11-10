@@ -40,16 +40,11 @@ func epochTestWrite(t *testing.T, m *replica.Manager, sc cell.Scope, epoch, txid
 	ctx := context.Background()
 	pageSize, commit := uint32(epochTestPageSize), uint32(epochTestCommit)
 	pages, want := epochTestPages(byte(epoch), pageSize, commit)
-	parts, err := ltx.EncodeSnapshotParts(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: txid, EndTxID: txid}, pageSize, commit, pages, 64<<10)
+	snapshot, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: 1, MaxTXID: txid}, pages)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range parts {
-		if _, _, err := m.Append(ctx, sc, epoch, part); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := m.MarkSnapshotDone(ctx, sc, epoch, txid); err != nil {
+	if _, _, err := m.Append(ctx, sc, epoch, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	// A large delta tail exercises chain continuation after the snapshot.
@@ -60,11 +55,10 @@ func epochTestWrite(t *testing.T, m *replica.Manager, sc cell.Scope, epoch, txid
 			modified = append(modified, ltx.WALPage{PageNo: p, Data: data})
 			want[p] = data
 		}
-		payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, modified)
+		seg, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: txid + n + 1, MaxTXID: txid + n + 1}, modified)
 		if err != nil {
 			t.Fatal(err)
 		}
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: txid + n + 1, EndTxID: txid + n + 1}, payload)
 		if _, _, err := m.Append(ctx, sc, epoch, seg); err != nil {
 			t.Fatal(err)
 		}
@@ -164,17 +158,21 @@ func TestEpochOwnerSwitchLargeDataAndSafeRetire(t *testing.T) {
 		}
 	}
 
-	// Safe retire the two oldest epochs; the newest baseline remains restorable.
-	opts := replica.RetireOptions{Safe: true, Grace: -1, Job: "e2e"}
+	// Offline native GC retires the oldest epoch and preserves the immediate
+	// predecessor even though the newest epoch has a full snapshot.
+	opts := replica.RetireOptions{OfflineQuiescent: true, Grace: -1, Job: "e2e"}
 	n, err := m.RetireEpochsWithOptions(ctx, sc, o3.Epoch, 0, opts)
 	if err != nil || n == 0 {
 		t.Fatalf("safe retire = %d, %v", n, err)
 	}
-	for _, epoch := range []uint64{o1.Epoch, o2.Epoch} {
+	for _, epoch := range []uint64{o1.Epoch} {
 		ok, err := m.EpochRetired(ctx, sc, epoch)
 		if err != nil || !ok {
 			t.Fatalf("epoch %d retired marker = %v %v", epoch, ok, err)
 		}
+	}
+	if keys, err := b.List(ctx, replica.Prefix(sc, o3.Epoch-1)); err != nil || len(keys) == 0 {
+		t.Fatalf("immediate predecessor payloads=%d err=%v", len(keys), err)
 	}
 	epochTestVerify(t, m, sc, o3.Epoch, want3)
 	if got, err := m.DurableWatermarkChain(ctx, sc, o3.Epoch); err != nil || got == 0 {

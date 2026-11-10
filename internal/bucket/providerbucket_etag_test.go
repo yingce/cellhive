@@ -2,9 +2,7 @@ package bucket
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
+	"errors"
 	"testing"
 )
 
@@ -18,35 +16,20 @@ func (a etagAppender) AppendWithETag(context.Context, string, int64, []byte) (st
 	return a.etag, nil
 }
 
-func TestProviderImmutableAppendUsesResponseETagAndFallsBackToHead(t *testing.T) {
-	var heads atomic.Int64
-	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodHead {
-			t.Errorf("unexpected S3 request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		heads.Add(1)
-		w.Header().Set("ETag", `"head-etag"`)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer httpServer.Close()
-	s3, err := NewS3Bucket(t.Context(), S3Options{
-		Endpoint: httpServer.URL, Region: "test", Bucket: "test", PathStyle: true,
-		AccessKey: "test", SecretKey: "test",
-	})
-	if err != nil {
+func TestProviderImmutableLTXUsesNativeCreate(t *testing.T) {
+	key := "cells/acme/__kv__/main/ltx/e1/0000/0000000000000001-0000000000000001.ltx"
+	creator := &assetCreatorProbe{}
+	b := NewProviderBucket(nil, creator)
+	tag, err := b.ConditionalCreate(t.Context(), key, []byte("segment"))
+	if err != nil || tag != "created-etag" || creator.calls != 1 {
+		t.Fatalf("create=%s calls=%d err=%v", tag, creator.calls, err)
+	}
+	creator.err = ErrPrecondition
+	if _, err := b.ConditionalCreate(t.Context(), key, []byte("changed")); !errors.Is(err, ErrPrecondition) {
 		t.Fatal(err)
 	}
-	key := "cells/acme/__kv__/main/ltx/e1/1.d"
-	fast := NewProviderBucket(s3, etagAppender{etag: "append-etag"})
-	got, err := fast.ConditionalCreate(t.Context(), key, []byte("segment"))
-	if err != nil || got != "append-etag" || heads.Load() != 0 {
-		t.Fatalf("append ETag = %q, HEADs = %d, err = %v", got, heads.Load(), err)
-	}
-	fallback := NewProviderBucket(s3, etagAppender{})
-	got, err = fallback.ConditionalCreate(t.Context(), key, []byte("segment"))
-	if err != nil || got != "head-etag" || heads.Load() != 1 {
-		t.Fatalf("fallback ETag = %q, HEADs = %d, err = %v", got, heads.Load(), err)
+	unsupported := NewProviderBucket(nil, etagAppender{})
+	if _, err := unsupported.ConditionalCreate(t.Context(), key, nil); !errors.Is(err, ErrNotSupported) {
+		t.Fatalf("must not fall back to AppendObject: %v", err)
 	}
 }

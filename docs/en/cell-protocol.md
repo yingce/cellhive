@@ -55,7 +55,7 @@ Unified rule: **owner = the node that holds the "working SQLite" for this cell.*
 Each cell has an owner record in object storage:
 
 ```
-cells/<scope>/owner.json
+cells/<scope>/own.json
 { "node": "<owner-node-id>", "role": "cell-agent|do-runtime",
   "session": "<session-id>", "epoch": 42,
   "expiry": 1730000000000, "address": "10.0.0.12:8788" }
@@ -148,11 +148,11 @@ KV and Queue deletion also use `cells/<scope>/resource-fence.v2`. On first acces
 - Backend B: the supervisor of `do-runtime` captures WAL segments, **reports them to cell-agent**, and cell-agent performs replication and proof (see [`durable-objects.md`](durable-objects.md)).
 - Snapshot: for large-data cells, restore a full-database snapshot (L9) first during takeover to avoid replaying the entire history; otherwise materialize the L0 chain.
 - Cold restore and paging choose the newest snapshot with a complete, contiguous delta suffix. A batched delta crossing the snapshot watermark must not be discarded as a whole; if no earlier snapshot yields a contiguous chain, restore fails closed rather than treating the overlapping tail as already applied.
-- An initial snapshot's `snapshot-started` marker, LTX parts, and `snapshot-done` marker must all use the same post-checkpoint watermark. Failure to write the started marker aborts before the first part; neither the pre-checkpoint baseline nor a later `Cell.TxID()` may replace the snapshot label.
+- A complete snapshot is fsynced in a local spool and published once as one canonical `.ltx` range object; production does not create snapshot-started/snapshot-done, epoch-cut, or other completion sidecars.
 - **compaction**: the background folds many L0 segments into L1 (triggered by `min_txids` / `min_mb`), so takeover reads only a small number of objects instead of thousands.
-- Once GC deletes every L0 object, `L1/manifest.json` remains a complete restore base for that epoch. Cold restore must recognize the manifest before filtering segment keys, so it never skips an L1-only epoch.
+- Compaction promotes uncovered native ranges between adjacent levels without deleting sources. L9 stores complete snapshots, identified by min TXID=1. No separate manifest/index is read or written.
 - **paging**: cells above a threshold use sparse files + on-demand paging, so cold start does not need to download the full database.
-- **checkpoint alignment (I-03)**: the supervisor of backend B polls `(salt, frame)`; salt changes or frame resets to zero = a checkpoint has occurred → pause delta, use the **SQLite Online Backup API** (read-only connection) to take a consistent snapshot, upload it as an **L9 snapshot** and record txid, then resume delta from frame 0 and write a **snapshot→delta linkage marker**. P0 must test "checkpoint during active writes".
+- **checkpoint alignment (I-03)**: the supervisor of backend B polls `(salt, frame)`; salt changes or frame resets to zero = a checkpoint has occurred → pause delta, use the **SQLite Online Backup API** (read-only connection) to take a consistent snapshot, upload it as an **L9 snapshot** and record txid, then resume delta from frame 0 and continue with canonical LTX ranges; no snapshot completion or linkage sidecar is written. P0 must test "checkpoint during active writes".
 
 ### Durability proof (output gate)
 
@@ -195,7 +195,7 @@ bucket commits are performed **in "blocks"** (a batch of writes for the same `(s
 - Both modes share the `internal/upload` batcher; `batch` uses `EnqueueWait`, and `async` uses `Enqueue`. When **no batcher is configured**, it degrades to direct per-write PUT (`mode:"bucket"`).
 - There is **no longer a separate `sync` mode**: with single concurrency (flush immediately every time), `batch` is equivalent to per-write synchronous PUT and has the same RPO, so it is folded into `batch`.
 - **Ordering guarantee**: the batcher is a **single loop**—it will not accept the next batch before `AppendBatch` completes, so the same `(scope, epoch)` **will not have two blocks uploading concurrently**; writes are packed in write order within a block, block names use increasing `txid ranges`; `Restore` reorders by txid. Covered by test `TestBatcherBlocksOrderedAndSerial` (forms blocks `< N`, order `0..N-1`, `maxInflight == 1`).
-- **Constraint**: block objects are **create-once (If-None-Match) and named by txid range**, so txids for the same `(scope, epoch)` must be **monotonically increasing and non-reusable**; load tests/replays that reuse txid ranges will hit an object with the same name and get 412.
+- **Constraint**: LTX keys encode epoch and TXID range. TXIDs advance within a writer epoch. Ordinary PUT/multipart permits idempotent retries of the same range; new transactions must not reuse published TXIDs. Ownership fencing and serialized capture/compaction provide writer isolation.
 - With **remote/transoceanic object storage**, `bucket` (RPO=0) tail latency of several seconds is unusable; in that case either run ≥2 nodes with fleet, or explicitly accept `async` with RPO>0.
 
 ### Takeover

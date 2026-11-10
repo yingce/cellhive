@@ -312,3 +312,18 @@ func TestValidateD1UsesDatabaseID(t *testing.T) {
 		t.Fatalf("d1 binding name masked a missing database id: %+v", res.Errors)
 	}
 }
+
+func TestWorkflowBindingValidatesResourceNameRatherThanAlias(t *testing.T) {
+	in := Input{BundleSHA: "test-bundle", Namespace: "demo", Worker: "reports", CompatibilityDate: "2026-01-01",
+		Bindings:     []Binding{{Type: "workflow", Name: "REPORTS", ID: "report-builder", ClassName: "ReportBuilder"}},
+		IsRegistered: func(kind, name string) bool { return kind == "workflow" && name == "report-builder" }}
+	result := Validate(in)
+	if len(result.Errors) != 0 {
+		t.Fatalf("workflow alias rejected: %+v", result.Errors)
+	}
+	in.IsRegistered = func(kind, name string) bool { return name == "REPORTS" }
+	result = Validate(in)
+	if len(result.Errors) == 0 {
+		t.Fatal("accepted alias registration without actual workflow resource")
+	}
+}

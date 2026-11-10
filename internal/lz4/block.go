@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Errors returned by DecodeBlock.
@@ -25,13 +26,24 @@ var (
 
 const (
 	minMatch = 4
-	// lastLiterals bounds the literal run per the format (no match after it).
-	maxOffset = 65535
+	// LZ4 requires five final literals and a final match starting at least
+	// twelve bytes before the end, including for strict external decoders.
+	lastLiterals   = 5
+	matchFindLimit = 12
+	maxOffset      = 65535
 )
 
 // EncodeBlock compresses src as one LZ4 block. The result is not necessarily
 // smaller; callers compare lengths and store raw frames when compression does
 // not help.
+type blockTable struct {
+	positions [1 << 16]int
+	epochs    [1 << 16]uint32
+	epoch     uint32
+}
+
+var blockTables = sync.Pool{New: func() any { return new(blockTable) }}
+
 func EncodeBlock(src []byte) []byte {
 	// Worst case: every 255 literals cost one extra length byte, plus a token.
 	dst := make([]byte, 0, len(src)+len(src)/255+16)
@@ -39,9 +51,12 @@ func EncodeBlock(src []byte) []byte {
 		return dst
 	}
 	const hashBits = 16
-	table := make([]int, 1<<hashBits)
-	for i := range table {
-		table[i] = -1
+	table := blockTables.Get().(*blockTable)
+	defer blockTables.Put(table)
+	table.epoch++
+	if table.epoch == 0 {
+		clear(table.epochs[:])
+		table.epoch = 1
 	}
 	hash := func(i int) uint32 {
 		v := binary.LittleEndian.Uint32(src[i:])
@@ -50,10 +65,14 @@ func EncodeBlock(src []byte) []byte {
 
 	anchor := 0
 	i := 0
-	for i+minMatch <= len(src) {
+	for i+matchFindLimit <= len(src) {
 		h := hash(i)
-		cand := table[h]
-		table[h] = i
+		cand := -1
+		if table.epochs[h] == table.epoch {
+			cand = table.positions[h]
+		}
+		table.positions[h] = i
+		table.epochs[h] = table.epoch
 		if cand < 0 || i-cand > maxOffset || cand+minMatch > len(src) ||
 			binary.LittleEndian.Uint32(src[cand:]) != binary.LittleEndian.Uint32(src[i:]) {
 			i++
@@ -62,7 +81,7 @@ func EncodeBlock(src []byte) []byte {
 		// Extend the match.
 		start := i
 		i += minMatch
-		for i < len(src) && src[cand+(i-start)] == src[i] {
+		for i < len(src)-lastLiterals && src[cand+(i-start)] == src[i] {
 			i++
 		}
 		matchLen := i - start

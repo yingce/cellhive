@@ -50,6 +50,13 @@ type Owner struct {
 	// has its own authentication surface and must not be folded into :7001.
 	AdminAddress string `json:"admin_address,omitempty"`
 	ProtoVersion string `json:"proto_version"`
+	// Retired marks a resource incarnation that is fenced for cleanup.  The
+	// record is kept after release (celld ownership lineage) so delayed writes
+	// cannot recreate an older epoch.  These fields are administrative state,
+	// not a second owner record.
+	Retired       bool   `json:"retired,omitempty"`
+	RetirementJob string `json:"retirement_job,omitempty"`
+	RetiredEpoch  uint64 `json:"retired_epoch,omitempty"`
 }
 
 // Expired reports whether a legacy (expiry-based) owner record has expired.

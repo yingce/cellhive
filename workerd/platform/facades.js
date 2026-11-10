@@ -920,9 +920,9 @@ export function wrapR2Metadata(bucket) {
   };
   return new Proxy(bucket, {
     get(target, prop, receiver) {
-      if (prop === "get") {
-        return async (key, options) => {
-          const obj = await target.get(key, options);
+      if (prop === "get" || prop === "head" || prop === "put") {
+        return async (...args) => {
+          const obj = await target[prop](...args);
           if (!obj) return obj;
           const write = (hdrs) => {
             for (const [k, v] of Object.entries(obj.httpMetadata || {})) {

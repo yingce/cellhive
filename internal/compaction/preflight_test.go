@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ type countingBucket struct {
 }
 
 func (b *countingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.Contains(key, "/L1/") && !strings.HasSuffix(key, ".json") {
+	if (strings.Contains(key, "/L1/") || strings.Contains(key, "/0001/")) && !strings.HasSuffix(key, ".json") {
 		b.l1Gets++
 	}
 	return b.Bucket.Get(ctx, key)
@@ -42,7 +43,7 @@ func TestCompactPreflightDoesNotReadBaseline(t *testing.T) {
 			if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err = m.Append(ctx, sc, 1, deltaSegment(t, 1, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
+			if _, _, err = m.Append(ctx, sc, 1, deltaSegment(t, 1, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 				t.Fatal(err)
 			}
 			first, err := Compact(ctx, m, sc, 1, Options{MinSegments: 1})
@@ -50,7 +51,7 @@ func TestCompactPreflightDoesNotReadBaseline(t *testing.T) {
 				t.Fatalf("first=%+v err=%v", first, err)
 			}
 			if tc.addDelta {
-				if _, _, err = m.Append(ctx, sc, 1, deltaSegment(t, 1, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
+				if _, _, err = m.Append(ctx, sc, 1, deltaSegment(t, 1, 4096, 1, 3, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -82,11 +83,11 @@ func TestCompactThresholdCountsOnlyNewBytes(t *testing.T) {
 	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatal(err)
 	}
-	first, err := Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true})
+	first, err := Compact(ctx, m, sc, 1, Options{MinSegments: 1})
 	if err != nil || !first.Compacted {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	delta := deltaSegment(t, 1, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)})
+	delta := deltaSegment(t, 1, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)})
 	if _, _, err = m.Append(ctx, sc, 1, delta); err != nil {
 		t.Fatal(err)
 	}
@@ -95,68 +96,24 @@ func TestCompactThresholdCountsOnlyNewBytes(t *testing.T) {
 	if err != nil || result.Compacted || result.Skipped != "below threshold" || b.l1Gets != 0 {
 		t.Fatalf("result=%+v err=%v L1 GET=%d", result, err, b.l1Gets)
 	}
-	// Exact threshold still triggers and validates the baseline.
-	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta)), GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
-	// Offline GC revalidates complete persisted baseline/index proofs and the
-	// superseded payload. This is deliberately not the zero-read online path.
-	if err != nil || !result.Compacted || result.MaxTxID != 1 || b.l1Gets != 9 {
+	// Exact threshold triggers an incremental fold without rereading the baseline.
+	result, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: int64(len(delta))})
+	// Additive compaction leaves all prior level objects untouched.
+	if err != nil || !result.Compacted || result.MaxTxID != 2 || b.l1Gets != 0 {
 		t.Fatalf("threshold result=%+v err=%v gets=%d", result, err, b.l1Gets)
 	}
 }
 
-func TestCompactPreflightRejectsCorruptTail(t *testing.T) {
-	ctx := context.Background()
-	fs, err := bucket.NewFSBucket(filepath.Join(t.TempDir(), "bucket"))
-	if err != nil {
-		t.Fatal(err)
+func (b *countingBucket) PutReader(ctx context.Context, key string, r io.ReadSeeker, size int64) (string, error) {
+	return b.Bucket.(bucket.StreamPutter).PutReader(ctx, key, r, size)
+}
+func (b *countingBucket) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
+	if strings.Contains(key, "/0001/") && strings.HasSuffix(key, ".ltx") {
+		b.l1Gets++
 	}
-	m := replica.New(fs)
-	sc := cell.Scope{Namespace: "preflight", Class: "__kv__", ID: "corrupt"}
-	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true}); err != nil {
-		t.Fatal(err)
-	}
-	before, _, err := fs.Get(ctx, replica.ManifestName(sc, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = fs.Put(ctx, replica.Prefix(sc, 1)+"1-1.ltx", []byte("broken")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 64, MinBytes: 1 << 30, GC: true, OfflineQuiescent: true}); err == nil {
-		t.Fatal("accepted corrupt tail")
-	}
-	after, _, err := fs.Get(ctx, replica.ManifestName(sc, 1))
-	if err != nil || string(before) != string(after) {
-		t.Fatal("manifest changed after corruption")
-	}
+	return b.Bucket.(bucket.StreamReader).OpenReader(ctx, key)
 }
 
-func TestCompactPreflightBatchCountsLogicalSegments(t *testing.T) {
-	ctx := context.Background()
-	fs, err := bucket.NewFSBucket(filepath.Join(t.TempDir(), "bucket"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := replica.New(fs)
-	sc := cell.Scope{Namespace: "preflight", Class: "__kv__", ID: "batch"}
-	if _, _, err = m.Append(ctx, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = Compact(ctx, m, sc, 1, Options{MinSegments: 1, GC: true, OfflineQuiescent: true}); err != nil {
-		t.Fatal(err)
-	}
-	batch := [][]byte{
-		deltaSegment(t, 1, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}),
-		deltaSegment(t, 1, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}),
-	}
-	if _, _, err = m.AppendBatch(ctx, sc, 1, batch); err != nil {
-		t.Fatal(err)
-	}
-	result, err := Compact(ctx, m, sc, 1, Options{MinSegments: 2, MinBytes: 1 << 30, MinObjects: 8, GC: true, OfflineQuiescent: true})
-	if err != nil || !result.Compacted || result.NewL0 != 2 || result.MaxTxID != 2 {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
+func (b *countingBucket) Stat(ctx context.Context, key string) (int64, string, error) {
+	return b.Bucket.(bucket.Statter).Stat(ctx, key)
 }

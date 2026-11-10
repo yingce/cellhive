@@ -37,7 +37,6 @@ import (
 	"cellhive/internal/instance"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
-	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/objgc"
 	"cellhive/internal/owner"
@@ -177,6 +176,11 @@ func main() {
 	nodeLog := nodelog.New(b, cfg.NodeID)
 
 	rep := replica.New(b)
+	if cleanup, err := rep.EnableLocalLTXCache(cfg.DataDir); err != nil {
+		log.Warn("local LTX cache disabled", "err", err)
+	} else {
+		defer cleanup()
+	}
 	rep.RestoreParallel = cfg.RestoreParallel
 	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
 	takeoverRecovery.Lease = lm
@@ -295,10 +299,9 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
-	// Fold the final L0 tail before releasing ownership. Rebalance, disk
-	// pressure, handoff, and peer drain otherwise leave an uncompacted
-	// predecessor epoch that no future owner compacts; the cell keeps its
-	// objects but restore has to read a long L0 chain forever.
+	// Publish a native L9 snapshot before releasing a bounded-size cell.
+	// Large cells keep their continuation chain rather than forcing a full
+	// database download at every ownership change.
 	om.BeforeRelease = func(rctx context.Context, sc cell.Scope, epoch uint64) error {
 		if cfg.CaptureEpochSnapshotMaxBytes > 0 {
 			if p, err := store.Path(sc); err == nil {
@@ -310,8 +313,9 @@ func main() {
 		}
 		cctx, cancel := context.WithTimeout(rctx, 10*time.Second)
 		defer cancel()
-		cres, cerr := compaction.Compact(cctx, rep, sc, epoch, compaction.Options{
-			MinSegments: 1, MinBytes: 1, MinObjects: 1,
+		cres, cerr := compaction.Snapshot(cctx, rep, sc, epoch, compaction.Options{
+			SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
+			MinSegments:      1, MinBytes: 1, MinObjects: 1,
 			Verify: func(vctx context.Context) error {
 				o, _, rerr := om.Resolve(vctx, sc)
 				if rerr != nil {
@@ -322,7 +326,6 @@ func main() {
 				}
 				return nil
 			},
-			GC: false,
 		})
 		if cerr != nil {
 			log.Warn("compaction before release failed", "scope", sc.String(), "epoch", epoch, "err", cerr)
@@ -434,7 +437,9 @@ func main() {
 			raw = append(raw, sg.Raw)
 		}
 		_, applySpan := telemetry.Tracer().Start(hctx, "cell.restore_apply_sqlite")
-		_, herr = restore.ApplyFile(dest, raw)
+		_, herr = restore.ApplyFileWithFinalize(dest, raw, func(path string, watermark uint64) error {
+			return cellstore.AdoptRestoreFileTXID(hctx, path, watermark)
+		})
 		if herr != nil {
 			applySpan.RecordError(herr)
 		}
@@ -448,6 +453,42 @@ func main() {
 	// Wake index: the bucket-side list of scopes with a pending timer, so the
 	// fleet waker finds due work without listing every cell (ADR-099).
 	wakeIdx := wake.New(b)
+	wakeIdx.Validate = func(ctx context.Context, scope string) error {
+		sc, err := cell.ParseScope(scope)
+		if err != nil {
+			return err
+		}
+		current, _, err := om.Resolve(ctx, sc)
+		if err != nil {
+			return err
+		}
+		if current.Node != cfg.NodeID || current.Session != cfg.SessionID || !lm.Healthy(time.Now()) {
+			return owner.ErrNotOwner
+		}
+		return nil
+	}
+	// Forget may be run by the fleet waker without owning the retired scope.
+	// Capture hint versions first; then prove that the resource is still retired.
+	forgetDeletedWake := func(ctx context.Context, scope string) error {
+		return wake.New(b).DeleteValidated(ctx, scope, func() error {
+			sc, err := cell.ParseScope(scope)
+			if err != nil {
+				return err
+			}
+			if sc.Class != "__kv__" && sc.Class != "__queue__" {
+				return owner.ErrNotOwner
+			}
+			current, _, err := om.Resolve(ctx, sc)
+			if err != nil {
+				return err
+			}
+			if !current.Retired || !lm.Healthy(time.Now()) {
+				return owner.ErrNotOwner
+			}
+			return nil
+		})
+	}
+
 	openTimer := func(tctx context.Context, sc cell.Scope) (*timer.Store, error) {
 		if sc.Class == "__kv__" || sc.Class == "__queue__" {
 			blocked, err := rep.ResourceBlocked(tctx, sc)
@@ -456,13 +497,6 @@ func main() {
 			}
 			if blocked {
 				return nil, replica.ErrResourceDeleted
-			}
-			generation, err := rep.ResourceGeneration(tctx, sc)
-			if err != nil {
-				return nil, err
-			}
-			if err := store.EnsureResourceGeneration(tctx, sc, generation, func() (string, error) { return rep.ResourceGeneration(tctx, sc) }); err != nil {
-				return nil, err
 			}
 		}
 		c, err := store.Cell(tctx, sc)
@@ -486,7 +520,6 @@ func main() {
 	dispatcher = enricher
 	// Workflows: KindWorkflowSleep timers resume the slept instance; other kinds
 	// pass through to user-runtime (control plane is wired just below via ctrlRef).
-	ltx.CompressionEnabled = cfg.LTXCompression
 	workflowStore := workflow.New(store)
 	workflowStore.Index = wakeIdx
 	workflowStore.Register = timerReg.Add
@@ -579,7 +612,7 @@ func main() {
 			Interval: cfg.TimerInterval, Batch: cfg.TimerBatch, FiredTTL: cfg.TimerFiredTTL,
 			CronMaxAttempts: cfg.CronMaxAttempts,
 			Forget: func(fctx context.Context, scope string) error {
-				return wakeIdx.Delete(fctx, scope)
+				return forgetDeletedWake(fctx, scope)
 			},
 			Log: log,
 		}
@@ -628,7 +661,7 @@ func main() {
 			},
 			Open: openTimerScope, Dispatcher: dispatcher, Interval: cfg.WakerInterval,
 			Forget: func(fctx context.Context, scope string) error {
-				return wakeIdx.Delete(fctx, scope)
+				return forgetDeletedWake(fctx, scope)
 			},
 			Log: log,
 			Cleanup: func(cctx context.Context) (int, error) {
@@ -858,29 +891,44 @@ func main() {
 				return false, nil
 			},
 			EpochSnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
-			WriteMarker: func(cctx context.Context, sc cell.Scope, epoch, cut uint64) error {
-				_, merr := rep.MarkEpoch(cctx, sc, epoch, cut)
-				return merr
-			},
+			WriteContinuation:     rep.AppendContinuation,
+			CheckContinuation:     rep.CheckContinuation,
 			RetireEpochsFunc: func(cctx context.Context, sc cell.Scope, epoch uint64) (int, error) {
-				return rep.RetireEpochs(cctx, sc, epoch, cfg.EpochGCKeepPrevious)
+				c, release, err := store.AcquireResident(cctx, sc)
+				if err != nil || c == nil {
+					return 0, err
+				}
+				defer release()
+				return rep.RetireEpochsWithOptions(cctx, sc, epoch, cfg.EpochGCKeepPrevious, replica.RetireOptions{
+					Safe: true, Grace: time.Hour,
+					Ready: func(context.Context) (bool, error) { return c.PagedComplete(), nil },
+					Verify: func(vctx context.Context) error {
+						o, _, err := om.Resolve(vctx, sc)
+						if err != nil {
+							return err
+						}
+						if o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
+							return owner.ErrNotOwner
+						}
+						live, err := om.Live(vctx, o, time.Now())
+						if err != nil {
+							return err
+						}
+						if !live {
+							return owner.ErrNotOwner
+						}
+						return nil
+					},
+				})
 			},
-			SnapshotStarted: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
-				return rep.MarkSnapshotStarted(cctx, sc, epoch, txid)
-			},
-			SnapshotDone: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
-				return rep.MarkSnapshotDone(cctx, sc, epoch, txid)
-			},
-			ClearSnapshotStarted: func(cctx context.Context, sc cell.Scope, epoch, txid uint64) error {
-				return rep.ClearSnapshotStarted(cctx, sc, epoch, txid)
-			},
+			// celld publishes snapshot bytes and the epoch continuation atomically
+			// through one canonical LTX range object.
 			OnEnsure:            srv.RecordCaptureEnsure,
 			AutoCheckpointBytes: cfg.CellWALCheckpointBytes,
 			GroupCommitWait:     cfg.CaptureGroupCommitWait,
 			PipelineThreshold:   cfg.CapturePipelineThreshold,
 			SnapshotMaxBytes:    cfg.CaptureSnapshotMaxBytes,
 			SnapshotPartBytes:   cfg.CaptureSnapshotPartBytes,
-			SnapshotBatchParts:  8,
 			Log:                 log,
 			Owner: func(cctx context.Context, sc cell.Scope) (bool, uint64, error) {
 				o, _, err := om.ResolveRoute(cctx, sc)
@@ -957,7 +1005,11 @@ func main() {
 						}
 						return srv.CaptureWrite(cctx, queue.Scope(ns, name), fn)
 					},
-					DeadLetterSend: srv.EnqueueToQueueOwner,
+					DeadLetterSend:   srv.EnqueueToQueueOwner,
+					ValidateDispatch: queue.OwnerCheck(om),
+					AdmitRead: func(ctx context.Context, ref queue.Ref) (func(), error) {
+						return srv.BeginResourceRequest(ctx, queue.Scope(ref.Namespace, ref.Name))
+					},
 					AdmitDispatch: func(ctx context.Context, ref queue.Ref) (func(), error) {
 						return srv.BeginResourceRequest(ctx, queue.Scope(ref.Namespace, ref.Name))
 					},
@@ -1033,6 +1085,9 @@ func main() {
 	// stale SQLite copy while the first loop is restoring a newly claimed cell.
 	var timerOwnerLocks [64]sync.Mutex
 	timerOwn := func(tctx context.Context, sc cell.Scope) (bool, error) {
+		if err := srv.PrepareResourceAccess(tctx, sc); err != nil {
+			return false, err
+		}
 		h := fnv.New32a()
 		_, _ = h.Write([]byte(sc.String()))
 		mu := &timerOwnerLocks[h.Sum32()%uint32(len(timerOwnerLocks))]
@@ -1067,11 +1122,6 @@ func main() {
 				return false, cerr
 			}
 		}
-		if captureMgr != nil {
-			if _, err := captureMgr.Ensure(tctx, sc); err != nil {
-				return false, err
-			}
-		}
 		return true, nil
 	}
 	timerCommit := func(tctx context.Context, scope string, fn func() error) error {
@@ -1089,6 +1139,23 @@ func main() {
 		}
 		return srv.CaptureWrite(tctx, sc, fn)
 	}
+	timerAdmit := func(tctx context.Context, scope string) (func(), error) {
+		sc, err := cell.ParseScope(scope)
+		if err != nil {
+			return nil, err
+		}
+		release, err := srv.BeginResourceRequest(tctx, sc)
+		if err != nil {
+			return nil, err
+		}
+		if captureMgr != nil {
+			if _, err := captureMgr.Ensure(tctx, sc); err != nil {
+				release()
+				return nil, err
+			}
+		}
+		return release, nil
+	}
 	if timerRunner != nil {
 		timerRunner.Own = func(tctx context.Context, scope string) (bool, error) {
 			sc, err := cell.ParseScope(scope)
@@ -1097,6 +1164,7 @@ func main() {
 			}
 			return timerOwn(tctx, sc)
 		}
+		timerRunner.Admit = timerAdmit
 		timerRunner.Commit = timerCommit
 		timerRunner.Start(ctx)
 	}
@@ -1115,11 +1183,23 @@ func main() {
 			}
 			return owned, err
 		}
+		wakerRunner.Admit = timerAdmit
 		wakerRunner.Commit = timerCommit
 		wakerRunner.Start(ctx)
 	}
 	if cronScheduler != nil {
-		cronScheduler.Own = timerOwn
+		cronScheduler.Own = func(tctx context.Context, sc cell.Scope) (bool, error) {
+			owned, err := timerOwn(tctx, sc)
+			if err != nil || !owned {
+				return owned, err
+			}
+			if captureMgr != nil {
+				if _, err := captureMgr.Ensure(tctx, sc); err != nil {
+					return false, err
+				}
+			}
+			return true, nil
+		}
 		cronScheduler.Commit = func(tctx context.Context, sc cell.Scope, fn func() error) error {
 			return timerCommit(tctx, sc.String(), fn)
 		}
@@ -1162,6 +1242,7 @@ func main() {
 	go srv.RunHyperdriveProxyHealthLoop(ctx)
 	srv.SetReady(true)
 	go srv.RunResourceCleanupLoop(ctx)
+	go srv.RunCellTransferCleanupLoop(ctx)
 	go srv.RunProxySQLReconcileLoop(ctx)
 
 	// Graceful handoff (cell-protocol §7): mark draining as soon as shutdown
@@ -1215,8 +1296,8 @@ func main() {
 	log.Info("cell-agent stopped")
 }
 
-// runEpochGCLoop reports deferred replication GC. Production never asserts
-// external writer/reader quiescence, even when an existing interval is nonzero.
+// runEpochGCLoop collects superseded native epochs after local hydration and
+// fresh ownership checks. The previous epoch and one-hour age margin remain.
 func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm *cellcapture.Manager, interval, initial time.Duration) {
 	if interval <= 0 {
 		return
@@ -1264,76 +1345,77 @@ type compactionScope struct {
 	verify func(context.Context) error
 }
 
-// runCompactionLoop periodically folds each owned scope's L0 chain into an L1
-// snapshot so a takeover restore reads a bounded set of objects. It re-checks
-// ownership (node + epoch) immediately before writing, so a node that lost the
-// lease never publishes a manifest.
+// runCompactionLoop gives each native level its own UTC-aligned schedule.
+// A slow L1 round cannot postpone the L2/L3 clocks.
 func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, rep *replica.Manager, cfg config.Config) {
-	t := time.NewTicker(cfg.CompactionInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			ownedScopes := om.OwnedScopes()
-			scopes := make([]compactionScope, 0, len(ownedScopes))
-			for _, owned := range ownedScopes {
-				sc, epoch := owned.Scope, owned.Epoch
-				verify := func(vctx context.Context) error {
-					o, _, err := om.Resolve(vctx, sc)
-					if err != nil {
-						return err
-					}
-					if o.Node != cfg.NodeID || o.Epoch != epoch {
-						return fmt.Errorf("ownership changed: node=%s epoch=%d", o.Node, o.Epoch)
-					}
-					return nil
+	var wg sync.WaitGroup
+	for _, schedule := range compaction.CelldLevels[1:] {
+		wg.Add(1)
+		go func(schedule compaction.LevelSchedule) {
+			defer wg.Done()
+			for {
+				timer := time.NewTimer(time.Until(schedule.NextAt(time.Now())))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
 				}
-				scopes = append(scopes, compactionScope{scope: sc, epoch: epoch, verify: verify})
+				ownedScopes := om.OwnedScopes()
+				scopes := make([]compactionScope, 0, len(ownedScopes))
+				for _, owned := range ownedScopes {
+					sc, epoch := owned.Scope, owned.Epoch
+					verify := func(vctx context.Context) error {
+						o, _, err := om.Resolve(vctx, sc)
+						if err != nil {
+							return err
+						}
+						if o.Node != cfg.NodeID || o.Epoch != epoch {
+							return fmt.Errorf("ownership changed: node=%s epoch=%d", o.Node, o.Epoch)
+						}
+						return nil
+					}
+					scopes = append(scopes, compactionScope{scope: sc, epoch: epoch, verify: verify})
+				}
+				compactScopesAtLevel(ctx, log, rep, cfg, scopes, uint16(schedule.Level))
 			}
-			compactScopes(ctx, log, rep, cfg, scopes)
-		}
+		}(schedule)
 	}
+	wg.Wait()
 }
 
 // compactScopes bounds each scope independently so one hung bucket operation
 // cannot delay every later owned scope. Ownership and epoch checks stay in the
 // per-scope Verify callback.
 func compactScopes(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, scopes []compactionScope) {
+	compactScopesAtLevel(ctx, log, rep, cfg, scopes, 1)
+}
+
+func compactScopesAtLevel(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, scopes []compactionScope, level uint16) {
 	timeout := cfg.CompactionTimeout
 	if timeout <= 0 {
 		timeout = defaultCompactionTimeout
 	}
 	for _, owned := range scopes {
 		sctx, cancel := context.WithTimeout(ctx, timeout)
-		res, err := compaction.Compact(sctx, rep, owned.scope, owned.epoch, compaction.Options{
-			MinSegments: cfg.CompactionMinSegments,
-			MinBytes:    cfg.CompactionMinBytes,
-			MinObjects:  cfg.CompactionMinObjects,
-			Verify:      owned.verify,
-			GC:          true,
-			// OfflineQuiescent intentionally remains false (ADR-307).
-		})
+		opts := compaction.Options{Verify: owned.verify}
+		if level == 1 {
+			opts.MinSegments = cfg.CompactionMinSegments
+			opts.MinBytes = cfg.CompactionMinBytes
+			opts.MinObjects = cfg.CompactionMinObjects
+		}
+		res, err := compaction.CompactLevel(sctx, rep, owned.scope, owned.epoch, level, opts)
 		cancel()
 		if err != nil {
 			// Do not emit scope/key names or backend error text; those can contain
 			// tenant identifiers and object names.
 			log.Warn("compaction failed", "epoch", owned.epoch)
 		} else if res.Compacted {
-			log.Info("compacted", "epoch", owned.epoch, "inputs", res.Inputs,
+			log.Info("compacted", "level", level, "epoch", owned.epoch, "inputs", res.Inputs,
 				"parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID,
-				"deleted_l1", res.DeletedL1, "deleted_l0", res.DeletedL0,
-				"stored_bytes", res.InputBytes, "objects", res.ObjectCount,
-				"object_bytes", res.ObjectBytes, "object_bytes_known", res.ObjectBytesKnown,
-				"covered", res.Covered, "deferred", res.Deferred, "unknown", res.Unknown,
-				"retained_bytes", res.RetainedBytes)
+				"stored_bytes", res.InputBytes)
 		}
-		if err == nil && res.GCSkipped != "" {
-			log.Info("compaction gc deferred", "epoch", owned.epoch, "objects", res.DeferredGC,
-				"covered", res.Covered, "deferred", res.Deferred, "unknown", res.Unknown,
-				"retained_bytes", res.RetainedBytes, "retained_bytes_known", res.RetainedBytesKnown)
-		}
+
 	}
 }
 
@@ -1494,6 +1576,11 @@ func runCellDiskLoop(ctx context.Context, log *slog.Logger, store *cellstore.Sto
 				if sc.Class == control.ControlClass || store.IsOpen(sc) {
 					return true, false
 				}
+				release, gateErr := store.BeginRequestContext(ctx, sc.String())
+				if gateErr != nil {
+					return true, false
+				}
+				defer release()
 				c, cerr := store.Cell(ctx, sc)
 				if cerr != nil {
 					return true, false
@@ -1514,8 +1601,12 @@ func runCellDiskLoop(ctx context.Context, log *slog.Logger, store *cellstore.Sto
 				if !ok {
 					continue
 				}
-				c, cerr := store.Cell(ctx, sc)
+				c, release, cerr := store.AcquireResident(ctx, sc)
 				if cerr != nil {
+					continue
+				}
+				release() // Never hold a request pin while Forget waits for requests.
+				if c == nil {
 					continue
 				}
 				// Re-verify under the eviction gate: the txid may have advanced
@@ -1590,6 +1681,14 @@ func runGCLoop(ctx context.Context, log *slog.Logger, b bucket.Bucket, ctrl *con
 }
 
 func registerTimerScope(ctx context.Context, open func(context.Context, cell.Scope) (*timer.Store, error), srv *server.Server, sc cell.Scope) {
+	if err := srv.PrepareResourceAccess(ctx, sc); err != nil {
+		return
+	}
+	release, err := srv.BeginResourceRequest(ctx, sc)
+	if err != nil {
+		return
+	}
+	defer release()
 	st, err := open(ctx, sc)
 	if err != nil {
 		return
@@ -1627,28 +1726,40 @@ func repairWakeIndexPass(ctx context.Context, log *slog.Logger, store *cellstore
 	for examined < batch && examined < len(scopes) {
 		sc := scopes[(*cursor+examined)%len(scopes)]
 		examined++
-		p, perr := store.Path(sc)
-		if perr != nil {
-			continue
-		}
-		min, hasTimers, perr := cellstore.PendingTimerMin(ctx, p)
-		if perr != nil || !hasTimers {
-			continue
-		}
-		if min <= 0 {
-			if err := idx.Delete(ctx, sc.String()); err == nil {
+		shouldRegister := func() bool {
+			if err := srv.PrepareResourceAccess(ctx, sc); err != nil {
+				return false
+			}
+			release, err := srv.BeginResourceRequest(ctx, sc)
+			if err != nil {
+				return false
+			}
+			defer release()
+			p, perr := store.Path(sc)
+			if perr != nil {
+				return false
+			}
+			min, hasTimers, perr := cellstore.PendingTimerMin(ctx, p)
+			if perr != nil || !hasTimers {
+				return false
+			}
+			if min <= 0 {
+				if err := idx.Delete(ctx, sc.String()); err == nil {
+					repaired++
+				}
+				return false
+			}
+			if err := idx.Put(ctx, sc.String(), min, "", ""); err == nil {
 				repaired++
 			}
-			continue
-		}
-		if err := idx.Put(ctx, sc.String(), min, "", ""); err == nil {
-			repaired++
-		}
-		if o, _, rerr := om.Resolve(ctx, sc); rerr == nil {
-			live, lerr := om.Live(ctx, o, time.Now())
-			if lerr == nil && live && o.Node == nodeID {
-				registerTimerScope(ctx, open, srv, sc)
+			if o, _, rerr := om.Resolve(ctx, sc); rerr == nil {
+				live, lerr := om.Live(ctx, o, time.Now())
+				return lerr == nil && live && o.Node == nodeID
 			}
+			return false
+		}()
+		if shouldRegister {
+			registerTimerScope(ctx, open, srv, sc)
 		}
 	}
 	*cursor = (*cursor + examined) % len(scopes)
@@ -1766,7 +1877,7 @@ func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
 	}
 	if strings.HasPrefix(cfg.BucketURL, "s3://") {
 		name := strings.TrimPrefix(cfg.BucketURL, "s3://")
-		return bucket.NewS3Bucket(ctx, bucket.S3Options{
+		data, err := bucket.NewS3Bucket(ctx, bucket.S3Options{
 			Endpoint:  cfg.S3Endpoint,
 			Region:    cfg.S3Region,
 			AccessKey: cfg.S3AccessKey,
@@ -1774,6 +1885,10 @@ func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
 			Bucket:    name,
 			PathStyle: cfg.S3PathStyle,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return bucket.NewS3ControlBucket(data), nil
 	}
 	if strings.HasPrefix(cfg.BucketURL, "oss://") || strings.HasPrefix(cfg.BucketURL, "cos://") {
 		name := cfg.BucketURL[6:]

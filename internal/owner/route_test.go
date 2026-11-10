@@ -131,11 +131,11 @@ func TestRouteExpiredLocalEvidenceDoesNotRevive(t *testing.T) {
 	}
 	// Simulate a missed safe lease window, followed by a recovered lease and
 	// ownership that has moved while the process could not serve.
-	m.mu.Lock()
-	c := m.routes[sc.String()]
-	c.until = time.Now().Add(-time.Second)
-	m.routes[sc.String()] = c
-	m.mu.Unlock()
+	// Observe the safety-margin boundary without expiring the actual lease.
+	// Merely aging a route is now allowed when publications stayed continuous.
+	if lm.Healthy(lm.HealthyUntil()) {
+		t.Fatal("margin boundary should interrupt the proof")
+	}
 	old.Node = "b"
 	old.Session = "b-s1"
 	old.Epoch++
@@ -420,5 +420,85 @@ func TestForwardHintRejectsChangedOrExpiredSession(t *testing.T) {
 				t.Fatal("unsafe hint accepted")
 			}
 		})
+	}
+}
+
+func TestRouteIdleAcrossContinuousRenewals(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "a")
+	lm := lease.NewManager(raw, m.NodeID, m.Session, "", "", 500*time.Millisecond)
+	m.LeaseView = lm
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "app", Class: "kv", ID: "idle-continuous"}
+	if _, err := m.Claim(t.Context(), sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b := &routeCountBucket{Bucket: raw}
+	m.B = b
+	first, _, err := m.ResolveRoute(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No scope access while node-level publications continue past the cached
+	// route deadline. This models idle30s with a continuously renewed node.
+	for i := 0; i < 6; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check, ok := m.LocalReadGuard(sc)
+	if !ok || !check() {
+		t.Fatal("idle local authorization proof required a redundant lookup")
+	}
+	got, _, err := m.ResolveRoute(t.Context(), sc)
+	if err != nil || got != first {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if b.gets.Load() != 1 {
+		t.Fatalf("owner reads=%d want1", b.gets.Load())
+	}
+}
+
+func TestRouteDelayedReadRejectsRecoveredMarginProof(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "a")
+	lm := lease.NewManager(raw, m.NodeID, m.Session, "", "", time.Minute)
+	m.LeaseView = lm
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "app", Class: "kv", ID: "delayed-margin"}
+	old, err := m.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &delayedOwnerGet{Bucket: raw, block: true, started: make(chan struct{}), release: make(chan struct{})}
+	m.B = b
+	done := make(chan cell.Owner, 1)
+	go func() {
+		o, _, err := m.ResolveRoute(t.Context(), sc)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- o
+	}()
+	<-b.started
+	if lm.Healthy(lm.HealthyUntil()) {
+		t.Fatal("expected margin interruption")
+	}
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	old.Node = "b"
+	old.Session = "b-s1"
+	old.Epoch++
+	data, _ := cell.MarshalOwner(old)
+	if _, err := raw.Put(t.Context(), Key(sc), data); err != nil {
+		t.Fatal(err)
+	}
+	close(b.release)
+	if got := <-done; got.Node != "b" {
+		t.Fatalf("pre-gap owner response reused: %+v", got)
 	}
 }

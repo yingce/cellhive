@@ -1202,9 +1202,25 @@ func TestDoRuntimeRestoresClaimedHostBeforeDispatch(t *testing.T) {
 }
 
 // replicaCommitter commits captures into a shared bucket via replica.
-type replicaCommitter struct{ rep *replica.Manager }
+type replicaCommitter struct {
+	rep           *replica.Manager
+	snapshotBytes atomic.Int64
+}
 
 func (r *replicaCommitter) Claim(context.Context, cell.Scope) error { return nil }
+func (r *replicaCommitter) CommitSnapshotFile(ctx context.Context, sc cell.Scope, epoch, txid uint64, path string, size int64) error {
+	_, _, err := r.rep.AppendSnapshotFile(ctx, sc, epoch, path, size)
+	if err == nil {
+		r.snapshotBytes.Add(size)
+	}
+	return err
+}
+
+func (r *replicaCommitter) CommitNativeFile(ctx context.Context, sc cell.Scope, epoch, txid uint64, path string, size int64) error {
+	_, _, err := r.rep.AppendLevelFile(ctx, sc, epoch, 0, path, size)
+	return err
+}
+
 func (r *replicaCommitter) Commit(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte) error {
 	_, _, err := r.rep.Append(ctx, sc, epoch, seg)
 	return err
@@ -1256,13 +1272,16 @@ func TestDoRuntimeCrossNodeColdActivation(t *testing.T) {
 
 // startRuntimeAt runs a do-runtime against an existing cell-agent stub, letting a
 // test pick the node id, data dir and gate (for takeover scenarios).
-func startRuntimeAt(t *testing.T, cellURL, bundle, diskDir, gateURL, nodeID string) (string, func()) {
+func startRuntimeAt(t *testing.T, cellURL, bundle, diskDir, gateURL, nodeID string, pagingEnv ...string) (string, func()) {
+	return startRuntimeAtLease(t, cellURL, bundle, diskDir, gateURL, nodeID, "", pagingEnv...)
+}
+func startRuntimeAtLease(t *testing.T, cellURL, bundle, diskDir, gateURL, nodeID, lease string, pagingEnv ...string) (string, func()) {
 	t.Helper()
 	port := freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: cellURL, CellToken: testJWTKey("internal"), BindingSigningKey: testJWTKey("scope"), Addr: fmt.Sprintf("*:%d", port),
 		DiskDir: diskDir, PlatformJS: "../../workerd/do-runtime",
-		NodeID: nodeID, PreventEviction: true, GateURL: gateURL,
+		NodeID: nodeID, PreventEviction: true, GateURL: gateURL, DoLeaseS: lease, PagingLifecycle: len(pagingEnv) != 0,
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -1273,7 +1292,13 @@ func startRuntimeAt(t *testing.T, cellURL, bundle, diskDir, gateURL, nodeID stri
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, workerd, capnpPath) }()
+	if len(pagingEnv) > 0 {
+		saved, _ := renderedEnvs.LoadAndDelete(capnpPath)
+		env := append(append([]string{}, saved.([]string)...), pagingEnv...)
+		go func() { done <- Run(ctx, workerd, capnpPath, env) }()
+	} else {
+		go func() { done <- Run(ctx, workerd, capnpPath) }()
+	}
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	client := noProxyClient()
 	deadline := time.Now().Add(25 * time.Second)
@@ -1624,5 +1649,237 @@ func TestDoRuntimeClassicDOAndStatus(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || body != want {
 			t.Fatalf("legacy fetch = %d %q, want 200 %q", resp.StatusCode, body, want)
 		}
+	}
+}
+
+// Registered classes exercise the generated facet wrapper, not only raw classes.
+func TestRegisteredDoRuntimeWebSocketAbort(t *testing.T) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		if _, serr := os.Stat("/root/.bun/bin/bun"); serr == nil {
+			bun = "/root/.bun/bin/bun"
+		} else {
+			t.Skip("bun unavailable for the WS client")
+		}
+	}
+	o := &ownerStub{live: map[string]bool{}, bindings: map[string]any{"SELF": map[string]any{"kind": "do", "namespace": "demo", "worker": "counter", "class": "Tenant", "name": "SELF"}}}
+	base, stop := startRuntimeWithBundle(t, o, wsTenant)
+	defer stop()
+
+	wsURL := base + "/v1/do/connect?namespace=demo&worker=counter&class=Tenant&id=a1&bundle_sha=sha1&storage_id=ds_ws&version=1"
+	script := `
+const [url, token] = process.argv.slice(-2);
+const ws = new WebSocket(url, { headers: { "Authorization": token } });
+ws.onopen = () => ws.send("hi");
+ws.onmessage = (e) => { console.log("MSG:" + e.data); };
+ws.onclose = (e) => { console.log("CLOSE:" + e.code); process.exit(0); };
+ws.onerror = (e) => { console.log("ERR:" + (e && e.message ? e.message : e)); };
+setTimeout(() => { console.log("TIMEOUT"); process.exit(2); }, 8000);
+`
+	outFile := filepath.Join(t.TempDir(), "ws.log")
+	f, _ := os.Create(outFile)
+	cmd := exec.Command(bun, "-e", script, wsURL, testJWTAuthorization("internal"))
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start bun: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	waitFor := func(sub string, d time.Duration) string {
+		deadline := time.Now().Add(d)
+		for time.Now().Before(deadline) {
+			b, _ := os.ReadFile(outFile)
+			if strings.Contains(string(b), sub) {
+				return string(b)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		b, _ := os.ReadFile(outFile)
+		return string(b)
+	}
+	if got := waitFor("MSG:echo:hi", 12*time.Second); !strings.Contains(got, "MSG:echo:hi") {
+		t.Fatalf("no echo; log=%q", got)
+	}
+	// Abort the facet -> the client must see 1012.
+	abortBody, _ := json.Marshal(map[string]any{"namespace": "demo", "worker": "counter", "class": "Tenant", "id": "a1", "storage_id": "ds_ws"})
+	areq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/abort", bytes.NewReader(abortBody))
+	areq.Header.Set("content-type", "application/json")
+	areq.Header.Set("Authorization", testJWTAuthorization("internal"))
+	aresp, err := noProxyClient().Do(areq)
+	if err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	aresp.Body.Close()
+
+	_ = cmd.Wait()
+	b, _ := os.ReadFile(outFile)
+	if !strings.Contains(string(b), "CLOSE:1012") {
+		t.Fatalf("expected CLOSE:1012, log=%q", string(b))
+	}
+}
+
+func TestPagedRegisteredDoRuntimeWebSocketAbort(t *testing.T) {
+	testPagedRegisteredWebSocketTransition(t, false)
+}
+
+func TestPagedRegisteredDoRuntimeWebSocketVersionChange(t *testing.T) {
+	testPagedRegisteredWebSocketTransition(t, true)
+}
+
+func testPagedRegisteredWebSocketTransition(t *testing.T, versionChange bool) {
+	if _, err := FindWorkerd(); err != nil {
+		t.Skipf("workerd unavailable: %v", err)
+	}
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		if _, serr := os.Stat("/root/.bun/bin/bun"); serr == nil {
+			bun = "/root/.bun/bin/bun"
+		} else {
+			t.Skip("bun unavailable for the WS client")
+		}
+	}
+	bundleBytes, err := os.ReadFile("../../examples/do-websocket/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := strings.ReplaceAll(string(bundleBytes), "Echo", "Tenant")
+	namespace := fmt.Sprintf("do-ws-%d", time.Now().UnixNano())
+	o := &ownerStub{live: map[string]bool{}, bindings: map[string]any{"SELF": map[string]any{"kind": "do", "namespace": namespace, "worker": "counter", "class": "Tenant", "name": "SELF"}}}
+	dir := t.TempDir()
+	store, err := doColdBucket(t, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paging, err := dosupervisor.NewPaging(dir, "websocket-paging-test-0123456789012345678901234567890123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer paging.Close()
+	rep := replica.New(store)
+	sup := &dosupervisor.Supervisor{Dir: dir, Bucket: store, Store: rep, Committer: &replicaCommitter{rep: rep}, Epoch: 1, ScopePrefix: namespace + "/__do__", Paging: paging}
+	pageHandler := sup.PagingHandler()
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := httptest.NewRecorder()
+		pageHandler.ServeHTTP(rec, r)
+		if rec.Code >= 400 {
+			t.Logf("paging operation=%s code=%d body=%s", r.URL.Path, rec.Code, rec.Body.String())
+		}
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		w.Write(rec.Body.Bytes())
+	}))
+	defer bridge.Close()
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/do/paging/admit" || r.URL.Path == "/internal/do/paging/retire" {
+			pagingFixtureGate(sup, namespace).ServeHTTP(w, r)
+			return
+		}
+		sup.Handler().ServeHTTP(w, r)
+	}))
+	defer gate.Close()
+	stub := httptest.NewServer(o.handler(bundle))
+	defer stub.Close()
+	base, stop := startRuntimeAt(t, stub.URL, bundle, dir, gate.URL, "ws-paging", "CELLHIVE_DO_PAGING_URL="+bridge.URL, "CELLHIVE_DO_PAGING_TOKEN=websocket-paging-test-0123456789012345678901234567890123456789", "CELLHIVE_DO_PAGING_FAIL_STOP=1")
+	defer stop()
+
+	wsURL := base + "/v1/do/connect?namespace=" + namespace + "&worker=counter&class=Tenant&id=a1&bundle_sha=sha1"
+	if versionChange {
+		wsURL += "&storage_id=ds_ws_transition"
+	}
+
+	script := `
+const [url, token] = process.argv.slice(-2);
+const ws = new WebSocket(url, { headers: { "Authorization": token } });
+ws.onopen = () => ws.send("hi");
+ws.onmessage = (e) => { console.log("MSG:" + e.data); };
+ws.onclose = (e) => { console.log("CLOSE:" + e.code); process.exit(0); };
+ws.onerror = (e) => { console.log("ERR:" + (e && e.message ? e.message : e)); };
+setTimeout(() => { console.log("TIMEOUT"); process.exit(2); }, 8000);
+`
+	outFile := filepath.Join(t.TempDir(), "ws.log")
+	f, _ := os.Create(outFile)
+	cmd := exec.Command(bun, "-e", script, wsURL, testJWTAuthorization("internal"))
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start bun: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	waitFor := func(sub string, d time.Duration) string {
+		deadline := time.Now().Add(d)
+		for time.Now().Before(deadline) {
+			b, _ := os.ReadFile(outFile)
+			if strings.Contains(string(b), sub) {
+				return string(b)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		b, _ := os.ReadFile(outFile)
+		return string(b)
+	}
+	if got := waitFor(`MSG:{"echo":"hi","n":1}`, 12*time.Second); !strings.Contains(got, `MSG:{"echo":"hi","n":1}`) {
+		t.Fatalf("no echo; log=%q", got)
+	}
+	if versionChange {
+		otherURL := strings.Replace(wsURL, "id=a1", "id=unrelated", 1)
+		otherWait, otherStop := wsClient(t, otherURL, testJWTAuthorization("internal"))
+		defer otherStop()
+		if got := otherWait(`MSG:{"echo":"hi","n":1}`, 5*time.Second); !strings.Contains(got, `MSG:{"echo":"hi","n":1}`) {
+			t.Fatalf("unrelated socket: %s", got)
+		}
+		var wg sync.WaitGroup
+		failures := make(chan string, 16)
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resp, body := invokeSpec(t, base, map[string]any{"namespace": namespace, "worker": "counter", "class": "Tenant", "id": "a1", "bundle_sha": "sha1", "storage_id": "ds_ws_transition", "version": 2, "request": map[string]any{"path": "/"}})
+				if resp.StatusCode != 426 {
+					failures <- fmt.Sprintf("%d %s", resp.StatusCode, body)
+				}
+			}()
+		}
+		wg.Wait()
+		close(failures)
+		for failure := range failures {
+			t.Errorf("version transition: %s", failure)
+		}
+		if got := waitFor("CLOSE:1012", 5*time.Second); !strings.Contains(got, "CLOSE:1012") {
+			t.Fatalf("old socket not closed: %s", got)
+		}
+		newWait, newStop := wsClient(t, wsURL+"&version=2", testJWTAuthorization("internal"))
+		defer newStop()
+		if got := newWait(`MSG:{"echo":"hi","n":2}`, 5*time.Second); !strings.Contains(got, `MSG:{"echo":"hi","n":2}`) {
+			t.Fatalf("state lost after replacement: %s", got)
+		}
+		if got := otherWait("CLOSE:", 0); strings.Contains(got, "CLOSE:") || strings.Contains(got, "ERR:") {
+			t.Fatalf("unrelated socket interrupted: %s", got)
+		}
+		t.Log("16 version-switch requests passed; target socket closed 1012; next activation retained n=2; unrelated socket stayed open; same native runtime")
+		_ = cmd.Wait()
+		return
+	}
+	// Abort the facet -> the client must see 1012.
+	abortBody, _ := json.Marshal(map[string]any{"namespace": namespace, "worker": "counter", "class": "Tenant", "id": "a1"})
+	areq, _ := http.NewRequest(http.MethodPost, base+"/v1/do/abort", bytes.NewReader(abortBody))
+	areq.Header.Set("content-type", "application/json")
+	areq.Header.Set("Authorization", testJWTAuthorization("internal"))
+	aresp, err := noProxyClient().Do(areq)
+	if err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	aresp.Body.Close()
+
+	_ = cmd.Wait()
+	b, _ := os.ReadFile(outFile)
+	if !strings.Contains(string(b), "CLOSE:1012") {
+		t.Fatalf("expected CLOSE:1012, log=%q", string(b))
 	}
 }

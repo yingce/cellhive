@@ -10,29 +10,30 @@ var ErrGCDeferred = errors.New("replica: physical GC deferred; external writer a
 
 // RetireOptions authorizes destructive cleanup. The zero value never deletes.
 type RetireOptions struct {
+	// Ready proves a resident activation no longer reads its remote paged cut.
+	// The caller must retain its local request/eviction gate for the GC pass.
+	// Online native epoch GC requires both Ready and fresh Verify callbacks.
+	Ready func(context.Context) (bool, error)
 	// OfflineQuiescent asserts that all writers AND readers have been stopped
 	// and drained externally for the entire operation. Production must not set it.
 	OfflineQuiescent bool
-	// Safe authorizes the online pin/seal/tombstone protocol. It is still not a
-	// production default: deleting requires a seal (unless AllowUnsealed), no
-	// live reader pin, and a due tombstone.
+	// Safe enables native online epoch GC when Ready and Verify are supplied.
 	Safe bool
-	// AllowUnsealed is only for same-epoch covered-L0 cleanup. It still requires
-	// no live reader pin and a due tombstone.
-	AllowUnsealed bool
-	// Grace is the tombstone window. 0 uses the default; a negative value means
-	// no delay (tests and explicitly offline maintenance only).
+	// Grace is the epoch object upload-age margin (default one hour).
+	// A negative value disables the delay for tests or offline maintenance.
 	Grace time.Duration
-	// DrainTimeout bounds WaitReaderPins. 0 waits until ctx is done.
-	DrainTimeout time.Duration
-	// Now is a test seam for lease and tombstone deadlines.
+	// Now is a test seam for object age.
 	Now func() time.Time
-	// Job identifies the maintenance operation that owns the tombstones.
+	// Job identifies the maintenance operation.
 	Job string
 	// Verify is checked immediately before each Delete. It stops observed owner
 	// loss, but cannot close the check/delete TOCTOU or establish quiescence.
 	Verify func(context.Context) error
 }
 
-// authorized reports whether the caller provided any deletion authorization.
-func (o RetireOptions) authorized() bool { return o.OfflineQuiescent || o.Safe }
+func (o RetireOptions) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}

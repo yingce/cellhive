@@ -55,7 +55,7 @@ cell 协议只有一套（租约 / epoch / 复制 / RPO / 寻址 / 发现 / 诊�
 每个 cell 在对象存储上有一个 owner 记录：
 
 ```
-cells/<scope>/owner.json
+cells/<scope>/own.json
 { "node": "<owner-node-id>", "role": "cell-agent|do-runtime",
   "session": "<session-id>", "epoch": 42,
   "expiry": 1730000000000, "address": "10.0.0.12:8788",
@@ -86,7 +86,7 @@ nodes/<node>.json
 ```
 
 - 每节点一条，按 TTL/3 续租；TTL 默认 10s（可配）。
-- `liveness=node-lease-fence-v2` 标明节点同时使用节点租约判活与 `resource-fence.v2` 协议；旧 `node-lease` 节点仍可能写旧栅栏，不能同桶混跑。启动时必须成功枚举并排除存活的旧协议节点；运行中发现旧节点则停止确认写入。
+- `liveness=node-lease-fence-v2` 是历史兼容标识；当前删除 fencing 使用 owner lineage（见 ADR-310），旧 sidecar 只读迁移，不再新增。
 - 节点 lease 是**存活证明**：节点失联 → 其名下所有 cell 可被接管。
 - `load` 暴露伸缩信号：`owned_cells`、`placement_weight`、`resident_cells`、`host_websockets`、`rss_bytes`、`cpu_percent_x100`、`pressured`、`memory_headroom`、`shed_cells`、`restoring`、`sampled_ms`。
 - **fleet capacity sample**：每节点每 5s 读一次共享快照；由一个节点刷新（读各 lease），其余读结果，避免 O(cells)。
@@ -138,7 +138,7 @@ nodes/<node>.json
 
 即：**epoch 是"写入有效性"的围栏**，配合 owner 记录上的代次校验，让旧 owner 的写入无害化。
 
-KV/Queue 的删除还使用 `cells/<scope>/resource-fence.v2`。首次访问把旧 `resource-fence.json` 的 `job_id/deleted/epoch_floor` 条件迁入稳定 append-position 记录；每次 LTX 提交在本地读锁内 fresh 点查该记录，删除/代际变更以 append-position CAS 更新。app 清理保留新旧栅栏；满 8 MiB 时拒绝更新并失败关闭。该记录不以负缓存绕过删除检查。
+KV/Queue 的删除 fencing 与 celld owner lineage 一致，状态保存在 `cells/<scope>/own.json` 的 retired/job/epoch 字段。释放 owner 时保留空记录和 epoch；旧 `owner.json` 与 sidecar 不属于当前格式，也不再读取。
 
 ## 6. 复制与 RPO=0
 
@@ -147,13 +147,13 @@ KV/Queue 的删除还使用 `cells/<scope>/resource-fence.v2`。首次访问把�
 - SQLite 提交事务被捕获为 **LTX**（事务日志段），上传到当前 epoch 前缀（普通 PUT）。
 - 后端 A：`cell-agent` 直接捕获自己拥有的 SQLite（**ADR-092**：KV/D1/Queue/Workflow/Vectorize/timer/control 写路径经 `internal/cellcapture` 接 `sqlcapture` → LTX → fleet 证明，bucket 异步；冷恢复经 `cellstore.Hydrate` + `replica.LatestEpoch`；`/v1/internal/{append,commit}` 亦可供外部 committer）。
 - 后端 B：`do-runtime` 的 supervisor 捕获 WAL 段，**上报给 cell-agent**，由 cell-agent 执行复制与证明（见 [`durable-objects.md`](./durable-objects.md)）。
-- 快照：对大数据 cell，接管时先恢复一个整库快照（L9）以避免回放全部历史；否则物化 L0 链。
+- 快照是全库逻辑基线；恢复组合快照及后续各 level/epoch 的连续增量。大 cell 可按内嵌索引分页读取，不要求接管时物化全库，也不要求每次 epoch 切换都产生 L9。
 - 冷恢复与分页索引选择**能接上完整、连续增量后缀的最新快照**。跨越快照水位的批量增量不能整段丢弃；若没有较早快照能提供连续链，则拒绝恢复，不能把重叠段当作已包含的事务。
-- 初始快照的 `snapshot-started`、LTX snapshot part 和 `snapshot-done` 必须使用同一个 checkpoint 后的实际水位。started 写入失败须在上传首个 part 前中止，不能用 checkpoint 前的 baseline 或上传后的 `Cell.TxID()` 代替快照标签。
+- 初始快照先流式写入本地临时 spool，完成并 fsync 后以一个 `ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx` 完整对象发布，允许同名幂等重传。生产路径不创建 `snapshot-started`、`snapshot-done`、`epoch-cut` 或其它完成 sidecar；恢复只信任完整原生 LTX 对象及其内嵌页索引。
 - **compaction**：后台把大量 L0 段折叠为 L1（`min_txids` / `min_mb` 触发），使接管只读少量对象而非成千上万。
-- GC 删除全部 L0 后，`L1/manifest.json` 仍是该 epoch 的完整恢复基线。冷恢复须在过滤 LTX 段之前识别 manifest；不能因为只剩 L1 而跳过这个 epoch。
+- compaction 把未覆盖范围逐级晋升为原生 `.ltx` 对象，不删除源对象；L9 保存完整快照，min TXID=1 识别基线，不读写独立 manifest/index。
 - **paging**：超过阈值的 cell 采用稀疏文件 + 按需分页，冷启动不必整库下载。
-- **checkpoint 对齐（I-03）**：后端 B 的 supervisor 轮询 `(salt, frame)`；salt 变化或 frame 归零 = 发生 checkpoint → 暂停 delta，用 **SQLite Online Backup API**（只读连接）取一致快照，上传为 **L9 快照**并记 txid，再从 frame 0 续 delta 并写 **snapshot→delta 衔接标记**。P0 必测"活跃写入期间 checkpoint"。
+- **checkpoint 对齐**：分页 native checkpoint 通过 prepare/commit 协议在 WAL reset 前完成持久捕获；普通 WAL 捕获按 salt/frame 跟踪事务。恢复使用原生 LTX 范围、WAL 坐标及内嵌索引，不写 snapshot→delta 独立衔接标记。
 
 ### 持久化证明（输出门）
 
@@ -198,7 +198,7 @@ bucket 提交**以"块"为单位**（同一 `(scope, epoch)` 的一批写攒成�
 - 两模式共用 `internal/upload` 合批器；`batch` 用 `EnqueueWait`，`async` 用 `Enqueue`。**未配置合批器**时退化为逐笔直接 PUT（`mode:"bucket"`）。
 - **不再有独立 `sync` 模式**：`batch` 在单并发（每次立即 flush）下即等价于逐笔同步 PUT，且 RPO 相同，故并入 `batch`。
 - **顺序保证**：合批器是**单循环**——`AppendBatch` 完成前不收下一批，因此同一 `(scope, epoch)` **不会有两个块并发上传**；块内按写入顺序打包，块名 `txid 区间` 递增；`Restore` 按 txid 重排。测试 `TestBatcherBlocksOrderedAndSerial` 覆盖（成块 `< N`、顺序 `0..N-1`、`maxInflight == 1`）。
-- **约束**：块对象是 **create-once（If-None-Match）且按 txid 区间命名**，故同一 `(scope, epoch)` 的 txid 必须**单调递增、不可重用**；压测/重放若复用 txid 区间会命中同名对象而 412。
+- **约束**：LTX 按 epoch/TXID 区间命名，同一写入代际的 TXID 单调推进。普通 PUT/multipart 允许同名幂等重传；不得把新的业务事务复用为已发布的 TXID。owner/epoch 与单写者捕获、压缩串行保证边界，不以对象条件创建实现写者隔离。
 - **远程/跨洋对象存储**下 `bucket`（RPO=0）尾延迟数秒不可用；此时要么上 ≥2 节点走 fleet，要么显式接受 `async` 的 RPO>0。
 
 ### 接管

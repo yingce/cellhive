@@ -37,6 +37,7 @@ func TestPinnedAuthorizationRevocation(t *testing.T) {
 			case "app":
 				err = s.Control.DeleteApp(t.Context(), "acme", "test")
 			case "resource":
+				claimSeededScope(t, s, control.Scope())
 				err = s.Control.DeleteResource(t.Context(), "acme", "kv", "KV", "test")
 			}
 			if err != nil {

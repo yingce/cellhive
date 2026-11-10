@@ -323,7 +323,7 @@ func TestFromEnvCellCacheDefaults(t *testing.T) {
 	t.Setenv("CELLHIVE_PAGED_MIN_BYTES", "")
 	t.Setenv("CELLHIVE_PAGED_READAHEAD_BYTES", "")
 	c := FromEnv()
-	if c.MaxOpenCells != 32 || c.CellIdleTTL != 5*time.Minute || c.PagedMinBytes != 32<<20 || c.PagedReadAheadBytes != 1<<20 {
+	if c.MaxOpenCells != 128 || c.CellIdleTTL != 5*time.Minute || c.PagedMinBytes != 32<<20 || c.PagedReadAheadBytes != 1<<20 {
 		t.Fatalf("cell defaults open=%d idle=%s paged_min=%d readahead=%d", c.MaxOpenCells, c.CellIdleTTL, c.PagedMinBytes, c.PagedReadAheadBytes)
 	}
 }

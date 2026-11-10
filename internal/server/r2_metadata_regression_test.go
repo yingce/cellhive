@@ -119,11 +119,11 @@ type r2RangeOverwriteBucket struct{ bucket.Bucket }
 func (b *r2RangeOverwriteBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
 	body, etag, err := b.Bucket.RangedGet(ctx, key, off, length)
 	if err == nil {
-		_, err = b.Bucket.Put(ctx, key, []byte("new-longer-version"))
+		_, err = r2.New(b.Bucket).PutWithMeta(ctx, "acme", "files", "k", []byte("new-longer-version"), &r2.Metadata{Custom: map[string]string{"writer": "new"}})
 	}
 	return body, etag, err
 }
-func TestR2RangeRejectsConcurrentVersionChange(t *testing.T) {
+func TestR2RangePinsConcurrentVersionChange(t *testing.T) {
 	s := newScopeServer(t)
 	if _, err := s.R2.Put(t.Context(), "acme", "files", "k", []byte("hello")); err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestR2RangeRejectsConcurrentVersionChange(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), ctxScopeNS, "acme"))
 	rr := httptest.NewRecorder()
 	s.handleR2Get(rr, req)
-	if rr.Code != 503 || rr.Header().Get("Content-Range") != "" {
+	if rr.Code != 206 || rr.Body.String() != "ell" || rr.Header().Get("Content-Range") != "bytes 1-3/5" || rr.Header().Get(r2MetaHeader) != "" {
 		t.Fatalf("range combined versions: %d %s %+v", rr.Code, rr.Body.String(), rr.Header())
 	}
 }

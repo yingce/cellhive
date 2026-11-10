@@ -21,6 +21,6 @@ React/Vite 在本地或 CI 构建，上传 `dist`；构建时变量和 runtime v
 - `assets.binding` 会注入用户指定名称的 `Fetcher`，其身份固定在当前版本的 namespace/worker/token；不能访问其他租户或版本。
 - `.assetsignore` 支持常用 gitignore 形式的路径、目录、`*`/`?` 和 `!` 重新包含规则；`.assetsignore` 本身不上传。
 - 同一 `(namespace, worker, assets token, path)` 只能写入一次；重试相同字节成功，写入不同字节失败。
-- COS/OSS 的 `assets/` 对象使用原生 PutObject 禁止覆盖选项执行原子创建，包含零字节文件；冲突交由 artifact 层读取并比较内容。不得使用先读后普通 Put，也不得对空文件使用 position=0 append，因为这两种方式无法保证首次写入后不可覆盖。控制面 authority 与 LTX 路径保持原有 append/fence 协议。
+- COS 的普通 PUT `forbid-overwrite` 实测会并发多赢家，因此 `assets/` 使用原 key 的 native append(position=0)，前置 16 字节 `CHASSET1`/长度头，空文件也占用非零长度。读接口剥离并校验头部，普通 Put/CAS 禁止修改；不增加协调文件。COS assets 通过 authenticated agent 点读回退，响应显式 Content-Length 以保留 runtime 小文件缓存；不再直接预签名物理对象。旧 raw assets 必须迁移到空目标重传，或停服清理后重传；仅重复发布同内容版本仍会命中旧 token。OSS 原生禁止覆盖 PUT、S3 条件 PUT 以及 LTX 路径不变。详见[真实竞争与发布验收](reports/2026-11-10-cos-assets-atomic-create.md)。
 
 完整 React 验收应检查：`/`、深层 history 路由、hash 资源、懒加载 chunk、API worker-first、版本回滚和 `.assetsignore` 文件不可访问。

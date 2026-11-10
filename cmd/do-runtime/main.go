@@ -82,6 +82,7 @@ func main() {
 		Advertise:         advertise,
 		PreventEviction:   preventEviction,
 		GateURL:           gateURL,
+		PagingLifecycle:   os.Getenv("CELLHIVE_DO_PAGING_URL") != "",
 		OutboundAllow:     outboundAllow(),
 	}
 	capnpPath, err := doruntime.Render(runtimeDir, runtimeCfg)

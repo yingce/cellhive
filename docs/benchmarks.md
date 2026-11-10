@@ -159,7 +159,7 @@ CELLHIVE_BUCKET=s3://cellhive AWS_ENDPOINT_URL=http://127.0.0.1:9000 \
 | c=16 | 3524 | 4.26 ms | 4616 |
 | c=32 | 4215 | 7.45 ms | 5052 |
 
-- **fleet 路径已确认**：follower 的 `peer-spool/<ns>/__kv__/default/e1/segments.log` 有数据，桶里有 727 个异步 `.batch` 对象。
+- **fleet 路径已确认**：follower 的 `peer-spool/<ns>/__kv__/default/e1/segments.log` 有数据，桶里有 727 个异步 canonical `.ltx` 对象。
 - **但同机 fleet 不更快**（甚至略慢）：两个进程抢同一块盘/CPU，peer fsync 与桶写是同一块盘，loopback 的桶本来就快。"fleet 显著快于单节点桶"只在**跨主机/跨网络**场景成立；要复现需**第二台主机**（当前环境缺，C 类 blocker）。
 - 结论：fleet 是为**远桶/高 RTT** 设计的；本地/近桶时单节点桶已够快。
 
@@ -297,15 +297,15 @@ CELLHIVE_BUCKET=s3://cellhive AWS_ENDPOINT_URL=http://127.0.0.1:9000 \
 
 ### LTX 碎片与自动合并
 
-`capture` 每个合并批产生一个 LTX 对象；上层 `upload` 的 `AppendBatch` 会把多个段**打包进一个对象**（`.batch`），`compaction` 再把 L0 链 fold 成 L1。
+`capture` 每个合并批产生一个 canonical LTX range 对象；`AppendBatch` 使用固定宽度十六进制 `<min>-<max>.ltx` 名称，`compaction` 再按 celld level 晋升。
 
 | 配置 | 2 万写后的对象数 | 说明 |
 |---|---|---|
 | 关闭 compaction | **1336** 个 L0（0 L1） | ~15 写/对象（窗口 2ms、c=64） |
-| 开启 compaction（默认 30s / ≥64 段或 64MB） | **3** 个（0 L0 + 3 L1） | `L1/{manifest.json,<maxTx>.snapshot,index.bin}` |
+| 开启 compaction（默认 30s / ≥64 段或 64MB） | **3** 个（0 L0 + 3 L1） | `0001/<min>-<max>.ltx`（canonical range object） |
 
 - **有自动合并**：cell-agent `runCompactionLoop` 周期扫描 **owned** scope，`>=MinSegments(64)` 或 `>=MinBytes(64MB)` 时 fold L0→L1 + GC 旧对象（fold 前校验 owner/epoch）；恢复只读 L1 + 更新的 L0（有界）。原始：`docs/archive/bench/ltx-fragmentation.txt`。
-- 碎片峰值 ≈ 两次 compaction 之间的对象数 ≈ **PUT 速率 × compaction 周期**。远端桶建议 `CELLHIVE_COMPACTION_INTERVAL=5–10s`、并配合窗口/分片控制 PUT 速率。
+- 碎片峰值 ≈ 两次 compaction 之间的对象数 ≈ **PUT 速率 × compaction 周期**。ADR-312 后各 level 固定独立周期（L1 30 秒、L2 5 分钟、L3 1 小时）；旧的 `CELLHIVE_COMPACTION_INTERVAL=5–10s` 调优建议已失效。
 
 
 ### 已试过、**无收益、已回退**的微优化

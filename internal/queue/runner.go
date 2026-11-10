@@ -61,6 +61,10 @@ type Runner struct {
 	// the queue for this pass.
 	Filter        func(ctx context.Context, ref Ref) (bool, error)
 	AdmitDispatch func(context.Context, Ref) (func(), error)
+	// AdmitRead protects BatchReady only; release precedes mutation admission.
+	AdmitRead func(context.Context, Ref) (func(), error)
+	// ValidateDispatch runs under admission and must not claim, reset or evict.
+	ValidateDispatch func(context.Context, Ref) (bool, error)
 	// Commit, when set, wraps every store mutation (claim/ack/retry/dead-letter)
 	// so it is captured and proven durable before the runner proceeds (RPO=0).
 	// nil means plain local writes (tests / capture disabled).
@@ -205,7 +209,7 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 	}
 	batches := make([][]Message, 0, conc)
 	for i := 0; i < conc; i++ {
-		ready, rerr := r.Store.BatchReady(ctx, ref.Namespace, ref.Name, batch, ref.MaxBatchTimeoutSeconds)
+		ready, rerr := r.batchReady(ctx, ref, batch)
 		if rerr != nil {
 			r.log().Warn("queue batch readiness failed", "ns", ref.Namespace, "queue", ref.Name, "err", rerr)
 			break
@@ -248,9 +252,27 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 	return total
 }
 
+func (r *Runner) batchReady(ctx context.Context, ref Ref, batch int) (bool, error) {
+	if r.AdmitRead != nil {
+		release, err := r.AdmitRead(ctx, ref)
+		if err != nil {
+			return false, err
+		}
+		defer release()
+	}
+	return r.Store.BatchReady(ctx, ref.Namespace, ref.Name, batch, ref.MaxBatchTimeoutSeconds)
+}
+
 // dispatchBatch delivers one claimed batch and acks (or retries/dead-letters)
 // its messages, returning the number acked.
 func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int {
+	// Preparation may reset a stale generation, so it must precede admission.
+	if r.Filter != nil {
+		allowed, err := r.Filter(ctx, ref)
+		if err != nil || !allowed {
+			return 0
+		}
+	}
 	release := func() {}
 	if r.AdmitDispatch != nil {
 		var err error
@@ -276,8 +298,8 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 			}
 		}
 	}
-	if r.Filter != nil {
-		allowed, err := r.Filter(ctx, ref)
+	if r.ValidateDispatch != nil {
+		allowed, err := r.ValidateDispatch(ctx, ref)
 		if err != nil || !allowed {
 			return 0
 		}

@@ -191,7 +191,7 @@ func (s *Store) CompleteMultipart(ctx context.Context, ns, bucketName, key, uplo
 	if len(parts) == 0 || len(parts) > MaxMultipartParts {
 		return "", 0, ErrBadUpload
 	}
-	dst, err := Key(ns, bucketName, key)
+	_, err := Key(ns, bucketName, key)
 	if err != nil {
 		return "", 0, err
 	}
@@ -219,12 +219,10 @@ func (s *Store) CompleteMultipart(ctx context.Context, ns, bucketName, key, uplo
 		total += len(data)
 		buf = append(buf, data...)
 	}
-	etag, err := s.B.Put(ctx, dst, buf)
+	etag, err := s.Put(ctx, ns, bucketName, key, buf)
 	if err != nil {
 		return "", 0, err
 	}
-	size := int64(total)
-	s.recordUsage(ctx, ns, bucketName, key, &size)
 	// Best-effort cleanup: a failed cleanup must not fail the completed upload.
 	_ = s.AbortMultipart(ctx, ns, bucketName, key, uploadID)
 	return etag, total, nil

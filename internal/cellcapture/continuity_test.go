@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"cellhive/internal/replica"
 )
 
-func TestInitialSnapshotMarkersUseCommittedSnapshotLabel(t *testing.T) {
+func TestInitialNativeSnapshotHasNoSidecars(t *testing.T) {
 	ctx := t.Context()
 	cs, err := cellstore.New(t.TempDir())
 	if err != nil {
@@ -37,10 +38,7 @@ func TestInitialSnapshotMarkersUseCommittedSnapshotLabel(t *testing.T) {
 			_, _, err := rep.Append(ctx, sc, epoch, data)
 			return err
 		}),
-		Durable:              rep.DurableWatermark,
-		SnapshotStarted:      rep.MarkSnapshotStarted,
-		SnapshotDone:         rep.MarkSnapshotDone,
-		ClearSnapshotStarted: rep.ClearSnapshotStarted,
+		Durable: rep.DurableWatermark,
 	}
 	defer m.Stop()
 	if _, err := m.Ensure(ctx, sc); err != nil {
@@ -50,22 +48,24 @@ func TestInitialSnapshotMarkersUseCommittedSnapshotLabel(t *testing.T) {
 	if err != nil || len(segs) == 0 {
 		t.Fatalf("initial snapshot not recoverable: segments=%d err=%v", len(segs), err)
 	}
-	var label uint64
 	for _, seg := range segs {
-		if seg.Header.Kind == ltx.KindSnapshot {
-			label = seg.Header.EndTxID
-			break
+		h, err := ltx.ValidateNative(seg.Raw)
+		if err != nil || !h.IsSnapshot() || h.MaxTXID == 0 {
+			t.Fatalf("invalid initial native snapshot: %+v %v", h, err)
 		}
 	}
-	if _, _, err := b.Get(ctx, replica.SnapshotStartedName(sc, 1, label)); err != nil {
-		t.Fatalf("started marker does not match snapshot %d: %v", label, err)
+	keys, err := b.List(ctx, sc.Key()+"/")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, err := b.Get(ctx, replica.SnapshotDoneName(sc, 1, label)); err != nil {
-		t.Fatalf("done marker does not match snapshot %d: %v", label, err)
+	for _, key := range keys {
+		if !strings.HasSuffix(key, ".ltx") {
+			t.Fatalf("unexpected snapshot sidecar: %s", key)
+		}
 	}
 }
 
-func TestInitialSnapshotStartMarkerFailureStopsUpload(t *testing.T) {
+func TestInitialSnapshotUploadFailureStopsCapture(t *testing.T) {
 	ctx := t.Context()
 	cs, err := cellstore.New(t.TempDir())
 	if err != nil {
@@ -78,13 +78,16 @@ func TestInitialSnapshotStartMarkerFailureStopsUpload(t *testing.T) {
 	}
 	var commits int
 	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) { return 0, nil }, &commits)
-	m.SnapshotStarted = func(context.Context, cell.Scope, uint64, uint64) error { return errors.New("marker unavailable") }
+	m.Committer = committerFunc(func(context.Context, cell.Scope, uint64, []byte) error {
+		commits++
+		return errors.New("upload unavailable")
+	})
 	defer m.Stop()
 	if _, err := m.Ensure(ctx, sc); err == nil {
-		t.Fatal("marker failure allowed capture to start")
+		t.Fatal("failed upload allowed capture to start")
 	}
-	if commits != 0 {
-		t.Fatalf("marker failure uploaded %d snapshot segments", commits)
+	if commits != 1 {
+		t.Fatalf("failed snapshot attempted %d uploads, want 1", commits)
 	}
 }
 
@@ -422,10 +425,8 @@ func TestEvictionKeepsResumeHint(t *testing.T) {
 	m.Stop()
 }
 
-// A marker-resumed epoch gets its own baseline in the background. The snapshot
-// must be bracketed by started -> done markers for the snapshot's own watermark,
-// not for whatever the cell's txid has moved on to.
-func TestBackgroundBaselineBracketsSnapshotWithMarkers(t *testing.T) {
+// A continued epoch publishes one native snapshot at its image watermark.
+func TestBackgroundBaselinePublishesNativeSnapshot(t *testing.T) {
 	ctx := context.Background()
 	cs, err := cellstore.New(t.TempDir())
 	if err != nil {
@@ -442,46 +443,37 @@ func TestBackgroundBaselineBracketsSnapshotWithMarkers(t *testing.T) {
 	}
 	local, _ := c.TxID(ctx)
 
-	var events []string
 	var commits int
 	m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
 		return local, nil
 	}, &commits)
 	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil } // new epoch
 	m.EpochSnapshotMaxBytes = 1 << 30
-	m.WriteMarker = func(context.Context, cell.Scope, uint64, uint64) error {
-		events = append(events, "marker")
-		return nil
-	}
-	m.SnapshotStarted = func(_ context.Context, _ cell.Scope, _, txid uint64) error {
-		events = append(events, "started")
+	m.WriteContinuation = func(context.Context, cell.Scope, uint64, ltx.NativeHeader) error {
 		return nil
 	}
 	doneTx := make(chan uint64, 1)
-	m.SnapshotDone = func(_ context.Context, _ cell.Scope, _, txid uint64) error {
-		events = append(events, "done")
-		doneTx <- txid
+	m.Committer = committerFunc(func(_ context.Context, _ cell.Scope, _ uint64, raw []byte) error {
+		h, err := ltx.ValidateNative(raw)
+		if err != nil {
+			return err
+		}
+		if !h.IsSnapshot() {
+			return errors.New("background baseline is not a native snapshot")
+		}
+		doneTx <- h.MaxTXID
 		return nil
-	}
+	})
 	defer m.Stop()
 	if _, err := m.Ensure(ctx, sc); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case txid := <-doneTx:
-		if txid < local {
-			t.Fatalf("done marker for txid %d, want >= %d", txid, local)
+		if txid != local+1 {
+			t.Fatalf("native snapshot for txid %d, want continuation watermark %d", txid, local+1)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatalf("background baseline never marked done; events=%v", events)
-	}
-	want := []string{"marker", "started", "done"}
-	if len(events) != len(want) {
-		t.Fatalf("events = %v, want %v", events, want)
-	}
-	for i := range want {
-		if events[i] != want[i] {
-			t.Fatalf("events = %v, want %v", events, want)
-		}
+		t.Fatal("background baseline was not published")
 	}
 }

@@ -182,13 +182,11 @@ func (s *Spool) AppendSessionGroup(_ context.Context, session string, appends []
 			return nil, fmt.Errorf("spool: empty session frame")
 		}
 		for _, seg := range append.Segments {
-			h, _, err := ltx.Decode(seg)
+			_, err := ltx.ValidateNative(seg)
 			if err != nil {
 				return nil, fmt.Errorf("spool: invalid segment: %w", err)
 			}
-			if h.Epoch != append.Epoch {
-				return nil, fmt.Errorf("spool: epoch mismatch: segment %d, request %d", h.Epoch, append.Epoch)
-			}
+
 		}
 	}
 	dir := s.sessionDir(session)
@@ -739,13 +737,11 @@ func (s *Spool) Append(ctx context.Context, sc cell.Scope, epoch uint64, segment
 // used by the follower-side group-commit batcher.
 func (s *Spool) AppendBatch(_ context.Context, sc cell.Scope, epoch uint64, segments [][]byte) (string, string, error) {
 	for _, seg := range segments {
-		h, _, err := ltx.Decode(seg)
+		_, err := ltx.ValidateNative(seg)
 		if err != nil {
 			return "", "", fmt.Errorf("spool: invalid segment: %w", err)
 		}
-		if h.Epoch != epoch {
-			return "", "", fmt.Errorf("spool: epoch mismatch: segment %d, request %d", h.Epoch, epoch)
-		}
+
 	}
 	dir := filepath.Dir(s.logPath(sc, epoch))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -766,24 +762,24 @@ func (s *Spool) AppendBatch(_ context.Context, sc cell.Scope, epoch uint64, segm
 	if !sl.loaded {
 		if existing, rerr := parseLogFile(lp); rerr == nil {
 			for _, seg := range existing {
-				if h, _, derr := ltx.Decode(seg); derr == nil {
-					sl.seen[h.ID()] = struct{}{}
+				if _, derr := ltx.ValidateNative(seg); derr == nil {
+					sl.seen[spoolSegmentIdentity(seg)] = struct{}{}
 				}
 			}
 		}
 		sl.loaded = true
 	}
 	fresh := make([][]byte, 0, len(segments))
+	pending := make(map[string]struct{}, len(segments))
 	for _, seg := range segments {
-		h, _, derr := ltx.Decode(seg)
-		if derr != nil {
-			return "", "", fmt.Errorf("spool: invalid segment: %w", derr)
-		}
-		id := h.ID()
-		if _, dup := sl.seen[id]; dup {
+		id := spoolSegmentIdentity(seg)
+		if _, ok := sl.seen[id]; ok {
 			continue
 		}
-		sl.seen[id] = struct{}{}
+		if _, ok := pending[id]; ok {
+			continue
+		}
+		pending[id] = struct{}{}
 		fresh = append(fresh, seg)
 	}
 	if len(fresh) == 0 {
@@ -808,10 +804,13 @@ func (s *Spool) AppendBatch(_ context.Context, sc cell.Scope, epoch uint64, segm
 		return "", "", err
 	}
 	if _, ok := s.dirs.Load(dir); !ok {
-		if err := syncDir(dir); err != nil {
+		if err := s.syncDir(dir); err != nil {
 			return "", "", err
 		}
 		s.dirs.Store(dir, struct{}{})
+	}
+	for id := range pending {
+		sl.seen[id] = struct{}{}
 	}
 	return lp, "", nil
 }
@@ -829,8 +828,8 @@ func (s *Spool) List(sc cell.Scope, epoch uint64) ([]string, error) {
 	}
 	out := make([]string, 0, len(segs))
 	for _, seg := range segs {
-		if h, _, err := ltx.Decode(seg); err == nil {
-			out = append(out, ltx.SegmentName(h))
+		if h, err := ltx.ValidateNative(seg); err == nil {
+			out = append(out, fmt.Sprintf("%016x-%016x.ltx", h.MinTXID, h.MaxTXID))
 		}
 	}
 	sort.Strings(out)
@@ -942,3 +941,7 @@ func (s *Spool) SessionExists(session string) bool {
 	_, err := os.Stat(filepath.Join(dir, sealName))
 	return err == nil
 }
+
+// The range alone is not content identity: conflicting same-range files must
+// survive to recovery, where immutable publication rejects the conflict.
+func spoolSegmentIdentity(raw []byte) string { sum := sha256.Sum256(raw); return string(sum[:]) }

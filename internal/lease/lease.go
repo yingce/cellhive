@@ -56,7 +56,7 @@ type NodeLease struct {
 // NodeLeaseLiveness gates owner, resource-fence and recovery compatibility.
 // Pre-v3 recovery writers could misinterpret identified logs as legacy Held
 // logs, so ADR-285 requires a coordinated replacement, not a rolling mix.
-const NodeLeaseLiveness = "node-lease-fence-v2-recovery-v3"
+const NodeLeaseLiveness = "node-lease-fence-v2-recovery-v3-retirement-v1"
 
 // Key returns the bucket key for a node lease.
 func Key(node string) string { return "nodes/" + node + ".json" }
@@ -78,6 +78,8 @@ type Manager struct {
 	// wrote. Peers judge us dead once it passes, so Healthy measures from it and
 	// not from when the PUT happened to return.
 	publishedExpiry time.Time
+	healthRevision  uint64
+	healthBroken    bool
 	fenced          bool
 	publishMu       sync.Mutex
 	publishedETag   string
@@ -177,7 +179,14 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		return fmt.Errorf("initial node lease write returned expired")
 	}
 	m.publishedETag = etag
+	// Check the old deadline before replacing it: requests may have been idle
+	// throughout a safety-margin gap, so Healthy alone cannot observe it.
+	_, continuous := m.healthLocked(now)
+	if m.healthRevision == 0 || !continuous || m.healthBroken {
+		m.healthRevision++
+	}
 	m.publishedExpiry = expiry
+	m.healthBroken = false
 	return nil
 }
 
@@ -205,14 +214,43 @@ func (m *Manager) Fenced() bool {
 // node never acks after the moment a peer may start taking its cells over.
 func (m *Manager) Healthy(now time.Time) bool {
 	m.mu.Lock()
-	fenced := m.expiredLocked(now)
-	m.mu.Unlock()
-	return !fenced && now.Before(m.HealthyUntil())
+	defer m.mu.Unlock()
+	_, healthy := m.healthLocked(now)
+	return healthy
+}
+
+// HealthProof identifies one uninterrupted safe service interval. Revision
+// alone is not authority: callers must check Healthy and bind the local session.
+// A new revision after a gap cannot revive evidence from the previous interval.
+type HealthProof struct {
+	Revision uint64
+	Until    time.Time
+	Healthy  bool
+}
+
+func (m *Manager) HealthProof() HealthProof {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until, healthy := m.healthLocked(time.Now())
+	return HealthProof{Revision: m.healthRevision, Until: until, Healthy: healthy && !m.healthBroken && m.healthRevision != 0}
+}
+
+func (m *Manager) healthLocked(now time.Time) (time.Time, bool) {
+	margin := m.TTL / 5
+	if margin <= 0 {
+		margin = time.Second
+	}
+	until := m.publishedExpiry.Add(-margin)
+	healthy := !m.expiredLocked(now) && !m.publishedExpiry.IsZero() && now.Before(until) && now.UnixMilli() < until.UnixMilli()
+	if !healthy {
+		m.healthBroken = true
+	}
+	return until, healthy
 }
 
 // HealthyUntil returns the last published lease deadline minus the self-fence
-// margin. The time retains its monotonic component; renewal cannot authorize
-// reuse of a cell route whose previously observed deadline has already passed.
+// margin. The time retains its monotonic component. Callers extending cached
+// evidence across publications must also bind HealthProof.Revision.
 func (m *Manager) HealthyUntil() time.Time {
 	m.mu.Lock()
 	exp := m.publishedExpiry
@@ -338,7 +376,13 @@ func HasShedTarget(leases []NodeLease, self string, now time.Time) bool {
 
 // Sample lists all node leases (operator/diagnostic use; never on hot path).
 func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
-	keys, err := m.B.List(ctx, "nodes/")
+	var keys []string
+	var err error
+	if lister, ok := m.B.(bucket.ImmediateLister); ok {
+		keys, err = lister.ListImmediate(ctx, "nodes/")
+	} else {
+		keys, err = m.B.List(ctx, "nodes/")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -346,6 +390,7 @@ func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
 	// within refresh's deadline. A cancelled pass must never publish a partial list.
 	results := make([]NodeLease, len(keys))
 	valid := make([]bool, len(keys))
+	failures := make([]error, len(keys))
 	slots := make(chan struct{}, 8)
 	var workers sync.WaitGroup
 scan:
@@ -363,14 +408,28 @@ scan:
 			defer workers.Done()
 			defer func() { <-slots }()
 			data, _, err := m.B.Get(ctx, k)
-			if err == nil && json.Unmarshal(data, &results[i]) == nil {
-				valid[i] = true
+			if errors.Is(err, bucket.ErrNotFound) {
+				return
 			}
+			if err != nil {
+				failures[i] = fmt.Errorf("sample node lease %s: %w", k, err)
+				return
+			}
+			if err := json.Unmarshal(data, &results[i]); err != nil {
+				failures[i] = fmt.Errorf("decode node lease %s: %w", k, err)
+				return
+			}
+			valid[i] = true
 		}(i, k)
 	}
 	workers.Wait()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	for _, err := range failures {
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]NodeLease, 0, len(keys))
 	for i, l := range results {

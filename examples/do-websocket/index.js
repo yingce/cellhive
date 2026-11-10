@@ -7,7 +7,7 @@ export class Echo {
     }
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1]);
-    return new Response(null, { status: 101, webSocket: pair[1] });
+    return new Response(null, { status: 101, webSocket: pair[0] });
   }
   async webSocketMessage(ws, msg) {
     const n = ((await this.state.storage.get("n")) ?? 0) + 1;

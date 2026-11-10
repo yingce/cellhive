@@ -532,7 +532,7 @@ func (b *etagOnlyBucket) Stat(ctx context.Context, k string) (int64, string, err
 	return b.st.Stat(ctx, k)
 }
 
-func TestConditionalPutUsesStatNotObjectGet(t *testing.T) {
+func TestConditionalPutDoesNotReadBody(t *testing.T) {
 	ctx := context.Background()
 	base, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
@@ -547,7 +547,12 @@ func TestConditionalPutUsesStatNotObjectGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.objectKey = k
+	p, _, err := s.readPublication(ctx, "acme", "files", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = k
+	b.objectKey = p.Body
 	b.mu.Lock()
 	b.gets, b.stats = 0, 0
 	b.mu.Unlock()
@@ -558,7 +563,7 @@ func TestConditionalPutUsesStatNotObjectGet(t *testing.T) {
 	b.mu.Lock()
 	gets, stats := b.gets, b.stats
 	b.mu.Unlock()
-	if gets != 0 || stats == 0 {
-		t.Fatalf("object get=%d stat=%d; conditional ETag must use HEAD/Stat", gets, stats)
+	if gets != 0 || stats != 0 {
+		t.Fatalf("object get=%d stat=%d; conditional ETag must use the publication record", gets, stats)
 	}
 }

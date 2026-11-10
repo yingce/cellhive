@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -180,6 +181,15 @@ func (o *Objects) ConditionalDelete(ctx context.Context, key, etag string) error
 	return o.B.ConditionalDelete(ctx, k, etag)
 }
 
+// RangedGet reads a range through the same owned-prefix validation as Get.
+func (o *Objects) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return nil, "", err
+	}
+	return o.B.RangedGet(ctx, k, off, length)
+}
+
 // Stat returns an object's size and etag through a point lookup. It never
 // falls back to List or a full-body read when the backend lacks Stat support.
 func (o *Objects) Stat(ctx context.Context, key string) (int64, string, error) {
@@ -315,4 +325,43 @@ func (o *Objects) CommonPrefixes(ctx context.Context, prefix, delimiter string) 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// ConditionalCreateReader preserves prefix validation for bounded-memory uploads.
+func (o *Objects) ConditionalCreateReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return "", err
+	}
+	creator, ok := o.B.(bucket.StreamCreator)
+	if !ok {
+		return "", bucket.ErrNotSupported
+	}
+	return creator.ConditionalCreateReader(ctx, k, src, size)
+}
+
+// OpenReader retains prefix ownership for streaming immutable object reads.
+func (o *Objects) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	reader, ok := o.B.(bucket.StreamReader)
+	if !ok {
+		return nil, 0, "", bucket.ErrNotSupported
+	}
+	return reader.OpenReader(ctx, k)
+}
+
+// PutReader validates ownership before an ordinary bounded-memory upload.
+func (o *Objects) PutReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	k, err := o.key(key)
+	if err != nil {
+		return "", err
+	}
+	p, ok := o.B.(bucket.StreamPutter)
+	if !ok {
+		return "", bucket.ErrNotSupported
+	}
+	return p.PutReader(ctx, k, src, size)
 }

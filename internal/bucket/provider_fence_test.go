@@ -53,91 +53,17 @@ func openProviderForFenceTest(t *testing.T) *ProviderBucket {
 	return NewProviderBucket(data, appender)
 }
 
+// Removed sidecar formats must never be silently recreated by cloud adapters.
 func TestProviderResourceFence(t *testing.T) {
-	ctx := context.Background()
 	b := openProviderForFenceTest(t)
-	id := time.Now().UnixNano()
-	key := fmt.Sprintf("cells/itest/__kv__/fence%d/resource-fence.json", id)
-	legacyKey := fmt.Sprintf("cells/itest/__kv__/fencelegacy%d/resource-fence.json", id)
-	defer b.Delete(ctx, key)
-	defer b.Delete(ctx, legacyKey)
-
-	one := []byte(`{"job_id":"one","deleted":true}`)
-	token, err := b.ConditionalCreate(ctx, key, one)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.ConditionalCreate(ctx, key, []byte(`{"job_id":"two"}`)); !errors.Is(err, ErrPrecondition) {
-		t.Fatalf("second create = %v, want precondition", err)
-	}
-	got, gotToken, err := b.Get(ctx, key)
-	if err != nil || string(got) != string(one) || gotToken != token {
-		t.Fatalf("get = %q token=%q err=%v, want %q token=%q", got, gotToken, err, one, token)
-	}
-
-	updated := []byte(`{"job_id":"one","deleted":false}`)
-	token2, err := b.CAS(ctx, key, updated, token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _, err = b.Get(ctx, key)
-	if err != nil || string(got) != string(updated) || token2 == token {
-		t.Fatalf("after CAS = %q err=%v token=%q, want %q", got, err, token2, updated)
-	}
-
-	// A plain JSON fence written by the earlier hotfix must remain readable and
-	// migrate into the append authority on its first CAS.
-	legacy := []byte(`{"job_id":"old","deleted":true}`)
-	if _, err := b.S3Bucket.Put(ctx, legacyKey, legacy); err != nil {
-		t.Fatal(err)
-	}
-	got, legacyToken, err := b.Get(ctx, legacyKey)
-	if err != nil || string(got) != string(legacy) || legacyToken == "" {
-		t.Fatalf("legacy get = %q token=%q err=%v", got, legacyToken, err)
-	}
-	if _, err := b.ConditionalCreate(ctx, legacyKey, []byte(`{"job_id":"new"}`)); !errors.Is(err, ErrPrecondition) {
-		t.Fatalf("legacy create = %v, want precondition", err)
-	}
-	if _, err := b.CAS(ctx, legacyKey, []byte(`{"job_id":"old","deleted":false}`), legacyToken); err != nil {
-		t.Fatalf("legacy CAS = %v", err)
-	}
-	got, _, err = b.Get(ctx, legacyKey)
-	if err != nil || string(got) != `{"job_id":"old","deleted":false}` {
-		t.Fatalf("legacy after CAS = %q err=%v", got, err)
-	}
-}
-
-func TestProviderPointResourceFence(t *testing.T) {
-	ctx := context.Background()
-	b := openProviderForFenceTest(t)
-	key := fmt.Sprintf("cells/itest/__kv__/point%d/resource-fence.v2", time.Now().UnixNano())
-	defer b.Delete(ctx, key)
-	if _, _, err := b.Get(ctx, key); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing point fence = %v", err)
-	}
-	first := []byte(`{"job_id":"old","deleted":true,"epoch_floor":7}`)
-	token, err := b.ConditionalCreate(ctx, key, first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.ConditionalCreate(ctx, key, []byte(`{}`)); !errors.Is(err, ErrPrecondition) {
-		t.Fatalf("duplicate point fence create = %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		got, tkn, err := b.Get(ctx, key)
-		if err != nil || string(got) != string(first) || tkn != token {
-			t.Fatalf("read %d: data=%q token=%q err=%v", i, got, tkn, err)
+	for _, name := range []string{"resource-fence.json", "resource-fence.v2"} {
+		key := fmt.Sprintf("cells/itest/__kv__/removed%d/%s", time.Now().UnixNano(), name)
+		if _, err := b.ConditionalCreate(t.Context(), key, []byte(`{"deleted":true}`)); !errors.Is(err, ErrNotSupported) {
+			t.Fatalf("removed %s create=%v", name, err)
 		}
-	}
-	if _, err := b.CAS(ctx, key, []byte(`{"deleted":false}`), token+"0"); !errors.Is(err, ErrPrecondition) {
-		t.Fatalf("stale CAS = %v", err)
-	}
-	next, err := b.CAS(ctx, key, []byte(`{"deleted":false}`), token)
-	if err != nil || next == token {
-		t.Fatalf("CAS token=%q err=%v", next, err)
-	}
-	if got, _, err := b.Get(ctx, key); err != nil || string(got) != `{"deleted":false}` {
-		t.Fatalf("new value=%q err=%v", got, err)
+		if _, _, err := b.Get(t.Context(), key); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("removed %s was published: %v", name, err)
+		}
 	}
 }
 

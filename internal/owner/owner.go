@@ -20,6 +20,9 @@ var (
 	ErrUnowned = errors.New("owner: unowned")
 	// ErrOwnerLive means another node holds a live lease.
 	ErrOwnerLive = errors.New("owner: live owner exists")
+	// ErrRetired prevents an ordinary claim from resurrecting a deleted
+	// resource. Resource activation clears the owner retirement marker first.
+	ErrRetired = errors.New("owner: resource retired")
 	// ErrEpochMismatch means the expected epoch no longer matches.
 	ErrEpochMismatch = errors.New("owner: epoch mismatch")
 	// ErrNotOwner means this node is not the scope's owner (a non-owner replica
@@ -124,7 +127,9 @@ type Manager struct {
 	// its owner record is replaced. Nil is only safe for roles with no fleet
 	// acknowledgement path.
 	BeforeTakeover func(context.Context, cell.Owner) error
-	// BeforeRelease runs while ownership is still valid, immediately before the
+	// BeforeRelease must not reenter same-scope Claim/Release or wait for
+	// admitted requests that might claim. It runs under the per-scope transition
+	// lock while ownership is still valid, immediately before the
 	// owner record is deleted. cell-agent uses it to fold the final L0 tail so a
 	// released/rebound cell does not leave an uncompacted predecessor epoch.
 	BeforeRelease func(context.Context, cell.Scope, uint64) error
@@ -142,8 +147,9 @@ type Manager struct {
 	claimMu sync.Mutex
 	claims  map[string]chan struct{}
 
-	ownedMu sync.Mutex
-	owned   map[string]OwnedScope
+	ownedMu                 sync.Mutex
+	owned                   map[string]OwnedScope
+	pendingExclusiveRelease map[string]OwnedScope
 
 	// Node-lease records are not rewritten by Renew. Touch them at most once
 	// per interval so they stay in the current segmented-authority window and
@@ -178,7 +184,10 @@ type OwnedScope struct {
 }
 
 // Key returns the owner record key for a scope.
-func Key(s cell.Scope) string { return s.Key() + "/owner.json" }
+// Key is the celld-compatible authority record name.  `own.json` is the
+// single owner/epoch lineage object; resource fencing must not create a
+// second metadata file beside it.
+func Key(s cell.Scope) string { return s.Key() + "/own.json" }
 
 // ResolveCached returns the owner record with a short TTL cache so the hot path
 // does not read object storage on every request (see docs/cell-protocol.md
@@ -340,12 +349,68 @@ func (m *Manager) Claim(ctx context.Context, s cell.Scope, now time.Time) (cell.
 // place, so retries cannot mistake an incomplete takeover for a ready owner.
 // reset must not re-enter Claim or wait on requests waiting for this claim.
 func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Time, reset func(context.Context, cell.Scope) error) (cell.Owner, error) {
+	return m.claimWithReset(ctx, s, now, reset, false)
+}
+
+// ClaimExclusive acquires maintenance ownership without reentering a local
+// owner. Concurrent maintenance operations must never share the same epoch.
+func (m *Manager) ClaimExclusive(ctx context.Context, s cell.Scope, now time.Time) (cell.Owner, func(context.Context) error, error) {
+	unlock, err := m.lockClaim(ctx, s.String())
+	if err != nil {
+		return cell.Owner{}, nil, err
+	}
+	o, err := m.claimLocked(ctx, s, now, nil, true)
+	if err != nil {
+		unlock()
+		return o, nil, err
+	}
+	// Keep the claim gate until release: idle eviction/rebalancing must not
+	// relinquish maintenance ownership while the caller is still publishing.
+	var releaseMu sync.Mutex
+	locked, released := true, false
+	release := func(ctx context.Context) error {
+		releaseMu.Lock()
+		defer releaseMu.Unlock()
+		if released {
+			return nil
+		}
+		var err error
+		if locked {
+			finish := m.beginOwnershipTransition(s)
+			err = m.releaseLocked(ctx, s, o.Epoch, false)
+			finish()
+			locked = false
+			unlock()
+		} else {
+			// Retry an ambiguous/transient cleanup failure with the exact epoch;
+			// never re-claim or delete a successor's owner record.
+			err = m.Release(ctx, s, o.Epoch)
+		}
+		if err == nil || errors.Is(err, ErrUnowned) {
+			released = true
+			m.finishExclusiveRelease(s, o.Epoch)
+			return nil
+		}
+		if errors.Is(err, ErrEpochMismatch) {
+			m.finishExclusiveRelease(s, o.Epoch)
+		} else {
+			m.deferExclusiveRelease(s, o.Epoch)
+		}
+		return err
+	}
+	return o, release, nil
+}
+
+func (m *Manager) claimWithReset(ctx context.Context, s cell.Scope, now time.Time, reset func(context.Context, cell.Scope) error, exclusive bool) (cell.Owner, error) {
 	release, err := m.lockClaim(ctx, s.String())
 	if err != nil {
 		return cell.Owner{}, err
 	}
 	defer release()
+	return m.claimLocked(ctx, s, now, reset, exclusive)
+}
 
+func (m *Manager) claimLocked(ctx context.Context, s cell.Scope, now time.Time, reset func(context.Context, cell.Scope) error, exclusive bool) (cell.Owner, error) {
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
@@ -359,8 +424,15 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 			}
 		}
 		o := m.newOwner(epoch, now)
+		if exclusive {
+			o.Address = ""
+		}
 		data, _ := cell.MarshalOwner(o)
 		if _, cerr := m.B.ConditionalCreate(ctx, Key(s), data); cerr != nil {
+			// Failure may mean the write committed but its response was lost.
+			if exclusive {
+				m.deferExclusiveRelease(s, o.Epoch)
+			}
 			return cell.Owner{}, cerr // lost the race
 		}
 		m.Invalidate(s)
@@ -369,12 +441,18 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 	case err != nil:
 		return cell.Owner{}, err
 	}
+	if cur.Retired {
+		return cur, ErrRetired
+	}
 
 	// Re-entering our own live record is the common local re-open: keep the
 	// epoch, write nothing. A node-lease record does not self-expire while the
 	// node lease is published, so this also removes the old renew-driven epoch
 	// churn (ADR-273).
 	if cur.Node == m.NodeID && cur.Session == m.Session {
+		if exclusive {
+			return cur, ErrOwnerLive
+		}
 		m.rememberOwned(s, cur.Epoch)
 		m.touchOwnerSegment(ctx, s, now)
 		return cur, nil
@@ -389,7 +467,9 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 	}
 
 	takeover := cur.Node != m.NodeID || cur.Session != m.Session
-	if takeover && m.BeforeTakeover != nil {
+	// A released lineage retains the epoch but has no predecessor session log.
+	// Recovery of an empty tuple would query node-logs//.json on S3.
+	if takeover && (cur.Node != "" || cur.Session != "") && m.BeforeTakeover != nil {
 		if err := m.BeforeTakeover(ctx, cur); err != nil {
 			m.takeoverFailed.Add(1)
 			return cur, err
@@ -405,8 +485,15 @@ func (m *Manager) ClaimWithReset(ctx context.Context, s cell.Scope, now time.Tim
 		return cell.Owner{}, gerr
 	}
 	o := m.newOwner(epoch, now)
+	if exclusive {
+		o.Address = ""
+	}
+	o.RetirementJob, o.RetiredEpoch = cur.RetirementJob, cur.RetiredEpoch
 	data, _ := cell.MarshalOwner(o)
 	if _, cerr := m.B.CAS(ctx, Key(s), data, e); cerr != nil {
+		if exclusive {
+			m.deferExclusiveRelease(s, o.Epoch)
+		}
 		if takeover {
 			m.takeoverFailed.Add(1)
 		}
@@ -499,6 +586,20 @@ func (m *Manager) ReleaseForPurge(ctx context.Context, s cell.Scope, epoch uint6
 }
 
 func (m *Manager) release(ctx context.Context, s cell.Scope, epoch uint64, skipBeforeRelease bool) error {
+	unlock, err := m.lockClaim(ctx, s.String())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	finish := m.beginOwnershipTransition(s)
+	defer finish()
+	return m.releaseLocked(ctx, s, epoch, skipBeforeRelease)
+}
+
+// beginOwnershipTransition invalidates read evidence for the whole transition,
+// including ambiguous failures. It does not wait for readers; retirement callers
+// must close admission and drain before acquiring the per-scope transition lock.
+func (m *Manager) beginOwnershipTransition(s cell.Scope) func() {
 	key := s.String()
 	m.mu.Lock()
 	if m.releasing == nil {
@@ -507,7 +608,7 @@ func (m *Manager) release(ctx context.Context, s cell.Scope, epoch uint64, skipB
 	m.releasing[key]++
 	m.invalidateLocked(key)
 	m.mu.Unlock()
-	defer func() {
+	return func() {
 		m.mu.Lock()
 		m.releasing[key]--
 		if m.releasing[key] == 0 {
@@ -515,7 +616,10 @@ func (m *Manager) release(ctx context.Context, s cell.Scope, epoch uint64, skipB
 		}
 		m.invalidateLocked(key)
 		m.mu.Unlock()
-	}()
+	}
+}
+
+func (m *Manager) releaseLocked(ctx context.Context, s cell.Scope, epoch uint64, skipBeforeRelease bool) error {
 	cur, e, err := m.Resolve(ctx, s)
 	if err != nil {
 		return err
@@ -529,6 +633,32 @@ func (m *Manager) release(ctx context.Context, s cell.Scope, epoch uint64, skipB
 			m.Invalidate(s)
 			return err
 		}
+	}
+	if skipBeforeRelease || cur.RetirementJob != "" {
+		// celld keeps the lineage record after a purge.  Clear the live owner but
+		// retain the epoch and retirement marker so a delayed predecessor cannot
+		// publish into the next incarnation.
+		cur.Node = ""
+		cur.Role = ""
+		cur.Session = ""
+		cur.Expiry = 0
+		cur.Liveness = ""
+		cur.Address = ""
+		cur.AdminAddress = ""
+		if skipBeforeRelease {
+			cur.Retired = true
+			cur.RetiredEpoch = epoch
+		}
+		data, _ := cell.MarshalOwner(cur)
+		if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
+			if errors.Is(err, bucket.ErrPrecondition) {
+				return ErrEpochMismatch
+			}
+			return err
+		}
+		m.Invalidate(s)
+		m.forgetOwned(s)
+		return nil
 	}
 	// Conditional delete: if the lease expired and a peer re-claimed between the
 	// resolve above and this delete, the CAS fails and the peer's claim survives
@@ -610,5 +740,52 @@ func (m *Manager) newOwner(epoch uint64, now time.Time) cell.Owner {
 		Address:      m.Advertise,
 		AdminAddress: m.AdminAdvertise,
 		ProtoVersion: cell.ProtoVersion,
+	}
+}
+
+// RetryExclusiveReleases retries only maintenance owners whose acquisition
+// outcome was uncertain or whose foreground cleanup failed. Exact epochs prevent an old task from releasing a successor.
+func (m *Manager) RetryExclusiveReleases(ctx context.Context) error {
+	m.ownedMu.Lock()
+	pending := make([]OwnedScope, 0, min(len(m.pendingExclusiveRelease), 32))
+	for _, o := range m.pendingExclusiveRelease {
+		pending = append(pending, o)
+		if len(pending) == 32 {
+			break
+		}
+	}
+	m.ownedMu.Unlock()
+	var result error
+	for _, o := range pending {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := m.Release(attempt, o.Scope, o.Epoch)
+		cancel()
+		if err == nil || errors.Is(err, ErrUnowned) || errors.Is(err, ErrEpochMismatch) {
+			m.finishExclusiveRelease(o.Scope, o.Epoch)
+		} else {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
+}
+func (m *Manager) finishExclusiveRelease(sc cell.Scope, epoch uint64) {
+	m.ownedMu.Lock()
+	defer m.ownedMu.Unlock()
+	if o, ok := m.pendingExclusiveRelease[sc.String()]; ok && o.Epoch == epoch {
+		delete(m.pendingExclusiveRelease, sc.String())
+	}
+}
+
+func (m *Manager) deferExclusiveRelease(sc cell.Scope, epoch uint64) {
+	m.ownedMu.Lock()
+	defer m.ownedMu.Unlock()
+	if m.pendingExclusiveRelease == nil {
+		m.pendingExclusiveRelease = make(map[string]OwnedScope)
+	}
+	if existing, ok := m.pendingExclusiveRelease[sc.String()]; !ok || existing.Epoch <= epoch {
+		m.pendingExclusiveRelease[sc.String()] = OwnedScope{Scope: sc, Epoch: epoch}
 	}
 }

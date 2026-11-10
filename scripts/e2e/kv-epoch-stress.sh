@@ -58,7 +58,7 @@ e2e_cli resource create "$NS" "$RES" "$CELL_ID" >/dev/null
 
 echo "CELL_SCOPE=$NS/__kv__/$CELL_ID"
 echo "BUCKET_PREFIX=cells/$NS/__kv__/$CELL_ID/"
-echo "COS_BUCKET=cos://vwork-e2e-hk-1376795072"
+echo "COS_BUCKET=cos://cellhive-e2e-hk-1376795072"
 echo "WRITE_TOTAL=$TOTAL"
 echo "SAFE_GC=${E2E_STRESS_SAFE_GC:-0}"
 
@@ -267,21 +267,29 @@ if missing:
 print(f"VERIFY_OK {len(want)}/{len(want)}", flush=True)
 PY
 
-# Optional explicit Safe GC. This is the ADR-309 operational path: dry-run,
-# first Safe pass writes tombstones, second pass after the grace period deletes.
+# Optional native epoch GC: dry-run, then retry after the test upload-age margin.
+# No tombstones are written; the direct predecessor and required chain survive.
 if [[ "${E2E_STRESS_SAFE_GC:-0}" = 1 ]]; then
   GC_ADMIN="http://127.0.0.1:$((E2E_PORT_BASE+5))"
   SCOPE="$NS/__kv__/$CELL_ID"
   gc_owner() { CELLHIVE_ADMIN_URL="$GC_ADMIN" "$E2E_BIN/cellhive" gc scope "$SCOPE" "$@"; }
-  gc_owner --dry-run --keep-previous "${E2E_STRESS_GC_KEEP:-0}" --keep-l1 2 >"$E2E_BASE/gc-dry-run.json"
+  gc_owner --dry-run --keep-previous "${E2E_STRESS_GC_KEEP:-0}" >"$E2E_BASE/gc-dry-run.json"
   cat "$E2E_BASE/gc-dry-run.json"
-  gc_owner --safe --grace 1 --keep-previous "${E2E_STRESS_GC_KEEP:-0}" --keep-l1 2 >"$E2E_BASE/gc-pass1.json"
+  gc_owner --safe --grace 1 --keep-previous "${E2E_STRESS_GC_KEEP:-0}" >"$E2E_BASE/gc-pass1.json"
   cat "$E2E_BASE/gc-pass1.json"
   sleep 2
-  gc_owner --safe --grace 1 --keep-previous "${E2E_STRESS_GC_KEEP:-0}" --keep-l1 2 >"$E2E_BASE/gc-pass2.json"
+  gc_owner --safe --grace 1 --keep-previous "${E2E_STRESS_GC_KEEP:-0}" >"$E2E_BASE/gc-pass2.json"
   cat "$E2E_BASE/gc-pass2.json"
   echo "SAFE_GC_DONE scope=$SCOPE keep_previous=${E2E_STRESS_GC_KEEP:-0}"
 fi
+
+# Stop the standby as well: cold verification must not fall back or forward
+# to another node's warm SQLite cache.
+STANDBY_PID=$(cat "$E2E_BASE/perf.pid")
+kill -TERM "$STANDBY_PID"
+for i in $(seq 1 120); do kill -0 "$STANDBY_PID" 2>/dev/null || break; sleep 1; done
+kill -0 "$STANDBY_PID" 2>/dev/null && e2e_fail 'standby did not drain'
+rm "$E2E_BASE/perf.pid"
 
 # Cold COS restore after removing only the survivor's local SQLite cache.
 ACTIVE_PID=$(cat "$E2E_BASE/peer.pid")
@@ -321,7 +329,7 @@ def conn_for(url):
     return c
 def get_one(item):
     key, value = item
-    for url in (b, a):
+    for url in (b,):
         try:
             c = conn_for(url)
             c.request("GET", f"/v1/kv/get?ns={ns}&key={key}",

@@ -13,6 +13,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
+	"cellhive/internal/owner"
 	"cellhive/internal/ownerclient"
 	queuepkg "cellhive/internal/queue"
 	"cellhive/internal/replica"
@@ -25,9 +26,21 @@ func (s *Server) resourceReplica() *replica.Manager { return s.resourceRep }
 // gate. Admission below rechecks it after acquiring the gate; a stale snapshot
 // can therefore neither serve a deleted resource nor roll back its marker.
 func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scope) (string, error) {
+	if err := s.reclaimLostResourceGate(ctx, sc); err != nil {
+		return "", err
+	}
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.resource_prepare")
 	defer span.End()
-	generation, blocked, floor, err := s.resourceReplica().ResourceSnapshot(ctx, sc)
+	var generation string
+	var blocked bool
+	var floor uint64
+	var err error
+	if p := resourceProof(ctx, sc); p != nil {
+		generation, err = resourceProofGeneration(p)
+		floor = p.Owner.RetiredEpoch
+	} else {
+		generation, blocked, floor, err = s.resourceReplica().ResourceSnapshot(ctx, sc)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -36,7 +49,7 @@ func (s *Server) prepareResourceAccessSnapshot(ctx context.Context, sc cell.Scop
 	}
 	if s.Store != nil {
 		if err := s.Store.EnsureResourceGenerationFromSnapshot(ctx, sc, generation, func() (string, error) {
-			return s.resourceReplica().ResourceGeneration(ctx, sc)
+			return s.preparedResourceGeneration(ctx, sc)
 		}); err != nil {
 			return "", err
 		}
@@ -64,7 +77,7 @@ func (s *Server) beginPreparedResourceRequest(ctx context.Context, sc cell.Scope
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.resource_gate")
 	defer span.End()
 	return s.Store.BeginPreparedResourceRequest(ctx, sc, generation, func() (string, error) {
-		return s.resourceReplica().ResourceGeneration(ctx, sc)
+		return s.preparedResourceGeneration(ctx, sc)
 	})
 }
 
@@ -72,6 +85,9 @@ func (s *Server) beginPreparedResourceRequest(ctx context.Context, sc cell.Scope
 // floor also invalidates an old self-owner hint and local cache on a node that
 // was offline during deletion, so recreation cannot expose its old SQLite data.
 func (s *Server) PrepareResourceAccess(ctx context.Context, sc cell.Scope) error {
+	if err := s.reclaimLostResourceGate(ctx, sc); err != nil {
+		return err
+	}
 	if s.resourceReplica() == nil {
 		return nil
 	}
@@ -139,30 +155,41 @@ func (s *Server) activateResource(ctx context.Context, ns, kind, name string) er
 	}
 	return s.resourceReplica().AllowResource(ctx, sc, r.JobID)
 }
-func (s *Server) revokeResource(ctx context.Context, ns, kind, name string) error {
+func (s *Server) revokeResource(ctx context.Context, ns, kind, name string, j control.ResourceCleanup) error {
 	if kind != "kv" && kind != "queue" {
 		return nil
 	}
-	j, err := s.Control.ResourceCleanup(ctx, ns, kind, name)
-	if errors.Is(err, control.ErrNotFound) {
-		// A malformed legacy registration is revoked without a data-cleanup job
-		// (ADR-269): there is no physical scope to block. Bindings still need to
-		// drop, because the registry row and any derived rows are gone.
+	// This exact intent was sampled under resourceMu before the control proof.
+	// Looking it up again by name could substitute an unproven later incarnation.
+	if j.JobID == "" {
 		s.invalidateBindings(ns)
 		return nil
-	}
-	if err != nil {
-		return err
 	}
 	if j.State == "complete" {
 		return nil
 	}
-	sc, err := cell.ParseScope(j.DataScope)
-	if err != nil {
+	s.invalidateBindings(ns)
+	var leased control.ResourceCleanup
+	var claimed bool
+	if err := s.capturedWrite(ctx, control.ScopeFor(ns), func() error {
+		var err error
+		leased, claimed, err = s.Control.ClaimResourceCleanup(ctx, j)
+		return err
+	}); err != nil {
 		return err
 	}
-	s.invalidateBindings(ns)
-	return s.resourceReplica().BlockResource(ctx, sc, j.JobID)
+	if !claimed {
+		return control.ErrCleanupPending
+	}
+	_, prepareErr := s.prepareResourceRetirement(ctx, leased)
+	// Publish pending state only after preparation has returned; no recursive
+	// cleanup callback runs inside the captured control write.
+	if err := s.capturedWrite(ctx, control.ScopeFor(ns), func() error {
+		return s.Control.ContinueResourceCleanup(ctx, leased)
+	}); err != nil {
+		return err
+	}
+	return prepareErr
 }
 
 func (s *Server) RunResourceCleanupLoop(ctx context.Context) {
@@ -186,6 +213,9 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 		return nil
 	}
 	defer s.resourceCleanupMu.Unlock()
+	if err := s.sweepLocalRetirementGates(ctx); err != nil && s.Log != nil {
+		s.Log.Warn("local retirement gate reclamation pending", "err", err)
+	}
 	if s.Control == nil || s.Store == nil || s.resourceReplica() == nil {
 		return nil
 	}
@@ -232,18 +262,7 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 			continue
 		}
 		work, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := s.Control.ValidateResourceCleanupLease(work, j)
-		if err == nil {
-			sc, parseErr := cell.ParseScope(j.DataScope)
-			err = parseErr
-			if err == nil {
-				err = s.resourceReplica().BlockResource(work, sc, j.JobID)
-			}
-		}
-		done := false
-		if err == nil {
-			done, err = s.cleanupResourceData(work, j)
-		}
+		done, err := s.cleanupResourceData(work, j)
 		if err == nil && done && j.Kind == "queue" {
 			for _, dlq := range j.DeadLetters {
 				if err = s.removeQueueSource(work, j.Namespace, dlq, j.Name, j.SourceGeneration); err != nil {
@@ -255,7 +274,14 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 			sc, parseErr := cell.ParseScope(j.DataScope)
 			err = parseErr
 			if err == nil {
-				_, j.RetiredEpoch, err = s.resourceReplica().ResourceState(work, sc)
+				// Preparation can run at a remote owner. Its CAS cannot invalidate
+				// this node's old fence cache, so persist a fresh retirement floor.
+				var retired cell.Owner
+				retired, _, err = s.Owner.Resolve(work, sc)
+				if err == nil && (!retired.Retired || retired.RetirementJob != j.JobID) {
+					err = control.ErrCleanupStale
+				}
+				j.RetiredEpoch = retired.RetiredEpoch
 			}
 		}
 		cancel()
@@ -301,96 +327,106 @@ func (s *Server) sweepResourceRetirements(ctx context.Context) error {
 }
 
 func (s *Server) cleanupResourceData(ctx context.Context, j control.ResourceCleanup) (bool, error) {
+	prepared, err := s.prepareResourceRetirement(ctx, j)
+	if err != nil {
+		return false, err
+	}
+	if prepared.Node == s.Cfg.NodeID && prepared.Session == s.Owner.Session {
+		return s.cleanupPreparedResource(ctx, j, prepared)
+	}
+	var out struct {
+		Done bool `json:"done"`
+	}
+	in := resourceRetirementRequest{resourceCleanupValidation: resourceCleanupValidation{Job: j, LeaseToken: j.LeaseToken, LeaseUntilMs: j.LeaseUntilMs}, Expected: prepared}
+	if err := s.cleanupRPC(ctx, prepared.Address, "/v1/internal/resource/cleanup-data", in, &out); err != nil {
+		return false, err
+	}
+	if err := s.validateResourceCleanupAuthority(ctx, j); err != nil {
+		return false, err
+	}
+	return out.Done, nil
+}
+
+func (s *Server) cleanupPreparedResource(ctx context.Context, j control.ResourceCleanup, expected cell.Owner) (bool, error) {
+	work, cancel := context.WithDeadline(ctx, time.UnixMilli(j.LeaseUntilMs))
+	defer cancel()
+	prepared, err := s.prepareOwnedResourceRetirement(work, j, expected)
+	if err != nil {
+		return false, err
+	}
 	sc, err := cell.ParseScope(j.DataScope)
 	if err != nil {
 		return false, err
 	}
-	if s.Owner != nil {
-		o, _, err := s.Owner.Resolve(ctx, sc)
-		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
-			if err := s.invalidateStaleLocal(ctx, sc); err != nil {
-				return false, err
-			}
-			o, err = s.Owner.Claim(ctx, sc, time.Now())
-			if err != nil {
-				return false, err
-			}
+	validate := func() error {
+		if err := s.validateResourceCleanupAuthority(work, j); err != nil {
+			return err
 		}
-		if o.Node != s.Cfg.NodeID {
-			var out struct {
-				Done bool `json:"done"`
-			}
-			err := s.cleanupRPC(ctx, o.Address, "/v1/internal/resource/cleanup-data", j, &out)
-			return out.Done, err
-		}
-	}
-	return s.cleanupOwnedResource(ctx, j)
-}
-func (s *Server) cleanupOwnedResource(ctx context.Context, j control.ResourceCleanup) (bool, error) {
-	sc, err := cell.ParseScope(j.DataScope)
-	if err != nil || sc.Namespace != j.Namespace || (j.Kind != "kv" && j.Kind != "queue") || sc.Class != "__"+j.Kind+"__" {
-		return false, fmt.Errorf("invalid resource cleanup identity")
-	}
-	var epoch uint64
-	if s.Owner != nil {
-		o, _, err := s.Owner.Resolve(ctx, sc)
+		now, _, err := s.Owner.Resolve(work, sc)
 		if err != nil {
-			return false, err
+			return err
 		}
-		if o.Node != s.Cfg.NodeID || !s.ownerLive(ctx, o, time.Now()) {
-			return false, fmt.Errorf("cleanup scope owner changed")
+		if !sameRetirementSource(now, prepared, j.JobID) || !now.Retired || now.RetirementJob != j.JobID || now.RetiredEpoch < prepared.Epoch || !s.ackAllowed(time.Now()) {
+			return owner.ErrEpochMismatch
 		}
-		epoch = o.Epoch
-	} else {
-		latest, _, err := s.resourceReplica().LatestEpoch(ctx, sc, 0)
+		return nil
+	}
+	var done bool
+	err = s.Owner.WithResourceRetirement(work, sc, j.JobID, prepared, func(ctx context.Context, _ cell.Owner) error {
+		// Gate is drained and capture has stopped. Invalidation deliberately
+		// bypasses residency Pin, which cannot protect deleted user data.
+		ok, err := s.Store.TryInvalidate(ctx, sc, validate)
 		if err != nil {
-			return false, err
+			return err
 		}
-		epoch = latest
-	}
-	if err := s.resourceReplica().FenceResource(ctx, sc, j.JobID, epoch); err != nil {
-		return false, err
-	}
-	// Stop capture/drain requests before removing files. The persistent fence
-	// rejects queued uploads and old-epoch compaction that outlive the handle.
-	if err := s.Store.ForgetWithVerify(ctx, sc, func() error { return s.resourceReplica().ValidateResourceDelete(ctx, sc, j.JobID) }); err != nil {
-		return false, err
-	}
-	if s.Timers != nil {
-		s.Timers.Remove(sc.String())
-	}
-	if s.Bucket != nil {
-		if err := wake.New(s.Bucket).Delete(ctx, sc.String()); err != nil {
-			return false, err
+		if !ok {
+			return control.ErrCleanupPending
 		}
-	}
-	done, err := s.resourceReplica().PurgeResource(ctx, sc, j.JobID, 500)
+		if err := validate(); err != nil {
+			return err
+		}
+		if s.Timers != nil {
+			s.Timers.Remove(sc.String())
+		}
+		if s.Bucket != nil {
+			if err := wake.New(s.Bucket).DeleteValidated(ctx, sc.String(), validate); err != nil {
+				return err
+			}
+		}
+		if err := validate(); err != nil {
+			return err
+		}
+		done, err = s.resourceReplica().PurgeResource(ctx, sc, j.JobID, 500, func(context.Context) error { return validate() })
+		if err != nil {
+			return err
+		}
+		return validate()
+	})
 	if err != nil || !done {
 		return done, err
 	}
-	if s.Owner != nil {
-		if err := s.Owner.ReleaseForPurge(ctx, sc, epoch); err != nil {
-			return false, err
-		}
+	if err := s.Owner.ReleaseForPurge(work, sc, prepared.Epoch); err != nil {
+		return false, err
+	}
+	identity := retirementIdentity(j, prepared)
+	err = s.Owner.WithReleasedResourceRetirement(work, sc, j.JobID, prepared, func(ctx context.Context) error {
+		return s.Store.ReclaimResourceRetirement(ctx, sc, identity, func(ctx context.Context) error { return s.validateResourceCleanupAuthority(ctx, j) })
+	})
+	if err != nil {
+		return false, err
 	}
 	return true, nil
 }
+
 func (s *Server) handleResourceCleanupData(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
-	var j control.ResourceCleanup
-	if err != nil || json.Unmarshal(raw, &j) != nil {
-		writeErr(w, 400, "bad_request", "invalid cleanup job")
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 64*1024+1))
+	var in resourceRetirementRequest
+	if err != nil || len(raw) > 64*1024 || json.Unmarshal(raw, &in) != nil {
+		writeErr(w, 400, "bad_request", "invalid cleanup envelope")
 		return
 	}
-	sc, err := cell.ParseScope(j.DataScope)
-	if err != nil || sc.Namespace != j.Namespace {
-		writeErr(w, 400, "bad_request", "invalid cleanup scope")
-		return
-	}
-	if s.forwardOrClaim(w, r, sc, raw) {
-		return
-	}
-	done, err := s.cleanupOwnedResource(r.Context(), j)
+	in.Job.LeaseToken, in.Job.LeaseUntilMs = in.LeaseToken, in.LeaseUntilMs
+	done, err := s.cleanupPreparedResource(r.Context(), in.Job, in.Expected)
 	if err != nil {
 		writeErr(w, 503, "cleanup_failed", err.Error())
 		return

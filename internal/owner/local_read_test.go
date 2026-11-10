@@ -123,3 +123,42 @@ func TestOldSessionCannotRenewOrRelease(t *testing.T) {
 		t.Fatalf("current owner modified: %+v %v", got, err)
 	}
 }
+
+func TestLocalReadGuardRejectsRecoveredHealthInterval(t *testing.T) {
+	m, raw := newManager(t, t.TempDir(), "a")
+	lm := lease.NewManager(raw, m.NodeID, m.Session, "", "", time.Minute)
+	m.LeaseView = lm
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "app", Class: "kv", ID: "guard-margin"}
+	if _, err := m.Claim(t.Context(), sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.ResolveRoute(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	check, ok := m.LocalReadGuard(sc)
+	if !ok {
+		t.Fatal("missing proof")
+	}
+	if lm.Healthy(lm.HealthyUntil()) {
+		t.Fatal("expected interrupted health")
+	}
+	if err := lm.Publish(t.Context(), lease.Load{}); err != nil {
+		t.Fatal(err)
+	}
+	if check() {
+		t.Fatal("read survived a health interval change")
+	}
+	if _, ok := m.LocalReadGuard(sc); ok {
+		t.Fatal("old route reused after health recovery")
+	}
+	if _, _, err := m.ResolveRoute(t.Context(), sc); err != nil {
+		t.Fatal(err)
+	}
+	fresh, ok := m.LocalReadGuard(sc)
+	if !ok || !fresh() {
+		t.Fatal("fresh authority unavailable after recovery")
+	}
+}

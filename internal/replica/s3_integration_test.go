@@ -3,6 +3,7 @@ package replica_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"cellhive/internal/cellstore"
 	"cellhive/internal/compaction"
 	"cellhive/internal/ltx"
+	"cellhive/internal/objectstore"
 	"cellhive/internal/replica"
 	"cellhive/internal/restore"
 )
@@ -41,13 +43,14 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		keys, err := b.List(cleanupCtx, scope.Key()+"/")
+		objects := objectstore.NewOwned(b, objectstore.PrefixCells, objectstore.OwnerReplica)
+		keys, err := objects.ListPrefix(cleanupCtx, scope.Key()+"/")
 		if err != nil {
 			t.Errorf("cleanup list: %v", err)
 			return
 		}
 		for _, key := range keys {
-			if err := b.Delete(cleanupCtx, key); err != nil {
+			if err := objects.Delete(cleanupCtx, key); err != nil {
 				t.Errorf("cleanup delete: %v", err)
 			}
 		}
@@ -73,7 +76,7 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	}
 	db.Close()
 
-	// Snapshot the file and commit parts to S3.
+	// Publish one complete native snapshot to S3.
 	pageSize, commit, pages, err := cellstore.ReadDBPages(src)
 	if err != nil {
 		t.Fatalf("read pages: %v", err)
@@ -82,7 +85,7 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 	for pg := uint32(1); pg <= commit; pg++ {
 		sorted = append(sorted, ltx.WALPage{PageNo: pg, Data: pages[pg]})
 	}
-	parts, err := ltx.EncodeSnapshotParts(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 1, EndTxID: 1}, pageSize, commit, sorted, ltx.DefaultSnapshotPartBytes)
+	snapshot, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: 1, MaxTXID: 1}, sorted)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -94,12 +97,17 @@ func TestS3ReplicationRestoreChain(t *testing.T) {
 		}
 		store = bucket.NewProviderBucket(b, appender)
 		t.Log("replication uses production COS provider (native append authority and immutable objects)")
+	} else if os.Getenv("CELLHIVE_S3_TEST_PROVIDER") == "oss" {
+		appender, err := bucket.NewOSSAppender(ep, os.Getenv("CELLHIVE_S3_TEST_BUCKET"), os.Getenv("CELLHIVE_S3_TEST_ACCESS"), os.Getenv("CELLHIVE_S3_TEST_SECRET"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store = bucket.NewProviderBucket(b, appender)
+		t.Log("replication uses production OSS provider (native append authority and immutable objects)")
 	}
 	rep := replica.New(store)
-	for _, seg := range parts {
-		if _, _, err := rep.Append(ctx, scope, 1, seg); err != nil {
-			t.Fatalf("append: %v", err)
-		}
+	if _, _, err := rep.Append(ctx, scope, 1, snapshot); err != nil {
+		t.Fatalf("append: %v", err)
 	}
 
 	// Full restore.
@@ -171,8 +179,18 @@ type compactionReadProbe struct {
 }
 
 func (p *compactionReadProbe) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.Contains(key, "/L1/") && !strings.HasSuffix(key, ".json") {
+	if strings.Contains(key, "/0001/") && strings.HasSuffix(key, ".ltx") {
 		p.baselineReads++
 	}
 	return p.Bucket.Get(ctx, key)
+}
+
+func (b *compactionReadProbe) PutReader(ctx context.Context, key string, r io.ReadSeeker, size int64) (string, error) {
+	return b.Bucket.(bucket.StreamPutter).PutReader(ctx, key, r, size)
+}
+func (b *compactionReadProbe) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
+	if strings.Contains(key, "/0001/") && strings.HasSuffix(key, ".ltx") {
+		b.baselineReads++
+	}
+	return b.Bucket.(bucket.StreamReader).OpenReader(ctx, key)
 }

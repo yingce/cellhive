@@ -141,6 +141,7 @@ type Server struct {
 	resourceCleanupMu       sync.Mutex
 	resourceCleanupPrunedAt time.Time
 	retirementAfter         string
+	localRetirementAfter    string
 
 	// timerRegPending dedupes asynchronous pending-timer registration for a
 	// scope. A claim must not block the data plane on a cold timer-cell hydrate.
@@ -265,6 +266,13 @@ func New(d Deps) *Server {
 		s.resourceRep = replica.New(d.Bucket)
 	}
 	s.configureQueueStore(s.Queue)
+	if d.Control != nil {
+		d.Control.BeforeResourceRevoked = func(ctx context.Context, ns string) error {
+			// Ensure capture also for direct control-store callers. A restarted capture
+			// snapshots the already committed intent; active capture proves its txid.
+			return s.capturedWrite(ctx, control.ScopeFor(ns), func() error { return nil })
+		}
+	}
 	if d.Control != nil && d.Bucket != nil {
 		d.Control.OnResourceActivated = s.activateResource
 		d.Control.OnResourceRevoked = s.revokeResource
@@ -295,6 +303,8 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/invocations", s.auth(s.handleInvocationPut))
 	mux.HandleFunc("POST /v1/internal/request-log", s.auth(s.handleRequestLog))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
+	mux.HandleFunc("POST /v1/internal/resource/cleanup-validate", s.auth(s.handleResourceCleanupValidate))
+	mux.HandleFunc("POST /v1/internal/resource/retirement-prepare", s.auth(s.handleResourceRetirementPrepare))
 	mux.HandleFunc("POST /v1/internal/queue/remove-source", s.auth(s.handleQueueRemoveSource))
 	mux.HandleFunc("GET /v1/control/resource/cleanup", s.auth(s.handleResourceCleanupStatus))
 	mux.HandleFunc("POST /v1/control/resource/cleanup/retry", s.auth(s.handleResourceCleanupRetry))
@@ -1116,6 +1126,11 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 // path. Opening a cold timer cell can hydrate a large chain; doing that inline
 // made invocation/KV requests pile up behind it and OOM the cell-agent.
 func (s *Server) enqueuePendingTimers(sc cell.Scope) {
+	// Native DO SQLite is owned by workerd; its alarm schedule is maintained
+	// separately. Opening a generic CellStore here creates a competing empty DB.
+	if !sc.IsReservedClass() || sc.Class == DOClass {
+		return
+	}
 	key := sc.String()
 	s.timerRegMu.Lock()
 	if s.timerRegPending == nil {
@@ -1563,10 +1578,25 @@ func isAdminForward(ctx context.Context) bool {
 // forwardNonOwner chooses the owner's admin listener for control-plane admin
 // requests. Data-plane requests keep the REST forwarding path.
 func (s *Server) forwardNonOwner(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte, admin bool) bool {
-	if admin {
-		return s.forwardAdmin(w, r, sc, preRead)
+	// The caller already established that this node is not the live owner.
+	// The transport loop guard alone returns false, which would incorrectly
+	// admit the request to a stale local database. Reject before execution so
+	// the original ingress may refresh its route once.
+	if r.Header.Get(ownerclient.ForwardedHeader) != "" {
+		writeErr(w, http.StatusConflict, "not_owner", "scope belongs to another owner")
+		return true
 	}
-	return s.forwardIfNonOwner(w, r, sc, preRead)
+	var handled bool
+	if admin {
+		handled = s.forwardAdmin(w, r, sc, preRead)
+	} else {
+		handled = s.forwardIfNonOwner(w, r, sc, preRead)
+	}
+	if !handled {
+		// A changed or unavailable route does not grant local ownership.
+		writeErr(w, http.StatusConflict, "not_owner", "scope owner changed before forwarding")
+	}
+	return true
 }
 
 // forwardAdmin proxies an already-authenticated admin request to the owner's
@@ -1611,6 +1641,11 @@ func (s *Server) forwardAdmin(w http.ResponseWriter, r *http.Request, sc cell.Sc
 	}
 	req.Header.Set(ownerclient.ForwardedHeader, "1")
 	client := s.forwardHTTPClient()
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/control/cell/import" {
+		transferClient := *client
+		transferClient.Timeout = 30 * time.Minute
+		client = &transferClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "admin_forward_failed", err.Error())
@@ -1766,7 +1801,12 @@ func (s *Server) handleListSegments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_epoch", err.Error())
 		return
 	}
-	keys, err := s.Replica.ListSegments(r.Context(), sc, epoch)
+	var keys []string
+	if r.URL.Query().Get("chain") == "1" {
+		keys, err = s.Replica.RestoreChainKeys(r.Context(), sc, epoch)
+	} else {
+		keys, err = s.Replica.ListSegments(r.Context(), sc, epoch)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list_failed", err.Error())
 		return
@@ -1780,6 +1820,23 @@ func (s *Server) handleReadSegment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_key", err.Error())
 		return
 	}
+	objects := objectstore.NewOwned(s.Bucket, objectstore.PrefixCells, objectstore.OwnerReplica)
+	if r.Method == http.MethodHead {
+		size, tag, err := objects.Stat(r.Context(), key)
+		if err != nil {
+			if errors.Is(err, bucket.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "segment_not_found", "no such segment")
+			} else {
+				writeErr(w, http.StatusInternalServerError, "stat_failed", err.Error())
+			}
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("ETag", strconv.Quote(tag))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	// Optional single-range read: `Range: bytes=<off>-<endInclusive>`. A paged
 	// cold restore fetches exactly the pages it needs (ADR-084).
 	if rng := r.Header.Get("range"); strings.HasPrefix(rng, "bytes=") {
@@ -1788,7 +1845,7 @@ func (s *Server) handleReadSegment(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_range", rerr.Error())
 			return
 		}
-		data, _, err := s.Bucket.RangedGet(r.Context(), key, int64(off), int64(end-off+1))
+		data, tag, err := objects.RangedGet(r.Context(), key, int64(off), int64(end-off+1))
 		if err != nil {
 			if errors.Is(err, bucket.ErrNotFound) {
 				writeErr(w, http.StatusNotFound, "segment_not_found", "no such segment")
@@ -1798,6 +1855,7 @@ func (s *Server) handleReadSegment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.segments.Add(1)
+		w.Header().Set("ETag", strconv.Quote(tag))
 		w.Header().Set("content-type", "application/octet-stream")
 		w.Header().Set("content-range", fmt.Sprintf("bytes %d-%d/*", off, off+uint64(len(data))-1))
 		w.WriteHeader(http.StatusPartialContent)
@@ -2253,11 +2311,15 @@ func (s *Server) handleTimerUpsert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_scope", err.Error())
 		return
 	}
+	if err := s.PrepareResourceAccess(r.Context(), sc); err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
 	if s.forwardOrClaim(w, r, sc, raw) {
 		return
 	}
 	if s.Store != nil {
-		end, err := s.Store.BeginRequestContext(r.Context(), sc.String())
+		end, err := s.BeginResourceRequest(r.Context(), sc)
 		if err != nil {
 			s.captureErr(w, err, "request_gate_failed")
 			return
@@ -2549,9 +2611,23 @@ func (s *Server) handleKVExpire(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_scope", err.Error())
 		return
 	}
+	if sc.Class != "__kv__" {
+		writeErr(w, 400, "invalid_scope", "KV expiry requires a KV cell")
+		return
+	}
+	if err := s.PrepareResourceAccess(r.Context(), sc); err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
 	if s.forwardOrClaim(w, r, sc, nil) {
 		return
 	}
+	end, err := s.BeginResourceRequest(r.Context(), sc)
+	if err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
+	defer end()
 	c, err := s.Store.Cell(r.Context(), sc)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open_failed", err.Error())
@@ -3119,6 +3195,10 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_epoch", err.Error())
 		return
 	}
+	if r.URL.Query().Get("snapshot") == "1" || r.URL.Query().Get("native_file") == "1" {
+		s.handleSnapshotStream(w, r, sc, epoch)
+		return
+	}
 	if s.forwardIfNonOwner(w, r, sc, nil) {
 		return
 	}
@@ -3135,7 +3215,7 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "segment_too_large", "segment exceeds cap")
 		return
 	}
-	if _, _, err := ltx.Decode(seg); err != nil {
+	if _, err := ltx.ValidateNative(seg); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_segment", err.Error())
 		return
 	}
@@ -3162,13 +3242,13 @@ func (s *Server) handleCommitBinary(w http.ResponseWriter, r *http.Request) {
 // ordering baseline is initialized from it so a chunk that arrives before a
 // lower one is buffered rather than treated as the head.
 func (s *Server) commitPipelined(w http.ResponseWriter, r *http.Request, sc cell.Scope, epoch uint64, seg []byte, followers []string, base uint64) {
-	header, _, err := ltx.Decode(seg)
+	header, err := ltx.ValidateNative(seg)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_segment", err.Error())
 		return
 	}
 	if base == 0 {
-		base = header.StartTxID
+		base = header.MinTXID
 	}
 	if !s.openFleetSession(r.Context(), epoch, followers) {
 		res, err := s.commitSegmentCore(r.Context(), sc, epoch, seg, followers, true, false)
@@ -3192,18 +3272,18 @@ func (s *Server) commitPipelined(w http.ResponseWriter, r *http.Request, sc cell
 	}
 	ctx := r.Context()
 	key := sc.String() + "@" + strconv.FormatUint(epoch, 10)
-	future, err := s.ordered.Do(ctx, key, base, header.StartTxID, header.EndTxID, func() (<-chan peer.CommitAck, error) {
+	future, err := s.ordered.Do(ctx, key, base, header.MinTXID, header.MaxTXID, func() (<-chan peer.CommitAck, error) {
 		return s.PeerShipper.ShipNowAsync(ctx, followers, sc, epoch, seg)
 	})
 	if err != nil {
-		s.Log.Warn("pipelined commit dispatch failed", "err", err, "start", header.StartTxID)
+		s.Log.Warn("pipelined commit dispatch failed", "err", err, "start", header.MinTXID)
 		writeErr(w, http.StatusServiceUnavailable, "commit_failed", err.Error())
 		return
 	}
 	select {
 	case ack := <-future:
 		if ack.Err != nil {
-			s.Log.Warn("pipelined commit ack failed", "err", ack.Err, "start", header.StartTxID)
+			s.Log.Warn("pipelined commit ack failed", "err", ack.Err, "start", header.MinTXID)
 			writeErr(w, http.StatusInternalServerError, "commit_failed", ack.Err.Error())
 			return
 		}
@@ -3213,7 +3293,7 @@ func (s *Server) commitPipelined(w http.ResponseWriter, r *http.Request, sc cell
 		s.commits.Add(1)
 		writeJSON(w, http.StatusOK, map[string]any{"mode": "fleet", "acked_by": ack.AckedBy})
 	case <-ctx.Done():
-		s.Log.Warn("pipelined commit ctx done", "start", header.StartTxID)
+		s.Log.Warn("pipelined commit ctx done", "start", header.MinTXID)
 		return
 	}
 }
@@ -3251,6 +3331,22 @@ func (c captureCommitter) Commit(ctx context.Context, scope cell.Scope, epoch ui
 // snapshot is a few PUTs instead of twelve serial ones (ADR-272).
 func (c captureCommitter) CommitBatch(ctx context.Context, scope cell.Scope, epoch uint64, segments [][]byte) error {
 	return c.s.commitSegmentBatchCore(ctx, scope, epoch, segments)
+}
+
+// CommitSnapshotFile publishes the complete streamed snapshot as one LTX
+// object. The spool is local and fully fsynced before this method is called, so
+// the bucket never exposes an incomplete snapshot object.
+func (c captureCommitter) CommitSnapshotFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64) error {
+	if size <= 0 {
+		return fmt.Errorf("cellcapture: empty snapshot spool")
+	}
+	if c.s.Replica == nil {
+		return fmt.Errorf("cellcapture: replica is unavailable")
+	}
+	if _, _, err := c.s.Replica.AppendSnapshotFile(ctx, scope, epoch, path, size); err != nil {
+		return err
+	}
+	return nil
 }
 
 // maxSnapshotParallel bounds concurrent follower replications for one batch.
@@ -3571,8 +3667,8 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 			return
 		}
 		attrs := []any{"scope", sc.String(), "epoch", epoch, "mode", result.Mode, "reason", reason, "total_ms", float64(elapsed) / float64(time.Millisecond), "owner_ms", float64(ownerTime) / float64(time.Millisecond), "select_ms", float64(selectTime) / float64(time.Millisecond), "session_ms", float64(sessionTime) / float64(time.Millisecond), "replicate_ms", float64(replicateTime) / float64(time.Millisecond), "enqueue_ms", float64(enqueueTime) / float64(time.Millisecond), "bucket_ms", float64(bucketTime) / float64(time.Millisecond), "followers", len(followers), "lease_snapshot", leaseSnapshot, "err", commitErr}
-		if h, _, err := ltx.Decode(seg); err == nil {
-			attrs = append(attrs, "start_txid", h.StartTxID, "end_txid", h.EndTxID)
+		if h, err := ltx.ParseNativeHeader(seg); err == nil {
+			attrs = append(attrs, "start_txid", h.MinTXID, "end_txid", h.MaxTXID)
 		}
 		s.Log.Info("slow cell commit", attrs...)
 	}()

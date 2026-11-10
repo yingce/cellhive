@@ -48,7 +48,7 @@ func TestObjectScopesAndRestoreObject(t *testing.T) {
 		Epoch: 1, ScopePrefix: "workerd/__do__", Bucket: fsb,
 	}
 	// Router + actor reports join on host_id.
-	sup.Bind(hostID, hash, "ds_obj", "Tenant")
+	sup.Bind(hostID, hash, "ds_obj", "Tenant", "tenant-app")
 	sup.Bind(hostID, hash, "", "")
 
 	if _, err := sup.SyncAll(context.Background()); err != nil {
@@ -67,7 +67,7 @@ func TestObjectScopesAndRestoreObject(t *testing.T) {
 	if o.Name != want.Name || o.StorageID != want.StorageID || o.Class != want.Class || o.N != want.N || o.Rel != want.Rel {
 		t.Fatalf("object = %+v, want %+v", o, want)
 	}
-	wantScope := "workerd/Tenant/" + objScopeID("ds_obj", "Tenant", "Tenant/c1")
+	wantScope := "tenant-app/Tenant/" + objScopeID("ds_obj", "Tenant", "Tenant/c1")
 	if o.Scope != wantScope {
 		t.Fatalf("scope = %q, want %q", o.Scope, wantScope)
 	}

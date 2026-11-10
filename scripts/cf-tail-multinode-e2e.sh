@@ -316,7 +316,7 @@ if rg -q 'cf-tail-e2e-admin-token' "$TMP/tail.log"; then
 fi
 if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then
   cron_owner_node() {
-    compose exec -T agent-a cat /data/bucket/cells/e2e/__cron__/web/owner.json \
+    compose exec -T agent-a cat /data/bucket/cells/e2e/__cron__/web/own.json \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])'
   }
   select_cron_targets() {
@@ -431,7 +431,7 @@ with open(sys.argv[3],'w') as f:
     json.dump({'version':max(int(item['id']) for item in items)+1,
                'before_ids':[item['id'] for item in items]},f)
 PY
-  CONTROL_OWNER=$(compose exec -T agent-a cat /data/bucket/cells/__platform__/__control__/main/owner.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
+  CONTROL_OWNER=$(compose exec -T agent-a cat /data/bucket/cells/__platform__/__control__/main/own.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
   [[ $CONTROL_OWNER == cf-tail-a ]] || fail "expected A to own control before precommit SIGKILL, got $CONTROL_OWNER"
   cat >"$TMP/hold-deploy-body.py" <<'PY'
 import os,pathlib,socket,sys
@@ -552,7 +552,7 @@ PY
   if [[ ${CELLHIVE_CF_DEPLOY_KILL_OWNER:-0} == 1 ]]; then
     # A created this app's control scope. Kill its actual server process after
     # the commit was acknowledged to the proxy but before the caller retries.
-    CONTROL_OWNER=$(compose exec -T agent-a cat /data/bucket/cells/__platform__/__control__/main/owner.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
+    CONTROL_OWNER=$(compose exec -T agent-a cat /data/bucket/cells/__platform__/__control__/main/own.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"])')
     [[ $CONTROL_OWNER == cf-tail-a ]] || fail "expected A to own control before SIGKILL, got $CONTROL_OWNER"
     echo "control owner before SIGKILL: $CONTROL_OWNER"
     compose kill -s SIGKILL agent-a >/dev/null

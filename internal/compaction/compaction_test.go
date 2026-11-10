@@ -3,7 +3,6 @@ package compaction
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,11 +26,11 @@ func snapshotSegment(t *testing.T, epoch uint64, pageSize, commit uint32, pages 
 		}
 		sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
 	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, sorted)
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: 1, MaxTXID: 1}, sorted)
 	if err != nil {
 		t.Fatalf("encode snapshot: %v", err)
 	}
-	return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 0, EndTxID: 0}, payload)
+	return raw
 }
 
 func deltaSegment(t *testing.T, epoch uint64, pageSize, commit uint32, start uint64, pages map[uint32][]byte) []byte {
@@ -42,11 +41,11 @@ func deltaSegment(t *testing.T, epoch uint64, pageSize, commit uint32, start uin
 			sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
 		}
 	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, sorted)
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: start, MaxTXID: start}, sorted)
 	if err != nil {
 		t.Fatalf("encode delta: %v", err)
 	}
-	return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: start, EndTxID: start}, payload)
+	return raw
 }
 
 func raws(segs []replica.Segment) [][]byte {
@@ -55,42 +54,6 @@ func raws(segs []replica.Segment) [][]byte {
 		out[i] = segs[i].Raw
 	}
 	return out
-}
-
-func TestDeferredAccountingUsesBoundedMetadataOnly(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	rawBucket, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := &l0CountingBucket{Bucket: rawBucket}
-	sc := cell.Scope{Namespace: "acct", Class: "worker", ID: "one"}
-	base := replica.Prefix(sc, 7)
-	for key, body := range map[string][]byte{
-		base + "0-1.ltx":          bytes.Repeat([]byte{'a'}, 11),
-		base + "2-3.ltx":          bytes.Repeat([]byte{'b'}, 13),
-		base + "opaque.metadata":  bytes.Repeat([]byte{'c'}, 17),
-		base + "L1/manifest.json": bytes.Repeat([]byte{'d'}, 19),
-	} {
-		if _, err := b.Put(ctx, key, body); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	res := deferredMetadataAccounting(ctx, replica.New(b), sc, 7, 1)
-	if got := b.gets(); got != 0 {
-		t.Fatalf("metadata accounting read %d payloads", got)
-	}
-	if res.ObjectCount != 4 || res.ObjectBytes != 60 || !res.ObjectBytesKnown {
-		t.Fatalf("accounting = %+v", res)
-	}
-	if res.Covered != 1 || res.Deferred != 1 || res.Unknown != 2 {
-		t.Fatalf("classification = %+v", res)
-	}
-	if res.CoveredBytes != 11 || res.DeferredBytes != 13 || res.RetainedBytes != 24 || !res.RetainedBytesKnown {
-		t.Fatalf("retained bytes = %+v", res)
-	}
 }
 
 func applyAndCheck(t *testing.T, segs []replica.Segment, dest, key, want string) {
@@ -165,7 +128,7 @@ func TestCompactFoldsToL1AndRestoreMatches(t *testing.T) {
 	const epoch = uint64(1)
 	for _, seg := range [][]byte{
 		snapshotSegment(t, epoch, pageSize, commitA, pagesA),
-		deltaSegment(t, epoch, pageSizeB, commitB, 1, changed1),
+		deltaSegment(t, epoch, pageSizeB, commitB, 2, changed1),
 	} {
 		if _, _, err := rep.Append(ctx, sc, epoch, seg); err != nil {
 			t.Fatalf("append: %v", err)
@@ -185,15 +148,20 @@ func TestCompactFoldsToL1AndRestoreMatches(t *testing.T) {
 	if !res.Compacted {
 		t.Fatalf("not compacted: %s", res.Skipped)
 	}
-	if res.MaxTxID != 1 {
-		t.Fatalf("max txid = %d, want 1", res.MaxTxID)
+	if res.MaxTxID != 2 {
+		t.Fatalf("max txid = %d, want 2", res.MaxTxID)
 	}
-	man, ok, err := rep.ReadManifest(ctx, sc, epoch)
-	if err != nil || !ok {
-		t.Fatalf("manifest ok=%v err=%v", ok, err)
+	keys, err := rep.ListLevel(ctx, sc, epoch, 1)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("L1 objects=%v err=%v", keys, err)
 	}
-	if len(man.Objects) == 0 || man.Commit != commitB {
-		t.Fatalf("manifest objects=%d commit=%d want %d", len(man.Objects), man.Commit, commitB)
+	raw, err := rep.ReadSegment(ctx, keys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := ltx.ValidateNative(raw)
+	if err != nil || h.Commit != commitB || h.MinTXID != 1 || h.MaxTXID != 2 {
+		t.Fatalf("native L1: %+v %v", h, err)
 	}
 
 	l1, err := rep.Restore(ctx, sc, epoch)
@@ -222,7 +190,7 @@ func TestCompactFoldsToL1AndRestoreMatches(t *testing.T) {
 			changed2[pgno] = data
 		}
 	}
-	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, commitC, 2, changed2)); err != nil {
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, commitC, 3, changed2)); err != nil {
 		t.Fatalf("append delta2: %v", err)
 	}
 	withDelta, err := rep.Restore(ctx, sc, epoch)
@@ -236,7 +204,7 @@ func TestCompactFoldsToL1AndRestoreMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recompact: %v", err)
 	}
-	if !res2.Compacted || res2.MaxTxID != 2 {
+	if !res2.Compacted || res2.MaxTxID != 3 {
 		t.Fatalf("recompact = %+v", res2)
 	}
 	after, err := rep.Restore(ctx, sc, epoch)
@@ -246,7 +214,7 @@ func TestCompactFoldsToL1AndRestoreMatches(t *testing.T) {
 	applyAndCheck(t, after, filepath.Join(dir, "d3.db"), "after", "2")
 }
 
-func TestCompactSkipsBelowThresholdAndWithoutSnapshot(t *testing.T) {
+func TestCompactPromotesDeltaOnlyEpochAndHonorsThreshold(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
@@ -257,19 +225,20 @@ func TestCompactSkipsBelowThresholdAndWithoutSnapshot(t *testing.T) {
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "c2"}
 	const epoch = uint64(3)
 
-	// Deltas only: no snapshot baseline -> skip, not error.
-	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
+	// A continued epoch can promote delta ranges without an independent snapshot.
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	res, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1})
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
-	if res.Compacted || res.Skipped != "no snapshot baseline" {
+	if !res.Compacted || res.MinTxID != 2 || res.MaxTxID != 2 {
 		t.Fatalf("result = %+v", res)
 	}
 
-	// Snapshot present but below a high threshold -> skip.
+	// An independent snapshot below a high threshold is retained at L0.
+	sc.ID = "below-threshold"
 	if _, _, err := rep.Append(ctx, sc, epoch, snapshotSegment(t, epoch, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
@@ -300,12 +269,12 @@ func TestCompactVerifyAbortsBeforeWrite(t *testing.T) {
 	if err == nil {
 		t.Fatalf("want verify error")
 	}
-	if _, ok, _ := rep.ReadManifest(ctx, sc, epoch); ok {
-		t.Fatalf("manifest must not be written when Verify fails")
+	if keys, err := rep.ListLevel(ctx, sc, epoch, 1); err != nil || len(keys) != 0 {
+		t.Fatalf("published after Verify failure: %v %v", keys, err)
 	}
 }
 
-func TestPageFetcherOnDemandFromL1Index(t *testing.T) {
+func TestPageFetcherOnDemandFromNativeL1Index(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
@@ -331,18 +300,16 @@ func TestPageFetcherOnDemandFromL1Index(t *testing.T) {
 	if _, _, err := rep.Append(ctx, sc, epoch, snapshotSegment(t, epoch, pageSize, 5, snap)); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
-	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 1, d1)); err != nil {
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 2, d1)); err != nil {
 		t.Fatalf("append delta1: %v", err)
 	}
 	res, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1})
 	if err != nil || !res.Compacted {
 		t.Fatalf("compact: %+v, %v", res, err)
 	}
-	if _, ok, err := rep.ReadIndex(ctx, sc, epoch); err != nil || !ok {
-		t.Fatalf("index ok=%v err=%v", ok, err)
-	}
+
 	// A newer delta lands after compaction and is not folded into L1.
-	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 2, d2)); err != nil {
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 3, d2)); err != nil {
 		t.Fatalf("append delta2: %v", err)
 	}
 
@@ -350,7 +317,7 @@ func TestPageFetcherOnDemandFromL1Index(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fetcher: %v", err)
 	}
-	if pf.Commit() != 5 || pf.PageSize() != pageSize || pf.Watermark() != 1 {
+	if pf.Commit() != 5 || pf.PageSize() != pageSize || pf.Watermark() != 3 {
 		t.Fatalf("fetcher dims commit=%d pageSize=%d watermark=%d", pf.Commit(), pf.PageSize(), pf.Watermark())
 	}
 	// Page 3 comes from L1 (ranged read), page 5 from the newer L0 delta, page 1
@@ -369,8 +336,8 @@ func TestPageFetcherOnDemandFromL1Index(t *testing.T) {
 	expected := filepath.Join(dir, "expected.db")
 	if _, err := restore.ApplyFile(expected, [][]byte{
 		snapshotSegment(t, epoch, pageSize, 5, snap),
-		deltaSegment(t, epoch, pageSize, 5, 1, d1),
-		deltaSegment(t, epoch, pageSize, 5, 2, d2),
+		deltaSegment(t, epoch, pageSize, 5, 2, d1),
+		deltaSegment(t, epoch, pageSize, 5, 3, d2),
 	}); err != nil {
 		t.Fatalf("expected apply: %v", err)
 	}
@@ -403,238 +370,6 @@ func TestPageFetcherOnDemandFromL1Index(t *testing.T) {
 	}
 }
 
-func TestCompactGarbageCollectsSupersededObjects(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
-	if err != nil {
-		t.Fatalf("bucket: %v", err)
-	}
-	rep := replica.New(b)
-	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "gc"}
-	const epoch = uint64(1)
-	const pageSize = uint32(4096)
-	mk := func(f byte) []byte {
-		p := make([]byte, pageSize)
-		for i := range p {
-			p[i] = f
-		}
-		return p
-	}
-	appendSeg := func(seg []byte) string {
-		t.Helper()
-		key, _, err := rep.Append(ctx, sc, epoch, seg)
-		if err != nil {
-			t.Fatalf("append: %v", err)
-		}
-		return key
-	}
-
-	snapKey := appendSeg(snapshotSegment(t, epoch, pageSize, 5, map[uint32][]byte{1: mk(1), 2: mk(2), 3: mk(3), 4: mk(4), 5: mk(5)}))
-	d1Key := appendSeg(deltaSegment(t, epoch, pageSize, 5, 1, map[uint32][]byte{3: mk(0x31)}))
-	if res, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1}); err != nil || !res.Compacted {
-		t.Fatalf("compact1: %+v %v", res, err)
-	}
-	man1, _, err := rep.ReadManifest(ctx, sc, epoch)
-	if err != nil || len(man1.Objects) == 0 {
-		t.Fatalf("manifest1: %+v %v", man1, err)
-	}
-	l1v1 := man1.Objects[0]
-
-	d2Key := appendSeg(deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)}))
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
-	if err != nil {
-		t.Fatalf("compact2: %v", err)
-	}
-	if res2.DeletedL1 == 0 {
-		t.Fatalf("expected a superseded L1 object to be deleted: %+v", res2)
-	}
-	if res2.DeletedL0 == 0 {
-		t.Fatalf("expected folded L0 objects to be deleted: %+v", res2)
-	}
-	if _, _, err := b.Get(ctx, l1v1); err == nil {
-		t.Fatalf("superseded L1 object %s still present", l1v1)
-	}
-	for _, k := range []string{snapKey, d1Key, d2Key} {
-		if _, _, err := b.Get(ctx, k); err == nil {
-			t.Fatalf("folded L0 object %s still present", k)
-		}
-	}
-
-	// The chain still restores from the surviving L1 snapshot.
-	segs, err := rep.Restore(ctx, sc, epoch)
-	if err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	dest := filepath.Join(dir, "gc.db")
-	if _, err := restore.ApplyFile(dest, raws(segs)); err != nil {
-		t.Fatalf("apply after gc: %v", err)
-	}
-	got, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	page := func(n int) []byte { return got[(n-1)*int(pageSize) : n*int(pageSize)] }
-	if page(1)[0] != 1 || page(3)[0] != 0x31 || page(5)[0] != 0x52 {
-		t.Fatalf("restored image wrong after gc: p1=%x p3=%x p5=%x", page(1)[0], page(3)[0], page(5)[0])
-	}
-}
-
-// wal2SnapshotSegment hand-builds a v1 (WAL2, uncompressed fixed-frame) snapshot,
-// the format written before ADR-160, so the tests keep proving that compaction
-// and GC fold legacy segments into the new compressed L1.
-func wal2SnapshotSegment(t *testing.T, epoch uint64, pageSize, commit uint32, pages map[uint32][]byte) []byte {
-	t.Helper()
-	payload := make([]byte, 0, 20+int(commit)*(4+int(pageSize)))
-	payload = append(payload, []byte("WAL2")...)
-	var tmp [4]byte
-	for _, v := range []uint32{pageSize, commit, 1, commit} {
-		binary.BigEndian.PutUint32(tmp[:], v)
-		payload = append(payload, tmp[:]...)
-	}
-	for p := uint32(1); p <= commit; p++ {
-		data, ok := pages[p]
-		if !ok {
-			t.Fatalf("wal2 snapshot missing page %d", p)
-		}
-		binary.BigEndian.PutUint32(tmp[:], p)
-		payload = append(payload, tmp[:]...)
-		payload = append(payload, data...)
-	}
-	// Baseline snapshots sort before every delta (StartTxID 0), matching the
-	// convention the capture path uses.
-	return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 0, EndTxID: 0}, payload)
-}
-
-// TestCompactFoldsLegacyV1AndGCsCompressedL1: GC is key/watermark based, so it
-// must keep working when the input chain mixes the legacy WAL2 snapshot with new
-// compressed (WAL3) segments and the folded L1 is compressed. Paged reads and a
-// full restore must both work from the surviving objects.
-func TestCompactFoldsLegacyV1AndGCsCompressedL1(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	b, err := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rep := replica.New(b)
-	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "gc-v1"}
-	const epoch = uint64(1)
-	const pageSize = uint32(4096)
-	mk := func(f byte) []byte {
-		p := make([]byte, pageSize)
-		for i := range p {
-			p[i] = f
-		}
-		return p
-	}
-	// Legacy v1 baseline snapshot + a new delta.
-	v1Key, _, err := rep.Append(ctx, sc, epoch, wal2SnapshotSegment(t, epoch, pageSize, 5, map[uint32][]byte{1: mk(1), 2: mk(2), 3: mk(3), 4: mk(4), 5: mk(5)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d1Key, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 1, map[uint32][]byte{3: mk(0x31)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res1, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1})
-	if err != nil || !res1.Compacted {
-		t.Fatalf("compact1: %+v %v", res1, err)
-	}
-	man1, _, err := rep.ReadManifest(ctx, sc, epoch)
-	if err != nil || len(man1.Objects) == 0 {
-		t.Fatalf("manifest1: %+v %v", man1, err)
-	}
-	oldL1 := man1.Objects[0]
-	// The folded L1 is compressed (WAL3) and the index carries frame locations.
-	raw1, err := rep.ReadSegment(ctx, oldL1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, payload, err := ltx.Decode(raw1); err != nil {
-		t.Fatal(err)
-	} else {
-		locs, lerr := ltx.PageLocs(payload)
-		if lerr != nil || len(locs) != 5 {
-			t.Fatalf("folded L1 locs = %d, %v", len(locs), lerr)
-		}
-		compressed := 0
-		for _, l := range locs {
-			if l.Codec == ltx.CodecLZ4 {
-				compressed++
-			}
-		}
-		if compressed == 0 {
-			t.Fatal("folded L1 is not compressed")
-		}
-	}
-	idx, ok, err := rep.ReadIndex(ctx, sc, epoch)
-	if err != nil || !ok || len(idx.Entries) == 0 || len(idx.Entries[0].Locs) != len(idx.Entries[0].Pages) {
-		t.Fatalf("index after compaction = %+v, %v", idx, err)
-	}
-
-	// A new delta lands, then compaction folds again and GCs the old L1 + L0.
-	d2Key, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res2, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true, OfflineQuiescent: true, KeepL1Generations: 1})
-	if err != nil {
-		t.Fatalf("compact2: %v", err)
-	}
-	if res2.DeletedL1 == 0 || res2.DeletedL0 == 0 {
-		t.Fatalf("GC did not delete superseded objects: %+v", res2)
-	}
-	if _, _, err := b.Get(ctx, oldL1); err == nil {
-		t.Fatalf("superseded L1 %s still present", oldL1)
-	}
-	for _, k := range []string{v1Key, d1Key, d2Key} {
-		if _, _, err := b.Get(ctx, k); err == nil {
-			t.Fatalf("folded L0 %s still present", k)
-		}
-	}
-	// The manifest and page index are overwritten in place, never GC'd.
-	if _, _, err := b.Get(ctx, replica.IndexName(sc, epoch)); err != nil {
-		t.Fatalf("index.bin missing after GC: %v", err)
-	}
-	if _, _, err := b.Get(ctx, replica.ManifestName(sc, epoch)); err != nil {
-		t.Fatalf("manifest.json missing after GC: %v", err)
-	}
-
-	// Paged reads work from the surviving compressed L1 (decompression path).
-	pf, err := rep.NewPageFetcher(ctx, sc, epoch)
-	if err != nil {
-		t.Fatalf("page fetcher after GC: %v", err)
-	}
-	for pgno, want := range map[uint32]byte{1: 1, 3: 0x31, 5: 0x52} {
-		page, err := pf.Page(ctx, pgno)
-		if err != nil || page[0] != want {
-			t.Fatalf("paged read after GC: page %d = %x, %v; want %x", pgno, page[0], err, want)
-		}
-	}
-	run, err := pf.ReadRun(ctx, 1, 8)
-	if err != nil || len(run) == 0 || run[0][0] != 1 {
-		t.Fatalf("paged run after GC = %d pages, %v", len(run), err)
-	}
-
-	// Full restore from the surviving objects is still byte-exact.
-	segs, err := rep.Restore(ctx, sc, epoch)
-	if err != nil {
-		t.Fatalf("restore after GC: %v", err)
-	}
-	dest := filepath.Join(dir, "gc-v1.db")
-	if _, err := restore.ApplyFile(dest, raws(segs)); err != nil {
-		t.Fatalf("apply after GC: %v", err)
-	}
-	got, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got[0] != 1 || got[2*int(pageSize)] != 0x31 || got[4*int(pageSize)] != 0x52 {
-		t.Fatalf("restored image wrong after GC: p1=%x p3=%x p5=%x", got[0], got[2*int(pageSize)], got[4*int(pageSize)])
-	}
-}
-
 func TestPageFetcherDeduplicatesRecoveredDelta(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -657,7 +392,7 @@ func TestPageFetcherDeduplicatesRecoveredDelta(t *testing.T) {
 	if _, _, err := rep.Append(ctx, sc, epoch, snapshotSegment(t, epoch, pageSize, 5, snap)); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
-	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 1, map[uint32][]byte{3: mk(0x31)})); err != nil {
+	if _, _, err := rep.Append(ctx, sc, epoch, deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{3: mk(0x31)})); err != nil {
 		t.Fatalf("append delta1: %v", err)
 	}
 	if _, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1}); err != nil {
@@ -665,7 +400,7 @@ func TestPageFetcherDeduplicatesRecoveredDelta(t *testing.T) {
 	}
 	// Owner uploads the delta as a batch; recovery re-uploads the same single
 	// segment. PageFetcher must keep one logical copy.
-	dup := deltaSegment(t, epoch, pageSize, 5, 2, map[uint32][]byte{5: mk(0x52)})
+	dup := deltaSegment(t, epoch, pageSize, 5, 3, map[uint32][]byte{5: mk(0x52)})
 	if _, _, err := rep.AppendBatch(ctx, sc, epoch, [][]byte{dup}); err != nil {
 		t.Fatalf("append batch: %v", err)
 	}

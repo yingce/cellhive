@@ -1,10 +1,14 @@
 # Object Storage
 
-**ADR-307 supersedes earlier replication deletion descriptions: contract first, implementation and acceptance in progress, not deployed.** Compaction keeps publishing; automatic physical replication GC is **DEFERRED**. Covered L0, old L1 and `RetireEpochs` payload deletion requires explicit `OfflineQuiescent bool=true` (default `false`), with all writers AND readers externally quiesced for the entire deletion. `Options.GC`, absent owner and nil `Verify` are not permission. Production background never opts in; intervals/timeouts cannot bypass. Configured per-delete `Verify` stops observed owner loss, not the check/delete race; optional payload ETag is not an atomic owner fence.
+The current, unshipped worktree follows native LTX from pinned celld `90b4301`. Compaction is additive: publish target-level files and retain sources. The old `Options.GC`, L1-generation retention, seals/pins/tombstones and separate manifest/index APIs are removed.
 
-All modes preserve marker/link/immutable epoch-cut/snapshot-started/done/unknown names. Complete manifest/index coverage proof remains required; watermark comparison alone is insufficient. Immutable cut, cut-before-prune and durable large-marker-before-Serve fixes are in progress, not accepted deployment claims. `ReportDeferredGC`/`GCSkipped` must deterministically report deferral without counting unperformed deletion as success. No pending-deletion registry; bundle/assets ops GC is unchanged. Bucket growth and historical List overhead remain. Full online GC still requires unresolved generation descriptors, monotonic epoch references and reader pinning. The ADR-306 checks below are necessary but do not authorize online deletion.
+Physical reclamation uses native epoch GC: validate the recovery chain and current owner; retain required epochs and the immediate predecessor; delete only older epochs beyond the one-hour upload-age margin. Publish upstream `ltx/retired.json` (`retired_below`) before deletion so interruptions can resume. Unknown objects/timestamps, truncated listings and missing predecessors fail closed. Online callers hold a resident cell request/eviction gate, require complete materialization, and revalidate ownership after scanning and before each epoch deletion. Otherwise nothing is deleted. Explicit offline maintenance requires externally quiescent writers/readers; individual deletions also validate native path/header/CRC. The one-hour margin is not an active-epoch L0/L1 TTL. Bundle/assets GC is unchanged.
 
-**Incrementally locally accepted, uncommitted and not deployed (ADR-306):** canonical snapshots/parts covered by the page index may skip payload reads; unknown/mixed/snapshot batches still decode. MinBytes index-only early exit requires zero L0 objects. Shortcut covered-L0 GC requires persisted index watermark >= manifest and owner revalidation; missing/behind indexes defer deletion and read errors fail closed. Per-scope compaction timeout defaults to 5m. Object reads default to 512MiB for native COS/OSS and S3, overridable via S3Options.MaxReadBytes; peer/HTTPStore defaults are 30s/60s total deadlines with residual slow-body risk. Full restore memory/streaming, old-epoch GC cost and all Range/background deadlines are not fixed by this batch; six confirmed epoch/lineage defects remain release gates. See [current storage boundaries](../storage-and-s3.md).
+Paged activation reads embedded native indexes and requires every final image page except the lock page. The cut stays immutable; a missing object does not permit switching to a newer cut. Size-threshold selection reads the final 100-byte header and uses page size × commit, without a separate index or zero-L0 restriction. Compaction reads only uncovered inputs. Independent level schedules are 30 seconds, five minutes and one hour; per-scope timeout defaults to five minutes.
+
+All native LTX uploads (byte deltas, continuation seeds, spools) use native forbid-overwrite PUT on COS/OSS, not AppendObject. Control records retain their separate append-based conditional-write protocol. LTX objects carry standard `litestream-timestamp` metadata derived from the header in UTC RFC3339Nano; multipart sets it at initiation without a sidecar.
+
+Native codecs, restored page writes, and snapshot spool uploads support streaming. Spools are fully CRC-validated before atomic publication through owned Objects; retries compare at most 1MiB per ranged read. Regenerated snapshots may differ only in Timestamp and its resulting file CRC, after independent validation of the existing file and exact comparison of every other byte; the first object and metadata are retained. Deltas require byte identity. COS uses 5MiB multipart uploads with forbid-overwrite at completion and abort on failure/cancellation; S3/OSS support streamed single-object conditional creation. Multipart state creates no additional visible files. L1/L2/L3/L9 compaction reads native HTTP/file streams and writes a local temporary spool, then validates CRC and publishes through streaming upload. It closes inputs and removes the spool on failure. Page indexes still grow with page count; ordinary Get/RestoreChain bodies remain buffered, so memory is not constant across the entire system. COS/OSS and S3 default to a 512MiB object-read limit and reject oversized reads. Strict multi-epoch crash and real COS recovery acceptance is recorded below; a full same-topology memory/throughput comparison with celld remains outstanding. See [storage details](../storage-and-s3.md).
 
 ## Hard Requirements (All Required)
 
@@ -44,9 +48,9 @@ Independent `state/code/assets/r2/backup` bucket roles and per-role credentials 
 ## Key Layout (Example)
 
 ```
-cells/<ns>/<class>/<id>/owner.json
-cells/<scope>/ltx/e<epoch>/<segment>
-cells/<scope>/snapshot/<txid>
+cells/<ns>/<class>/<id>/own.json
+cells/<scope>/ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx
+cells/<scope>/ltx/e<epoch>/0009/<min>-<max>.ltx
 nodes/<node>.json
 node-logs/<node>/<session>.json
 fleet/capacity-v1.json
@@ -57,7 +61,7 @@ assets/<ns>/<worker>/<token>/<path>
 r2/<ns>/<bucket_name>/<object-key>
 ```
 
-**Provider authority physical layout (ADR-266)**: on `cos://` / `oss://`, logical authority keys (`owner.json`, `owner-gen`, `nodes/<node>.json`, `node-logs/...`, `fleet/waker.json`) map to time-segmented `.w<window>` objects, e.g. `cells/<scope>/owner.json.w<window>`. The API keeps the logical key; the provider console shows the segment keys. Each segment is a `CHL2` frame log read from its tail, and old segments are physically deleted at rollover; normally only the current and previous windows exist.
+**Owner physical layout (current canonical format)**: `cells/<scope>/own.json` is the only owner object. COS/OSS applies conditional create, CAS, and conditional delete directly to that key; no `owner.json.w<window>` or other owner sidecar is produced.
 
 ## Credentials
 
@@ -88,3 +92,26 @@ r2/<ns>/<bucket_name>/<object-key>
 - Other cloud stores/accounts: atomic write/delete semantics, concurrent races, and presigned reads (Class C environment).
 
 _Last updated: 2026-09-25_
+
+### Native protocol acceptance audit (2026-11-09)
+
+The reference is pinned celld 90b43017241f81189453d326d05948f388b34652. Current Go/Rust header/page interoperability, native delta WAL coordinates, snapshot recognition, levels 0/1/2/3/9, UTC 30s/5m/1h schedules, exact-cut epoch continuation, additive compaction, and real COS level promotion have direct source/test evidence. The strict 100k three-owner-crash run passed, including cold verification with the standby stopped and no fallback URLs. See the Chinese audit table for individual evidence and limits.
+
+NoChecksum is the standard flag used by reference celld ordinary sync and replica_compactor. Its separate handoff snapshot_to_writer also supports rolling post-apply snapshot checksums; CellHive reads that native variant, while its current writer uses NoChecksum. File CRC64 is always retained. Do not claim every celld writer uses NoChecksum.
+
+Actual HTTPStore/direct replica DO paths now use streaming ProvenWatermark, HEAD/Range with size and ETag, and chain=1 for cross-epoch page recovery. Generic Restore/RestoreChain and external SegmentSource fallbacks can still buffer bodies; index memory scales with page count.
+
+Final make test/build/vet passed. The latest binary recovered 100/100 values after owner SIGKILL and after local SQLite removal on HK COS; cold first GET was 1.035300s (/tmp/native-do-proof-final-batch.log). The strict 100k run used the earlier snapshot-clock-fixed binary; the new HTTP/proof paths separately passed real COS 8.48MB cross-epoch recovery with identical SHA (/tmp/native-cos-http-stream-proof.log). These are distinct binary acceptance runs.
+
+The previously requested general cell SQLite export/import product entry point is still outstanding, separate from these six protocol-alignment requirements. The successful one-off control-database migration does not establish completion of that feature.
+
+
+### Large-cell resource budgets (2026-11-09)
+
+Native LTX format is unchanged. Adjacent-level rounds select at most256 inputs/64MiB; one indivisible large source runs alone. OptionalL9 checks the latest native header before payload reads (80MiB generic default, existing256MiB policy on owner release); over-budget logical size or full-chain inputs skip without partial publication or predecessor deletion.
+
+Maintenance, native proof, restore/index construction and file upload have process concurrency limits. Long plans use bounded versioned ranges; materialization caches at most8MiB decoded pages with1MiB encoded requests, preserving source/ETag and sparse range boundaries. Production DO paging errors do not fall back to whole bodies. CRC remains mandatory; buffered disk IO and chunked index comparison reduce overhead. Final page-index memory still scales with page count.
+
+A disposable64MiB/256-entry local disk LTX cache contains only newly successful publications and requires remote size/ETag equality before reuse; it is neither authority nor remote metadata. See the [10GiB acceptance report](../reports/2026-11-09-large-cell-storage.md). Mandatory capture retains a configurable default8GiB snapshot limit; storage-level acceptance does not imply default capture accepts10GiB.
+
+Cache review: only existing snapshot/compaction file spools populate the local cache after successful new publication. Ordinary byte deltas do not add cache filesystem writes; a dedicated regression enforces this hot-path boundary.

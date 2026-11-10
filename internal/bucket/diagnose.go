@@ -3,6 +3,7 @@ package bucket
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -19,6 +20,9 @@ func Diagnose(ctx context.Context, b Bucket) error {
 		}
 	}
 	base := fmt.Sprintf("probe/%d", time.Now().UnixNano())
+	if err := diagnoseOwnerConditions(ctx, b, "cells/"+base+"/own.json"); err != nil {
+		return fmt.Errorf("bucket owner authority: %w", err)
+	}
 	createKey := "nodes/" + base + "/create.json"
 	rangeKey := base + "/range"
 
@@ -79,5 +83,43 @@ func Diagnose(ctx context.Context, b Bucket) error {
 
 	_ = b.Delete(ctx, createKey)
 	_ = b.Delete(ctx, rangeKey)
+	return nil
+}
+
+// Provider adapters may route nodes and owners through different primitives.
+// Checking only node leases cannot establish owner exclusion.
+func diagnoseOwnerConditions(ctx context.Context, b Bucket, key string) error {
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = b.Delete(cleanup, key)
+	}()
+	first, err := b.ConditionalCreate(ctx, key, []byte("first"))
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if _, err = b.ConditionalCreate(ctx, key, []byte("duplicate")); !errors.Is(err, ErrPrecondition) {
+		return fmt.Errorf("reject-create: expected precondition, got %v", err)
+	}
+	second, err := b.CAS(ctx, key, []byte("second"), first)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	if _, err = b.CAS(ctx, key, []byte("stale"), first); !errors.Is(err, ErrPrecondition) {
+		return fmt.Errorf("reject-stale: expected precondition, got %v", err)
+	}
+	if err = b.ConditionalDelete(ctx, key, first); !errors.Is(err, ErrPrecondition) {
+		return fmt.Errorf("conditional delete (reject-stale): expected precondition, got %v", err)
+	}
+	data, token, err := b.Get(ctx, key)
+	if err != nil || !bytes.Equal(data, []byte("second")) || token != second {
+		return fmt.Errorf("rejected operation changed record: %v", err)
+	}
+	if err = b.ConditionalDelete(ctx, key, second); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if _, _, err = b.Get(ctx, key); !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("delete left record: %v", err)
+	}
 	return nil
 }

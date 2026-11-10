@@ -115,8 +115,9 @@ PY
 listops(){ curl -sS -m 5 -H "Authorization: Bearer $(auth internal)" "http://$REST/metrics" | awk '/^cellhive_bucket_ops_total\{op="list"\}/{print $NF}'; }
 
 # A5: wipe the local cell directory and force the control cell to hydrate from
-# the bucket. Hydration must be one scope listing at most (RestoreChain) plus
-# the LatestEpoch lookup, not one List per epoch.
+# the bucket. This fixture has two continuation epochs: one epoch-directory
+# lookup plus a level-directory and L0 listing for each epoch (five total).
+# Native layout discovery must not regress to broad per-object scans.
 kill -9 "$AGENT" 2>/dev/null; wait "$AGENT" 2>/dev/null; AGENT=""
 rm -rf "$CELLHIVE_DATA_DIR/cells"
 start_agent owner-e2e-s3 || exit 1
@@ -126,7 +127,7 @@ AFTER_LIST=$(listops)
 echo "cold hydrate first deploy: $COLD list_delta=$((AFTER_LIST - BEFORE_LIST))"
 COLD_SECONDS=$(echo "$COLD" | awk '{print $1}')
 [[ $(echo "$COLD" | awk '{print $2}') == 200 ]] || fail "cold hydrate deploy failed: $COLD"
-[[ $((AFTER_LIST - BEFORE_LIST)) -le 4 ]] || fail "cold hydrate used $((AFTER_LIST - BEFORE_LIST)) bucket Lists (want <=4)"
+[[ $((AFTER_LIST - BEFORE_LIST)) -le 5 ]] || fail "cold hydrate used $((AFTER_LIST - BEFORE_LIST)) bucket Lists (want <=5)"
 python3 - "$COLD_SECONDS" <<'PY' || fail "cold hydrate first write took ${COLD_SECONDS}s"
 import sys
 sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)

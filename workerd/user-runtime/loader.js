@@ -1241,6 +1241,9 @@ async function hostView(env, host, ctx) {
   hostCache.set(host, fresh);
   try {
     await revalidateHost(env, host, fresh);
+    // A concurrent routes revision discards the old response. Re-read once
+    // before invoking tenant code; never use the discarded pointer.
+    if (fresh.value === undefined) await revalidateHost(env, host, fresh);
   } catch (err) {
     // Do not leave a poisoned cold entry behind: the next request should retry
     // (subject to the global backoff) rather than get 503 until LRU eviction.

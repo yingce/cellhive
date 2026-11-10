@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -10,23 +9,21 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/compaction"
-	"cellhive/internal/ltx"
 )
 
 func TestMetricsExposeGCBacklog(t *testing.T) {
 	s, _ := newTestServer(t)
 	ctx := context.Background()
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc-metrics"}
-	payload, err := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 64)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.Replica.Append(ctx, sc, 1, ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 1, EndTxID: 1}, payload)); err != nil {
+	if _, _, err := s.Replica.Append(ctx, sc, 1, nativeTestFile(t, 1, 1, []byte("metrics"))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := compaction.Compact(ctx, s.Replica, sc, 1, compaction.Options{MinSegments: 1}); err != nil {
 		t.Fatal(err)
 	}
+	// An explicit diagnostic refresh populates metrics; neither compaction nor
+	// scraping adds a broad bucket listing.
+	compaction.RecordStats(ctx, s.Replica, sc, 1)
 	rr := httptest.NewRecorder()
 	s.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rr.Body.String()

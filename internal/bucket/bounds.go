@@ -86,12 +86,12 @@ func readAllBounded(key string, body io.Reader, contentLength, max int64) ([]byt
 // readTailBounded keeps only the last n bytes while consuming a possibly full
 // response (some providers ignore suffix ranges), so a full-object response
 // does not allocate the full object.
-func readTailBounded(key string, body io.Reader, n int, contentLength, max int64) ([]byte, error) {
+func readTailBounded(key string, body io.Reader, n int, contentLength, max int64) ([]byte, int64, error) {
 	if max <= 0 {
 		max = DefaultMaxObjectBytes
 	}
 	if contentLength > max {
-		return nil, objectTooLarge(key, contentLength, max)
+		return nil, 0, objectTooLarge(key, contentLength, max)
 	}
 	if n <= 0 {
 		n = segProbeBytes
@@ -112,7 +112,7 @@ func readTailBounded(key string, body io.Reader, n int, contentLength, max int64
 		if nr > 0 {
 			read += int64(nr)
 			if read > max {
-				return nil, objectTooLarge(key, read, max)
+				return nil, 0, objectTooLarge(key, read, max)
 			}
 			tail = append(tail, buf[:nr]...)
 			if len(tail) > 2*n {
@@ -124,11 +124,11 @@ func readTailBounded(key string, body io.Reader, n int, contentLength, max int64
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	if len(tail) > n {
 		tail = tail[len(tail)-n:]
 	}
-	return tail, nil
+	return tail, read, nil
 }

@@ -12,7 +12,6 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/config"
 	"cellhive/internal/lease"
-	"cellhive/internal/ltx"
 	"cellhive/internal/owner"
 	"cellhive/internal/peer"
 	"cellhive/internal/recovery"
@@ -50,7 +49,7 @@ func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("do-write"))
+	seg := nativeTestFile(t, 1, 1, []byte("do-write"))
 	transport := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).WithSession("s1")
 	if err := transport.Append(ctx, fh.URL, capture, 1, seg); err != nil {
 		t.Fatal(err)
@@ -103,7 +102,7 @@ func TestDORecoveryPointerABARoundTrip(t *testing.T) {
 		if err := s.ensureDORecoveryPointer(ctx, sc, p); err != nil {
 			t.Fatalf("pointer epoch %d: %v", epoch, err)
 		}
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: epoch, EndTxID: epoch}, []byte(fmt.Sprintf("value-%d", epoch)))
+		seg := nativeTestFile(t, epoch, epoch, []byte(fmt.Sprintf("value-%d", epoch)))
 		if err := transport.Append(ctx, fh.URL, sc, 1, seg); err != nil {
 			t.Fatal(err)
 		}

@@ -2,6 +2,7 @@ package replica
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,116 +39,89 @@ const maxStatsObjects = 50000
 // callers do not treat it as a complete byte total.
 func (m *Manager) BacklogStats(ctx context.Context, s cell.Scope, epoch uint64) (BacklogStats, error) {
 	out := BacklogStats{Scope: s.String(), Epoch: epoch}
-	man, haveMan, err := m.ReadManifest(ctx, s, epoch)
-	if err != nil {
-		return out, err
-	}
-	floor := uint64(0)
-	if haveMan {
-		floor = man.MaxTxID
-		out.LastCompactionKnown = man.CreatedMs > 0
-		if out.LastCompactionKnown {
-			out.LastCompactionLagSeconds = time.Now().UnixMilli() - man.CreatedMs
-			if out.LastCompactionLagSeconds < 0 {
-				out.LastCompactionLagSeconds = 0
-			}
-		}
-	}
-	keep := map[string]bool{}
-	for _, k := range man.Objects {
-		keep[k] = true
-	}
-	infos, sizesKnown, truncated, err := m.listObjectInfos(ctx, Prefix(s, epoch))
+	infos, sizesKnown, truncated, err := m.listObjectInfos(ctx, EpochPrefix(s, epoch))
 	if err != nil {
 		return out, err
 	}
 	out.Truncated = truncated
-	now := time.Now().UnixMilli()
-	var oldest int64
-	l1Gen := map[uint64]bool{}
-	l1 := L1Prefix(s, epoch)
+	out.L0BacklogBytesKnown = sizesKnown
+	out.DeferredBytesKnown = sizesKnown
+	type file struct {
+		info   bucket.ObjectInfo
+		level  uint16
+		lo, hi uint64
+	}
+	var files []file
+	var higher [10][]txRange
+	var latest int64
 	for _, info := range infos {
-		name := strings.TrimPrefix(info.Key, Prefix(s, epoch))
-		if strings.HasPrefix(info.Key, l1) {
-			short := strings.TrimPrefix(info.Key, l1)
-			if strings.HasSuffix(short, ".snapshot") {
-				base := short[:strings.IndexByte(short, '.')]
-				if gen, perr := strconv.ParseUint(base, 10, 64); perr == nil {
-					l1Gen[gen] = true
-				}
-			}
-			if !keep[info.Key] {
-				if sizesKnown {
-					out.DeferredGCBytes += info.Size
-				}
+		rel := strings.TrimPrefix(info.Key, EpochPrefix(s, epoch))
+		if len(rel) != 42 || rel[4] != '/' {
+			continue
+		}
+		level, err := strconv.ParseUint(rel[:4], 16, 16)
+		if err != nil || !validLevel(uint16(level)) || fmt.Sprintf("%04x", level) != rel[:4] {
+			continue
+		}
+		sp, ok := parseSegmentSpan(rel[5:])
+		if !ok || sp.start == 0 || sp.end < sp.start {
+			continue
+		}
+		files = append(files, file{info, uint16(level), sp.start, sp.end})
+		if level == 1 {
+			out.L1Generations++
+		}
+		if level > 0 && info.LastModifiedMs > latest {
+			latest = info.LastModifiedMs
+		}
+		for lower := uint16(0); lower < uint16(level); lower++ {
+			higher[lower] = append(higher[lower], txRange{sp.start, sp.end})
+		}
+	}
+	for i := range higher {
+		higher[i] = mergeTXRanges(higher[i])
+	}
+	now := time.Now().UnixMilli()
+	if latest > 0 {
+		out.LastCompactionKnown = true
+		out.LastCompactionLagSeconds = max(0, (now-latest)/1000)
+	}
+	for _, f := range files {
+		covered := rangeCovered(higher[f.level], f.lo, f.hi)
+		if covered {
+			if sizesKnown {
+				out.DeferredGCBytes += f.info.Size
 			}
 			continue
 		}
-		if !isSegmentKey(info.Key) {
+		if f.level != 0 {
 			continue
-		}
-		sp, known := parseSegmentSpan(name)
-		if known {
-			if sp.marker {
-				continue
-			}
-			if floor > 0 && sp.end <= floor {
-				if sizesKnown {
-					out.DeferredGCBytes += info.Size
-				}
-				continue
-			}
 		}
 		out.L0BacklogObjects++
 		if sizesKnown {
-			out.L0BacklogBytes += info.Size
-			out.L0BacklogBytesKnown = true
+			out.L0BacklogBytes += f.info.Size
 		}
-		if info.LastModifiedMs > 0 {
-			age := (now - info.LastModifiedMs) / 1000
-			if age < 0 {
-				age = 0
-			}
-			if !out.OldestL0AgeKnown || age > out.OldestL0AgeSeconds {
-				out.OldestL0AgeSeconds = age
-				out.OldestL0AgeKnown = true
-			}
-			if oldest == 0 || info.LastModifiedMs < oldest {
-				oldest = info.LastModifiedMs
-			}
+		if f.info.LastModifiedMs > 0 {
+			out.OldestL0AgeKnown = true
+			out.OldestL0AgeSeconds = max(out.OldestL0AgeSeconds, max(0, (now-f.info.LastModifiedMs)/1000))
 		}
 	}
-	out.L1Generations = len(l1Gen)
-	if sizesKnown {
-		out.DeferredBytesKnown = true
-	}
-	if oldest > 0 {
-		out.OldestL0AgeKnown = true
-	}
-	epochs, err := m.Epochs(ctx, s, 0)
+	// Report physically present native epochs. Do not read private retired,
+	// manifest or seal objects to infer whether an epoch is retained.
+	epochs, err := m.epochDirs(ctx, s, 0)
 	if err != nil {
 		return out, err
 	}
-	for _, e := range epochs {
-		retired, rerr := m.EpochRetired(ctx, s, e)
-		if rerr != nil {
-			return out, rerr
-		}
-		if retired {
-			out.RetiredEpochs++
-		} else {
-			out.RetainedEpochs++
-		}
-	}
+	out.RetainedEpochs = len(epochs)
 	return out, nil
 }
 
 func (m *Manager) listObjectInfos(ctx context.Context, prefix string) ([]bucket.ObjectInfo, bool, bool, error) {
-	if pl, ok := m.B.(bucket.PagedLister); ok {
+	if _, ok := m.B.(bucket.PagedLister); ok {
 		var out []bucket.ObjectInfo
 		after := ""
 		for {
-			page, next, err := pl.ListPage(ctx, prefix, after, 1000)
+			page, next, err := m.resourceObjects().ListPage(ctx, prefix, after, 1000)
 			if err != nil {
 				return nil, false, false, err
 			}
@@ -163,7 +137,7 @@ func (m *Manager) listObjectInfos(ctx context.Context, prefix string) ([]bucket.
 			after = next
 		}
 	}
-	keys, err := m.B.List(ctx, prefix)
+	keys, err := m.resourceObjects().ListPrefix(ctx, prefix)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -177,4 +151,27 @@ func (m *Manager) listObjectInfos(ctx context.Context, prefix string) ([]bucket.
 		out = append(out, bucket.ObjectInfo{Key: key, Size: -1})
 	}
 	return out, false, truncated, nil
+}
+
+// txRange coverage is a union, not a maximum watermark: gaps must remain backlog.
+type txRange struct{ lo, hi uint64 }
+
+func mergeTXRanges(in []txRange) []txRange {
+	sort.Slice(in, func(i, j int) bool { return in[i].lo < in[j].lo })
+	out := in[:0]
+	for _, r := range in {
+		if len(out) > 0 {
+			p := &out[len(out)-1]
+			if r.lo <= p.hi || p.hi != ^uint64(0) && r.lo == p.hi+1 {
+				p.hi = max(p.hi, r.hi)
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+func rangeCovered(in []txRange, lo, hi uint64) bool {
+	i := sort.Search(len(in), func(i int) bool { return in[i].hi >= lo })
+	return i < len(in) && in[i].lo <= lo && in[i].hi >= hi
 }

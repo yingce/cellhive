@@ -38,14 +38,14 @@ env = {k: v for k, v in os.environ.items()
        and not k.upper().endswith('_PROXY')}
 env.update(
     CELLHIVE_NATIVE_TEST_PROVIDER='cos', CELLHIVE_COS_TEST='1',
-    COS_BUCKET='vwork-e2e-hk-1376795072',
-    COS_ENDPOINT='https://vwork-e2e-hk-1376795072.cos.ap-hongkong.myqcloud.com',
+    COS_BUCKET='cellhive-e2e-hk-1376795072',
+    COS_ENDPOINT='https://cellhive-e2e-hk-1376795072.cos.ap-hongkong.myqcloud.com',
     COS_SECRET_ID=creds['AWS_ACCESS_KEY_ID'],
     COS_SECRET_KEY=creds['AWS_SECRET_ACCESS_KEY'], NO_PROXY='*', no_proxy='*',
     CELLHIVE_S3_TEST_PROVIDER='cos',
     CELLHIVE_S3_TEST_ENDPOINT='https://cos.ap-hongkong.myqcloud.com',
     CELLHIVE_S3_TEST_REGION='ap-hongkong',
-    CELLHIVE_S3_TEST_BUCKET='vwork-e2e-hk-1376795072',
+    CELLHIVE_S3_TEST_BUCKET='cellhive-e2e-hk-1376795072',
     CELLHIVE_S3_TEST_ACCESS=creds['AWS_ACCESS_KEY_ID'],
     CELLHIVE_S3_TEST_SECRET=creds['AWS_SECRET_ACCESS_KEY'],
     CELLHIVE_S3_TEST_PATH_STYLE='false',
@@ -54,6 +54,11 @@ tests = (
     'TestS3ReplicationRestoreChain', 'TestProviderCloudDiagnose', 'TestProviderListCloud',
     'TestNativeAppendCloud', 'TestCOSConditionalDelete',
     'TestCOSDataContract', 'TestCOSLargePagedRestore',
+    'TestCOSNativeLevelsColdRestore', 'TestCOSNativeFollowerRecovery',
+    'TestCOSNativeStreamingSnapshotMultipart',
+    'TestCOSAuthorityCHA3', 'TestCOSOwnerConditions',
+    'TestProviderHistoricalNodeListDoesNotAmplifyLists', 'TestCOSAssetImmutableCreateLive',
+    'TestResourceFenceCOSNativeLifecycle', 'TestCOSWakeStaleDeletePreservesRepublication',
 )
 if args.native_repeat:
     tests = ('TestNativeAppendCloud',)
@@ -64,7 +69,7 @@ print('COS contracts: production native-append adapter + S3 data plane; dedicate
 result = subprocess.run(
     ['go', 'test', '-tags',
      'sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook',
-     './internal/bucket', './internal/replica', '-run', '^(' + '|'.join(tests) + ')$',
+     './internal/bucket', './internal/replica', './internal/wake', '-p', '1', '-run', '^(' + '|'.join(tests) + ')$',
      f'-count={repeat}', '-v', '-timeout=10m'],
     env=env, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 output = result.stdout

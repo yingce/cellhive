@@ -374,6 +374,11 @@ function ticketSpec(ticket, spec) {
   } catch { return false; }
 }
 
+// Match native host/capture identity to the independently fenced class shard.
+function hostIdentity(spec, shard) {
+  return `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/${spec.storage_class || spec.class}/shard${shard}`;
+}
+
 async function invoke(req, env, ticket) {
   if (draining) return json({ error: "draining" }, 503);
   const envelope = await readEnvelope(req);
@@ -420,7 +425,7 @@ async function invoke(req, env, ticket) {
   }
   if (ensured && ensured.resp) return ensured.resp; // fail closed (pre-dispatch)
 
-  const hostIdName = `${spec.storage_id || `${namespace}/${worker}`}/shard${shard}`;
+  const hostIdName = hostIdentity(spec, shard);
   await reportRouterBinding(env, hostIdName, {
     host_id: hostIdName,
     storage_id: spec.storage_id || "",
@@ -429,6 +434,7 @@ async function invoke(req, env, ticket) {
   });
   const hostId = env.HOST.idFromName(hostIdName);
   const host = env.HOST.get(hostId);
+  const dispatchedClaim = claims.get(key);
   inflight++;
   try {
     const res = await host.fetch("http://host/invoke", {
@@ -436,12 +442,18 @@ async function invoke(req, env, ticket) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...spec, shard, owner_node: env.NODE_ID,
-        owner_epoch: claims.get(key)?.epoch || 0 }),
+        owner_epoch: dispatchedClaim?.epoch || 0 }),
     });
     // Dispatch finished; if we lost ownership during execution the outcome is
     // unknown to the caller (do not blindly replay) — ADR-080.
-    const c = claims.get(key);
-    if (!c || c.expiryMs < Date.now()) {
+    const c = dispatchedClaim;
+    if (c?.managed && c.expiryMs - Date.now() < GUARD_MS) {
+      try {
+        const current = await renewLease(env, c);
+        if (claims.get(key) === c) c.expiryMs = current.expiry_ms;
+      } catch (error) { forgetFailedClaim(key, c, error); }
+    }
+    if (!c || claims.get(key) !== c || c.expiryMs < Date.now()) {
       try {
         const pending = res.body && res.body.cancel();
         if (pending && typeof pending.catch === "function") pending.catch(() => {});
@@ -484,20 +496,47 @@ async function forward(env, address, spec) {
   }
 }
 
-async function restoreClaimedHost(env, spec, shard, epoch) {
+async function restoreClaimedHost(env, spec, shard, claimed) {
   const base = env.GATE_URL || "";
   if (!base) return null;
-  const hostId = `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`;
+  const hostId = hostIdentity(spec, shard);
   try {
+    const deadline = Date.now() + 15000;
+    let resetSent = false;
+    for (;;) {
     const r = await fetch(base.replace(/\/$/, "") + "/internal/do/restore-host", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ host_id: hostId,
         owner_scope: `${spec.namespace}/__do__/${spec.worker}~${spec.storage_class || spec.class}~shard${shard}`,
-        owner_node: env.NODE_ID, owner_epoch: epoch }),
+        owner_node: env.NODE_ID, owner_epoch: claimed.epoch, lease_ttl_seconds: leaseTtlS(env) }),
     });
+    if (r.status === 409) {
+      const failure = await r.json();
+      if (failure.error !== "host_reset_required") return "restore_409";
+      if (!resetSent) {
+        resetSent = true;
+        const host = env.HOST.get(env.HOST.idFromName(hostId));
+        try {
+          await host.fetch("http://host/internal/reset-owner", {
+            method: "POST", signal: AbortSignal.timeout(5000),
+          });
+        } catch { /* ctx.abort rejects; supervisor detach is the proof. */ }
+      }
+      if (Date.now() >= deadline) return "restore_detach_timeout";
+      await new Promise(resolve => setTimeout(resolve, 25));
+      continue;
+    }
     if (!r.ok) return `restore_${r.status}`;
+    const result = await r.json();
+    if (result.lease) {
+      const lease = result.lease;
+      if (lease.node !== env.NODE_ID || lease.epoch !== claimed.epoch || lease.expiry_ms <= Date.now()) return "restore_lease_mismatch";
+      claimed.managed = true;
+      claimed.expiryMs = lease.expiry_ms;
+    }
     return null;
+    }
   } catch (e) {
     return "restore_transport";
   }
@@ -533,7 +572,7 @@ async function ensureClaim(env, spec, shard) {
     const claimed = { epoch: o.epoch, expiryMs: o.expiry_ms,
       spec: { namespace: spec.namespace, worker: spec.worker, class: storageClass }, shard };
     claims.set(key, claimed); // renewAll keeps this lease alive during a slow restore
-    const restoreError = await restoreClaimedHost(env, spec, shard, o.epoch);
+    const restoreError = await restoreClaimedHost(env, spec, shard, claimed);
     if (restoreError) {
       if (claims.get(key) === claimed) claims.delete(key);
       await post(env, "/v1/internal/do/release", {
@@ -558,7 +597,7 @@ async function ensureClaim(env, spec, shard) {
       c.epoch = o.epoch;
       c.expiryMs = o.expiry_ms;
     } catch (e) {
-      if (claims.get(key) === c) claims.delete(key);
+      forgetFailedClaim(key, c, e);
       return { resp: json({ error: "owner_unavailable", reason: "renew_failed" }, 503) };
     }
   }
@@ -601,21 +640,28 @@ async function connect(req, env, url, ticket) {
   if (firstSight) {
     await indexObject(env, { namespace: spec.namespace, worker: spec.worker, class: spec.class, storage_class: spec.storage_class || spec.class, shard, id: spec.id }, false);
   }
-  const key = `${spec.namespace}/${spec.worker}/${spec.class}/shard${shard}`;
+  const key = `${spec.namespace}/${spec.worker}/${spec.storage_class || spec.class}/shard${shard}`;
   const hint = hints.get(key);
   if (hint && hint.expiry > Date.now()) return proxyConnect(env, hint.address, req, url);
   const ensured = await ensureClaim(env, spec, shard);
   if (ensured && ensured.forwardTo) return proxyConnect(env, ensured.forwardTo, req, url);
   if (ensured && ensured.resp) return ensured.resp;
-  await reportRouterBinding(env, `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`, {
-    host_id: `${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`,
+  await reportRouterBinding(env, hostIdentity(spec, shard), {
+    host_id: hostIdentity(spec, shard),
     storage_id: spec.storage_id || "",
     class: spec.storage_class || spec.class,
     namespace: spec.namespace, worker: spec.worker,
   });
   wsNet += 1;
-  const host = env.HOST.get(env.HOST.idFromName(`${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`));
-  return host.fetch(req); // preserve the Upgrade
+  const host = env.HOST.get(env.HOST.idFromName(hostIdentity(spec, shard)));
+  // Host runs in a separate actor context; carry the verified claim just as
+  // invoke does. Never trust owner fields supplied in the incoming URL.
+  const dispatchedClaim = claims.get(key);
+  const hostURL = new URL(req.url);
+  hostURL.searchParams.set("shard", String(shard));
+  hostURL.searchParams.set("owner_node", env.NODE_ID);
+  hostURL.searchParams.set("owner_epoch", String(dispatchedClaim?.epoch || 0));
+  return host.fetch(new Request(hostURL, req)); // preserve the Upgrade
 }
 
 // buildFacetEnv materializes the worker's bindings as props-bound entrypoint
@@ -719,12 +765,13 @@ async function abortFacet(req, env) {
   const shard = typeof spec.shard === "number"
     ? spec.shard
     : fnv1a(`${spec.namespace}/${spec.worker}/${spec.storage_class || spec.class}/${spec.id}`) % SHARD_COUNT;
-  const host = env.HOST.get(env.HOST.idFromName(`${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`));
-  await host.fetch("http://host/v1/do/abort", {
+  const host = env.HOST.get(env.HOST.idFromName(hostIdentity(spec, shard)));
+  const result = await host.fetch("http://host/v1/do/abort", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(spec), // include class so the host can find the facet
   });
+  if (!result.ok) return result;
   return json({ aborted: true });
 }
 
@@ -748,7 +795,7 @@ async function deleteFacet(req, env) {
   const shard = typeof spec.shard === "number"
     ? spec.shard
     : fnv1a(`${spec.namespace}/${spec.worker}/${spec.storage_class || spec.class}/${spec.id}`) % SHARD_COUNT;
-  const host = env.HOST.get(env.HOST.idFromName(`${spec.storage_id || `${spec.namespace}/${spec.worker}`}/shard${shard}`));
+  const host = env.HOST.get(env.HOST.idFromName(hostIdentity(spec, shard)));
   const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
   await host.fetch("http://host/v1/do/delete", {
     method: "POST",
@@ -774,7 +821,7 @@ async function restartObjects(req, env) {
   for (const o of [...seen.values()]) {
     const key = o.storage_id || `${o.namespace}/${o.worker}`;
     if (spec.storage_id && key !== spec.storage_id) continue;
-    const host = env.HOST.get(env.HOST.idFromName(`${key}/shard${o.shard}`));
+    const host = env.HOST.get(env.HOST.idFromName(hostIdentity(o, o.shard)));
     await host.fetch("http://host/v1/do/abort", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -791,18 +838,34 @@ async function renewLease(env, c) {
   const controller = new AbortController();
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => { controller.abort(); reject(new Error("renew timeout")); }, 2000);
+    timer = setTimeout(() => { controller.abort(); reject(Object.assign(new Error("renew timeout"), { leaseTransient: true })); }, 2000);
   });
   try {
     return await Promise.race([(async () => {
-      const r = await post(env, "/v1/internal/do/renew", {
+      let r;
+      try { r = c.managed ? await fetch(String(env.GATE_URL).replace(/\/$/, "") + "/internal/do/lease", {
+        method: "POST", signal: controller.signal, headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: `${c.spec.namespace}/__do__/${c.spec.worker}~${c.spec.class}~shard${c.shard}`, node: env.NODE_ID, epoch: c.epoch }),
+      }) : await post(env, "/v1/internal/do/renew", {
         namespace: c.spec.namespace, worker: c.spec.worker, class: c.spec.class, shard: c.shard,
         node: env.NODE_ID, epoch: c.epoch, ttl_seconds: leaseTtlS(env),
       }, controller.signal);
-      if (!r.ok) throw new Error("renew " + r.status);
-      return await r.json();
+      } catch (error) { throw Object.assign(error, { leaseTransient: true }); }
+      if (!r.ok) throw Object.assign(new Error("renew " + r.status), {
+        leaseTransient: r.status === 408 || r.status === 429 || (r.status >= 500 && r.status <= 599),
+      });
+      const state = await r.json();
+      if (state.epoch !== c.epoch || (c.managed && state.node !== env.NODE_ID) || state.expiry_ms <= Date.now()) throw new Error("renew identity/expiry mismatch");
+      return state;
     })(), timeout]);
   } finally { clearTimeout(timer); }
+}
+
+function forgetFailedClaim(key, c, error) {
+  if (claims.get(key) !== c) return false;
+  if (error?.leaseTransient && c.expiryMs > Date.now()) return false;
+  claims.delete(key);
+  return true;
 }
 
 async function renewAll(env) {
@@ -817,8 +880,7 @@ async function renewAll(env) {
       renewed++;
     } catch (e) {
       // A delayed renewal must never remove a newer claim of the same scope.
-      if (claims.get(key) === c) claims.delete(key);
-      lost++;
+      if (forgetFailedClaim(key, c, e)) lost++;
     }
   }
   return json({ renewed, lost });
@@ -832,6 +894,13 @@ async function drain(env) {
   }
   let released = 0;
   for (const c of claims.values()) {
+    if (c.managed) {
+      const stopped = await fetch(String(env.GATE_URL).replace(/\/$/, "") + "/internal/do/lease", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: `${c.spec.namespace}/__do__/${c.spec.worker}~${c.spec.class}~shard${c.shard}`, node: env.NODE_ID, epoch: c.epoch, forget: true }),
+      });
+      if (!stopped.ok) throw new Error("stop independent renewal failed");
+    }
     const r = await post(env, "/v1/internal/do/release", {
       namespace: c.spec.namespace, worker: c.spec.worker, class: c.spec.class, shard: c.shard,
       node: env.NODE_ID, epoch: c.epoch,
@@ -996,7 +1065,18 @@ function tenantRequest(req) {
 
 export class Host extends DurableObject {
   async fetch(req) {
-    this.#sweepFacets();
+    if (new URL(req.url).pathname === "/internal/reset-owner") {
+      // Only the trusted router invokes this after supervisor admission closes.
+      // Abort native facets before releasing their shared Worker references.
+      for (const [id, loader] of this.#facetLoader) {
+        try { this.ctx.facets.abort(id, new Error("owner superseded")); } catch {}
+        releaseLoadedWorker(loader, this.#facetRef(id));
+      }
+      boundActors.delete(this.ctx.id.toString());
+      this.ctx.abort("owner superseded");
+      throw new Error("host abort returned");
+    }
+    await this.#sweepFacets();
     await this.#bind();
     const url = new URL(req.url);
     if (url.pathname === "/v1/do/connect") {
@@ -1009,6 +1089,9 @@ export class Host extends DurableObject {
         storage_id: q.get("storage_id") || "",
         storage_class: q.get("storage_class") || "",
         version: q.get("version") ?? undefined,
+        shard: q.has("shard") ? Number(q.get("shard")) : undefined,
+        owner_node: q.get("owner_node") || "",
+        owner_epoch: Number(q.get("owner_epoch") || 0),
       };
       const facetId = `${spec.storage_class || spec.class}/${spec.id}`;
       this.#enterFacet(facetId);
@@ -1025,7 +1108,13 @@ export class Host extends DurableObject {
         const res = await facet.fetch(tenantRequest(req)); // 101 + webSocket preserved
         if (res && res.webSocket) {
           this.#addFacetSocket(facetId);
-          const done = () => this.#removeFacetSocket(facetId);
+          const generation = this.#facetSocketGeneration.get(facetId);
+          let removed = false;
+          const done = () => {
+            if (removed || generation !== (this.#facetSocketGeneration.get(facetId))) return;
+            removed = true;
+            this.#removeFacetSocket(facetId);
+          };
           try {
             res.webSocket.addEventListener("close", done, { once: true });
             res.webSocket.addEventListener("error", done, { once: true });
@@ -1042,7 +1131,7 @@ export class Host extends DurableObject {
       // Close resident sockets gracefully (1012) using the existing facet stub;
       // no rebuild, so no bundle_sha is needed here.
       const facet = this.#facets.get(facetId);
-      if (facet) {
+      if (facet && (this.#facetSockets.get(facetId) || 0) > 0) {
         try {
           const closed = await facet.__chCloseAll(1012);
           wsNet -= Number(closed) || 0;
@@ -1052,7 +1141,7 @@ export class Host extends DurableObject {
         await new Promise((r) => setTimeout(r, 50));
       }
       this.#facetVersion.delete(facetId);
-      this.#forgetFacet(facetId);
+      await this.#retireFacet(facetId, "owner changed");
       try {
         this.ctx.facets.abort(facetId, new Error("owner changed"));
       } catch (e) {
@@ -1064,7 +1153,7 @@ export class Host extends DurableObject {
       const spec = await req.json();
       const facetId = spec.facet_id;
       this.#facetVersion.delete(facetId);
-      this.#forgetFacet(facetId);
+      await this.#retireFacet(facetId, "object deleted");
       try {
         this.ctx.facets.delete(facetId);
       } catch (e) {
@@ -1169,6 +1258,7 @@ export class Host extends DurableObject {
     if (this.#facetLastUsed.has(id)) this.#touchFacet(id);
   }
   #addFacetSocket(id) {
+    if (!this.#facetSocketGeneration.has(id)) this.#facetSocketGeneration.set(id, {});
     this.#facetSockets.set(id, (this.#facetSockets.get(id) || 0) + 1);
     this.#touchFacet(id);
   }
@@ -1180,8 +1270,9 @@ export class Host extends DurableObject {
   #forgetFacet(id) {
     this.#facets.delete(id);
     this.#facetLastUsed.delete(id);
-    this.#facetActive.delete(id);
+    // Waiting replacement requests still own their active counters.
     this.#facetSockets.delete(id);
+    this.#facetSocketGeneration.delete(id);
     const loaderId = this.#facetLoader.get(id);
     if (loaderId) {
       releaseLoadedWorker(loaderId, this.#facetRef(id));
@@ -1189,27 +1280,151 @@ export class Host extends DurableObject {
     }
   }
   #facetRef(id) { return `${this.ctx.id.toString()}/${id}`; }
-  #sweepFacets(force = false) {
+  async #sweepFacets(force = false) {
     const now = Date.now();
     if (!force && now - this.#lastSweep < FACET_SWEEP_MS) return;
     this.#lastSweep = now;
     for (const [id, at] of [...this.#facetLastUsed]) {
       if (!force && now - at <= FACET_IDLE_MS) continue;
       if ((this.#facetActive.get(id) || 0) > 0 || (this.#facetSockets.get(id) || 0) > 0) continue;
-      this.#forgetFacet(id);
-      try { this.ctx.facets.abort(id, new Error("facet idle")); } catch (e) { /* already gone */ }
+      try { await this.#retireFacet(id, "facet idle"); } catch { /* retain closed admission for retry */ }
     }
+  }
+  async #pagingRequest(operation, admission, timeoutMs = 5000) {
+    const base = this.env.PAGING_LIFECYCLE === "true" ? this.env.GATE_URL || "" : "";
+    if (!base) return operation === "admit" ? { activation: "" } : { retired: true };
+    const r = await fetch(base.replace(/\/$/, "") + "/internal/do/paging/" + operation, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(admission),
+      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
+    });
+    if (!r.ok) {
+      let reason = "";
+      try { reason = (await r.text()).slice(0, 1024); } catch {}
+      console.error(JSON.stringify({ event: "do_paging_lifecycle_failed", operation, status: r.status, reason }));
+      throw new Error("do_runtime_capacity");
+    }
+    return r.json();
+  }
+  async #admitFacet(id, spec) {
+    if (this.#facetAdmission.has(id)) return;
+    const pending = this.#facetAdmitting.get(id);
+    if (pending) return pending;
+    // A native facet constructor retains this exact admission object across
+    // awaits. Concurrent requests must not replace it with another response.
+    const work = this.#openFacetAdmission(id, spec);
+    this.#facetAdmitting.set(id, work);
+    try { await work; }
+    finally { if (this.#facetAdmitting.get(id) === work) this.#facetAdmitting.delete(id); }
+  }
+  async #openFacetAdmission(id, spec) {
+    const shard = spec.shard ?? Number(String(this.ctx.id.name || "").match(/shard([0-9]+)$/)?.[1] || 0);
+    const storageClass = spec.storage_class || spec.class;
+    const localClaim = claims.get(`${spec.namespace}/${spec.worker}/${storageClass}/shard${shard}`);
+    const admission = {
+      host_hash: this.ctx.id.toString(), facet_id: id,
+      namespace: spec.namespace, storage_id: spec.storage_id || `${spec.namespace}/${spec.worker}`,
+      class: storageClass,
+      owner_scope: `${spec.namespace}/__do__/${spec.worker}~${storageClass}~shard${shard}`,
+      owner_node: spec.owner_node || this.env.NODE_ID || "",
+      owner_epoch: spec.owner_epoch || localClaim?.epoch || 0,
+    };
+    let result;
+    try { result = await this.#pagingRequest("admit", admission); }
+    catch (error) { try { await this.#pagingRequest("retire", admission); } catch {} throw error; }
+    if (this.env.PAGING_LIFECYCLE === "true" && !result.activation) throw new Error("do_runtime_capacity");
+    this.#facetAdmission.set(id, { ...admission, activation: result.activation });
+  }
+  async #retireFacet(id, reason) {
+    const prior = this.#facetRetiring.get(id);
+    if (prior) return prior;
+    const work = (async () => {
+      this.#facetRetirementNeeded.add(id);
+      // Explicit abort/delete can arrive while the first admit is in flight.
+      // Do not declare retirement complete before that activation is known.
+      const opening = this.#facetAdmitting.get(id);
+      if (opening) { try { await opening; } catch {} }
+      const admission = this.#facetAdmission.get(id);
+      // Close supervisor admission before aborting the native facet. Its native
+      // detach acknowledgment, not isolate RPC completion, proves file closure.
+      let retired = !admission;
+      const deadline = Date.now() + 5000;
+      if (admission) { try { await this.#pagingRequest("retire", admission, deadline - Date.now()); retired = true; } catch {} }
+      try { this.ctx.facets.abort(id, new Error(reason)); } catch { /* already absent */ }
+      const loaderId = this.#facetLoader.get(id);
+      if (loaderId) releaseLoadedWorker(loaderId, this.#facetRef(id));
+      if (!retired) {
+        for (let attempt = 0; attempt < 20 && Date.now() < deadline; attempt++) {
+          try { await this.#pagingRequest("retire", admission, deadline - Date.now()); retired = true; break; } catch {}
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      if (!retired) throw new Error("do_runtime_capacity");
+      this.#forgetFacet(id);
+      this.#facetVersion.delete(id);
+      this.#facetAdmission.delete(id);
+      this.#facetRetirementNeeded.delete(id);
+    })();
+    this.#facetRetiring.set(id, work);
+    try { return await work; } finally { if (this.#facetRetiring.get(id) === work) this.#facetRetiring.delete(id); }
   }
   #scheduleFacetSweep() {
     if (FACET_SWEEP_MS <= 0 || this.#sweepTimer !== null || this.#facetLastUsed.size === 0) return;
-    this.#sweepTimer = setTimeout(() => {
+    this.#sweepTimer = setTimeout(async () => {
       this.#sweepTimer = null;
-      this.#sweepFacets();
-      this.#scheduleFacetSweep();
+      try { await this.#sweepFacets(); } finally { this.#scheduleFacetSweep(); }
     }, FACET_SWEEP_MS);
   }
 
   async #facet(spec) {
+    const id = `${spec.storage_class || spec.class}/${spec.id}`;
+    this.#facetPreparing.set(id, (this.#facetPreparing.get(id) || 0) + 1);
+    try {
+      const key = `${spec.version ?? ""}/${spec.bundle_sha}`;
+      for (;;) {
+        const pending = this.#facetBuilding.get(id);
+        if (pending) {
+          if (pending.key === key) return await pending.promise;
+          try { await pending.promise; } catch { /* another build can retry */ }
+          continue;
+        }
+        const promise = this.#prepareFacet(spec);
+        const build = { key, promise };
+        this.#facetBuilding.set(id, build);
+        try { return await promise; }
+        finally { if (this.#facetBuilding.get(id) === build) this.#facetBuilding.delete(id); }
+      }
+    } finally {
+      const n = (this.#facetPreparing.get(id) || 0) - 1;
+      if (n > 0) this.#facetPreparing.set(id, n); else this.#facetPreparing.delete(id);
+    }
+  }
+  async #switchFacet(id) {
+    const prior = this.#facetSwitching.get(id);
+    if (prior) { await prior; return; }
+    const task = (async () => {
+      const deadline = Date.now() + 5000;
+      // Incoming requests await this switch; only already executing requests
+      // may delay retirement. Counting waiting requests would deadlock.
+      while ((this.#facetActive.get(id) || 0) > (this.#facetPreparing.get(id) || 0)) {
+        if (Date.now() >= deadline) throw new Error("do_runtime_capacity");
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      const facet = this.#facets.get(id);
+      if (facet && (this.#facetSockets.get(id) || 0) > 0) {
+        const closed = await facet.__chCloseAll(1012);
+        wsNet = Math.max(0, wsNet - (Number(closed) || 0));
+      }
+      await this.#retireFacet(id, "cellhive: version changed");
+    })();
+    this.#facetSwitching.set(id, task);
+    try { await task; }
+    finally { if (this.#facetSwitching.get(id) === task) this.#facetSwitching.delete(id); }
+  }
+  async #prepareFacet(spec) {
+    const requestedFacet = `${spec.storage_class || spec.class}/${spec.id}`;
+    const retiring = this.#facetRetiring.get(requestedFacet);
+    if (retiring) await retiring;
+    if (this.#facetRetirementNeeded.has(requestedFacet)) await this.#retireFacet(requestedFacet, "retirement retry");
     // Two identities: code is immutable per sha (bundles cache), while the
     // facet/isolate is keyed by (version, sha) so a binding/vars-only redeploy
     // refreshes the facet env instead of reusing the old one (ADR-127).
@@ -1233,22 +1448,23 @@ export class Host extends DurableObject {
     // SQLite is preserved (abort, never delete).
     const built = this.#facetVersion.get(facetId);
     if (built !== undefined && built !== buildKey) {
-      this.#forgetFacet(facetId);
-      try {
-        this.ctx.facets.abort(facetId, new Error("cellhive: version changed"));
-      } catch (e) {
-        /* not resident */
-      }
+      await this.#switchFacet(facetId);
     }
     // #activeFacets is only the number of in-flight requests; it is not a
     // resident-isolate bound.  Use the loader reference set, which also
     // includes facets whose JS stub was evicted from the CountLRU.
     if (!this.#facets.has(facetId) && !this.#facetLoader.has(facetId) && this.#facetLoader.size >= FACET_CACHE_MAX) {
-      this.#sweepFacets(true);
+      await this.#sweepFacets(true);
       if (this.#facetLoader.size >= FACET_CACHE_MAX) throw new Error("do_runtime_capacity");
     }
+    await this.#admitFacet(facetId, spec);
+    const expectedAdmission = this.#facetAdmission.get(facetId);
+    const assertAdmission = () => {
+      if (this.#facetAdmission.get(facetId) !== expectedAdmission || this.#facetRetirementNeeded.has(facetId)) throw new Error("do_runtime_capacity");
+    };
     const facet = this.ctx.facets.get(facetId, async () => {
       await refreshLogCapture(this.env);
+      assertAdmission();
       // CF parity: a Durable Object's env must expose the worker's bindings.
       // Fetch the worker's binding spec once (cold path); the tenant's base class
       // (cellhive-do.js) builds the facades and merges them into this.env, since
@@ -1266,6 +1482,7 @@ export class Host extends DurableObject {
       } catch (e) {
         /* no bindings: DO runs with the host env only */
       }
+      assertAdmission();
       // Legacy Durable Object classes (fetch/alarm/webSocket* but no
       // DurableObject base) are not RPC-capable, and facets must be. Cloudflare
       // accepts them, so generate a facet entry module that wraps every DO class
@@ -1356,6 +1573,14 @@ export class Host extends DurableObject {
   #facetVersion = new Map();
   #facets = new CountLRU(FACET_CACHE_MAX);
   #facetLoader = new Map();
+  #facetAdmission = new Map();
+  #facetAdmitting = new Map();
+  #facetPreparing = new Map();
+  #facetBuilding = new Map();
+  #facetSwitching = new Map();
+  #facetSocketGeneration = new Map();
+  #facetRetiring = new Map();
+  #facetRetirementNeeded = new Set();
   #facetLastUsed = new Map();
   #facetActive = new Map();
   #facetSockets = new Map();

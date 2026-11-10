@@ -14,7 +14,6 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
-	"cellhive/internal/ltx"
 	"cellhive/internal/owner"
 	"cellhive/internal/purge"
 	"cellhive/internal/queue"
@@ -27,7 +26,7 @@ type fenceCountingBucket struct {
 }
 
 func (b *fenceCountingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.HasSuffix(key, "/resource-fence.v2") {
+	if strings.HasSuffix(key, "/own.json") {
 		b.gets.Add(1)
 	}
 	return b.Bucket.Get(ctx, key)
@@ -68,7 +67,7 @@ func TestPreparedResourceAdmissionCachesAbsentFenceAndRejectsRevoke(t *testing.T
 
 func seedCleanupReplica(t *testing.T, s *Server, sc cell.Scope) {
 	t.Helper()
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("payload"))
+	segment := nativeTestFile(t, 1, 1, []byte("payload"))
 	if _, _, err := s.resourceReplica().Append(t.Context(), sc, 1, segment); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +132,7 @@ func TestQueueDeletionCleansOwnDataAndSourceDeadLettersOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"jobs", "dlq"} {
+		claimSeededScope(t, s, queue.Scope("acme", name))
 		if _, err := s.Control.CreateResource(ctx, "acme", "queue", name, queue.Scope("acme", name).String(), "ops"); err != nil {
 			t.Fatal(err)
 		}
@@ -263,12 +263,25 @@ func TestResourceCleanupRunsAtActualDataOwner(t *testing.T) {
 	sc := queue.Scope("acme", "jobs")
 	data.Bucket = root.Bucket
 	data.resourceRep = replica.New(root.Bucket)
+	previous, _, err := root.Owner.Resolve(ctx, control.Scope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Owner.Release(ctx, control.Scope(), previous.Epoch); err != nil {
+		t.Fatal(err)
+	}
 	data.Cfg.NodeID = "data"
 	root.Cfg.NodeID = "control"
 	remote := httptest.NewServer(data.Handler())
 	defer remote.Close()
 	data.Owner = &owner.Manager{B: root.Bucket, NodeID: "data", Session: "d", Advertise: remote.URL, Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
 	root.Owner = &owner.Manager{B: root.Bucket, NodeID: "control", Session: "c", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
+	controlHTTP := httptest.NewServer(root.Handler())
+	defer controlHTTP.Close()
+	root.Owner.Advertise = controlHTTP.URL
+	if _, err := root.Owner.Claim(ctx, control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := root.Control.CreateResource(ctx, "acme", "queue", "jobs", sc.String(), "ops"); err != nil {
 		t.Fatal(err)
 	}
@@ -313,11 +326,11 @@ func TestCompletedCleanupSweepsLateOldEpochButKeepsSuccessor(t *testing.T) {
 	}
 	// Model a different node's bucket Put that passed its preflight before the
 	// fence but completed after the job finished (even if that writer then died).
-	old := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("late old payload"))
+	old := nativeTestFile(t, 1, 1, []byte("late old payload"))
 	if _, err := s.Bucket.Put(ctx, replica.Prefix(sc, 1)+"1-1.ltx", old); err != nil {
 		t.Fatal(err)
 	}
-	current := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 1, EndTxID: 1}, []byte("new payload"))
+	current := nativeTestFile(t, 1, 1, []byte("new payload"))
 	if _, _, err := s.resourceReplica().Append(ctx, sc, 2, current); err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +447,7 @@ func TestNamespacePurgePreservesRetirementGC(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("namespace purge removed persistent retirement: %+v %v", rows, err)
 	}
-	old := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("late"))
+	old := nativeTestFile(t, 1, 1, []byte("late"))
 	if _, err := s.Bucket.Put(ctx, replica.Prefix(sc, 1)+"1-1.ltx", old); err != nil {
 		t.Fatal(err)
 	}

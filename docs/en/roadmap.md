@@ -2,9 +2,7 @@
 
 _Last updated: 2026-11-01_
 
-The historical roadmap (2026-09, P0–P5 exit criteria) is archived at
-[roadmap-2026-09](archive/roadmap-2026-09.en.md). P0–P5 are delivered; this page
-tracks current status and remaining work only.
+P0–P5 tasks were delivered; historical evidence remains in the [P0 report](../archive/p0-report.md). See [current issues](known-issues.md) for latest acceptance and migration boundaries. The 2026-11-01 baseline below is historical, not a claim about current defects or live production versions.
 
 ## Current status
 

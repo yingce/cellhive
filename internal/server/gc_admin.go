@@ -12,16 +12,15 @@ import (
 )
 
 type gcScopeRequest struct {
-	Scope             string `json:"scope"`
-	Safe              bool   `json:"safe"`
-	KeepPrevious      int    `json:"keep_previous"`
-	GraceSeconds      int    `json:"grace_seconds"`
-	KeepL1Generations int    `json:"keep_l1_generations"`
-	DryRun            bool   `json:"dry_run"`
+	Scope        string `json:"scope"`
+	Safe         bool   `json:"safe"`
+	KeepPrevious int    `json:"keep_previous"`
+	GraceSeconds int    `json:"grace_seconds"`
+	DryRun       bool   `json:"dry_run"`
 }
 
-// handleControlGCScope is the explicit ADR-309 Safe GC operation. It refuses to
-// run anywhere except the live owner, and only with the Safe protocol enabled.
+// handleControlGCScope runs explicit native maintenance on the live owner.
+// Epoch deletion additionally requires a resident, fully hydrated activation.
 func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 	if s.Replica == nil || s.Owner == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no_replica", "replica or owner manager not configured")
@@ -53,23 +52,23 @@ func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 	current := o.Epoch
 	grace := time.Duration(req.GraceSeconds) * time.Second
 	if grace <= 0 {
-		grace = 30 * time.Second
+		grace = time.Hour
 	}
 	if req.KeepPrevious < 0 {
 		req.KeepPrevious = 0
 	}
-	if req.KeepL1Generations <= 0 {
-		req.KeepL1Generations = 2
-	}
-	opts := compaction.Options{
-		MinSegments:       1,
-		GC:                true,
-		Safe:              req.Safe,
-		Grace:             grace,
-		KeepL1Generations: req.KeepL1Generations,
-		Job:               "admin-gc",
-	}
-	stats, _ := s.Replica.BacklogStats(ctx, sc, current)
+	opts := compaction.Options{MinSegments: 1, Verify: func(vctx context.Context) error {
+		cur, _, err := s.Owner.Resolve(vctx, sc)
+		if err != nil {
+			return err
+		}
+		if cur.Node != s.Cfg.NodeID || cur.Session != s.Owner.Session || cur.Epoch != current || !s.ownerLive(vctx, cur, time.Now()) {
+			return errors.New("owner changed during compaction")
+		}
+		return nil
+	}}
+	stats, statsErr := s.Replica.BacklogStats(ctx, sc, current)
+	compaction.RecordStatsSnapshot(stats, statsErr)
 	if req.DryRun {
 		res, derr := compaction.DryRun(ctx, s.Replica, sc, current, opts)
 		if derr != nil {
@@ -89,35 +88,41 @@ func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 	}
 	retired := 0
 	retireSkipped := ""
-	complete, herr := s.Replica.HasCompleteSnapshot(ctx, sc, current)
-	if herr != nil {
-		retireSkipped = herr.Error()
-	} else if !complete {
-		retireSkipped = "current epoch has no complete independently restorable baseline"
+	var residentReady func(context.Context) (bool, error)
+	if s.Store != nil {
+		c, release, rerr := s.Store.AcquireResident(ctx, sc)
+		if rerr != nil {
+			writeErr(w, http.StatusInternalServerError, "resident_failed", rerr.Error())
+			return
+		}
+		if c != nil {
+			defer release()
+			residentReady = func(context.Context) (bool, error) { return c.PagedComplete(), nil }
+		}
+	}
+	if residentReady == nil {
+		retireSkipped = "no resident activation"
 	} else {
 		retired, err = s.Replica.RetireEpochsWithOptions(ctx, sc, current, req.KeepPrevious, replica.RetireOptions{
-			Safe: true, Grace: grace, Job: "admin-gc", DrainTimeout: 30 * time.Second,
+			Safe: true, Grace: grace, Ready: residentReady,
 			Verify: func(vctx context.Context) error {
 				cur, _, rerr := s.Owner.Resolve(vctx, sc)
 				if rerr != nil {
 					return rerr
 				}
-				if cur.Node != s.Cfg.NodeID || cur.Session != s.Owner.Session || !s.ownerLive(vctx, cur, time.Now()) {
+				if cur.Node != s.Cfg.NodeID || cur.Session != s.Owner.Session || cur.Epoch != current || !s.ownerLive(vctx, cur, time.Now()) {
 					return errors.New("owner changed during Safe GC")
 				}
 				return nil
 			},
 		})
-		if errors.Is(err, replica.ErrGCBusy) {
-			writeErr(w, http.StatusConflict, "gc_busy", "live reader pins still cover a retiring epoch")
-			return
-		}
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "retire_failed", err.Error())
 			return
 		}
 	}
-	stats, _ = s.Replica.BacklogStats(ctx, sc, current)
+	stats, statsErr = s.Replica.BacklogStats(ctx, sc, current)
+	compaction.RecordStatsSnapshot(stats, statsErr)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"scope": sc.String(), "epoch": current, "dry_run": false,
 		"compaction": res, "retired": retired, "retire_skipped": retireSkipped,

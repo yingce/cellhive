@@ -88,10 +88,16 @@ func (s *Server) resourceScope(w http.ResponseWriter, r *http.Request, kind stri
 		writeErr(w, http.StatusInternalServerError, "resource_scope_invalid", err.Error())
 		return cell.Scope{}, false
 	}
-	if s.forwardRead(w, r, scope, nil) {
+	if !s.authorizeNS(w, r, ns) {
 		return cell.Scope{}, false
 	}
-	if !s.authorizeNS(w, r, ns) {
+	if kind == "kv" || kind == "queue" {
+		if err := s.PrepareResourceAccess(r.Context(), scope); err != nil {
+			s.captureErr(w, err, "resource_unavailable")
+			return cell.Scope{}, false
+		}
+	}
+	if s.forwardRead(w, r, scope, nil) {
 		return cell.Scope{}, false
 	}
 	return scope, true
@@ -106,6 +112,12 @@ func (s *Server) kvStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "no_store", "cellstore not configured")
 		return
 	}
+	end, err := s.BeginResourceRequest(r.Context(), scope)
+	if err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
+	defer end()
 	c, err := s.Store.Cell(r.Context(), scope)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cell_failed", err.Error())
@@ -162,6 +174,17 @@ func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "queue_status_failed", err.Error())
 		return
 	}
+	// Status has released its own admission; protect the independent disk read.
+	if err := s.PrepareResourceAccess(r.Context(), scope); err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
+	end, err := s.BeginResourceRequest(r.Context(), scope)
+	if err != nil {
+		s.captureErr(w, err, "resource_unavailable")
+		return
+	}
+	defer end()
 	if ds, derr := s.Queue.DiskStats(r.Context(), scope.Namespace, scope.ID); derr == nil {
 		out["disk"] = ds
 	}

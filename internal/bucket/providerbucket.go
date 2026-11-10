@@ -1,6 +1,7 @@
 package bucket
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,21 +14,14 @@ import (
 // ProviderBucket uses native append-position checks for control records and
 // ordinary S3-compatible object operations for immutable bulk data.
 //
-// Authority records are segmented per time window (see SegmentedAuthority), so
-// a long-running renewal loop no longer grows one object forever: the newest
-// value lives in a fresh bounded segment and old segments are physically
-// deleted after readers no longer need them.
+// Authority records use a permanent capped append root and sealed generations.
+// Reads use bounded suffix ranges. Retired generations retain one-byte stubs
+// so delayed append requests cannot recreate an obsolete authority.
 type ProviderBucket struct {
 	*S3Bucket
 	authority  *SegmentedAuthority
 	pointFence *AppendAuthority
 	appender   PositionAppender
-}
-
-// appendETagger is optional: COS returns the immutable object's ETag in the
-// append response, while other providers can keep using the HEAD fallback.
-type appendETagger interface {
-	AppendWithETag(context.Context, string, int64, []byte) (string, error)
 }
 
 func NewProviderBucket(data *S3Bucket, appendLog PositionAppender, opts ...AuthorityOptions) *ProviderBucket {
@@ -52,22 +46,26 @@ func (b *ProviderBucket) diagnosePreflight(ctx context.Context) error {
 
 func authorityKey(key string) bool {
 	if strings.HasPrefix(key, "cells/") {
-		// Resource-deletion fences are small conditional records; route them
-		// through the append authority so COS/OSS get a real atomic create/CAS
-		// instead of relying on PutObject If-Match, which they ignore or reject.
-		return strings.HasSuffix(key, "/owner.json") ||
-			strings.HasSuffix(key, "/owner-gen") ||
-			strings.HasSuffix(key, "/resource-fence.json") || pointFenceKey(key)
+		// COS/OSS cannot fence ordinary conditional PUTs. Owner records
+		// require the same native append-position authority as node leases.
+		return ownKey(key) || strings.HasSuffix(key, "/owner-gen") || pointFenceKey(key)
 	}
-	return strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
+	return strings.HasPrefix(key, "r2meta/") || strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
 		key == "fleet/drain-token.json" || key == "fleet/waker.json"
 }
 
+func ownKey(key string) bool {
+	return strings.HasPrefix(key, "cells/") && strings.HasSuffix(key, "/own.json")
+}
+
 func pointFenceKey(key string) bool {
-	return strings.HasPrefix(key, "cells/") && strings.HasSuffix(key, "/resource-fence.v2")
+	return false
 }
 
 func (b *ProviderBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
+	if b.framedAsset(key) {
+		return b.getAsset(ctx, key)
+	}
 	if pointFenceKey(key) {
 		return b.pointFence.Get(ctx, key)
 	}
@@ -77,6 +75,9 @@ func (b *ProviderBucket) Get(ctx context.Context, key string) ([]byte, string, e
 	return b.S3Bucket.Get(ctx, key)
 }
 func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+	if b.framedAsset(key) {
+		return b.appender.(*COSAppender).AppendWithETag(ctx, key, 0, encodeAsset(data))
+	}
 	if strings.HasPrefix(key, "assets/") {
 		// Asset tokens identify a manifest, not each object's bytes. A
 		// check-then-Put can overwrite a concurrent upload at the same path.
@@ -92,27 +93,13 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 		return b.authority.ConditionalCreate(ctx, key, data)
 	}
 	if strings.HasPrefix(key, "cells/") && strings.Contains(key, "/ltx/e") {
-		// Provider PutObject conditionals are not portable. Native append at
-		// position zero atomically creates an immutable segment; an existing
-		// object cannot be overwritten, including a legacy normal object.
-		var appendETag string
-		var err error
-		if a, ok := b.appender.(appendETagger); ok {
-			appendETag, err = a.AppendWithETag(ctx, key, 0, data)
-		} else {
-			err = b.appender.Append(ctx, key, 0, data)
+		// Immutable LTX uses the same native forbid-overwrite PUT as spools.
+		// AppendObject produces appendable objects and drops standard metadata.
+		creator, ok := b.appender.(conditionalObjectCreator)
+		if !ok {
+			return "", ErrNotSupported
 		}
-		if err != nil {
-			if _, _, getErr := b.S3Bucket.Get(ctx, key); getErr == nil {
-				return "", ErrPrecondition
-			}
-			return "", err
-		}
-		if appendETag != "" {
-			return appendETag, nil
-		}
-		_, etag, err := b.S3Bucket.Stat(ctx, key)
-		return etag, err
+		return creator.CreateObject(ctx, key, data)
 	}
 	// Only content-addressed bundles use this path on provider buckets.
 	if !strings.HasPrefix(key, "bundles/sha256/") {
@@ -123,14 +110,25 @@ func (b *ProviderBucket) ConditionalCreate(ctx context.Context, key string, data
 	} else if !errors.Is(err, ErrNotFound) {
 		return "", err
 	}
+	if strings.HasPrefix(key, "cells/") && strings.Contains(key, "/ltx/e") {
+		return b.PutReader(ctx, key, bytes.NewReader(data), int64(len(data)))
+	}
 	return b.S3Bucket.Put(ctx, key, data)
 }
 func (b *ProviderBucket) CAS(ctx context.Context, key string, data []byte, token string) (string, error) {
+	if b.framedAsset(key) {
+		return "", ErrNotSupported
+	}
 	if pointFenceKey(key) {
 		return b.pointFence.CAS(ctx, key, data, token)
 	}
 	if authorityKey(key) {
 		return b.authority.CAS(ctx, key, data, token)
+	}
+	// COS/OSS ordinary PUT conditions do not provide atomic R2 replacement.
+	// Metadata's append CAS must not imply the same capability for bulk bodies.
+	if strings.HasPrefix(key, "r2/") {
+		return "", ErrNotSupported
 	}
 	return b.S3Bucket.CAS(ctx, key, data, token)
 }
@@ -159,11 +157,17 @@ func (b *ProviderBucket) ConditionalDelete(ctx context.Context, key, token strin
 	return b.S3Bucket.ConditionalDelete(ctx, key, token)
 }
 func (b *ProviderBucket) Put(ctx context.Context, key string, data []byte) (string, error) {
+	if b.framedAsset(key) {
+		return "", ErrNotSupported
+	}
 	if pointFenceKey(key) {
 		return "", ErrNotSupported
 	}
 	if authorityKey(key) {
 		return b.authority.Put(ctx, key, data)
+	}
+	if strings.HasPrefix(key, "cells/") && strings.Contains(key, "/ltx/e") {
+		return b.PutReader(ctx, key, bytes.NewReader(data), int64(len(data)))
 	}
 	return b.S3Bucket.Put(ctx, key, data)
 }
@@ -178,6 +182,9 @@ func (b *ProviderBucket) Delete(ctx context.Context, key string) error {
 	return b.S3Bucket.Delete(ctx, key)
 }
 func (b *ProviderBucket) Stat(ctx context.Context, key string) (int64, string, error) {
+	if b.framedAsset(key) {
+		return b.statAsset(ctx, key)
+	}
 	if pointFenceKey(key) {
 		data, token, err := b.pointFence.Get(ctx, key)
 		return int64(len(data)), token, err
@@ -188,6 +195,9 @@ func (b *ProviderBucket) Stat(ctx context.Context, key string) (int64, string, e
 	return b.S3Bucket.Stat(ctx, key)
 }
 func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	if b.framedAsset(key) {
+		return b.rangeAsset(ctx, key, off, length)
+	}
 	if pointFenceKey(key) {
 		data, token, err := b.pointFence.Get(ctx, key)
 		if err != nil {
@@ -204,47 +214,48 @@ func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length 
 	return b.S3Bucket.RangedGet(ctx, key, off, length)
 }
 
-// List returns logical keys. Physical window objects are collapsed into their
+// List returns logical keys. Physical generation objects are collapsed into their
 // logical key and tombstoned records are hidden, matching the Bucket contract.
 func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, error) {
+	return b.listLogical(ctx, prefix, false)
+}
+
+// ListImmediate filters logical children before reading authority records.
+func (b *ProviderBucket) ListImmediate(ctx context.Context, prefix string) ([]string, error) {
+	if !strings.HasSuffix(prefix, "/") {
+		return nil, fmt.Errorf("immediate listing prefix must end in slash")
+	}
+	return b.listLogical(ctx, prefix, true)
+}
+
+func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immediate bool) ([]string, error) {
 	keys, err := b.S3Bucket.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(keys))
-	// The physical listing already identifies the latest authority window.
-	// Calling Get for every listed historical node would make each old window
-	// miss list its own prefix again (one List per node per lease sample).
+	// Physical generations are only discovery hints. The stable root alone
+	// selects authority; never serve a listed retired or prepared generation.
 	windows := make(map[string]int64, len(keys))
 	for _, key := range keys {
-		if base, window, ok := ParsePhysicalAuthorityKey(key); ok {
-			if prev, seen := windows[base]; !seen || window > prev {
-				windows[base] = window
-			}
+		logical := key
+		if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
+			logical = base
+		}
+		if immediate && (!strings.HasPrefix(logical, prefix) || strings.Contains(strings.TrimPrefix(logical, prefix), "/")) {
 			continue
 		}
-		if !authorityKey(key) {
+		if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
+			windows[base] = 0
+		} else if authorityKey(key) {
+			windows[key] = 0
+		} else {
 			out = append(out, key)
-			continue
-		}
-		if _, seen := windows[key]; !seen {
-			windows[key] = -1 // legacy unsegmented key
 		}
 	}
-	logical, err := resolveListedWindows(ctx, windows, func(ctx context.Context, logical string, window int64) (bool, error) {
-		var err error
-		var seg *authoritySegment
-		if pointFenceKey(logical) {
-			_, _, err = b.Get(ctx, logical)
-		} else {
-			seg, err = b.authority.listed(ctx, logical, window)
-			if errors.Is(err, ErrNotFound) && window >= 0 {
-				// GC raced the physical list: discover the current authority.
-				_, _, err = b.Get(ctx, logical)
-				seg = nil
-			}
-		}
-		if errors.Is(err, ErrNotFound) || (seg != nil && seg.deleted) {
+	logical, err := resolveListedWindows(ctx, windows, func(ctx context.Context, logical string, _ int64) (bool, error) {
+		_, _, err := b.Get(ctx, logical)
+		if errors.Is(err, ErrNotFound) {
 			return false, nil
 		}
 		if err != nil {
@@ -255,6 +266,9 @@ func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out = append(out, logical...)
 
 	sort.Strings(out)
@@ -262,6 +276,9 @@ func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, err
 }
 
 func (b *ProviderBucket) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	if b.framedAsset(key) {
+		return "", ErrNotSupported
+	}
 	if authorityKey(key) {
 		return "", ErrNotSupported
 	}
@@ -297,14 +314,14 @@ func (b *ProviderBucket) ListSizes(ctx context.Context, prefix string) ([]Object
 		out = append(out, ObjectInfo{Key: logical, Size: size, ETag: token})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, nil
+	return b.logicalAssetSizes(out), nil
 }
 
 func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, string, error) {
-	// Keep the underlying page bound. A logical authority key can own up to two
-	// physical window objects, so a page may yield fewer logical items; the
+	// Keep the underlying page bound. A logical authority key can own multiple
+	// physical generations, so a page may yield fewer logical items; the
 	// physical cursor is still monotonic. Cross-page duplicates are possible if
-	// a page boundary splits one logical key's windows; callers treat listing as
+	// a page boundary splits one logical key's generations; callers treat listing as
 	// diagnostic/idempotent (delete/purge tolerate repeats).
 	items, next, err := b.S3Bucket.ListPage(ctx, prefix, after, limit)
 	if err != nil {
@@ -334,7 +351,7 @@ func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, lim
 		out = append(out, ObjectInfo{Key: logical, Size: size, ETag: token})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, next, nil
+	return b.logicalAssetSizes(out), next, nil
 }
 
 var _ Bucket = (*ProviderBucket)(nil)
@@ -391,4 +408,14 @@ send:
 		return nil, err
 	}
 	return out, nil
+}
+
+// MaxValueBytes exposes the native control-frame payload limit for admission
+// before a multi-object operation mutates its data object. Zero means no bound
+// is imposed by this adapter.
+func (b *ProviderBucket) MaxValueBytes(key string) int64 {
+	if authorityKey(key) {
+		return b.authority.valueMax
+	}
+	return 0
 }

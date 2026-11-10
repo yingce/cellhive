@@ -117,6 +117,7 @@ type Store struct {
 	// it scoped: a global eviction lock would let one slow close block opens of
 	// unrelated cells.
 	evicting map[string]bool
+	retiring map[string]resourceRetirement
 
 	// diskMu caches the cold-path DiskFiles walk for metrics (ADR-122).
 	diskMu    sync.Mutex
@@ -177,6 +178,8 @@ func (s *Store) waitLocked(ctx context.Context, blocked func() bool) error {
 // BeginRequest is the compatibility gate for callers without a context.
 // Request paths must use BeginRequestContext so an eviction cannot hold an
 // already cancelled request indefinitely.
+// Deprecated: retirement-aware callers must use BeginRequestContext and handle
+// rejection; this compatibility wrapper returns nil when admission is rejected.
 func (s *Store) BeginRequest(key string) func() {
 	end, _ := s.BeginRequestContext(context.Background(), key)
 	return end
@@ -192,22 +195,36 @@ func (s *Store) BeginRequestContext(ctx context.Context, key string) (func(), er
 		return func() {}, nil
 	}
 	s.mu.Lock()
-	if err := s.waitLocked(ctx, func() bool { return s.evicting[key] }); err != nil {
+	if _, retired := s.retiring[key]; retired {
+		s.mu.Unlock()
+		return nil, cell.ErrResourceDeleted
+	}
+	if err := s.waitLocked(ctx, func() bool {
+		_, retired := s.retiring[key]
+		return s.evicting[key] && !retired
+	}); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
+	if _, retired := s.retiring[key]; retired {
+		s.mu.Unlock()
+		return nil, cell.ErrResourceDeleted
+	}
 	s.busy[key]++
 	s.mu.Unlock()
+	var once sync.Once
 	return func() {
-		s.mu.Lock()
-		if s.busy[key] > 0 {
-			s.busy[key]--
-		}
-		if s.busy[key] == 0 {
-			delete(s.busy, key)
-			s.cond.Broadcast()
-		}
-		s.mu.Unlock()
+		once.Do(func() {
+			s.mu.Lock()
+			if s.busy[key] > 0 {
+				s.busy[key]--
+			}
+			if s.busy[key] == 0 {
+				delete(s.busy, key)
+				s.cond.Broadcast()
+			}
+			s.mu.Unlock()
+		})
 	}, nil
 }
 
@@ -335,6 +352,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	// never by the base VFS. Treat it like a cold cell and re-register it.
 	cold := missing || markerExists
 	paged := false
+	var restoredTXID uint64
 	if cold && (missing || markerValid) && s.Paged != nil {
 		hctx, cancel := s.hydrateContext(ctx)
 		slotCtx, slotSpan := telemetry.Tracer().Start(hctx, "cell.restore_slot_wait")
@@ -392,6 +410,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 				return nil, fmt.Errorf("cellstore: paged prepare %s: %w", sc, err)
 			}
 			paged = true
+			restoredTXID = srcTx
 			missing = false // the sparse file now exists
 		}
 	}
@@ -443,6 +462,12 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 			pagedvfs.Release(p)
 		}
 		return nil, err
+	}
+	if restoredTXID > 0 {
+		if err := c.AdoptRestoreTXID(ctx, restoredTXID); err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 	}
 	if paged {
 		c.paged = true
@@ -590,6 +615,12 @@ func (s *Store) TryInvalidate(ctx context.Context, sc cell.Scope, verify func() 
 	}
 	s.mu.Lock()
 	c := s.cells[p]
+	s.mu.Unlock()
+	if err := s.stopBeforeRemoval(ctx, sc, c, verify); err != nil {
+		s.finishEviction(key)
+		return false, err
+	}
+	s.mu.Lock()
 	if c != nil {
 		delete(s.cells, p)
 		if e := s.byPath[p]; e != nil {
@@ -599,9 +630,6 @@ func (s *Store) TryInvalidate(ctx context.Context, sc cell.Scope, verify func() 
 	}
 	s.mu.Unlock()
 	if c != nil {
-		if s.Drop != nil {
-			_ = s.Drop(ctx, sc)
-		}
 		_ = c.Close()
 	}
 	for _, path := range []string{p, p + "-wal", p + "-shm", pagedMarkerPath(p)} {
@@ -659,6 +687,12 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	// callers out for this scope; unrelated scopes proceed independently.
 	s.mu.Lock()
 	c := s.cells[p]
+	s.mu.Unlock()
+	if err := s.stopBeforeRemoval(ctx, sc, c, verify); err != nil {
+		s.finishEviction(key)
+		return err
+	}
+	s.mu.Lock()
 	if c != nil {
 		delete(s.cells, p)
 		if e := s.byPath[p]; e != nil {
@@ -669,9 +703,6 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	s.mu.Unlock()
 
 	if c != nil {
-		if s.Drop != nil {
-			_ = s.Drop(ctx, sc) // stop the capture loop before closing
-		}
 		_ = c.Close()
 	}
 	var removeErr error
@@ -698,6 +729,7 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 func (s *Store) evictOne(ctx context.Context) bool {
 	s.mu.Lock()
 	var c *Cell
+	var path string
 	for e := s.lru.Back(); e != nil; e = e.Prev() {
 		ent := e.Value.(*lruEnt)
 		cc := s.cells[ent.path]
@@ -717,9 +749,7 @@ func (s *Store) evictOne(ctx context.Context) bool {
 			continue
 		}
 		s.evicting[key] = true
-		delete(s.cells, ent.path)
-		s.lru.Remove(e)
-		delete(s.byPath, ent.path)
+		path = ent.path
 		c = cc
 		break
 	}
@@ -727,12 +757,17 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	if c == nil {
 		return false
 	}
-	if s.Drop != nil {
-		// Drop MUST NOT call back into Store.Cell for this scope: evicting is
-		// held here, and a cold open would wait forever. It only stops the
-		// capture loop.
-		_ = s.Drop(ctx, c.Scope)
+	if err := s.stopBeforeRemoval(ctx, c.Scope, c, nil); err != nil {
+		s.finishEviction(c.Scope.String())
+		return false
 	}
+	s.mu.Lock()
+	delete(s.cells, path)
+	if e := s.byPath[path]; e != nil {
+		s.lru.Remove(e)
+		delete(s.byPath, path)
+	}
+	s.mu.Unlock()
 	_ = c.Close()
 	s.mu.Lock()
 	delete(s.evicting, c.Scope.String())
@@ -743,6 +778,29 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	}
 	s.evicted.Add(1)
 	return true
+}
+
+// The eviction gate excludes new opens, but the resident entry stays intact
+// until capture has actually stopped. Drop must never reenter Store.Cell.
+func (s *Store) stopBeforeRemoval(ctx context.Context, sc cell.Scope, c *Cell, verify func() error) error {
+	if c != nil && s.Drop != nil {
+		if err := s.Drop(ctx, sc); err != nil {
+			return err
+		}
+		if verify != nil {
+			if err := verify(); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+func (s *Store) finishEviction(key string) {
+	s.mu.Lock()
+	delete(s.evicting, key)
+	s.cond.Broadcast()
+	s.mu.Unlock()
 }
 
 // Limits reports the configured resident-handle cap and idle TTL.
@@ -1016,7 +1074,7 @@ CREATE TABLE IF NOT EXISTS cell_meta (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 );
-INSERT OR IGNORE INTO cell_meta(k, v) VALUES ('txid', '0');
+INSERT OR IGNORE INTO cell_meta(k, v) VALUES ('txid', '1');
 INSERT OR IGNORE INTO cell_meta(k, v) VALUES ('created_ms', CAST(strftime('%s','now') AS TEXT) || '000');
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
@@ -1224,7 +1282,7 @@ func (c *Cell) CheckpointTruncate(ctx context.Context) error {
 		return err
 	}
 	_, _ = conn.ExecContext(ctx, "PRAGMA busy_timeout=500")
-	_, err = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	err = checkpointTruncate(ctx, conn)
 	_ = conn.Close()
 	return err
 }
@@ -1740,8 +1798,9 @@ type SnapshotPartFunc func(partIndex, total int, watermark uint64, pageSize, com
 // cannot complete would leave the image older than the returned watermark.
 //
 // The image's page numbers are unchanged (no VACUUM): they match the WAL frames
-// that later deltas carry, and the parts are byte-compatible with
-// ltx.EncodeSnapshotParts. Any partBytes <= 0 uses 8MiB.
+// that later deltas carry. Callbacks are bounded batches of raw pages feeding
+// one native LTX encoder, not independently encoded snapshot files.
+// Any partBytes <= 0 uses an 8MiB page-read buffer.
 func (c *Cell) SnapshotStream(ctx context.Context, partBytes int, fn SnapshotPartFunc) (watermark uint64, pageSize, commit uint32, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -1849,22 +1908,14 @@ func (c *Cell) snapshotStream(ctx context.Context, partBytes int, fn SnapshotPar
 	return watermark, ps, commit, nil
 }
 
-// snapshotPagesPerPart bounds one streamed part by partBytes. The per-page cost
-// is the page itself plus a conservative index allowance that covers both the
-// legacy 4-byte page-number prefix and the v2 12-byte offset index, and the
-// fixed overhead covers the LTX header (44) and the larger v2 page-map header
-// (24), so a part encoded by ltx.EncodeSnapshotPart stays within partBytes.
+// snapshotPagesPerPart bounds the reusable raw-page read buffer. Native LTX
+// framing, compressed pages, and the embedded index belong to the encoder;
+// callback boundaries do not create additional headers or object-store files.
 func snapshotPagesPerPart(pageSize uint32, partBytes int) (int, error) {
-	const (
-		headerBytes        = 44 // ltx.HeaderSize
-		pageMapHeaderBytes = 24 // ltx v2 (WAL3) payload header
-		perPageIndexBytes  = 12 // v2 index entry; also covers the v1 prefix
-	)
-	perPart := (partBytes - headerBytes - pageMapHeaderBytes) / (perPageIndexBytes + int(pageSize))
-	if perPart < 1 {
+	if pageSize == 0 || partBytes < int(pageSize) {
 		return 0, fmt.Errorf("cellstore: snapshot part budget %d too small for page size %d", partBytes, pageSize)
 	}
-	return perPart, nil
+	return partBytes / int(pageSize), nil
 }
 
 // SnapshotPages reads the database file as a full-page image
@@ -1920,6 +1971,19 @@ func ReadDBPages(path string) (uint32, uint32, map[uint32][]byte, error) {
 // Checkpoint forces a WAL checkpoint (used by tests and shutdown).
 // TRUNCATE resets the WAL file and rotates its salt.
 func (c *Cell) Checkpoint(ctx context.Context) error {
-	_, err := c.DB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-	return err
+	return checkpointTruncate(ctx, c.DB)
+}
+
+// SQLite reports a blocked checkpoint in its result row, not as a SQL error.
+func checkpointTruncate(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	var busy, logFrames, checkpointed int
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("cellstore: checkpoint busy (%d of %d frames checkpointed)", checkpointed, logFrames)
+	}
+	return nil
 }

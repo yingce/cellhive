@@ -3,6 +3,8 @@
 package sqlcapture
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,13 +23,17 @@ type Committer interface {
 	Commit(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte) error
 }
 
-// BatchCommitter is an optional Committer extension: it proves a group of
-// snapshot parts durable with one request, which avoids one round trip per part
-// when a full-page snapshot is split into many parts. The capture only uses it
-// when SnapshotBatchParts > 1. Every segment must become durable before the
-// call returns nil (RPO=0, same proof as Commit).
-type BatchCommitter interface {
-	CommitBatch(ctx context.Context, scope cell.Scope, epoch uint64, segments [][]byte) error
+// SnapshotFileCommitter publishes a complete snapshot as one immutable LTX
+// object after the capture has streamed every part to a local temporary file.
+// Implementations must not expose the destination until the call succeeds.
+type SnapshotFileCommitter interface {
+	CommitSnapshotFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64) error
+}
+
+// NativeFileCommitter publishes a complete native incremental without a
+// buffered-segment transport limit. It preserves the indivisible TXID range.
+type NativeFileCommitter interface {
+	CommitNativeFile(ctx context.Context, scope cell.Scope, epoch, txid uint64, path string, size int64) error
 }
 
 // ErrSnapshotTooLarge reports that a full-page snapshot image exceeds
@@ -51,9 +57,9 @@ type Stats struct {
 
 const (
 	// maxCaptureTransactions bounds one LTX chunk. Larger chunks amortize a
-	// single in-flight RTT (throughput ~= chunk/RTT) and, because the WAL2
-	// payload is page-map deduplicated, a hot-page chunk stays tiny. The
-	// 1MiB payload cap still bounds wide-write chunks.
+	// single in-flight RTT (throughput ~= chunk/RTT); last-write-per-page
+	// deduplication keeps hot-page chunks small. The native encoded size
+	// bound limits wide-write chunks, except an indivisible large transaction.
 	maxCaptureTransactions = 512
 	maxCapturePayloadBytes = 1 << 20
 	captureGroupCommitWait = 2 * time.Millisecond
@@ -84,9 +90,9 @@ type Capture struct {
 	barrier          *barrier
 	notify           chan struct{}
 	done             chan struct{}
-	// onBaselineStart, set only while a requested baseline runs, is called with
-	// the snapshot's label before its first part is uploaded.
-	onBaselineStart func(ctx context.Context, label uint64) error
+	// onImageReady releases detached-image boundary coordination before upload.
+	// It is local synchronization, never an object-store marker callback.
+	onImageReady func(ctx context.Context, label uint64) error
 
 	// GroupCommitWait and PipelineThreshold are tunable (0 = package defaults).
 	// They are set before Start.
@@ -126,13 +132,9 @@ type Capture struct {
 	// a checkpoint-triggered rebaseline over budget fails the capture loop
 	// rather than silently skipping the snapshot.
 	SnapshotMaxBytes int64
-	// SnapshotPartBytes bounds one streamed snapshot part (0 = 8MiB,
+	// SnapshotPartBytes bounds the raw-page read buffer, not an encoded file (0 = 8MiB,
 	// ltx.DefaultSnapshotPartBytes).
 	SnapshotPartBytes int
-	// SnapshotBatchParts groups this many streamed parts into one CommitBatch
-	// when the committer implements BatchCommitter (0 or 1 = one commit per
-	// part). Parts are additionally capped at 64MiB per batch.
-	SnapshotBatchParts int
 
 	statsMu sync.Mutex
 	stats   Stats
@@ -154,6 +156,7 @@ func New(db *cellstore.Cell, scope cell.Scope, epoch, baselineTxID uint64, commi
 		return nil, fmt.Errorf("sqlcapture: baseline WAL poll: %w", err)
 	}
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+
 	return &Capture{
 		backgroundCtx: backgroundCtx, backgroundCancel: backgroundCancel,
 		cell: db, scope: scope, epoch: epoch, cursor: cursor, baselineWALBytes: cursor.BytesRead(),
@@ -177,10 +180,10 @@ func (c *Capture) Notify() {
 
 // RequestBaseline uploads an independent fixed image without stopping WAL
 // capture. It does not reset the cursor or advance the write durability barrier:
-// callers must already have a recoverable chain (for example an epoch marker).
+// callers must already have a recoverable chain (for example a native continuation).
 // A failed optional baseline leaves that chain intact. The returned label belongs
 // to the copied image, never to the later live database.
-func (c *Capture) RequestBaseline(ctx context.Context, onStart func(context.Context, uint64) error) (uint64, error) {
+func (c *Capture) RequestBaseline(ctx context.Context) (uint64, error) {
 	c.backgroundMu.Lock()
 	if c.backgroundClosed {
 		c.backgroundMu.Unlock()
@@ -204,15 +207,11 @@ func (c *Capture) RequestBaseline(ctx context.Context, onStart func(context.Cont
 		c.baselineCuts = append(c.baselineCuts, label)
 		locked = false
 		c.pollMu.Unlock()
-		if onStart != nil {
-			return onStart(ctx, label)
-		}
 		return nil
 	}
 	shadow := &Capture{cell: c.cell, scope: c.scope, epoch: c.epoch, committer: c.committer,
-		cursor: wal.NewCursor(), barrier: newBarrier(0), onBaselineStart: boundary,
-		SnapshotMaxBytes: c.SnapshotMaxBytes, SnapshotPartBytes: c.SnapshotPartBytes,
-		SnapshotBatchParts: c.SnapshotBatchParts}
+		cursor: wal.NewCursor(), barrier: newBarrier(0), onImageReady: boundary,
+		SnapshotMaxBytes: c.SnapshotMaxBytes, SnapshotPartBytes: c.SnapshotPartBytes}
 	err := shadow.emitSnapshotStream(ctx, snapshotModeDetached, 0)
 	if err != nil {
 		return 0, err
@@ -245,13 +244,29 @@ func (c *Capture) Stats() Stats {
 
 func (c *Capture) Done() <-chan struct{} { return c.done }
 
+// Err reports a terminal capture failure as soon as durability waiters see it.
+// Done closes later, after cursor and background-image cleanup have finished.
+func (c *Capture) Err() error {
+	c.barrier.mu.Lock()
+	defer c.barrier.mu.Unlock()
+	return c.barrier.fatal
+}
+
 func (c *Capture) loop(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer close(c.done)
 	defer func() {
+		// A failed poll also cancels outstanding commits, even when the caller
+		// context remains live. Done proves completion, not just cancellation.
+		cancel()
 		c.backgroundMu.Lock()
 		c.backgroundClosed = true
 		c.backgroundCancel()
 		c.backgroundMu.Unlock()
+		for _, future := range c.inflight {
+			<-future.ch
+		}
+		c.inflight = nil
 		c.backgroundWG.Wait()
 	}()
 	defer c.cursor.Close()
@@ -359,21 +374,28 @@ func (c *Capture) poll(ctx context.Context) error {
 		txs, start = txs[n:], cut
 	}
 	chunks = append(chunks, chunkTransactions(result.Header.PageSize, txs)...)
+	walOffset := result.WALOffset
 	for _, chunk := range chunks {
+		var walSize int64
+		for _, tx := range chunk {
+			walSize += int64(len(tx.Frames)) * (24 + int64(result.Header.PageSize))
+		}
 		commit, pages, err := ltx.PageMapFromTransactions(result.Header.PageSize, chunk)
 		if err != nil {
 			return fmt.Errorf("sqlcapture: build page map: %w", err)
 		}
-		payload, err := ltx.EncodeWALPageMap(result.Header.PageSize, commit, len(chunk), pages)
-		if err != nil {
-			return fmt.Errorf("sqlcapture: encode page map: %w", err)
-		}
+
 		startTxID := c.nextTxID + 1
 		endTxID := c.nextTxID + uint64(len(chunk))
-		segment := ltx.Encode(ltx.Header{
-			Kind: ltx.KindDelta, Epoch: c.epoch,
-			StartTxID: startTxID, EndTxID: endTxID,
-		}, payload)
+		segment, err := ltx.EncodeNativePages(ltx.NativeHeader{
+			PageSize: result.Header.PageSize, Commit: commit,
+			MinTXID: startTxID, MaxTXID: endTxID, Timestamp: time.Now().UnixMilli(),
+			WALOffset: walOffset, WALSize: walSize, WALSalt1: result.Header.Salt1, WALSalt2: result.Header.Salt2,
+		}, pages)
+		if err != nil {
+			return fmt.Errorf("sqlcapture: encode native delta: %w", err)
+		}
+		walOffset += walSize
 		started := time.Now()
 
 		// Bound in-flight chunks: block on the head before dispatching another.
@@ -503,36 +525,22 @@ const (
 	snapshotModeDetached
 )
 
-// maxSnapshotBatchBytes caps the encoded bytes buffered for one CommitBatch.
-const maxSnapshotBatchBytes = 64 << 20
-
 // Snapshot checkpoints the database (backfilling WAL frames) and streams a full
 // snapshot. The checkpoint, watermark read and page image are taken under the
 // cell write mutex, so a commit cannot land between them and release a ticket
-// whose pages are absent from the image. Parts are read, encoded and committed
-// one at a time, so memory is O(SnapshotPartBytes), not O(database).
+// whose pages are absent from the image. Pages are read in bounded chunks and
+// encoded into one native file. A byte-only committer still buffers that file.
 func (c *Capture) Snapshot(ctx context.Context) error {
 	return c.emitSnapshotStream(ctx, snapshotModeCheckpoint, 0)
-}
-
-// SnapshotWithStart is the pre-Start baseline path. It records the started
-// marker using the snapshot's actual post-checkpoint watermark, then returns
-// that same label for the done marker. The cell txid before/after Snapshot may
-// differ from this label (for example, a first checkpoint advances 0 to 1).
-func (c *Capture) SnapshotWithStart(ctx context.Context, onStart func(context.Context, uint64) error) (uint64, error) {
-	c.onBaselineStart = onStart // Capture.Start has not been called yet.
-	err := c.emitSnapshotStream(ctx, snapshotModeCheckpoint, 0)
-	c.onBaselineStart = nil
-	if err != nil {
-		return 0, err
-	}
-	return c.Stats().SnapshotTxID, nil
 }
 
 // Checkpoint forces a WAL truncate checkpoint. The capture loop then emits a
 // full-page snapshot on its next poll, so the truncated WAL has a durable
 // baseline to restore from. Callers must not run it while writes are in flight.
 func (c *Capture) Checkpoint(ctx context.Context) error {
+	// Keep TRUNCATE outside the cursor's Stat/read boundary.
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
 	return c.cell.Checkpoint(ctx)
 }
 
@@ -583,12 +591,8 @@ func (c *Capture) emitSnapshot(ctx context.Context, watermark uint64) error {
 	return c.emitSnapshotStream(ctx, snapshotModePages, watermark)
 }
 
-// emitSnapshotStream streams a full-page snapshot part by part and commits each
-// part as it is encoded. Nothing advances — no cursor reset, no nextTxID, no
-// barrier — unless every part is durable, so a failed snapshot never becomes the
-// capture's new baseline. (Parts already committed before a mid-stream failure
-// stay in the durable chain as an incomplete snapshot; see the ADR-272 P2 notes
-// on partial-snapshot cleanup.)
+// emitSnapshotStream streams page callbacks into one complete native LTX file.
+// File committers use a local spool; byte-only committers buffer that one file.
 func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, watermark uint64) error {
 	partBytes := c.SnapshotPartBytes
 	if partBytes <= 0 {
@@ -602,27 +606,28 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 			return fmt.Errorf("%w: database %d bytes, budget %d", ErrSnapshotTooLarge, info.Size(), max)
 		}
 	}
-	var batcher BatchCommitter
-	if c.SnapshotBatchParts > 1 {
-		batcher, _ = c.committer.(BatchCommitter)
+	fileCommitter, fileMode := c.committer.(SnapshotFileCommitter)
+	var snapshotBuffer bytes.Buffer
+	var snapshotFile *os.File
+	var snapshotWriter *bufio.Writer
+	var snapshotEncoder *ltx.NativeEncoder
+	var snapshotFilePath string
+	if fileMode {
+		var ferr error
+		snapshotFile, ferr = os.CreateTemp("", "cellhive-snapshot-*.ltx")
+		if ferr != nil {
+			return fmt.Errorf("sqlcapture: create snapshot spool: %w", ferr)
+		}
+		snapshotFilePath = snapshotFile.Name()
+		defer func() {
+			_ = snapshotFile.Close()
+			_ = os.Remove(snapshotFilePath)
+		}()
 	}
 	var (
-		batch         [][]byte
-		batchBytes    int
 		label         = watermark
 		snapshotBytes int
 	)
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		segments := batch
-		batch, batchBytes = nil, 0
-		if err := batcher.CommitBatch(ctx, c.scope, c.epoch, segments); err != nil {
-			return fmt.Errorf("sqlcapture: snapshot batch commit (%d parts): %w", len(segments), err)
-		}
-		return nil
-	}
 	stream := func(partIndex, total int, wm uint64, pageSize, commit, firstPage uint32, pages [][]byte) error {
 		if max := c.SnapshotMaxBytes; max > 0 {
 			// Exact check: the image size is only known once the checkpoint and
@@ -633,46 +638,46 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 		}
 		if (mode == snapshotModeCheckpoint || mode == snapshotModeDetached) && partIndex == 0 {
 			label = wm
-			if c.onBaselineStart != nil {
-				if err := c.onBaselineStart(ctx, label); err != nil {
-					return fmt.Errorf("sqlcapture: snapshot start marker: %w", err)
+			if c.onImageReady != nil {
+				if err := c.onImageReady(ctx, label); err != nil {
+					return fmt.Errorf("sqlcapture: snapshot image boundary: %w", err)
 				}
 			}
 		}
-		walPages := make([]ltx.WALPage, len(pages))
-		for i, data := range pages {
-			walPages[i] = ltx.WALPage{PageNo: firstPage + uint32(i), Data: data}
+
+		nativeMin := uint64(1)
+		nativeMax := label
+		if nativeMax < nativeMin {
+			nativeMax = nativeMin
 		}
-		segment, err := ltx.EncodeSnapshotPart(ltx.Header{
-			Kind: ltx.KindSnapshot, Epoch: c.epoch,
-			StartTxID: label, EndTxID: label,
-		}, pageSize, commit, walPages, partIndex, total)
-		if err != nil {
-			return fmt.Errorf("sqlcapture: encode snapshot part %d/%d: %w", partIndex+1, total, err)
-		}
-		snapshotBytes += len(segment)
-		if batcher == nil {
-			if err := c.committer.Commit(ctx, c.scope, c.epoch, segment); err != nil {
-				return fmt.Errorf("sqlcapture: snapshot commit part %d/%d: %w", partIndex+1, total, err)
+		if snapshotEncoder == nil {
+			h := ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: nativeMin, MaxTXID: nativeMax, Timestamp: time.Now().UnixMilli()}
+			var err error
+			if fileMode {
+				snapshotWriter = bufio.NewWriterSize(snapshotFile, 256<<10)
+				snapshotEncoder, err = ltx.NewNativeEncoder(snapshotWriter, h)
+			} else {
+				snapshotEncoder, err = ltx.NewNativeEncoder(&snapshotBuffer, h)
 			}
-			return nil
-		}
-		if batchBytes+len(segment) > maxSnapshotBatchBytes && len(batch) > 0 {
-			if err := flush(); err != nil {
+			if err != nil {
 				return err
 			}
 		}
-		batch = append(batch, segment)
-		batchBytes += len(segment)
-		if len(batch) >= c.SnapshotBatchParts {
-			return flush()
+		for i, data := range pages {
+			pg := firstPage + uint32(i)
+			if pg == uint32(0x40000000)/pageSize+1 {
+				continue // SQLite locking page is never part of a native LTX snapshot.
+			}
+			if err := snapshotEncoder.WritePage(ltx.WALPage{PageNo: pg, Data: data}); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
 
-	if mode == snapshotModePages && c.onBaselineStart != nil {
-		if herr := c.onBaselineStart(ctx, label); herr != nil {
-			return fmt.Errorf("sqlcapture: baseline start marker: %w", herr)
+	if mode == snapshotModePages && c.onImageReady != nil {
+		if herr := c.onImageReady(ctx, label); herr != nil {
+			return fmt.Errorf("sqlcapture: baseline image boundary: %w", herr)
 		}
 	}
 	var err error
@@ -694,11 +699,32 @@ func (c *Capture) emitSnapshotStream(ctx context.Context, mode snapshotMode, wat
 	if err != nil {
 		return err
 	}
-	if batcher != nil {
-		if err := flush(); err != nil {
+	if snapshotEncoder == nil {
+		return fmt.Errorf("sqlcapture: snapshot contained no image")
+	}
+	if err := snapshotEncoder.Close(); err != nil {
+		return err
+	}
+	snapshotBytes = int(snapshotEncoder.BytesWritten())
+	if fileMode {
+		if err := snapshotWriter.Flush(); err != nil {
 			return err
 		}
+		if err := snapshotFile.Sync(); err != nil {
+			return fmt.Errorf("sqlcapture: sync snapshot spool: %w", err)
+		}
+		if err := snapshotFile.Close(); err != nil {
+			return fmt.Errorf("sqlcapture: close snapshot spool: %w", err)
+		}
+		if err := fileCommitter.CommitSnapshotFile(ctx, c.scope, c.epoch, label, snapshotFilePath, int64(snapshotBytes)); err != nil {
+			return fmt.Errorf("sqlcapture: publish snapshot: %w", err)
+		}
+	} else {
+		if err := c.committer.Commit(ctx, c.scope, c.epoch, snapshotBuffer.Bytes()); err != nil {
+			return fmt.Errorf("sqlcapture: publish snapshot: %w", err)
+		}
 	}
+
 	// The database file is now this snapshot's baseline; re-anchor the cursor so
 	// later WAL frames become deltas with txid > watermark.
 	c.cursor.Reset()
@@ -734,22 +760,28 @@ func (c *Capture) drain(ctx context.Context, block bool) error {
 				return nil
 			}
 		}
+		// This result has been consumed, including on failure. Shutdown must
+		// join only futures still outstanding, never read a result twice.
+		c.inflight = c.inflight[1:]
 		if err != nil {
 			return fmt.Errorf("sqlcapture: fleet commit ending %d: %w", head.end, err)
 		}
 		c.adaptPipeline(time.Since(head.started))
 		c.barrier.advance(head.end)
-		c.inflight = c.inflight[1:]
 	}
 	return nil
 }
 
 // chunkTransactions splits a poll into ordered chunks bounded by transaction
-// count and the deduplicated page-map payload size (last write per page). In a
+// count and a native encoded-file size bound (last write per page). In a
 // hot-page workload the deduplicated size stays tiny, so the count bound
 // dominates; the byte bound only fires for wide-write workloads.
 func chunkTransactions(pageSize uint32, txs []ltx.WALTransaction) [][]ltx.WALTransaction {
-	const headerBytes = 20 // WAL2 header
+	// Header, terminator, index terminator, index length, and trailer.
+	const fixedBytes = ltx.NativeHeaderSize + 6 + 1 + 8 + 16
+	// LZ4 worst-case block size, extended page header, and maximum index
+	// varints (page number 5 bytes, offset and frame length 10 bytes each).
+	perPageBytes := uint64(pageSize) + uint64(pageSize)/255 + 16 + 10 + 25
 	var chunks [][]ltx.WALTransaction
 	var current []ltx.WALTransaction
 	seen := map[uint32]struct{}{}
@@ -776,7 +808,7 @@ func chunkTransactions(pageSize uint32, txs []ltx.WALTransaction) [][]ltx.WALTra
 	for _, transaction := range txs {
 		newPages := countNew(transaction)
 		if len(current) > 0 && (len(current) >= maxCaptureTransactions ||
-			headerBytes+(pages+newPages)*(4+int(pageSize)) > maxCapturePayloadBytes) {
+			fixedBytes+uint64(pages+newPages)*perPageBytes > maxCapturePayloadBytes) {
 			flush()
 			newPages = countNew(transaction)
 		}
@@ -857,4 +889,25 @@ func (b *barrier) durable() uint64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.durableTxID
+}
+
+// AdoptContinuation resets the pre-start cursor after a durable zero-page
+// continuation and its local metadata update. No application writers may run
+// until the manager releases its initialization gate.
+func (c *Capture) AdoptContinuation(ctx context.Context) (uint64, error) {
+	txid, err := c.cell.TxID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	cursor := wal.NewCursor()
+	if _, err := cursor.Poll(c.cell.WALPath()); err != nil && !errors.Is(err, wal.ErrNoWAL) {
+		_ = cursor.Close()
+		return 0, err
+	}
+	if c.cursor != nil {
+		_ = c.cursor.Close()
+	}
+	c.cursor, c.baselineWALBytes, c.nextTxID = cursor, cursor.BytesRead(), txid
+	c.barrier = newBarrier(txid)
+	return txid, nil
 }

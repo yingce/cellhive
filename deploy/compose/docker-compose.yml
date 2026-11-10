@@ -33,7 +33,7 @@ x-common-env: &common-env
   # and CELLHIVE_HYPERDRIVE_PROXY to route through an external pooler.
   # Bound cached cell handles so a long-lived node cannot grow its SQLite
   # handle/page-cache working set without limit (0 disables the cap).
-  CELLHIVE_MAX_OPEN_CELLS: ${CELLHIVE_MAX_OPEN_CELLS:-32}
+  CELLHIVE_MAX_OPEN_CELLS: ${CELLHIVE_MAX_OPEN_CELLS:-128}
   CELLHIVE_CELL_IDLE: ${CELLHIVE_CELL_IDLE:-5m}
   CELLHIVE_PAGED_MIN_BYTES: ${CELLHIVE_PAGED_MIN_BYTES:-32MiB}
   CELLHIVE_PAGED_READAHEAD_BYTES: ${CELLHIVE_PAGED_READAHEAD_BYTES:-1MiB}

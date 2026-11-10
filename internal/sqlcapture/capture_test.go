@@ -108,24 +108,21 @@ func TestCaptureReplicatesRealWALTransactions(t *testing.T) {
 	defer committer.mu.Unlock()
 	transactions := 0
 	for _, segment := range committer.segments {
-		header, payload, err := ltx.Decode(segment)
+		header, pages, err := ltx.DecodeNativePages(segment)
 		if err != nil {
 			t.Fatalf("decode segment: %v", err)
 		}
-		if header.Epoch != 1 {
-			t.Fatalf("unexpected header: %+v", header)
-		}
-		if header.Kind == ltx.KindSnapshot {
+		if header.IsSnapshot() {
 			continue // the baseline snapshot covers no application transaction
 		}
-		pageSize, _, txCount, pages, err := ltx.DecodeWALPageMap(payload)
+		pageSize := header.PageSize
 		if err != nil || pageSize == 0 {
 			t.Fatalf("decode page map: pageSize=%d err=%v", pageSize, err)
 		}
 		if len(pages) == 0 {
 			t.Fatalf("page map had no pages")
 		}
-		transactions += txCount
+		transactions += int(header.MaxTXID - header.MinTXID + 1)
 	}
 	if transactions != 3 {
 		t.Fatalf("replicated transactions = %d, want 3", transactions)
@@ -133,7 +130,7 @@ func TestCaptureReplicatesRealWALTransactions(t *testing.T) {
 }
 
 func TestHTTPCommitterDurabilityProofs(t *testing.T) {
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("payload"))
+	segment := []byte("opaque HTTP transport fixture")
 	claimed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if bearertoken.VerifyInternal(r.Header, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "internal", time.Now()) != nil {
@@ -212,7 +209,7 @@ func TestHTTPCommitterDOOwnerProofOrBucketFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	doOwner := DOOwnerIdentity{Scope: cell.Scope{Namespace: "demo", Class: "__do__", ID: "w~C~shard0"}, Node: "do-b", Epoch: 3}
-	if err := client.Commit(WithDOOwner(context.Background(), doOwner), scope, 1, []byte("segment")); err != nil {
+	if err := client.Commit(WithDOOwner(context.Background(), doOwner), scope, doOwner.Epoch, []byte("segment")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -282,7 +279,7 @@ func TestWriterUsesInMemoryTicketsWithoutTxIDPage(t *testing.T) {
 	if got := writer.Current(); got != 3 {
 		t.Fatalf("current ticket = %d, want 3", got)
 	}
-	if persisted, err := db.TxID(ctx); err != nil || persisted != 0 {
+	if persisted, err := db.TxID(ctx); err != nil || persisted != 1 {
 		t.Fatalf("cell_meta txid = %d, %v; writer must not update it", persisted, err)
 	}
 }
@@ -356,6 +353,7 @@ func TestCaptureEmitsSnapshotOnCheckpoint(t *testing.T) {
 		t.Fatalf("new capture: %v", err)
 	}
 	capture.Start(ctx)
+	defer func() { cancel(); <-capture.Done() }()
 
 	for i := 0; i < 20; i++ {
 		txid, err := db.PutTx(ctx, string(rune('a'+i)), []byte("v"), nil)
@@ -378,15 +376,15 @@ func TestCaptureEmitsSnapshotOnCheckpoint(t *testing.T) {
 		committer.mu.Lock()
 		snapshots, deltas := 0, 0
 		for _, seg := range committer.segments {
-			h, _, err := ltx.Decode(seg)
+			h, err := ltx.ValidateNative(seg)
 			if err != nil {
 				committer.mu.Unlock()
 				t.Fatalf("decode: %v", err)
 			}
-			switch h.Kind {
-			case ltx.KindSnapshot:
+			switch {
+			case h.IsSnapshot():
 				snapshots++
-			case ltx.KindDelta:
+			default:
 				deltas++
 			}
 		}
@@ -398,7 +396,7 @@ func TestCaptureEmitsSnapshotOnCheckpoint(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("capture did not emit a snapshot after checkpoint")
+			t.Fatalf("capture did not emit a snapshot after checkpoint: err=%v stats=%+v", capture.Err(), capture.Stats())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -447,7 +445,7 @@ func TestCaptureChainRestores(t *testing.T) {
 		seen := false
 		committer.mu.Lock()
 		for _, seg := range committer.segments {
-			if h, _, err := ltx.Decode(seg); err == nil && h.Kind == ltx.KindSnapshot {
+			if h, err := ltx.ValidateNative(seg); err == nil && h.IsSnapshot() {
 				seen = true
 			}
 		}
@@ -531,7 +529,7 @@ func TestContinuousWritesWithCheckpointRestore(t *testing.T) {
 		seen := false
 		committer.mu.Lock()
 		for _, seg := range committer.segments {
-			if h, _, err := ltx.Decode(seg); err == nil && h.Kind == ltx.KindSnapshot {
+			if h, err := ltx.ValidateNative(seg); err == nil && h.IsSnapshot() {
 				seen = true
 			}
 		}
@@ -630,7 +628,7 @@ func TestContinuousWritesWithAutoCheckpointRestore(t *testing.T) {
 	segments := append([][]byte(nil), committer.segments...)
 	snapshots := 0
 	for _, seg := range segments {
-		if h, _, err := ltx.Decode(seg); err == nil && h.Kind == ltx.KindSnapshot {
+		if h, err := ltx.ValidateNative(seg); err == nil && h.IsSnapshot() {
 			snapshots++
 		}
 	}
@@ -724,7 +722,7 @@ func TestRebaselineSnapshotReflectsCommittedWrites(t *testing.T) {
 	committer.mu.Lock()
 	var snaps [][]byte
 	for _, seg := range committer.segments {
-		if h, _, err := ltx.Decode(seg); err == nil && h.Kind == ltx.KindSnapshot {
+		if h, err := ltx.ValidateNative(seg); err == nil && h.IsSnapshot() {
 			snaps = append(snaps, seg)
 		}
 	}
@@ -753,7 +751,7 @@ func TestRebaselineSnapshotReflectsCommittedWrites(t *testing.T) {
 // TestHTTPCommitterProofModes pins the durability semantics: fleet/bucket/
 // bucket-batch are RPO=0 proofs; bucket-async (and anything unknown) is rejected.
 func TestHTTPCommitterProofModes(t *testing.T) {
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("payload"))
+	segment := []byte("opaque HTTP transport fixture")
 	cases := []struct {
 		mode string
 		ok   bool

@@ -23,6 +23,7 @@ import (
 	"cellhive/internal/config"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
+	"cellhive/internal/owner"
 )
 
 // Run with scripts/e2e/session-recovery.sh. Real processes and HTTP; no workerd
@@ -318,7 +319,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	// Pause the actual owner beyond its published lease, let its peer recover
 	// and take over, then resume it. Its late renewal must not resurrect it.
 	scope := cell.Scope{Namespace: "sessiontest", Class: "__kv__", ID: "ka"}
-	raw, _, err := b.Get(context.Background(), scope.Key()+"/owner.json")
+	raw, _, err := b.Get(context.Background(), owner.Key(scope))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	if err != nil || code != 200 || string(data) != "a-value0" {
 		t.Fatalf("paused-owner takeover: %d %q %v", code, data, err)
 	}
-	raw, _, err = b.Get(context.Background(), scope.Key()+"/owner.json")
+	raw, _, err = b.Get(context.Background(), owner.Key(scope))
 	if err != nil {
 		t.Fatal(err)
 	}

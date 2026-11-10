@@ -33,7 +33,9 @@ type Runner struct {
 	Open     func(ctx context.Context, scope string) (*Store, error)
 	// Own confirms this process owns the scope before opening its local SQLite.
 	// It may claim an unowned scope and restore its authoritative state.
-	Own    func(ctx context.Context, scope string) (bool, error)
+	Own func(ctx context.Context, scope string) (bool, error)
+	// Admit pins one prepared scope through open, dispatch, commit and reads.
+	Admit  func(context.Context, string) (func(), error)
 	Commit func(ctx context.Context, scope string, fn func() error) error
 	// Forget removes a terminal scope (for example a deleted resource
 	// incarnation) from the persistent wake index.
@@ -132,42 +134,52 @@ func (r *Runner) Pass(ctx context.Context) (int, error) {
 				continue
 			}
 		}
-		st, err := r.Open(ctx, scope)
-		if err != nil {
-			if errors.Is(err, cell.ErrResourceDeleted) {
-				// The resource incarnation is intentionally gone. Stop local
-				// polling and remove its wake-index pointer so every node does
-				// not keep rediscovering the same orphan.
-				r.Registry.removeIf(scope, gen)
-				if r.Forget != nil {
-					if ferr := r.Forget(ctx, scope); ferr != nil {
-						r.log().Warn("timer forget deleted scope failed", "scope", scope, "err", ferr)
-					}
+		dispatched += func() int {
+			if r.Admit != nil {
+				release, err := r.Admit(ctx, scope)
+				if err != nil {
+					r.log().Warn("timer admission failed", "scope", scope, "err", err)
+					return 0
 				}
-				continue
+				defer release()
 			}
-			r.log().Warn("timer open store failed", "scope", scope, "err", err)
-			continue
-		}
-		var commit Commit
-		if r.Commit != nil {
-			commit = func(cctx context.Context, fn func() error) error { return r.Commit(cctx, scope, fn) }
-		}
-		n, err := DispatchDueWithCommit(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.CronMaxAttempts, r.log(), commit)
-		if err != nil {
-			r.log().Warn("timer dispatch pass failed", "scope", scope, "err", err)
-			continue
-		}
-		dispatched += n
-		// Re-arm precisely, or forget the scope when it has no pending timer, so
-		// the runner neither scans it every pass nor pins its cell resident.
-		if next, nerr := st.NextDue(ctx); nerr == nil {
-			if next == 0 {
-				r.Registry.removeIf(scope, gen)
-			} else {
-				r.Registry.setIfUnchanged(scope, gen, next)
+			st, err := r.Open(ctx, scope)
+			if err != nil {
+				if errors.Is(err, cell.ErrResourceDeleted) {
+					// The resource incarnation is intentionally gone. Stop local
+					// polling and remove its wake-index pointer so every node does
+					// not keep rediscovering the same orphan.
+					r.Registry.removeIf(scope, gen)
+					if r.Forget != nil {
+						if ferr := r.Forget(ctx, scope); ferr != nil {
+							r.log().Warn("timer forget deleted scope failed", "scope", scope, "err", ferr)
+						}
+					}
+					return 0
+				}
+				r.log().Warn("timer open store failed", "scope", scope, "err", err)
+				return 0
 			}
-		}
+			var commit Commit
+			if r.Commit != nil {
+				commit = func(cctx context.Context, fn func() error) error { return r.Commit(cctx, scope, fn) }
+			}
+			n, err := DispatchDueWithCommit(ctx, st, r.Dispatcher, now, r.batch(), r.firedTTL(), r.CronMaxAttempts, r.log(), commit)
+			if err != nil {
+				r.log().Warn("timer dispatch pass failed", "scope", scope, "err", err)
+				return 0
+			}
+			// Re-arm precisely, or forget the scope when it has no pending timer, so
+			// the runner neither scans it every pass nor pins its cell resident.
+			if next, nerr := st.NextDue(ctx); nerr == nil {
+				if next == 0 {
+					r.Registry.removeIf(scope, gen)
+				} else {
+					r.Registry.setIfUnchanged(scope, gen, next)
+				}
+			}
+			return n
+		}()
 	}
 	return dispatched, nil
 }

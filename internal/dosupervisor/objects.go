@@ -15,6 +15,7 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/replica"
 	"cellhive/internal/restore"
 	"cellhive/internal/telemetry"
 
@@ -28,6 +29,7 @@ var ErrHostNotCaptured = errors.New("dosupervisor: host not captured")
 // 64-hex filename prefix (host_hash). Together they let the supervisor address a
 // facet file by object identity (ADR-084).
 type hostBinding struct {
+	Namespace string `json:"namespace,omitempty"`
 	HostID    string `json:"host_id"`
 	HostHash  string `json:"host_hash,omitempty"`
 	StorageID string `json:"storage_id,omitempty"`
@@ -66,7 +68,7 @@ type manifestDoc struct {
 
 // Bind merges a partial host binding. hostHash/storageID/class are optional so the
 // router and the actor can each contribute what they know.
-func (s *Supervisor) Bind(hostID, hostHash, storageID, class string) {
+func (s *Supervisor) Bind(hostID, hostHash, storageID, class string, namespace ...string) {
 	if hostID == "" {
 		return
 	}
@@ -78,6 +80,9 @@ func (s *Supervisor) Bind(hostID, hostHash, storageID, class string) {
 	}
 	b := s.hosts[hostID]
 	b.HostID = hostID
+	if len(namespace) > 0 && namespace[0] != "" {
+		b.Namespace = namespace[0]
+	}
 	if hostHash != "" {
 		b.HostHash = hostHash
 		s.hashTo[hostHash] = hostID
@@ -258,7 +263,7 @@ func (s *Supervisor) objectForRel(rel string) (objectEntry, bool) {
 		return objectEntry{}, false
 	}
 	b, ok := s.bindingForHash(hash)
-	if !ok || b.StorageID == "" || b.Class == "" {
+	if !ok || b.StorageID == "" {
 		return objectEntry{}, false
 	}
 	names := s.facetNamesFor(hash)
@@ -266,10 +271,20 @@ func (s *Supervisor) objectForRel(rel string) (objectEntry, bool) {
 		return objectEntry{}, false
 	}
 	name := names[n-1]
-	scope := cell.Scope{Namespace: s.ns(), Class: b.Class, ID: objScopeID(b.StorageID, b.Class, name)}
+	// A shared historical host can contain facets of multiple storage classes.
+	// Its last router binding must never redefine another facet's identity.
+	class, objectName, ok := strings.Cut(name, "/")
+	if !ok || class == "" || objectName == "" {
+		return objectEntry{}, false
+	}
+	namespace := b.Namespace
+	if namespace == "" {
+		namespace = s.ns()
+	}
+	scope := cell.Scope{Namespace: namespace, Class: class, ID: objScopeID(b.StorageID, class, name)}
 	return objectEntry{
 		Rel: filepath.ToSlash(rel), HostHash: hash, N: n, Name: name,
-		StorageID: b.StorageID, Class: b.Class, Scope: scope.String(),
+		StorageID: b.StorageID, Class: class, Scope: scope.String(),
 	}, true
 }
 
@@ -402,7 +417,7 @@ func (s *Supervisor) RestoreHostClaimed(ctx context.Context, outDir, hostID stri
 				return n, err
 			}
 		}
-		if err := s.restoreScope(ctx, scope, filepath.Join(outDir, filepath.FromSlash(rel))); err != nil {
+		if err := s.restoreScopeClaimed(ctx, scope, filepath.Join(outDir, filepath.FromSlash(rel)), claim); err != nil {
 			return n, err
 		}
 		n++
@@ -458,49 +473,55 @@ func (s *Supervisor) restoreSidecarsFor(ctx context.Context, outDir string, raws
 	return nil
 }
 
-// restoreScope materializes one scope into dest (paged when possible).
+// restoreScope materializes one scope. Paging errors fail closed; only external
+// SegmentSource implementations without PageSource use buffered restoration.
 func (s *Supervisor) restoreScope(ctx context.Context, scope cell.Scope, dest string) error {
+	return s.restoreScopeClaimed(ctx, scope, dest, RecoveryClaim{})
+}
+
+func (s *Supervisor) restoreScopeClaimed(ctx context.Context, scope cell.Scope, dest string, claim RecoveryClaim) error {
+	epoch := s.Epoch
+	if !scope.IsReservedClass() {
+		epoch = ^uint64(0)
+	}
+	if claim.Epoch != 0 {
+		epoch = claim.Epoch
+	}
+	var pf *replica.PageFetcher
+	var err error
 	if s.Segments != nil {
 		if ps, ok := s.Segments.(PageSource); ok {
-			if pf, perr := ps.PageFetcher(ctx, scope, s.Epoch); perr == nil {
-				if _, merr := pf.Materialize(ctx, dest, nil); merr == nil {
-					return nil
-				}
+			pf, err = ps.PageFetcher(ctx, scope, epoch)
+		} else {
+			raw, err := s.Segments.Restore(ctx, scope, epoch)
+			if err != nil {
+				return fmt.Errorf("dosupervisor: restore %s: %w", scope.String(), err)
 			}
+			if len(raw) == 0 {
+				return fmt.Errorf("dosupervisor: no segments for %s: %w", scope.String(), replica.ErrNoPageIndex)
+			}
+			_, err = restore.ApplyFile(dest, raw)
+			return err
 		}
-		raw, serr := s.Segments.Restore(ctx, scope, s.Epoch)
-		if serr != nil {
-			return fmt.Errorf("dosupervisor: restore %s: %w", scope.String(), serr)
+	} else {
+		rep := s.store()
+		if rep == nil {
+			return fmt.Errorf("dosupervisor: no store configured for restore")
 		}
-		if len(raw) == 0 {
-			return fmt.Errorf("dosupervisor: no segments for %s", scope.String())
-		}
-		_, aerr := restore.ApplyFile(dest, raw)
-		return aerr
+		pf, err = rep.NewPageFetcher(ctx, scope, epoch)
 	}
-	rep := s.store()
-	if rep == nil {
-		return fmt.Errorf("dosupervisor: no store configured for restore")
-	}
-	if pf, perr := rep.NewPageFetcher(ctx, scope, s.Epoch); perr == nil {
-		_, merr := pf.Materialize(ctx, dest, nil)
-		_ = pf.Close()
-		if merr == nil {
-			return nil
-		}
-	}
-	segs, err := rep.Restore(ctx, scope, s.Epoch)
 	if err != nil {
 		return fmt.Errorf("dosupervisor: restore %s: %w", scope.String(), err)
 	}
-	raw := make([][]byte, 0, len(segs))
-	for _, seg := range segs {
-		raw = append(raw, seg.Raw)
+	if s.Paging != nil {
+		if err := s.Paging.registerClaimed(ctx, dest, scope, pf, claim); err != nil {
+			_ = pf.Close()
+			return err
+		}
+		return nil
 	}
-	if len(raw) == 0 {
-		return fmt.Errorf("dosupervisor: no segments for %s", scope.String())
-	}
-	_, err = restore.ApplyFile(dest, raw)
+	defer pf.Close()
+	_, err = pf.Materialize(ctx, dest, nil)
 	return err
 }
 

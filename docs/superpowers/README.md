@@ -1,13 +1,14 @@
-# Historical plans and specs
+# Plans and historical specs
 
-This directory contains implementation plans and design specs written during
-2026-09/10. They are **historical records**, not current contracts:
+This directory contains historical specs and remaining implementation plans.
+Dates, unchecked boxes and old “pending” notes are not proof of current defects.
+Current contracts and acceptance are indexed by:
 
-- Unchecked checkboxes and "pending" notes describe the state at the time of
-  writing, not current TODOs.
-- Current behaviour is defined by `docs/decisions.md`, `docs/known-issues.md`,
-  `docs/roadmap.md` and the source/tests.
-- Release records live in `docs/archive/release-*.md`.
+- [Decisions](../decisions.md)
+- [Current issues and migration boundaries](../known-issues.md)
+- [Remaining follow-ups](../todo.md)
 
-Keep new plans here only while work is in progress; once shipped, move the
-summary to an ADR or an archive record.
+Completed or superseded intermediate plans are removed after their remaining
+follow-ups and unique evidence have been retained in these pages or reports.
+Do not revive an abandoned storage format from an older plan. Historical release
+records remain under `docs/archive/`.

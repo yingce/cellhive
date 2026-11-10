@@ -119,7 +119,7 @@ cellhive wrangler deploy --name web
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `32` | 驻留句柄软上限（含 control）；`0` = 不限。周期性 LRU 回收，busy/pinned 可暂时超限，不是并发或硬内存限制 |
+| `CELLHIVE_MAX_OPEN_CELLS` | `128` | 驻留句柄软上限（含 control）；`0` = 不限。周期性 LRU 回收，busy/pinned 可暂时超限，不是并发或硬内存限制 |
 | `CELLHIVE_CELL_IDLE` | `5m` | 空闲句柄关闭；`0` 关闭 TTL 驱逐 |
 | `CELLHIVE_CELL_DISK_MAX` | `0` 无限 | cell 文件字节预算（LRU 删非 owned） |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor 间隔 |
@@ -131,7 +131,7 @@ cellhive wrangler deploy --name web
 
 | cell-agent 内存预算 | MAX_OPEN_CELLS | CELL_IDLE | 建议 |
 |---|---:|---|---|
-| 2 GiB | 32 | 5m | 保守默认；大值/重 D1 查询需进一步留余量 |
+| 2 GiB | 32 | 5m | 小内存显式配置；大值/重 D1 查询需进一步留余量 |
 | 4 GiB | 64 | 5m | 通用起点；同机共享 2 核时先保持 32 |
 | 8 GiB | 64，压测后可尝试 128 | 5m | CPU 不随内存增加；不建议仅凭内存直接调到 256 |
 
@@ -148,7 +148,7 @@ CELLHIVE_CELL_IDLE=5m
 - 每 cell 的连接池最多 3 个连接；本机实测 SQLite cache_size=-2000（约每连接 2MiB 目标缓存，并非预分配或硬上限）、mmap_size=0。RSS 还含 WAL 游标、Go/C 分配与恢复暂存，不能只看 Go heap。
 - capture 默认 2ms 检查 WAL。2 核亲和性下，64 个闲置但开启 capture 的 cell 消耗约 0.21 核；128 个约 0.43 核；256 个约 0.88 核。只打开 SQLite、没有 capture 的对照几乎无空闲 CPU。64 个各有 2MiB 值、预热两个连接的进程 RSS 约421MiB；该数字不包含完整服务、HTTP、fleet、恢复和负载突发。
 - 调整时观察 cellhive_cellstore_open_cells、cellhive_cellstore_evicted_total、cellhive_capture_ensure_total（标签区分重开）、Pod CPU/RSS、HTTP p95。软上限不能防住大量同时 active 的 cell；高写入并发应分流/加节点。
-- 当前默认仍为32/5m，本轮未修改生产配置。完整方法与范围见 [实测记录](archive/bench/recovery-residency-2026-10-24.md)。
+- 2026-11-10 默认已调整为128/5m；上表保留小内存节点的显式配置建议，历史压测并非本次默认值的完整容量验收。完整方法与范围见 [实测记录](archive/bench/recovery-residency-2026-10-24.md)。
 
 ## cell-agent：归属 / 伸缩
 
@@ -183,19 +183,18 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
 | `CELLHIVE_RESTORE_PARALLEL` | 整数，默认 `4` | 每次恢复的对象读取并发；整库恢复与分页探测未覆盖的 L0 共用。Helm 可选 `cellAgent.restoreParallel`（默认 `null`，不注入环境变量）；提高前须按并发 hydrate 槽位和解码尾页内存评估，不会改变超时或槽位数 |
 | `CELLHIVE_PAGED_RESTORE` | bool，默认 `true` | cell-agent：冷恢复时对"已 compaction 且链 ≥ MIN_BYTES"的 cell 用 fault-in VFS 按页加载（ADR-160） |
-| `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `32MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且存在 L1 页索引才分页，否则整库克隆；`0` = 有页索引时一律分页 |
+| `CELLHIVE_PAGED_MIN_BYTES` | 字节，默认 `32MiB` | 按 SQLite image 字节（`pageSize*commit`）比较；达到阈值且原生链内嵌索引完整时分页，否则整库克隆；`0` = 有完整内嵌索引时一律分页 |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | 整数，默认 `16` | paged cell 后台补齐速率（MiB/s，每节点同时一个）；`0` = 保持稀疏、每个冷页读桶 |
 | `CELLHIVE_PAGED_READAHEAD_BYTES` | 字节，默认 `1MiB` | 一次 paged read 的字节预算；按实际 pageSize 换算页数（至少 1 页） |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
-| `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
-| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 关) | L0→L1 压实 |
+| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 关) | 0 关闭；正值启用固定独立周期：L1 30 秒、L2 5 分钟、L3 1 小时（ADR-312；数值不再覆盖周期） |
 | `CELLHIVE_COMPACTION_TIMEOUT` | `5m` | 每个 scope 单独的 compaction deadline；非正值在循环中回退 5m，不是关闭超时 |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 触发段数 |
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | 触发字节 |
 | `CELLHIVE_COMPACTION_MIN_OBJECTS` | `8` | 新 L0 对象数触发阈值，与段数/存储字节阈值为 OR |
 | `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |
 
-Safe GC 不通过环境变量自动启用。运维使用 `cellhive gc scope <ns/class/id> --dry-run` 先看候选，再用 `--safe` 执行；`--keep-l1` 默认 2 代，`--grace` 默认 30s。默认后台仍是 DEFERRED。
+运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC；`--grace` 默认 3600 秒，按旧 epoch 对象上传时间计龄。压缩不删除源文件，已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。
 
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` 关 | bundle/assets GC |
 | `CELLHIVE_BUNDLE_GC_GRACE` | `24h` | 未引用保留期 |

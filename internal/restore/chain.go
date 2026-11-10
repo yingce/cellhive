@@ -1,234 +1,133 @@
 package restore
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"sort"
 
 	"cellhive/internal/ltx"
 )
 
-// selectChain chooses the newest snapshot that has an exact, contiguous delta
-// suffix. A delta spanning a snapshot watermark cannot be discarded: its tail
-// contains transactions newer than that snapshot. An older snapshot may provide
-// a complete chain without replaying an ambiguous overlap.
-func selectChain(headers []ltx.Header) (snapshots, deltas []int, watermark uint64, err error) {
-	type setKey struct {
-		epoch uint64
-		base  uint64
-	}
-	// Epoch markers truncate tails from older epochs. A marker says epoch e
-	// starts at StartTxID; any older epoch object ending above EndTxID is from
-	// a fenced writer and must not enter the new lineage (ADR-275).
-	cut := map[uint64]uint64{}
-	for _, h := range headers {
-		if h.Kind == ltx.KindMarker {
-			if h.StartTxID == 0 || h.StartTxID-1 != h.EndTxID {
-				return nil, nil, 0, fmt.Errorf("restore: invalid epoch marker")
-			}
-			if prev, ok := cut[h.Epoch]; ok && prev != h.EndTxID {
-				return nil, nil, 0, fmt.Errorf("restore: conflicting marker cuts for epoch %d", h.Epoch)
-			}
-			cut[h.Epoch] = h.EndTxID
-		}
-	}
-	// A later epoch inherits its predecessor at the marker cut, so cuts must be
-	// monotonic across epochs. A decreasing cut would silently drop transactions
-	// that an earlier marker already declared inherited.
-	cutEpochs := make([]uint64, 0, len(cut))
-	for e := range cut {
-		cutEpochs = append(cutEpochs, e)
-	}
-	sort.Slice(cutEpochs, func(i, j int) bool { return cutEpochs[i] < cutEpochs[j] })
-	var requiredWatermark uint64
-	for _, e := range cutEpochs {
-		if cut[e] < requiredWatermark {
-			return nil, nil, 0, fmt.Errorf("restore: epoch %d cut %d regresses below %d", e, cut[e], requiredWatermark)
-		}
-		requiredWatermark = cut[e]
-	}
-	var keep []int
+// selectNativeChain selects a complete snapshot and the longest contiguous
+// native suffix. Epoch clipping belongs to replica's path-based planner, never
+// to a private field or marker in the LTX bytes.
+func selectNativeChain(headers []ltx.NativeHeader) ([]int, uint64, error) {
+	base := -1
 	for i, h := range headers {
-		truncated := false
-		for e, c := range cut {
-			if e > h.Epoch && h.EndTxID > c {
-				truncated = true
+		if h.MinTXID == 0 || h.MaxTXID < h.MinTXID {
+			return nil, 0, fmt.Errorf("restore: invalid native range")
+		}
+		if h.IsSnapshot() && (base < 0 || h.MaxTXID > headers[base].MaxTXID) {
+			base = i
+		}
+	}
+	if base < 0 {
+		return nil, 0, fmt.Errorf("restore: no snapshot in native chain")
+	}
+	current := headers[base].MaxTXID
+	order := []int{base}
+	candidates := make([]int, 0, len(headers))
+	for i, h := range headers {
+		if !h.IsSnapshot() {
+			candidates = append(candidates, i)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := headers[candidates[i]], headers[candidates[j]]
+		if a.MinTXID != b.MinTXID {
+			return a.MinTXID < b.MinTXID
+		}
+		return a.MaxTXID > b.MaxTXID
+	})
+	pos := 0
+	for current != ^uint64(0) {
+		best := -1
+		for pos < len(candidates) && headers[candidates[pos]].MinTXID <= current+1 {
+			i := candidates[pos]
+			pos++
+			if headers[i].MaxTXID > current && (best < 0 || headers[i].MaxTXID > headers[best].MaxTXID) {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		order = append(order, best)
+		current = headers[best].MaxTXID
+	}
+	if pos < len(candidates) {
+		return nil, 0, fmt.Errorf("restore: missing transaction after %d", current)
+	}
+	return order, current, nil
+}
+
+// ValidateChain proves a native restore cut without retaining page contents.
+// A contiguous TXID range is insufficient: every final non-lock database page
+// must be present. Memory is bounded by page identities, not database bytes.
+func ValidateChain(segments [][]byte) error {
+	readers := make([]io.Reader, len(segments))
+	for i, raw := range segments {
+		readers[i] = bytes.NewReader(raw)
+	}
+	_, err := ValidateChainReaders(readers)
+	return err
+}
+
+// ValidateChainReaders validates a native chain without retaining input bodies.
+// The caller owns and must close all input streams. Returns the proven cut.
+func ValidateChainReaders(readers []io.Reader) (uint64, error) {
+	headers := make([]ltx.NativeHeader, len(readers))
+	decoders := make([]*ltx.NativeDecoder, len(readers))
+	for i, r := range readers {
+		d, err := ltx.NewNativeDecoder(r)
+		if err != nil {
+			return 0, fmt.Errorf("restore: native header %d: %w", i, err)
+		}
+		decoders[i], headers[i] = d, d.Header
+	}
+	order, watermark, err := selectNativeChain(headers)
+	if err != nil {
+		return 0, err
+	}
+	pages := make(map[uint32]struct{})
+	var pageSize, commit uint32
+	for _, i := range order {
+		d := decoders[i]
+		if pageSize == 0 {
+			pageSize = d.Header.PageSize
+		} else if pageSize != d.Header.PageSize {
+			return 0, fmt.Errorf("restore: page size mismatch")
+		}
+		if d.Header.Commit < commit {
+			for pg := range pages {
+				if pg > d.Header.Commit {
+					delete(pages, pg)
+				}
+			}
+		}
+		commit = d.Header.Commit
+		for {
+			p, err := d.ReadPage()
+			if err == io.EOF {
 				break
 			}
-		}
-		if !truncated {
-			keep = append(keep, i)
-		}
-	}
-
-	sets := map[setKey][]int{}
-	baseSeen := map[uint64]bool{}
-	var bases []uint64
-	for _, i := range keep {
-		h := headers[i]
-		if h.Kind != ltx.KindSnapshot {
-			continue
-		}
-		k := setKey{epoch: h.Epoch, base: h.StartTxID}
-		sets[k] = append(sets[k], i)
-		if !baseSeen[h.StartTxID] {
-			baseSeen[h.StartTxID] = true
-			bases = append(bases, h.StartTxID)
-		}
-	}
-	if len(bases) == 0 {
-		return nil, nil, 0, fmt.Errorf("restore: no snapshot in chain")
-	}
-	sort.Slice(bases, func(i, j int) bool { return bases[i] > bases[j] })
-	var firstErr error
-	for _, base := range bases {
-		// A later epoch can legitimately snapshot the same txid as its
-		// predecessor when the cell was idle between restarts. Those snapshots
-		// are alternatives, not parts of one snapshot: pick one epoch's complete
-		// set, never concatenate sets from different epochs (the duplicate-page
-		// failure on an idle cron cell).
-		var epochs []uint64
-		for k := range sets {
-			if k.base == base {
-				epochs = append(epochs, k.epoch)
+			if err != nil {
+				return 0, err
 			}
+			pages[p.PageNo] = struct{}{}
 		}
-		sort.Slice(epochs, func(i, j int) bool { return epochs[i] > epochs[j] })
-		for _, epoch := range epochs {
-			snap := append([]int(nil), sets[setKey{epoch: epoch, base: base}]...)
-			if !completeSnapshotSet(headers, snap) {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("restore: incomplete snapshot set for txid %d epoch %d", base, epoch)
-				}
-				continue
-			}
-			sort.SliceStable(snap, func(i, j int) bool {
-				a, _ := ltx.SnapshotPart(headers[snap[i]])
-				b, _ := ltx.SnapshotPart(headers[snap[j]])
-				return a < b
-			})
-			var tail []int
-			for _, i := range keep {
-				h := headers[i]
-				if h.Kind == ltx.KindDelta && h.EndTxID > base {
-					tail = append(tail, i)
-				}
-			}
-			sort.SliceStable(tail, func(i, j int) bool {
-				a, b := headers[tail[i]], headers[tail[j]]
-				if a.StartTxID != b.StartTxID {
-					return a.StartTxID < b.StartTxID
-				}
-				return a.EndTxID < b.EndTxID
-			})
-			expected := base + 1
-			var chainErr error
-			for _, i := range tail {
-				h := headers[i]
-				if h.EndTxID < h.StartTxID {
-					chainErr = fmt.Errorf("restore: invalid delta txid range %d..%d", h.StartTxID, h.EndTxID)
-					break
-				}
-				if h.StartTxID != expected {
-					chainErr = fmt.Errorf("restore: non-contiguous chain: expected txid %d, got %d", expected, h.StartTxID)
-					break
-				}
-				expected = h.EndTxID + 1
-			}
-			if chainErr == nil && expected-1 < requiredWatermark {
-				// The marker proves a higher inherited watermark. Returning an
-				// older snapshot as a successful restore would silently lose the
-				// transactions between expected-1 and the cut.
-				chainErr = fmt.Errorf("restore: chain watermark %d below epoch cut %d", expected-1, requiredWatermark)
-			}
-			if chainErr == nil {
-				return snap, tail, expected - 1, nil
-			}
-			if firstErr == nil {
-				firstErr = chainErr
-			}
-		}
+		decoders[i] = nil // release this file's validated index before the next file
 	}
-	return nil, nil, 0, firstErr
-}
-
-// completeSnapshotSet reports whether idx is one complete, non-overlapping
-// snapshot set. Paged parts must be a unique 0..N-1 sequence; an unpaged
-// snapshot is one part. Multiple unpaged copies are accepted only when their
-// payload CRC matches (restoreOnce dedupes identical headers by ID).
-func completeSnapshotSet(headers []ltx.Header, idx []int) bool {
-	if len(idx) == 0 {
-		return false
+	if pageSize == 0 {
+		return 0, fmt.Errorf("restore: no native snapshot")
 	}
-	parts := map[int]bool{}
-	pagedSeen := false
-	unpaged := 0
-	var crc uint32
-	for _, i := range idx {
-		h := headers[i]
-		part, paged := ltx.SnapshotPart(h)
-		if !paged {
-			unpaged++
-			if unpaged > 1 && h.CRC != crc {
-				return false
-			}
-			crc = h.CRC
-			continue
-		}
-		pagedSeen = true
-		if parts[part] {
-			return false
-		}
-		parts[part] = true
+	expected := uint64(commit)
+	if uint64(0x40000000)/uint64(pageSize)+1 <= uint64(commit) {
+		expected--
 	}
-	if unpaged > 0 {
-		return !pagedSeen
+	if uint64(len(pages)) != expected {
+		return 0, fmt.Errorf("restore: incomplete page coverage: have %d want %d", len(pages), expected)
 	}
-	if !pagedSeen {
-		return false
-	}
-	total := len(parts)
-	for i := 0; i < total; i++ {
-		if !parts[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// SelectIndices returns the indices of the snapshot and delta segments that
-// form the live chain, in apply order, together with its watermark. Marker and
-// truncated dead-tail segments are excluded. It is the same selection used by
-// ApplyFile/IndexChain; callers use it to avoid returning dead segments.
-func SelectIndices(segments [][]byte) ([]int, uint64, error) {
-	headers := make([]ltx.Header, len(segments))
-	for i, raw := range segments {
-		h, _, err := ltx.Decode(raw)
-		if err != nil {
-			return nil, 0, err
-		}
-		headers[i] = h
-	}
-	snaps, deltas, watermark, err := selectChain(headers)
-	if err != nil {
-		return nil, 0, err
-	}
-	order := make([]int, 0, len(snaps)+len(deltas))
-	order = append(order, snaps...)
-	order = append(order, deltas...)
-	return order, watermark, nil
-}
-
-// ValidateChain checks checksums, complete snapshot parts and exact delta
-// continuity without materializing database pages. It never skips a newer tail.
-func ValidateChain(segments [][]byte) error {
-	headers := make([]ltx.Header, len(segments))
-	for i, raw := range segments {
-		h, _, err := ltx.Decode(raw)
-		if err != nil {
-			return err
-		}
-		headers[i] = h
-	}
-	_, _, _, err := selectChain(headers)
-	return err
+	return watermark, nil
 }

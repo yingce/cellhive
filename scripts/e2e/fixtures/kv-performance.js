@@ -2,6 +2,7 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname === '/perf-ready') return new Response('ok');
+    if (url.pathname === '/perf-version') return new Response(env.PERF_ACCEPTANCE_VERSION || '');
     const key = url.searchParams.get('key') || 'k0';
     if (url.pathname === '/put') {
       await env.KV.put(key, await req.text());

@@ -187,6 +187,9 @@ func Read(path string) (*Snapshot, error) {
 
 // PollResult is returned by Cursor.Poll.
 type PollResult struct {
+	// WALOffset/WALSize describe only newly committed frames, before page deduplication.
+	WALOffset    int64
+	WALSize      int64
 	Header       Header
 	NewCommitted []Frame
 	Transactions []Transaction
@@ -205,9 +208,40 @@ type Cursor struct {
 	cksum2    uint32
 	haveCksum bool
 	frameIdx  int // complete frames already consumed
+	pageSize  uint32
+	commit    uint32 // database size at the last consumed commit
 	file      *os.File
 	path      string
 	bytesRead atomic.Uint64
+}
+
+// Position identifies a verified committed WAL prefix. It is a value, so a
+// caller can retain the old identity across Poll's destructive salt rotation.
+// This is not a durability acknowledgement: only the committer can prove that
+// the corresponding transactions have reached the replication authority.
+type Position struct {
+	Valid                bool
+	Salt1, Salt2         uint32
+	Checksum1, Checksum2 uint32
+	PageSize, Commit     uint32
+	Frames               uint64
+}
+
+func (p Position) EndOffset() int64 {
+	if !p.Valid {
+		return 0
+	}
+	return walHeaderSize + int64(p.Frames)*int64(frameHdrSize+p.PageSize)
+}
+
+// Position requires the same external serialization as Poll and Reset.
+func (c *Cursor) Position() Position {
+	if !c.haveSalt || !c.haveCksum || c.frameIdx == 0 || c.commit == 0 {
+		return Position{}
+	}
+	return Position{Valid: true, Salt1: c.salt1, Salt2: c.salt2,
+		Checksum1: c.cksum1, Checksum2: c.cksum2, PageSize: c.pageSize,
+		Commit: c.commit, Frames: uint64(c.frameIdx)}
 }
 
 // NewCursor creates an empty cursor.
@@ -215,6 +249,7 @@ func NewCursor() *Cursor { return &Cursor{} }
 
 func (c *Cursor) reset() {
 	c.frameIdx = 0
+	c.pageSize, c.commit = 0, 0
 	c.salt1, c.salt2 = 0, 0
 	c.cksum1, c.cksum2 = 0, 0
 	c.haveSalt = false
@@ -321,6 +356,7 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 	frameSize := int(frameHdrSize) + int(h.PageSize)
 	if saltChanged || info.Size() < int64(walHeaderSize+c.frameIdx*frameSize) {
 		c.frameIdx = 0
+		c.commit = 0
 		c.haveSalt = true
 		c.salt1, c.salt2 = h.Salt1, h.Salt2
 		c.cksum1, c.cksum2 = hs1, hs2
@@ -334,6 +370,7 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 			c.haveCksum = true
 		}
 	}
+	c.pageSize = h.PageSize
 
 	total := int((info.Size() - walHeaderSize) / int64(frameSize))
 	if total <= c.frameIdx {
@@ -385,6 +422,8 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 		for i := range committed {
 			committed[i].Committed = true
 		}
+		res.WALOffset = offset
+		res.WALSize = int64(len(committed) * frameSize)
 		res.NewCommitted = committed
 		start := 0
 		for i, frame := range committed {
@@ -396,6 +435,7 @@ func (c *Cursor) Poll(path string) (PollResult, error) {
 			start = i + 1
 		}
 		c.frameIdx += lastCommit + 1
+		c.commit = committed[len(committed)-1].DBSize
 		c.cksum1, c.cksum2 = lastS1, lastS2
 	}
 	if bad && lastCommit < 0 {

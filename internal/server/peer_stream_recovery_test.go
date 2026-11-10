@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
-	"cellhive/internal/ltx"
 	"cellhive/internal/peer"
 )
 
@@ -67,7 +66,7 @@ func TestPeerStreamStallBucketProofAndRecoveryHTTP(t *testing.T) {
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "stream-stall"}
 	call("/v1/internal/claim", []byte(fmt.Sprintf(`{"scope":%q}`, sc.String())))
 	commit := func(txid uint64) string {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: txid, EndTxID: txid}, []byte(fmt.Sprint(txid)))
+		seg := nativeTestFile(t, txid, txid, []byte(fmt.Sprint(txid)))
 		raw := call("/v1/internal/commit", []byte(fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[%q]}`, sc.String(), base64.StdEncoding.EncodeToString(seg), fh.URL)))
 		var result struct{ Mode string }
 		if e := json.Unmarshal(raw, &result); e != nil {
@@ -87,7 +86,7 @@ func TestPeerStreamStallBucketProofAndRecoveryHTTP(t *testing.T) {
 		t.Fatalf("HTTP succeeded without bucket segment: keys=%v err=%v", keys, err)
 	}
 	found := false
-	expected := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("1"))
+	expected := nativeTestFile(t, 1, 1, []byte("1"))
 	for _, key := range keys {
 		raw, _, e := owner.Bucket.Get(context.Background(), key)
 		if e != nil {

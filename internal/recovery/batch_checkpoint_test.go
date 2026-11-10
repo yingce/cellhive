@@ -9,7 +9,6 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
-	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
 	"cellhive/internal/recovery"
@@ -23,14 +22,14 @@ type failSecondBatch struct {
 	writes int
 }
 
-func (b *failSecondBatch) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+func (b *failSecondBatch) Put(ctx context.Context, key string, data []byte) (string, error) {
 	if strings.Contains(key, "/ltx/") {
 		b.writes++
 		if b.fail && b.writes == 2 {
 			return "", errors.New("injected second batch failure")
 		}
 	}
-	return b.Bucket.ConditionalCreate(ctx, key, data)
+	return b.Bucket.Put(ctx, key, data)
 }
 
 func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
@@ -46,7 +45,7 @@ func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
 	}
 	sc := cell.Scope{Namespace: "batch", Class: "__kv__", ID: "checkpoint"}
 	for i := uint64(1); i <= 100; i++ {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		seg := nativeRecoverySegment(t, i, []byte{byte(i)})
 		if _, _, err := spool.AppendBatchSession(ctx, "session", sc, 1, [][]byte{seg}); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +59,7 @@ func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
 	}
 	rep := replica.New(fb)
 	rec := recovery.New(rep, peer.NewHTTPTransport(recoveryPeerKey(), nil))
-	if n, err := rec.Recover(ctx, nl, "dead", "session"); err == nil || n != 64 {
+	if n, err := rec.Recover(ctx, nl, "dead", "session"); err == nil || n != 1 {
 		t.Fatalf("partial recover=%d %v", n, err)
 	}
 	record, _, err := nl.Get(ctx, "dead", "session")
@@ -77,11 +76,11 @@ func TestRecoveryBatchFailureDoesNotCheckpointOrReclaim(t *testing.T) {
 		t.Fatalf("retry=%d %v", n, err)
 	}
 	segs, err := rep.Restore(ctx, sc, 1)
-	if err != nil || len(segs) != 100 {
+	if err != nil || len(segs) != 3 {
 		t.Fatalf("restored=%d %v", len(segs), err)
 	}
 	keys, err := rep.ListSegments(ctx, sc, 1)
-	if err != nil || len(keys) != 2 {
+	if err != nil || len(keys) != 3 {
 		t.Fatalf("objects=%v %v", keys, err)
 	}
 	record, _, err = nl.Get(ctx, "dead", "session")

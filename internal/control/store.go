@@ -65,8 +65,11 @@ type Store struct {
 	// Lifecycle hooks run after the metadata transaction but before its caller
 	// acknowledges it. Coordination failures must be returned to the caller.
 	OnResourceActivated func(context.Context, string, string, string) error
-	OnResourceRevoked   func(context.Context, string, string, string) error
-	ResourceGeneration  func(context.Context, cell.Scope) (string, error)
+	OnResourceRevoked   func(context.Context, string, string, string, ResourceCleanup) error
+	// BeforeResourceRevoked proves committed KV/queue intent before external
+	// coordination, including direct DeleteResource callers. Runs without resourceMu.
+	BeforeResourceRevoked func(context.Context, string) error
+	ResourceGeneration    func(context.Context, cell.Scope) (string, error)
 }
 
 // SetDeployBeforeCommitForTest installs the process-death barrier used by fault
@@ -2524,17 +2527,35 @@ func (s *Store) ResourceReferencedBy(ctx context.Context, ns, kind, name, scope 
 // the asynchronous owner-routed job subsequently removes data. Repeats preserve
 // the same job and are safe even when the original acknowledgement was lost.
 func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string) error {
+	intent, err := s.deleteResourceIntent(ctx, ns, kind, name, actor)
+	if err != nil {
+		return err
+	}
+	if (kind == "kv" || kind == "queue") && s.BeforeResourceRevoked != nil {
+		if err := s.BeforeResourceRevoked(ctx, ns); err != nil {
+			return err
+		}
+	}
+	if s.OnResourceRevoked != nil {
+		return s.OnResourceRevoked(ctx, ns, kind, name, intent)
+	}
+	return nil
+}
+
+// deleteResourceIntent serializes only local mutation; callbacks may reenter
+// control lifecycle APIs and must never inherit resourceMu.
+func (s *Store) deleteResourceIntent(ctx context.Context, ns, kind, name, actor string) (ResourceCleanup, error) {
 	s.resourceMu.Lock()
 	defer s.resourceMu.Unlock()
 	if err := validateNS(ns); err != nil {
-		return err
+		return ResourceCleanup{}, err
 	}
 	if kind == "" || name == "" {
-		return fmt.Errorf("control: resource kind and name are required")
+		return ResourceCleanup{}, fmt.Errorf("control: resource kind and name are required")
 	}
 	c, err := s.cell(ctx)
 	if err != nil {
-		return err
+		return ResourceCleanup{}, err
 	}
 	err = tx(ctx, c, func(t *sql.Tx) error {
 		dataScope, generation := "", ""
@@ -2674,8 +2695,14 @@ func (s *Store) DeleteResource(ctx context.Context, ns, kind, name, actor string
 		}
 		return txAudit(ctx, t, ns, actor, "resource.delete", kind+"/"+name)
 	})
-	if err == nil && s.OnResourceRevoked != nil {
-		err = s.OnResourceRevoked(ctx, ns, kind, name)
+	if err != nil {
+		return ResourceCleanup{}, err
 	}
-	return err
+	if kind == "kv" || kind == "queue" {
+		intent, err := s.ResourceCleanup(ctx, ns, kind, name)
+		if !errors.Is(err, ErrNotFound) {
+			return intent, err
+		}
+	}
+	return ResourceCleanup{}, nil
 }

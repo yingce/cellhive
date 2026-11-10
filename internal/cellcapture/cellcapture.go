@@ -18,6 +18,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/ltx"
 	"cellhive/internal/sqlcapture"
 )
 
@@ -69,10 +70,10 @@ type Manager struct {
 	// on every new epoch. Larger cells keep the cross-epoch chain until paged
 	// continuation is wired; 0 snapshots every new epoch.
 	EpochSnapshotMaxBytes int64
-	// WriteMarker, when set, durably writes the next epoch's marker before a
-	// cross-epoch resume. The marker is what makes the old epoch's fenced tail
-	// safe to exclude on restore (ADR-275).
-	WriteMarker func(ctx context.Context, scope cell.Scope, epoch, cut uint64) error
+	// WriteContinuation publishes the native zero-page [cut+1,cut+1] LTX.
+	WriteContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader) error
+	// CheckContinuation only verifies an existing seed after an ambiguous publication.
+	CheckContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader) error
 	// PagedBaselinePoll is how often a marker-resumed paged cell checks whether
 	// its background hydrate finished before taking its baseline (0 = 2s).
 	PagedBaselinePoll time.Duration
@@ -80,15 +81,7 @@ type Manager struct {
 	// the current epoch has a complete snapshot. Runs from the background GC
 	// loop, not on the request path.
 	RetireEpochsFunc func(ctx context.Context, scope cell.Scope, epoch uint64) (int, error)
-	// SnapshotDone, when set, records that a full-page snapshot at txid was
-	// completely committed. Resume treats only marked snapshots as baselines.
-	SnapshotDone func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
-	// SnapshotStarted, when set, records that a snapshot at txid has begun, so
-	// restore can skip a crash-partial snapshot instead of selecting it.
-	SnapshotStarted func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
-	// ClearSnapshotStarted degrades a completed snapshot whose done marker
-	// failed into a legacy (complete) snapshot.
-	ClearSnapshotStarted func(ctx context.Context, scope cell.Scope, epoch, txid uint64) error
+
 	// OnEnsure, when set, observes each Ensure with its outcome
 	// (warm/resume/snapshot/plain/error) and duration. Warm Ensure is a map
 	// lookup; the other modes are cold paths.
@@ -101,9 +94,6 @@ type Manager struct {
 	// SnapshotPartBytes overrides the 8MiB snapshot part budget (tests/small
 	// stores); 0 keeps the ltx default.
 	SnapshotPartBytes int
-	// SnapshotBatchParts groups that many parts per CommitBatch call (0/1 =
-	// one Commit per part, correct but 12 RTTs for a 96MiB image).
-	SnapshotBatchParts int
 
 	// GroupCommitWait is the WAL coalescing window (0 = package default).
 	GroupCommitWait time.Duration
@@ -137,6 +127,13 @@ type state struct {
 	// any) has completed. Concurrent Ensure calls wait on it instead of blocking
 	// the whole manager on m.mu.
 	ready chan struct{}
+	// stopped covers initialization, loop exit, and the optional baseline worker.
+	// Protected by Manager.mu; stopping states keep their slot until stopped.
+	stopped        chan struct{}
+	backgroundDone chan struct{}
+	stopping       bool
+	saveHint       bool
+	hintInvalid    bool
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -157,19 +154,22 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 			m.OnEnsure(scope, mode, time.Since(start))
 		}
 	}()
-	isOwner, epoch, err := m.Owner(ctx, scope)
-	if err != nil {
-		return 0, err
-	}
-	if !isOwner {
-		return 0, ErrNotOwner
-	}
-	c, err := m.Store.Cell(ctx, scope)
-	if err != nil {
-		return 0, err
-	}
 	key := scope.String()
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		isOwner, epoch, err := m.Owner(ctx, scope)
+		if err != nil {
+			return 0, err
+		}
+		if !isOwner {
+			return 0, ErrNotOwner
+		}
+		c, err := m.Store.Cell(ctx, scope)
+		if err != nil {
+			return 0, err
+		}
 		baseline, err := c.TxID(ctx)
 		if err != nil {
 			return 0, err
@@ -178,38 +178,53 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		if m.caps == nil {
 			m.caps = map[string]*state{}
 		}
-		if st, ok := m.caps[key]; ok {
-			if st.epoch == epoch {
-				ready := st.ready
-				m.mu.Unlock()
-				if ready != nil {
-					<-ready // wait for the scope's initializer (snapshot) to finish
-				}
-				m.mu.Lock()
-				st2, ok2 := m.caps[key]
-				if ok2 && st2.epoch == epoch {
-					select {
-					case <-st2.cap.Done():
-						// A failed capture cannot prove later writes. The next
-						// instance must establish a full durable baseline first.
-						if !m.AutoSnapshot {
-							m.mu.Unlock()
-							return 0, errors.New("cellcapture: stopped capture requires a snapshot to recover")
-						}
-						st2.cancel()
-						delete(m.caps, key)
-					default:
-						m.mu.Unlock()
-						mode = "warm"
-						return baseline, nil
-					}
+		if st := m.caps[key]; st != nil {
+			if st.stopping || st.epoch != epoch {
+				if st.epoch != epoch {
+					m.stopLocked(key, st, false)
 				}
 				m.mu.Unlock()
-				continue // initializer failed or the epoch moved: retry
+				select {
+				case <-st.stopped:
+					continue
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
 			}
-			// Owner epoch changed: stop the stale capture and restart below.
-			st.cancel()
-			delete(m.caps, key)
+			select {
+			case <-st.ready:
+			default:
+				m.mu.Unlock()
+				select {
+				case <-st.ready:
+					continue
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			failed := st.cap.Err() != nil
+			select {
+			case <-st.cap.Done():
+				failed = true
+			default:
+			}
+			if failed {
+				if !m.AutoSnapshot {
+					m.mu.Unlock()
+					return 0, errors.New("cellcapture: stopped capture requires a snapshot to recover")
+				}
+				m.stopLocked(key, st, false)
+				m.mu.Unlock()
+				select {
+				case <-st.stopped:
+					continue
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			m.mu.Unlock()
+			mode = "warm"
+			return baseline, nil
 		}
 		cap, err := sqlcapture.New(c, scope, epoch, baseline, m.Committer)
 		if err != nil {
@@ -220,7 +235,6 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		cap.PipelineThreshold = m.PipelineThreshold
 		cap.SnapshotMaxBytes = m.SnapshotMaxBytes
 		cap.SnapshotPartBytes = m.SnapshotPartBytes
-		cap.SnapshotBatchParts = m.SnapshotBatchParts
 		cctx, cancel := context.WithCancel(context.Background())
 		if m.AutoCheckpointBytes > 0 {
 			cell := c
@@ -235,8 +249,30 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 			cap.SetAutoCheckpoint(m.AutoCheckpointBytes)
 		}
 		ready := make(chan struct{})
-		m.caps[key] = &state{scope: scope, epoch: epoch, cap: cap, cancel: cancel, ready: ready}
+		st := &state{scope: scope, epoch: epoch, cap: cap, cancel: cancel, ready: ready,
+			stopped: make(chan struct{}), backgroundDone: make(chan struct{})}
+		m.caps[key] = st
 		m.mu.Unlock()
+
+		// Initialization belongs to both the request and capture lifetime. Drop
+		// must cancel a snapshot even while the long-lived loop has not started.
+		initCtx, initCancel := context.WithCancel(ctx)
+		stopInit := context.AfterFunc(cctx, initCancel)
+		finishInit := func() { stopInit(); initCancel() }
+		failInit := func(err error) (uint64, error) {
+			finishInit()
+			cancel()
+			cap.Start(cctx)
+			close(st.backgroundDone)
+			m.mu.Lock()
+			// Publish failure before waking other Ensure callers. The cancelled
+			// loop may not have run yet, so Err/Done alone cannot reject it.
+			m.stopLocked(key, st, false)
+			close(ready)
+			m.mu.Unlock()
+			<-st.stopped
+			return 0, err
+		}
 
 		// Establish a restore baseline (full-page snapshot) before writers, so a
 		// cold restore has a starting point even after the WAL rotates — unless
@@ -251,64 +287,45 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 			resume := hintOK
 			var rerr error
 			if !hintOK {
-				resume, crossEpoch, rerr = m.canResume(ctx, c, scope, epoch, baseline)
+				resume, crossEpoch, rerr = m.canResume(initCtx, c, scope, epoch, baseline)
+			}
+			if rerr == nil && crossEpoch {
+				baseline, rerr = cap.AdoptContinuation(initCtx)
 			}
 			if rerr != nil {
-				cancel()
-				cap.Start(cctx)
-				<-cap.Done()
-				m.mu.Lock()
-				if m.caps[key] != nil && m.caps[key].cap == cap {
-					delete(m.caps, key)
-				}
-				m.mu.Unlock()
-				close(ready)
-				return 0, rerr
+				return failInit(rerr)
 			}
 			if resume {
 				mode = "resume"
 				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
 			} else {
-				var onStart func(context.Context, uint64) error
-				if m.SnapshotStarted != nil {
-					onStart = func(sctx context.Context, label uint64) error {
-						return m.SnapshotStarted(sctx, scope, epoch, label)
-					}
-				}
-				snapshotTxID, err := cap.SnapshotWithStart(ctx, onStart)
+				err := cap.Snapshot(initCtx)
 				if err != nil {
-					cancel()
-					cap.Start(cctx)
-					<-cap.Done()
-					m.mu.Lock()
-					if m.caps[key] != nil && m.caps[key].cap == cap {
-						delete(m.caps, key)
-					}
-					m.mu.Unlock()
-					close(ready)
-					return 0, err
-				}
-				if m.SnapshotDone != nil {
-					// The snapshot parts are durable now; the marker makes the
-					// snapshot a trusted resume baseline. A marker failure only
-					// costs a future snapshot, never correctness.
-					if merr := m.SnapshotDone(ctx, scope, epoch, snapshotTxID); merr != nil {
-						m.log().Warn("snapshot done marker failed", "scope", key, "txid", snapshotTxID, "err", merr)
-						if m.ClearSnapshotStarted != nil {
-							_ = m.ClearSnapshotStarted(ctx, scope, epoch, snapshotTxID)
-						}
-					}
+					return failInit(err)
 				}
 				mode = "snapshot"
 			}
 		} else {
 			mode = "plain"
 		}
+		if err := initCtx.Err(); err != nil {
+			return failInit(err)
+		}
+		finishInit()
 		cap.Start(cctx)
-		go m.watchOwner(cctx, key, scope)
-		close(ready)
+		go m.watchOwner(cctx, key, scope, st)
 		if crossEpoch {
-			go m.backgroundBaseline(cctx, c, cap, scope, epoch)
+			go func() {
+				defer close(st.backgroundDone)
+				m.backgroundBaseline(cctx, c, cap, scope, epoch)
+			}()
+		} else {
+			close(st.backgroundDone)
+		}
+		close(ready)
+		// Drop may have cancelled initialization just as it finished.
+		if err := cctx.Err(); err != nil {
+			return 0, err
 		}
 		return baseline, nil
 	}
@@ -351,6 +368,17 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	if err != nil {
 		return false, false, err
 	}
+	// A publication may have succeeded before its response (or local counter
+	// update) failed. Retry only the single zero-page continuation; the writer
+	// validates the existing native object, rejecting a real missing delta.
+	if exists && local != ^uint64(0) && durable == local+1 && local == baseline && m.CheckContinuation != nil {
+		if _, err := c.SeedContinuation(ctx, local, func(h ltx.NativeHeader) error {
+			return m.CheckContinuation(ctx, scope, epoch, h)
+		}); err != nil {
+			return false, false, fmt.Errorf("cellcapture: retry continuation: %w", err)
+		}
+		return true, true, nil
+	}
 	if durable > local {
 		return false, false, fmt.Errorf("%w: scope %s local txid %d < durable %d", ErrLocalBehindDurable, scope.String(), local, durable)
 	}
@@ -360,17 +388,19 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 		if st, serr := os.Stat(c.Path); serr == nil {
 			size = st.Size()
 		}
-		if m.WriteMarker == nil {
+		if m.WriteContinuation == nil {
 			if m.EpochSnapshotMaxBytes > 0 && size > m.EpochSnapshotMaxBytes {
 				return false, false, fmt.Errorf("cellcapture: large cross-epoch resume requires epoch marker writer")
 			}
 			m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
 			return false, false, nil
 		}
-		if err := m.WriteMarker(ctx, scope, epoch, local); err != nil {
-			return false, false, fmt.Errorf("cellcapture: write epoch marker: %w", err)
+		if _, err := c.SeedContinuation(ctx, local, func(header ltx.NativeHeader) error {
+			return m.WriteContinuation(ctx, scope, epoch, header)
+		}); err != nil {
+			return false, false, fmt.Errorf("cellcapture: write epoch continuation: %w", err)
 		}
-		m.log().Info("capture continues cross-epoch chain with marker", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
+		m.log().Info("capture continues cross-epoch chain with continuation", "scope", scope.String(), "epoch", epoch, "cut", local, "bytes", size)
 		crossEpoch = true
 	}
 	if durable == baseline && durable == local {
@@ -403,40 +433,58 @@ func (m *Manager) Wait(ctx context.Context, scope cell.Scope, txid uint64) error
 	return st.cap.Wait(ctx, txid)
 }
 
-// Drop stops the capture for one scope and waits for its loop to exit, so the
-// caller can then close the cell (eviction). It is a no-op if no capture runs.
+// stopLocked keeps cancelled captures discoverable until all capture work has
+// exited. The reaper also handles timed-out callers without retaining history.
+// m.mu must be held. A non-Drop stop permanently suppresses this state's hint.
+func (m *Manager) stopLocked(key string, st *state, saveHint bool) {
+	if st.stopping {
+		if !saveHint {
+			st.saveHint = false
+		}
+		return
+	}
+	st.stopping, st.saveHint = true, saveHint && !st.hintInvalid
+	st.cancel()
+	go func() {
+		<-st.ready
+		<-st.cap.Done()
+		<-st.backgroundDone
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.caps[key] == st {
+			delete(m.caps, key)
+			delete(m.hints, key)
+			if st.saveHint {
+				if d := st.cap.Stats().DurableTxID; d > 0 {
+					if m.hints == nil {
+						m.hints = map[string]resumeHint{}
+					}
+					m.hints[key] = resumeHint{epoch: st.epoch, durable: d}
+				}
+			}
+		}
+		close(st.stopped)
+	}()
+}
+
+// Drop cancels capture and waits for initialization, loop, and baseline work to
+// exit. A timeout retains the stopped proof's pending state for retry. Callers
+// must exclude new Ensure calls and drain admitted writes first when using this
+// as an eviction/retirement barrier; Drop itself does not close admission.
 func (m *Manager) Drop(ctx context.Context, scope cell.Scope) error {
 	key := scope.String()
 	m.mu.Lock()
 	st := m.caps[key]
+	if st != nil {
+		m.stopLocked(key, st, true)
+	}
 	m.mu.Unlock()
 	if st == nil {
 		return nil
 	}
-	// Do NOT open the cell here: Store.evictOne calls Drop while holding its
-	// openMu, and Store.Cell takes openMu. Doing a drain from Drop deadlocks the
-	// whole store (every cold cell open then hangs, including KV reads/writes).
-	// Capture is stopped; the acked write path already waited for durability.
-	m.mu.Lock()
-	if m.caps[key] == st {
-		st.cancel()
-		delete(m.caps, key)
-	} else {
-		// A newer capture replaced this one while we drained; leave it alone.
-		m.mu.Unlock()
-		return nil
-	}
-	m.mu.Unlock()
+	// Never open Store.Cell here: eviction may hold the store's open lock.
 	select {
-	case <-st.cap.Done():
-		if d := st.cap.Stats().DurableTxID; d > 0 {
-			m.mu.Lock()
-			if m.hints == nil {
-				m.hints = map[string]resumeHint{}
-			}
-			m.hints[key] = resumeHint{epoch: st.epoch, durable: d}
-			m.mu.Unlock()
-		}
+	case <-st.stopped:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -455,8 +503,8 @@ func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
 	return ok && h.epoch == epoch && h.durable == baseline
 }
 
-// backgroundBaseline gives a marker-resumed epoch its own complete snapshot in
-// a detached SQLite backup image, then records the done marker. Upload does not
+// backgroundBaseline gives a continued epoch its own complete native snapshot
+// from a detached SQLite backup image. Upload does not
 // occupy the capture loop or the cell write lock; epoch GC retires predecessors.
 func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap *sqlcapture.Capture, scope cell.Scope, epoch uint64) {
 	if !c.PagedComplete() {
@@ -477,23 +525,10 @@ func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap
 			}
 		}
 	}
-	var onStart func(ctx context.Context, label uint64) error
-	if m.SnapshotStarted != nil {
-		onStart = func(sctx context.Context, label uint64) error {
-			return m.SnapshotStarted(sctx, scope, epoch, label)
-		}
-	}
-	txid, err := cap.RequestBaseline(ctx, onStart)
+	_, err := cap.RequestBaseline(ctx)
 	if err != nil {
 		m.log().Warn("background baseline failed", "scope", scope.String(), "epoch", epoch, "err", err)
 		return
-	}
-	if m.SnapshotDone != nil {
-		// Mark the snapshot's own watermark; the cell's txid may already be ahead.
-		if merr := m.SnapshotDone(ctx, scope, epoch, txid); merr != nil {
-			m.log().Warn("background snapshot done marker failed", "scope", scope.String(), "txid", txid, "err", merr)
-			return
-		}
 	}
 	// Epoch GC is periodic: the background loop lists old epochs, and doing it
 	// here would add those Lists to the cold-open latency measured by E2E. The
@@ -506,6 +541,10 @@ func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap
 func (m *Manager) ForgetHint(scope cell.Scope) {
 	m.mu.Lock()
 	delete(m.hints, scope.String())
+	if st := m.caps[scope.String()]; st != nil {
+		st.hintInvalid = true
+		st.saveHint = false
+	}
 	m.mu.Unlock()
 }
 
@@ -526,23 +565,25 @@ func (m *Manager) Drain(ctx context.Context) error {
 	m.mu.Unlock()
 	var firstErr error
 	for _, it := range items {
-		c, err := m.Store.Cell(ctx, it.scope)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+		err := func() error {
+			// A capture snapshot may race eviction. Pin only an existing
+			// activation; shutdown must not reopen a forgotten resource.
+			c, release, err := m.Store.AcquireResident(ctx, it.scope)
+			if err != nil {
+				return err
 			}
-			continue
-		}
-		txid, err := c.TxID(ctx)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+			defer release()
+			if c == nil {
+				return nil
 			}
-			continue
-		}
-		werr := it.cap.Wait(ctx, txid)
-		if werr != nil && firstErr == nil {
-			firstErr = werr
+			txid, err := c.TxID(ctx)
+			if err != nil {
+				return err
+			}
+			return it.cap.Wait(ctx, txid)
+		}()
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr
@@ -553,14 +594,13 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, st := range m.caps {
-		st.cancel()
-		delete(m.caps, k)
+		m.stopLocked(k, st, false)
 	}
 }
 
 // watchOwner stops the capture when this node stops owning the scope (epoch
 // change or ownership loss); the new owner re-baselines from the bucket.
-func (m *Manager) watchOwner(ctx context.Context, key string, scope cell.Scope) {
+func (m *Manager) watchOwner(ctx context.Context, key string, scope cell.Scope, watched *state) {
 	interval := m.Checkpoint
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -578,10 +618,13 @@ func (m *Manager) watchOwner(ctx context.Context, key string, scope cell.Scope) 
 			}
 			m.mu.Lock()
 			st := m.caps[key]
+			if st != watched || st.stopping {
+				m.mu.Unlock()
+				return
+			}
 			changed := st == nil || !isOwner || st.epoch != epoch
 			if changed && st != nil {
-				st.cancel()
-				delete(m.caps, key)
+				m.stopLocked(key, st, false)
 			}
 			m.mu.Unlock()
 			if changed {

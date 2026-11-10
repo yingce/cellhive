@@ -57,7 +57,6 @@ build:
 	$(GO) build $(GOTAGS) -o $(BIN)/s3init ./cmd/s3init
 	$(GO) build $(GOTAGS) -o $(BIN)/s3probe ./cmd/s3probe
 	$(GO) build $(GOTAGS) -o $(BIN)/walscan ./cmd/walscan
-	$(GO) build $(GOTAGS) -o $(BIN)/cell-supervisor ./cmd/cell-supervisor
 	$(GO) build $(GOTAGS) -o $(BIN)/gatebench ./cmd/gatebench
 	$(GO) build $(GOTAGS) -o $(BIN)/kvbench ./cmd/kvbench
 	$(GO) build $(GOTAGS) -o $(BIN)/restoreverify ./cmd/restoreverify

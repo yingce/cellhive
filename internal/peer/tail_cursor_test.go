@@ -20,7 +20,7 @@ func TestSealedTailCursorValidatesFileAndSupportsRestart(t *testing.T) {
 			}
 			sc := cell.Scope{Namespace: "test", Class: "kv", ID: "cursor"}
 			for i := uint64(1); i <= 4; i++ {
-				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, bytes.Repeat([]byte{1}, 128))
+				seg := nativePeerFile(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, bytes.Repeat([]byte{1}, 128))
 				if _, _, err := sp.AppendBatchSession(context.Background(), "s", sc, 1, [][]byte{seg}); err != nil {
 					t.Fatal(err)
 				}

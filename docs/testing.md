@@ -234,7 +234,7 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 `go test ./...` 覆盖 **54/68** 包。无独立单测的是 **14** 个包：
 
 - 服务入口 `cmd/user-runtime`、`cmd/do-supervisor`：由集成/e2e（`internal/userruntime`、`internal/doruntime`、`cmd/cellhive` e2e）覆盖（`cmd/cell-agent`、`cmd/do-runtime`、`cmd/cellhive` 自身有单测）；
-- 压测/工具 `cmd/{cellbench,realbench,sqlbench,kvbench,gatebench,s3init,s3probe,walscan,recoververify,restoreverify,cell-supervisor}`：一次性 CLI，靠 `make s3-test`/`make perf-test` 触发；
+- 压测/工具 `cmd/{cellbench,realbench,sqlbench,kvbench,gatebench,s3init,s3probe,walscan,recoververify,restoreverify}`：一次性 CLI，靠 `make s3-test`/`make perf-test` 触发；
 - `internal/workerdbin`：二进制发现，由 `make js-test`（真实 workerd）间接覆盖。
 
 ## 待细化
@@ -342,11 +342,11 @@ ADR-156（vwork 运维接口）：`internal/control TestResourceRevoke`（引用
 
 ADR-157（每域资源 + stats）：`internal/cellstore TestDiskStatsAndKVStats`（page/file 字段、新库必须有 `kv_expires` 索引、`expired`/`next_expiry_ms`、dbstat 估计与 `estimate_note`、`?exact` 语义、prefix 作用域）与 `TestKVExpiryIndexUsed`（`EXPLAIN QUERY PLAN` 必须出现 `kv_expires`——回退修复会失败）；`internal/d1 TestD1Stats`（内部表排除、`?tables=1` 的 dbstat 明细、行数估计）与 `TestD1StatsLargeCellSkipsDetail`（超阈值必须跳过而不是变慢）；`internal/queue TestStatusCounts`（新增 `oldest_visible_ms`/`max_attempts` + `DiskStats`）；`internal/r2 TestStatsBoundedListing`（总量/前缀/`truncated`+cursor/`multipart_*` 计数/暂存区对用户 List 不可见/非法桶名）；`internal/workflow TestStats`（估计 vs `?exact=1` 的状态分解）；`internal/server TestPerKindResourceEndpoints`（每域 CRUD、服务端补 scope、body/path kind 冲突 400、409+`force`、**与 `/v1/control/resource*` 别名等价**）、`TestPerKindStats`（七种 stats 的真数据断言 + 旧 `/v1/control/queue/status` 保持扁平）、`TestStatsFailClosedAndScoped`（未知/已吊销 404、JWT 跨 ns 403）、`TestMetricsBucketAndCellGauges`（`cellhive_list_calls_total`/`cellhive_bucket_ops_total{op="list"}`/`cellhive_resident_cells` 必须出现）；`cmd/cellhive` e2e 追加 `kv namespace|queue` 每域 CLI（create/list/stats/delete）。
 
-ADR-160（按页冷启动）：`internal/pagedvfs`（`TestPagedOpenFaultsPagesOnDemand`：点读只 fault 少量页且 `HydrateAll` 后文件逐字节等于源；`TestPagedWritesMarkHydrated`：写/checkpoint 不被旧 cut 覆盖；`TestBackgroundHydrateFillsTheFile`：限速后台补齐到全量且逐字节一致）、`internal/cellstore TestPagedCellServesKVAndSnapshots`（KV 点读正确 + `SnapshotPages` 先 hydrate + 写可用 + Close 释放）、`TestPagedCellReopenAfterClose`（重启重新挂载稀疏缓存）、`TestMalformedPagedMarkerForcesRestore`（marker 损坏时丢弃缓存并从权威副本恢复，不以 base VFS 读洞为零）、`internal/compaction TestPagedCellAgentEndToEnd`（真链路：真 cell→桶快照→Compact 出 L1 索引→PageFetcher→冷 cellstore paged open；实测 8/771 页 fault、8 ranged 读、整对象 3158B vs 镜像 3158016B；**全表扫描 20 次 ranged 读**即窗口预取）、`internal/ltx TestPageMapV2Compression`/`TestPageMapV1StillReadable`（`WAL3` 压缩帧 + v1 兼容）。
+ADR-160（按页冷启动）：`internal/pagedvfs`（`TestPagedOpenFaultsPagesOnDemand`：点读只 fault 少量页且 `HydrateAll` 后文件逐字节等于源；`TestPagedWritesMarkHydrated`：写/checkpoint 不被旧 cut 覆盖；`TestBackgroundHydrateFillsTheFile`：限速后台补齐到全量且逐字节一致）、`internal/cellstore TestPagedCellServesKVAndSnapshots`（KV 点读正确 + `SnapshotPages` 先 hydrate + 写可用 + Close 释放）、`TestPagedCellReopenAfterClose`（重启重新挂载稀疏缓存）、`TestMalformedPagedMarkerForcesRestore`（marker 损坏时丢弃缓存并从权威副本恢复，不以 base VFS 读洞为零）、`internal/compaction TestPagedCellAgentEndToEnd`（真链路：真 cell→桶快照→Compact 出 L1 索引→PageFetcher→冷 cellstore paged open；实测 8/771 页 fault、8 ranged 读、整对象 3158B vs 镜像 3158016B；**全表扫描 20 次 ranged 读**即窗口预取）。旧 WAL2/WAL3 codec 测试已由 `internal/ltx TestNativeRoundTripAndCelldHeader`、`TestNativeCelldGoldenFiles` 和 `TestNativeEncoderStreamingMatchesBuffered` 替代，当前仅写入原生 LTX。
 
 冷恢复边界：`internal/replica TestColdHydrateIsWholeObjectNotPaged`（**实测**：cell-agent 的 hydrate 路径 = 1 次整对象下载 4198464B、**0 次 ranged 读**；分页原语可只物化部分页；ranged 读路径见 `internal/compaction TestPageFetcherOnDemandFromL1Index`）——回退成"分页 hydrate"必须显式改这个测试。
 
-ADR-161（压缩开关）：`internal/ltx TestPageMapCompressionDisabledWritesV1`（`CELLHIVE_LTX_COMPRESSION=false` 时输出 `WAL2` 固定帧 + 固定 off 布局，`PageLocs`/`DecodeWALPageMap` 往返正确）。
+ADR-161 为历史压缩开关设计，当前原生 LTX 实现已删除该开关及对应旧格式测试；压缩、校验和与索引由 `internal/ltx` 原生编码/解码测试覆盖。
 ADR-167（OTLP 追踪）：`internal/telemetry TestExportsSpanAndRemoteSpan`/`TestSamplerHonorsRemoteFlag`/`TestDisabledIsNoop`（进程内 OTLP 接收器解码 protobuf，验证 JS 上报的 root/child `trace_id`/`span_id`/`parent_span_id` 原样保留、采样与关闭 no-op）、`workerd/platform/telemetry.test.mjs`（嵌套平台 span 的 parent 与下游 traceparent）、`internal/userruntime TestUserRuntimeTraceExport`（真 workerd：loader `http.server` span 打到 `/v1/internal/telemetry/spans`）、`internal/doruntime TestDoRuntimeSpanExport`（真 workerd：`do.invoke → do.gate → supervisor` 精确父子链）、`internal/dosupervisor TestGateEmitsSpan`（supervisor `do.gate` 延续调用方 `traceparent`）、`internal/doruntime TestDoRuntimeBindingInsideDO`（断言 DO 内 props-bound 绑定调用当前不带 traceparent 的已知边界）、`TestUserRuntimeTraceContextPropagation`（props-bound binding 现带 traceparent）。
 ADR-166（复制/定时器/do 指标）：`internal/timer TestFireStatsAggregates`/`TestDispatchDueObservesFireOutcomes`、`internal/dosupervisor TestSupervisorMetricsAndStats`（`/internal/do/stats` 增量 + `/metrics` 渲染 + ws 钳零）、`internal/doruntime TestDoRuntimeMetricsReportedToSupervisor`（真 workerd：alarm 后 host 上报增量）、`internal/server TestMetricsObservability`（replication/waker 行）。
 ADR-165（可观测性指标）：`internal/server TestMetricsObservability`（`cellhive_binding_calls_total{kind,outcome}`、`cellhive_durability_proof_seconds` 桶/sum/count、`cellhive_route_projection_version`、owner/takeover 与 hedge 行）、`internal/owner TestClaimStatsTakeoverAndEpoch`（fresh/blocked/takeover success + epoch bumps）、`TestClaimAsStats`、`internal/peer TestShipBatcherHedgeStats`（fired/won）。
@@ -419,7 +419,7 @@ ranged_bytes=1059803
 
 `TestCOSConditionalDelete`（opt-in，和上面的 `CELLHIVE_COS_TEST=1` 共用凭据）覆盖两条路径：
 
-- authority key（`cells/.../owner.json`）：走 COS native append authority；
+- 当前 owner key（`cells/.../own.json`）：走 COS 原生条件创建/CAS/条件删除；下面 2026-10-21 的记录是旧 authority 实现的历史结果，不能作为当前 owner 布局验收。
 - 普通 key：走 S3 `DeleteObject If-Match`。
 
 2026-10-21 真实 COS 结果：

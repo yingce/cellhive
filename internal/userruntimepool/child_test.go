@@ -30,6 +30,9 @@ func testChildExecutesPinnedVersion(t *testing.T, storageID string) {
 	}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/internal/log-capture":
+			// Log subscription discovery is independent of tenant host routing.
+			json.NewEncoder(w).Encode(map[string]any{"mode": "off", "workers": []string{}})
 		case "/v1/control/worker":
 			if r.URL.Query().Get("version") != "3" {
 				t.Error("unpinned version lookup")

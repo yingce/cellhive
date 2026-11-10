@@ -215,7 +215,24 @@ func (b *Batcher) replayEntries(ctx context.Context, entries []SpoolEntry) {
 		if ctx.Err() != nil {
 			return
 		}
-		if _, _, err := b.sink.AppendBatch(ctx, e.Scope, e.Epoch, e.Segments); err != nil {
+		if retiredSink, ok := b.sink.(interface {
+			EpochRetired(context.Context, cell.Scope, uint64) (bool, error)
+		}); ok {
+			retired, err := retiredSink.EpochRetired(ctx, e.Scope, e.Epoch)
+			if err != nil {
+				b.errors.Add(1)
+				continue
+			}
+			if retired {
+				if err := b.spool.Remove(e.ID); err != nil {
+					b.spoolErrors.Add(1)
+				} else {
+					b.discarded.Add(uint64(len(e.Segments)))
+				}
+				continue
+			}
+		}
+		if err := b.appendBatch(ctx, e.Scope, e.Epoch, e.Segments); err != nil {
 			if errors.Is(err, cell.ErrResourceDeleted) {
 				if err := b.spool.Remove(e.ID); err != nil {
 					b.spoolErrors.Add(1)
@@ -319,7 +336,7 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 		// durable retry queue yet).
 		var err error
 		for attempt := 0; attempt < 3; attempt++ {
-			if _, _, err = b.sink.AppendBatch(ctx, g.scope, g.epoch, g.segments); err == nil {
+			if err = b.appendBatch(ctx, g.scope, g.epoch, g.segments); err == nil {
 				break
 			}
 			if errors.Is(err, cell.ErrResourceDeleted) {
@@ -387,7 +404,7 @@ func (b *Batcher) EnqueueWait(ctx context.Context, s cell.Scope, epoch uint64, s
 	case sh.ch <- item{scope: s, epoch: epoch, seg: seg, done: done}:
 	default:
 		// Queue full: upload synchronously (backpressure).
-		_, _, err := b.sink.AppendBatch(ctx, s, epoch, [][]byte{seg})
+		err := b.appendBatch(ctx, s, epoch, [][]byte{seg})
 		if err != nil {
 			b.errors.Add(1)
 			return err
@@ -425,7 +442,7 @@ func (b *Batcher) EnqueueBatchWait(ctx context.Context, s cell.Scope, epoch uint
 	case sh.ch <- item{scope: s, epoch: epoch, segs: segs, done: done}:
 	default:
 		// Queue full: upload synchronously (backpressure).
-		_, _, err := b.sink.AppendBatch(ctx, s, epoch, segs)
+		err := b.appendBatch(ctx, s, epoch, segs)
 		if err != nil {
 			b.errors.Add(1)
 			return err
@@ -480,7 +497,7 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 		b.syncFallbacks.Add(1)
 		fallbackStart := time.Now()
 		defer func() { b.syncFallbackNanos.Add(uint64(time.Since(fallbackStart).Nanoseconds())) }()
-		if _, _, err := b.sink.AppendBatch(ctx, s, epoch, [][]byte{seg}); err != nil {
+		if err := b.appendBatch(ctx, s, epoch, [][]byte{seg}); err != nil {
 			b.errors.Add(1)
 			if spoolID != 0 {
 				b.deferred.Add(1)
@@ -578,4 +595,16 @@ func itoa(u uint64) string {
 		u /= 10
 	}
 	return string(buf[i:])
+}
+
+// Native sinks partition arrival-order queues into contiguous immutable files.
+// Other sinks retain the generic batch interface (e.g. injected test sinks).
+func (b *Batcher) appendBatch(ctx context.Context, s cell.Scope, epoch uint64, segments [][]byte) error {
+	if sink, ok := b.sink.(interface {
+		UploadBatch(context.Context, cell.Scope, uint64, [][]byte) error
+	}); ok {
+		return sink.UploadBatch(ctx, s, epoch, segments)
+	}
+	_, _, err := b.sink.AppendBatch(ctx, s, epoch, segments)
+	return err
 }

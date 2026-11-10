@@ -69,6 +69,7 @@ func newRoot() *cobra.Command {
 		newStatusCommand(),
 		newCapacityCommand(),
 		newGCCommand(),
+		newCellCommand(),
 		newRoutesCommand(),
 		newAuditCommand(),
 		newServiceACLCommand(),

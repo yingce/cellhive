@@ -8,7 +8,6 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -47,7 +46,7 @@ func New(b bucket.Bucket) *Store { return &Store{B: b} }
 
 // Key returns the backend key for an object.
 func Key(ns, bucketName, key string) (string, error) {
-	if ns == "" || bucketName == "" || key == "" {
+	if ns == "" || bucketName == "" || key == "" || ns == ".versions" || ns == ".mpu" {
 		return "", ErrBadKey
 	}
 	if strings.ContainsAny(ns, "/\\") || strings.ContainsAny(bucketName, "/\\") {
@@ -60,15 +59,15 @@ func Key(ns, bucketName, key string) (string, error) {
 }
 
 func prefix(ns, bucketName string) (string, error) {
-	if ns == "" || bucketName == "" || strings.ContainsAny(ns, "/\\") || strings.ContainsAny(bucketName, "/\\") {
+	if ns == "" || bucketName == "" || ns == ".versions" || ns == ".mpu" || strings.ContainsAny(ns, "/\\") || strings.ContainsAny(bucketName, "/\\") {
 		return "", ErrBadKey
 	}
 	return fmt.Sprintf("r2/%s/%s/", ns, bucketName), nil
 }
 
 // Metadata is the R2 object metadata exposed on R2Object/R2ObjectBody. It is
-// stored in a sidecar object (r2meta/<ns>/<bucket>/<key>). Every successful
-// object write invalidates the old sidecar before publishing new metadata.
+// published together with an immutable body reference in r2meta. Readers
+// resolve one publication snapshot, including for identical-body rewrites.
 type Metadata struct {
 	HTTP       map[string]string `json:"http,omitempty"`
 	Custom     map[string]string `json:"custom,omitempty"`
@@ -118,7 +117,9 @@ func metaKey(ns, bucketName, key string) (string, error) {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("r2meta/%s/%s/%s", ns, bucketName, key), nil
+	// Fixed hexadecimal names cannot collide with native authority .gN siblings.
+	sum := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("r2meta/%s/%s/%x", ns, bucketName, sum), nil
 }
 
 // Put writes an object and returns its etag (no user metadata).
@@ -133,35 +134,11 @@ func (s *Store) PutWithMeta(ctx context.Context, ns, bucketName, key string, dat
 	return etag, err
 }
 
-// objectETag returns an object's etag without downloading its body when the
-// backend supports HEAD (Statter). Conditional writes only need the etag, so a
-// large R2 object must not be transferred just to evaluate onlyIf.
-func (s *Store) objectETag(ctx context.Context, key string) (string, bool, error) {
-	if st, ok := s.B.(bucket.Statter); ok {
-		_, etag, err := st.Stat(ctx, key)
-		if errors.Is(err, bucket.ErrNotFound) {
-			return "", false, nil
-		}
-		if err != nil {
-			return "", false, err
-		}
-		return etag, true, nil
-	}
-	_, etag, err := s.B.Get(ctx, key)
-	if errors.Is(err, bucket.ErrNotFound) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return etag, true, nil
-}
-
 // PutConditional returns matched=false when onlyIf fails. A condition always
 // uses the bucket's atomic create/CAS, so a concurrent writer cannot slip
 // between the check and the write.
 func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, data []byte, md *Metadata, condition *Condition) (etag string, matched bool, err error) {
-	k, err := Key(ns, bucketName, key)
+	_, err = Key(ns, bucketName, key)
 	if err != nil {
 		return "", false, err
 	}
@@ -179,129 +156,23 @@ func (s *Store) PutConditional(ctx context.Context, ns, bucketName, key string, 
 			}
 		}
 	}
-	var old string
-	var exists bool
-	if condition != nil {
-		var condErr error
-		old, exists, condErr = s.objectETag(ctx, k)
-		if condErr != nil {
-			return "", false, condErr
-		}
-		if !condition.matches(exists, old) {
-			return "", false, nil
-		}
-	}
-	// Snapshot the sidecar's storage revision before changing the object.
-	// Cleanup must never erase a newer writer's acknowledged metadata.
-	mk, _ := metaKey(ns, bucketName, key)
-	_, priorMetaETag, metaErr := s.B.Get(ctx, mk)
-	if metaErr != nil && !errors.Is(metaErr, bucket.ErrNotFound) {
-		return "", false, metaErr
-	}
-	if metaErr == nil {
-		// Some provider gateways ignore DeleteObject If-Match. Do not mutate
-		// data when the adapter explicitly cannot fence sidecar cleanup.
-		if support, ok := s.B.(interface{ SupportsConditionalDelete(string) bool }); ok && !support.SupportsConditionalDelete(mk) {
-			return "", false, bucket.ErrNotSupported
-		}
-	}
-	if condition == nil {
-		etag, err = s.B.Put(ctx, k, data)
-	} else {
-		if exists {
-			etag, err = s.B.CAS(ctx, k, data, old)
-		} else {
-			etag, err = s.B.ConditionalCreate(ctx, k, data)
-		}
-		if errors.Is(err, bucket.ErrPrecondition) {
-			return "", false, nil
-		}
-	}
-	if err != nil {
-		return "", false, err
-	}
-	size := int64(len(data))
-	s.recordUsage(ctx, ns, bucketName, key, &size)
-	// The data and sidecar are separate bucket objects, not an atomic pair.
-	// Invalidate even for identical data: content ETags cannot distinguish two
-	// writes of the same bytes. Failures here must not be acknowledged.
-	if metaErr == nil {
-		if err := s.B.ConditionalDelete(ctx, mk, priorMetaETag); err != nil && !errors.Is(err, bucket.ErrPrecondition) {
-			return "", false, err
-		}
-	}
-	if md == nil || (len(md.HTTP) == 0 && len(md.Custom) == 0 && md.MD5 == "" && md.SHA256 == "") {
-		return etag, true, nil
-	}
-	stored := *md
-	stored.Size = int64(len(data))
-	stored.ETag = etag
-	if stored.UploadedMs == 0 {
-		stored.UploadedMs = s.now().UnixMilli()
-	}
-	buf, err := json.Marshal(stored)
-	if err != nil {
-		return "", false, err
-	}
-	if _, err := s.B.Put(ctx, mk, buf); err != nil {
-		return "", false, err
-	}
-	return etag, true, nil
+	return s.publish(ctx, ns, bucketName, key, data, md, condition)
 }
 
 // GetMeta returns metadata matching the current object, or nil when absent
 // or obsolete. Backend and decoding failures are returned to the caller.
 func (s *Store) GetMeta(ctx context.Context, ns, bucketName, key string) (*Metadata, error) {
-	md, err := s.getMeta(ctx, ns, bucketName, key)
-	if err != nil || md == nil {
-		return md, err
-	}
-	size, etag, err := s.Stat(ctx, ns, bucketName, key)
+	p, _, err := s.readPublication(ctx, ns, bucketName, key)
 	if errors.Is(err, bucket.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !md.Matches(size, etag) {
-		return nil, nil
-	}
-	return md, nil
+	return p.Metadata, nil
 }
 
-// GetMetaForVersion reads metadata for a caller's already-read object version,
-// avoiding a second object read/HEAD. A mismatching sidecar is omitted.
-func (s *Store) GetMetaForVersion(ctx context.Context, ns, bucketName, key string, size int64, etag string) (*Metadata, error) {
-	md, err := s.getMeta(ctx, ns, bucketName, key)
-	if err != nil {
-		return nil, err
-	}
-	if !md.Matches(size, etag) {
-		return nil, nil
-	}
-	return md, nil
-}
-
-func (s *Store) getMeta(ctx context.Context, ns, bucketName, key string) (*Metadata, error) {
-	mk, err := metaKey(ns, bucketName, key)
-	if err != nil {
-		return nil, err
-	}
-	buf, _, err := s.B.Get(ctx, mk)
-	if errors.Is(err, bucket.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var md Metadata
-	if err := json.Unmarshal(buf, &md); err != nil {
-		return nil, err
-	}
-	return &md, nil
-}
-
-// Matches checks a sidecar against authoritative object information. Content
+// Matches checks metadata against its publication. Content
 // ETags do not identify separate writes of identical bytes.
 func (md *Metadata) Matches(size int64, etag string) bool {
 	return md != nil && etag != "" && md.ETag == etag && md.Size == size
@@ -310,68 +181,67 @@ func (md *Metadata) Matches(size int64, etag string) bool {
 // Stat returns the object size and etag. It uses the backend's Statter (S3
 // HeadObject) when available and falls back to a body read.
 func (s *Store) Stat(ctx context.Context, ns, bucketName, key string) (int64, string, error) {
-	k, err := Key(ns, bucketName, key)
+	v, err := s.Open(ctx, ns, bucketName, key)
 	if err != nil {
 		return 0, "", err
 	}
-	if st, ok := s.B.(bucket.Statter); ok {
-		return st.Stat(ctx, k)
-	}
-	data, etag, err := s.B.Get(ctx, k)
-	if err != nil {
-		return 0, "", err
-	}
-	return int64(len(data)), etag, nil
+	return v.Size, v.ETag, nil
 }
-
-// Get returns an object and its etag.
 func (s *Store) Get(ctx context.Context, ns, bucketName, key string) ([]byte, string, error) {
-	k, err := Key(ns, bucketName, key)
+	v, err := s.Open(ctx, ns, bucketName, key)
 	if err != nil {
 		return nil, "", err
 	}
-	return s.B.Get(ctx, k)
+	b, err := v.Get(ctx)
+	return b, v.ETag, err
 }
-
-// GetRange returns bytes [off, off+length) and the full etag.
-// PresignGet returns a short-lived read URL for an object (ADR-030).
 func (s *Store) PresignGet(ctx context.Context, ns, bucketName, key string, ttl time.Duration) (string, error) {
-	k, err := Key(ns, bucketName, key)
+	v, err := s.Open(ctx, ns, bucketName, key)
 	if err != nil {
 		return "", err
 	}
-	return s.B.PresignGet(ctx, k, ttl)
+	return v.Presign(ctx, ttl)
 }
-
 func (s *Store) GetRange(ctx context.Context, ns, bucketName, key string, off, length int64) ([]byte, string, error) {
-	k, err := Key(ns, bucketName, key)
+	v, err := s.Open(ctx, ns, bucketName, key)
 	if err != nil {
 		return nil, "", err
 	}
-	return s.B.RangedGet(ctx, k, off, length)
+	b, err := v.GetRange(ctx, off, length)
+	return b, v.ETag, err
 }
-
-// Delete removes an object and its metadata sidecar (missing is not an error).
 func (s *Store) Delete(ctx context.Context, ns, bucketName, key string) error {
-	k, err := Key(ns, bucketName, key)
+	mk, err := metaKey(ns, bucketName, key)
 	if err != nil {
 		return err
 	}
-	if mk, merr := metaKey(ns, bucketName, key); merr == nil {
-		_ = s.B.Delete(ctx, mk)
+	for i := 0; i < 32; i++ {
+		_, token, err := s.readPublication(ctx, ns, bucketName, key)
+		if errors.Is(err, bucket.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = s.metadataObjects().ConditionalDelete(ctx, mk, token)
+		if errors.Is(err, bucket.ErrPrecondition) {
+			return nil // A newer publication superseded the version selected for deletion.
+		}
+		if err != nil && !errors.Is(err, bucket.ErrNotFound) {
+			return err
+		}
+		s.recordUsage(ctx, ns, bucketName, key, nil)
+		return nil
 	}
-	if err := s.B.Delete(ctx, k); err != nil {
-		return err
-	}
-	s.recordUsage(ctx, ns, bucketName, key, nil)
-	return nil
+	return fmt.Errorf("r2: delete contention: %w", bucket.ErrPrecondition)
 }
 
 // Object is a listed R2 object.
 type Object struct {
-	Key  string `json:"key"`
-	Size int64  `json:"size"`
-	ETag string `json:"etag"`
+	Key      string    `json:"key"`
+	Size     int64     `json:"size"`
+	ETag     string    `json:"etag"`
+	Metadata *Metadata `json:"-"`
 }
 
 // ListPageDelimited lists one page with Cloudflare delimiter semantics: keys
@@ -398,6 +268,9 @@ func (s *Store) ListPageDelimited(ctx context.Context, ns, bucketName, keyPrefix
 			return nil, nil, "", lerr
 		}
 		if len(page) == 0 {
+			if pageNext != "" {
+				return objects, prefixes, pageNext, nil
+			}
 			return objects, prefixes, "", nil
 		}
 		stoppedEarly := false
@@ -451,53 +324,36 @@ func (s *Store) ListPage(ctx context.Context, ns, bucketName, keyPrefix, after s
 		limit = 100
 	}
 	full := p + keyPrefix
-	if pl, ok := s.B.(bucket.PagedLister); ok {
-		items, next, lerr := pl.ListPage(ctx, full, p+after, limit)
-		if lerr != nil {
-			return nil, "", lerr
-		}
-		out := make([]Object, 0, len(items))
-		for _, it := range items {
-			out = append(out, Object{Key: strings.TrimPrefix(it.Key, p), Size: it.Size, ETag: it.ETag})
-		}
-		return out, strings.TrimPrefix(next, p), nil
-	}
-	objs, err := s.listAll(ctx, full, p)
-	if err != nil {
-		return nil, "", err
-	}
-	return pageObjects(objs, after, limit)
-}
-
-// listAll sizes every object under prefix (SizeLister when available, else
-// List+Get) and returns them sorted by key.
-func (s *Store) listAll(ctx context.Context, full, p string) ([]Object, error) {
-	if sl, ok := s.B.(bucket.SizeLister); ok {
-		items, err := sl.ListSizes(ctx, full)
+	out := make([]Object, 0, limit)
+	cursor := p + after
+	// Bound work even when failed/deleted publications leave index entries.
+	for scanned := 0; scanned < 10000; {
+		items, next, err := s.bodyObjects().ListPage(ctx, full, cursor, limit-len(out))
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		out := make([]Object, 0, len(items))
 		for _, it := range items {
-			out = append(out, Object{Key: strings.TrimPrefix(it.Key, p), Size: it.Size, ETag: it.ETag})
+			scanned++
+			cursor = it.Key
+			k := strings.TrimPrefix(it.Key, p)
+			v, err := s.Open(ctx, ns, bucketName, k)
+			if errors.Is(err, bucket.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, "", err
+			}
+			out = append(out, Object{Key: k, Size: v.Size, ETag: v.ETag, Metadata: v.Metadata})
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-		return out, nil
-	}
-	keys, err := s.B.List(ctx, full)
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(keys)
-	out := make([]Object, 0, len(keys))
-	for _, k := range keys {
-		data, etag, gerr := s.B.Get(ctx, k)
-		if gerr != nil {
-			continue
+		if next == "" {
+			return out, "", nil
 		}
-		out = append(out, Object{Key: strings.TrimPrefix(k, p), Size: int64(len(data)), ETag: etag})
+		cursor = next
+		if len(out) >= limit {
+			return out, strings.TrimPrefix(cursor, p), nil
+		}
 	}
-	return out, nil
+	return out, strings.TrimPrefix(cursor, p), nil
 }
 
 // pageObjects slices a sorted listing by (exclusive) cursor and limit.

@@ -267,6 +267,17 @@ func TestInteractiveHydrateNotStarvedByBackground(t *testing.T) {
 	s.HydrateInteractiveParallel = 1
 	block := make(chan struct{})
 	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	var workers sync.WaitGroup
+	var backgroundErr error
+	defer func() {
+		cancel()
+		close(release)
+		workers.Wait()
+		if backgroundErr != nil {
+			t.Errorf("background hydrate: %v", backgroundErr)
+		}
+	}()
 	s.Hydrate = func(ctx context.Context, sc cell.Scope, _ string) error {
 		if sc.ID == "background" {
 			close(block)
@@ -274,18 +285,20 @@ func TestInteractiveHydrateNotStarvedByBackground(t *testing.T) {
 		}
 		return nil
 	}
+	workers.Add(1)
 	go func() {
-		_, _ = s.Cell(context.Background(), cell.Scope{Namespace: "acme", Class: "__kv__", ID: "background"})
+		defer workers.Done()
+		_, backgroundErr = s.Cell(context.Background(), cell.Scope{Namespace: "acme", Class: "__kv__", ID: "background"})
 	}()
 	select {
 	case <-block:
 	case <-time.After(2 * time.Second):
 		t.Fatal("background hydrate did not start")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	done := make(chan error, 1)
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		_, err := s.Cell(ctx, cell.Scope{Namespace: "acme", Class: "__kv__", ID: "interactive"})
 		done <- err
 	}()
@@ -297,7 +310,6 @@ func TestInteractiveHydrateNotStarvedByBackground(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("interactive hydrate was starved by background hydrate")
 	}
-	close(release)
 }
 
 func TestPinnedOwnershipInvalidationRestoresNewerData(t *testing.T) {

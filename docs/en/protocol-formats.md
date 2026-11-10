@@ -2,7 +2,7 @@
 
 This document defines data formats and interfaces across processes/nodes. All integers are **big-endian**, and all strings are UTF-8. `proto_version` is currently `v1` (ADR-034).
 
-## 1. owner record (bucket `cells/<scope>/owner.json`)
+## 1. owner record (bucket `cells/<scope>/own.json`)
 
 ```json
 { "node": "n1", "role": "cell-agent|do-runtime", "session": "s1",
@@ -12,7 +12,7 @@ This document defines data formats and interfaces across processes/nodes. All in
 
 - `expiry` (unix ms) is **always ≤ the node lease expiry**;
 - Acquire: `If-None-Match:*` (cold) or `If-Match:<etag>` (takeover/renewal).
-- **Provider physical encoding (ADR-266)**: on `cos://` / `oss://` this is not a plain JSON object. The logical key maps to `cells/<scope>/owner.json.w<window>`; each segment appends `CHL2` frames (`magic(4)|op(1)|instance(8)|payload_len(4)|payload|frame_len(4)|crc32(4)`) and the token is `s<window>:<instance>:<length>`. Readers tail-probe only the last frame; the current and previous windows are retained and older ones are physically deleted at rollover. Legacy CHL1 objects migrate and are deleted on first write.
+- `own.json` is the logical owner key. COS/OSS implement conditional writes using native append positions and bounded generations; S3/MinIO control records use conditional PUT/tombstones. The physical encoding is not a plain JSON PUT; see [storage adapters](storage-and-s3.md). The old `owner.json` layout is not read.
 
 ## 2. Node lease (bucket `nodes/<node>.json`)
 
@@ -31,83 +31,38 @@ This document defines data formats and interfaces across processes/nodes. All in
   "followers": ["n2"], "status": "open|recovering|sealed" }
 ```
 
-## 4. LTX Segment (`cells/<scope>/ltx/e<epoch>/<seq>.ltx`)
+## 4. Native LTX (`cells/<scope>/ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx`)
 
-Used to replicate SQLite commits. The P0 spike uses a **frame stream + segment header**; production can align with `superfly/ltx`.
+The only stored format is native celld/Litestream LTX, aligned with pinned celld `90b4301`. There is no format switch, legacy-format compatibility or separate manifest/index. Existing databases migrate via SQLite export/import.
 
-Segment header (fixed 44 bytes):
+The header is 100 bytes; multi-byte integers are big endian:
 
-| Offset | Length | Field |
+| Offset | Bytes | Field |
 |---|---|---|
-| 0 | 4 | magic `"LTX1"` |
-| 4 | 1 | `version` (segment format version) |
-| 5 | 1 | `kind` (0=delta, 1=snapshot, 2=link) |
-| 6 | 2 | flags (reserved; interpreted only for `kind=snapshot`: bit15=paged, bit0..14=part index) |
-| 8 | 8 | `epoch` |
-| 16 | 8 | `start_txid` |
-| 24 | 8 | `end_txid` |
-| 32 | 8 | payload length |
-| 40 | 4 | CRC32C(payload) |
+| 0 | 4 | magic `LTX1` |
+| 4 | 4 | flags (writer uses standard NoChecksum; file CRC64 remains checked) |
+| 8 | 4 | page size |
+| 12 | 4 | commit (final database page count) |
+| 16 | 8 | min TXID |
+| 24 | 8 | max TXID |
+| 32 | 8 | timestamp |
+| 40 | 8 | pre-apply checksum |
+| 48 | 8 | WAL offset |
+| 56 | 8 | WAL size |
+| 64 | 4 | WAL salt 1 |
+| 68 | 4 | WAL salt 2 |
+| 72 | 8 | node ID |
+| 80 | 20 | reserved |
 
-- Segment filename `<start_txid>-<end_txid>.ltx` (or `<txid>.snapshot`);
-- `kind=2 link` is used for **snapshot→delta stitching** (checkpoint alignment);
-- Upload: `Put` (temporary key → atomic rename), **no List on the hot path**.
+Epoch and kind are not header fields. Epoch comes from the object directory; **min TXID=1 identifies a snapshot**. A snapshot covers every final image page except SQLite's pending-byte lock page. Deltas retain the final image of each modified page and apply truncation using commit.
 
-SQLite WAL payload (`WAL1`) for `kind=delta`:
+File order: 100-byte header → native page frames → six-byte zero page header → embedded page index → eight-byte index length → 16-byte trailer. Sorted page frames use native LZ4 encoding. The index stores varint page-number/offset/frame-length tuples terminated by zero. The trailer contains post-apply checksum and file CRC64. No WAL1/WAL2/WAL3, CIDX/CID2 or private 44-byte wrapper is stored.
 
-| Field | Encoding |
-|---|---|
-| magic | 4 bytes `"WAL1"` |
-| page_size | u32 BE |
-| transaction_count | u32 BE |
-| Each transaction | frame_count u32 BE |
-| Each frame | page_no u32 BE + db_size u32 BE + `page_size` bytes |
+Names use fixed 16-digit lowercase hexadecimal `<min>-<max>.ltx`. Only sparse levels `0000`, `0001`, `0002`, `0003`, `0009` are scanned. Ordinary PUT/multipart publishes a complete file and permits same-key idempotent retries; snapshots first complete and fsync a local spool. No snapshot-started/done, epoch-cut, seal, pin, tombstone or custom fence files are created.
 
-The last frame of each transaction has `db_size != 0` (SQLite WAL commit marker). The LTX header’s `start_txid..end_txid` covers the transactions in the payload in order.
+A new epoch continues with a zero-page native `[cut+1,cut+1]` file carrying real page size/commit and WAL coordinates. The first application delta starts at cut+2. Recovery walks epochs backwards, accepting only exact predecessor cuts and excluding late predecessor tails crossing that cut.
 
-The SQL capture production path switches to **`WAL2` page-map**: within a capture chunk, only the **last write** per page number is kept, and the payload contains only the final page image, without preserving intermediate transaction versions.
-
-| Field | Encoding |
-|---|---|
-| magic | 4 bytes `"WAL2"` |
-| page_size | u32 BE |
-| commit | u32 BE (final DB page count)|
-| tx_count | u32 BE (number of application transactions covered by this chunk)|
-| page_count | u32 BE |
-| Each page | page_no u32 BE + `page_size` bytes (ascending by page_no, unique)|
-
-**`WAL3` (page-map v2, ADR-160)**: snapshot/compaction now writes `WAL3`—each page frame is first compressed with an **LZ4 block** (stored raw if it does not shrink), and the **frame position for each page** is placed in the payload header index, so paged reads can fetch and decompress a single page directly with one ranged read (without scanning the payload):
-
-| Field | Encoding |
-|---|---|
-| magic | 4 bytes `"WAL3"` |
-| page_size / commit / tx_count / page_count | u32 BE ×4 |
-| reserved | u32 BE |
-| Index (12B per page) | page_no u32 BE \| off u32 BE (offset within payload) \| stored u32 BE (low 31 bits=frame length, bit31=1 means LZ4)|
-| frames | One per page (raw `page_size` or LZ4 block; always `page_size` after decompression)|
-
-`WAL2` (v1, fixed frames, no compression) can still be decoded (backward compatibility); `PageLocs`/`FrameData` handle both uniformly.
-
-**Paged snapshots (large cells)**: a complete snapshot (pages `1..commit`) may be split into multiple `kind=snapshot` segments that **share the same txid watermark**. Each segment payload is still `WAL2` and carries the same `commit`; page ranges do not overlap and are in ascending page-number order. Shard information is encoded in the **LTX header’s `flags`** (interpreted only for snapshots):
-
-- bit15 = paged marker; bit0..14 = 0-based part index;
-- Segment name `<end_txid>.p<part>.snapshot` (single-segment snapshots that fit remain `<end_txid>.snapshot`, `flags=0`, backward compatible).
-
-restore selects the snapshot with the **largest watermark**, merges all of its parts, and then applies deltas by txid. The default per-segment budget is `ltx.DefaultSnapshotPartBytes` (8 MiB), which must be smaller than the cell-agent `maxSegmentBytes` (64 MiB).
-
-**L1 compaction (large-cell takeover optimization)**: `cells/<scope>/ltx/e<epoch>/L1/` stores folded snapshot parts, and `L1/manifest.json` points to the current L1:
-
-| Field | Description |
-|---|---|
-| `min_txid` / `max_txid` | txid range covered by this L1 |
-| `objects` | L1 snapshot part object keys (in part order) |
-| `commit` / `page_size` | Final page count / page size of the folded snapshot |
-
-Takeover restore: when a manifest exists, read only its `objects` + L0 deltas with `txid > max_txid`; otherwise read the full L0 chain. L0 segments are not deleted for now (`Bucket` has no Delete interface) and are superseded by the manifest pointer.
-
-`WAL1` is retained for scenarios that require transaction boundaries and for compatible decoding. Delta payloads are currently still uncompressed (small; see known-issues).
-
-**L1 page index (`L1/index.bin`, ADR-160)**: `CID2` appends the **12B frame position per page** after the v1 page-number table (page_no u32 \| off u32 \| stored u32, bit31=LZ4), so cold start fetches only the pages it needs; `CIDX` (v1, page numbers only) remains readable.
+Independent UTC-aligned 30-second, five-minute and one-hour schedules promote uncovered ranges L0→L1→L2→L3. L9 is a complete-chain snapshot. Compaction is additive and retains sources. Native epoch GC uses upstream stream-level `ltx/retired.json`; see [storage and GC](storage-and-s3.md).
 
 ## 5. bundle manifest (inside object storage `bundles/sha256/<aa>/<hash>`)
 

@@ -9,11 +9,15 @@ import (
 	"cellhive/internal/bucket"
 	cellcfg "cellhive/internal/config"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -30,7 +34,7 @@ func main() {
 	listen := flag.String("listen", ":18901", "HTTP listen address for /sync-all")
 	dir := flag.String("dir", "", "do-runtime data dir (contains the host-actor sqlite files)")
 	scopePrefix := flag.String("scope-prefix", "workerd/__do__", "scope namespace/class for derived capture scopes")
-	epoch := flag.Uint64("epoch", 1, "epoch")
+	epoch := flag.Uint64("epoch", 1, "standalone capture epoch; claimed DOs use their shard owner epoch")
 	owner := flag.String("owner", "http://127.0.0.1:7001", "owner cell-agent URL")
 	follower := flag.String("follower", "", "comma-separated follower URLs")
 	token := flag.String("token", cellcfg.DeriveCredentials(cellcfg.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
@@ -142,6 +146,42 @@ func main() {
 				log.Fatalf("find workerd: %v", err)
 			}
 		}
+		// Never expose sparse databases to a binary that silently ignores the
+		// paging environment. The fork advertises this explicit protocol probe.
+		probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
+		probe := exec.CommandContext(probeCtx, bin, "cellhive-build-info")
+		output, probeErr := probe.Output()
+		probeCancel()
+		if probeErr != nil || !strings.Contains("\n"+string(output), "\ndo-paging/1\n") ||
+			!strings.Contains("\n"+string(output), "\ndo-paging-fail-stop/1\n") ||
+			!strings.Contains("\n"+string(output), "\ndo-paging-lifecycle/1\n") {
+			log.Fatalf("workerd lacks required DO paging/fail-stop protocol v1: %v", probeErr)
+		}
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			log.Fatalf("paging capability: %v", err)
+		}
+		pageToken := hex.EncodeToString(secret)
+		paging, err := dosupervisor.NewPaging(*dir, pageToken)
+		if err != nil {
+			log.Fatalf("paging registry: %v", err)
+		}
+		defer paging.Close()
+		s.Paging = paging
+		s.ScopedRecovery = strings.Contains("\n"+string(output), "\ndo-paging-local-close/1\n")
+
+		pageListener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			log.Fatalf("paging listener: %v", err)
+		}
+		pageServer := &http.Server{Handler: s.PagingHandler(), ReadHeaderTimeout: 5 * time.Second}
+		defer pageServer.Close()
+		go func() {
+			if err := pageServer.Serve(pageListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("paging service failed: %v", err)
+				stop()
+			}
+		}()
 		creds := cellcfg.DeriveCredentials(cellcfg.LoadRootKey())
 		childEnv, err := doruntime.WorkerdEnv(doruntime.Config{
 			CellURL:           *owner,
@@ -152,12 +192,25 @@ func main() {
 			AIURL:             os.Getenv("CELLHIVE_AI_URL"),
 			AIKey:             os.Getenv("CELLHIVE_AI_KEY"),
 			GateURL:           os.Getenv("CELLHIVE_DO_GATE_URL"),
+			PagingLifecycle:   true,
 		})
 		if err != nil {
 			log.Fatalf("build workerd environment: %v", err)
 		}
+		childEnv = append(childEnv, "CELLHIVE_DO_PAGING_URL=http://"+pageListener.Addr().String(), "CELLHIVE_DO_PAGING_TOKEN="+pageToken, "CELLHIVE_DO_PAGING_FAIL_STOP=1")
+		// Renewal has its own lifetime: canceling the child requests termination,
+		// but only Run returning proves it has stopped accessing the database.
+		s.OwnerLeases = dosupervisor.NewOwnerLeases(context.Background(), agent.RenewDOOwner)
+		defer s.OwnerLeases.Close()
+		childExited := make(chan struct{})
+		defer func() {
+			cancelRun()
+			<-childExited // join before paging.Close or any remaining lease teardown
+		}()
 		go func() {
-			if err := doruntime.Run(runCtx, bin, *config, childEnv); err != nil && runCtx.Err() == nil {
+			err := waitForChild(func() error { return doruntime.Run(runCtx, bin, *config, childEnv) },
+				s.OwnerLeases.Close, childExited)
+			if runCtx.Err() == nil {
 				log.Printf("workerd exited: %v", err)
 				stop()
 			}
@@ -165,9 +218,15 @@ func main() {
 		log.Printf("supervising workerd %s config=%s", bin, *config)
 		// When we own the workerd process we also own its lease lifecycle:
 		// renew the DO owner leases and drain on shutdown (ADR-078/083).
-		go doruntime.RenewLoop(ctx, *doURL, *token, doruntime.RenewEvery,
-			func(err error) { log.Printf("do renew failed: %v", err) })
-		drain = func() error { return doruntime.Drain(*doURL, *token) }
+		// Gated hosts negotiate independent Go renewal at restore/claim time.
+		// Ungated runtimes retain the local workerd lifecycle endpoint.
+		if os.Getenv("CELLHIVE_DO_GATE_URL") == "" {
+			go doruntime.RenewLoop(ctx, *doURL, *token, doruntime.RenewEvery,
+				func(err error) { log.Printf("do renew failed: %v", err) })
+		}
+		drain = func() error {
+			return drainLiveChild(childExited, func() error { return doruntime.Drain(*doURL, *token) })
+		}
 	}
 
 	srv := &http.Server{Addr: *listen, Handler: s.Handler()}
@@ -204,5 +263,25 @@ func optionalRestoreError(err error, optional bool) error {
 	if optional && errors.Is(err, bucket.ErrNotFound) {
 		return nil
 	}
+	return err
+}
+
+// A dead child cannot prove a successful drain. Keep the owner record fenced
+// until its lease expires instead of releasing it using ambiguous local state.
+func drainLiveChild(childExited <-chan struct{}, drain func() error) error {
+	select {
+	case <-childExited:
+		return errors.New("workerd already exited; retaining ownership until lease expiry")
+	default:
+		return drain()
+	}
+}
+
+// run must wait for the OS process to exit. Renewal ends only after that proof,
+// before shutdown is notified; no release RPC or certificate reset is involved.
+func waitForChild(run func() error, stopRenewal func(), exited chan<- struct{}) error {
+	err := run()
+	stopRenewal()
+	close(exited)
 	return err
 }

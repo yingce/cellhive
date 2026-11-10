@@ -27,7 +27,25 @@ done
 export PERF_AGENT="http://127.0.0.1:$E2E_AGENT_PORT" PERF_RUNTIME="http://127.0.0.1:$E2E_RT_PORT" PERF_NS=e2eperf PERF_HOST=e2eperf.test
 node "$E2E_ROOT/scripts/e2e/kv-performance.cjs" | tee "$E2E_BASE/performance.jsonl"
 # Snapshot resource use and logs before cleanup.
-ps -p "$(cat "$E2E_BASE/perf.pid"),$(cat "$E2E_BASE/rt.pid")" -o pid,pcpu,rss,etime,args
+python3 - "$E2E_BASE" <<'PYRES'
+import json,sys,subprocess
+from pathlib import Path
+root=Path(sys.argv[1])
+ids={int(p.read_text()) for p in root.glob('*.pid') if p.read_text().strip().isdigit()}
+rows=[line.split(None,4) for line in subprocess.check_output(['ps','-e','-o','pid=,ppid=,rss=,pcpu=,comm='],text=True).splitlines()]
+while True:
+ children={int(row[0]) for row in rows if int(row[1]) in ids}
+ if children<=ids:break
+ ids|=children
+for pid,parent,rss,cpu,name in rows:
+ if int(pid) not in ids:continue
+ peak=None
+ try:
+  for line in Path('/proc/'+pid+'/status').read_text().splitlines():
+   if line.startswith('VmHWM:'):peak=int(line.split()[1])
+ except FileNotFoundError:pass
+ print(json.dumps({'event':'process-resource','pid':int(pid),'parent':int(parent),'name':name,'rss_kib':int(rss),'peak_rss_kib':peak,'lifetime_cpu_percent':float(cpu)}))
+PYRES
 curl -fsS -H "Authorization: Bearer $(e2e_token internal)" "$PERF_AGENT/metrics" > "$E2E_BASE/metrics.txt" || true
 if [[ -n "${PERF_PEER:-}" ]]; then curl -fsS -H "Authorization: Bearer $(e2e_token internal)" "$PERF_PEER/metrics" > "$E2E_BASE/peer-metrics.txt"; fi
 export PERF_RUN_DIR="$E2E_BASE" PERF_ADMIN="http://127.0.0.1:$E2E_ADMIN_PORT" PERF_ROOT="$E2E_ROOT"

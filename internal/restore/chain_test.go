@@ -6,38 +6,23 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"cellhive/internal/ltx"
 )
 
-func TestChainRejectsConflictingEpochMarkers(t *testing.T) {
-	for _, cuts := range [][]uint64{{5, 7}, {7, 5}} {
-		headers := []ltx.Header{{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}}
-		for _, cut := range cuts {
-			headers = append(headers, ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: cut + 1, EndTxID: cut})
-		}
-		if _, _, _, err := selectChain(headers); err == nil {
-			t.Fatalf("accepted conflicting cuts %v", cuts)
-		}
-	}
-}
-
-func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
+func TestNativeRestoreChoosesLongestContiguousOverlap(t *testing.T) {
 	page := func(value byte) map[uint32][]byte {
-		return map[uint32][]byte{1: bytes.Repeat([]byte{value}, 64)}
+		return map[uint32][]byte{1: bytes.Repeat([]byte{value}, 512)}
 	}
 	snapshot := func(txid uint64, value byte) []byte {
-		return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 38, StartTxID: txid, EndTxID: txid},
-			encodePageMap(t, 64, 1, page(value)))
+		return nativeTestFile(t, 512, 1, 1, txid, page(value))
 	}
 	delta := func(start, end uint64, value byte) []byte {
-		return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 38, StartTxID: start, EndTxID: end},
-			encodePageMap(t, 64, 1, page(value)))
+		return nativeTestFile(t, 512, 1, start, end, page(value))
 	}
-	// The newest snapshot overlaps a batched delta. The older snapshot has an
-	// exact suffix, and the whole batch must remain in that suffix.
+	// The newest snapshot overlaps a compacted delta. Its later pages remain
+	// necessary, so the suffix must include that whole delta.
 	s33 := snapshot(33, 'a')
 	s34 := snapshot(34, 'b')
 	d34 := delta(34, 49, 'c')
@@ -48,7 +33,7 @@ func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
 		t.Fatalf("apply fallback chain: %v", err)
 	}
 	image, err := os.ReadFile(dest)
-	if err != nil || !bytes.Equal(image, bytes.Repeat([]byte{'d'}, 64)) {
+	if err != nil || !bytes.Equal(image, bytes.Repeat([]byte{'d'}, 512)) {
 		t.Fatalf("restored image = %q, %v", image, err)
 	}
 	ix, err := IndexChain(chain)
@@ -59,13 +44,13 @@ func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
 	if err != nil || ix.Watermark != 66 || !bytes.Equal(got, image) {
 		t.Fatalf("paged image = %q, watermark %d, err %v", got, ix.Watermark, err)
 	}
-	compact, err := Compact(chain, 0)
+	compact, err := Compact(chain)
 	if err != nil {
 		t.Fatalf("compact fallback chain: %v", err)
 	}
-	h, _, err := ltx.Decode(compact[0])
-	if err != nil || h.EndTxID != 66 {
-		t.Fatalf("compacted watermark = %d, err %v", h.EndTxID, err)
+	h, err := ltx.ValidateNative(compact[0])
+	if err != nil || h.MaxTXID != 66 {
+		t.Fatalf("compacted watermark = %d, err %v", h.MaxTXID, err)
 	}
 }
 
@@ -73,14 +58,12 @@ func TestRestoreFallsBackToContiguousSnapshot(t *testing.T) {
 // Snapshots are deliberately supplied out of order, as object listings need not
 // preserve the order in which an owner uploaded them.
 func TestRestoreAdversarialChains(t *testing.T) {
-	const pageSize = 64
+	const pageSize = 512
 	snapshot := func(txid uint64, value byte) []byte {
-		return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 7, StartTxID: txid, EndTxID: txid},
-			encodePageMap(t, pageSize, 1, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)}))
+		return nativeTestFile(t, pageSize, 1, 1, txid, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)})
 	}
 	delta := func(start, end uint64, value byte) []byte {
-		return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 7, StartTxID: start, EndTxID: end},
-			encodePageMap(t, pageSize, 1, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)}))
+		return nativeTestFile(t, pageSize, 1, start, end, map[uint32][]byte{1: bytes.Repeat([]byte{value}, pageSize)})
 	}
 	check := func(t *testing.T, chain [][]byte, want byte, wantTxID uint64) {
 		t.Helper()
@@ -100,7 +83,7 @@ func TestRestoreAdversarialChains(t *testing.T) {
 		if err != nil || index.Watermark != wantTxID || !bytes.Equal(page, full) {
 			t.Fatalf("paged image = %q, watermark %d, err %v", page, index.Watermark, err)
 		}
-		compacted, err := Compact(chain, 0)
+		compacted, err := Compact(chain)
 		if err != nil {
 			t.Fatalf("compact: %v", err)
 		}
@@ -139,7 +122,7 @@ func TestRestoreAdversarialChains(t *testing.T) {
 		if _, err := IndexChain(chain); err == nil {
 			t.Fatal("paged restore accepted missing transaction 16")
 		}
-		if _, err := Compact(chain, 0); err == nil {
+		if _, err := Compact(chain); err == nil {
 			t.Fatal("compaction accepted missing transaction 16")
 		}
 	})
@@ -153,113 +136,122 @@ func TestRestoreAdversarialChains(t *testing.T) {
 		if _, err := IndexChain(chain); err == nil {
 			t.Fatal("paged restore accepted corrupted batch")
 		}
-		if _, err := Compact(chain, 0); err == nil {
+		if _, err := Compact(chain); err == nil {
 			t.Fatal("compaction accepted corrupted batch")
 		}
 	})
 }
 
-func TestRestoreRejectsOverlapWithoutContiguousFallback(t *testing.T) {
-	page := map[uint32][]byte{1: bytes.Repeat([]byte{'a'}, 64)}
-	snapshot := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 34, EndTxID: 34},
-		encodePageMap(t, 64, 1, page))
-	delta := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 34, EndTxID: 49},
-		encodePageMap(t, 64, 1, page))
-	chain := [][]byte{snapshot, delta}
-	if _, err := ApplyFile(filepath.Join(t.TempDir(), "unsafe.db"), chain); err == nil || !strings.Contains(err.Error(), "non-contiguous chain") {
-		t.Fatalf("ApplyFile error = %v, want overlap rejection", err)
+func TestNativeRestoreAcceptsCompactedOverlap(t *testing.T) {
+	encode := func(min, max uint64, value byte) []byte {
+		raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: min, MaxTXID: max}, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{value}, 512)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
 	}
-	if _, err := IndexChain(chain); err == nil || !strings.Contains(err.Error(), "non-contiguous chain") {
-		t.Fatalf("IndexChain error = %v, want overlap rejection", err)
+	chain := [][]byte{encode(1, 34, 'a'), encode(34, 49, 'b')}
+	dest := filepath.Join(t.TempDir(), "overlap.db")
+	if _, err := ApplyFile(dest, chain); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestSelectChainDoesNotMergeSnapshotsFromDifferentEpochs(t *testing.T) {
-	// An idle cell can open epoch 39 with a snapshot at txid 100, then open
-	// epoch 40 (new owner) without any write, producing a second snapshot at
-	// the same txid. They are alternatives, not parts of one snapshot.
-	e39 := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 39, StartTxID: 100, EndTxID: 100, CRC: 7}
-	e40 := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 40, StartTxID: 100, EndTxID: 100, CRC: 7}
-	d := ltx.Header{Kind: ltx.KindDelta, Epoch: 40, StartTxID: 101, EndTxID: 101, CRC: 9}
-	snap, deltas, watermark, err := selectChain([]ltx.Header{e39, e40, d})
+	raw, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(raw, bytes.Repeat([]byte{'b'}, 512)) {
+		t.Fatalf("restored wrong final image: %v", err)
+	}
+	ix, err := IndexChain(chain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap) != 1 || len(deltas) != 1 {
-		t.Fatalf("snap=%v deltas=%v, want one snapshot from one epoch and one delta", snap, deltas)
-	}
-	if got := e39; false {
-		_ = got
-	}
-	// The newest epoch's snapshot must be chosen.
-	if uint64(40) != 40 {
-	}
-	if h := (ltx.Header{}); false {
-		_ = h
-	}
-	// selectChain returns indices, so check the chosen header's epoch.
-	// (The index order is the input order: e39=0, e40=1.)
-	if snap[0] != 1 {
-		t.Fatalf("chose snapshot index %d, want newest epoch snapshot index 1", snap[0])
-	}
-	if watermark != 101 {
-		t.Fatalf("watermark=%d, want 101", watermark)
+	page, err := ix.Page(1)
+	if err != nil || ix.Watermark != 49 || !bytes.Equal(page, raw) {
+		t.Fatalf("paged restore disagrees: watermark=%d err=%v", ix.Watermark, err)
 	}
 }
 
-func TestMarkerTruncatesFencedOldEpochTail(t *testing.T) {
-	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
-	old := ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 6, EndTxID: 7, CRC: 2}
-	late := ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 8, EndTxID: 9, CRC: 3}
-	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 8, EndTxID: 7}
-	newDelta := ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 8, EndTxID: 9, CRC: 4}
-	_, deltas, watermark, err := selectChain([]ltx.Header{snap, old, late, marker, newDelta})
+// Epoch clipping and conflicting predecessor coverage are exercised in
+// replica/epoch_chain_test.go. Native file headers carry no epoch or marker.
+func TestNativeContinuationRequiresContiguousPredecessor(t *testing.T) {
+	page := map[uint32][]byte{1: make([]byte, 512)}
+	base := nativeTestFile(t, 512, 1, 1, 5, page)
+	continuation := nativeTestFile(t, 512, 1, 7, 7, nil)
+	if err := ValidateChain([][]byte{base, continuation}); err == nil {
+		t.Fatal("accepted missing predecessor TXID6")
+	}
+	base = nativeTestFile(t, 512, 1, 1, 6, page)
+	if err := ValidateChain([][]byte{base, continuation}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChain([][]byte{continuation}); err == nil {
+		t.Fatal("continuation accepted without snapshot")
+	}
+}
+
+func TestNativeSnapshotUsesMaxTXIDAsRestoreWatermark(t *testing.T) {
+	headers := []ltx.NativeHeader{{MinTXID: 1, MaxTXID: 5}, {MinTXID: 1, MaxTXID: 10}, {MinTXID: 11, MaxTXID: 12}}
+	order, watermark, err := selectNativeChain(headers)
+	if err != nil || len(order) != 2 || order[0] != 1 || order[1] != 2 || watermark != 12 {
+		t.Fatalf("selection=%v watermark=%d err=%v", order, watermark, err)
+	}
+	headers[2].MinTXID = 12
+	if _, _, err := selectNativeChain(headers); err == nil {
+		t.Fatal("accepted missing transaction11")
+	}
+}
+
+func TestNativeValidateChainRejectsMissingSnapshotPage(t *testing.T) {
+	// This file has a valid native index/trailer/CRC, but no page1. A TXID-only
+	// continuity proof must not authorize deleting its predecessor epoch.
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 7}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if watermark != 9 || len(deltas) != 2 {
-		t.Fatalf("watermark=%d deltas=%v, want 9 and the old prefix + new-epoch delta", watermark, deltas)
-	}
-	if deltas[0] != 1 || deltas[1] != 4 {
-		t.Fatalf("chose delta indices %v, want old prefix and new epoch delta", deltas)
+	if err := ValidateChain([][]byte{raw}); err == nil {
+		t.Fatal("incomplete snapshot accepted as independently recoverable")
 	}
 }
 
-func TestMarkerWithoutPredecessorPrefixFailsClosed(t *testing.T) {
-	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
-	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}
-	newDelta := ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 9, EndTxID: 9, CRC: 4}
-	if _, _, _, err := selectChain([]ltx.Header{snap, marker, newDelta}); err == nil {
-		t.Fatal("marker gap should fail closed")
+func TestNativeValidateChainChecksPageCoverageAndShape(t *testing.T) {
+	encode := func(ps, commit uint32, lo, hi uint64, pages ...ltx.WALPage) []byte {
+		t.Helper()
+		raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: ps, Commit: commit, MinTXID: lo, MaxTXID: hi}, pages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	p := func(n uint32) ltx.WALPage { return ltx.WALPage{PageNo: n, Data: make([]byte, 512)} }
+	base := encode(512, 2, 1, 5, p(1), p(2))
+	continuation := encode(512, 2, 6, 6)
+	if err := ValidateChain([][]byte{base, continuation}); err != nil {
+		t.Fatal(err)
+	}
+	wrongSize := encode(1024, 2, 6, 6)
+	if err := ValidateChain([][]byte{base, wrongSize}); err == nil {
+		t.Fatal("page-size mismatch accepted")
+	}
+	corrupt := append([]byte(nil), continuation...)
+	corrupt[len(corrupt)-1] ^= 1
+	if err := ValidateChain([][]byte{base, corrupt}); err == nil {
+		t.Fatal("bad file CRC accepted")
+	}
+	shrink := encode(512, 1, 6, 6)
+	growWithoutPage := encode(512, 2, 7, 7)
+	if err := ValidateChain([][]byte{base, shrink, growWithoutPage}); err == nil {
+		t.Fatal("truncated page resurrected")
+	}
+	growWithPage := encode(512, 2, 7, 7, p(2))
+	if err := ValidateChain([][]byte{base, shrink, growWithPage}); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestMarkerCutIsRestoreLowerBound(t *testing.T) {
-	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5, CRC: 1}
-	marker := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}
-	if _, _, _, err := selectChain([]ltx.Header{snap, marker}); err == nil {
-		t.Fatal("marker-only chain restored below its inherited cut")
+func TestRestoreRejectsPrivateSegmentFormat(t *testing.T) {
+	raw := []byte("\x4c\x54\x58\x31\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x07\x56\x50\x41\xe6\x70\x72\x69\x76\x61\x74\x65")
+	if _, err := IndexChain([][]byte{raw}); err == nil {
+		t.Error("paged restore accepted private 44-byte segment")
 	}
-	// A snapshot at the cut is a valid marker-only chain.
-	atCut := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 8, EndTxID: 8, CRC: 2}
-	if _, _, watermark, err := selectChain([]ltx.Header{atCut, marker}); err != nil || watermark != 8 {
-		t.Fatalf("marker-at-cut restore = %d, %v; want 8", watermark, err)
-	}
-}
-
-func TestMarkerCutsMustBeMonotonic(t *testing.T) {
-	snap := ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}
-	m2 := ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 8, EndTxID: 7}
-	m3 := ltx.Header{Kind: ltx.KindMarker, Epoch: 3, StartTxID: 7, EndTxID: 6}
-	if _, _, _, err := selectChain([]ltx.Header{snap, m2, m3}); err == nil {
-		t.Fatal("accepted a regressing epoch cut")
-	}
-}
-
-func TestValidateChainRejectsMarkerOnlyGap(t *testing.T) {
-	snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 5, EndTxID: 5}, encodePageMap(t, 64, 1, map[uint32][]byte{1: bytes.Repeat([]byte{1}, 64)}))
-	marker := ltx.Encode(ltx.Header{Kind: ltx.KindMarker, Epoch: 2, StartTxID: 9, EndTxID: 8}, nil)
-	if err := ValidateChain([][]byte{snap, marker}); err == nil {
-		t.Fatal("ValidateChain accepted a marker-only chain below the cut")
+	if _, err := ApplyFile(filepath.Join(t.TempDir(), "legacy.db"), [][]byte{raw}); err == nil {
+		t.Error("full restore accepted private 44-byte segment")
 	}
 }

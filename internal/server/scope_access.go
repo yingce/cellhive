@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"cellhive/internal/owner"
 	"cellhive/internal/replica"
 	"cellhive/internal/scopedtoken"
 	"cellhive/internal/telemetry"
@@ -14,6 +15,20 @@ import (
 // authorization. Revocation snapshot, stale-copy invalidation, and admission
 // must stay in this order. The caller holds release until its handler returns.
 func (s *Server) beginBindingAccess(w http.ResponseWriter, r *http.Request, kind string, claims scopedtoken.Claims) (preInvalidated string, release func(), ok bool) {
+	var proof *owner.ResourceProof
+	if (kind == "kv" || kind == "queue") && s.Owner != nil && s.Store != nil && s.resourceReplica() != nil {
+		if sc, found := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); found {
+			proof, _ = s.Owner.LocalResourceProof(sc)
+			if proof != nil {
+				*r = *r.WithContext(context.WithValue(r.Context(), resourceProofKey{}, &resourceAccessProof{scope: sc, proof: proof}))
+			}
+		}
+	}
+	defer func() {
+		if !ok && proof != nil {
+			proof.Release()
+		}
+	}()
 	preparedGeneration := ""
 	if (kind == "kv" || kind == "queue") && s.resourceReplica() != nil {
 		if sc, ok := s.gateScope(r.Context(), kind, claims.Namespace, claims.Name, r.URL.Query()); ok {
@@ -51,6 +66,10 @@ func (s *Server) beginBindingAccess(w http.ResponseWriter, r *http.Request, kind
 				var err error
 				end, err = s.beginPreparedResourceRequest(r.Context(), sc, preparedGeneration)
 				if err != nil {
+					if errors.Is(err, owner.ErrNotOwner) {
+						writeErr(w, http.StatusServiceUnavailable, "owner_proof_expired", "local resource authority changed")
+						return "", nil, false
+					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						s.captureErr(w, err, "request_gate_failed")
 						return "", nil, false
@@ -69,6 +88,15 @@ func (s *Server) beginBindingAccess(w http.ResponseWriter, r *http.Request, kind
 			}
 		}
 		release = end
+	}
+	if proof != nil {
+		end := release
+		release = func() {
+			if end != nil {
+				end()
+			}
+			proof.Release()
+		}
 	}
 	return preInvalidated, release, true
 }

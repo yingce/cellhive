@@ -21,6 +21,13 @@ var (
 	ErrNotSupported = errors.New("bucket: not supported")
 )
 
+// ImmediateLister optionally lists only logical keys immediately below prefix.
+// Prefix must end in a slash. Physical authority keys are never returned.
+// Errors must not return partial results. Recursive List remains unchanged.
+type ImmediateLister interface {
+	ListImmediate(ctx context.Context, prefix string) ([]string, error)
+}
+
 // SizeLister is an optional Bucket extension: list keys with their sizes
 // without reading object bodies (S3 list responses carry sizes; local files are
 // stat'ed). Callers fall back to Get-based sizing when absent.

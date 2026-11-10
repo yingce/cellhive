@@ -52,6 +52,7 @@ func TestPinnedKVVersionMappingAndRevocation(t *testing.T) {
 	if got := kvReq(t, s, "POST", "/v1/kv/put?ns=acme&key=fenced", token, []byte("bad")); got != 403 {
 		t.Fatalf("pinned resource fence: %d", got)
 	}
+	claimSeededScope(t, s, control.Scope())
 	if err := s.Control.DeleteResource(ctx, "acme", "kv", "KV", "test"); err != nil {
 		t.Fatal(err)
 	}

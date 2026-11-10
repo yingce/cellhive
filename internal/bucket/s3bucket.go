@@ -12,10 +12,12 @@ import (
 	"time"
 
 	aws "github.com/aws/aws-sdk-go-v2/aws"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // S3Options configures an S3-compatible bucket.
@@ -172,8 +174,13 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		n = segProbeBytes
 	}
 	b.gets.Add(1)
+	var fallback bool
+	var fallbackSize, fallbackOffset int64
+	var fallbackETag string
 	rng := fmt.Sprintf("bytes=-%d", n)
-	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng})
+	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
+		o.APIOptions = append(o.APIOptions, awsmiddleware.AddRawResponseToMetadata)
+	})
 	if err != nil {
 		if isNotFound(err) {
 			return nil, 0, "", ErrNotFound
@@ -195,45 +202,66 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		if off < 0 {
 			off = 0
 		}
-		data, etag, rerr := b.RangedGet(ctx, key, off, size-off)
-		if rerr != nil {
-			return nil, 0, "", rerr
+		fallback, fallbackSize, fallbackOffset, fallbackETag = true, size, off, etag
+		rng = fmt.Sprintf("bytes=%d-%d", off, size-1)
+		b.gets.Add(1)
+		out, err = b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
+			o.APIOptions = append(o.APIOptions, awsmiddleware.AddRawResponseToMetadata)
+		})
+		if err != nil {
+			if isNotFound(err) {
+				return nil, 0, "", ErrNotFound
+			}
+			return nil, 0, "", err
 		}
-		return data, size, etag, nil
 	}
 	defer out.Body.Close()
-	data, err := readTailBounded(key, out.Body, n, readContentLength(out.ContentLength), b.maxRead)
+	if fallback && (fallbackETag == "" || unquote(aws.ToString(out.ETag)) != fallbackETag) {
+		return nil, 0, "", ErrPrecondition
+	}
+	data, received, err := readTailBounded(key, out.Body, n, readContentLength(out.ContentLength), b.maxRead)
 	if err != nil {
 		return nil, 0, "", err
 	}
-	total := int64(len(data))
-	if out.ContentRange != nil {
-		if slash := strings.LastIndex(*out.ContentRange, "/"); slash >= 0 && slash+1 < len(*out.ContentRange) {
-			if parsed, perr := strconv.ParseInt((*out.ContentRange)[slash+1:], 10, 64); perr == nil {
-				total = parsed
-			}
-		}
-	} else {
-		// A 206 without Content-Range is non-compliant; HEAD gives the true
-		// total so fencing tokens stay correct. A 200 that ignored Range has a
-		// full ContentLength and this HEAD is unnecessary but harmless.
-		if size, _, serr := b.Stat(ctx, key); serr == nil {
-			total = size
-		} else if out.ContentLength != nil {
-			total = *out.ContentLength
-		}
+	// Never pair this payload with a later HEAD: append may advance its size.
+	response, ok := awsmiddleware.GetRawResponse(out.ResultMetadata).(*smithyhttp.Response)
+	if !ok || response == nil {
+		return nil, 0, "", fmt.Errorf("bucket: missing suffix response status for %s", key)
 	}
-	if int64(len(data)) > int64(n) {
-		data = data[len(data)-n:]
-	}
-	if total < int64(len(data)) {
-		total = int64(len(data))
+	total := received
+	switch response.StatusCode {
+	case http.StatusOK:
+		if fallback && (fallbackOffset != 0 || received != fallbackSize) {
+			return nil, 0, "", fmt.Errorf("bucket: invalid whole-object suffix fallback for %s", key)
+		}
+	// Range ignored or the whole small object returned. Count this response,
+	// including chunked bodies, rather than reading another object's version.
+	case http.StatusPartialContent:
+		raw := aws.ToString(out.ContentRange)
+		extent, full, valid := strings.Cut(strings.TrimPrefix(raw, "bytes "), "/")
+		first, last, dash := strings.Cut(extent, "-")
+		start, e1 := strconv.ParseInt(first, 10, 64)
+		end, e2 := strconv.ParseInt(last, 10, 64)
+		size, e3 := strconv.ParseInt(full, 10, 64)
+		if !strings.HasPrefix(raw, "bytes ") || !valid || !dash || e1 != nil || e2 != nil || e3 != nil ||
+			start < 0 || end < start || size <= end || end != size-1 || end-start+1 != received || received > int64(n) {
+			return nil, 0, "", fmt.Errorf("bucket: invalid suffix Content-Range for %s", key)
+		}
+		if fallback && (start != fallbackOffset || size != fallbackSize) {
+			return nil, 0, "", fmt.Errorf("bucket: mismatched suffix fallback range for %s", key)
+		}
+		total = size
+	default:
+		return nil, 0, "", fmt.Errorf("bucket: unexpected suffix response status %d", response.StatusCode)
 	}
 	return data, total, unquote(aws.ToString(out.ETag)), nil
 }
 
 // Put implements Bucket.
 func (b *S3Bucket) Put(ctx context.Context, key string, data []byte) (string, error) {
+	if strings.HasPrefix(key, "cells/") && strings.Contains(key, "/ltx/e") {
+		return b.PutReader(ctx, key, bytes.NewReader(data), int64(len(data)))
+	}
 	b.puts.Add(1)
 	out, err := b.client.PutObject(ctx, &s3.PutObjectInput{Bucket: &b.bucket, Key: &key, Body: bytes.NewReader(data)})
 	if err != nil {
@@ -244,16 +272,7 @@ func (b *S3Bucket) Put(ctx context.Context, key string, data []byte) (string, er
 
 // ConditionalCreate implements Bucket.
 func (b *S3Bucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
-	b.creates.Add(1)
-	star := "*"
-	out, err := b.client.PutObject(ctx, &s3.PutObjectInput{Bucket: &b.bucket, Key: &key, Body: bytes.NewReader(data), IfNoneMatch: &star})
-	if err != nil {
-		if isPrecondition(err) {
-			return "", ErrPrecondition
-		}
-		return "", err
-	}
-	return unquote(aws.ToString(out.ETag)), nil
+	return b.ConditionalCreateReader(ctx, key, bytes.NewReader(data), int64(len(data)))
 }
 
 // CAS implements Bucket.
@@ -278,6 +297,9 @@ func (b *S3Bucket) ConditionalDelete(ctx context.Context, key, expectEtag string
 	em := quote(expectEtag)
 	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &b.bucket, Key: &key, IfMatch: &em})
 	if err != nil {
+		if isNotFound(err) {
+			return ErrNotFound
+		}
 		if isPrecondition(err) {
 			return ErrPrecondition
 		}

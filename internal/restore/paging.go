@@ -1,7 +1,10 @@
 package restore
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 
 	"cellhive/internal/ltx"
@@ -16,123 +19,108 @@ type PageIndex struct {
 	PageSize  uint32
 	Commit    uint32
 	Watermark uint64
-
-	refs     map[uint32]int
-	payloads [][]byte
+	refs      map[uint32]pageRef
+	objects   [][]byte
+	timestamp int64
 }
 
-// IndexChain builds a PageIndex from an ordered segment chain (snapshot parts
-// plus deltas), applying the same ordering and txid-contiguity rules as
-// mergeChain. It reads only page numbers, not page data.
-func IndexChain(segments [][]byte) (*PageIndex, error) {
-	type part struct {
-		h       ltx.Header
-		payload []byte
-	}
-	var parts []part
-	for i, raw := range segments {
-		split, err := ltx.Split(raw)
-		if err != nil {
-			return nil, fmt.Errorf("restore: decode segment %d: %w", i, err)
-		}
-		for _, one := range split {
-			h, payload, err := ltx.Decode(one)
-			if err != nil {
-				return nil, err
-			}
-			parts = append(parts, part{h: h, payload: payload})
-		}
-	}
+type pageRef struct {
+	object       int
+	offset, size uint64
+}
 
-	headers := make([]ltx.Header, len(parts))
-	for i, p := range parts {
-		headers[i] = p.h
+// IndexChain validates native files and builds locations into their original
+// compressed frames. No private WAL map, re-encoding or decoded database copy
+// is retained. Epochs have already been resolved by the replica planner.
+func IndexChain(segments [][]byte) (*PageIndex, error) {
+	headers := make([]ltx.NativeHeader, len(segments))
+	for i, raw := range segments {
+		h, err := ltx.ParseNativeHeader(raw)
+		if err != nil {
+			return nil, fmt.Errorf("restore: native header %d: %w", i, err)
+		}
+		headers[i] = h
 	}
-	snapshots, deltas, watermark, err := selectChain(headers)
+	order, watermark, err := selectNativeChain(headers)
 	if err != nil {
 		return nil, err
 	}
-	order := make([]part, 0, len(snapshots)+len(deltas))
-	for _, i := range snapshots {
-		order = append(order, parts[i])
-	}
-	for _, i := range deltas {
-		order = append(order, parts[i])
-	}
-
-	snapSet := make(map[int]bool, len(snapshots))
-	for _, i := range snapshots {
-		snapSet[i] = true
-	}
-	ix := &PageIndex{refs: map[uint32]int{}, Watermark: watermark}
-	snapCommit := uint32(0)
-	snapPages := map[uint32]bool{}
-	for idx, p := range order {
-		pageSize, commit, _, _, err := ltx.DecodeWALPageMap(p.payload)
-		if err != nil {
-			return nil, fmt.Errorf("restore: decode part %d: %w", idx, err)
-		}
-		if ix.PageSize == 0 {
-			ix.PageSize = pageSize
-		} else if pageSize != ix.PageSize {
-			return nil, fmt.Errorf("restore: page size mismatch")
-		}
-		if snapSet[idx] {
-			if snapCommit == 0 {
-				snapCommit = commit
-			} else if commit != snapCommit {
-				return nil, fmt.Errorf("restore: snapshot parts disagree on commit %d/%d", snapCommit, commit)
-			}
-		}
-		if commit > ix.Commit {
-			ix.Commit = commit
-		}
-		nums, err := ltx.PageMapNumbers(p.payload)
+	ix := &PageIndex{Watermark: watermark, refs: make(map[uint32]pageRef)}
+	for _, i := range order {
+		raw := segments[i]
+		d, err := ltx.NewNativeDecoder(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
-		for _, no := range nums {
-			if snapSet[idx] {
-				if snapPages[no] {
-					return nil, fmt.Errorf("restore: duplicate snapshot page %d", no)
-				}
-				snapPages[no] = true
+		if ix.PageSize == 0 {
+			ix.PageSize = d.Header.PageSize
+		} else if ix.PageSize != d.Header.PageSize {
+			return nil, fmt.Errorf("restore: page size mismatch")
+		}
+		for {
+			_, err := d.ReadPage()
+			if err == io.EOF {
+				break
 			}
-			ix.refs[no] = idx
+			if err != nil {
+				return nil, err
+			}
 		}
-		ix.payloads = append(ix.payloads, p.payload)
-	}
-	if ix.Commit == 0 || ix.PageSize == 0 {
-		return nil, fmt.Errorf("restore: snapshot has no pages")
-	}
-	for pgno := uint32(1); pgno <= ix.Commit; pgno++ {
-		if _, ok := ix.refs[pgno]; !ok {
-			return nil, fmt.Errorf("restore: chain does not define page %d of %d", pgno, ix.Commit)
+		// The streaming decoder has checked this exact tail against every frame.
+		size := binary.BigEndian.Uint64(raw[len(raw)-24:])
+		start := uint64(len(raw)) - 24 - size
+		locations, err := ltx.ParseNativePageIndex(raw[start:uint64(len(raw))-24], start-6, d.Header)
+		if err != nil {
+			return nil, err
 		}
+		if d.Header.Commit < ix.Commit {
+			for pg := range ix.refs {
+				if pg > d.Header.Commit {
+					delete(ix.refs, pg)
+				}
+			}
+		}
+		ix.Commit = d.Header.Commit
+		ix.timestamp = d.Header.Timestamp
+		object := len(ix.objects)
+		ix.objects = append(ix.objects, raw)
+		for _, loc := range locations {
+			ix.refs[loc.PageNo] = pageRef{object, loc.Offset, loc.Size}
+		}
+	}
+	if ix.PageSize == 0 {
+		return nil, fmt.Errorf("restore: no native snapshot")
+	}
+	expected := uint64(ix.Commit)
+	if uint64(0x40000000)/uint64(ix.PageSize)+1 <= uint64(ix.Commit) {
+		expected--
+	}
+	if uint64(len(ix.refs)) != expected {
+		return nil, fmt.Errorf("restore: incomplete page coverage: have %d want %d", len(ix.refs), expected)
 	}
 	return ix, nil
 }
 
-// Has reports whether the page is defined by the chain.
 func (ix *PageIndex) Has(pgno uint32) bool {
+	if pgno == 0 || pgno > ix.Commit {
+		return false
+	}
+	if pgno == 0x40000000/ix.PageSize+1 {
+		return true
+	}
 	_, ok := ix.refs[pgno]
 	return ok
 }
 
-// Page returns the final version of one page, reading only the part that holds it.
 func (ix *PageIndex) Page(pgno uint32) ([]byte, error) {
+	if pgno > 0 && pgno <= ix.Commit && pgno == 0x40000000/ix.PageSize+1 {
+		return make([]byte, ix.PageSize), nil
+	}
 	ref, ok := ix.refs[pgno]
 	if !ok {
 		return nil, fmt.Errorf("restore: page %d not defined", pgno)
 	}
-	data, found, err := ltx.PageMapLookup(ix.payloads[ref], pgno)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return nil, fmt.Errorf("restore: page %d missing from part %d", pgno, ref)
-	}
-	return data, nil
+	return ltx.DecodeNativePageFrame(ix.objects[ref.object][ref.offset:ref.offset+ref.size], ix.PageSize, pgno)
 }
 
 // Ranges returns the contiguous runs of defined pages, as [start, end] pairs.

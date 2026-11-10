@@ -105,7 +105,15 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 			if preInvalidated != "" {
 				ctx = context.WithValue(ctx, ctxScopePreInvalidated, preInvalidated)
 			}
-			next(w, r.WithContext(ctx))
+			if p, _ := ctx.Value(resourceProofKey{}).(*resourceAccessProof); p != nil {
+				guarded := &resourceProofWriter{ResponseWriter: w, proof: p.proof}
+				next(guarded, r.WithContext(ctx))
+				if !guarded.started {
+					guarded.WriteHeader(http.StatusOK)
+				}
+			} else {
+				next(w, r.WithContext(ctx))
+			}
 		}
 	}
 }

@@ -6,7 +6,7 @@
     {
       "binding": "DB",
       "database_name": "notes",
-      "database_id": "demo/__d1__/DB"
+      "database_id": "DB"
     }
   ]
 }

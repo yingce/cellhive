@@ -174,13 +174,16 @@ func (s *Server) ensureDORecoveryPointer(ctx context.Context, sc cell.Scope, wan
 }
 
 // captureOwnerEpochKey is accepted only together with a verified DO shard claim.
-// LTX epoch remains the stable capture-chain identity across agent restarts.
+// LTX epoch is the DO shard generation; this header fences the receiving agent.
 type captureOwnerEpochKey struct{}
 
 func (s *Server) requireCommitOwner(ctx context.Context, sc cell.Scope, epoch uint64) error {
+	if id, ok := ctx.Value(doCommitIdentityKey{}).(doCommitIdentity); ok && epoch != id.Epoch {
+		return fmt.Errorf("DO data epoch differs from owner epoch")
+	}
 	if captureEpoch, ok := ctx.Value(captureOwnerEpochKey{}).(uint64); ok {
 		id, ok := ctx.Value(doCommitIdentityKey{}).(doCommitIdentity)
-		if !ok || captureEpoch == 0 {
+		if !ok || captureEpoch == 0 || epoch != id.Epoch {
 			return fmt.Errorf("DO capture owner identity required")
 		}
 		if err := s.validateDOCommit(ctx, id); err != nil {

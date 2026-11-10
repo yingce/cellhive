@@ -40,7 +40,7 @@ func TestCOSConditionalDelete(t *testing.T) {
 	stamp := time.Now().UnixNano()
 
 	// Authority path: owner/lease fencing must reject a stale token.
-	authorityKey := fmt.Sprintf("cells/itest-cos/__test__/%d/owner.json", stamp)
+	authorityKey := fmt.Sprintf("cells/itest-cos/__test__/%d/own.json", stamp)
 	defer b.Delete(context.Background(), authorityKey)
 	token, err := b.ConditionalCreate(ctx, authorityKey, []byte("owner"))
 	if err != nil {
@@ -73,5 +73,8 @@ func TestCOSConditionalDelete(t *testing.T) {
 	if err := base.ConditionalDelete(ctx, s3Key, etag); err != nil {
 		t.Fatalf("s3 current delete: %v", err)
 	}
-	t.Logf("s3 conditional delete: stale rejected, current accepted")
+	if err := base.ConditionalDelete(ctx, s3Key, etag); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("s3 already-deleted key: %v, want ErrNotFound", err)
+	}
+	t.Logf("s3 conditional delete: stale rejected, current accepted, missing mapped")
 }

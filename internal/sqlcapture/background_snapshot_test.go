@@ -23,11 +23,11 @@ type blockedSnapshotCommitter struct {
 }
 
 func (c *blockedSnapshotCommitter) Commit(ctx context.Context, s cell.Scope, e uint64, raw []byte) error {
-	h, _, err := ltx.Decode(raw)
+	h, err := ltx.ValidateNative(raw)
 	if err != nil {
 		return err
 	}
-	if h.Kind == ltx.KindSnapshot {
+	if h.IsSnapshot() {
 		select {
 		case c.entered <- struct{}{}:
 		default:
@@ -38,7 +38,7 @@ func (c *blockedSnapshotCommitter) Commit(ctx context.Context, s cell.Scope, e u
 			return ctx.Err()
 		}
 	}
-	if h.Kind == ltx.KindSnapshot && c.snapshotErr != nil {
+	if h.IsSnapshot() && c.snapshotErr != nil {
 		return c.snapshotErr
 	}
 	return c.recordingCommitter.Commit(ctx, s, e, raw)
@@ -53,7 +53,7 @@ func TestBackgroundSnapshotUploadDoesNotBlockDurableWrites(t *testing.T) {
 	capture.Start(ctx)
 	defer func() { cancel(); <-capture.Done() }()
 	done := make(chan error, 1)
-	go func() { _, err := capture.RequestBaseline(ctx, nil); done <- err }()
+	go func() { _, err := capture.RequestBaseline(ctx); done <- err }()
 	select {
 	case <-c.entered:
 	case <-ctx.Done():
@@ -87,9 +87,9 @@ func TestBackgroundSnapshotUploadDoesNotBlockDurableWrites(t *testing.T) {
 	segments := append([][]byte(nil), c.segments...)
 	c.mu.Unlock()
 	sort.SliceStable(segments, func(i, j int) bool {
-		a, _, _ := ltx.Decode(segments[i])
-		b, _, _ := ltx.Decode(segments[j])
-		return a.EndTxID < b.EndTxID
+		a, _ := ltx.ValidateNative(segments[i])
+		b, _ := ltx.ValidateNative(segments[j])
+		return a.MaxTXID < b.MaxTXID
 	})
 	dest := filepath.Join(t.TempDir(), "restored.db")
 	if _, err := restore.ApplyFile(dest, segments); err != nil {
@@ -138,7 +138,7 @@ func TestBackgroundSnapshotFailureLeavesCaptureRunning(t *testing.T) {
 			snapctx, stop := context.WithCancel(ctx)
 			defer stop()
 			done := make(chan error, 1)
-			go func() { _, err := capture.RequestBaseline(snapctx, nil); done <- err }()
+			go func() { _, err := capture.RequestBaseline(snapctx); done <- err }()
 			select {
 			case <-c.entered:
 			case <-ctx.Done():
@@ -194,7 +194,7 @@ func TestCaptureStopCancelsBackgroundSnapshot(t *testing.T) {
 	snapctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	result := make(chan error, 1)
-	go func() { _, err := capture.RequestBaseline(snapctx, nil); result <- err }()
+	go func() { _, err := capture.RequestBaseline(snapctx); result <- err }()
 	select {
 	case <-c.entered:
 	case <-time.After(time.Second):
@@ -220,11 +220,11 @@ type blockedDeltaCommitter struct {
 }
 
 func (c *blockedDeltaCommitter) Commit(ctx context.Context, s cell.Scope, e uint64, raw []byte) error {
-	h, _, err := ltx.Decode(raw)
+	h, err := ltx.ValidateNative(raw)
 	if err != nil {
 		return err
 	}
-	if h.Kind == ltx.KindDelta {
+	if !h.IsSnapshot() {
 		select {
 		case <-c.release:
 		case <-ctx.Done():
@@ -246,7 +246,7 @@ func TestBackgroundSnapshotDoesNotAdvanceDeltaBarrier(t *testing.T) {
 		t.Fatal(err)
 	}
 	capture.Notify()
-	label, err := capture.RequestBaseline(ctx, nil)
+	label, err := capture.RequestBaseline(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestDetachedBaselineSplitsPendingWALBatch(t *testing.T) {
 	if _, err := db.PutTx(ctx, "before", []byte("one"), nil); err != nil {
 		t.Fatal(err)
 	}
-	watermark, err := c.RequestBaseline(ctx, nil)
+	watermark, err := c.RequestBaseline(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,12 +285,12 @@ func TestDetachedBaselineSplitsPendingWALBatch(t *testing.T) {
 	}
 	var tail [][]byte
 	for _, raw := range rec.segments {
-		h, _, _ := ltx.Decode(raw)
-		if h.Kind == ltx.KindSnapshot || h.EndTxID > watermark {
+		h, _ := ltx.ValidateNative(raw)
+		if h.IsSnapshot() || h.MaxTXID > watermark {
 			tail = append(tail, raw)
 		}
-		if h.Kind == ltx.KindDelta && h.StartTxID <= watermark && h.EndTxID > watermark {
-			t.Fatalf("delta %d..%d crosses snapshot %d", h.StartTxID, h.EndTxID, watermark)
+		if !h.IsSnapshot() && h.MinTXID <= watermark && h.MaxTXID > watermark {
+			t.Fatalf("delta %d..%d crosses snapshot %d", h.MinTXID, h.MaxTXID, watermark)
 		}
 	}
 	dest := filepath.Join(t.TempDir(), "restored.db")
@@ -337,7 +337,7 @@ func TestDetachedBaselinesDuringConcurrentWritesRemainIndependentlyRestorable(t 
 		writes <- nil
 	}()
 	for i := 0; i < 10; i++ {
-		if _, e := c.RequestBaseline(ctx, nil); e != nil {
+		if _, e := c.RequestBaseline(ctx); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -349,20 +349,20 @@ func TestDetachedBaselinesDuringConcurrentWritesRemainIndependentlyRestorable(t 
 	rec.mu.Unlock()
 	checked := 0
 	for _, baseline := range segments {
-		h, _, _ := ltx.Decode(baseline)
-		if h.Kind != ltx.KindSnapshot {
+		h, _ := ltx.ValidateNative(baseline)
+		if !h.IsSnapshot() {
 			continue
 		}
 		chain := [][]byte{baseline}
 		for _, raw := range segments {
-			d, _, _ := ltx.Decode(raw)
-			if d.Kind == ltx.KindDelta && d.EndTxID > h.EndTxID {
+			d, _ := ltx.ValidateNative(raw)
+			if !d.IsSnapshot() && d.MaxTXID > h.MaxTXID {
 				chain = append(chain, raw)
 			}
 		}
 		path := filepath.Join(t.TempDir(), "image.db")
 		if _, e := restore.ApplyFile(path, chain); e != nil {
-			t.Fatalf("baseline %d: %v", h.EndTxID, e)
+			t.Fatalf("baseline %d: %v", h.MaxTXID, e)
 		}
 		got, e := cellstore.OpenAt(ctx, path)
 		if e != nil {
@@ -372,7 +372,7 @@ func TestDetachedBaselinesDuringConcurrentWritesRemainIndependentlyRestorable(t 
 			v, _, e := got.Get(ctx, fmt.Sprintf("saved-%03d", i))
 			if e != nil || string(v) != fmt.Sprintf("value-%03d", i) {
 				got.Close()
-				t.Fatalf("baseline %d lost key %d: %v", h.EndTxID, i, e)
+				t.Fatalf("baseline %d lost key %d: %v", h.MaxTXID, i, e)
 			}
 		}
 		got.Close()

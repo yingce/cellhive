@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
-	"cellhive/internal/ltx"
 	"cellhive/internal/upload"
 )
 
@@ -37,7 +36,7 @@ func TestSlowCommitObservationIdentifiesBucketWait(t *testing.T) {
 	s.Lease = nil
 	var buf bytes.Buffer
 	s.Log = slog.New(slog.NewJSONHandler(&buf, nil))
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("observed"))
+	seg := nativeTestFile(t, 1, 1, []byte("observed"))
 	result, err := s.commitSegmentCore(ctx, sc, 1, seg, nil, false, false)
 	if err != nil || result.Mode != "bucket-batch" {
 		t.Fatalf("result: %+v %v", result, err)

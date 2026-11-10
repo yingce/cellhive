@@ -75,8 +75,8 @@ func TestEvictIdleAndReopenContinuesTxID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("put after reopen: %v", err)
 	}
-	if id != 2 {
-		t.Fatalf("txid after reopen = %d, want 2", id)
+	if id != 3 {
+		t.Fatalf("txid after reopen = %d, want 3", id)
 	}
 }
 

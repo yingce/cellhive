@@ -10,6 +10,7 @@ import (
 	"cellhive/internal/bearertoken"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -40,6 +41,7 @@ type result struct {
 	Mode        string  `json:"mode"`
 	N           int     `json:"n"`
 	Failures    int     `json:"failures"`
+	FirstError  string  `json:"first_error,omitempty"`
 	Concurrency int     `json:"concurrency"`
 	P50ms       float64 `json:"p50_ms"`
 	P99ms       float64 `json:"p99_ms"`
@@ -60,7 +62,8 @@ func main() {
 	defer os.RemoveAll(dir)
 
 	shared, _ := bucket.NewFSBucket(filepath.Join(dir, "bucket"))
-	ownerSrv, ownerURL, followerURL := buildPair(dir, shared)
+	ownerSrv, ownerURL, followerURL, closePair := buildPair(dir, shared)
+	defer closePair()
 	_ = ownerURL
 	scFleet := cell.Scope{Namespace: "bench", Class: "__kv__", ID: "fleet"}
 	scBucket := cell.Scope{Namespace: "bench", Class: "__kv__", ID: "bucket"}
@@ -73,7 +76,7 @@ func main() {
 	b0 := shared.Stats()
 	rFleet := benchCommit(ownerSrv, scFleet, *n, *c, []string{followerURL}, 1)
 	b1 := shared.Stats()
-	rFleet.Puts = b1["put"] - b0["put"]
+	rFleet.Puts = b1["put"] + b1["conditional_create"] - b0["put"] - b0["conditional_create"]
 	if rFleet.N > 0 {
 		rFleet.PutPerAck = float64(rFleet.Puts) / float64(rFleet.N)
 	}
@@ -81,7 +84,7 @@ func main() {
 
 	rBucket := benchCommit(ownerSrv, scBucket, *n, *c, nil, 1)
 	b2 := shared.Stats()
-	rBucket.Puts = b2["put"] - b1["put"]
+	rBucket.Puts = b2["put"] + b2["conditional_create"] - b1["put"] - b1["conditional_create"]
 	if rBucket.N > 0 {
 		rBucket.PutPerAck = float64(rBucket.Puts) / float64(rBucket.N)
 	}
@@ -92,14 +95,14 @@ func main() {
 
 	// Bucket op counters (hot path must not List).
 	out["bucket_ops"] = shared.Stats()
-	out["note"] = "in-process httptest + filesystem bucket; not production S3"
+	out["note"] = "in-process httptest + filesystem bucket; synthetic 512-byte page commits, not SQL or production S3; puts includes immutable creates and metadata"
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
 }
 
-func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, string) {
+func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, string, func()) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Follower node: spool only.
@@ -109,16 +112,20 @@ func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, str
 	fh := httptest.NewServer(follower.Handler())
 
 	// Owner node: full deps, sharing the fleet bucket.
-	lm := lease.NewManager(shared, "owner", "s-owner", "127.0.0.1:7001", "http://127.0.0.1:7001", 10*time.Second)
+	lm := lease.NewManager(shared, "owner", "s-owner", "127.0.0.1:7001", "http://127.0.0.1:7001", 10*time.Minute)
+	if err := lm.Publish(context.Background(), lease.Load{}); err != nil {
+		panic(err)
+	}
 	om := &owner.Manager{B: shared, NodeID: "owner", Session: "s-owner", Advertise: "127.0.0.1:7001", Role: cell.RoleCellAgent, OwnerTTL: 60 * time.Second}
 	ownerSpool, _ := peer.NewSpool(filepath.Join(dir, "owner-spool"))
 	pm := peer.NewManager(peer.NewHTTPTransport(creds.Peer, nil))
 	nl := nodelog.New(shared, "owner")
 	rep := replica.New(shared)
 	up := upload.New(rep, log, 64, 1<<20, 10*time.Millisecond)
-	up.Start(context.Background())
+	uploadCtx, cancelUpload := context.WithCancel(context.Background())
+	up.Start(uploadCtx)
 	ownerSrv := server.New(server.Deps{
-		Cfg:      config.Config{RootKey: "0123456789abcdef0123456789abcdef", NodeID: "owner", SessionID: "s-owner", TokenPeer: creds.Peer, TokenInternal: creds.Internal, TokenDispatch: creds.Dispatch, BucketDir: filepath.Join(dir, "bucket")},
+		Cfg:      config.Config{RootKey: "0123456789abcdef0123456789abcdef", NodeID: "owner", BucketWait: true, SessionID: "s-owner", TokenPeer: creds.Peer, TokenInternal: creds.Internal, TokenDispatch: creds.Dispatch, BucketDir: filepath.Join(dir, "bucket")},
 		Bucket:   shared,
 		Lease:    lm,
 		Owner:    om,
@@ -130,7 +137,7 @@ func buildPair(dir string, shared *bucket.FSBucket) (*server.Server, string, str
 		Log:      log,
 	})
 	oh := httptest.NewServer(ownerSrv.Handler())
-	return ownerSrv, oh.URL, fh.URL
+	return ownerSrv, oh.URL, fh.URL, func() { cancelUpload(); up.Stop(); oh.Close(); fh.Close() }
 }
 
 func claim(srv *server.Server, sc cell.Scope) {
@@ -172,6 +179,7 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 	h := srv.Handler()
 	lat := make([][]time.Duration, c)
 	fails := make([]int, c)
+	errs := make([]string, c)
 	var wg sync.WaitGroup
 	start := time.Now()
 	for w := 0; w < c; w++ {
@@ -182,7 +190,11 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 			offset := workerOffset(n, c, w)
 			lat[w] = make([]time.Duration, 0, runs)
 			for i := 0; i < runs; i++ {
-				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: uint64(offset + i + 1), EndTxID: uint64(offset + i + 1)}, []byte("bench"))
+				seg, err := nativeBenchSegment(uint64(offset + i + 1))
+				if err != nil {
+					fails[w]++
+					continue
+				}
 				body, _ := json.Marshal(map[string]any{
 					"scope": sc.String(), "epoch": epoch,
 					"segment": base64.StdEncoding.EncodeToString(seg), "followers": followers,
@@ -196,6 +208,9 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 				t0 := time.Now()
 				h.ServeHTTP(rr, req)
 				if rr.Code != http.StatusOK {
+					if errs[w] == "" {
+						errs[w] = fmt.Sprintf("HTTP %d: %s", rr.Code, rr.Body.String())
+					}
 					fails[w]++
 					continue
 				}
@@ -229,7 +244,15 @@ func benchCommit(srv *server.Server, sc cell.Scope, n, c int, followers []string
 	if len(all) > 0 {
 		mean = sum / time.Duration(len(all))
 	}
+	firstError := ""
+	for _, err := range errs {
+		if err != "" {
+			firstError = err
+			break
+		}
+	}
 	return result{
+		FirstError:  firstError,
 		Mode:        mode,
 		N:           len(all),
 		Failures:    failures,
@@ -245,7 +268,10 @@ func benchRestore(b bucket.Bucket, sc cell.Scope, segments int) map[string]any {
 	rep := replica.New(b)
 	ctx := context.Background()
 	for i := 0; i < segments; i++ {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 9, StartTxID: uint64(i + 1), EndTxID: uint64(i + 1)}, []byte("x"))
+		seg, err := nativeBenchSegment(uint64(i + 1))
+		if err != nil {
+			panic(err)
+		}
 		if _, _, err := rep.Append(ctx, sc, 9, seg); err != nil {
 			panic(err)
 		}
@@ -276,4 +302,12 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// nativeBenchSegment measures transport of one synthetic SQLite page, not a SQL
+// operation. TXID 1 is a complete one-page baseline; subsequent files are deltas.
+func nativeBenchSegment(txid uint64) ([]byte, error) {
+	page := make([]byte, 512)
+	binary.BigEndian.PutUint64(page[:8], txid)
+	return ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: txid, MaxTXID: txid}, []ltx.WALPage{{PageNo: 1, Data: page}})
 }

@@ -130,6 +130,16 @@ func TestCursorReadsOnlyNewWALTail(t *testing.T) {
 	if len(res.Transactions) != 1 {
 		t.Fatalf("transactions = %d, want 1", len(res.Transactions))
 	}
+	if baseline.WALOffset != 32 || baseline.WALSize != int64(len(baseline.NewCommitted))*int64(24+baseline.Header.PageSize) {
+		t.Fatalf("baseline span=%d+%d", baseline.WALOffset, baseline.WALSize)
+	}
+	if res.WALOffset != baseline.WALOffset+baseline.WALSize || res.WALSize != int64(len(res.NewCommitted))*int64(24+res.Header.PageSize) {
+		t.Fatalf("tail span=%d+%d", res.WALOffset, res.WALSize)
+	}
+	empty, err := cur.Poll(c.WALPath())
+	if err != nil || empty.WALOffset != 0 || empty.WALSize != 0 {
+		t.Fatalf("empty poll=%+v err=%v", empty, err)
+	}
 	delta := cur.BytesRead() - before
 	frameSize := uint64(baseline.Header.PageSize + frameHdrSize)
 	if delta > 4*frameSize {
@@ -157,6 +167,51 @@ func TestCursorDetectsCheckpoint(t *testing.T) {
 	}
 	if !res.Checkpoint {
 		t.Fatalf("checkpoint not detected (salt/truncation)")
+	}
+}
+
+func TestCursorPositionSurvivesCheckpointAsValue(t *testing.T) {
+	c, ctx := openCell(t)
+	if err := c.Put(ctx, "before", []byte("one"), nil); err != nil {
+		t.Fatal(err)
+	}
+	cur := NewCursor()
+	defer cur.Close()
+	res, err := cur.Poll(c.WALPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cur.Position()
+	if !before.Valid || before.EndOffset() != res.WALOffset+res.WALSize || before.Commit == 0 {
+		t.Fatalf("invalid committed position: %+v", before)
+	}
+	if _, err := cur.Poll(c.WALPath()); err != nil {
+		t.Fatal(err)
+	}
+	if cur.Position() != before {
+		t.Fatal("empty poll changed committed identity")
+	}
+	if err := c.Checkpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// No gate occurs between resetting the WAL and the next transaction.
+	if err := c.Put(ctx, "after", []byte("two"), nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err = cur.Poll(c.WALPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := cur.Position()
+	if !res.Checkpoint || len(res.Transactions) == 0 || !after.Valid || before == after {
+		t.Fatalf("reset plus commit lost: old=%+v new=%+v checkpoint=%v txs=%d", before, after, res.Checkpoint, len(res.Transactions))
+	}
+	if before.Salt1 == after.Salt1 && before.Salt2 == after.Salt2 {
+		t.Fatal("WAL salt did not rotate")
+	}
+	cur.Reset()
+	if cur.Position().Valid {
+		t.Fatal("reset retained a reusable position")
 	}
 }
 
@@ -190,6 +245,31 @@ func TestReadRejectsCorruptCommitFrame(t *testing.T) {
 	}
 	if _, err := Read(path); !errors.Is(err, ErrChecksum) {
 		t.Fatalf("Read(corrupt) error = %v, want ErrChecksum", err)
+	}
+	cur := NewCursor()
+	defer cur.Close()
+	prefix, err := cur.Poll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix.WALOffset != 32 || prefix.WALSize != int64(len(prefix.NewCommitted)*frameSize) || prefix.WALOffset+prefix.WALSize >= int64(len(data)) {
+		t.Fatalf("invalid committed prefix: offset=%d size=%d", prefix.WALOffset, prefix.WALSize)
+	}
+	if _, err := cur.Poll(path); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("torn tail accepted: %v", err)
+	}
+	for i := off; i < off+int(h.PageSize); i++ {
+		data[i] ^= 0xff
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := cur.Poll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.WALOffset != prefix.WALOffset+prefix.WALSize || repaired.WALOffset+repaired.WALSize != int64(len(data)) {
+		t.Fatalf("repair skipped or repeated frames: %d+%d", repaired.WALOffset, repaired.WALSize)
 	}
 }
 

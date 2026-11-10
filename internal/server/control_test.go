@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,11 +44,15 @@ func newControlServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
+	om := &owner.Manager{B: b, NodeID: "node-1", Session: "test-session", Role: cell.RoleCellAgent, OwnerTTL: time.Hour}
+	if _, err := om.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	return New(Deps{
 		Cfg: testAuthConfig(config.Config{
 			NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok",
 		}),
-		Bucket:    b,
+		Bucket: b, Owner: om, Store: cs,
 		Control:   control.New(cs, env),
 		Workflows: workflow.New(cs),
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1326,6 +1331,7 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/deploy",
 		`{"namespace":"acme","worker":"consumer","bundle_sha":"`+bo.Sha+`","bindings":[{"type":"queue","name":"q","id":"q"}],"consumers":[{"queue":"q","dead_letter_queue":"qdlq","max_retries":2}]}`)
 
+	claimSeededScope(t, s, queue.Scope("acme", "qdlq"))
 	for _, body := range []string{"m1", "m2"} {
 		if _, err := s.Queue.Send(ctx, "acme", "qdlq", []byte(body), "text/plain", 0, ""); err != nil {
 			t.Fatalf("seed dlq: %v", err)
@@ -1340,8 +1346,7 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 
 	// Production replay runs with an owner manager: the main queue may already
 	// have a live lease on this same node after normal consumer activity.
-	om := &owner.Manager{B: s.Bucket, NodeID: s.Cfg.NodeID, Session: "replay-test", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
-	s.Owner = om
+	om := s.Owner
 	if _, err := om.Claim(ctx, queue.Scope("acme", "q"), time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -1365,5 +1370,35 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 	rr = adminDo(t, admin, http.MethodPost, "/v1/control/queue/replay-dlq?namespace=acme&queue=nope", "admin-tok", "")
 	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "no_dead_letter_queue") {
 		t.Fatalf("replay without dlq = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Direct store seeding must hold the same ownership that an HTTP writer would
+// acquire; otherwise the first real request correctly treats its files as stale.
+func claimSeededScope(t *testing.T, s *Server, sc cell.Scope) {
+	t.Helper()
+	if s.Owner == nil {
+		s.Owner = &owner.Manager{B: s.Bucket, NodeID: s.Cfg.NodeID, Session: "test-resource-session", Role: cell.RoleCellAgent, OwnerTTL: time.Hour}
+	}
+	if _, err := s.Owner.Claim(t.Context(), sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Runtime asset caching requires Content-Length even when the agent serves the
+// body instead of a provider presigned URL. Otherwise >2KiB responses become
+// chunked and bypass the bounded small-asset cache.
+func TestAssetFallbackAdvertisesLogicalLength(t *testing.T) {
+	s := newControlServer(t)
+	for _, size := range []int{0, 4096} {
+		body := strings.Repeat("x", size)
+		token, _, err := s.artifactStore().PutAsset(t.Context(), "acme", "api", "cache.txt", []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := do(t, s.Handler(), http.MethodGet, "/v1/internal/asset?ns=acme&worker=api&token="+token+"&path=cache.txt", "tok", nil)
+		if r.Code != 200 || r.Body.String() != body || r.Header().Get("Content-Length") != fmt.Sprint(size) {
+			t.Fatalf("size=%d status=%d length=%q", size, r.Code, r.Header().Get("Content-Length"))
+		}
 	}
 }

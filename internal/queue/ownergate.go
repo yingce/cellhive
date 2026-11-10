@@ -56,3 +56,25 @@ func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scop
 		return false, nil
 	}
 }
+
+// OwnerCheck verifies dispatch authority without acquiring or resetting a cell.
+// It is safe to call while holding resource admission.
+func OwnerCheck(om *owner.Manager) func(context.Context, Ref) (bool, error) {
+	return func(ctx context.Context, ref Ref) (bool, error) {
+		if om == nil {
+			return true, nil
+		}
+		sc := Scope(ref.Namespace, ref.Name)
+		o, _, err := om.ResolveRoute(ctx, sc)
+		if errors.Is(err, owner.ErrUnowned) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if o.Retired || o.Node != om.NodeID || o.Session != om.Session {
+			return false, nil
+		}
+		return om.LiveRoute(ctx, sc, o, time.Now())
+	}
+}

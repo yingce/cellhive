@@ -18,8 +18,8 @@ test('seen is bounded, facet version identity is retained, facet stubs are count
   assert.match(source, /#facets = new CountLRU\(FACET_CACHE_MAX\)/);
   assert.match(source, /#facetVersion = new Map\(\)/);
   assert.match(source, /#bundles = sourceCache\(BUNDLE_CACHE_MAX\)/);
-  assert.match(source, /#forgetFacet\(facetId\)/);
-  assert.match(source, /#facetVersion\.delete\(facetId\)/);
+  assert.match(source, /#forgetFacet\(id\)/);
+  assert.match(source, /#facetVersion\.delete\(id\)/);
   assert.equal(SOURCE_CACHE_BYTES, 65 * 1024 * 1024);
   assert.equal(textWeight('abc'), 6);
 });

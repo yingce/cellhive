@@ -69,7 +69,7 @@ func (p *Purger) Run(ctx context.Context, ns, worker string) (bool, error) {
 				// outlive app metadata: offline writers/recovery can finish after
 				// this payload purge, and the durable retirement sweeper still
 				// needs these guards to reject/remove their old epochs.
-				return !strings.HasSuffix(key, "/resource-fence.json") && !strings.HasSuffix(key, "/resource-fence.v2") && !strings.HasSuffix(key, "/owner-gen")
+				return !strings.HasSuffix(key, "/owner-gen") && !strings.HasSuffix(key, "/own.json")
 			}},
 			{dir: "assets/" + ns + "/"},
 		})
@@ -87,7 +87,7 @@ func (p *Purger) Run(ctx context.Context, ns, worker string) (bool, error) {
 			dir: "cells/" + ns + "/__do__/",
 			match: func(key string) bool {
 				rel := strings.TrimPrefix(key, "cells/"+ns+"/__do__/")
-				return strings.HasPrefix(rel, worker+"~")
+				return strings.HasPrefix(rel, worker+"~") && !strings.HasSuffix(key, "/owner-gen") && !strings.HasSuffix(key, "/own.json")
 			},
 		},
 		{dir: "assets/" + ns + "/" + worker + "/"},

@@ -314,3 +314,11 @@ test('direct OTLP request log posts the function_request shape and headers', asy
   assert.ok(calls[0][1].body instanceof Uint8Array);
   assert.ok(calls[0][1].body.byteLength > 100);
 });
+
+test('cold host retries a response invalidated by a concurrent route revision',async()=>{
+ let calls=0;
+ const c=vm.createContext({internalHeaders:async()=>({}),Date,AbortController,setTimeout,clearTimeout,encodeURIComponent,routeEpoch:0,backoffUntil:0,lookupWindowAt:0,lookupCount:0,hostLookupLimit:()=>100,hostCache:new Map(),hostTtlMs:()=>10000,noteSuccess(){},noteFailure(){},fetch:async()=>{calls++;if(calls===1)c.routeEpoch++;return {status:200,headers:new Headers(),json:async()=>({revision:calls})};}});
+ vm.runInContext(extract('async function hostView(', '// workerEnv returns'),c);
+ const view=await c.hostView({},'new-host',{});
+ assert.equal(view.revision,2);assert.equal(calls,2);
+});

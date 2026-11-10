@@ -236,12 +236,21 @@ func (s *Store) ContinueResourceCleanup(ctx context.Context, j ResourceCleanup) 
 	})
 }
 
+// ValidateResourceCleanupLease binds the lease to the durable cleanup target
+// and incarnation. Empty source generations remain valid for legacy resources.
+// This is a point-in-time check, not a lease extension or a mutation guard.
 func (s *Store) ValidateResourceCleanupLease(ctx context.Context, j ResourceCleanup) error {
+	if j.LeaseToken == "" {
+		return ErrCleanupStale
+	}
 	current, err := s.ResourceCleanup(ctx, j.Namespace, j.Kind, j.Name)
 	if err != nil {
 		return err
 	}
-	if current.JobID != j.JobID || current.State != "running" || current.LeaseToken != j.LeaseToken || current.LeaseUntilMs <= s.now().UnixMilli() {
+	if current.JobID != j.JobID || current.DataScope != j.DataScope ||
+		current.SourceGeneration != j.SourceGeneration || current.State != "running" ||
+		current.LeaseToken != j.LeaseToken || current.LeaseUntilMs != j.LeaseUntilMs ||
+		current.LeaseUntilMs <= s.now().UnixMilli() {
 		return ErrCleanupStale
 	}
 	return nil

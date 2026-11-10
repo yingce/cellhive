@@ -12,7 +12,7 @@ Worker 通过 `env` 看到 Cloudflare 形态的 binding；平台用 **host adapt
 | **D1** | D1 cell | 异步（`prepare/bind/all/first/run/raw/batch/exec`） | SQLite（`__d1__` cell） | cell-agent 节点 |
 | 　└ binding/id | `binding` 只是 Worker 里的 env 变量名（如 `DB`）；`database_id`（API 的 `id`）才是 D1 资源/data cell 的 id，运行时和部署校验都以它为准。不要再把 binding 名当成 database id。 | | | |
 | 　└ 契约保真 | `prepare()`/`bind()` 是租户 isolate 内同步本地对象，可直接传给 `batch()`；TypedArray 按 BLOB 往返；`run()` 返回 `results: []`；`exec().count` 是 SQL 语句数；`meta` 含常用 `changes/last_row_id/changed_db/duration/rows_read/rows_written`；`withSession()/session()/getBookmark()` 已提供强一致 txid bookmark；`dump()` 返回脱敏 SQLite 快照（32MiB 上限）；输入限制对齐 SQL 100KiB/参数100/值和结果行2MiB/查询30s；D1 connection 还设置列数、LIKE、compound、表达式、VDBE、函数参数、trigger 深度和 ATTACH limits，并用 SQLite authorizer 拦截临时对象/动态扩展；禁止 `BEGIN/COMMIT/ROLLBACK/ATTACH/VACUUM/load_extension`；错误 `err.name=D1_ERROR` + `err.code`（ADR-163）。不提供 Cloudflare read replica 路由/region 语义。 | | | |
-| **R2** | 对象存储 S3 兼容 | 异步 | `r2/<ns>/<bucket>/...` + `r2meta/...`（metadata sidecar） | 对象存储 |
+| **R2** | 对象存储 S3 兼容 | 异步 | `r2meta/...` 原子发布记录 + `r2/.versions/...` 独立正文；`r2/<ns>/<bucket>/...` 为 listing 索引 | 对象存储 |
 | 　└ 契约保真 | `R2Object/R2ObjectBody` 全字段（`key/version/size/etag/httpEtag/uploaded/httpMetadata/customMetadata/checksums` + `text/json/arrayBuffer/blob`）；`put` 支持 `{httpMetadata,customMetadata,md5,sha256}`（校验）；`head()`；list `truncated/cursor` + `include`（按需 metadata）+ `delimiter`/`delimitedPrefixes`（ADR-163/168） | | | |
 | **Queues 生产者** | Queue cell | 异步 | SQLite（`__queue__` cell） | cell-agent 节点 |
 | **Queues 消费者** | `queue()` handler | 派发 | 同上 | 由 cell-agent 派发 |
@@ -138,7 +138,7 @@ _最后更新：2026-09-24_
 - **KV / R2 / Queue**：entrypoint stub（`workerd/platform/bindings.js`）；R2 `get()` 返回 `RpcTarget` body。**D1** 的数据库调用仍走 props-bound entrypoint，但 generated wrapper 用 `makeD1FromStub()` 在租户 isolate 重建同步 `prepare()`/`bind()` 语句对象，避免 ORM `batch()` 收到不可序列化的 `RpcPromise`。租户 fetch 与其 DO 的 `this.env` 与构造函数形参 `env` 都可见这些绑定。
 - **DO namespace / Workflow**：CF API 需**同步** `idFromName`，不能跨 RPC → 用 generated `bindings-wrapper.js` patch importable `env`。两宿主统一（do-runtime `bindings-wrapper.js`；user-runtime `queue-wrapper.js`/`workflow-wrapper.js`）。
 - **ServiceBinding**：`env.SVC.fetch()` 与 `env.SVC.<method>()`（Proxy 转发）→ cell-agent `/v1/service/{fetch,run}`（scope kind=service）→ user-runtime `/v1/services/{fetch,run}` → 目标 worker / 其命名 entrypoint（同名空间）；`binding.entrypoint` 指定目标 entrypoint。
-- **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、尺寸来自 list 响应，ADR-145）。
+- **R2 list**：`env.BUCKET.list({prefix,limit,cursor,startAfter})` → `/v1/r2/list` 返回 `{objects,truncated,cursor}`（cursor 独占、索引候选经权威发布记录过滤，尺寸和 metadata 来自同一发布版本）。
 - **R2 presign**：`env.BUCKET.createPresignedUrl(key,{expiresIn})` → cell-agent `/v1/r2/presign` → bucket `PresignGet`（自托管后端返回短时读 URL）。
 - **日志 Tail**：`workerd/platform/log-tail.js` 由可信宿主作为真实 `Fetcher` 挂到动态 Worker 的 `WorkerCode.tails`；它捕获 `console.*`/异常并写入平台 ring/可选 OTLP。身份、log token、URL 与 private transport 不进入 tenant env（ADR-185）。
 - **AI（BYO）**：`env.AI.run(model, inputs)` → `<AI_URL>/chat/completions`（OpenAI 兼容，`AI_KEY` Bearer），返回 `{response,model,usage}`；`inputs.messages` 或 `{prompt}`。
@@ -209,3 +209,5 @@ CELLHIVE_HYPERDRIVE_PROXY=postgres://proxysql:6133,mysql://proxysql:6033
 D1 结果按最终保留载荷线性累计，32 MiB 总预算包含数值和 BLOB 展开为整数数组后的载荷；不包含全部 Go 容器开销，也不是 JSON wire size 上限。逐行检查请求取消。
 
 R2 GET/HEAD/list 的 metadata 仅在 ETag/size 匹配对象版本时返回，size/ETag 以对象为准。无 metadata 的覆盖会清理观察到的旧 sidecar（包含相同内容），条件删除不会清掉并发的新版本；已知不支持条件删除的 provider 在存在旧 sidecar 时拒绝覆盖。每次 PUT 增加 sidecar 点读，存在旧 sidecar 时另需条件删除。数据与 metadata 不是原子发布，迟到发布及同内容并发仍有边界，失败响应可能已更新数据；不保证完整 Cloudflare R2 并发原子语义。
+
+2026-11-10 R2 一致性修订：正文先写独立随机版本，再以既有 metadata authority 条件写一次发布正文引用与 metadata。COS/OSS onlyIf 使用 native append authority，S3/MinIO 使用条件 PUT；不再对 COS/OSS raw body CAS 作原子性假设。GET/HEAD/Range 固定一份发布记录，Presign 指向具体正文版本。保留旧正文保护正在读取的快照和签名 URL，当前不执行在线版本 GC；使用量账本只计逻辑当前对象，不包含保留版本的物理占用。旧布局需离线迁移或空目标，内部 .versions/.mpu 不能作为 R2 用户 namespace。

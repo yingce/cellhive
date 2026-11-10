@@ -15,6 +15,9 @@ import (
 // S3-compatible endpoint, including conditional delete for owner fencing.
 // Gated by CELLHIVE_S3_TEST_ENDPOINT (e.g. local MinIO/rustfs).
 func TestS3BucketIntegration(t *testing.T) {
+	if os.Getenv("CELLHIVE_S3_TEST_CONTROL") == "1" {
+		t.Skip("raw DELETE contract tested separately; production control adapter covered by TestS3ControlIntegration")
+	}
 	ep := os.Getenv("CELLHIVE_S3_TEST_ENDPOINT")
 	if ep == "" {
 		t.Skip("set CELLHIVE_S3_TEST_ENDPOINT to run S3 integration")

@@ -1,8 +1,10 @@
 package recovery
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -22,22 +24,37 @@ func TestRecoveryBatchBoundaries(t *testing.T) {
 	b := recoveryBatch{rep: rep}
 	sc := cell.Scope{Namespace: "batch", Class: "__kv__", ID: "main"}
 	other := cell.Scope{Namespace: "batch", Class: "__kv__", ID: "other"}
-	add := func(scope cell.Scope, epoch, tx uint64, kind ltx.Kind, payload int) {
+	add := func(scope cell.Scope, epoch, lo, hi uint64, size int) {
 		t.Helper()
-		raw := ltx.Encode(ltx.Header{Kind: kind, Epoch: epoch, StartTxID: tx, EndTxID: tx}, make([]byte, payload))
-		if err := b.add(ctx, scope, epoch, raw); err != nil {
+		pages := make([]ltx.WALPage, 0)
+		rng := rand.New(rand.NewSource(int64(hi)))
+		count := uint32((size + 4095) / 4096)
+		if count == 0 {
+			count = 1
+		}
+		for pg := uint32(1); pg <= count && size > 0; pg++ {
+			data := make([]byte, 4096)
+			_, _ = rng.Read(data)
+			pages = append(pages, ltx.WALPage{PageNo: pg, Data: data})
+		}
+		raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 4096, Commit: count, MinTXID: lo, MaxTXID: hi}, pages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.add(ctx, scope, epoch, raw); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Two deltas per batch because a third would exceed 1MiB.
-	for i := uint64(1); i <= 3; i++ {
-		add(sc, 1, i, ltx.KindDelta, 400<<10)
+	// Random pages keep each native input near400KiB; a third exceeds1MiB.
+	for i := uint64(2); i <= 4; i++ {
+		add(sc, 1, i, i, 400<<10)
 	}
-	add(other, 1, 1, ltx.KindDelta, 1)
-	add(sc, 2, 1, ltx.KindDelta, 1)
-	add(sc, 2, 3, ltx.KindDelta, 1) // gap must not be advertised as a contiguous batch
-	add(sc, 2, 4, ltx.KindSnapshot, 1)
-	add(sc, 2, 5, ltx.KindMarker, 0)
+	add(other, 1, 2, 2, 1)
+	add(sc, 2, 2, 2, 1)
+	add(sc, 2, 4, 4, 1) // missing3 must split the advertised range
+	add(sc, 2, 1, 5, 1) // complete native snapshot remains standalone
+	add(sc, 2, 6, 6, 0) // native zero-page continuation, no private marker
+
 	if err := b.flush(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -55,21 +72,17 @@ func TestRecoveryBatchBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		parts, err := ltx.Split(raw)
+		h, _, err := ltx.DecodeNativePages(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(raw) > 1<<20 {
 			t.Fatalf("oversize batch %s", key)
 		}
-		if len(parts) > 1 {
-			for _, part := range parts {
-				h, _, _ := ltx.Decode(part)
-				if h.Kind != ltx.KindDelta {
-					t.Fatalf("mixed baseline in %s", key)
-				}
-			}
+		if strings.Contains(key, "/e2/") && h.MinTXID == 2 && h.MaxTXID >= 4 {
+			t.Fatal("batch advertised missing transaction3")
 		}
+
 	}
 	if count != 7 || b.uploaded != 8 {
 		t.Fatalf("objects=%d uploaded=%d", count, b.uploaded)
@@ -81,11 +94,11 @@ type failBatchBucket struct {
 	fail bool
 }
 
-func (b *failBatchBucket) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+func (b *failBatchBucket) Put(ctx context.Context, key string, data []byte) (string, error) {
 	if b.fail && strings.Contains(key, "/ltx/") {
 		return "", errors.New("injected upload failure")
 	}
-	return b.Bucket.ConditionalCreate(ctx, key, data)
+	return b.Bucket.Put(ctx, key, data)
 }
 
 func TestRecoveryBatchFailureRetainsPending(t *testing.T) {
@@ -93,8 +106,11 @@ func TestRecoveryBatchFailureRetainsPending(t *testing.T) {
 	fb := &failBatchBucket{Bucket: fs, fail: true}
 	b := recoveryBatch{rep: replica.New(fb)}
 	sc := cell.Scope{Namespace: "batch", Class: "__kv__", ID: "failure"}
-	for i := uint64(1); i <= 2; i++ {
-		raw := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte("data"))
+	for i := uint64(2); i <= 3; i++ {
+		raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: i, MaxTXID: i}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := b.add(t.Context(), sc, 1, raw); err != nil {
 			t.Fatal(err)
 		}
@@ -111,5 +127,42 @@ func TestRecoveryBatchFailureRetainsPending(t *testing.T) {
 	}
 	if b.uploaded != 2 {
 		t.Fatalf("uploaded=%d", b.uploaded)
+	}
+}
+
+func TestNativeRecoverySkipsRetiredEpochWithoutHidingLiveConflicts(t *testing.T) {
+	fs, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(fs)
+	sc := cell.Scope{Namespace: "n", Class: "__kv__", ID: "retired"}
+	if _, err := fs.Put(t.Context(), sc.Key()+"/ltx/retired.json", []byte(`{"retired_below":3}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := recoveryBatch{rep: rep}
+	if err := b.add(t.Context(), sc, 1, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := rep.ListSegments(t.Context(), sc, 1)
+	if err != nil || len(keys) != 0 || b.uploaded != 0 {
+		t.Fatalf("retired upload=%d keys=%v err=%v", b.uploaded, keys, err)
+	}
+	if err := b.add(t.Context(), sc, 3, raw); err != nil {
+		t.Fatal(err)
+	}
+	conflict, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1}, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{1}, 512)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.add(t.Context(), sc, 3, conflict); err == nil {
+		t.Fatal("live conflict skipped")
 	}
 }

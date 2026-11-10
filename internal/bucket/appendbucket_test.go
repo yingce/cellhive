@@ -130,10 +130,13 @@ func TestAuthorityKeyDoesNotCaptureTenantObjects(t *testing.T) {
 			t.Fatalf("tenant key %q routed to append authority", key)
 		}
 	}
-	for _, key := range []string{"cells/demo/__kv__/main/owner.json", "cells/demo/__kv__/main/owner-gen", "nodes/n1.json", "node-logs/n1/s1.json", "fleet/waker.json"} {
+	for _, key := range []string{"cells/demo/__kv__/main/own.json", "cells/demo/__kv__/main/owner-gen", "nodes/n1.json", "node-logs/n1/s1.json", "fleet/waker.json"} {
 		if !authorityKey(key) {
 			t.Fatalf("control key %q not routed to append authority", key)
 		}
+	}
+	if authorityKey("cells/demo/__kv__/main/owner.json") {
+		t.Fatal("obsolete owner.json is not an authority key")
 	}
 }
 

@@ -19,6 +19,7 @@ func TestDLQPreviewIsReadOnlyAndAckIsIdempotent(t *testing.T) {
 	if _, err := s.Control.Deploy(ctx, "acme", "web", control.DeploySpec{BundleSHA: "sha", Consumers: []control.Consumer{{Queue: "jobs", DeadLetterQueue: "dlq"}}}, "ops"); err != nil {
 		t.Fatal(err)
 	}
+	claimSeededScope(t, s, queue.Scope("acme", "dlq"))
 	ids := []string{}
 	for _, delay := range []int{0, 0, 3600} {
 		id, err := s.Queue.Send(ctx, "acme", "dlq", []byte("body"), "text", delay, "")

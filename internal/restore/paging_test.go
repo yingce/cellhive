@@ -9,7 +9,6 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
-	"cellhive/internal/ltx"
 )
 
 func buildChain(t *testing.T, dir, id string) (segments [][]byte, pageSize, commitA, commitB uint32) {
@@ -70,8 +69,8 @@ func TestPageIndexAndSparseFile(t *testing.T) {
 	if ix.PageSize != pageSize || ix.Commit != commitB {
 		t.Fatalf("index dims pageSize=%d commit=%d want %d/%d", ix.PageSize, ix.Commit, pageSize, commitB)
 	}
-	if ix.Watermark != 1 {
-		t.Fatalf("watermark = %d, want 1", ix.Watermark)
+	if ix.Watermark != 2 {
+		t.Fatalf("watermark = %d, want 2", ix.Watermark)
 	}
 
 	// Full materialization for comparison.
@@ -146,27 +145,5 @@ func TestPageIndexRejectsGap(t *testing.T) {
 	bad := [][]byte{segments[0], deltaSegment(t, pageSize, commitA, 2, map[uint32][]byte{1: make([]byte, pageSize)})}
 	if _, err := IndexChain(bad); err == nil {
 		t.Fatalf("want non-contiguous error")
-	}
-}
-
-func TestPageMapNumbersAndLookupRoundTrip(t *testing.T) {
-	pages := []ltx.WALPage{
-		{PageNo: 1, Data: bytes.Repeat([]byte{0xaa}, 64)},
-		{PageNo: 3, Data: bytes.Repeat([]byte{0xbb}, 64)},
-	}
-	payload, err := ltx.EncodeWALPageMap(64, 3, 1, pages)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	nums, err := ltx.PageMapNumbers(payload)
-	if err != nil || len(nums) != 2 || nums[0] != 1 || nums[1] != 3 {
-		t.Fatalf("numbers = %v, %v", nums, err)
-	}
-	got, ok, err := ltx.PageMapLookup(payload, 3)
-	if err != nil || !ok || !bytes.Equal(got, pages[1].Data) {
-		t.Fatalf("lookup page 3 = %x ok=%v err=%v", got, ok, err)
-	}
-	if _, ok, _ := ltx.PageMapLookup(payload, 2); ok {
-		t.Fatalf("page 2 should be absent")
 	}
 }

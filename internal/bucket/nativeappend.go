@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,15 +20,41 @@ type OSSAppender struct {
 }
 
 // conditionalObjectCreator creates immutable ordinary objects, including
-// empty assets. Native forbid-overwrite is atomic; append-at-zero is not
-// sufficient for an empty object, which still has append position zero.
+// empty assets. Callers require atomic create-if-absent. Live COS tests show
+// forbid-overwrite PUT does not satisfy concurrent uniqueness on the tested
+// bucket; see the 2026-11-10 acceptance report. Append-at-zero also cannot
+// reserve an empty object, which still has append position zero.
 type conditionalObjectCreator interface {
 	CreateObject(context.Context, string, []byte) (string, error)
 }
 
 func (o *OSSAppender) CreateObject(ctx context.Context, key string, data []byte) (string, error) {
+	return o.CreateObjectReader(ctx, key, bytes.NewReader(data), int64(len(data)))
+}
+
+func (o *OSSAppender) CreateObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	return o.writeObjectReader(ctx, key, src, size, true)
+}
+func (o *OSSAppender) PutObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	return o.writeObjectReader(ctx, key, src, size, false)
+}
+func (o *OSSAppender) writeObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64, create bool) (string, error) {
+	if size < 0 {
+		return "", fmt.Errorf("bucket: negative object size")
+	}
+	timestamp, err := ltxTimestamp(key, src, size)
+	if err != nil {
+		return "", err
+	}
 	var headers http.Header
-	err := o.bucket.PutObject(key, bytes.NewReader(data), oss.WithContext(ctx), oss.ForbidOverWrite(true), oss.GetResponseHeader(&headers))
+	options := []oss.Option{oss.WithContext(ctx), oss.ContentLength(size), oss.GetResponseHeader(&headers)}
+	if create {
+		options = append(options, oss.ForbidOverWrite(true))
+	}
+	if timestamp != "" {
+		options = append(options, oss.Meta(ltxTimestampMetadataKey, timestamp))
+	}
+	err = o.bucket.PutObject(key, borrowedReadSeeker{src}, options...)
 	if err != nil {
 		var svc oss.ServiceError
 		if errors.As(err, &svc) && svc.StatusCode == http.StatusConflict && svc.Code == "FileAlreadyExists" {
@@ -83,7 +110,7 @@ func nativeOSSError(err error) error {
 		if svc.Code == "NoSuchKey" || svc.Code == "NoSuchBucket" {
 			return ErrNotFound
 		}
-		if svc.Code == "PositionNotEqualToLength" {
+		if svc.Code == "PositionNotEqualToLength" || svc.Code == "ObjectNotAppendable" {
 			return ErrPrecondition
 		}
 	}
@@ -96,10 +123,35 @@ type COSAppender struct {
 }
 
 func (c *COSAppender) CreateObject(ctx context.Context, key string, data []byte) (string, error) {
+	return c.CreateObjectReader(ctx, key, bytes.NewReader(data), int64(len(data)))
+}
+
+func (c *COSAppender) CreateObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	return c.writeObjectReader(ctx, key, src, size, true)
+}
+func (c *COSAppender) PutObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64) (string, error) {
+	return c.writeObjectReader(ctx, key, src, size, false)
+}
+func (c *COSAppender) writeObjectReader(ctx context.Context, key string, src io.ReadSeeker, size int64, create bool) (string, error) {
+	if size < 0 {
+		return "", fmt.Errorf("bucket: negative object size")
+	}
+	timestamp, err := ltxTimestamp(key, src, size)
+	if err != nil {
+		return "", err
+	}
 	headers := http.Header{}
-	headers.Set("x-cos-forbid-overwrite", "true")
-	resp, err := c.client.Object.Put(ctx, key, bytes.NewReader(data), &cos.ObjectPutOptions{
-		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{XOptionHeader: &headers},
+	if timestamp != "" {
+		headers.Set("x-cos-meta-"+ltxTimestampMetadataKey, timestamp)
+	}
+	if size >= nativeMultipartThresholdBytes {
+		return c.writeMultipart(ctx, key, src, size, headers, create)
+	}
+	if create {
+		headers.Set("x-cos-forbid-overwrite", "true")
+	}
+	resp, err := c.client.Object.Put(ctx, key, borrowedReadSeeker{src}, &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{XOptionHeader: &headers, ContentLength: size},
 	})
 	if err != nil {
 		var svc *cos.ErrorResponse
@@ -203,7 +255,7 @@ func nativeCOSError(err error) error {
 		if svc.Code == "NoSuchKey" || svc.Response != nil && svc.Response.StatusCode == http.StatusNotFound {
 			return ErrNotFound
 		}
-		if svc.Code == "PositionNotEqualToLength" || svc.Code == "AppendPositionErr" {
+		if svc.Code == "PositionNotEqualToLength" || svc.Code == "AppendPositionErr" || svc.Code == "ObjectNotAppendable" {
 			return ErrPrecondition
 		}
 	}

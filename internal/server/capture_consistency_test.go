@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellcapture"
@@ -37,6 +38,20 @@ func captureServer(t *testing.T) (*Server, *replica.Manager, []byte) {
 		AutoSnapshot: true,
 		Owner:        func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil },
 	}
+	// Captures run independently of the HTTP request. Join them before the
+	// underlying test store and TempDir are removed; cancellation alone races
+	// with final local LTX writes under disk load.
+	t.Cleanup(func() {
+		srv.WaitBackground()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, sc := range []cell.Scope{{Namespace: "acme", Class: "__kv__", ID: "default"}, d1.Scope("acme", "DB")} {
+			if err := srv.Capture.Drop(ctx, sc); err != nil {
+				t.Errorf("stop test capture %s: %v", sc, err)
+			}
+		}
+		srv.Capture.Stop()
+	})
 	return srv, rep, []byte(srv.Cfg.ScopeSecret)
 }
 
@@ -87,7 +102,26 @@ func TestKVCaptureConsistencyN(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 
+	// Activate through the actual routing path and drain its asynchronous
+	// claim work before measuring application-only TXID increments. Opening
+	// timer tables alone does not complete owner activation/recovery.
+	warm := httptest.NewRequest(http.MethodGet, "/v1/kv/get?ns=acme&key=__capture_warmup__", nil)
+	warm.Header.Set("Authorization", "Bearer "+tok)
+	wr := httptest.NewRecorder()
+	h.ServeHTTP(wr, warm)
+	if wr.Code != http.StatusNotFound && wr.Code != http.StatusOK {
+		t.Fatalf("warm activation: %d %s", wr.Code, wr.Body.String())
+	}
+	srv.WaitBackground()
+
+	// Owner activation asynchronously opens timer tables. That schema write
+	// consumes a legitimate TXID; finish it before asserting one ticket per
+	// application write so scheduling cannot insert a transaction mid-loop.
+	if _, err := srv.OpenTimer(t.Context(), cell.Scope{Namespace: "acme", Class: "__kv__", ID: "default"}); err != nil {
+		t.Fatal(err)
+	}
 	want := make(map[string]string, n)
+	var firstAck uint64
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("k%04d", i)
 		// 0..~8KB, all unique and byte-distinct.
@@ -99,6 +133,18 @@ func TestKVCaptureConsistencyN(t *testing.T) {
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("put %s = %d %s", key, rr.Code, rr.Body.String())
+		}
+		var ack struct {
+			TXID uint64 `json:"txid"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &ack); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			firstAck = ack.TXID
+		}
+		if ack.TXID != firstAck+uint64(i) {
+			t.Fatalf("write %d acknowledged txid %d, want %d", i, ack.TXID, firstAck+uint64(i))
 		}
 	}
 

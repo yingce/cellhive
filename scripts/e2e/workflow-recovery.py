@@ -55,6 +55,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         try:
             code, body = request(agent, self.path, self.command, data,
                                  {k:v for k,v in self.headers.items() if k.lower() not in ('host','connection','transfer-encoding')})
+            if code >= 500 and '/v1/internal/workflow/' in self.path:
+                print('PROXY workflow failure', self.command, urllib.parse.urlsplit(self.path).path, code, body[:1024].decode('utf-8', errors='replace'), flush=True)
             if armed.is_set() and '/event/consume?' in self.path and code == 200 and json.loads(body).get('found'):
                 armed.clear()
                 # The real agent has waited for the bucket durability proof;
@@ -107,7 +109,7 @@ def start_runtime():
     return p
 
 def call(path, **query):
-    code, body = request(public, path+'?'+urllib.parse.urlencode(query), headers={'Host':'workflow-recovery.test'})
+    code, body = request(public, path+'?'+urllib.parse.urlencode(query), headers={'Host':os.environ.get('E2E_WORKFLOW_HOST', 'workflow-recovery.test')})
     assert code == 200, (path, code, body)
     return body
 
@@ -121,7 +123,7 @@ def stop(pid):
     except ProcessLookupError: pass
 
 runtime = start_runtime()
-wait_for(lambda: request(public, '/ping', headers={'Host':'workflow-recovery.test'}) == (200,b'ok'), 'route')
+wait_for(lambda: request(public, '/ping', headers={'Host':os.environ.get('E2E_WORKFLOW_HOST', 'workflow-recovery.test')}) == (200,b'ok'), 'route')
 try:
     # Real runtime callback fencing: capture the superseded run identity.
     call('/create', id='fence')

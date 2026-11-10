@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,7 +29,6 @@ import (
 	"cellhive/internal/d1"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
-	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/owner"
 	"cellhive/internal/ownerclient"
@@ -128,7 +128,7 @@ func TestAppendPipeline(t *testing.T) {
 		t.Fatalf("claim code = %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("data"))
+	seg := nativeTestFile(t, 1, 1, []byte("data"))
 
 	// Append with the correct epoch.
 	rr = do(t, h, http.MethodPost, "/v1/internal/append?scope="+sc+"&epoch=1", "tok", seg)
@@ -175,7 +175,7 @@ func TestCommitFleetAndBucketFallback(t *testing.T) {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
 
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("data"))
+	seg := nativeTestFile(t, 1, 1, []byte("data"))
 	segB64 := base64.StdEncoding.EncodeToString(seg)
 
 	// Fleet posture: a reachable follower acks the write.
@@ -234,7 +234,7 @@ func TestCommitDoesNotFleetAckOutsideRecordedEnsemble(t *testing.T) {
 	if _, err := ownerSrv.NodeLog.Open(context.Background(), ownerSrv.Cfg.SessionID, 1, []string{"http://recorded.invalid"}); err != nil {
 		t.Fatalf("open node-log: %v", err)
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("safe"))
+	segment := nativeTestFile(t, 1, 1, []byte("safe"))
 	body := fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[%q]}`, scopeText, base64.StdEncoding.EncodeToString(segment), fh.URL)
 	rr := do(t, h, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"bucket-batch"`) {
@@ -277,7 +277,7 @@ func TestCommitBucketModes(t *testing.T) {
 			if rr := do(t, h, http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+sc+`"}`)); rr.Code != http.StatusOK {
 				t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 			}
-			seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("bucket-"+mode))
+			seg := nativeTestFile(t, 1, 1, []byte("bucket-"+mode))
 			body := fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[]}`, sc, base64.StdEncoding.EncodeToString(seg))
 			rr := do(t, h, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
 			if rr.Code != http.StatusOK {
@@ -304,7 +304,7 @@ func TestCommitFleetOnSingleNodeWaitsForBucket(t *testing.T) {
 	if rr := do(t, h, http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+sc+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("fleet-solo"))
+	seg := nativeTestFile(t, 1, 1, []byte("fleet-solo"))
 	body := fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[]}`, sc, base64.StdEncoding.EncodeToString(seg))
 	rr := do(t, h, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"bucket-batch"`) {
@@ -330,7 +330,7 @@ func TestCommitAutoSelectsFollowersFromLeases(t *testing.T) {
 		t.Fatalf("publish peer lease: %v", err)
 	}
 
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("auto"))
+	seg := nativeTestFile(t, 1, 1, []byte("auto"))
 	segB64 := base64.StdEncoding.EncodeToString(seg)
 
 	// No explicit followers: the owner must discover node-2 from leases.
@@ -363,7 +363,7 @@ func TestCommitAutoSelectsFollowersFromLeases(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	seg = ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("after-discovery"))
+	seg = nativeTestFile(t, 2, 2, []byte("after-discovery"))
 	body = fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[]}`, sc, base64.StdEncoding.EncodeToString(seg))
 	rr = do(t, oh, http.MethodPost, "/v1/internal/commit", "tok", []byte(body))
 	if rr.Code != http.StatusOK {
@@ -383,8 +383,8 @@ func TestPeerPersistentStreamAppendBatch(t *testing.T) {
 	transport := peer.NewStreamTransport(testAuthConfig(config.Config{}).TokenPeer, 2, 4)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "stream"}
 	segments := [][]byte{
-		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a")),
-		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("b")),
+		nativeTestFile(t, 1, 1, []byte("a")),
+		nativeTestFile(t, 2, 2, []byte("b")),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -410,8 +410,8 @@ func TestPeerSessionHTTPAppendReturnsV2Proof(t *testing.T) {
 	transport := peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil).WithSession("http-owner-session")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "http-session"}
 	segments := [][]byte{
-		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a")),
-		ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("b")),
+		nativeTestFile(t, 1, 1, []byte("a")),
+		nativeTestFile(t, 2, 2, []byte("b")),
 	}
 	if err := transport.Append(context.Background(), server.URL, sc, 1, segments[0]); err != nil {
 		t.Fatalf("session append: %v", err)
@@ -435,7 +435,11 @@ func TestCommitAcceptsLargeLTXJSON(t *testing.T) {
 	if rr := do(t, handler, http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scope+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, bytes.Repeat([]byte("x"), 800<<10))
+	payload := make([]byte, 800<<10)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	segment := nativeTestFile(t, 1, 1, payload)
 	body := fmt.Sprintf(`{"scope":%q,"epoch":1,"segment":%q,"followers":[]}`, scope, base64.StdEncoding.EncodeToString(segment))
 	if len(body) <= 1<<20 {
 		t.Fatalf("test body is not larger than 1 MiB")
@@ -455,7 +459,7 @@ func TestCommitBinaryFleet(t *testing.T) {
 	if rr := do(t, owner.Handler(), http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scopeText+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("binary"))
+	segment := nativeTestFile(t, 1, 1, []byte("binary"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scopeText+"&epoch=1", bytes.NewReader(segment))
 	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("content-type", "application/octet-stream")
@@ -481,7 +485,7 @@ func TestCommitBinaryBucketProofForDO(t *testing.T) {
 	if rr := do(t, owner.Handler(), http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scopeText+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("do"))
+	segment := nativeTestFile(t, 1, 1, []byte("do"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scopeText+"&epoch=1", bytes.NewReader(segment))
 	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("x-cellhive-followers", followerHTTP.URL)
@@ -492,7 +496,7 @@ func TestCommitBinaryBucketProofForDO(t *testing.T) {
 		t.Fatalf("DO commit must wait for bucket: %d %s", rr.Code, rr.Body.String())
 	}
 	scope, _ := cell.ParseScope(scopeText)
-	key := replica.Prefix(scope, 1) + "0.snapshot"
+	key := replica.EpochPrefix(scope, 1) + "0000/0000000000000001-0000000000000001.ltx"
 	got, err := owner.Replica.ReadSegment(context.Background(), key)
 	if err != nil || !bytes.Equal(got, segment) {
 		t.Fatalf("bucket head after ack: %q, %v", got, err)
@@ -506,7 +510,7 @@ func TestPeerStreamAppendBatchAsync(t *testing.T) {
 
 	transport := peer.NewStreamTransport(testAuthConfig(config.Config{}).TokenPeer, 2, 4)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "async"}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("a"))
+	segment := nativeTestFile(t, 1, 1, []byte("a"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ch, err := transport.AppendBatchAsync(ctx, server.URL, sc, 1, [][]byte{segment})
@@ -544,7 +548,7 @@ func TestCommitBinaryPipelinedFleet(t *testing.T) {
 	if rr := do(t, owner.Handler(), http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+scope+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("x"))
+	segment := nativeTestFile(t, 1, 1, []byte("x"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/commit_binary?scope="+scope+"&epoch=1&pipelined=1&base=1", bytes.NewReader(segment))
 	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("content-type", "application/octet-stream")
@@ -644,7 +648,7 @@ func TestNonOwnerForwardsCommitBinary(t *testing.T) {
 	}
 	_, _, nonOwnerHS := newForwardServer(t, dir, "node-2")
 
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("p"))
+	seg := nativeTestFile(t, 1, 1, []byte("p"))
 	url := nonOwnerHS.URL + "/v1/internal/commit_binary?scope=" + url.QueryEscape(sc.String()) + "&epoch=1"
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(seg))
 	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
@@ -742,7 +746,7 @@ func TestReadSegmentRange(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
 	sc := "demo/__kv__/main"
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("hello-range"))
+	seg := nativeTestFile(t, 1, 1, []byte("hello-range"))
 	if rr := do(t, h, http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+sc+`"}`)); rr.Code != http.StatusOK {
 		t.Fatalf("claim: %d", rr.Code)
 	}
@@ -755,10 +759,8 @@ func TestReadSegmentRange(t *testing.T) {
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &app)
 
-	idx := bytes.Index(seg, []byte("hello-range"))
-	if idx < 0 {
-		t.Fatal("payload not found in encoded segment")
-	}
+	idx := 100 // Range the original compressed native bytes, not decoded pages.
+	want := seg[idx : idx+11]
 	req := httptest.NewRequest(http.MethodGet, "/v1/internal/segment?key="+app.Key, nil)
 	req.Header.Set("Authorization", "Bearer "+testRoleJWT(t, "internal"))
 	req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", idx, idx+len("hello-range")-1))
@@ -767,8 +769,8 @@ func TestReadSegmentRange(t *testing.T) {
 	if rec.Code != http.StatusPartialContent {
 		t.Fatalf("range code = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Body.String() != "hello-range" {
-		t.Fatalf("range body = %q, want %q", rec.Body.String(), "hello-range")
+	if !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Fatalf("range body = %x, want %x", rec.Body.Bytes(), want)
 	}
 	if rr := do(t, h, http.MethodGet, "/v1/internal/segment?key="+app.Key+"&x=1", "tok", nil); rr.Code != http.StatusOK || !bytes.Equal(rr.Body.Bytes(), seg) {
 		t.Fatalf("full read regressed: code=%d len=%d", rr.Code, rr.Body.Len())

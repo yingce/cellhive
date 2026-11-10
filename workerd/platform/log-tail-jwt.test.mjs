@@ -33,8 +33,10 @@ test('tail query accepts only current log-role Bearer JWT, no static fallback', 
 });
 test('log capture reads authenticate using an internal JWT, never the key', async () => {
   let headers;
-  const context = harness({ fetch: async (_url, init) => { headers = new Headers(init.headers); return Response.json({ enabled: true }); } });
-  assert.equal((await context.readLogCapture({ CELL_URL: 'http://agent', CELL_TOKEN: key })).enabled, true);
+  const context = harness({ fetch: async (_url, init) => { headers = new Headers(init.headers); return Response.json({ mode: 'tail', workers: ['test-worker'] }); } });
+  const capture = await context.readLogCapture({ CELL_URL: 'http://agent', CELL_TOKEN: key });
+  assert.equal(capture.mode, 'tail');
+  assert.deepEqual(Array.from(capture.workers), ['test-worker']);
   assert.ok(await verifyJWT(key, headers.get('authorization').slice(7), 'token/internal', 'internal'));
   assert.equal(headers.has('x-cellhive-internal-token'), false);
 });

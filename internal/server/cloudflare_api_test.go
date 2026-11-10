@@ -19,6 +19,7 @@ import (
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/queue"
+	"cellhive/internal/workflow"
 	"github.com/gorilla/websocket"
 )
 
@@ -247,6 +248,7 @@ func TestCloudflareDeploymentsReflectCommittedActivations(t *testing.T) {
 
 func TestCloudflareWorkflowInstancesReadPersistedStepsAndPages(t *testing.T) {
 	s := newControlServer(t)
+	claimSeededScope(t, s, workflow.Scope("acme", "flow"))
 	if _, err := s.Control.CreateApp(t.Context(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}

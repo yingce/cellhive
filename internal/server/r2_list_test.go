@@ -65,6 +65,21 @@ func TestR2ListDelimiterAndInclude(t *testing.T) {
 		t.Fatalf("included metadata = %v / %v", hm, cm)
 	}
 
+	for _, field := range []string{"httpMetadata", "customMetadata"} {
+		rr := list("delimiter=/&include=" + field)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("single include %s: %d", field, rr.Code)
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		hm, _ := out.Objects[0]["httpMetadata"].(map[string]any)
+		cm, _ := out.Objects[0]["customMetadata"].(map[string]any)
+		if (len(hm) > 0) != (field == "httpMetadata") || (len(cm) > 0) != (field == "customMetadata") {
+			t.Fatalf("unrequested fields for %s: %v %v", field, hm, cm)
+		}
+	}
+
 	// include without metadata, and invalid include.
 	rr = list("delimiter=/")
 	if rr.Code != http.StatusOK {

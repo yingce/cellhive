@@ -155,7 +155,7 @@ func TestCaptureTakeoverRoundTripKeepsDurableHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := a.scopeForRel(name)
-	oldKey := replica.Prefix(scope, 1) + "0.snapshot"
+	oldKey := replica.EpochPrefix(scope, 1) + "0000/0000000000000001-0000000000000001.ltx"
 	oldSnapshot, _, err := b.Get(ctx, oldKey)
 	if err != nil {
 		t.Fatal(err)
@@ -291,8 +291,10 @@ func queryRow(t *testing.T, path string) int {
 	return v
 }
 
+// Embed the concrete backend so optional Stat/streaming interfaces survive
+// instrumentation and exercise the same compaction path as the real bucket.
 type countingBucket struct {
-	bucket.Bucket
+	*bucket.FSBucket
 	mu     sync.Mutex
 	gets   int
 	ranged int
@@ -303,21 +305,21 @@ func (c *countingBucket) Put(ctx context.Context, key string, data []byte) (stri
 	c.mu.Lock()
 	c.puts++
 	c.mu.Unlock()
-	return c.Bucket.Put(ctx, key, data)
+	return c.FSBucket.Put(ctx, key, data)
 }
 
 func (c *countingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
 	c.mu.Lock()
 	c.gets++
 	c.mu.Unlock()
-	return c.Bucket.Get(ctx, key)
+	return c.FSBucket.Get(ctx, key)
 }
 
 func (c *countingBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
 	c.mu.Lock()
 	c.ranged++
 	c.mu.Unlock()
-	return c.Bucket.RangedGet(ctx, key, off, length)
+	return c.FSBucket.RangedGet(ctx, key, off, length)
 }
 
 // TestParseFacets decodes real workerd ".facets" bytes (from the facet probe in
@@ -367,7 +369,7 @@ func TestPagedRestoreUsesRangedReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
-	cb := &countingBucket{Bucket: fsb}
+	cb := &countingBucket{FSBucket: fsb}
 	rep := replica.New(cb)
 	sup := &Supervisor{
 		Dir: dirA, Committer: &bucketCommitter{rep: rep, epoch: 1},
@@ -378,7 +380,7 @@ func TestPagedRestoreUsesRangedReads(t *testing.T) {
 	}
 	c, err := sup.CompactAll(context.Background())
 	if err != nil || c == 0 {
-		t.Skipf("compaction unavailable (compacted=%d, %v)", c, err)
+		t.Fatalf("compaction failed (compacted=%d, %v)", c, err)
 	}
 	before := cb.ranged
 	dirB := t.TempDir()
@@ -407,7 +409,12 @@ func agentStub(t *testing.T, rep *replica.Manager, b *bucket.FSBucket) (*httptes
 		}
 		var epoch uint64
 		_, _ = fmt.Sscan(r.URL.Query().Get("epoch"), &epoch)
-		keys, err := rep.ListSegments(r.Context(), sc, epoch)
+		var keys []string
+		if r.URL.Query().Get("chain") == "1" {
+			keys, err = rep.RestoreChainKeys(r.Context(), sc, epoch)
+		} else {
+			keys, err = rep.ListSegments(r.Context(), sc, epoch)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -416,6 +423,18 @@ func agentStub(t *testing.T, rep *replica.Manager, b *bucket.FSBucket) (*httptes
 	})
 	mux.HandleFunc("GET /v1/internal/segment", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
+		if r.Method == http.MethodHead {
+			size, tag, err := b.Stat(r.Context(), key)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprint(size))
+			w.Header().Set("ETag", `"`+tag+`"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		if rng := r.Header.Get("range"); strings.HasPrefix(rng, "bytes=") {
 			var off, end int64
 			if _, err := fmt.Sscanf(strings.TrimPrefix(rng, "bytes="), "%d-%d", &off, &end); err != nil {
@@ -423,11 +442,12 @@ func agentStub(t *testing.T, rep *replica.Manager, b *bucket.FSBucket) (*httptes
 				return
 			}
 			atomic.AddInt64(&ranged, 1)
-			data, _, err := b.RangedGet(r.Context(), key, off, end-off+1)
+			data, tag, err := b.RangedGet(r.Context(), key, off, end-off+1)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
+			w.Header().Set("ETag", `"`+tag+`"`)
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write(data)
 			return
@@ -577,7 +597,7 @@ func TestSyncAllSkipsUnchangedBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cb := &countingBucket{Bucket: fsb}
+	cb := &countingBucket{FSBucket: fsb}
 	rep := replica.New(cb)
 	sup := &Supervisor{
 		Dir: dirA, Committer: &bucketCommitter{rep: rep, epoch: 1},

@@ -22,7 +22,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 
 ## 目录约定（命名要直观）
 
-- 顶层：`cmd/`（薄 CLI/服务入口）、`internal/`（可复用包）、`workerd/`（workerd JS/capnp）、`cli/`（dev 工具，非生产）、`docs/`（现行文档）、`docs/archive/`（历史文档，如 `p0-tasks.md`/`p0-report.md`）。
+- 顶层：`cmd/`（薄 CLI/服务入口）、`internal/`（可复用包）、`workerd/`（workerd JS/capnp）、`cli/`（dev 工具，非生产）、`docs/`（现行文档）、`docs/archive/`（历史文档，如 `p0-report.md`）。
 - `workerd/` 分**生产**与**非生产**，不要把生产代码放进 spike/存档目录：
   - 生产：`user-runtime/`、`do-runtime/`（host actor/loader/wrapper）、`platform/`（两个 runtime 共用的平台 JS：`facades.js`/`bindings.js`/`bindings-wrapper.js`，ADR-090）、`wrapper/`（DO 组提交）。
   - 非生产：`spikes/<阶段>/`（探索性 spike，如 `spikes/p0/`）、`skeletons/`（已被取代的骨架 capnp）。

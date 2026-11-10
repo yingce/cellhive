@@ -121,3 +121,39 @@ func TestS3DefaultMaxReadCoversLargestRestorableObject(t *testing.T) {
 		t.Fatalf("DefaultMaxObjectBytes = %d, must cover the 512 MiB multipart object ceiling", DefaultMaxObjectBytes)
 	}
 }
+
+// COS returns NoSuchKey when another deleter wins after the caller's GET.
+// Preserve the bucket sentinel so optional wake cleanup can ignore that race.
+func TestS3ConditionalDeleteMapsProviderErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		want   error
+	}{
+		{"missing", 404, "NoSuchKey", ErrNotFound},
+		{"stale", 412, "PreconditionFailed", ErrPrecondition},
+		{"denied", 403, "AccessDenied", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.Header.Get("If-Match") != `"original"` {
+					t.Errorf("unexpected delete: %s %q", r.Method, r.Header.Get("If-Match"))
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("<Error><Code>" + tc.code + "</Code><Message>test</Message></Error>"))
+			}))
+			defer srv.Close()
+			b := newBoundsTestS3(t, srv.URL, 1024)
+			err := b.ConditionalDelete(t.Context(), "wake/test", "original")
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("got %v, want %v", err, tc.want)
+				}
+			} else if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrPrecondition) {
+				t.Fatalf("unexpected suppressed error: %v", err)
+			}
+		})
+	}
+}

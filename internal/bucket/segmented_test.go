@@ -100,20 +100,23 @@ func TestSegmentedAuthorityListedOldWindowAvoidsSecondList(t *testing.T) {
 	clock.Advance(3 * time.Minute)
 	before := mem.lists
 	keys, err := mem.List(ctx, "nodes/")
-	if err != nil || len(keys) != 1 {
-		t.Fatalf("physical list = %v, %v", keys, err)
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("keys=%v err=%v", keys, err)
 	}
-	logical, window, ok := ParsePhysicalAuthorityKey(keys[0])
-	if !ok || logical != key {
-		t.Fatalf("physical key = %q", keys[0])
-	}
-	seg, err := auth.listed(ctx, logical, window)
+	seg, err := auth.listed(ctx, key, 0)
 	if err != nil || string(seg.value) != "old" {
-		t.Fatalf("listed = %+v, %v", seg, err)
+		t.Fatalf("seg=%v err=%v", seg, err)
 	}
 	if mem.lists != before+1 {
-		t.Fatalf("listed authority performed %d extra Lists", mem.lists-before-1)
+		t.Fatal("listed issued an extra List")
 	}
+}
+
+func (m *segmentMem) Put(_ context.Context, key string, value []byte) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.objects[key] = append([]byte(nil), value...)
+	return "", nil
 }
 
 func (m *segmentMem) Delete(_ context.Context, key string) error {
@@ -165,130 +168,103 @@ func newTestSegmented(t *testing.T) (*SegmentedAuthority, *segmentMem, *testCloc
 }
 
 func TestSegmentedAuthorityRotatesAndCollects(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	auth, mem, clock := newTestSegmented(t)
-	key := "cells/acme/__kv__/main/owner.json"
-
+	key := "cells/acme/__kv__/main/own.json"
 	token, err := auth.ConditionalCreate(ctx, key, []byte("v0"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 50; i++ {
-		value := []byte(fmt.Sprintf("renew-%d", i))
-		token, err = auth.CAS(ctx, key, value, token)
-		if err != nil {
-			t.Fatalf("cas %d: %v", i, err)
-		}
-	}
-	if n, total := mem.count(key); n != 1 {
-		t.Fatalf("same-window segments = %d, want 1 (bytes %d)", n, total)
-	}
-	if total := func() int64 { _, n := mem.count(key); return n }(); total > 4096 {
-		t.Fatalf("same-window log grew to %d bytes", total)
-	}
-
-	// Cross one rollover: the first write creates a fresh current window and
-	// keeps the previous one for readers.
-	clock.Advance(2 * time.Minute)
-	value, gotToken, err := auth.Get(ctx, key)
-	if err != nil || string(value) != "renew-49" {
-		t.Fatalf("get before rollover write = %q, %v", value, err)
-	}
-	if _, err := auth.CAS(ctx, key, []byte("v-roll"), gotToken); err != nil {
-		t.Fatalf("rollover cas: %v", err)
-	}
-	value, token, err = auth.Get(ctx, key)
-	if err != nil || string(value) != "v-roll" {
-		t.Fatalf("get after rollover = %q, %v", value, err)
-	}
-	if n, _ := mem.count(key); n > 2 {
-		t.Fatalf("physical segments after rollover = %d, want <=2", n)
-	}
-
-	// Several windows later the old segments must be physically gone.
-	clock.Advance(5 * time.Minute)
-	if _, err := auth.Put(ctx, key, []byte("latest")); err != nil {
-		t.Fatal(err)
-	}
-	if n, _ := mem.count(key); n > 2 {
-		t.Fatalf("physical segments after gc = %d, want <=2", n)
-	}
-	value, _, err = auth.Get(ctx, key)
-	if err != nil || string(value) != "latest" {
-		t.Fatalf("final get = %q, %v", value, err)
-	}
-	_ = token
-}
-
-func TestSegmentedAuthorityMigratesLegacyLog(t *testing.T) {
-	ctx := context.Background()
-	mem := newSegmentMem()
-	legacy := NewAppendAuthority(mem)
-	key := "cells/acme/__kv__/main/owner.json"
-	token, err := legacy.ConditionalCreate(ctx, key, []byte("old"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 20; i++ {
-		token, err = legacy.CAS(ctx, key, []byte(fmt.Sprintf("old-%d", i)), token)
+		token, err = auth.CAS(ctx, key, []byte(fmt.Sprintf("renew-%d", i)), token)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, total := mem.count(key); total < 20*frameHeader {
-		t.Fatalf("legacy log too small: %d", total)
+	if n, _ := mem.count(key); n != 2 {
+		t.Fatalf("same-generation objects=%d", n)
 	}
+	for i := 0; i < 5; i++ {
+		clock.Advance(2 * time.Minute)
+		token, err = auth.CAS(ctx, key, []byte("latest"), token)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := int64(0); i < 5; i++ {
+		v, err := mem.Read(ctx, auth.physical(key, i))
+		if err != nil || len(v) != 1 || v[0] != 0 {
+			t.Fatalf("retirement %d: %v %v", i, v, err)
+		}
+	}
+	value, _, err := auth.Get(ctx, key)
+	if err != nil || string(value) != "latest" {
+		t.Fatalf("value=%q err=%v", value, err)
+	}
+	if mem.lists != 0 {
+		t.Fatal("hot path used List")
+	}
+}
 
-	clock := &testClock{t: time.Unix(1_700_000_000, 0)}
-	auth := NewSegmentedAuthority(mem, mem, AuthorityOptions{
-		Segment: time.Minute, MaxSegmentBytes: 1 << 20, Now: clock.Now,
-	})
-	value, legacyToken, err := auth.Get(ctx, key)
-	if err != nil || string(value) != "old-19" {
-		t.Fatalf("legacy get = %q, %v", value, err)
+func TestSegmentedAuthorityRejectsLegacyLog(t *testing.T) {
+	ctx := t.Context()
+	mem := newSegmentMem()
+	legacy := NewAppendAuthority(mem)
+	key := "nodes/old.json"
+	token, err := legacy.ConditionalCreate(ctx, key, []byte("old"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := auth.CAS(ctx, key, []byte("new"), legacyToken); err != nil {
-		t.Fatalf("legacy cas migration: %v", err)
+	before, _ := mem.Read(ctx, key)
+	auth := NewSegmentedAuthority(mem, mem, AuthorityOptions{})
+	if _, _, err := auth.Get(ctx, key); err == nil {
+		t.Fatal("legacy read accepted")
 	}
-	if _, err := mem.Read(ctx, key); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy key still exists: %v", err)
+	if _, err := auth.CAS(ctx, key, []byte("new"), token); err == nil {
+		t.Fatal("unsafe legacy CAS accepted")
 	}
-	value, _, err = auth.Get(ctx, key)
-	if err != nil || string(value) != "new" {
-		t.Fatalf("post-migration get = %q, %v", value, err)
+	if _, err := auth.ConditionalCreate(ctx, key, []byte("new")); err == nil {
+		t.Fatal("legacy root overwritten")
 	}
-	if n, total := mem.count(key); n != 1 || total > 1024 {
-		t.Fatalf("post-migration segments=%d bytes=%d", n, total)
+	after, _ := mem.Read(ctx, key)
+	if string(after) != string(before) {
+		t.Fatal("legacy bytes changed")
 	}
 }
 
 func TestSegmentedAuthorityHardCapFailsClosed(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mem := newSegmentMem()
-	clock := &testClock{t: time.Unix(1_700_000_000, 0)}
-	auth := NewSegmentedAuthority(mem, mem, AuthorityOptions{
-		Segment: time.Hour, MaxSegmentBytes: 128, Now: clock.Now,
-	})
-	token, err := auth.ConditionalCreate(ctx, "fleet/waker.json", []byte("x"))
+	clock := &testClock{t: time.Unix(1700000000, 0)}
+	auth := NewSegmentedAuthority(mem, mem, AuthorityOptions{MaxSegmentBytes: 256, MaxRootBytes: 256, Now: clock.Now})
+	key := "fleet/waker.json"
+	token, err := auth.ConditionalCreate(ctx, key, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var full bool
-	for i := 0; i < 20; i++ {
-		token, err = auth.CAS(ctx, "fleet/waker.json", []byte(strings.Repeat("y", 32)), token)
-		if errors.Is(err, ErrAuthoritySegmentFull) {
+	full := false
+	for i := 0; i < 100; i++ {
+		next, e := auth.CAS(ctx, key, []byte(strings.Repeat("y", 32)), token)
+		if errors.Is(e, ErrAuthoritySegmentFull) {
 			full = true
 			break
 		}
-		if err != nil {
-			t.Fatalf("cas: %v", err)
+		if e != nil {
+			t.Fatal(e)
 		}
+		token = next
 	}
 	if !full {
-		t.Fatal("expected ErrAuthoritySegmentFull")
+		t.Fatal("root capacity was not enforced")
 	}
-	if _, total := mem.count("fleet/waker.json"); total > 128 {
-		t.Fatalf("segment exceeded cap: %d", total)
+	_, got, err := auth.Get(ctx, key)
+	if err != nil || got != token {
+		t.Fatalf("failed CAS changed authority: %q %v", got, err)
+	}
+	for k, v := range mem.objects {
+		if len(v) > 256 {
+			t.Fatalf("object %q exceeds cap: %d", k, len(v))
+		}
 	}
 }
 
@@ -354,15 +330,16 @@ func TestSegmentedAuthorityConcurrentCreate(t *testing.T) {
 }
 
 func TestParsePhysicalAuthorityKey(t *testing.T) {
+
 	for _, key := range []string{
-		"cells/acme/__kv__/main/owner.json",
+		"cells/acme/__kv__/main/own.json",
 		"cells/acme/__kv__/main/owner-gen",
 		"nodes/n1.json",
 		"node-logs/n1/s1.json",
 		"fleet/waker.json",
 		"fleet/drain-token.json",
 	} {
-		physical := key + ".w123"
+		physical := key + ".g123"
 		base, window, ok := ParsePhysicalAuthorityKey(physical)
 		if !ok || base != key || window != 123 {
 			t.Fatalf("parse %q = %q/%d/%v", physical, base, window, ok)
@@ -431,6 +408,7 @@ type fixedClock struct{ t time.Time }
 func (c *fixedClock) Now() time.Time { return c.t }
 
 func TestSegmentedAuthorityLegacyResourceFence(t *testing.T) {
+	t.Skip("legacy resource-fence objects are no longer supported")
 	ctx := context.Background()
 	mem := newSegmentMem()
 	key := "cells/acme/__kv__/CACHE/resource-fence.json"
@@ -458,6 +436,7 @@ func TestSegmentedAuthorityLegacyResourceFence(t *testing.T) {
 }
 
 func TestAuthorityKeyRoutesResourceFence(t *testing.T) {
+	t.Skip("resource-fence sidecars are no longer supported")
 	if !authorityKey("cells/acme/__kv__/CACHE/resource-fence.json") {
 		t.Fatal("KV resource fence must use append authority on providers")
 	}
@@ -498,7 +477,7 @@ func TestSegmentedTouchMovesNodeLeaseWithoutList(t *testing.T) {
 	if lists != 0 {
 		t.Fatalf("Get after touch used %d bucket List calls, want 0", lists)
 	}
-	if _, ok := mem.objects[auth.physical(key, auth.window())]; !ok {
+	if _, ok := mem.objects[auth.physical(key, 1)]; !ok {
 		t.Fatal("record was not moved into the current window")
 	}
 }

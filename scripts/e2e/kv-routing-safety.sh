@@ -33,7 +33,8 @@ sleep 2
 # An unpinned binding JWT can access the current registration, but old data
 # must never reappear. Pinned-version auth retains its separate existing tests.
 for base in "$OWNER" "$PEER"; do
- [[ $(request "$base/v1/kv/get?ns=e2eroute&key=old") = 404 ]] || e2e_fail 'old incarnation data reappeared'
+ code=$(request "$base/v1/kv/get?ns=e2eroute&key=old")
+ [[ $code = 404 ]] || e2e_fail "recreated read expected 404, got $code: $(cat "$E2E_BASE/response")"
 done
 [[ $(request -X POST --data-binary new "$PEER/v1/kv/put?ns=e2eroute&key=new") = 200 ]] || e2e_fail 'recreated put'
 [[ $(request "$OWNER/v1/kv/get?ns=e2eroute&key=new") = 200 && $(cat "$E2E_BASE/response") = new ]] || e2e_fail 'recreated cross-node read'

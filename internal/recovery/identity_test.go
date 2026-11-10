@@ -14,7 +14,6 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
-	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
 	"cellhive/internal/recovery"
@@ -35,7 +34,7 @@ func TestRecoveryFollowsIdentityAfterAddressChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := cell.Scope{Namespace: "test", Class: "kv", ID: "recover"}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("acked data"))
+	seg := nativeRecoverySegment(t, 1, []byte("acked data"))
 	if _, _, err := spool.AppendBatchSession(ctx, "old-session", sc, 1, [][]byte{seg}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +165,7 @@ func TestRecoveryResumesCheckpointAfterTailFailure(t *testing.T) {
 	spool, _ := peer.NewSpool(t.TempDir())
 	sc := cell.Scope{Namespace: "test", Class: "kv", ID: "resume"}
 	for i := uint64(1); i <= 300; i++ {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte("data"))
+		seg := nativeRecoverySegment(t, i, []byte("data"))
 		if _, _, err := spool.AppendBatchSession(ctx, "old", sc, 1, [][]byte{seg}); err != nil {
 			t.Fatal(err)
 		}
@@ -236,7 +235,7 @@ func TestReplicationRequiresMatchingIdentityHTTPAndStream(t *testing.T) {
 				defer st.Close()
 			}
 			sc := cell.Scope{Namespace: "test", Class: "kv", ID: "proof"}
-			seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("confirmed"))
+			seg := nativeRecoverySegment(t, 1, []byte("confirmed"))
 			if err := transport.Append(ctx, h.URL, sc, 1, seg); err != nil {
 				t.Fatal(err)
 			}

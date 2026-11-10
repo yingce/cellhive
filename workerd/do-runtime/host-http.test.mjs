@@ -189,3 +189,15 @@ test('host facet invoke and forwarded invoke stream the response body', async ()
   assert.equal(forwardedPulls, 0);
   assert.deepEqual([...new Uint8Array(await fwd.arrayBuffer())], [1, 2]);
 });
+
+test('same storage and shard isolate classes while aliases retain identity', async () => {
+  const c = invokeHarness();
+  const hosts = [];
+  const env = { NODE_ID: 'n', HOST: { idFromName: id => { hosts.push(id); return id; }, get: () => ({fetch: async () => new Response('ok')}) } };
+  for (const [cls, alias] of [['SessionDO',''], ['SchedulerDO',''], ['RenamedSession','SessionDO']]) {
+    const spec = {namespace:'app',worker:'web',storage_id:'sid',class:cls,storage_class:alias,id:'same',bundle_sha:'sha'};
+    await c.invoke({headers:new Headers(),text:async()=>JSON.stringify(spec)},env,null);
+  }
+  assert.notEqual(hosts[0],hosts[1]);
+  assert.equal(hosts[0],hosts[2]);
+});

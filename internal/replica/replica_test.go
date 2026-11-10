@@ -1,303 +1,219 @@
 package replica
 
 import (
-	"context"
-	"strings"
-	"testing"
-
+	"bytes"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
+	"os"
+	"strings"
+	"testing"
 )
 
 func newManager(t *testing.T) *Manager {
 	t.Helper()
 	b, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
-		t.Fatalf("bucket: %v", err)
+		t.Fatal(err)
 	}
 	return New(b)
 }
-
+func nativeBlob(t *testing.T, lo, hi uint64, v byte) []byte {
+	t.Helper()
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: lo, MaxTXID: hi}, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{v}, 512)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
 func TestAppendListRead(t *testing.T) {
-	ctx := context.Background()
 	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
-
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 2, StartTxID: 1, EndTxID: 1}, []byte("payload"))
-	key, etag, err := m.Append(ctx, sc, 2, seg)
-	if err != nil {
-		t.Fatalf("append: %v", err)
+	raw := nativeBlob(t, 1, 1, 'a')
+	key, etag, err := m.Append(t.Context(), sc, 2, raw)
+	if err != nil || etag == "" {
+		t.Fatalf("append %q %v", etag, err)
 	}
-	if etag == "" {
-		t.Fatalf("empty etag")
+	if key != EpochPrefix(sc, 2)+"0000/0000000000000001-0000000000000001.ltx" {
+		t.Fatalf("key=%s", key)
 	}
-	if key != Prefix(sc, 2)+"1-1.ltx" {
-		t.Fatalf("key = %q", key)
+	keys, err := m.ListSegments(t.Context(), sc, 2)
+	if err != nil || len(keys) != 1 || keys[0] != key {
+		t.Fatalf("keys=%v %v", keys, err)
 	}
-
-	keys, err := m.ListSegments(ctx, sc, 2)
-	if err != nil {
-		t.Fatalf("list: %v", err)
+	got, err := m.ReadSegment(t.Context(), key)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("read differs %v", err)
 	}
-	if len(keys) != 1 || keys[0] != key {
-		t.Fatalf("list = %v, want [%s]", keys, key)
-	}
-
-	got, err := m.ReadSegment(ctx, key)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if _, payload, err := ltx.Decode(got); err != nil || string(payload) != "payload" {
-		t.Fatalf("decoded payload = %q, %v", payload, err)
+	h, pages, err := ltx.DecodeNativePages(got)
+	if err != nil || h.MinTXID != 1 || len(pages) != 1 || !bytes.Equal(pages[0].Data, bytes.Repeat([]byte{'a'}, 512)) {
+		t.Fatalf("native decode %v", err)
 	}
 }
-
-func TestAppendDoesNotOverwriteAcknowledgedSegment(t *testing.T) {
-	ctx := context.Background()
+func TestAppendSnapshotFileUsesCanonicalRangeObject(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "file"}
+	raw := nativeBlob(t, 1, 7, 1)
+	path := t.TempDir() + "/snapshot"
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := m.AppendSnapshotFile(t.Context(), sc, 1, path, int64(len(raw)))
+	if err != nil || key != EpochPrefix(sc, 1)+"0000/0000000000000001-0000000000000007.ltx" {
+		t.Fatalf("file=%s %v", key, err)
+	}
+}
+func TestAppendSnapshotReplayKeepsCanonicalRange(t *testing.T) {
 	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__do__", ID: "host"}
-	first := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("A"))
-	second := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, []byte("B"))
-	key, _, err := m.Append(ctx, sc, 1, first)
+	raw := nativeBlob(t, 1, 1, 1)
+	key, _, err := m.Append(t.Context(), sc, 1, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Append(ctx, sc, 1, first); err != nil {
-		t.Fatalf("identical replay: %v", err)
+	if _, _, err = m.Append(t.Context(), sc, 1, raw); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, err := m.Append(ctx, sc, 1, second); err == nil {
-		t.Fatal("conflicting replay overwrote acknowledged segment")
+	if _, _, err = m.Append(t.Context(), sc, 1, nativeBlob(t, 1, 1, 2)); err != nil {
+		t.Fatalf("overwrite=%v", err)
 	}
-	got, err := m.ReadSegment(ctx, key)
-	if err != nil || string(got) != string(first) {
-		t.Fatalf("retained segment = %q, err=%v", got, err)
+	got, err := m.ReadSegment(t.Context(), key)
+	if err != nil || !bytes.Equal(got, nativeBlob(t, 1, 1, 2)) {
+		t.Fatalf("ordinary replay %v", err)
 	}
 }
-
-func TestAppendRejectsEpochMismatch(t *testing.T) {
-	ctx := context.Background()
+func TestAppendRejectsPrivateEpochHeader(t *testing.T) {
 	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "db"}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, EndTxID: 1}, []byte("x"))
-	if _, _, err := m.Append(ctx, sc, 2, seg); err == nil {
-		t.Fatalf("expected epoch mismatch error")
+	raw := []byte("\x4c\x54\x58\x31\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x07\x56\x50\x41\xe6\x70\x72\x69\x76\x61\x74\x65")
+	if _, _, err := m.Append(t.Context(), sc, 2, raw); err == nil {
+		t.Fatal("private header accepted")
 	}
 }
-
 func TestAppendRejectsInvalidSegment(t *testing.T) {
-	ctx := context.Background()
 	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "db"}
-	if _, _, err := m.Append(ctx, sc, 1, []byte("not a segment")); err == nil {
-		t.Fatalf("expected invalid segment error")
+	if _, _, err := m.Append(t.Context(), sc, 1, []byte("invalid")); err == nil {
+		t.Fatal("invalid file accepted")
 	}
 }
-
 func TestValidateKey(t *testing.T) {
 	if err := ValidateKey("cells/a/b/c/ltx/e1/1-1.ltx", "cells/"); err != nil {
-		t.Fatalf("valid key rejected: %v", err)
+		t.Fatal(err)
 	}
 	if err := ValidateKey("nodes/x.json", "cells/"); err == nil {
-		t.Fatalf("expected rejection for key outside prefix")
+		t.Fatal("outside prefix accepted")
 	}
 }
-
 func TestAppendBatchAndRestore(t *testing.T) {
-	ctx := context.Background()
 	m := newManager(t)
-	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "batched"}
-
-	seg1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 7, StartTxID: 1, EndTxID: 1}, []byte("a"))
-	seg2 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 7, StartTxID: 2, EndTxID: 2}, []byte("b"))
-	seg3 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 7, StartTxID: 3, EndTxID: 3}, []byte("c"))
-
-	key, _, err := m.AppendBatch(ctx, sc, 7, [][]byte{seg1, seg2, seg3})
+	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "batch"}
+	key, _, err := m.AppendBatch(t.Context(), sc, 7, [][]byte{nativeBlob(t, 1, 1, 1), nativeBlob(t, 2, 2, 2), nativeBlob(t, 3, 3, 3)})
 	if err != nil {
-		t.Fatalf("append batch: %v", err)
+		t.Fatal(err)
 	}
-	keys, err := m.ListSegments(ctx, sc, 7)
+	keys, err := m.ListSegments(t.Context(), sc, 7)
 	if err != nil || len(keys) != 1 || keys[0] != key {
-		t.Fatalf("batch produced %v objects, want 1 (%s): %v", keys, key, err)
+		t.Fatalf("batch keys %v %v", keys, err)
 	}
-
-	segs, err := m.Restore(ctx, sc, 7)
-	if err != nil {
-		t.Fatalf("restore batch: %v", err)
+	segs, err := m.Restore(t.Context(), sc, 7)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("batch restore %d %v", len(segs), err)
 	}
-	if len(segs) != 3 {
-		t.Fatalf("restore returned %d segments, want 3", len(segs))
-	}
-	if string(segs[0].Raw) != string(seg1) || string(segs[2].Raw) != string(seg3) {
-		t.Fatalf("batch segments not restored in order")
+	h, pages, err := ltx.DecodeNativePages(segs[0].Raw)
+	if err != nil || h.MinTXID != 1 || h.MaxTXID != 3 || len(pages) != 1 || pages[0].Data[0] != 3 {
+		t.Fatalf("batch state header=%+v err=%v", h, err)
 	}
 }
-
 func TestRestoreOrdersSegments(t *testing.T) {
-	ctx := context.Background()
 	m := newManager(t)
-	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "db"}
-
-	// Append out of order: two deltas then a snapshot.
-	_, _, _ = m.Append(ctx, sc, 5, ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 5, StartTxID: 3, EndTxID: 3}, []byte("d3")))
-	_, _, _ = m.Append(ctx, sc, 5, ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 5, StartTxID: 2, EndTxID: 2}, []byte("d2")))
-	_, _, _ = m.Append(ctx, sc, 5, ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 5, EndTxID: 1}, []byte("snap")))
-
-	segs, err := m.Restore(ctx, sc, 5)
-	if err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	if len(segs) != 3 {
-		t.Fatalf("segment count = %d, want 3", len(segs))
-	}
-	if segs[0].Header.Kind != ltx.KindSnapshot {
-		t.Fatalf("first segment kind = %v, want snapshot", segs[0].Header.Kind)
-	}
-	if segs[1].Header.StartTxID != 2 || segs[2].Header.StartTxID != 3 {
-		t.Fatalf("delta order wrong: %d,%d", segs[1].Header.StartTxID, segs[2].Header.StartTxID)
-	}
-}
-
-func TestManifestAndL1RestorePreference(t *testing.T) {
-	ctx := context.Background()
-	b, err := bucket.NewFSBucket(t.TempDir())
-	if err != nil {
-		t.Fatalf("bucket: %v", err)
-	}
-	m := New(b)
-	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "l1"}
-	const epoch = uint64(2)
-
-	snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 0, EndTxID: 0}, []byte("s"))
-	d1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 1, EndTxID: 1}, []byte("d1"))
-	d2 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 2, EndTxID: 2}, []byte("d2"))
-	for _, seg := range [][]byte{snap, d1, d2} {
-		if _, _, err := m.Append(ctx, sc, epoch, seg); err != nil {
-			t.Fatalf("append: %v", err)
-		}
-	}
-
-	l0, err := m.ListL0Segments(ctx, sc, epoch)
-	if err != nil || len(l0) != 3 {
-		t.Fatalf("l0 = %v, %v", l0, err)
-	}
-
-	// Publish an L1 snapshot covering through txid 1, plus a manifest.
-	l1seg := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 1, EndTxID: 1, Flags: ltx.SnapshotFlags(0)}, []byte("l1"))
-	k, _, err := m.AppendL1(ctx, sc, epoch, l1seg)
-	if err != nil {
-		t.Fatalf("append L1: %v", err)
-	}
-	if err := m.PutManifest(ctx, sc, epoch, Manifest{MinTxID: 0, MaxTxID: 1, Objects: []string{k}}); err != nil {
-		t.Fatalf("put manifest: %v", err)
-	}
-	if _, ok, err := m.ReadManifest(ctx, sc, epoch); err != nil || !ok {
-		t.Fatalf("read manifest ok=%v err=%v", ok, err)
-	}
-	l0after, _ := m.ListL0Segments(ctx, sc, epoch)
-	if len(l0after) != 3 {
-		t.Fatalf("unexpected L0 listing: %v", l0after)
-	}
-	for _, k := range l0after {
-		if strings.HasPrefix(k, L1Prefix(sc, epoch)) {
-			t.Fatalf("L1 object leaked into L0 listing: %v", l0after)
-		}
-	}
-
-	// Restore must use L1 + only the delta newer than MaxTxID.
-	segs, err := m.Restore(ctx, sc, epoch)
-	if err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	if len(segs) != 2 {
-		t.Fatalf("restore segments = %d, want 2 (L1 snapshot + d2)", len(segs))
-	}
-	if segs[0].Header.Kind != ltx.KindSnapshot || string(segs[0].Raw[ltx.HeaderSize:]) != "l1" {
-		t.Fatalf("first segment is not the L1 snapshot: %+v", segs[0].Header)
-	}
-	if string(segs[1].Raw[ltx.HeaderSize:]) != "d2" {
-		t.Fatalf("second segment payload = %q, want d2", segs[1].Raw[ltx.HeaderSize:])
-	}
-}
-
-func TestRestoreKeepsDeltaCrossingL1Watermark(t *testing.T) {
-	ctx := context.Background()
-	m := newManager(t)
-	sc := cell.Scope{Namespace: "demo", Class: "__invocations__", ID: "main"}
-	const epoch = uint64(3)
-	snapshot := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 10, EndTxID: 10}, []byte("snapshot"))
-	key, _, err := m.AppendL1(ctx, sc, epoch, snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.PutManifest(ctx, sc, epoch, Manifest{MinTxID: 1, MaxTxID: 10, Objects: []string{key}}); err != nil {
-		t.Fatal(err)
-	}
-	for _, h := range []ltx.Header{
-		{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 9, EndTxID: 12},
-		{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 13, EndTxID: 13},
-	} {
-		if _, _, err := m.Append(ctx, sc, epoch, ltx.Encode(h, []byte("delta"))); err != nil {
+	sc := cell.Scope{Namespace: "demo", Class: "__d1__", ID: "order"}
+	for _, tx := range []uint64{3, 2, 1} {
+		if _, _, err := m.Append(t.Context(), sc, 5, nativeBlob(t, tx, tx, byte(tx))); err != nil {
 			t.Fatal(err)
 		}
 	}
-	segs, err := m.Restore(ctx, sc, epoch)
+	segs, err := m.Restore(t.Context(), sc, 5)
+	if err != nil || len(segs) != 3 {
+		t.Fatalf("restore %d %v", len(segs), err)
+	}
+	for i, s := range segs {
+		h, err := ltx.ParseNativeHeader(s.Raw)
+		if err != nil || h.MinTXID != uint64(i+1) {
+			t.Fatalf("order %+v %v", h, err)
+		}
+	}
+}
+func TestNativeL1RestorePreferenceWithoutManifest(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "l1"}
+	for tx := uint64(1); tx <= 3; tx++ {
+		if _, _, err := m.Append(t.Context(), sc, 2, nativeBlob(t, tx, tx, byte(tx))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key, _, err := m.AppendL1(t.Context(), sc, 2, nativeBlob(t, 1, 2, 2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(segs) != 3 || segs[1].Header.StartTxID != 9 || segs[2].Header.StartTxID != 13 {
-		t.Fatalf("restore dropped the crossing delta: %+v", segs)
+	keys, err := m.ListL0Segments(t.Context(), sc, 2)
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("L0 %v %v", keys, err)
+	}
+	for _, key := range keys {
+		if strings.HasPrefix(key, L1Prefix(sc, 2)) {
+			t.Fatal("L1 leaked into L0")
+		}
+	}
+	segs, err := m.Restore(t.Context(), sc, 2)
+	if err != nil || len(segs) != 2 || segs[0].Key != key || segs[1].Header.EndTxID != 3 {
+		t.Fatalf("plan=%+v %v", segs, err)
 	}
 }
-
+func TestRestoreKeepsDeltaCrossingL1Watermark(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__invocations__", ID: "main"}
+	if _, _, err := m.AppendL1(t.Context(), sc, 3, nativeBlob(t, 1, 10, 1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range [][2]uint64{{9, 12}, {13, 13}} {
+		if _, _, err := m.Append(t.Context(), sc, 3, nativeBlob(t, r[0], r[1], 2)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segs, err := m.Restore(t.Context(), sc, 3)
+	if err != nil || len(segs) != 3 || segs[1].Header.StartTxID != 9 || segs[2].Header.StartTxID != 13 {
+		t.Fatalf("overlap plan=%+v %v", segs, err)
+	}
+}
 func TestRestoreDeduplicatesMixedGranularity(t *testing.T) {
-	ctx := context.Background()
-	b, err := bucket.NewFSBucket(t.TempDir())
-	if err != nil {
-		t.Fatalf("bucket: %v", err)
-	}
-	m := New(b)
+	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "dedup"}
-	const epoch = uint64(1)
-	snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 0, EndTxID: 0}, []byte("s"))
-	d1 := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 1, EndTxID: 1}, []byte("d1"))
-	// Owner uploads a batch (one object), and recovery later re-uploads the
-	// follower's single copy of d1.
-	if _, _, err := m.AppendBatch(ctx, sc, epoch, [][]byte{snap, d1}); err != nil {
-		t.Fatalf("append batch: %v", err)
+	delta := nativeBlob(t, 2, 2, 2)
+	if _, _, err := m.AppendBatch(t.Context(), sc, 1, [][]byte{nativeBlob(t, 1, 1, 1), delta}); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, err := m.Append(ctx, sc, epoch, d1); err != nil {
-		t.Fatalf("append single: %v", err)
+	if _, _, err := m.Append(t.Context(), sc, 1, delta); err != nil {
+		t.Fatal(err)
 	}
-	segs, err := m.Restore(ctx, sc, epoch)
-	if err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	if len(segs) != 2 {
-		t.Fatalf("restore returned %d segments, want 2 (deduplicated)", len(segs))
+	segs, err := m.Restore(t.Context(), sc, 1)
+	if err != nil || len(segs) != 1 || segs[0].Header.EndTxID != 2 {
+		t.Fatalf("dedup=%+v %v", segs, err)
 	}
 }
-
-// TestCovers covers the disk-janitor safety predicate (ADR-123): a manifest
-// covers local writes up to its MaxTxID, not beyond.
 func TestCovers(t *testing.T) {
-	ctx := context.Background()
-	b, err := bucket.NewFSBucket(t.TempDir())
-	if err != nil {
-		t.Fatalf("bucket: %v", err)
-	}
-	m := New(b)
+	m := newManager(t)
 	sc := cell.Scope{Namespace: "app", Class: "__kv__", ID: "main"}
-	if ok, err := m.Covers(ctx, sc, 1, 5); err != nil || ok {
-		t.Fatalf("covers without manifest = %v, %v; want false", ok, err)
+	if ok, err := m.Covers(t.Context(), sc, 1, 5); err != nil || ok {
+		t.Fatalf("empty=%v %v", ok, err)
 	}
-	if err := m.PutManifest(ctx, sc, 1, Manifest{Epoch: 1, MaxTxID: 10}); err != nil {
-		t.Fatalf("put manifest: %v", err)
+	if _, _, err := m.AppendL1(t.Context(), sc, 1, nativeBlob(t, 1, 10, 1)); err != nil {
+		t.Fatal(err)
 	}
-	if ok, err := m.Covers(ctx, sc, 1, 10); err != nil || !ok {
-		t.Fatalf("covers at max = %v, %v; want true", ok, err)
+	if ok, err := m.Covers(t.Context(), sc, 1, 10); err != nil || !ok {
+		t.Fatalf("covered=%v %v", ok, err)
 	}
-	if ok, err := m.Covers(ctx, sc, 1, 11); err != nil || ok {
-		t.Fatalf("covers beyond max = %v, %v; want false", ok, err)
+	if ok, err := m.Covers(t.Context(), sc, 1, 11); err != nil || ok {
+		t.Fatalf("beyond=%v %v", ok, err)
 	}
 }

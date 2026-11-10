@@ -38,7 +38,7 @@ cleanup() {
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 
 mkdir -p "$TMP/oo" "$TMP/rt" "$TMP/bucket" "$TMP/data"
-TOOLS_CONTAINER=$(docker create cellhive:runtime-baseline)
+TOOLS_CONTAINER=$(docker create "${CELLHIVE_OBS_TOOLS_IMAGE:-cellhive:runtime-baseline}")
 docker cp "$TOOLS_CONTAINER:/usr/local/bin/esbuild" "$TMP/esbuild"
 docker rm "$TOOLS_CONTAINER" >/dev/null
 chmod 0755 "$TMP/esbuild"

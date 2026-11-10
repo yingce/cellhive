@@ -17,9 +17,11 @@ type Waker struct {
 	Election *Election
 	// DeadScopes returns the timer scopes whose owner is dead/unowned. It is a
 	// cold-path provider (leader only; may list owner records).
-	DeadScopes      func(ctx context.Context) ([]string, error)
-	Open            func(ctx context.Context, scope string) (*timer.Store, error)
-	Own             func(ctx context.Context, scope string) (bool, error)
+	DeadScopes func(ctx context.Context) ([]string, error)
+	Open       func(ctx context.Context, scope string) (*timer.Store, error)
+	Own        func(ctx context.Context, scope string) (bool, error)
+	// Admit pins one prepared scope through open, dispatch, commit and reads.
+	Admit           func(context.Context, string) (func(), error)
 	Commit          func(ctx context.Context, scope string, fn func() error) error
 	Forget          func(ctx context.Context, scope string) error
 	Dispatcher      timer.Dispatcher
@@ -165,29 +167,39 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 				continue
 			}
 		}
-		st, err := w.Open(ctx, scope)
-		if err != nil {
-			if errors.Is(err, cell.ErrResourceDeleted) {
-				if w.Forget != nil {
-					if ferr := w.Forget(ctx, scope); ferr != nil {
-						w.log().Warn("waker forget deleted scope failed", "scope", scope, "err", ferr)
-					}
+		dispatched += func() int {
+			if w.Admit != nil {
+				release, err := w.Admit(ctx, scope)
+				if err != nil {
+					w.log().Warn("timer admission failed", "scope", scope, "err", err)
+					return 0
 				}
-				continue
+				defer release()
 			}
-			w.log().Warn("waker open store failed", "scope", scope, "err", err)
-			continue
-		}
-		var commit timer.Commit
-		if w.Commit != nil {
-			commit = func(cctx context.Context, fn func() error) error { return w.Commit(cctx, scope, fn) }
-		}
-		n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.CronMaxAttempts, w.log(), commit)
-		if err != nil {
-			w.log().Warn("waker dispatch pass failed", "scope", scope, "err", err)
-			continue
-		}
-		dispatched += n
+			st, err := w.Open(ctx, scope)
+			if err != nil {
+				if errors.Is(err, cell.ErrResourceDeleted) {
+					if w.Forget != nil {
+						if ferr := w.Forget(ctx, scope); ferr != nil {
+							w.log().Warn("waker forget deleted scope failed", "scope", scope, "err", ferr)
+						}
+					}
+					return 0
+				}
+				w.log().Warn("waker open store failed", "scope", scope, "err", err)
+				return 0
+			}
+			var commit timer.Commit
+			if w.Commit != nil {
+				commit = func(cctx context.Context, fn func() error) error { return w.Commit(cctx, scope, fn) }
+			}
+			n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.CronMaxAttempts, w.log(), commit)
+			if err != nil {
+				w.log().Warn("waker dispatch pass failed", "scope", scope, "err", err)
+				return 0
+			}
+			return n
+		}()
 	}
 	return dispatched, true, nil
 }

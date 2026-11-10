@@ -129,21 +129,19 @@ func main() {
 		prev := uint64(0)
 		awkward := 0
 		for i, seg := range segments {
-			h, _, err := ltx.Decode(seg)
+			h, err := ltx.ValidateNative(seg)
 			if err != nil {
 				fmt.Printf("{\"i\":%d,\"error\":%q}\n", i, err.Error())
 				continue
 			}
 			gap := ""
-			if h.Kind == ltx.KindDelta && prev != 0 && h.StartTxID != prev+1 {
+			if !h.IsSnapshot() && prev != 0 && h.MinTXID != prev+1 {
 				gap = "GAP"
 				awkward++
 			}
-			if h.Kind == ltx.KindDelta {
-				prev = h.EndTxID
-			}
-			fmt.Printf("{\"i\":%d,\"kind\":%d,\"start\":%d,\"end\":%d,\"len\":%d,\"crc\":%d,\"gap\":%q}\n",
-				i, h.Kind, h.StartTxID, h.EndTxID, len(seg), h.CRC, gap)
+			prev = max(prev, h.MaxTXID)
+			fmt.Printf("{\"i\":%d,\"snapshot\":%t,\"start\":%d,\"end\":%d,\"len\":%d,\"gap\":%q}\n",
+				i, h.IsSnapshot(), h.MinTXID, h.MaxTXID, len(seg), gap)
 		}
 		fmt.Printf("{\"segments\":%d,\"gaps\":%d}\n", len(segments), awkward)
 		return

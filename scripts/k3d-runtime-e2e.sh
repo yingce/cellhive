@@ -68,7 +68,11 @@ public_get() {
 }
 
 echo "== build and load image =="
-docker build --build-context workerd-fork=deploy/workerd-fork -f deploy/Dockerfile -t "$IMAGE" .
+if [[ ${CELLHIVE_E2E_PREBUILT_IMAGE:-0} == 1 ]]; then
+  docker image inspect "$IMAGE" >/dev/null
+else
+  docker build --build-context workerd-fork=deploy/workerd-fork -f deploy/Dockerfile -t "$IMAGE" .
+fi
 docker tag "$IMAGE" cellhive:dev
 if [[ $K3D_FLEET == 1 ]]; then
   mkdir -p "$TMP/shared-bucket"
@@ -186,7 +190,7 @@ invoke_pod() {
 }
 assert_owner() {
   local pod=$1 address ip
-  address=$(kubectl -n cellhive exec cell-agent-0 -- cat "/data/bucket/cells/e2e/__do__/api~Counter~shard${SHARD}/owner.json" | jq -r .address)
+  address=$(kubectl -n cellhive exec cell-agent-0 -- cat "/data/bucket/cells/e2e/__do__/api~Counter~shard${SHARD}/own.json" | jq -r .address)
   ip=$(kubectl -n cellhive get pod "$pod" -o jsonpath='{.status.podIP}')
   [[ $address == "$ip:8788" ]] || fail "owner address $address, expected $pod at $ip"
 }
@@ -197,7 +201,7 @@ retry_capture FIRST 60 invoke_pod "$POD_A" || fail "A initial invoke failed: $FI
 if [[ $K3D_FLEET == 1 ]]; then
   POINTER_COUNT=$(kubectl -n cellhive exec cell-agent-0 -- sh -c 'find /data/bucket/cells -name do-recovery.json | wc -l')
   [[ $POINTER_COUNT -gt 0 ]] || fail "DO fleet write did not establish a recovery pointer"
-  FOLLOWER_DO_LOGS=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/state/peer-spool/_sessions -name fragments.log -exec grep -al "workerd/" {} + | wc -l')
+  FOLLOWER_DO_LOGS=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/state/peer-spool/_sessions -name fragments.log -exec grep -al "e2e/Counter/" {} + | wc -l')
   [[ $FOLLOWER_DO_LOGS -gt 0 ]] || fail "DO fleet write did not reach the follower spool"
 fi
 assert_owner "$POD_A"
@@ -212,16 +216,16 @@ assert_owner "$POD_B"
 if [[ $K3D_ABC == 1 ]]; then
   echo "== A -> B -> C with B's follower-only write =="
   sleep 2
-  BEFORE_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type f -path "*/ltx/*" | wc -l')
-  kubectl -n cellhive exec cell-agent-0 -- sh -c 'find /data/bucket/cells/workerd -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a-w {} +'
+  BEFORE_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type f -path "*/ltx/*" | wc -l')
+  kubectl -n cellhive exec cell-agent-0 -- sh -c 'find /data/bucket/cells/e2e/Counter -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a-w {} +'
   THIRD=""
   retry_capture THIRD 10 invoke_pod "$POD_B" || fail "B's follower-only write was not acknowledged: $THIRD"
   [[ $THIRD == '{"count":3}' ]] || fail "B's blocked-COS write returned $THIRD"
   sleep 1
-  AFTER_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type f -path "*/ltx/*" | wc -l')
+  AFTER_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type f -path "*/ltx/*" | wc -l')
   [[ $AFTER_LTX == "$BEFORE_LTX" ]] || fail "B's write reached COS before takeover ($BEFORE_LTX->$AFTER_LTX)"
   kubectl -n cellhive delete pod "$POD_B" --grace-period=0 --force --wait=true >/dev/null
-  kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a+w {} +'
+  kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a+w {} +'
   kubectl -n cellhive rollout status statefulset/do-runtime-gated --timeout=180s
   FOURTH=""
   retry_capture FOURTH 90 invoke_pod "$POD_C" || fail "C did not recover B's follower-only write: $FOURTH"
@@ -245,16 +249,16 @@ EXPECTED_FINAL=124
 if [[ $K3D_FLEET_FAULT == 1 ]]; then
   echo "== follower-confirmed DO write before COS upload =="
   sleep 2
-  BEFORE_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type f -path "*/ltx/*" | wc -l')
-  kubectl -n cellhive exec cell-agent-0 -- sh -c 'find /data/bucket/cells/workerd -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a-w {} +'
+  BEFORE_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type f -path "*/ltx/*" | wc -l')
+  kubectl -n cellhive exec cell-agent-0 -- sh -c 'find /data/bucket/cells/e2e/Counter -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a-w {} +'
   FOURTH=""
   retry_capture FOURTH 10 invoke_pod "$POD_A" || fail "follower did not acknowledge while COS LTX was blocked: $FOURTH"
   [[ $FOURTH == '{"count":4}' ]] || fail "blocked-COS write returned $FOURTH"
   sleep 1
-  AFTER_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type f -path "*/ltx/*" | wc -l')
+  AFTER_LTX=$(kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type f -path "*/ltx/*" | wc -l')
   [[ $AFTER_LTX == "$BEFORE_LTX" ]] || fail "DO LTX reached COS before forced takeover ($BEFORE_LTX->$AFTER_LTX)"
   kubectl -n cellhive delete pod "$POD_A" --grace-period=0 --force --wait=true >/dev/null
-  kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/workerd -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a+w {} +'
+  kubectl -n cellhive exec cell-agent-1 -- sh -c 'find /data/bucket/cells/e2e/Counter -type d \( -name ltx -o -path "*/ltx/*" \) -exec chmod a+w {} +'
   kubectl -n cellhive rollout status statefulset/do-runtime-gated --timeout=180s
   FIFTH=""
   retry_capture FIFTH 90 invoke_pod "$POD_B" || fail "B did not recover follower-only write: $FIFTH"

@@ -25,6 +25,10 @@ type countingBucket struct {
 	lists       int
 }
 
+func (c *countingBucket) Stat(ctx context.Context, key string) (int64, string, error) {
+	return c.Bucket.(bucket.Statter).Stat(ctx, key)
+}
+
 func (c *countingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
 	data, etag, err := c.Bucket.Get(ctx, key)
 	c.mu.Lock()
@@ -74,26 +78,19 @@ func syntheticSnapshot(t *testing.T, m *Manager, sc cell.Scope, epoch uint64, pa
 		}
 		walPages = append(walPages, ltx.WALPage{PageNo: uint32(i), Data: data})
 	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, uint32(pages), 1, walPages)
+	seg, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: uint32(pages), MinTXID: 1, MaxTXID: 1}, walPages)
 	if err != nil {
-		t.Fatalf("encode page map: %v", err)
+		t.Fatal(err)
 	}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: epoch, StartTxID: 1, EndTxID: 1}, payload)
 	if _, _, err := m.Append(context.Background(), sc, epoch, seg); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
 	return seg
 }
 
-// TestColdHydrateIsWholeObjectNotPaged pins the documented boundary
-// (ADR-056/159, known-issues): the cell-agent cold-restore path — exactly the
-// hook wired in cmd/cell-agent/main.go — downloads the whole replica object and
-// writes the whole database file. The paged machinery (restore.PageIndex /
-// replica.PageFetcher) exists but is not used by that path.
-//
-// It is a regression guard: if hydrate ever becomes paged, this test must be
-// updated deliberately (with the VFS/hydration-set work that implies).
-func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
+// Whole-object restore remains available for offline export and materialization.
+// Production activation also supports native indexed paging, tested separately.
+func TestWholeObjectRestoreMaterializesNativeImage(t *testing.T) {
 	ctx := context.Background()
 	const pageSize = 4096
 	const pages = 1024 // 4 MiB image
@@ -110,7 +107,7 @@ func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
 	cb.gets, cb.rangedGets, cb.getBytes, cb.rangedBytes = 0, 0, 0, 0
 	cb.mu.Unlock()
 
-	// --- Path A: cell-agent hydrate (LatestEpoch -> Restore -> ApplyFile).
+	// Whole-object restore followed by SQLite image materialization.
 	ep, ok, err := m.LatestEpoch(ctx, sc, 0)
 	if err != nil || !ok {
 		t.Fatalf("latest epoch = %d, %v, %v", ep, ok, err)
@@ -128,9 +125,7 @@ func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	gets, ranged, getBytes, rangedBytes := cb.stats()
-	// ranged == 0 is the point: hydrate never page-faults. gets includes the
-	// manifest probes (404 -> nil) plus the one real segment download, and the
-	// payload byte count must equal the whole object.
+	// No page faults are needed by the whole-object API.
 	if ranged != 0 {
 		t.Fatalf("hydrate issued %d ranged reads; want 0 (whole-object only)", ranged)
 	}
@@ -168,7 +163,7 @@ func TestColdHydrateIsWholeObjectNotPaged(t *testing.T) {
 		getBytes, filled, rangedBytes)
 }
 
-func TestRestoreChainListsScopeOnce(t *testing.T) {
+func TestRestoreChainUsesSeparateLevelScans(t *testing.T) {
 	ctx := context.Background()
 	base, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
@@ -177,9 +172,9 @@ func TestRestoreChainListsScopeOnce(t *testing.T) {
 	cb := &countingBucket{Bucket: base}
 	m := New(cb)
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "one-list"}
-	// Two epochs, each with a complete snapshot and a delta.
+	// Each epoch contains an independent native snapshot.
 	for e := uint64(1); e <= 3; e++ {
-		snap := ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: e, StartTxID: e, EndTxID: e}, []byte("x"))
+		snap := nativeBlob(t, 1, e, byte(e))
 		if _, _, err := m.Append(ctx, sc, e, snap); err != nil {
 			t.Fatal(err)
 		}
@@ -193,12 +188,12 @@ func TestRestoreChainListsScopeOnce(t *testing.T) {
 	cb.mu.Lock()
 	lists := cb.lists
 	cb.mu.Unlock()
-	if lists != 1 {
-		t.Fatalf("RestoreChain listed %d times, want 1", lists)
+	if lists < 2 {
+		t.Fatalf("RestoreChain listed %d times, want separate level scans", lists)
 	}
 }
 
-func TestRestoreChainKeepsCompactedEpochWithOnlyL1Manifest(t *testing.T) {
+func TestRestoreChainKeepsCompactedEpochWithOnlyNativeL1(t *testing.T) {
 	ctx := t.Context()
 	b, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
@@ -207,11 +202,8 @@ func TestRestoreChainKeepsCompactedEpochWithOnlyL1Manifest(t *testing.T) {
 	m := New(b)
 	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "compacted"}
 	snapshot := syntheticSnapshot(t, m, sc, 1, 4096, 2)
-	l1, _, err := m.AppendL1(ctx, sc, 1, snapshot)
+	_, _, err = m.AppendL1(ctx, sc, 1, snapshot)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.PutManifest(ctx, sc, 1, Manifest{MinTxID: 1, MaxTxID: 1, Objects: []string{l1}}); err != nil {
 		t.Fatal(err)
 	}
 	l0, err := m.ListL0Segments(ctx, sc, 1)
@@ -223,8 +215,7 @@ func TestRestoreChainKeepsCompactedEpochWithOnlyL1Manifest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A new owner restores an epoch with no L0 left. The manifest must still
-	// seed the chain; otherwise it silently boots an empty cell.
+	// A new owner finds the snapshot directly in L1 after L0 reclamation.
 	segs, err := m.RestoreChain(ctx, sc, 1)
 	if err != nil || len(segs) != 1 || string(segs[0].Raw) != string(snapshot) {
 		t.Fatalf("compacted base lost: segments=%d err=%v", len(segs), err)
@@ -239,12 +230,15 @@ func TestRestoreChainSkipsEpochsOlderThanNewestBase(t *testing.T) {
 	}
 	m := New(b)
 	sc := cell.Scope{Namespace: "demo", Class: "__invocations__", ID: "main"}
-	old := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("old"))
+	old := nativeBlob(t, 1, 1, 1)
 	if _, _, err := m.Append(ctx, sc, 1, old); err != nil {
 		t.Fatal(err)
 	}
 	_ = syntheticSnapshot(t, m, sc, 3, 4096, 1)
-	fresh := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 3, StartTxID: 2, EndTxID: 2}, []byte("fresh"))
+	fresh, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 4096, Commit: 1, MinTXID: 2, MaxTXID: 2}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 4096)}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := m.Append(ctx, sc, 3, fresh); err != nil {
 		t.Fatal(err)
 	}

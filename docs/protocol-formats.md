@@ -2,7 +2,7 @@
 
 本文件定义跨进程/跨节点的数据格式与接口。所有整数为**大端**，所有字符串为 UTF-8。`proto_version` 当前为 `v1`（ADR-034）。
 
-## 1. owner 记录（bucket `cells/<scope>/owner.json`）
+## 1. owner 记录（bucket `cells/<scope>/own.json`）
 
 ```json
 { "node": "n1", "role": "cell-agent|do-runtime", "session": "s1",
@@ -12,7 +12,7 @@
 
 - `expiry`（unix ms）**总是 ≤ 节点 lease expiry**；
 - 获取：`If-None-Match:*`（冷）或 `If-Match:<etag>`（接管/续约）。
-- **provider 物理编码（ADR-266）**：`cos://` / `oss://` 上不是普通 JSON 对象。逻辑 key 映射为按时间窗分段的 `cells/<scope>/owner.json.w<window>`；每段追加 `CHL2` 帧（`magic(4)|op(1)|instance(8)|payload_len(4)|payload|frame_len(4)|crc32(4)`），token 为 `s<window>:<instance>:<length>`。读侧 tail-probe 最后一帧；旧窗口只保留当前+上一段，rollover 时 deep GC 物理删除更老段。legacy `CHL1` 单对象在第一次写时迁移并删除。
+- `own.json` 是逻辑 owner key。COS/OSS 通过 native append 的位置条件及有界 generation 实现条件写；S3/MinIO 控制记录通过条件 PUT/tombstone 适配。物理 owner 编码不等同于普通 JSON PUT，详见 [存储适配](storage-and-s3.md)。旧 `owner.json` 布局不在线兼容。
 
 ## 2. 节点 lease（bucket `nodes/<node>.json`）
 
@@ -31,83 +31,38 @@
   "followers": ["n2"], "status": "open|recovering|sealed" }
 ```
 
-## 4. LTX 段（`cells/<scope>/ltx/e<epoch>/<seq>.ltx`）
+## 4. 原生 LTX（`cells/<scope>/ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx`）
 
-用于复制 SQLite 提交。P0 spike 使用**帧流 + 段头**；生产可对齐 `superfly/ltx`。
+唯一存储格式是 celld/Litestream 原生 LTX，与 `/opt/celld` 的固定参考版本 `90b4301` 对齐。无格式开关、旧格式兼容或独立 manifest/index。旧数据迁移使用 SQLite export/import。
 
-段头（固定 44 字节）：
+Header 固定 100 字节，多字节整数为大端序：
 
 | 偏移 | 长度 | 字段 |
 |---|---|---|
-| 0 | 4 | magic `"LTX1"` |
-| 4 | 1 | `version`（段格式版本） |
-| 5 | 1 | `kind`（0=delta, 1=snapshot, 2=link） |
-| 6 | 2 | flags（保留；仅 `kind=snapshot` 解释：bit15=分页，bit0..14=part index） |
-| 8 | 8 | `epoch` |
-| 16 | 8 | `start_txid` |
-| 24 | 8 | `end_txid` |
-| 32 | 8 | payload length |
-| 40 | 4 | CRC32C(payload) |
+| 0 | 4 | magic `LTX1` |
+| 4 | 4 | flags（当前 writer 使用标准 NoChecksum 位；文件 CRC64 仍校验） |
+| 8 | 4 | page size |
+| 12 | 4 | commit（最终数据库页数） |
+| 16 | 8 | min TXID |
+| 24 | 8 | max TXID |
+| 32 | 8 | timestamp |
+| 40 | 8 | pre-apply checksum |
+| 48 | 8 | WAL offset |
+| 56 | 8 | WAL size |
+| 64 | 4 | WAL salt 1 |
+| 68 | 4 | WAL salt 2 |
+| 72 | 8 | node ID |
+| 80 | 20 | reserved |
 
-- 段文件名 `<start_txid>-<end_txid>.ltx`（或 `<txid>.snapshot`）；
-- `kind=2 link` 用于 **snapshot→delta 衔接**（checkpoint 对齐）；
-- 上传：`Put`（临时 key → 原子 rename），**热路径不 List**。
+Header 不包含 epoch 或 kind。epoch 来自对象目录；**min TXID=1 就是快照**，其余为增量。快照必须覆盖最终数据库全部页面（SQLite pending-byte lock page 除外）；增量仅保存范围内每个被修改页的最终图像，并按 commit 处理截断。
 
-`kind=delta` 的 SQLite WAL payload（`WAL1`）：
+文件顺序为：100 字节 header → 原生 page frames → 6 字节零 page header → 内嵌 page index → 8 字节 index length → 16 字节 trailer。页帧按页号排序，使用原生 LZ4 编码；索引以 varint 编码页号、文件内 offset 和帧长度，以零结束。trailer 包含 post-apply checksum 与文件 CRC64。不再包裹 WAL1/WAL2/WAL3、CIDX/CID2 或私有 44 字节段头。
 
-| 字段 | 编码 |
-|---|---|
-| magic | 4 bytes `"WAL1"` |
-| page_size | u32 BE |
-| transaction_count | u32 BE |
-| 每个 transaction | frame_count u32 BE |
-| 每个 frame | page_no u32 BE + db_size u32 BE + `page_size` bytes |
+对象名为固定 16 位小写十六进制 `<min>-<max>.ltx`，只扫描实际 level `0000`、`0001`、`0002`、`0003`、`0009`。普通 PUT/multipart 发布整个文件，允许同名幂等重传；快照先在本地 spool 完成并 fsync 后发布。不产生 snapshot-started/done、epoch-cut、seal、pin、tombstone 或自定义 fence 文件。
 
-每个 transaction 的最后一帧 `db_size != 0`（SQLite WAL commit marker）。LTX header 的 `start_txid..end_txid` 覆盖 payload 中按序排列的 transactions。
+续链在新 epoch 发布 `[cut+1,cut+1]` 的零页原生 LTX，保留真实 page size/commit 与 WAL 坐标；首个应用增量从 cut+2 开始。恢复按最新 epoch 倒推，只接受恰好衔接 cut 的前驱，并裁剪越过该 cut 的晚到前驱尾部。
 
-SQL capture 生产路径改用 **`WAL2` page-map**：一个 capture chunk 内按 page number 只保留**最后一次写入**，payload 只含最终 page image，不保留中间事务版本。
-
-| 字段 | 编码 |
-|---|---|
-| magic | 4 bytes `"WAL2"` |
-| page_size | u32 BE |
-| commit | u32 BE（最终 DB page count）|
-| tx_count | u32 BE（该 chunk 覆盖的应用事务数）|
-| page_count | u32 BE |
-| 每个 page | page_no u32 BE + `page_size` bytes（按 page_no 升序、唯一）|
-
-**`WAL3`（page-map v2，ADR-160）**：snapshot/compaction 现在写 `WAL3`——每个 page frame 先用 **LZ4 block** 压缩（压不小则存 raw），并把**每页的 frame 位置**放进 payload 头部索引，使 paged 读取能一次 ranged read 直接取到并解压单页（不必扫 payload）：
-
-| 字段 | 编码 |
-|---|---|
-| magic | 4 bytes `"WAL3"` |
-| page_size / commit / tx_count / page_count | u32 BE ×4 |
-| reserved | u32 BE |
-| 索引（每页 12B） | page_no u32 BE \| off u32 BE（payload 内偏移）\| stored u32 BE（低 31 位=帧长，bit31=1 表示 LZ4）|
-| frames | 每页一个（raw `page_size` 或 LZ4 block，解压后恒为 `page_size`）|
-
-`WAL2`（v1，固定帧、无压缩）仍可被解码（向后兼容）；`PageLocs`/`FrameData` 统一处理两种。
-
-**快照分页（大 cell）**：一个完整快照（页 `1..commit`）可拆成多个 `kind=snapshot` 段，**共享同一 txid watermark**，每段 payload 仍是 `WAL2` 且带相同的 `commit`，页范围互不重叠、按页号升序。分片信息编码在 **LTX header 的 `flags`**（仅对 snapshot 解释）：
-
-- bit15 = 分页标记；bit0..14 = 0-based part index；
-- 段名 `<end_txid>.p<part>.snapshot`（放得下的单段快照仍是 `<end_txid>.snapshot`，`flags=0`，向后兼容）。
-
-restore 取**最大 watermark** 的快照，合并其所有分片后再按 txid 套用 delta。每段预算默认 `ltx.DefaultSnapshotPartBytes`（8 MiB），须小于 cell-agent `maxSegmentBytes`（64 MiB）。
-
-**L1 compaction（大 cell 接管优化）**：`cells/<scope>/ltx/e<epoch>/L1/` 存放折叠后的快照分片，`L1/manifest.json` 指向当前 L1：
-
-| 字段 | 说明 |
-|---|---|
-| `min_txid` / `max_txid` | 该 L1 覆盖的 txid 区间 |
-| `objects` | L1 快照分片对象 key（按 part 顺序） |
-| `commit` / `page_size` | 折叠后快照的最终页数 / 页大小 |
-
-接管 restore：有 manifest 时只读其 `objects` + `txid > max_txid` 的 L0 delta；否则读整条 L0 链。L0 段暂不删除（`Bucket` 无 Delete 接口），由 manifest 指针取代。
-
-`WAL1` 保留用于需要 transaction 边界的场景与兼容解码。delta payload 目前仍不压缩（很小；见 known-issues）。
-
-**L1 页索引（`L1/index.bin`，ADR-160）**：`CID2` 在 v1 的页号表后追加**每页 12B 的 frame 位置**（page_no u32 \| off u32 \| stored u32，bit31=LZ4），cold start 只取需要的页；`CIDX`（v1，仅页号）仍可读。
+压缩按独立的 30 秒、5 分钟、1 小时 UTC 边界晋升 L0→L1→L2→L3，只合并未覆盖范围。L9 是完整链快照。压缩为 additive，不删除源对象；回收遵循原生 epoch GC，使用 celld 自带的 stream 级 `ltx/retired.json`，见 [存储与 GC](storage-and-s3.md)。
 
 ## 5. bundle manifest（对象存储 `bundles/sha256/<aa>/<hash>` 内）
 

@@ -2,539 +2,480 @@ package replica
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 	"sync"
 
-	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
 	"cellhive/internal/restore"
 )
 
-// ErrNoPageIndex reports that a scope has no compacted L1 page index yet; the
-// caller should fall back to a whole-chain restore rather than treating it as a
-// failure.
-var ErrNoPageIndex = errors.New("replica: no page index")
+// restoreWorkSlots bounds expensive restore work across all managers in a process.
+// Construction releases its slot before returning; Materialize acquires separately.
+var restoreWorkSlots = make(chan struct{}, 2)
 
-// PageFetcher resolves pages of a scope/epoch on demand. Pages folded into the
-// persisted L1 page index are fetched one at a time with a ranged read; pages
-// from newer (unfolded) L0 deltas are held in memory (L0 is small by
-// construction). It never downloads the whole L1 snapshot to answer a page, so a
-// cold start can materialize only the pages it needs.
+func acquireRestoreWork(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case restoreWorkSlots <- struct{}{}:
+		return func() { <-restoreWorkSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+var ErrNoPageIndex = errors.New("replica: no native page index")
+
+// A frame is at most the native LZ4 bound for a 64 KiB SQLite page, so
+// its size fits uint32. Object identity is stored once per native object.
+type pageLocation struct {
+	Offset uint64
+	Size   uint32
+	object uint32
+}
+
+type pageObject struct{ key, etag string }
+
+// Allocate only blocks containing validated entries, never from the declared
+// Commit: a corrupt sparse index can claim up to 2^32-1 pages.
+const pageIndexBlockSize = 1024
+
+type pageIndex struct {
+	blocks map[uint32]*[pageIndexBlockSize]pageLocation
+	count  uint64
+}
+
+func (idx *pageIndex) get(pg uint32) (pageLocation, bool) {
+	block := idx.blocks[pg/pageIndexBlockSize]
+	if block == nil {
+		return pageLocation{}, false
+	}
+	loc := block[pg%pageIndexBlockSize]
+	return loc, loc.Size != 0
+}
+
+func (idx *pageIndex) set(pg uint32, loc pageLocation) {
+	if idx.blocks == nil {
+		idx.blocks = make(map[uint32]*[pageIndexBlockSize]pageLocation)
+	}
+	block := idx.blocks[pg/pageIndexBlockSize]
+	if block == nil {
+		block = new([pageIndexBlockSize]pageLocation)
+		idx.blocks[pg/pageIndexBlockSize] = block
+	}
+	if block[pg%pageIndexBlockSize].Size == 0 {
+		idx.count++
+	}
+	block[pg%pageIndexBlockSize] = loc
+}
+
+func (idx *pageIndex) truncate(commit uint32) {
+	for n, block := range idx.blocks {
+		if n < commit/pageIndexBlockSize {
+			continue
+		}
+		start := uint32(0)
+		if n == commit/pageIndexBlockSize {
+			start = commit%pageIndexBlockSize + 1
+		}
+		for i := start; i < pageIndexBlockSize; i++ {
+			if block[i].Size != 0 {
+				idx.count--
+			}
+			block[i] = pageLocation{}
+		}
+		if n > commit/pageIndexBlockSize {
+			delete(idx.blocks, n)
+		}
+	}
+}
+
+// PageFetcher is an immutable activation cut built from native embedded indexes.
+// Faults never rebuild against newer data: mixing two cuts can corrupt SQLite.
 type PageFetcher struct {
-	m         *Manager
-	scope     cell.Scope
-	epoch     uint64
-	idx       PageIndex
-	entryOf   map[uint32]int
-	l0        map[uint32][]byte
-	commit    uint32
-	pageSize  uint32
-	watermark uint64 // highest txid included in the index/L0 cut
-
-	mu    sync.RWMutex
-	lease *ReaderLease
+	m                *Manager
+	pages            pageIndex
+	objects          []pageObject
+	commit, pageSize uint32
+	watermark        uint64
+	resident         int64
 }
 
-// NewPageFetcher builds a fetcher from the persisted L1 page index plus newer L0
-// deltas. It requires a page index (a compacted cell); an uncompacted cell has no
-// index and should be restored with Restore.
 func (m *Manager) NewPageFetcher(ctx context.Context, s cell.Scope, epoch uint64) (*PageFetcher, error) {
-	lease, err := m.PinReader(ctx, s, epoch, 0)
-	if err != nil {
-		return nil, err
-	}
-	pf, err := m.newPinnedPageFetcher(ctx, s, epoch)
-	if err != nil {
-		_ = lease.Release()
-		return nil, err
-	}
-	pf.lease = lease
-	return pf, nil
+	pf, _, err := m.NewPageFetcherMinBytes(ctx, s, epoch, 0)
+	return pf, err
 }
 
-func (m *Manager) newPinnedPageFetcher(ctx context.Context, s cell.Scope, epoch uint64) (*PageFetcher, error) {
-	idx, ok, err := m.ReadIndex(ctx, s, epoch)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
-	}
-	l0keys, err := m.ListL0Segments(ctx, s, epoch)
-	if err != nil {
-		return nil, err
-	}
-	return m.newPageFetcher(ctx, s, epoch, idx, l0keys)
-}
-
-// NewPageFetcherMinBytes is NewPageFetcher with an index-only early-out for
-// clearly small images. When the L1 index's page-size*commit is already below
-// minBytes and the scope/epoch has no L0 objects at all, it returns
-// (nil, false, nil) without reading any L0 payload, so the caller can take the
-// full-restore path without downloading a tail it will discard.
-//
-// Any L0 object makes the early-out unsafe: the index does not record an L0
-// page map's decoded commit, and compressed L0 bytes can grow the decoded
-// image above the index bound. In that case the fetcher is built normally and
-// the caller must compare Commit() as before.
-func (m *Manager) NewPageFetcherMinBytes(ctx context.Context, s cell.Scope, epoch uint64, minBytes int64) (*PageFetcher, bool, error) {
-	lease, err := m.PinReader(ctx, s, epoch, 0)
+func (m *Manager) NewPageFetcherMinBytes(ctx context.Context, s cell.Scope, epoch uint64, minBytes int64) (pf *PageFetcher, ok bool, err error) {
+	release, err := acquireRestoreWork(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-	idx, ok, err := m.ReadIndex(ctx, s, epoch)
+	defer release()
+	plan, err := m.nativeRestorePlan(ctx, s, epoch)
 	if err != nil {
 		return nil, false, err
 	}
-	if !ok {
-		_ = lease.Release()
-		return nil, false, fmt.Errorf("%w for %s (cell not compacted)", ErrNoPageIndex, s.String())
+	if len(plan) == 0 {
+		return nil, false, ErrNoPageIndex
 	}
-	l0keys, err := m.ListL0Segments(ctx, s, epoch)
+	objects := m.resourceObjects()
+	// The newest header gives the final image size before any index downloads.
+	newest := plan[len(plan)-1]
+	raw, _, err := objects.RangedGet(ctx, newest.key, 0, ltx.NativeHeaderSize)
 	if err != nil {
-		_ = lease.Release()
 		return nil, false, err
 	}
-	if len(l0keys) == 0 {
-		pageSize, commit, err := pageIndexShape(idx)
+	h, err := ltx.ParseNativeHeader(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	if h.MinTXID != newest.min || h.MaxTXID != newest.max {
+		return nil, false, fmt.Errorf("replica: header/path mismatch")
+	}
+	if minBytes > 0 && uint64(h.PageSize)*uint64(h.Commit) < uint64(minBytes) {
+		return nil, false, nil
+	}
+	pf = &PageFetcher{m: m, pageSize: h.PageSize, commit: h.Commit, watermark: h.MaxTXID}
+	built := pf
+	defer func() {
 		if err != nil {
+			built.DropLocalIndex()
+		}
+	}()
+	if len(plan) > 16384 {
+		return nil, false, ErrPageIndexCapacity
+	}
+	if err = pf.reserve(int64(len(plan)) * 64); err != nil {
+		return nil, false, err
+	}
+	pf.objects = make([]pageObject, 0, len(plan))
+	type result struct {
+		header      ltx.NativeHeader
+		pages       []ltx.NativePageLocation
+		object      pageObject
+		err         error
+		reservation int64
+	}
+	parallel := m.RestoreParallel
+	if parallel <= 0 {
+		parallel = 32
+	}
+	// Bound retained intermediate indexes even when callers request more workers.
+	parallel = min(parallel, 32, len(plan))
+	var previousCommit uint32
+	for start := 0; start < len(plan); start += parallel {
+		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		if pageSize > 0 && commit > 0 && minBytes > 0 &&
-			uint64(pageSize)*uint64(commit) < uint64(minBytes) {
-			_ = lease.Release()
-			return nil, false, nil
+		batch := plan[start:min(start+parallel, len(plan))]
+		results := make([]result, len(batch))
+		var wg sync.WaitGroup
+		for i, f := range batch {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				results[i].header, results[i].pages, results[i].object, results[i].reservation, results[i].err = m.fetchNativeIndex(ctx, f)
+			}()
 		}
+		wg.Wait()
+		var scratch int64
+		for i := range results {
+			scratch += results[i].reservation
+		}
+		// Returned parsed indexes are all charged until this batch is merged.
+		defer func() { pageIndexResident.Add(-scratch) }()
+		for i := range results {
+			r := &results[i]
+			if r.err != nil {
+				return nil, false, r.err
+			}
+			if r.header.PageSize != h.PageSize {
+				return nil, false, fmt.Errorf("replica: page size mismatch")
+			}
+			// Preserve truncation across batches: extension cannot resurrect old pages.
+			if r.header.Commit < previousCommit {
+				before := len(pf.pages.blocks)
+				pf.pages.truncate(r.header.Commit)
+				released := int64(before-len(pf.pages.blocks)) * (pageIndexBlockSize*16 + 128)
+				pf.resident -= released
+				pageIndexResident.Add(-released)
+			}
+			previousCommit = r.header.Commit
+			if uint64(len(pf.objects)) > uint64(^uint32(0)) {
+				return nil, false, fmt.Errorf("replica: too many native objects")
+			}
+			object := uint32(len(pf.objects))
+			if err = pf.reserve(int64(len(r.object.key) + len(r.object.etag))); err != nil {
+				return nil, false, err
+			}
+			pf.objects = append(pf.objects, r.object)
+			for _, loc := range r.pages {
+				if loc.PageNo <= h.Commit {
+					if pf.pages.blocks[loc.PageNo/pageIndexBlockSize] == nil {
+						if err = pf.reserve(pageIndexBlockSize*16 + 128); err != nil {
+							return nil, false, err
+						}
+					}
+					pf.pages.set(loc.PageNo, pageLocation{Offset: loc.Offset, Size: uint32(loc.Size), object: object})
+				}
+			}
+			r.pages = nil
+		}
+		pageIndexResident.Add(-scratch)
+		scratch = 0
 	}
-	pf, err := m.newPageFetcher(ctx, s, epoch, idx, l0keys)
-	if err != nil {
-		_ = lease.Release()
+	// Every final image page must have a source before activation. Count the
+	// validated unique page numbers instead of walking a potentially huge image.
+	// SQLite's pending-byte lock page is intentionally absent from native LTX.
+	expected := uint64(h.Commit)
+	if h.Commit >= uint32(0x40000000)/h.PageSize+1 {
+		expected--
+	}
+	if pf.pages.count != expected {
+		return nil, false, fmt.Errorf("replica: incomplete native page index: have %d pages, need %d", pf.pages.count, expected)
+	}
+	// Reserve the owning supervisor's possible hydration bitmap up front,
+	// so native I/O cannot first encounter capacity while marking a page.
+	if err = pf.reserve(int64(len(pf.pages.blocks)+1) * 256); err != nil {
 		return nil, false, err
 	}
-	pf.lease = lease
 	return pf, true, nil
 }
 
-func pageIndexShape(idx PageIndex) (pageSize, commit uint32, err error) {
-	for ei, e := range idx.Entries {
-		if e.PageSize == 0 {
-			return 0, 0, fmt.Errorf("replica: index entry %d has zero page size", ei)
-		}
-		if pageSize == 0 {
-			pageSize = e.PageSize
-		} else if e.PageSize != pageSize {
-			return 0, 0, fmt.Errorf("replica: index page size mismatch")
-		}
-		if e.Commit > commit {
-			commit = e.Commit
-		}
+func (m *Manager) fetchNativeIndex(ctx context.Context, f epochFile) (header ltx.NativeHeader, locations []ltx.NativePageLocation, object pageObject, reservation int64, retErr error) {
+	// Reserve bounded tail/header scratch before any ranged allocation.
+	if err := reservePageIndex(512 << 10); err != nil {
+		return header, nil, object, 0, err
 	}
-	return pageSize, commit, nil
-}
-
-func (m *Manager) newPageFetcher(ctx context.Context, s cell.Scope, epoch uint64, idx PageIndex, l0keys []string) (*PageFetcher, error) {
-	pageSize, commit, err := pageIndexShape(idx)
+	reservation = 512 << 10
+	defer func() {
+		if retErr != nil {
+			pageIndexResident.Add(-reservation)
+			reservation = 0
+		}
+	}()
+	objects := m.resourceObjects()
+	var h ltx.NativeHeader
+	size, etag, err := objects.Stat(ctx, f.key)
 	if err != nil {
-		return nil, err
+		return h, nil, pageObject{}, reservation, err
 	}
-	pf := &PageFetcher{
-		m: m, scope: s, epoch: epoch, idx: idx, watermark: idx.Watermark,
-		entryOf: map[uint32]int{}, l0: map[uint32][]byte{},
-		commit: commit, pageSize: pageSize,
+	if size < ltx.NativeHeaderSize+31 {
+		return h, nil, pageObject{}, reservation, ltx.ErrShort
 	}
-	for ei, e := range idx.Entries {
-		for _, p := range e.Pages {
-			pf.entryOf[p] = ei
-		}
-	}
-	// Collect the L0 deltas first and require a contiguous chain from the index
-	// watermark before applying any of them: a missing (not yet uploaded) delta
-	// must fail closed instead of silently producing a stale database.
-	type l0delta struct {
-		start, end uint64
-		pageSize   uint32
-		commit     uint32
-		pages      []ltx.WALPage
-	}
-	var deltas []l0delta
-	seen := map[string]bool{}
-	keys := make([]string, 0, len(l0keys))
-	for _, k := range l0keys {
-		name := k
-		if i := strings.LastIndexByte(name, '/'); i >= 0 {
-			name = name[i+1:]
-		}
-		// A plain delta, a delta-only batch, or a strictly canonical snapshot
-		// (or snapshot part) can be skipped when its txid is at or below the
-		// index watermark. Snapshot batches, mixed, legacy, and malformed names
-		// still need decoding: ".s.batch" does not prove which parts it holds,
-		// so it stays on the read path.
-		if txid, ok := canonicalSnapshotTxID(name); ok && txid <= idx.Watermark {
-			continue
-		}
-		if strings.HasSuffix(name, ".ltx") || (batchSpanKnown(name) && strings.HasSuffix(name, ".d.batch")) {
-			rangeName := strings.TrimSuffix(name, ".ltx")
-			if strings.HasSuffix(name, ".batch") {
-				rangeName = strings.TrimSuffix(name, ".d.batch")
-			}
-			if span, ok := parseSegmentRange(rangeName); ok && span.end <= idx.Watermark {
-				continue
-			}
-		}
-		keys = append(keys, k)
-	}
-	// Match restore's configured read concurrency and default. Decode each
-	// bounded batch in key order, retaining at most one batch of raw objects
-	// in addition to the decoded tail. Never start a goroutine per listed key.
-	parallel := m.RestoreParallel
-	if parallel <= 0 {
-		parallel = 4
-	}
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	for base := 0; base < len(keys); {
-		n := min(parallel, len(keys)-base)
-		raws := make([][]byte, n)
-		var wg sync.WaitGroup
-		for i := range raws {
-			if ctx.Err() != nil {
-				break
-			}
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				if ctx.Err() != nil {
-					return
-				}
-				raw, err := m.ReadSegment(ctx, keys[base+i])
-				if err != nil {
-					cancel(err)
-					return
-				}
-				raws[i] = raw
-			}(i)
-		}
-		wg.Wait()
-		if err := context.Cause(ctx); err != nil {
+	read := func(off, n int64) ([]byte, error) {
+		raw, tag, err := objects.RangedGet(ctx, f.key, off, n)
+		if err != nil {
 			return nil, err
 		}
-		for i, raw := range raws {
-			k := keys[base+i]
-			parts, err := ltx.Split(raw)
-			if err != nil {
-				return nil, fmt.Errorf("replica: corrupt L0 object %s: %w", k, err)
-			}
-			for _, part := range parts {
-				h, payload, err := ltx.Decode(part)
-				if err != nil {
-					return nil, err
-				}
-				// Recovery re-uploads a follower's single segments, which may also be
-				// present inside an owner-uploaded batch. Keep one logical copy so the
-				// contiguity check below does not reject an otherwise valid chain.
-				if id := h.ID(); seen[id] {
-					continue
-				} else {
-					seen[id] = true
-				}
-				if h.Kind != ltx.KindDelta || h.EndTxID <= idx.Watermark {
-					continue
-				}
-				ps, commit, _, pages, err := ltx.DecodeWALPageMap(payload)
-				if err != nil {
-					return nil, fmt.Errorf("replica: decode L0 delta: %w", err)
-				}
-				deltas = append(deltas, l0delta{start: h.StartTxID, end: h.EndTxID, pageSize: ps, commit: commit, pages: pages})
-			}
+		if int64(len(raw)) != n || tag != etag {
+			return nil, fmt.Errorf("replica: short or changed native object %s", f.key)
 		}
-		base += n
+		return raw, nil
 	}
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
+	tailStart := max(int64(0), size-(256<<10))
+	tail, err := read(tailStart, size-tailStart)
+	if err != nil {
+		return h, nil, pageObject{}, reservation, err
 	}
-	sort.SliceStable(deltas, func(i, j int) bool { return deltas[i].start < deltas[j].start })
-	expected := idx.Watermark + 1
-	for _, d := range deltas {
-		if d.start != expected {
-			return nil, fmt.Errorf("replica: non-contiguous L0 chain: expected txid %d, got %d", expected, d.start)
-		}
-		if d.end < d.start {
-			return nil, fmt.Errorf("replica: invalid L0 delta range %d..%d", d.start, d.end)
-		}
-		expected = d.end + 1
-	}
-	for _, d := range deltas {
-		if pf.pageSize == 0 {
-			pf.pageSize = d.pageSize
-		} else if d.pageSize != pf.pageSize {
-			return nil, fmt.Errorf("replica: L0 page size mismatch")
-		}
-		if d.commit > pf.commit {
-			pf.commit = d.commit
-		}
-		for _, p := range d.pages {
-			pf.l0[p.PageNo] = p.Data
+	var head []byte
+	if tailStart == 0 {
+		head = tail[:ltx.NativeHeaderSize]
+	} else {
+		head, err = read(0, ltx.NativeHeaderSize)
+		if err != nil {
+			return h, nil, pageObject{}, reservation, err
 		}
 	}
-	if len(deltas) > 0 {
-		pf.watermark = deltas[len(deltas)-1].end
+	h, err = ltx.ParseNativeHeader(head)
+	if err != nil {
+		return h, nil, pageObject{}, reservation, err
 	}
-	if pf.pageSize == 0 || pf.commit == 0 {
-		return nil, fmt.Errorf("replica: page index has no pages")
+	if h.MinTXID != f.min || h.MaxTXID != f.max {
+		return h, nil, pageObject{}, reservation, fmt.Errorf("replica: header/path mismatch %s", f.key)
 	}
-	return pf, nil
+	indexLen := binary.BigEndian.Uint64(tail[len(tail)-24:])
+	if indexLen < 1 || indexLen > uint64(size-ltx.NativeHeaderSize-30) {
+		return h, nil, pageObject{}, reservation, fmt.Errorf("replica: invalid index length")
+	}
+	// Reserve encoded input first, before the ranged allocation. Parsed
+	// scratch is charged separately after an allocation-free varint count.
+	if indexLen > uint64(pageIndexResidentLimit) {
+		return h, nil, pageObject{}, reservation, ErrPageIndexCapacity
+	}
+	if err = reservePageIndex(int64(indexLen) + 6); err != nil {
+		return h, nil, pageObject{}, reservation, err
+	}
+	reservation += int64(indexLen) + 6
+	indexStart := size - 24 - int64(indexLen)
+	var index []byte
+	// Include the native zero-page terminator in the validation.
+	if indexStart-6 >= tailStart {
+		index = tail[indexStart-6-tailStart : len(tail)-24]
+	} else {
+		index, err = read(indexStart-6, int64(indexLen)+6)
+		if err != nil {
+			return h, nil, pageObject{}, reservation, err
+		}
+	}
+	for _, b := range index[:6] {
+		if b != 0 {
+			return h, nil, pageObject{}, reservation, fmt.Errorf("replica: invalid page terminator")
+		}
+	}
+	entries, countErr := countNativeIndexEntries(index[6:])
+	if countErr != nil || entries > uint64(h.Commit) {
+		return h, nil, pageObject{}, reservation, fmt.Errorf("replica: invalid native index entries")
+	}
+	// Covers old+new backing arrays during parser slice growth (24-byte
+	// entries), including transient allocation before the old slice is GC'd.
+	if entries > uint64(pageIndexResidentLimit/64) {
+		return h, nil, pageObject{}, reservation, ErrPageIndexCapacity
+	}
+	if err = reservePageIndex(int64(entries) * 64); err != nil {
+		return h, nil, pageObject{}, reservation, err
+	}
+	reservation += int64(entries) * 64
+	locs, err := ltx.ParseNativePageIndex(index[6:], uint64(indexStart-6), h)
+	if err != nil {
+		return h, nil, pageObject{}, reservation, err
+	}
+	return h, locs, pageObject{key: f.key, etag: etag}, reservation, nil
 }
 
-// Commit is the final database page count across the index and newer L0 deltas.
-func (pf *PageFetcher) Commit() uint32 { return pf.commit }
+func (pf *PageFetcher) Commit() uint32    { return pf.commit }
+func (pf *PageFetcher) PageSize() uint32  { return pf.pageSize }
+func (pf *PageFetcher) Watermark() uint64 { return pf.watermark }
+func (pf *PageFetcher) TxID() uint64      { return pf.watermark }
 
-// PageSize is the database page size.
-func (pf *PageFetcher) PageSize() uint32 { return pf.pageSize }
+// Close implements the page-source lifecycle; native indexes hold no remote
+// lease or renewable state and therefore create no COS sidecar objects.
+func (pf *PageFetcher) Close() error { pf.DropLocalIndex(); return nil }
 
-// Watermark is the highest txid folded into the index.
-func (pf *PageFetcher) Watermark() uint64 { return pf.idx.Watermark }
-
-// TxID is the highest txid covered by the page source (index plus newer L0
-// deltas). Paged-cache reuse uses it to detect a bucket cut older than the
-// local cache.
-func (pf *PageFetcher) TxID() uint64 { return pf.watermark }
-
-// rebuild re-reads the index and L0 tail under the existing pin. A generation
-// change may move the L1 object set; the caller retries against the new state.
-func (pf *PageFetcher) rebuild(ctx context.Context) error {
-	pf.mu.Lock()
-	defer pf.mu.Unlock()
-	idx, ok, err := pf.m.ReadIndex(ctx, pf.scope, pf.epoch)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrNoPageIndex
-	}
-	l0keys, err := pf.m.ListL0Segments(ctx, pf.scope, pf.epoch)
-	if err != nil {
-		return err
-	}
-	next, err := pf.m.newPageFetcher(ctx, pf.scope, pf.epoch, idx, l0keys)
-	if err != nil {
-		return err
-	}
-	pf.idx, pf.entryOf, pf.l0, pf.commit, pf.pageSize, pf.watermark = next.idx, next.entryOf, next.l0, next.commit, next.pageSize, next.watermark
-	return nil
-}
-
-// Close releases the reader pin. Callers must close a fetcher when they stop
-// reading so GC can drain the epoch.
-func (pf *PageFetcher) Close() error {
-	if pf == nil {
-		return nil
-	}
-	pf.mu.Lock()
-	lease := pf.lease
-	pf.lease = nil
-	pf.mu.Unlock()
-	if lease != nil {
-		return lease.Release()
-	}
-	return nil
-}
-
-// Page returns the final version of one page. Newer L0 deltas win; otherwise the
-// page is fetched from its L1 object with a single ranged read. If the object
-// disappeared under GC, the fetcher rebuilds its index once and retries.
 func (pf *PageFetcher) Page(ctx context.Context, pgno uint32) ([]byte, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		pf.mu.Lock()
-		data, err := pf.pageLocked(ctx, pgno)
-		pf.mu.Unlock()
-		if err == nil {
-			return data, nil
-		}
-		if attempt == 0 && errors.Is(err, bucket.ErrNotFound) {
-			if rerr := pf.rebuild(ctx); rerr == nil {
-				continue
-			}
-			return nil, err
-		}
-		return nil, err
-	}
-	return nil, fmt.Errorf("replica: page %d unavailable", pgno)
-}
-
-func (pf *PageFetcher) pageLocked(ctx context.Context, pgno uint32) ([]byte, error) {
-	if data, ok := pf.l0[pgno]; ok {
-		return data, nil
-	}
-	ei, ok := pf.entryOf[pgno]
-	if !ok {
-		return nil, fmt.Errorf("replica: page %d not defined", pgno)
-	}
-	e := pf.idx.Entries[ei]
-	pos := sort.Search(len(e.Pages), func(i int) bool { return e.Pages[i] >= pgno })
-	if pos >= len(e.Pages) || e.Pages[pos] != pgno {
-		return nil, fmt.Errorf("replica: page %d missing from index entry", pgno)
-	}
-	if len(e.Locs) == len(e.Pages) && len(e.Locs) > 0 {
-		// v2: the index carries the frame location; the frame may be compressed.
-		loc := e.Locs[pos]
-		raw, _, err := pf.m.B.RangedGet(ctx, e.Key, int64(ltx.HeaderSize)+loc.Off, int64(loc.Stored))
-		if err != nil {
-			return nil, fmt.Errorf("replica: ranged read %s page %d: %w", e.Key, pgno, err)
-		}
-		if len(raw) != loc.Stored {
-			return nil, fmt.Errorf("replica: short ranged read for page %d", pgno)
-		}
-		// raw starts at the frame, so the loc's absolute offset no longer applies.
-		sliced := loc
-		sliced.Off = 0
-		return ltx.FrameData(raw, sliced)
-	}
-	// v1: fixed-size frames with a 4-byte page-number prefix.
-	off := ltx.HeaderSize + ltx.PageEntryOffset(e.PageSize, pos)
-	want := 4 + int(e.PageSize)
-	raw, _, err := pf.m.B.RangedGet(ctx, e.Key, int64(off), int64(want))
+	pages, err := pf.ReadRun(ctx, pgno, 1)
 	if err != nil {
-		return nil, fmt.Errorf("replica: ranged read %s page %d: %w", e.Key, pgno, err)
-	}
-	if len(raw) != want {
-		return nil, fmt.Errorf("replica: short ranged read for page %d", pgno)
-	}
-	got := uint32(raw[0])<<24 | uint32(raw[1])<<16 | uint32(raw[2])<<8 | uint32(raw[3])
-	if got != pgno {
-		return nil, fmt.Errorf("replica: index offset mismatch for page %d (got %d)", pgno, got)
-	}
-	out := make([]byte, e.PageSize)
-	copy(out, raw[4:])
-	return out, nil
-}
-
-// ReadRun returns the final version of pgno plus up to maxPages-1 pages that
-// follow it and are stored contiguously in the same L1 object, fetched with one
-// ranged read. It is the paging window (ADR-160): a scan then costs one bucket
-// read per window instead of one per page. Pages that fall back to an in-memory
-// L0 delta, leave the L1 entry, or exceed the byte budget end the run.
-func (pf *PageFetcher) ReadRun(ctx context.Context, pgno uint32, maxPages int) ([][]byte, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		pf.mu.Lock()
-		out, err := pf.readRunLocked(ctx, pgno, maxPages)
-		pf.mu.Unlock()
-		if err == nil {
-			return out, nil
-		}
-		if attempt == 0 && errors.Is(err, bucket.ErrNotFound) {
-			if rerr := pf.rebuild(ctx); rerr == nil {
-				continue
-			}
-			return nil, err
-		}
 		return nil, err
 	}
-	return nil, fmt.Errorf("replica: pages %d.. unavailable", pgno)
+	return pages[0], nil
 }
 
-func (pf *PageFetcher) readRunLocked(ctx context.Context, pgno uint32, maxPages int) ([][]byte, error) {
-	if maxPages < 1 {
-		maxPages = 1
-	}
-	if data, ok := pf.l0[pgno]; ok {
-		return [][]byte{data}, nil
-	}
-	ei, ok := pf.entryOf[pgno]
-	if !ok {
+// Bound decoded memory separately from network transfer: compressible pages
+// should not force thousands of tiny COS requests during a large restore.
+const runByteBudget = 8 << 20
+const runEncodedBudget = 1 << 20
+
+// ReadRun stops at a changed page owner, even when an older object's index
+// contains physically adjacent frames for the same page numbers.
+func (pf *PageFetcher) ReadRun(ctx context.Context, pgno uint32, maxPages int) ([][]byte, error) {
+	return pf.readRun(ctx, pgno, maxPages, runEncodedBudget)
+}
+
+// readRun uses a larger transfer budget for sequential materialization while
+// preserving the decoded-memory bound and the exact latest-page ownership cut.
+func (pf *PageFetcher) readRun(ctx context.Context, pgno uint32, maxPages int, encodedBudget uint64) ([][]byte, error) {
+	first, ok := pf.pages.get(pgno)
+	if !ok || pgno == 0 || pgno > pf.commit {
 		return nil, fmt.Errorf("replica: page %d not defined", pgno)
 	}
-	e := pf.idx.Entries[ei]
-	pos := sort.Search(len(e.Pages), func(i int) bool { return e.Pages[i] >= pgno })
-	if pos >= len(e.Pages) || e.Pages[pos] != pgno {
-		return nil, fmt.Errorf("replica: page %d missing from index entry", pgno)
-	}
-	n := 1
-	if len(e.Locs) == len(e.Pages) && len(e.Locs) > 0 {
-		// v2: extend while pages are consecutive and their frames are adjacent in
-		// the object (one ranged read serves the whole span).
-		for n < maxPages && pos+n < len(e.Pages) && e.Pages[pos+n] == pgno+uint32(n) {
-			next := e.Locs[pos+n]
-			prev := e.Locs[pos+n-1]
-			if next.Off != prev.Off+int64(prev.Stored) || next.Codec != prev.Codec {
-				break
-			}
-			if int64(n+1)*int64(e.PageSize) > runByteBudget {
-				break
-			}
-			n++
-		}
-		start := e.Locs[pos]
-		span := int64(0)
-		for k := 0; k < n; k++ {
-			span += int64(e.Locs[pos+k].Stored)
-		}
-		raw, _, err := pf.m.B.RangedGet(ctx, e.Key, int64(ltx.HeaderSize)+start.Off, span)
-		if err != nil {
-			return nil, fmt.Errorf("replica: ranged read %s pages %d..%d: %w", e.Key, pgno, pgno+uint32(n)-1, err)
-		}
-		out := make([][]byte, n)
-		at := int64(0)
-		for k := 0; k < n; k++ {
-			loc := e.Locs[pos+k]
-			if at+int64(loc.Stored) > int64(len(raw)) {
-				return nil, fmt.Errorf("replica: short ranged read for pages %d..%d", pgno, pgno+uint32(n)-1)
-			}
-			sliced := loc
-			sliced.Off = 0
-			page, derr := ltx.FrameData(raw[at:at+int64(loc.Stored)], sliced)
-			if derr != nil {
-				return nil, derr
-			}
-			out[k] = page
-			at += int64(loc.Stored)
-		}
-		return out, nil
-	}
-	// v1: fixed-size frames.
-	for n < maxPages && pos+n < len(e.Pages) && e.Pages[pos+n] == pgno+uint32(n) {
-		if int64(n+1)*int64(4+e.PageSize) > runByteBudget {
+	maxPages = max(1, min(maxPages, runByteBudget/int(pf.pageSize)))
+	end := first.Offset + uint64(first.Size)
+	locs := []pageLocation{first}
+	for n := 1; n < maxPages && uint64(pgno)+uint64(n) <= uint64(pf.commit); n++ {
+		loc, ok := pf.pages.get(pgno + uint32(n))
+		if !ok || loc.object != first.object || loc.Offset != end || end+uint64(loc.Size)-first.Offset > encodedBudget {
 			break
 		}
-		n++
+		locs = append(locs, loc)
+		end += uint64(loc.Size)
 	}
-	off := ltx.HeaderSize + ltx.PageEntryOffset(e.PageSize, pos)
-	frame := 4 + int(e.PageSize)
-	want := n * frame
-	raw, _, err := pf.m.B.RangedGet(ctx, e.Key, int64(off), int64(want))
+	object := pf.objects[first.object]
+	raw, etag, err := pf.m.resourceObjects().RangedGet(ctx, object.key, int64(first.Offset), int64(end-first.Offset))
 	if err != nil {
-		return nil, fmt.Errorf("replica: ranged read %s pages %d..%d: %w", e.Key, pgno, pgno+uint32(n)-1, err)
+		return nil, err
 	}
-	if len(raw) != want {
-		return nil, fmt.Errorf("replica: short ranged read for pages %d..%d", pgno, pgno+uint32(n)-1)
+	if etag != object.etag || uint64(len(raw)) != end-first.Offset {
+		return nil, fmt.Errorf("replica: short or changed native object %s", object.key)
 	}
-	out := make([][]byte, n)
-	for k := 0; k < n; k++ {
-		at := k * frame
-		got := uint32(raw[at])<<24 | uint32(raw[at+1])<<16 | uint32(raw[at+2])<<8 | uint32(raw[at+3])
-		if got != pgno+uint32(k) {
-			return nil, fmt.Errorf("replica: index offset mismatch for page %d (got %d)", pgno+uint32(k), got)
+	out := make([][]byte, len(locs))
+	var at uint64
+	for i, loc := range locs {
+		out[i], err = ltx.DecodeNativePageFrame(raw[at:at+uint64(loc.Size)], pf.pageSize, pgno+uint32(i))
+		if err != nil {
+			return nil, err
 		}
-		page := make([]byte, e.PageSize)
-		copy(page, raw[at+4:at+frame])
-		out[k] = page
+		at += uint64(loc.Size)
 	}
 	return out, nil
 }
-
-// runByteBudget bounds one window read (decoded pages). It matches the
-// paged VFS default readahead budget; the caller's maxPages still caps it.
-const runByteBudget = 1 << 20
-
-// Materialize writes a database image to dest, filling only the given page
-// ranges (all pages when ranges is nil) by fetching each page on demand. Unfilled
-// bytes remain holes. It returns the number of pages written and never holds more
-// than one page (plus the small unfolded L0 set) in memory.
 func (pf *PageFetcher) Materialize(ctx context.Context, dest string, ranges [][2]uint32) (int, error) {
-	return restore.SparseFileFunc(dest, pf.pageSize, pf.commit, func(pgno uint32) ([]byte, error) {
-		return pf.Page(ctx, pgno)
-	}, ranges)
+	release, err := acquireRestoreWork(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	// Keep one decoded run per materialization, bounded by runByteBudget.
+	// ReadRun already stops at a different source/ETag or non-adjacent frame;
+	// also stop at the requested sparse range boundary to avoid read amplification.
+	var cached [][]byte
+	var first uint32
+	fill := func(pgno uint32) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if pgno == uint32(0x40000000)/pf.pageSize+1 {
+			return make([]byte, pf.pageSize), nil
+		}
+		if pgno >= first && uint64(pgno)-uint64(first) < uint64(len(cached)) {
+			return cached[pgno-first], nil
+		}
+		end := pf.commit
+		if len(ranges) > 0 {
+			for _, r := range ranges {
+				if pgno >= r[0] && pgno <= r[1] {
+					end = r[1]
+					break
+				}
+			}
+		}
+		limit := int(min(uint64(end)-uint64(pgno)+1, uint64(runByteBudget)/uint64(pf.pageSize)))
+		var err error
+		cached, err = pf.readRun(ctx, pgno, limit, runByteBudget)
+		if err != nil {
+			return nil, err
+		}
+		first = pgno
+		return cached[0], nil
+	}
+	return restore.SparseFileFunc(dest, pf.pageSize, pf.commit, fill, ranges)
+}
+
+func countNativeIndexEntries(raw []byte) (uint64, error) {
+	var count uint64
+	for {
+		pg, n := binary.Uvarint(raw)
+		if n <= 0 {
+			return 0, ltx.ErrShort
+		}
+		raw = raw[n:]
+		if pg == 0 {
+			if len(raw) != 0 {
+				return 0, ltx.ErrShort
+			}
+			return count, nil
+		}
+		for i := 0; i < 2; i++ {
+			_, n = binary.Uvarint(raw)
+			if n <= 0 {
+				return 0, ltx.ErrShort
+			}
+			raw = raw[n:]
+		}
+		count++
+	}
 }

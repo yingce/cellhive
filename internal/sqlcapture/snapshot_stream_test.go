@@ -56,34 +56,25 @@ func newCapture(t *testing.T, db *cellstore.Cell, scope cell.Scope, committer Co
 	return capture, baseline
 }
 
-// decodeSnapshotParts decodes a streamed part set and validates the part
-// contract: one KindSnapshot watermark, paged indices 0..n-1 in order, identical
-// dimensions, and a contiguous 1..commit page cover.
+// decodeSnapshotParts validates a single native snapshot and complete page coverage.
 func decodeSnapshotParts(t *testing.T, segments [][]byte, watermark uint64) (pageSize, commit uint32) {
 	t.Helper()
+	if len(segments) != 1 {
+		t.Fatalf("snapshots=%d, want one native file", len(segments))
+	}
 	nextPage := uint32(1)
 	for i, segment := range segments {
-		h, payload, err := ltx.Decode(segment)
+		h, pages, err := ltx.DecodeNativePages(segment)
 		if err != nil {
 			t.Fatalf("decode part %d: %v", i, err)
 		}
-		if h.Kind != ltx.KindSnapshot || h.Epoch != 1 {
+		if !h.IsSnapshot() {
 			t.Fatalf("part %d header %+v", i, h)
 		}
-		if h.StartTxID != watermark || h.EndTxID != watermark {
-			t.Fatalf("part %d watermark %d..%d, want %d", i, h.StartTxID, h.EndTxID, watermark)
+		if h.MinTXID != 1 || h.MaxTXID != watermark {
+			t.Fatalf("part %d watermark %d..%d, want %d", i, h.MinTXID, h.MaxTXID, watermark)
 		}
-		part, paged := ltx.SnapshotPart(h)
-		if !paged || part != i {
-			t.Fatalf("part %d: paged=%v index=%d", i, paged, part)
-		}
-		ps, cm, txCount, pages, err := ltx.DecodeWALPageMap(payload)
-		if err != nil {
-			t.Fatalf("decode part %d payload: %v", i, err)
-		}
-		if txCount != 1 {
-			t.Fatalf("part %d tx count = %d, want 1", i, txCount)
-		}
+		ps, cm := h.PageSize, h.Commit
 		if i == 0 {
 			pageSize, commit = ps, cm
 		} else if ps != pageSize || cm != commit {
@@ -134,7 +125,7 @@ func assertRestored(t *testing.T, ctx context.Context, dir string, segments [][]
 	}
 }
 
-func TestSnapshotStreamsMultiplePartsAndRestores(t *testing.T) {
+func TestSnapshotStreamsSingleNativeFileAndRestores(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dir := t.TempDir()
@@ -173,13 +164,8 @@ func TestSnapshotStreamsMultiplePartsAndRestores(t *testing.T) {
 	committer.mu.Lock()
 	segments := append([][]byte(nil), committer.segments...)
 	committer.mu.Unlock()
-	if len(segments) < 2 {
-		t.Fatalf("want a multi-part snapshot, got %d part(s)", len(segments))
-	}
-	for i, segment := range segments {
-		if len(segment) > capture.SnapshotPartBytes {
-			t.Fatalf("part %d size %d exceeds part budget %d", i, len(segment), capture.SnapshotPartBytes)
-		}
+	if len(segments) != 1 {
+		t.Fatalf("want one complete file, got %d", len(segments))
 	}
 	pageSize, commit := decodeSnapshotParts(t, segments, wantWatermark)
 	if pageSize == 0 || commit < 2 {
@@ -233,15 +219,12 @@ func TestSnapshotSinglePartStaysUnpaged(t *testing.T) {
 	if len(segments) != 1 {
 		t.Fatalf("want 1 part for a small database, got %d", len(segments))
 	}
-	h, _, err := ltx.Decode(segments[0])
+	h, err := ltx.ValidateNative(segments[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if part, paged := ltx.SnapshotPart(h); paged {
-		t.Fatalf("single-part streamed snapshot must stay unpaged (part %d)", part)
-	}
-	if h.StartTxID != wantWatermark || h.EndTxID != wantWatermark {
-		t.Fatalf("watermark %d..%d, want %d", h.StartTxID, h.EndTxID, wantWatermark)
+	if !h.IsSnapshot() || h.MaxTXID != wantWatermark {
+		t.Fatalf("watermark %d..%d, want 1..%d", h.MinTXID, h.MaxTXID, wantWatermark)
 	}
 }
 
@@ -321,18 +304,19 @@ func TestSnapshotRejectsImageGrownByCheckpoint(t *testing.T) {
 	}
 }
 
-// batchRecordingCommitter implements both Committer and BatchCommitter so the
-// optional batching path is exercised.
+// batchRecordingCommitter detects accidental per-part batch publication.
 type batchRecordingCommitter struct {
-	mu      sync.Mutex
-	singles int
-	batches [][][]byte
+	mu       sync.Mutex
+	singles  int
+	segments [][]byte
+	batches  [][][]byte
 }
 
-func (c *batchRecordingCommitter) Commit(_ context.Context, _ cell.Scope, _ uint64, _ []byte) error {
+func (c *batchRecordingCommitter) Commit(_ context.Context, _ cell.Scope, _ uint64, raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.singles++
+	c.segments = append(c.segments, append([]byte(nil), raw...))
 	return nil
 }
 
@@ -347,7 +331,7 @@ func (c *batchRecordingCommitter) CommitBatch(_ context.Context, _ cell.Scope, _
 	return nil
 }
 
-func TestSnapshotBatchCommitsGroupsParts(t *testing.T) {
+func TestSnapshotBatchCapabilityStillPublishesOneNativeFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dir := t.TempDir()
@@ -378,28 +362,126 @@ func TestSnapshotBatchCommitsGroupsParts(t *testing.T) {
 	committer := &batchRecordingCommitter{}
 	capture, _ := newCapture(t, db, scope, committer)
 	capture.SnapshotPartBytes = pageSizeHint + 1024
-	capture.SnapshotBatchParts = 2
 	if err := capture.Snapshot(ctx); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 	committer.mu.Lock()
 	defer committer.mu.Unlock()
-	if committer.singles != 0 {
-		t.Fatalf("batched snapshot still issued %d single commits", committer.singles)
+	if committer.singles != 1 || len(committer.batches) != 0 {
+		t.Fatalf("singles=%d batches=%d", committer.singles, len(committer.batches))
 	}
-	if len(committer.batches) < 2 {
-		t.Fatalf("want several batches, got %d", len(committer.batches))
-	}
-	var segments [][]byte
-	for i, batch := range committer.batches {
-		if len(batch) > 2 {
-			t.Fatalf("batch %d has %d parts, want at most 2", i, len(batch))
-		}
-		segments = append(segments, batch...)
-	}
-	if len(segments) < 2 {
-		t.Fatalf("batched snapshot produced %d parts, want a paged snapshot", len(segments))
-	}
+	segments := committer.segments
 	decodeSnapshotParts(t, segments, wantWatermark)
 	assertRestored(t, ctx, dir, segments, rows)
+}
+
+// File publication must contain one complete native file even when SQLite
+// supplies the image through many bounded page callbacks.
+type snapshotFileRecorder struct {
+	raw   []byte
+	path  string
+	calls int
+}
+
+func (r *snapshotFileRecorder) Commit(context.Context, cell.Scope, uint64, []byte) error {
+	return errors.New("unexpected per-part publication")
+}
+
+func (r *snapshotFileRecorder) CommitSnapshotFile(_ context.Context, _ cell.Scope, _, _ uint64, path string, size int64) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) != size {
+		return fmt.Errorf("file size %d, declared %d", len(raw), size)
+	}
+	r.raw, r.path = raw, path
+	r.calls++
+	return nil
+}
+
+func TestSnapshotFileStreamsOneNativeFileAndRestores(t *testing.T) {
+	ctx := context.Background()
+	const rows = 96
+	db, scope, pageSize := openStreamCell(t, ctx, "native-file", rows)
+	recorder := &snapshotFileRecorder{}
+	capture, watermark := newCapture(t, db, scope, recorder)
+	capture.SnapshotPartBytes = pageSize + 1024
+	if err := capture.Snapshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.calls != 1 {
+		t.Fatalf("publications=%d", recorder.calls)
+	}
+	h, pages, err := ltx.DecodeNativePages(recorder.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.MinTXID != 1 || h.MaxTXID != watermark {
+		t.Fatalf("header=%+v", h)
+	}
+	commit := h.Commit
+	if commit < 2 || len(pages) != int(commit) {
+		t.Fatalf("pages=%d commit=%d", len(pages), commit)
+	}
+	for i, p := range pages {
+		if p.PageNo != uint32(i+1) {
+			t.Fatalf("page[%d]=%d", i, p.PageNo)
+		}
+	}
+	if _, err := os.Stat(recorder.path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("spool not removed: %v", err)
+	}
+	assertRestored(t, ctx, t.TempDir(), [][]byte{recorder.raw}, rows)
+}
+
+func TestRegressionSnapshotLockPage(t *testing.T) {
+	db, scope, ps := openStreamCell(t, t.Context(), "audit-lock-page", 0)
+	if err := db.Checkpoint(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(db.Path, (1<<30)+int64(ps)); err != nil {
+		t.Fatal(err)
+	}
+	cap, wm := newCapture(t, db, scope, &recordingCommitter{})
+	defer cap.cursor.Close()
+	err := cap.emitSnapshotStream(t.Context(), snapshotModePages, wm)
+	if err != nil {
+		t.Fatalf("large snapshot: %v", err)
+	}
+}
+
+func TestRegressionAdoptClosesCursor(t *testing.T) {
+	db, scope, _ := openStreamCell(t, t.Context(), "audit-cursor", 1)
+	cap, _ := newCapture(t, db, scope, &recordingCommitter{})
+	old := cap.cursor
+	defer old.Close()
+	if _, err := cap.AdoptContinuation(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer cap.cursor.Close()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		target, _ := os.Readlink("/proc/self/fd/" + e.Name())
+		if target == db.WALPath() {
+			n++
+		}
+	}
+	// SQLite itself also holds a WAL handle. Compare after closing the old cursor.
+	old.Close()
+	after, _ := os.ReadDir("/proc/self/fd")
+	m := 0
+	for _, e := range after {
+		target, _ := os.Readlink("/proc/self/fd/" + e.Name())
+		if target == db.WALPath() {
+			m++
+		}
+	}
+	if n != m {
+		t.Fatalf("AdoptContinuation left old WAL descriptor open: before manual close=%d after=%d", n, m)
+	}
 }

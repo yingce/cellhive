@@ -9,6 +9,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
+	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
 	"cellhive/internal/replica"
@@ -53,6 +54,18 @@ func (m *Manager) Collect(ctx context.Context, followers []string) (int, error) 
 			sc, err := cell.ParseScope(h.Scope)
 			if err != nil {
 				lastErr = err
+				continue
+			}
+			if _, err := ltx.ValidateNative(h.Segment); err != nil {
+				lastErr = err
+				continue
+			}
+			retired, err := m.Replica.EpochRetired(ctx, sc, h.Epoch)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if retired {
 				continue
 			}
 			if _, _, err := m.Replica.Append(ctx, sc, h.Epoch, h.Segment); err != nil {

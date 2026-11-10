@@ -4,25 +4,35 @@ import (
 	"cellhive/internal/ltx"
 	"cellhive/internal/replica"
 	"cellhive/internal/restore"
+	"fmt"
 	"testing"
 )
 
-func TestFoldGCPreservesEpochMarker(t *testing.T) {
+func TestNativeFoldPreservesContinuationLineage(t *testing.T) {
 	ctx, b, m, s, e := newCompactionFixture(t)
-	marker, err := m.MarkEpoch(ctx, s, e, 0)
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendSegment(t, m, s, e, snapshotSegment(t, e, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
-	appendSegment(t, m, s, e, deltaSegment(t, e, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
-	res, err := Compact(ctx, m, s, e, Options{MinSegments: 1, GC: true})
+	appendSegment(t, m, s, e, raw)
+	next := e + 1
+	if err := m.AppendContinuation(ctx, s, next, ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 2, MaxTXID: 2, WALOffset: 32}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 3, MaxTXID: 3}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendSegment(t, m, s, next, raw)
+	res, err := Compact(ctx, m, s, next, Options{MinSegments: 1})
 	if err != nil || !res.Compacted {
-		t.Fatalf("fold: %+v %v", res, err)
+		t.Fatalf("fold=%+v %v", res, err)
 	}
-	if _, _, err := b.Get(ctx, marker); err != nil {
-		t.Fatalf("fold deleted epoch marker: %v", err)
+	seed := fmt.Sprintf("%s0000/%016x-%016x.ltx", replica.EpochPrefix(s, next), 2, 2)
+	if _, _, err := b.Get(ctx, seed); err != nil {
+		t.Fatalf("seed missing %v", err)
 	}
-	segs, err := m.RestoreChain(ctx, s, e)
+	segs, err := m.RestoreChain(ctx, s, next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,35 +43,33 @@ func TestFoldGCPreservesEpochMarker(t *testing.T) {
 	if err := restore.ValidateChain(raws); err != nil {
 		t.Fatal(err)
 	}
-	if wm, err := m.DurableWatermarkChain(ctx, s, e); err != nil || wm != 1 {
-		t.Fatalf("watermark=%d err=%v", wm, err)
+	if wm, err := m.DurableWatermarkChain(ctx, s, next); err != nil || wm != 3 {
+		t.Fatalf("watermark=%d %v", wm, err)
 	}
-	if ok, err := m.HasCompleteSnapshot(ctx, s, e); err != nil || !ok {
-		t.Fatalf("complete=%v err=%v", ok, err)
+	if complete, err := m.HasCompleteSnapshot(ctx, s, next); err != nil || complete {
+		t.Fatalf("continuation mistaken for independent snapshot %v %v", complete, err)
 	}
 }
 
-func TestFoldGCPreservesUnprovenNames(t *testing.T) {
-	for _, name := range []string{"0.link", "legacy.batch", "0-1.m.batch", "unknown.ltx", "00.snapshot"} {
+func TestNativeFoldPreservesUnprovenNames(t *testing.T) {
+	for _, name := range []string{"unknown.proof", "unknown.ltx", "other/file"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, b, m, s, e := newCompactionFixture(t)
-			snap := snapshotSegment(t, e, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)})
-			appendSegment(t, m, s, e, snap)
-			appendSegment(t, m, s, e, deltaSegment(t, e, 4096, 1, 1, map[uint32][]byte{1: make([]byte, 4096)}))
-			raw := snap
-			if name == "0.link" {
-				raw = ltx.Encode(ltx.Header{Kind: ltx.KindLink, Epoch: e}, nil)
-			}
-			key := replica.Prefix(s, e) + name
-			if _, err := b.Put(ctx, key, raw); err != nil {
+			raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 2}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+			if err != nil {
 				t.Fatal(err)
 			}
-			res, err := Compact(ctx, m, s, e, Options{MinSegments: 1, GC: true})
-			if err != nil || !res.Compacted {
-				t.Fatalf("fold=%+v err=%v", res, err)
+			appendSegment(t, m, s, e, raw)
+			key := replica.EpochPrefix(s, e) + name
+			if _, err := b.Put(ctx, key, []byte("opaque")); err != nil {
+				t.Fatal(err)
 			}
-			if _, _, err := b.Get(ctx, key); err != nil {
-				t.Fatalf("fold removed unproven name: %v", err)
+			res, err := Compact(ctx, m, s, e, Options{MinSegments: 1})
+			if err != nil || !res.Compacted {
+				t.Fatalf("fold=%+v %v", res, err)
+			}
+			if raw, _, err := b.Get(ctx, key); err != nil || string(raw) != "opaque" {
+				t.Fatalf("unknown object changed %v", err)
 			}
 		})
 	}

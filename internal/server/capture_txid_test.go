@@ -9,7 +9,6 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/control"
-	"cellhive/internal/ltx"
 	"cellhive/internal/owner"
 	"cellhive/internal/queue"
 	"cellhive/internal/timer"
@@ -115,7 +114,7 @@ func TestCaptureCommitEpochFence(t *testing.T) {
 	epoch := owned.Epoch
 	committer := srv.CaptureCommitter()
 	seg := func(tag string, hdrEpoch uint64) []byte {
-		return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: hdrEpoch, StartTxID: 1, EndTxID: 1}, []byte(tag))
+		return nativeTestFile(t, 1, 1, []byte(tag))
 	}
 	// Stale epoch: must be refused before anything is committed.
 	err = committer.Commit(ctx, sc, epoch+1, seg("stale", epoch+1))

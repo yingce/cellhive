@@ -59,7 +59,23 @@ e2e_cleanup() {
       fi
     fi
   done
-  pkill -9 -f "workerd serve --experimental $E2E_BASE" 2>/dev/null || true
+  # A SIGKILLed supervisor can leave its native child behind. Match the exact
+  # fixture config path, since immutable test binaries need not be named workerd.
+  python3 - "$E2E_BASE" <<'PY'
+import os, signal, sys
+from pathlib import Path
+base = os.fsencode(sys.argv[1].rstrip('/') + '/')
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        args = (entry / 'cmdline').read_bytes().split(b'\0')
+        if (len(args) >= 4 and args[1:3] == [b'serve', b'--experimental']
+                and args[3].startswith(base)):
+            os.kill(int(entry.name), signal.SIGKILL)
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        pass
+PY
   if [[ "$E2E_KEEP" != "1" ]]; then
     rm -rf "$E2E_BASE"
   else

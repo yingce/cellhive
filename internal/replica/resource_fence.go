@@ -1,10 +1,8 @@
 package replica
 
 import (
-	"bytes"
 	"cellhive/internal/telemetry"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -20,13 +18,14 @@ import (
 var ErrResourceDeleted = cell.ErrResourceDeleted
 
 type resourceFence struct {
-	JobID   string `json:"job_id"`
-	Deleted bool   `json:"deleted"`
-	Epoch   uint64 `json:"epoch_floor"`
+	JobID      string `json:"job_id"`
+	Deleted    bool   `json:"deleted"`
+	Epoch      uint64 `json:"epoch_floor"`
+	OwnerEpoch uint64 `json:"-"`
 }
 
-func resourceFenceKey(sc cell.Scope) string       { return sc.Key() + "/resource-fence.v2" }
-func legacyResourceFenceKey(sc cell.Scope) string { return sc.Key() + "/resource-fence.json" }
+func resourceFenceKey(sc cell.Scope) string { return sc.Key() + "/own.json" }
+
 func (m *Manager) resourceLock(sc cell.Scope) *sync.RWMutex {
 	var hash uint64
 	for _, b := range []byte(sc.String()) {
@@ -171,47 +170,32 @@ func fenceAbsent(f resourceFence) bool {
 // readResourceFenceFresh bypasses the cache for write-side fence updates and
 // delete validation.
 func (m *Manager) readResourceFenceFresh(ctx context.Context, sc cell.Scope) (resourceFence, string, error) {
+	o, etag, err := m.readResourceFenceOwner(ctx, sc)
+	return resourceFence{JobID: o.RetirementJob, Deleted: o.Retired, Epoch: o.RetiredEpoch, OwnerEpoch: o.Epoch}, etag, err
+}
+
+// readResourceFenceOwner binds a fence decision to its owner CAS version.
+func (m *Manager) readResourceFenceOwner(ctx context.Context, sc cell.Scope) (cell.Owner, string, error) {
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.fence_bucket_read")
 	defer span.End()
 	if err := sc.Validate(); err != nil {
-		return resourceFence{}, "", err
+		return cell.Owner{}, "", err
 	}
 	if sc.Class != "__kv__" && sc.Class != "__queue__" {
-		return resourceFence{}, "", nil
+		return cell.Owner{}, "", nil
 	}
-	objects := m.resourceObjects()
-	raw, etag, err := objects.GetVersion(ctx, resourceFenceKey(sc))
+	raw, etag, err := m.resourceObjects().GetVersion(ctx, resourceFenceKey(sc))
 	if errors.Is(err, bucket.ErrNotFound) {
-		// The fixed-position record is created on first access. A successful
-		// create is the migration point: later readers never rediscover a
-		// missing fence by listing old authority windows. Every participant in
-		// a bucket must understand v2 before this path is enabled.
-		legacy, _, lerr := objects.GetVersion(ctx, legacyResourceFenceKey(sc))
-		if errors.Is(lerr, bucket.ErrNotFound) {
-			legacy = []byte("{}")
-		} else if lerr != nil {
-			return resourceFence{}, "", lerr
-		}
-		if !json.Valid(legacy) {
-			return resourceFence{}, "", fmt.Errorf("replica: corrupt legacy resource fence")
-		}
-		etag, err = objects.ConditionalCreate(ctx, resourceFenceKey(sc), legacy)
-		if errors.Is(err, bucket.ErrPrecondition) {
-			// A concurrent delete/migration may have won. Its value is the
-			// authority; never return the stale legacy value.
-			raw, etag, err = objects.GetVersion(ctx, resourceFenceKey(sc))
-		} else if err == nil {
-			raw = legacy
-		}
+		return cell.Owner{}, "", nil
 	}
 	if err != nil {
-		return resourceFence{}, "", err
+		return cell.Owner{}, "", err
 	}
-	var f resourceFence
-	if err := json.Unmarshal(raw, &f); err != nil {
-		return f, "", fmt.Errorf("replica: corrupt resource fence: %w", err)
+	o, err := cell.UnmarshalOwner(raw)
+	if err != nil {
+		return cell.Owner{}, "", fmt.Errorf("replica: corrupt owner record: %w", err)
 	}
-	return f, etag, nil
+	return o, etag, nil
 }
 
 func (m *Manager) cacheFence(sc cell.Scope, f resourceFence, etag string) {
@@ -240,25 +224,47 @@ func (m *Manager) resourceWriteGuard(ctx context.Context, sc cell.Scope, epoch u
 	}
 	return lock.RUnlock, nil
 }
-func (m *Manager) updateResourceFence(ctx context.Context, sc cell.Scope, change func(*resourceFence) error) error {
+func (m *Manager) updateResourceFence(ctx context.Context, sc cell.Scope, change func(*resourceFence) error, ownerChecks ...func(cell.Owner) error) error {
 	lock := m.resourceLock(sc)
 	lock.Lock()
 	defer lock.Unlock()
-	for i := 0; i < 8; i++ {
-		f, etag, err := m.readResourceFenceFresh(ctx, sc)
+	// own.json is shared with the owner lease writer. A cleanup update may
+	// legitimately race a lease renewal, so give the CAS loop a bounded
+	// backoff window instead of surfacing a transient precondition failure.
+	for i := 0; i < 64; i++ {
+		o, ownerETag, err := m.readResourceFenceOwner(ctx, sc)
 		if err != nil {
 			return err
 		}
+		for _, check := range ownerChecks {
+			if err := check(o); err != nil {
+				return err
+			}
+		}
+		f := resourceFence{JobID: o.RetirementJob, Deleted: o.Retired, Epoch: o.RetiredEpoch, OwnerEpoch: o.Epoch}
 		if err := change(&f); err != nil {
 			return err
 		}
-		raw, _ := json.Marshal(f)
-		if etag == "" {
-			_, err = m.resourceObjects().ConditionalCreate(ctx, resourceFenceKey(sc), raw)
+		objects := m.resourceObjects()
+		o.Retired, o.RetirementJob, o.RetiredEpoch = f.Deleted, f.JobID, f.Epoch
+		raw, _ := cell.MarshalOwner(o)
+		if ownerETag == "" {
+			_, err = objects.ConditionalCreate(ctx, resourceFenceKey(sc), raw)
 		} else {
-			_, err = m.resourceObjects().CAS(ctx, resourceFenceKey(sc), raw, etag)
+			_, err = objects.CAS(ctx, resourceFenceKey(sc), raw, ownerETag)
 		}
 		if errors.Is(err, bucket.ErrPrecondition) {
+			backoff := time.Duration(5*(i+1)) * time.Millisecond
+			if backoff > 250*time.Millisecond {
+				backoff = 250 * time.Millisecond
+			}
+			t := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return ctx.Err()
+			case <-t.C:
+			}
 			continue
 		}
 		if err == nil {
@@ -320,7 +326,7 @@ func (m *Manager) ResourceState(ctx context.Context, sc cell.Scope) (bool, uint6
 // Admission must recheck the generation after acquiring the local request gate.
 func (m *Manager) ResourceSnapshot(ctx context.Context, sc cell.Scope) (string, bool, uint64, error) {
 	f, _, err := m.readResourceFence(ctx, sc)
-	return f.JobID, f.Deleted, f.Epoch, err
+	return fenceGeneration(f), f.Deleted, f.Epoch, err
 }
 
 func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string, error) {
@@ -335,7 +341,14 @@ func (m *Manager) ResourceGeneration(ctx context.Context, sc cell.Scope) (string
 	if f.Deleted {
 		return "", ErrResourceDeleted
 	}
-	return f.JobID, nil
+	return fenceGeneration(f), nil
+}
+
+func fenceGeneration(f resourceFence) string {
+	if f.JobID == "" {
+		return ""
+	}
+	return f.JobID + "/" + strconv.FormatUint(f.Epoch, 10)
 }
 
 func (m *Manager) ValidateResourceDelete(ctx context.Context, sc cell.Scope, jobID string) error {
@@ -352,7 +365,13 @@ func (m *Manager) ValidateResourceDelete(ctx context.Context, sc cell.Scope, job
 // PurgeResource removes payloads in bounded administrative passes, preserving
 // the monotonic owner generation and deletion fence so late uploads cannot
 // resurrect the deleted incarnation. It never lists during normal requests.
-func (m *Manager) PurgeResource(ctx context.Context, sc cell.Scope, jobID string, max int) (bool, error) {
+func (m *Manager) PurgeResource(ctx context.Context, sc cell.Scope, jobID string, max int, validate func(context.Context) error) (bool, error) {
+	if validate == nil {
+		return false, fmt.Errorf("replica: missing cleanup authority validator")
+	}
+	if err := validate(ctx); err != nil {
+		return false, err
+	}
 	lock := m.resourceLock(sc)
 	lock.Lock()
 	defer lock.Unlock()
@@ -367,23 +386,45 @@ func (m *Manager) PurgeResource(ctx context.Context, sc cell.Scope, jobID string
 		max = 500
 	}
 	objects := m.resourceObjects()
-	items, next, err := objects.ListPage(ctx, sc.Key()+"/ltx/", "", max)
-	if err != nil {
-		return false, err
-	}
-	for _, item := range items {
-		epoch, ok := resourceObjectEpoch(sc, item.Key)
-		if !ok {
-			return false, fmt.Errorf("replica: unrecognized resource payload key %q", item.Key)
-		}
-		if epoch > f.Epoch {
-			continue
-		}
-		if err := objects.Delete(ctx, item.Key); err != nil {
+	cursor := ""
+	for {
+		items, next, err := objects.ListPage(ctx, sc.Key()+"/ltx/", cursor, max)
+		if err != nil {
 			return false, err
 		}
+		deleted := 0
+		for _, item := range items {
+			// Native GC's monotonic retirement floor survives resource recreation.
+			if item.Key == retiredMarkKey(sc) {
+				continue
+			}
+			epoch, ok := resourceObjectEpoch(sc, item.Key)
+			if !ok {
+				return false, fmt.Errorf("replica: unrecognized resource payload key %q", item.Key)
+			}
+			if epoch > f.Epoch {
+				continue
+			}
+			if err := validate(ctx); err != nil {
+				return false, err
+			}
+			if err := objects.Delete(ctx, item.Key); err != nil {
+				return false, err
+			}
+			deleted++
+		}
+		if err := validate(ctx); err != nil {
+			return false, err
+		}
+		if next == "" {
+			return true, nil
+		}
+		if deleted > 0 {
+			return false, nil
+		}
+		cursor = next
 	}
-	return next == "", nil
+
 }
 
 func resourceObjectEpoch(sc cell.Scope, key string) (uint64, bool) {
@@ -411,7 +452,7 @@ func (m *Manager) putResourceObject(ctx context.Context, sc cell.Scope, epoch ui
 		return etag, err
 	}
 	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
-		cleanupErr := objects.ConditionalDelete(ctx, key, etag)
+		cleanupErr := m.deleteRetiredObject(ctx, sc, key, epoch)
 		if cleanupErr != nil && !errors.Is(cleanupErr, bucket.ErrPrecondition) && !errors.Is(cleanupErr, bucket.ErrNotFound) {
 			return "", fmt.Errorf("%w: late publication cleanup: %v", ErrResourceDeleted, cleanupErr)
 		}
@@ -420,32 +461,23 @@ func (m *Manager) putResourceObject(ctx context.Context, sc cell.Scope, epoch ui
 	return etag, nil
 }
 
-// putImmutableSegment never changes an acknowledged LTX object. Replays from a
-// follower or retry are allowed only when the bytes are identical.
-func (m *Manager) putImmutableSegment(ctx context.Context, sc cell.Scope, epoch uint64, key string, data []byte) (string, error) {
-	objects := m.resourceObjects()
-	etag, err := objects.ConditionalCreate(ctx, key, data)
-	created := err == nil
-	if errors.Is(err, bucket.ErrPrecondition) {
-		old, oldETag, getErr := objects.GetVersion(ctx, key)
-		if getErr != nil {
-			return "", getErr
-		}
-		if !bytes.Equal(old, data) {
-			return "", fmt.Errorf("replica: conflicting segment at %s: %w", key, bucket.ErrPrecondition)
-		}
-		etag, err = oldETag, nil
-	}
+// uploadSegment publishes validated LTX under the caller's single-writer epoch.
+func (m *Manager) uploadSegment(ctx context.Context, sc cell.Scope, epoch uint64, key string, data []byte) (string, error) {
+	etag, err := m.resourceObjects().Put(ctx, key, data)
 	if err != nil {
 		return "", err
 	}
+	return m.finishPublication(ctx, sc, epoch, key, etag, true)
+}
+
+func (m *Manager) finishPublication(ctx context.Context, sc cell.Scope, epoch uint64, key, etag string, created bool) (string, error) {
 	fence, _, err := m.readResourceFence(ctx, sc)
 	if err != nil {
 		return "", err
 	}
 	if fence.Deleted || (fence.JobID != "" && epoch <= fence.Epoch) {
 		if created {
-			cleanupErr := objects.ConditionalDelete(ctx, key, etag)
+			cleanupErr := m.deleteRetiredObject(ctx, sc, key, epoch)
 			if cleanupErr != nil && !errors.Is(cleanupErr, bucket.ErrPrecondition) && !errors.Is(cleanupErr, bucket.ErrNotFound) {
 				return "", fmt.Errorf("%w: late publication cleanup: %v", ErrResourceDeleted, cleanupErr)
 			}
@@ -476,19 +508,28 @@ func (m *Manager) SweepRetired(ctx context.Context, sc cell.Scope, jobID string,
 		if !ok || epoch > floor {
 			continue
 		}
-		etag := item.ETag
-		if etag == "" {
-			_, etag, err = objects.GetVersion(ctx, item.Key)
-			if errors.Is(err, bucket.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return after, err
-			}
-		}
-		if err := objects.ConditionalDelete(ctx, item.Key, etag); err != nil && !errors.Is(err, bucket.ErrPrecondition) && !errors.Is(err, bucket.ErrNotFound) {
+		if err := m.deleteRetiredObject(ctx, sc, item.Key, floor); err != nil {
 			return after, err
 		}
 	}
 	return next, nil
+}
+
+// deleteRetiredObject uses the same epoch isolation as the initial resource
+// purge. A resource incarnation never reuses retired epoch keys. Rechecking
+// the persistent retirement floor admits physical deletion on providers that
+// cannot condition DELETE, without weakening mutable control-record CAS.
+func (m *Manager) deleteRetiredObject(ctx context.Context, sc cell.Scope, key string, floor uint64) error {
+	epoch, ok := resourceObjectEpoch(sc, key)
+	if !ok || epoch > floor {
+		return fmt.Errorf("replica: object outside retirement floor: %s", key)
+	}
+	f, _, err := m.readResourceFenceFresh(ctx, sc)
+	if err != nil {
+		return err
+	}
+	if f.JobID == "" || f.Epoch < floor {
+		return ErrResourceDeleted
+	}
+	return m.resourceObjects().Delete(ctx, key)
 }

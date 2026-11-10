@@ -97,3 +97,18 @@ func TestClaimWaitsForResetAndCancelsPerScope(t *testing.T) {
 		t.Fatalf("unrelated scope blocked: %v", err)
 	}
 }
+
+func TestClaimReleasedLineageDoesNotRecoverEmptyPredecessor(t *testing.T) {
+	m, _ := newManager(t, t.TempDir(), "new")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "released"}
+	raw, _ := cell.MarshalOwner(cell.Owner{Epoch: 7, RetirementJob: "delete-1", RetiredEpoch: 7})
+	if _, err := m.B.Put(t.Context(), Key(sc), raw); err != nil {
+		t.Fatal(err)
+	}
+	m.BeforeTakeover = func(context.Context, cell.Owner) error { return errors.New("empty predecessor must not be recovered") }
+	reset := false
+	got, err := m.ClaimWithReset(t.Context(), sc, time.Now(), func(context.Context, cell.Scope) error { reset = true; return nil })
+	if err != nil || !reset || got.Epoch <= 7 || got.RetirementJob != "delete-1" || got.RetiredEpoch != 7 {
+		t.Fatalf("claim=%+v reset=%v err=%v", got, reset, err)
+	}
+}

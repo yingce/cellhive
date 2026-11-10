@@ -1,9 +1,12 @@
 package purge
 
 import (
+	"cellhive/internal/cell"
+	"cellhive/internal/owner"
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/objectstore"
@@ -74,7 +77,7 @@ func TestAppPurgeDropsNamespaceData(t *testing.T) {
 	}
 }
 
-func TestAppPurgePreservesBothResourceFenceFormats(t *testing.T) {
+func TestAppPurgeRemovesCellPayloadAndLeavesControlGeneration(t *testing.T) {
 	b, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -92,8 +95,8 @@ func TestAppPurgePreservesBothResourceFenceFormats(t *testing.T) {
 		t.Fatalf("purge: done=%v err=%v", done, err)
 	}
 	got := list(t, b, objectstore.PrefixCells, objectstore.OwnerReplica)
-	if len(got) != 3 {
-		t.Fatalf("guards were purged or payload retained: %v", got)
+	if len(got) != 1 || !strings.HasSuffix(got[0], "/owner-gen") {
+		t.Fatalf("unexpected control objects after purge: %v", got)
 	}
 	for _, key := range got {
 		if strings.Contains(key, "/ltx/") {
@@ -217,5 +220,53 @@ func TestPurgePaginatesAcrossBudget(t *testing.T) {
 	}
 	if got := list(t, b, objectstore.PrefixCells, objectstore.OwnerReplica); len(got) != 1 || !strings.HasPrefix(got[0], "cells/other/") {
 		t.Fatalf("cells left = %v, want only cells/other", got)
+	}
+}
+
+func TestWorkerPurgePreservesAuthority(t *testing.T) {
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "cells/acme/__do__/api~Room~shard1/"
+	for _, name := range []string{"own.json", "owner-gen", "ltx/e1/0.ltx"} {
+		put(t, b, objectstore.PrefixCells, objectstore.OwnerReplica, base+name)
+	}
+	p := &Purger{Bucket: b}
+	if done, err := p.Run(t.Context(), "acme", "api"); err != nil || !done {
+		t.Fatalf("purge: %v %v", done, err)
+	}
+	got := list(t, b, objectstore.PrefixCells, objectstore.OwnerReplica)
+	if len(got) != 2 {
+		t.Fatalf("authority records: %v", got)
+	}
+	for _, key := range got {
+		if key != base+"own.json" && key != base+"owner-gen" {
+			t.Fatalf("unexpected retained key %s", key)
+		}
+	}
+}
+
+func TestWorkerRecreateIncreasesEpoch(t *testing.T) {
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &owner.Manager{B: b, NodeID: "agent", Session: "s", Advertise: "http://agent", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__do__", ID: "api~Room~shard1"}
+	first, err := m.ClaimAs(t.Context(), sc, "runtime-a", "http://runtime-a", cell.RoleCellAgent, time.Minute, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.ReleaseAs(t.Context(), sc, "runtime-a", first.Epoch); err != nil {
+		t.Fatal(err)
+	}
+	p := &Purger{Bucket: b}
+	if done, err := p.Run(t.Context(), "acme", "api"); err != nil || !done {
+		t.Fatalf("purge: %v %v", done, err)
+	}
+	next, err := m.ClaimAs(t.Context(), sc, "runtime-b", "http://runtime-b", cell.RoleCellAgent, time.Minute, time.Now())
+	if err != nil || next.Epoch <= first.Epoch {
+		t.Fatalf("epoch reused: first=%d next=%d err=%v", first.Epoch, next.Epoch, err)
 	}
 }

@@ -29,7 +29,7 @@ func TestSealedTailPaginationReadVolume(t *testing.T) {
 			t.Fatal(err)
 		}
 		w := bufio.NewWriterSize(f, 1<<20)
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, bytes.Repeat([]byte{1}, 4096))
+		seg := nativePeerFile(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, bytes.Repeat([]byte{1}, 4096))
 		for i := 1; i <= n; i++ {
 			if _, err := w.Write(encodeSessionRecord(uint64(i), "app/__kv__/x", 1, [][]byte{seg})); err != nil {
 				t.Fatal(err)

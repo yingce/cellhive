@@ -2,67 +2,52 @@ package compaction
 
 import (
 	"bytes"
-	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/ltx"
-	"cellhive/internal/replica"
 	"cellhive/internal/restore"
-	"context"
 	"testing"
 )
 
-func TestCompactUsesRetainedPredecessorForOverlappingBaseline(t *testing.T) {
-	ctx := context.Background()
-	b, e := bucket.NewFSBucket(t.TempDir())
-	if e != nil {
-		t.Fatal(e)
-	}
-	m := replica.New(b)
-	sc := cell.Scope{Namespace: "p0", Class: "__kv__", ID: "compact"}
-	payload, e := ltx.EncodeWALPageMap(64, 1, 1, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{7}, 64)}})
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, h := range []ltx.Header{{Kind: ltx.KindSnapshot, Epoch: 22, StartTxID: 3766, EndTxID: 3766}, {Kind: ltx.KindDelta, Epoch: 22, StartTxID: 3767, EndTxID: 3768}, {Kind: ltx.KindMarker, Epoch: 23, StartTxID: 3769, EndTxID: 3768}, {Kind: ltx.KindDelta, Epoch: 23, StartTxID: 3769, EndTxID: 3769}, {Kind: ltx.KindSnapshot, Epoch: 23, StartTxID: 3771, EndTxID: 3771}, {Kind: ltx.KindDelta, Epoch: 23, StartTxID: 3770, EndTxID: 3772}} {
-		if _, _, e = m.Append(ctx, sc, h.Epoch, ltx.Encode(h, payload)); e != nil {
-			t.Fatal(e)
+func TestNativeCompactionKeepsExactPredecessorWithOverlappingRanges(t *testing.T) {
+	m, sc := nativeManager(t)
+	put := func(e, lo, hi uint64, zero bool) {
+		t.Helper()
+		var pages []ltx.WALPage
+		if !zero {
+			pages = []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{byte(hi)}, 512)}}
+		}
+		raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: lo, MaxTXID: hi}, pages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = m.Append(t.Context(), sc, e, raw); err != nil {
+			t.Fatal(err)
 		}
 	}
-	res, e := Compact(ctx, m, sc, 23, Options{GC: true})
-	if e != nil {
-		t.Fatal(e)
+	put(22, 1, 3766, false)
+	put(22, 3767, 3768, false)
+	put(23, 3769, 3769, true)
+	put(23, 3770, 3770, false)
+	put(23, 3770, 3772, false)
+	result, err := Compact(t.Context(), m, sc, 23, Options{})
+	if err != nil || !result.Compacted || result.MinTxID != 3769 || result.MaxTxID != 3772 {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if !res.Compacted || res.MaxTxID != 3772 {
-		t.Fatalf("result %+v", res)
-	}
-	man, ok, e := m.ReadManifest(ctx, sc, 23)
-	if e != nil || !ok {
-		t.Fatalf("manifest: %v %v", ok, e)
-	}
-	for _, key := range man.Objects {
-		raw, e := m.ReadSegment(ctx, key)
-		if e != nil {
-			t.Fatal(e)
+	check := func(sc cell.Scope) {
+		chain, err := m.RestoreChain(t.Context(), sc, 23)
+		if err != nil {
+			t.Fatal(err)
 		}
-		h, _, e := ltx.Decode(raw)
-		if e != nil || h.Epoch != 23 {
-			t.Fatalf("wrong output epoch: %+v %v", h, e)
+		ix, err := restore.IndexChain(raws(chain))
+		if err != nil || ix.Watermark != 3772 {
+			t.Fatalf("chain=%v err=%v", ix, err)
+		}
+		if chain[0].Header.Epoch != 22 {
+			t.Fatal("predecessor lost")
 		}
 	}
-	segs, e := m.Restore(ctx, sc, 23)
-	if e != nil {
-		t.Fatal(e)
-	}
-	var raw [][]byte
-	for _, s := range segs {
-		raw = append(raw, s.Raw)
-	}
-	ix, e := restore.IndexChain(raw)
-	if e != nil || ix.Watermark != 3772 {
-		t.Fatalf("restore %v %v", ix, e)
-	}
-	old, e := m.ListL0Segments(ctx, sc, 22)
-	if e != nil || len(old) == 0 {
-		t.Fatal("compaction removed predecessor")
-	}
+	check(sc)
+	// A late predecessor file crossing the continuation cut cannot replace it.
+	put(22, 1, 3771, false)
+	check(sc)
 }

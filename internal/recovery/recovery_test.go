@@ -1,6 +1,7 @@
 package recovery_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http/httptest"
@@ -54,7 +55,7 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	peerMgr := peer.NewManager(transport)
 	nl := nodelog.New(shared, "node-1")
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("acked-data"))
+	seg := nativeRecoverySegment(t, 1, []byte("acked-data"))
 
 	if _, err := nl.Open(ctx, "s1", 1, []string{fh.URL}); err != nil {
 		t.Fatalf("node-log open: %v", err)
@@ -88,8 +89,8 @@ func TestRecoverUnuploadedAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read recovered: %v", err)
 	}
-	if _, payload, err := ltx.Decode(got); err != nil || string(payload) != "acked-data" {
-		t.Fatalf("recovered payload = %q, %v", payload, err)
+	if _, pages, err := ltx.DecodeNativePages(got); err != nil || len(pages) != 1 || !bytes.Equal(pages[0].Data[:10], []byte("acked-data")) {
+		t.Fatalf("recovered pages=%d %v", len(pages), err)
 	}
 
 	// The node-log is sealed so a second recovery is a no-op.
@@ -124,7 +125,7 @@ func TestRecoverLiveScopeLeavesOtherCellWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sc := range []cell.Scope{target, other} {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte(sc.ID))
+		seg := nativeRecoverySegment(t, 1, []byte(sc.ID))
 		if err := transport.Append(ctx, fh.URL, sc, 1, seg); err != nil {
 			t.Fatal(err)
 		}
@@ -145,7 +146,7 @@ func TestRecoverLiveScopeLeavesOtherCellWritable(t *testing.T) {
 		t.Fatalf("other unexpectedly uploaded = %v, %v", keys, err)
 	}
 	// A process-wide seal here would reject this still-live unrelated cell.
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 2, EndTxID: 2}, []byte("still-live"))
+	seg := nativeRecoverySegment(t, 2, []byte("still-live"))
 	if err := transport.Append(ctx, fh.URL, other, 1, seg); err != nil {
 		t.Fatalf("other cell blocked: %v", err)
 	}
@@ -174,7 +175,7 @@ func TestRecoverOneSessionAcrossCellEpochs(t *testing.T) {
 			t.Fatalf("open epoch %d: %v", tc.epoch, err)
 		}
 		sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: tc.id}
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: tc.epoch, StartTxID: 1, EndTxID: 1}, []byte(tc.id))
+		seg := nativeRecoverySegment(t, 1, []byte(tc.id))
 		if err := transport.Append(ctx, http.URL, sc, tc.epoch, seg); err != nil {
 			t.Fatalf("append epoch %d: %v", tc.epoch, err)
 		}
@@ -210,7 +211,7 @@ func TestRecoverySkipsDeletedResourcesButRecoversLiveScopes(t *testing.T) {
 			deleted := cell.Scope{Namespace: "acme", Class: "__queue__", ID: "deleted"}
 			live := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "live"}
 			for _, sc := range []cell.Scope{deleted, live} {
-				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte(sc.ID))
+				seg := nativeRecoverySegment(t, 1, []byte(sc.ID))
 				if mode == "sealed" {
 					_, _, err = spool.AppendBatchSession(ctx, "session", sc, 1, [][]byte{seg})
 				} else {
@@ -265,7 +266,7 @@ func TestRecoverLegacyNodeLogUsesHeldSpool(t *testing.T) {
 		t.Fatalf("spool: %v", err)
 	}
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "legacy"}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("legacy-acked"))
+	seg := nativeRecoverySegment(t, 1, []byte("legacy-acked"))
 	if _, _, err := spool.AppendBatch(ctx, sc, 1, [][]byte{seg}); err != nil {
 		t.Fatalf("legacy spool append: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestRecoverSessionTailAcrossPages(t *testing.T) {
 	}
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "paged-recovery"}
 	for i := uint64(1); i <= 300; i++ {
-		seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)})
+		seg := nativeRecoverySegment(t, i, []byte{byte(i)})
 		if _, _, err := spool.AppendBatchSession(ctx, "paged-session", sc, 1, [][]byte{seg}); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
@@ -321,7 +322,7 @@ func TestRecoverSessionTailAcrossPages(t *testing.T) {
 	// Recovery must preserve immutable bytes and restore each logical tx once.
 	var ownerBatch [][]byte
 	for i := uint64(10); i <= 20; i++ {
-		ownerBatch = append(ownerBatch, ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: i, EndTxID: i}, []byte{byte(i)}))
+		ownerBatch = append(ownerBatch, nativeRecoverySegment(t, i, []byte{byte(i)}))
 	}
 	if _, _, err := rep.AppendBatch(ctx, sc, 1, ownerBatch); err != nil {
 		t.Fatal(err)
@@ -334,14 +335,28 @@ func TestRecoverSessionTailAcrossPages(t *testing.T) {
 		t.Fatalf("paged recovered objects = %d, want <=8 for 300 segments", len(keys))
 	}
 	segs, err := rep.Restore(ctx, sc, 1)
-	if err != nil || len(segs) != 300 {
-		t.Fatalf("restored segments=%d err=%v", len(segs), err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, seg := range segs {
-		if seg.Header.StartTxID != uint64(i+1) {
-			t.Fatalf("missing/out of order txid at %d: %d", i, seg.Header.StartTxID)
+	var head uint64
+	for _, seg := range segs {
+		if seg.Header.StartTxID > head+1 {
+			t.Fatalf("missing txid after %d", head)
 		}
+		head = seg.Header.EndTxID
 	}
+	if head != 300 {
+		t.Fatalf("restored watermark=%d want300", head)
+	}
+	last, err := ltx.ValidateNative(segs[len(segs)-1].Raw)
+	if err != nil || last.MaxTXID != 300 {
+		t.Fatal(err)
+	}
+	_, pages, err := ltx.DecodeNativePages(segs[len(segs)-1].Raw)
+	if err != nil || len(pages) != 1 || pages[0].Data[0] != byte(300%256) {
+		t.Fatalf("last acknowledged value missing: %v", err)
+	}
+
 }
 
 // TestRecoverNodeListsAndSkipsSealed verifies that a new owner can recover every
@@ -369,7 +384,7 @@ func TestRecoverNodeListsAndSkipsSealed(t *testing.T) {
 	if _, err := nl.Open(ctx, "s1", 1, []string{fh.URL}); err != nil {
 		t.Fatalf("open s1: %v", err)
 	}
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("s1-data"))
+	seg := nativeRecoverySegment(t, 1, []byte("s1-data"))
 	if _, err := peerMgr.Replicate(ctx, []string{fh.URL}, sc, 1, seg); err != nil {
 		t.Fatalf("replicate: %v", err)
 	}
@@ -402,5 +417,61 @@ func TestRecoverNodeListsAndSkipsSealed(t *testing.T) {
 	// A second pass is a no-op (all sealed).
 	if segments, sessions, err := rec.RecoverNode(ctx, nl, "node-1"); err != nil || segments != 0 || sessions != 0 {
 		t.Fatalf("second recover node = %d, %d, %v", segments, sessions, err)
+	}
+}
+
+func nativeRecoverySegment(t testing.TB, tx uint64, payload []byte) []byte {
+	t.Helper()
+	page := make([]byte, 512)
+	copy(page, payload)
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: tx, MaxTXID: tx}, []ltx.WALPage{{PageNo: 1, Data: page}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestNativeRecoveryConflictingRangeDoesNotSealOrReclaim(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool, err := peer.NewSpool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "n", Class: "__kv__", ID: "conflict"}
+	for _, value := range []string{"first", "different"} {
+		if _, _, err = spool.AppendBatchSession(ctx, "conflict-session", sc, 8, [][]byte{nativeRecoverySegment(t, 1, []byte(value))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	follower := httptest.NewServer(server.New(server.Deps{Cfg: recoveryTestConfig(""), Spool: spool}).Handler())
+	defer follower.Close()
+	nl := nodelog.New(b, "dead")
+	if _, err = nl.Open(ctx, "conflict-session", 8, []string{follower.URL}); err != nil {
+		t.Fatal(err)
+	}
+	rep := replica.New(b)
+	rec := recovery.New(rep, peer.NewHTTPTransport(recoveryPeerKey(), nil))
+	if _, err = rec.Recover(ctx, nl, "dead", "conflict-session"); err == nil {
+		t.Fatal("conflicting acknowledged data silently accepted")
+	}
+	state, _, err := nl.Get(ctx, "dead", "conflict-session")
+	if err != nil || state.Status == nodelog.StatusSealed || state.Progress[follower.URL] != 0 {
+		t.Fatalf("unsafe checkpoint %+v %v", state, err)
+	}
+	keys, err := rep.ListSegments(ctx, sc, 8)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("immutable object count %d %v", len(keys), err)
+	}
+	raw, err := rep.ReadSegment(ctx, keys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pages, err := ltx.DecodeNativePages(raw)
+	if err != nil || !bytes.Equal(pages[0].Data[:5], []byte("first")) {
+		t.Fatal("conflict overwrote first durable object")
 	}
 }

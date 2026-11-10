@@ -2,6 +2,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 export class Api extends WorkerEntrypoint {
+  async fetch() { return new Response("api ok\n"); }
   greet(name) { return `hi ${name}`; }
   async sum(a, b) { return a + b; }
 }

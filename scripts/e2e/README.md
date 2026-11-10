@@ -48,12 +48,21 @@ user-runtime，验证 Queue 并发上限、R2 不同/相同内容覆盖后的 HE
 
 `python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3` runs the review,
 Queue and two-agent failover suites against the fixed dedicated
-`vwork-e2e-hk-1376795072` COS bucket. It uses locally built binaries and the pinned
+`cellhive-e2e-hk-1376795072` COS bucket. It uses locally built binaries and the pinned
 fork at `/opt/cellhive/deploy/workerd-fork/workerd`, unique namespaces/node IDs,
 `durability=bucket`, and removes each test app before stopping its processes.
 Logs are retained under the printed `/tmp/hk-review-*` directory. Credentials
 are parsed without shell execution and never logged. Do not interpret these
 local-compute/remote-storage measurements as HK same-region or peer-fsync performance.
+
+`--suite background` runs Queue retry/DLQ, 100-message concurrency, two-agent
+failover, Workflow timers/retries/response-loss cold recovery, and the actual
+cron/do-alarm/queues/workflows examples. Set `E2E_BIN` to the tested binaries,
+`--workerd` to the existing paging/lifecycle fork, and `CELLHIVE_ESBUILD` to an
+installed esbuild executable for example deployment. All cases run sequentially
+under the shared-bucket lock with unique application namespaces and hostnames.
+This suite tests normal Cron triggering; the Docker Cron owner failover test is
+separate and does not become a COS test merely by selecting this suite.
 
 For cold KV recovery, run `cold-write-cos.sh` with `CELLHIVE_E2E_BUCKET=cos`,
 `CELLHIVE_COS_ENV_FILE=/opt/.secrets/s3`, and `BIN` pointing to the same build.
@@ -152,3 +161,31 @@ This selects only the concurrent-create/CAS/delete contract and requires all N
 iterations to pass. Diagnostics record HTTP response status/length/type/request
 ID and timing, never signed headers or bodies. The native probe retains unique
 `itest/` keys as evidence; it never removes a shared prefix.
+
+### SQLite cell transfer acceptance
+
+`python3 scripts/e2e/hk-review.py --credentials /opt/.secrets/s3 --workerd /opt/cellhive/cli/node_modules/.bin/workerd --suite cell-transfer` runs the binary SQLite CLI roundtrip against the dedicated COS bucket. Set `E2E_BIN` to the directory containing the intended Go binaries. It checks100 KV values, SQLite integrity, refusal to overwrite an existing target, and a post-import write followed by re-export.
+
+`python3 scripts/e2e/do-cold-cos.py --workerd <official-or-fork-binary>` runs actual native DO full restore, point read, update, recapture and independent third-disk restore with256 BLOB SHA256 checks. Add `--paged` only with the paging fork. It uses the same bucket lock and unique test scopes. Native paging results and ordinary full materialization results are reported separately.
+
+### Checked-in examples
+
+`E2E_BIN=/path/to/current/bin CELLHIVE_WORKERD=/path/to/paging-fork CELLHIVE_ESBUILD=/path/to/esbuild E2E_PORT_BASE=29300 bash scripts/e2e/examples.sh` starts an isolated filesystem-backed production stack and deploys all26 example projects. Bun, Node/npm and esbuild are required; Astro installs/builds a temporary copy. Tests include actual Queue consumption, Cron delivery and Durable Object WebSocket messages. AI uses a local protocol fixture; React-static is a config-only template with test HTML; actual Hyperdrive SQL is covered by `mysql-auto.sh`.
+
+`E2E_EXAMPLES=kv,do-websocket` selects projects for diagnosis. `E2E_KEEP=1` retains logs. `E2E_RUN_DO_RPS=1` also runs the existing DO benchmark against this isolated stack. The benchmark accepts `E2E_BIN` and `DO_RPS_URL`; do not point it at a production stack.
+
+Container suites may reuse an explicitly built current-source image via `CELLHIVE_E2E_PREBUILT_IMAGE=1` together with `CELLHIVE_RUNTIME_BASELINE_IMAGE` or `CELLHIVE_K3D_IMAGE`. This does not validate an arbitrary old image as current code. `CELLHIVE_OBS_TOOLS_IMAGE` selects the OpenObserve harness's esbuild tools image.
+
+### Immutable static assets
+
+`bash scripts/e2e/assets.sh` deploys the checked-in assets example and verifies
+public HTML, binary and empty files, same-content upload retries, and rejection
+of different content at the same version/path. Run against the dedicated COS
+bucket with `hk-review.py --credentials /opt/.secrets/s3 --suite assets`.
+The COS bucket test `TestCOSAssetImmutableCreateLive` additionally exercises
+8 concurrent writers for both empty and nonempty assets, logical range/stream/
+size reads and forbidden unconditional mutation. `TestCOSAssetUploadLimitLive`
+checks the public 64MiB upload limit. These native tests require the existing
+`CELLHIVE_NATIVE_TEST_PROVIDER=cos` credential environment and shared test lock.
+
+`hk-review.py --suite do-idle-retirement` runs the native DO owner handoff and five idle/reopen cycles against HK COS, with 16 concurrent cold reads at each reopen. Uses the explicit existing paging/lifecycle fork via `--workerd`.

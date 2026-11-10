@@ -9,7 +9,7 @@ set -uo pipefail
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$ROOT"
 
-BIN=./bin
+BIN=${E2E_BIN:-$ROOT/bin}
 # Derive the same role credentials as cell-agent (ADR-137); the dev root is
 # enabled so no secret needs to be passed around.
 export CELLHIVE_ALLOW_INSECURE_DEFAULTS=1
@@ -31,7 +31,7 @@ B_URL="http://127.0.0.1:$B_PORT"
 B_ADMIN="http://127.0.0.1:$B_ADMIN_PORT"
 # Root-derived credentials (ADR-137): the dev root is used when ALLOW_INSECURE
 # is set, and the same derivation is applied by cell-agent.
-export E2E_BIN="$ROOT/bin"
+export E2E_BIN="$BIN"
 auth() { node "$ROOT/scripts/e2e/jwt.cjs" "$@"; }
 
 # Never send the fault test to an unrelated service already using these ports.

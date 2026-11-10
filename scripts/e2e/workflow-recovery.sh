@@ -14,4 +14,5 @@ OUT=$(e2e_deploy "$E2E_BASE/deploy.json")
 [[ "$(jq -r '.number // empty' <<<"$OUT")" = "1" ]] || e2e_fail "deploy: $OUT"
 e2e_cli route add e2ewfr workflow-recovery.test worker >/dev/null
 export E2E_BASE E2E_ROOT E2E_BIN E2E_AGENT_PORT E2E_ADMIN_PORT E2E_RT_PORT E2E_RT_INTERNAL
+export E2E_WORKFLOW_HOST=workflow-recovery.test
 python3 "$E2E_ROOT/scripts/e2e/workflow-recovery.py" --namespace e2ewfr

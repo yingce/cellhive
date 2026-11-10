@@ -3,6 +3,7 @@ package owner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -689,6 +690,13 @@ func TestReleaseForPurgeSkipsBeforeReleaseHook(t *testing.T) {
 	if called {
 		t.Fatal("BeforeRelease ran for a purge release")
 	}
+	retired, _, err := m.Resolve(ctx, sc)
+	if err != nil {
+		t.Fatalf("retired lineage missing: %v", err)
+	}
+	if retired.Node != "" || retired.Session != "" || !retired.Retired || retired.Epoch != o.Epoch || retired.RetiredEpoch != o.Epoch {
+		t.Fatalf("purge release lost owner lineage: %+v", retired)
+	}
 }
 
 func TestReleaseBeforeReleaseErrorKeepsOwnership(t *testing.T) {
@@ -707,5 +715,221 @@ func TestReleaseBeforeReleaseErrorKeepsOwnership(t *testing.T) {
 	}
 	if got := m.OwnedScopes(); len(got) != 1 || got[0].Scope.String() != sc.String() {
 		t.Fatalf("ownership not retained after hook error: %+v", got)
+	}
+}
+
+func TestClaimAsUsesNodeLeaseSession(t *testing.T) {
+	for _, state := range []string{"live", "expired", "restarted"} {
+		t.Run(state, func(t *testing.T) {
+			m, _ := newManager(t, t.TempDir(), "agent")
+			now := time.Now()
+			sc := cell.Scope{Namespace: "acme", Class: "__do__", ID: "import"}
+			prior, err := m.Claim(t.Context(), sc, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := lease.NodeLease{Node: "agent", Session: prior.Session, Expiry: now.Add(time.Minute).UnixMilli()}
+			if state == "expired" {
+				l.Expiry = now.Add(-time.Second).UnixMilli()
+			}
+			if state == "restarted" {
+				l.Session = "new-session"
+			}
+			m.LeaseView = fakeLeaseView{"agent": l}
+			got, err := m.ClaimAs(t.Context(), sc, "runtime", "http://runtime", cell.RoleCellAgent, time.Minute, now)
+			if state == "live" {
+				if !errors.Is(err, ErrOwnerLive) {
+					t.Fatalf("live predecessor accepted: %v", err)
+				}
+			} else if err != nil || got.Epoch <= prior.Epoch {
+				t.Fatalf("takeover=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestExclusiveClaimPinsOwnershipAndRejectsReentry(t *testing.T) {
+	m, b := newManager(t, t.TempDir(), "agent")
+	sc := DOScope("acme", "worker", "Counter", 0)
+	o, release, err := m.ClaimExclusive(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(t.Context())
+	if o.Address != "" {
+		t.Fatal("maintenance owner advertised a runtime endpoint")
+	}
+	peer := &Manager{B: b, NodeID: m.NodeID, Session: m.Session, OwnerTTL: time.Minute}
+	if _, _, err := peer.ClaimExclusive(t.Context(), sc, time.Now()); !errors.Is(err, ErrOwnerLive) {
+		t.Errorf("reentered shared identity: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := m.Claim(ctx, sc, time.Now()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("ordinary claim bypassed exclusive guard: %v", err)
+	}
+	if err := peer.ReleaseAs(t.Context(), sc, m.NodeID, o.Epoch); !errors.Is(err, ErrEpochMismatch) {
+		t.Errorf("runtime release bypassed guard: %v", err)
+	}
+	if _, err := peer.RenewAs(t.Context(), sc, m.NodeID, o.Epoch, time.Minute, time.Now()); !errors.Is(err, ErrEpochMismatch) {
+		t.Errorf("runtime renewal changed guard: %v", err)
+	}
+	if err := release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.ClaimAs(t.Context(), sc, "runtime", "runtime:1234", cell.RoleCellAgent, time.Minute, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type failExclusiveDeleteOnce struct {
+	bucket.Bucket
+	failed bool
+}
+
+func (b *failExclusiveDeleteOnce) ConditionalDelete(ctx context.Context, key, etag string) error {
+	if !b.failed {
+		b.failed = true
+		return errors.New("temporary delete failure")
+	}
+	return b.Bucket.ConditionalDelete(ctx, key, etag)
+}
+func TestExclusiveReleaseRetriesTransientFailure(t *testing.T) {
+	m, b := newManager(t, t.TempDir(), "agent")
+	m.B = &failExclusiveDeleteOnce{Bucket: b}
+	sc := DOScope("acme", "worker", "Counter", 0)
+	_, release, err := m.ClaimExclusive(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(t.Context()); err == nil {
+		t.Fatal("failure was hidden")
+	}
+	if err := release(t.Context()); err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+	if _, err := m.ClaimAs(t.Context(), sc, "runtime", "http://runtime", cell.RoleCellAgent, time.Minute, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedExclusiveReleaseBackgroundRecovery(t *testing.T) {
+	for _, takeover := range []bool{false, true} {
+		t.Run(fmt.Sprint(takeover), func(t *testing.T) {
+			m, b := newManager(t, t.TempDir(), "agent")
+			sc := DOScope("acme", "worker", "Counter", 0)
+			failing := true
+			m.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+				if failing {
+					return errors.New("storage unavailable")
+				}
+				return nil
+			}
+			_, release, err := m.ClaimExclusive(t.Context(), sc, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := release(t.Context()); err == nil {
+				t.Fatal("expected foreground failure")
+			}
+			if err := m.RetryExclusiveReleases(t.Context()); err == nil {
+				t.Fatal("expected persistent failure")
+			}
+			failing = false
+			if takeover {
+				_, etag, err := m.Resolve(t.Context(), sc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := b.ConditionalDelete(t.Context(), Key(sc), etag); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.ClaimAs(t.Context(), sc, "successor", "http://runtime", cell.RoleCellAgent, time.Minute, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := m.RetryExclusiveReleases(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if len(m.pendingExclusiveRelease) != 0 {
+				t.Fatal("completed cleanup retained")
+			}
+			o, _, err := m.Resolve(t.Context(), sc)
+			if takeover {
+				if err != nil || o.Node != "successor" {
+					t.Fatalf("successor deleted: %+v %v", o, err)
+				}
+			} else if !errors.Is(err, ErrUnowned) {
+				t.Fatalf("guard remains: %v", err)
+			}
+		})
+	}
+}
+
+// Model a provider that durably accepts the owner mutation but loses its reply.
+type lostExclusiveClaimReply struct {
+	bucket.Bucket
+	key string
+}
+
+func (b *lostExclusiveClaimReply) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
+	etag, err := b.Bucket.ConditionalCreate(ctx, key, data)
+	if err == nil && key == b.key {
+		return "", errors.New("owner write reply lost")
+	}
+	return etag, err
+}
+func (b *lostExclusiveClaimReply) CAS(ctx context.Context, key string, data []byte, expected string) (string, error) {
+	etag, err := b.Bucket.CAS(ctx, key, data, expected)
+	if err == nil && key == b.key {
+		return "", errors.New("owner write reply lost")
+	}
+	return etag, err
+}
+func TestExclusiveClaimLostReplyIsEventuallyReleased(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		for _, successor := range []bool{false, true} {
+			t.Run(fmt.Sprintf("existing=%v/successor=%v", existing, successor), func(t *testing.T) {
+				m, b := newManager(t, t.TempDir(), "agent")
+				sc := DOScope("acme", "worker", "Counter", 0)
+				if existing {
+					if _, err := m.ClaimAs(t.Context(), sc, "old-runtime", "http://old", cell.RoleCellAgent, time.Second, time.Now().Add(-time.Minute)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m.B = &lostExclusiveClaimReply{Bucket: b, key: Key(sc)}
+				_, release, err := m.ClaimExclusive(t.Context(), sc, time.Now())
+				if err == nil || release != nil {
+					t.Fatal("ambiguous acquisition returned a usable guard")
+				}
+				o, etag, err := m.Resolve(t.Context(), sc)
+				if err != nil || o.Node != m.NodeID {
+					t.Fatalf("write did not land: %+v %v", o, err)
+				}
+				if successor {
+					if err := b.ConditionalDelete(t.Context(), Key(sc), etag); err != nil {
+						t.Fatal(err)
+					}
+					peer := &Manager{B: b, NodeID: "peer", Session: "peer-session", OwnerTTL: time.Minute}
+					if _, err := peer.ClaimAs(t.Context(), sc, "successor", "http://successor", cell.RoleCellAgent, time.Minute, time.Now()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := m.RetryExclusiveReleases(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				current, _, err := m.Resolve(t.Context(), sc)
+				if successor {
+					if err != nil || current.Node != "successor" {
+						t.Fatalf("successor lost: %+v %v", current, err)
+					}
+				} else if !errors.Is(err, ErrUnowned) {
+					t.Fatalf("ambiguous guard stranded: %+v %v", current, err)
+				}
+			})
+		}
 	}
 }

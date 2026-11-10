@@ -8,6 +8,7 @@ import (
 	"cellhive/internal/config"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -92,7 +93,11 @@ func bench(c *http.Client, owner, token, scope string, epoch uint64, n, conc int
 			lat[w] = make([]time.Duration, 0, per)
 			for i := 0; i < per; i++ {
 				id := txid.Add(1)
-				seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: id, EndTxID: id}, []byte("real"))
+				seg, err := nativeBenchSegment(id)
+				if err != nil {
+					fails[w]++
+					continue
+				}
 				body, _ := json.Marshal(map[string]any{
 					"scope": scope, "epoch": epoch,
 					"segment": base64.StdEncoding.EncodeToString(seg), "followers": followers,
@@ -161,3 +166,11 @@ func pct(s []time.Duration, p float64) time.Duration {
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+
+// nativeBenchSegment measures transport of one synthetic SQLite page, not a SQL
+// operation. TXID 1 is a complete one-page baseline; subsequent files are deltas.
+func nativeBenchSegment(txid uint64) ([]byte, error) {
+	page := make([]byte, 512)
+	binary.BigEndian.PutUint64(page[:8], txid)
+	return ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: txid, MaxTXID: txid}, []ltx.WALPage{{PageNo: 1, Data: page}})
+}

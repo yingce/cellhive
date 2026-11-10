@@ -167,3 +167,20 @@ func TestSnapshotStreamPropagatesCallbackError(t *testing.T) {
 		t.Fatalf("err = %v, want wrapped %v", err, boom)
 	}
 }
+
+func TestSnapshotReadBufferBudget(t *testing.T) {
+	for _, size := range []uint32{512, 4096, 65536} {
+		for _, budget := range []int{int(size), int(size)*2 - 1, int(size) * 2} {
+			count, err := snapshotPagesPerPart(size, budget)
+			if err != nil || count != budget/int(size) || count*int(size) > budget {
+				t.Fatalf("page size %d budget %d: count=%d err=%v", size, budget, count, err)
+			}
+		}
+		if _, err := snapshotPagesPerPart(size, int(size)-1); err == nil {
+			t.Fatalf("accepted budget smaller than page size %d", size)
+		}
+	}
+	if _, err := snapshotPagesPerPart(0, 1024); err == nil {
+		t.Fatal("accepted zero page size")
+	}
+}

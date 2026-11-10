@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -119,37 +120,55 @@ func (b *FSBucket) getLocked(key string) ([]byte, string, error) {
 
 // Stat implements Statter: size from stat, etag from the content-addressed
 // body (the local backend has no cheap content hash).
-func (b *FSBucket) Stat(_ context.Context, key string) (int64, string, error) {
+func (b *FSBucket) Stat(ctx context.Context, key string) (int64, string, error) {
 	unlock := b.acquire(key)
 	defer unlock()
-	info, err := os.Stat(b.path(key))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, "", ErrNotFound
-		}
-		return 0, "", err
+	f, err := os.Open(b.path(key))
+	if os.IsNotExist(err) {
+		return 0, "", ErrNotFound
 	}
-	data, err := os.ReadFile(b.path(key))
 	if err != nil {
 		return 0, "", err
 	}
-	return info.Size(), etag(data), nil
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, contextReader{ctx, f})
+	if err != nil {
+		return 0, "", err
+	}
+	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// RangedGet implements Bucket.
+// RangedGet reads only the requested bytes into memory. The local content ETag
+// still requires a streaming scan; unlike Get it never allocates the full file.
 func (b *FSBucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
-	data, e, err := b.Get(ctx, key)
+	b.gets.Add(1)
+	unlock := b.acquire(key)
+	defer unlock()
+	f, err := os.Open(b.path(key))
+	if os.IsNotExist(err) {
+		return nil, "", ErrNotFound
+	}
 	if err != nil {
 		return nil, "", err
 	}
-	if off < 0 || length < 0 || off > int64(len(data)) {
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	if off < 0 || length < 0 || off > info.Size() {
 		return nil, "", fmt.Errorf("bucket: range out of bounds")
 	}
-	end := off + length
-	if end > int64(len(data)) {
-		end = int64(len(data))
+	h := sha256.New()
+	if _, err = io.Copy(h, contextReader{ctx, f}); err != nil {
+		return nil, "", err
 	}
-	return data[off:end], e, nil
+	data := make([]byte, min(length, info.Size()-off))
+	if _, err = f.ReadAt(data, off); err != nil {
+		return nil, "", err
+	}
+	return data, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Put implements Bucket.

@@ -12,6 +12,7 @@ import (
 
 	"cellhive/internal/auth"
 	"cellhive/internal/bearertoken"
+	"cellhive/internal/cell"
 	"cellhive/internal/control"
 )
 
@@ -70,6 +71,10 @@ var nslessListPaths = map[string]bool{
 // the query parameter and falling back to a JSON body field. When it has to read
 // the body it returns the raw bytes so the caller can replay them.
 func controlTargetNS(r *http.Request) (ns string, body []byte, err error) {
+	if r.URL.Path == "/v1/control/cell/export" || r.URL.Path == "/v1/control/cell/import" {
+		sc, e := cell.ParseScope(r.URL.Query().Get("scope"))
+		return sc.Namespace, nil, e
+	}
 	if ns = r.URL.Query().Get("namespace"); ns == "" {
 		ns = r.URL.Query().Get("ns")
 	}

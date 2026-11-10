@@ -2,7 +2,9 @@ package bucket
 
 import (
 	"bytes"
+	"cellhive/internal/ltx"
 	"context"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	oss "github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -53,12 +55,20 @@ type assetRoundTripFunc func(*http.Request) (*http.Response, error)
 func (f assetRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestProviderAssetCreateNativeHeadersAndConflicts(t *testing.T) {
+	native, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 2, MaxTXID: 2, Timestamp: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, kind := range []string{"cos", "oss"} {
 		t.Run(kind, func(t *testing.T) {
 			var mu sync.Mutex
 			objects := map[string][]byte{}
 			transport := assetRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-				if r.Method != http.MethodPut || r.URL.RawQuery != "" || r.Header.Get("x-"+kind+"-forbid-overwrite") != "true" {
+				if kind == "cos" && strings.HasPrefix(r.URL.Path, "/assets/") {
+					if r.Method != http.MethodPost || r.URL.Query().Get("position") != "0" || !r.URL.Query().Has("append") {
+						t.Errorf("COS assets must use atomic append at zero, got %s %s", r.Method, r.URL.RawQuery)
+					}
+				} else if r.Method != http.MethodPut || r.URL.RawQuery != "" || r.Header.Get("x-"+kind+"-forbid-overwrite") != "true" {
 					t.Errorf("expected native forbid-overwrite PUT, got %s query=%q", r.Method, r.URL.RawQuery)
 				}
 				var body []byte
@@ -69,16 +79,22 @@ func TestProviderAssetCreateNativeHeadersAndConflicts(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+				if bytes.Equal(body, native) && r.Header.Get("x-"+kind+"-meta-litestream-timestamp") != "1970-01-01T00:00:00.5Z" {
+					t.Errorf("missing native timestamp metadata")
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				status, response := http.StatusOK, ""
 				if _, exists := objects[r.URL.Path]; exists {
 					status = http.StatusConflict
 					response = "<Error><Code>FileAlreadyExists</Code><Message>exists</Message></Error>"
+					if r.Method == http.MethodPost {
+						response = "<Error><Code>PositionNotEqualToLength</Code></Error>"
+					}
 				} else {
 					objects[r.URL.Path] = append([]byte(nil), body...)
 				}
-				return &http.Response{StatusCode: status, Header: http.Header{"Etag": []string{`"asset-etag"`}, "X-Cos-Hash-Crc64ecma": []string{strconv.FormatUint(crc64.Checksum(body, crc64.MakeTable(crc64.ECMA)), 10)}}, Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+				return &http.Response{StatusCode: status, Header: http.Header{"Etag": []string{`"asset-etag"`}, "X-Cos-Content-Sha1": []string{fmt.Sprintf("%x", md5.Sum(body))}, "X-Cos-Next-Append-Position": []string{strconv.Itoa(len(body))}, "X-Cos-Hash-Crc64ecma": []string{strconv.FormatUint(crc64.Checksum(body, crc64.MakeTable(crc64.ECMA)), 10)}}, Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
 			})
 			client := &http.Client{Transport: transport}
 			var appender PositionAppender
@@ -97,8 +113,11 @@ func TestProviderAssetCreateNativeHeadersAndConflicts(t *testing.T) {
 				appender = &OSSAppender{bucket: b}
 			}
 			provider := NewProviderBucket(nil, appender)
-			for i, body := range [][]byte{nil, []byte("original")} {
+			for i, body := range [][]byte{nil, []byte("original"), native} {
 				key := fmt.Sprintf("assets/ns/worker/manifest/file%d", i)
+				if i == 2 {
+					key = "cells/n/c/i/ltx/e1/0000/0000000000000002-0000000000000002.ltx"
+				}
 				etag, err := provider.ConditionalCreate(t.Context(), key, body)
 				if err != nil || etag != "asset-etag" {
 					t.Fatalf("first create: etag=%q error=%v", etag, err)
@@ -111,6 +130,12 @@ func TestProviderAssetCreateNativeHeadersAndConflicts(t *testing.T) {
 				mu.Lock()
 				got := objects["/"+key]
 				mu.Unlock()
+				if kind == "cos" && strings.HasPrefix(key, "assets/") {
+					if _, err := assetLength(got[:assetHeaderSize], int64(len(got))); err != nil {
+						t.Fatal(err)
+					}
+					got = got[assetHeaderSize:]
+				}
 				if !bytes.Equal(got, body) {
 					t.Fatal("existing bytes changed")
 				}

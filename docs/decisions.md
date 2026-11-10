@@ -1,4 +1,15 @@
 # 决策记录（ADR）
+### ADR-311 celld LTX 物理布局与完整快照发布（2026-11-08）
+
+本 ADR supersedes earlier snapshot-sidecar and legacy-layout clauses in ADR-272/307/308/309 and the historical implementation notes below; those entries remain historical records only.
+
+CellHive 的唯一物理布局与 celld 保持一致：owner 使用 `cells/<scope>/own.json`；LTX 使用 `cells/<scope>/ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx`。L0/L1 的对象发现按 level 使用 continuation，已知 TXID 时把 offset 推进到该 TXID，不在热路径使用 List。旧 `owner.json`、`L1/`、十进制名称和 snapshot sidecar 不属于当前格式，也不再读取兼容。
+
+完整快照先流式写入本地临时 spool，fsync 后通过普通 PUT/multipart 发布完整 `.ltx` 对象（同名重传语义见 2026-11-10 修订）；发布失败只清理 spool，不留下远端半快照。生产路径不创建 `snapshot-started`、`snapshot-done` 或其它快照完成 sidecar。恢复以完整 LTX 对象及其内嵌索引为准。
+
+### ADR-310 owner lineage retirement fence（2026-11-08）
+
+资源删除 fencing 与 celld 对齐：owner 记录是唯一权威元数据，普通读取不创建 owner；claim 或 cleanup 才条件写入。删除期间普通 admission、旧 epoch LTX 和延迟重试均拒绝，cleanup job 以 job ID 继续执行 purge。purge 后保留空 owner、epoch 和 retirement 标记，namespace purge 也不得删除 `own.json`。资源重新激活时清除 retired 状态但保留单调 epoch floor，后续 owner epoch 必须递增。
 
 ## ADR-300 Queue 响应确认、跨队列隔离与 Workflow schedule 去重（2026-10-26）
 
@@ -173,7 +184,7 @@ Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是�
 ## ADR-276 资源删除栅栏使用稳定点查记录（2026-10-24，已实现，性能验收未达标）
 
 - **问题**：KV/Queue 的 LTX 上传每次在 `resourceWriteGuard` 中 fresh 读取删除栅栏。原 `resource-fence.json` 走按时间窗口分段的 authority；大多数资源没有栅栏，miss 会列举 `resource-fence.json.w*`。COS 冷写 e2e 的稳态约 600 次 put 对应约 770 次全局 List，但这只是相关性，仍须用按调用点计数确认。
-- **决策**：栅栏改用稳定的 `resource-fence.v2` append-position 记录。首次访问先读取旧栅栏，再用条件创建把旧状态（或空状态）迁到 v2；竞争创建时重新读取 v2。之后每次提交仍 fresh 点查 v2，删除/代际更新仍通过 append-position CAS。该记录只在资源生命周期变更时追加，设 8 MiB 硬上限；满时失败关闭。app purge 保留新旧栅栏。旧栅栏在迁移后只供历史诊断，不再改写。节点租约将 `liveness` 升为 `node-lease-fence-v2`；启动无法枚举 peer 或发现活跃旧协议 peer 即拒绝启动，运行中发现则停止 ack。协议切换要求同一桶中所有 cell-agent 一次性升级。
+- **决策（已由 ADR-310 supersede）**：历史版本曾使用稳定的 `resource-fence.v2` append-position 记录；当前版本改为 owner lineage，旧对象只读兼容。
 - **不变量**：不缓存提交路径的缺失结果；跨节点删除后下一次提交必须看到最新栅栏；旧栅栏中的 `JobID/Deleted/Epoch` 必须逐字迁移；旧代际上传不得复活；权威读取不依赖 bucket List。
 - **验收**：缺失栅栏多次 fresh 读取的 List=0（首次迁移的历史查找单独计数），跨节点 Block 后旧 epoch 上传被拒，旧 JSON 与旧分段栅栏迁移通过；固定版本真实 COS e2e 记录 p50/p99、每阶段 List/Get、缺失/错值、integrity check。Cron 用独立的真实 runtime 故障 e2e 验收，不能用 KV 测试替代。
 
@@ -3640,7 +3651,7 @@ HK COS真实并发请求捕获：首次POST Append(position=0)尚未返回时，
 
 ### 数据路径优化计划（2026-10-27，未实施）
 
-后续优化按[实施计划](superpowers/plans/2026-10-27-data-path-optimization.md)逐项设计与验收。优先减少compaction无效读取、优化上传spool持久化和capture空闲轮询；第一轮保持桶格式、确认条件、epoch/resource fence不变。增量分层和跨cell bundle仅列为独立设计/实验，不代表已经采纳新格式或放宽RPO=0。
+后续优化按[实施计划](todo.md#存储性能后续评估)逐项设计与验收。优先减少compaction无效读取、优化上传spool持久化和capture空闲轮询；第一轮保持桶格式、确认条件、epoch/resource fence不变。增量分层和跨cell bundle仅列为独立设计/实验，不代表已经采纳新格式或放宽RPO=0。
 
 ### Compaction 新增尾部预检（2026-10-27，实施中）
 
@@ -3774,3 +3785,333 @@ ADR-307/308 已定义默认 DEFERRED 与 pin/seal/tombstone 协议，但缺少�
 - **指标**：暴露 `l0_backlog_objects`、`l0_backlog_bytes`、`oldest_l0_age_seconds`、`last_compaction_lag_seconds`、`l1_generations`、`deferred_gc_bytes`、`retained_epochs`。零值、未压缩、读取错误必须有确定性语义；不得把延后/未知计为已删除字节。
 - **清理原子性**：namespace/resource 删除必须先写 deleting fence，再以幂等 job 按前缀续跑；控制面记录只在 payload 删除完成后移除。502、context canceled 或进程退出不得留下“控制面仍在、数据半删”的可服务状态；重试必须收敛。
 - **验收**：单测覆盖 KeepL1Generations 1/2/>2、Safe 入口 dry-run/owner 拒绝/授权、指标、cleanup 中断续跑；race；本地 e2e；真实 HK COS 30k–50k 跨 2–3 epoch，记录 Safe GC 前后对象数/字节、保留 L1 代数、最新 epoch 全量可恢复。未运行证据不得声称通过，也不改变生产默认。
+
+## ADR-312 celld 原生 LTX 协议迁移（2026-11-08，实施中）
+
+CellHive 不再维护自定义 44 字节 LTX header、`kind` 快照标志或 WAL2/WAL3 私有 payload 作为对象存储协议。对象存储必须使用 `/opt/celld` 的原生 LTX v3：100 字节 header、`min_txid == 1` 快照判定、原生 page block/index/trailer/checksum 与 `<min>-<max>.ltx` 命名。
+
+level 固定为 celld 的 `0/1/2/3/9`：L0 实时写入，L1/L2/L3 分别按 30 秒、5 分钟、1 小时逐级压缩，L9 保存完整快照。epoch 恢复按 continuation cut 建链：从最新 epoch 向前裁剪到上一个 epoch 的精确 cut，找不到连续前驱则失败；不再用独立 marker/link/snapshot sidecar 代替 continuation 关系。compaction 采用 celld 的 additive publish，再由独立 GC 策略处理源对象删除。
+
+本 ADR 覆盖 ADR-311 中仍使用 CellHive 自定义 LTX codec、单 interval compaction、marker-based epoch chain 的实现；迁移期间不得新写或读取第二套对象格式。迁移完成前不得宣称与 celld 文件级互通。
+
+ADR-312 编号约束：新建 SQLite cell 的初始持久 TXID 为 1（初始数据库镜像），首笔应用事务为 2。capture、writer ticket、checkpoint watermark 必须使用同一编号；禁止仅在编码器中把 0 钳制成 1，否则会提前释放 durability barrier 或把首个增量误识别为快照。快照分页仅为本地读取批次，必须合并为一个原生 LTX 文件后发布；同路径不同内容必须报冲突，不能覆盖已确认对象。
+
+ADR-312 owner 合并约束：`own.json` 同时承载 owner epoch 和资源 retirement 信息，但两者不可混为一个 resource generation。普通 owner epoch 更新不表示资源已删除重建；resource generation 只使用 retirement job 与 retired epoch floor。否则 1 秒缓存刷新会将正常 owner 变化误判为删除代际变化，触发本地数据失效。owner takeover 的 epoch 校验仍由 ownership 路径执行。
+
+ADR-312 续链与扫描细则（对照 celld `client/epochs.rs`、`replica.rs`）：新 epoch 的零页 continuation 位于 `[cut+1, cut+1]`，而非旧私有反向范围 `[cut+1, cut]`；其后的真实增量从 `cut+2` 开始。恢复先由文件名求出各 epoch 最小 TXID，自最新 epoch 向前裁掉 `max >= successor.min` 的对象，只有恰好结束于 `successor.min-1` 的前驱可以接链，遇到最小 TXID=1 的 epoch 停止。恢复计划先选最新 L9，再跨 L3/L2/L1/L0 选择延伸最远的连续范围；允许压缩文件与已恢复前缀重叠，不能因重叠丢弃包含新事务的尾部。元数据规划不 GET LTX 正文，下载所选对象后必须检查 header 与路径范围一致。写入端的本地 TXID/ticket 推进仍在实施中，不得将扫描迁移视为续链整体验收。
+
+ADR-312 原生 compaction 实施细则：L0→L1→L2→L3 只合并相邻源 level 尚未覆盖的连续范围；不会把每次增量晋升都改写为完整快照。允许源范围跨越已压缩水位，按 celld `compact_from` 输出尚未覆盖的范围。输出仅一个原生 `.ltx`，不发布 manifest/index sidecar。流式合并器每个输入保留一页并保留内嵌索引；最后输入的 commit 决定截断，重复页取最新。对象 provider 的 Get/Put 仍是缓冲接口，尚不能将该合并器的内存界限等同于整个 COS 链路。后台 L1/L2/L3 分别使用 UTC 对齐的 30 秒/5 分钟/1 小时独立时钟；阈值仅限制 L1，不抑制高 level 定时晋升。旧 COMPACTION_INTERVAL 正值只启用调度，0 关闭，不再覆盖周期。L9 在显式快照/受大小预算限制的 owner release 路径发布，不能将部分增量标记为 L9。原有物理 GC 与原生内嵌索引分页读取的迁移仍未完成，保留未验收状态。
+
+
+原生分页恢复进展（2026-11-08）：PageFetcher 已改为从原生恢复计划读取 LTX 尾部内嵌索引，以范围请求读取原生 LZ4 页帧，不再依赖外部 page index/manifest 或整库 fallback。跨 epoch 选页、截断、覆盖页中断 read-run、ETag 固定恢复视图已加回归；对象缺失不会重建为较新 cut，避免混读。内嵌索引长度/范围/顺序与页号均校验；范围读不声称验证整文件 CRC（与 celld paged 路径相同），完整读取仍校验 CRC。目前仍逐对象 Stat 获取 size/ETag，后续可复用列表元数据减少请求。ltx/restore/sqlcapture/cellstore/dosupervisor/objectstore 整包通过。真实指定 HK COS 64MiB 测试通过：1MiB 随机 blob 字节一致，查询 5 次范围读、2,118,006 字节，整项测试 8.53s（含建库、上传、压缩、清理，不是冷激活延迟）。epoch continuation 写入和本地 TXID 推进、GC、旧 codec 清理及全量验收仍未完成。
+
+
+原生 epoch continuation 进展（2026-11-08）：生产 cell-agent 不再调用旧 MarkEpoch；改用 SQLite 实际 page_size/page_count/WAL salts 的零页 `[cut+1,cut+1]` 文件（WALOffset=32），发布成功后持久化本地计数并重建启动前 capture cursor/barrier，首笔业务增量从 cut+2 开始。上传成功但响应丢失时，仅对已存在的原生零页文件做只读证明后重试；真实缺失增量不可冒充续链。完整冷恢复在临时文件原子发布前采用已验证链水位，分页恢复在开放业务写入前采用页源水位，避免续链未修改 SQLite 元数据页导致 TXID 复用。对应恢复/失败发布/首次增量回归和 native race 通过。
+
+分页恢复已删除远端 `gc/pins/*.json` 创建；PageFetcher 固定 cut，无远端续租或自动换链。HasCompleteSnapshot 同样删除 pin/manifest/index 证明路径，使用原生当前 epoch 独立链验证。在线物理 GC 当前仍 deferred；缺失对象读取报错，不能将去掉 pin 解读为在线删文件已获安全证明。真实指定 HK COS 测试：前驱57、续链58、首笔增量59，跨 epoch L1 压缩及完整/分页物化后41行字节与 integrity_check 通过，9–10 对象全部 .ltx（批次数不同）。测试是单 Go 进程+真实 COS，非 fleet owner lease 接管。旧 MarkEpoch API/测试、旧 codec/manifest/index 接口、物理 GC 策略和全仓验收仍未清理完成，不能宣称全面对齐。
+
+原生完整性证明修订（2026-11-08）：`ValidateChain` 已直接流式解码原生 LTX，验证文件 CRC、页面尺寸和最终页面覆盖，不再仅凭 TXID 连续性证明完整快照。只保存页号集合，不保留数据库页面正文；截断后扩库必须重新提供被截断的页面。已补缺页但 CRC 正确的快照、真实零页续链、错误页尺寸、损坏 trailer、截断后页复活及当前 epoch 独立性回归。此修订加强删除前的证明，物理 GC 仍未完成。
+
+
+原生恢复/上传收口（2026-11-08）：restore.IndexChain/ApplyFile/Compact 已只接受原生100字节header；按内嵌索引保留原始压缩帧位置，按需解压写入1MiB磁盘写窗口，不再转换WAL page-map或保留整库解压页集合。恢复选链仅使用MinTXID/MaxTXID，旧header epoch/marker/分页snapshot选择逻辑删除；epoch前驱裁剪继续由replica路径规划负责。旧内部marker测试替换为原生续链缺前驱回归，epoch裁剪回归保留在replica。restore.Compact现在无分片预算参数，输出单个原生索引快照。
+
+Append/AppendL1及批量入口已走原生校验/合并，拒绝私有44字节格式。批量上传改用CompactNative，修复缩库后旧page超出Commit导致上传失败，并去重字节一致的重试，冲突内容仍拒绝。readNativePlan与AppendSnapshotFile校验不再为验证创建私有page-map。restore/ltx/cellcapture/cellstore/sqlcapture/dosupervisor整包和native race通过；真实指定COS续链冷恢复通过（41行、57→58→59，全对象.ltx）。provider仍缓冲对象正文，故尚不能声称全链路内存有界；旧codec在其他模块、旧GC/manifest接口和全仓测试失败仍待处理。
+
+
+原生 follower/灾难恢复修订（2026-11-08）：follower spool 已直接验证原生LTX，epoch来自请求/session envelope，不再比较不存在的header epoch。非session spool内容去重改为原始文件SHA256，同范围不同内容必须保留到恢复阶段，由不可变对象冲突阻止误确认；seen集合只在文件fsync和目录sync成功后更新，避免失败重试误认已持久化。recoveryBatch使用原生header/CRC验证与MinTXID==1快照识别，不再转换私有page-map。peer/recovery/upload整包通过；新增同范围冲突不得seal/checkpoint、损坏文件不得ack、目录sync失败必须重新证明回归。
+
+真实指定HK COS新增TestCOSNativeFollowerRecovery通过：两个实际HTTP follower spool先确认SQLite捕获数据，writer停止时COS尚无cell LTX，恢复从followers上传COS再冷恢复新SQLite，20行逐字节一致、TXID21和integrity_check通过；2个LTX对象，恢复及冷恢复校验约1.512s，总测试2.43s。测试是单Go进程内两个HTTP服务+真实COS，不代表多节点进程崩溃或owner lease接管验收。旧格式接口/GC与其他包旧测试仍未清理完成。
+
+
+owner 删除代次修订（2026-11-08）：删除围栏合并进 own.json 后，Claim/ClaimAs 必须保留 RetirementJob/RetiredEpoch，普通 Release/ReleaseAs 对带删除历史的记录只清空持有者，不删除记录；ClaimAs 与 Claim 一样拒绝 Retired。修复更高 epoch owner 接管时丢失删除代次、导致离线节点接受旧本地 SQLite 的实际回归。普通 owner epoch 变化不改变资源 generation；没有新增 COS 对象。owner 整包、server 离线旧数据隔离与 KV/D1 捕获一致性测试通过；全量协议对齐验收仍未完成。
+
+
+原生 HTTP/fleet 测试迁移（2026-11-09）：server 主要 commit/append/peer stream、DO recovery、resource cleanup 测试已用真实原生页文件，epoch 只在请求 envelope 中传递；大 JSON 请求使用不可压缩页保持大于1MiB的边界，range 断言比较原始压缩文件字节。binary commit/pipelined commit 改为 ValidateNative，慢提交日志只读原生 header，不再转换私有 page-map；新增旧格式必须入口400拒绝回归。相关测试通过。KV TXID偶发跳号已用调用栈确认来自首次owner激活后的异步timer建表事务；测试先初始化timer schema后仍严格断言每个应用写TXID连续，并保留250行逐字节冷恢复验证，重复20次通过。指定HK COS follower恢复重跑通过：20行、TXID21、2个LTX，恢复与冷校验662ms、总测试1.24s（单进程两个HTTP follower，非多节点故障验收）。server GC指标自动更新和旧GC测试对退休幂等性的断言仍待处理，不宣称全量通过。
+
+
+原生 GC 诊断修订（2026-11-09）：BacklogStats 删除 manifest 与 retired/seal 对象读取，按原生0/1/2/3/9文件范围的并集判断低层覆盖；高层范围缺口不会被最大TXID掩盖。压缩时间使用高层对象LastModified，秒数单位修正；epoch数量报告实际列出的目录，不再推断私有退休标记。列表经owned objectstore校验。显式诊断与管理维护更新进程内指标快照，压缩与metrics scrape不触发额外广泛扫描。原生压缩前后统计、范围缺口/跨level并集/无metadata GET及server指标测试通过。更正待办：旧管理GC实现仍调用SealEpoch/MarkRetired/EnsureTombstone，其特殊文件路径必须整体替换；不能只调整旧测试的第二次退休计数就宣称符合无特殊文件要求。
+
+
+快照标记接口删除（2026-11-09）：彻底移除 cellcapture 的 SnapshotStarted/SnapshotDone/ClearSnapshotStarted 回调、replica 同名空API和 skipPartialSnapshot 旧标记判定；sqlcapture 删除 SnapshotWithStart，RequestBaseline不再接受外部标记回调。仅保留内部onImageReady用于固定镜像边界确定后释放捕获锁，不产生远端对象。初始快照测试检查整个scope只含LTX，后台快照测试直接校验原生header与continuation后的精确水位，上传失败测试要求启动失败；旧started/done前置设置删除。指定COS的level/续链/冷恢复通过（57→58→59，41行，9个LTX）。回归同时暴露并修复capture失败竞态：barrier已返回fatal而Done尚未关闭时，Ensure必须取消并等待退出清理再重建，不得把失败实例当作warm。GC特殊文件路径、旧codec及全量验收仍待完成。
+
+
+原生 epoch GC 实施（2026-11-09）：RetireEpochsWithOptions已整体替换为celld恢复链基线算法，使用已有epochChain而非“最新快照”猜测；必须看到当前owner epoch为最新链和最新目录，已记录退休基线高于本次基线时拒绝清理。默认一小时对象上传年龄、保护紧邻前一epoch，未知时间/截断列表/非原生对象保留。扫描后重新验证owner，再写与上游完全同名同字段的ltx/retired.json（retired_below），随后删除候选LTX；不创建每epoch seal/tombstone/gc-retired/pin文件。这个retired.json在固定celld 90b4301中确实存在，不是CellHive自定义扩展。
+
+后台与管理GC使用AcquireResident持有本地请求门闩，不打开冷cell，分页恢复未完成则不扫描/不删除；完整扫描后再次检查本地就绪与精确owner epoch，删除中owner失效停止。默认不授权调用仍返回deferred；显式离线调用保留外部静默前提。纯判定、前一epoch保护、时间边界/时钟偏差、缺opener/旧视图/本地pinned、owner丢失前不得发布退休标记、重复清理和管理接口无私有sidecar测试通过。旧level GC辅助API、旧codec和全量验收仍待清理，尚不能宣称全部对齐或生产发布。
+
+
+原生epoch GC验收补充（2026-11-09）：补充恢复计划可解析检查，当前epoch虽有快照但TXID中间缺口时不得发布退休标记；每轮最多扫描64个旧epoch，与celld一致。owner验证在扫描后及每个候选epoch删除前执行，不为每个LTX重复读取owner。server整包通过（46.039s），GC/驻留门闩相关race通过。真实指定HK COS：停止两个producer并完成分页物化后，以测试时钟推进保留窗口，epoch3发布原生L9，删除epoch1的6个LTX，保留epoch2，剩余5个对象只含LTX和上游retired.json；随后冷恢复41行逐字节一致且integrity_check通过。总测试6.39s；这是离线静默GC+真实COS验收，不代表在线多节点竞争/一小时真实等待验收。全仓make test仍在运行，其他旧接口/level GC测试待修齐。
+
+
+退休epoch恢复覆盖（2026-11-09）：恢复sealed follower和旧Held收集在验证原生LTX后查询精确scope退休标记；已退休epoch不重新上传。持久化upload spool仅在重放路径查询标记并移除退休记录，实时Append/AppendBatch不增加标记GET。Covers先用原生链回答，覆盖不足时退休epoch视为全TXID已覆盖；未退休范围冲突依然拒绝。缓存按celld存在5分钟/不存在30秒，本地GC成功写标记后立即更新；并发/迟到读取不降低已知退休水位，读取错误不缓存为absence，scope隔离，缓存最多4096项。退休覆盖/缓存TTL/精确scope/读取失败重试、恢复不复活且活跃冲突不隐藏、spool清理回归及race通过。最新全仓测试完成，仍失败的包为compaction和replica（旧格式与旧GC契约测试）；其余包通过，整体目标仍未完成。
+
+
+旧epoch marker接口删除（2026-11-09）：删除MarkEpoch及ErrEpochMarkerConflict，清除反向范围[cut+1,cut]生成和旧page-map转换；Go调用点归零。旧marker测试迁移为真实AppendContinuation：[cut+1,cut+1]零页、WALOffset32、真实page size/commit；并发同键不同尺寸必须仅一方成功，冲突统一包装bucket.ErrPrecondition；发布成功响应丢失后的Check/Append重试不增对象。原先跳过的旧marker/混合batch测试由原生前驱裁剪/缺失前驱/压缩续链/已覆盖L0不下载/未知对象保留测试替代，不提供旧格式兼容。
+
+基础replica测试同步原生语义：批量输出单个原生合并文件并验证最终页；L1按范围优先无需manifest；重叠增量保留未覆盖后缀；单文件和批量混合按最长连续范围去重；Covers只由真实原生数据证明。资源删除围栏fixture改为原生页，保留晚到上传拒绝断言。目标仍未完成：其他旧manifest/index/GC辅助API、其余两包旧测试和完整验收继续清理。
+
+原生分页恢复完整性补强（2026-11-09）：PageFetcher 在原生内嵌索引合并及截断裁剪后，验证最终 Commit 范围的每个数据页都有来源（排除 SQLite pending-byte lock page），缺页在激活前拒绝。按唯一页数 O(1) 检查，不遍历声明的巨大数据库，不增加对象存储请求。基线证明测试覆盖 0000/0001/0002/0003/0009 的 MinTXID=1、损坏、截断、范围不符和缺失对象；冷恢复及大小阈值测试迁移原生格式。相关原生测试和 race 通过；指定 COS 桶 64 MiB 分页恢复通过（8.07 秒，读取 1 MiB 查询数据使用 5 次范围读、2118004 字节）。该结果不是全量 fleet/灾难恢复验收；旧 GC 接口和其余旧测试清理仍未完成。
+
+原生压缩/GC契约收敛（2026-11-09）：以固定 celld 90b4301 的 crates/ltx/src/replica_compactor.rs 为准，level 压缩是 additive：只发布目标原生 LTX，不删除源文件，不按 L1 generation 数清理，也不写 seal、reader pin、tombstone 或 gc-retired。物理回收由原生 epoch GC 执行；一小时是旧 epoch 对象 upload-age 安全窗口，不代表活跃 epoch 的 L0/L1 一小时后自动删除。此条替代此前同 epoch pin/tombstone 和 KeepL1Generations 的设计描述。原生退休证明仍是 celld 自带的 stream 级 retired.json。显式离线单对象删除只允许外部静默且原生路径与文件内容验证通过的 LTX；不得由 Safe 布尔值独立授权。相关旧 API/测试正在删除和替换，尚未宣称全量验收完成。
+
+原生GC清理验证（2026-11-09）：已删除 gcproto.go 中 seal/pin/tombstone/gc-retired 全部实现、旧同 epoch 删除辅助函数及其并发工具；移除 ReaderPinTTL/DisableReaderPins/ReadOnly pin 配置。EpochRetired 只读原生退休缓存；显式离线删除改为原生路径/header/CRC完整验证，并支持全部五个level。删除中断后可从已发布retired.json继续回收，保留链始终可恢复；新增测试覆盖无静默拒绝、跨epoch拒绝、校验失败/owner丢失拒绝、重复删除、原生GC中断重试。DryRun与真实compaction共用原生范围计划，不读manifest或LTX正文。新增additive测试覆盖全部晋升级别后旧PageFetcher首次读仍保持原cut、新reader得到更新且只有.ltx对象。replica/server/dosupervisor全包、相关race、build/vet通过。指定COS真实续链57→58→59、41行冷恢复、旧epoch删除6个LTX并保留直接前驱，GC后再次恢复一致；总测试4.35秒。仍有旧compaction测试和manifest/index API需清理；不代表完整fleet验收。
+
+独立LTX元数据与压缩契约清理（2026-11-09）：删除 Manifest/PutManifest/ReadManifest/ManifestName、PageIndex/PutIndex/ReadIndex/IndexName 及 CIDX/CID2 sidecar codec；移除 compaction 的 GC/Safe/OfflineQuiescent/KeepL1Generations/MaxPartBytes 等无效选项和虚假 deferred/deleted 结果字段。维护接口不再接受 keep_l1_generations，压缩发布前验证真实 owner；日志仅报告实际增量压缩输入/输出。移除已失效 CELLHIVE_LTX_COMPRESSION 配置，生产原生 LTX 无格式切换。旧格式兼容、同epoch删除、独立索引契约测试被原生字节完整恢复、稀疏materialize、范围去重、阈值、续链、旧cut保留和epochGC测试替代；replica/compaction完整包测试通过（清理最终选项后全仓重跑中）。protocol-formats、storage-and-s3、cell-protocol、configuration 中英文正文已同步，不再把44字节/WAL3描述为生产协议。最终全仓与COS验收结果待后续记录。
+
+本轮最终检查（2026-11-09）：make test 全仓通过（Go允许复用未变更包缓存），make build、make vet通过；replica/compaction两包完整race重跑通过（4.045s/6.230s）。后台压缩测试改为验证两个原生L0/L1对象、源保留且无sidecar，不再要求已删除的gc-deferred日志。CLI去除--keep-l1，--grace默认3600秒并说明epoch对象upload-age；相关e2e脚本已同步。指定COS续链/GC/冷恢复再次通过（4.22秒，57→58→59，41行，旧epoch删除6对象后恢复一致）。完整fleet灾难恢复、SQLite导出导入及工具命令旧codec清理仍未完成；全仓单元/集成命令通过不等于该端到端验收完成。
+
+原生工具与乱序上传修复（2026-11-09）：删除仅由P0 spike引用、非当前部署依赖的cmd/cell-supervisor及Makefile构建目标，历史gate目录标为不可运行的研究记录。cellbench/realbench改为真实原生512字节单页文件（synthetic transport benchmark，不是SQLite SQL吞吐），restoreverify只用ValidateNative。删除未使用的EncodeNative私有page-map转换入口及DecodeAny/SplitAny混合格式回退。发现并修复真实并发上传bug：到达顺序下一个scope的队列可能含TXID间隙，不能整体交给单文件原生compactor。replica.UploadBatch排序并分割为连续范围逐个不可变发布，AppendBatch仍严格要求连续；上传实时、spool重放、队列满同步回退共用该入口。缺失TXID仍使恢复失败；只有全部分组成功才确认队列项，失败保留spool供幂等重试；同范围内容冲突仍拒绝。新增测试覆盖乱序[5,1,4,2]与迟到[6,3]、部分发布失败重试、缺口不隐藏、冲突不隐藏。replica/upload/cellbench完整race通过；修复后的16请求×4并发fleet/bucket均零失败（仅smoke，不能作为性能对比）。COS两HTTP follower恢复20行通过1.84秒。用本轮Go生成输入/输出再次运行固定celld Rust Compactor，header及页面完全一致。最终全仓测试结果随后记录；完整fleet灾难恢复/导出导入/大文件有界内存仍未全部验收。
+
+本轮收尾验证（2026-11-09）：上述乱序上传与工具清理后的 make test 全仓通过，make build/vet通过；COS follower恢复和固定Rust互操作通过。该结果仍不代替独立多进程fleet崩溃/切owner/SQLite导出导入验收。
+
+原生快照分片残留清理（2026-11-09）：删除私有 EncodeSnapshotParts/EncodeSnapshotPart、SnapshotFlags/SnapshotPart 及对应旧格式测试；SnapshotStream 的批次仅是原始页面读取缓冲区，送入同一个原生 encoder，不产生独立对象。缓冲区页数按原始页面预算计算，移除44字节/WAL3开销；新增精确页边界测试。S3集成fixture改为原生完整快照，修正L1读次数探针及owned cells前缀清理；指定HK COS验证快照恢复、压缩、按页恢复通过，无新增压缩的L1 body GET=0。恢复启用大数据A→B→A测试，验证原生快照/增量、压缩、离线GC物理保留前一epoch与逐页恢复；逻辑retired_below不等于物理删除边界。
+真实双agent batch-recovery本轮失败于初始化：共享控制cell cells/__platform__/__control__/main 中存在旧index.bin/manifest.json/epoch-cut；只读盘点104对象、536978字节。未添加旧格式兼容、未删除这些共享数据。须经数据库导出/导入迁移后重跑，不能把局部COS成功宣称为完整fleet验收。其他旧44字节codec残留、provider大文件有界内存及完整迁移验收仍未完成。
+
+本轮最终验证（2026-11-09）：清理后的 make test 全仓通过（允许Go缓存），make build/vet通过；恢复启用的大数据owner切换测试race通过（19.456秒）。本轮独立双agent COS测试失败仍按上述记录，未将全仓测试通过当作完整fleet验收通过。
+
+原生codec最终清理与控制数据库迁移（2026-11-09）：删除44字节Encode/Decode/Split、DecodeNative私有page-map转换、WAL1/WAL2/WAL3编解码器和开关，保留WAL捕获内存结构及只写原生格式的encoder。测试直接校验原生header/pages/CRC，旧格式拒绝仅保留固定字节fixture；删除无兼容要求的旧resource-fence迁移跳过测试。对齐celld WalReader::page_map，过滤超过最终commit页数的旧页，修复同批WAL数据库缩小时原生编码失败；回归先失败(commit=2却保留page9)后通过。增量批次大小估算改为原生header/frame/LZ4最坏开销/内嵌index/trailer，上限1MiB（单个事务不可拆除外）；不可压缩fixture修复前1053403字节超限，修复后通过。
+HK测试桶控制cell迁移已完成：104个旧对象先完整备份（含ETag/SHA256），隔离旧版工具导出watermark86/89页SQLite，integrity_check=ok；导出文件与原生LTX恢复文件逐字节一致。共享桶测试锁内确认36个node lease均不存活、owner不存在、备份对象未变化后，先发布e34/L9原生快照，再删除103个旧LTX/辅助对象，保留owner-gen；COS恢复SQLite SHA256=aea1e731ebfdbf5dac926e59369f7b7430cae691819dd30f246d5baa884e2357，与导出一致。备份及一次性工具仅保存在/tmp/native-control-backup，旧codec没有加入当前生产代码。该迁移仅覆盖共享控制cell，不表示所有历史测试cell都迁移完。
+双独立agent真实COS batch-recovery通过：确认fleet ack后写100条，SIGKILL owner，接管恢复100/100；清空接管节点本地SQLite后COS冷恢复100/100，首次GET1.077385秒；命名空间清理HTTP200。日志/tmp/native-migrated-batch-recovery.log，产物/tmp/hk-review-1794158724-4f060b-fg9gkqek。provider大文件有界内存、通用SQLite导出导入产品入口与完整100k epoch-stress验收仍待完成；不宣称全部goal完成。
+
+本轮最终检查（2026-11-09）：删除旧codec并修正native增量字节预算后的 make test 全仓通过，make build/vet通过。ltx/sqlcapture/replica完整race在本轮codec清理及缩页修复后通过（1.180s/31.025s/25.569s；后续仅调整批次字节预算，其回归及全仓测试通过）。10万条真实COS epoch-stress已启动，尚未终态，不作通过声明。另修正S3集成测试清理前缀：Scope.Key本身含cells/，不能再拼接一次；测试使用owned Objects。
+
+原生快照流式上传（2026-11-09，真实provider验收进行中）：新增bucket.StreamCreator与Objects.ConditionalCreateReader，FS临时文件完成后hard-link原子发布（.tmp不进入扫描）、S3 IfNoneMatch、COS/OSS原生forbid-overwrite。AppendSnapshotFile不再os.ReadFile，使用NativeDecoder完整CRC校验再上传；同范围重试按1MiB以内Range GET与spool逐字节比较并检查ETag稳定，复用既有resource fence后置校验/晚到写条件清理。FS Stat/Range改为流式hash避免整文件分配。COS阈值/分片均5MiB，与固定celld默认相同，最多10000片；最终complete禁止覆盖，失败或取消用独立30秒清理context abort。只产生原有canonical LTX对象，没有新marker/manifest文件。
+单元测试覆盖初始/重试流式路径、冲突与损坏拒绝、原子可见性、尺寸不符/取消不发布、COS multipart成功/完成冲突/分片失败/取消/短源全部abort；bucket/objectstore/replica完整race通过2.761s/1.021s/32.404s。真实COS8MiB不可压缩SQLite multipart+同字节重试+按页冷恢复测试已加入，等待现有100k epoch-stress释放共享测试锁；目前不能把SDK wire测试当作真实provider验收。当前100k运行仍使用开跑时旧二进制（此前nativecodec清理/缩页/预算修复版本），未混入本轮流式上传版本。普通Get与部分compaction仍非完整有界内存；对象timestamp metadata与producer时间戳语义尚须继续对齐审计。
+
+真实COS流式上传与恢复性能验收（2026-11-09）：TestCOSNativeStreamingSnapshotMultipart已真实通过（随机SQLite约8.48MB/2054页，原生分片上传、相同内容重试、禁止整文件GET、Range冷恢复、SQLite逐字节SHA256及integrity_check）。分阶段定位旧Materialize逐页GET瓶颈：上传0.393秒、重试1.250秒、完整恢复66.548秒；Materialize改为复用ReadRun，按来源key/ETag/相邻帧及稀疏范围边界截断，最多缓存1MiB解码页，并对SQLite lock page写零而不请求不存在的远端帧。回归先失败600次GET，再通过5次GET（含覆盖页）；稀疏恢复4页仅2次GET、未请求页面保持空洞。相同规格真实COS复测：上传0.375秒、重试0.738秒、恢复0.531秒、整项1.993秒，SHA256一致。两次随机内容不同，属同规格单次对比，不是统计吞吐基准；日志/tmp/native-cos-stream-phases.log和/tmp/native-cos-stream-optimized.log。
+100k独立双agent真实COS epoch-stress终态PASS：单写线程100000确认写入909.8秒，三次SIGKILL A→B→A→B；在线及冷恢复各100000/100000值相同，cold首GET2.529947秒，清理HTTP200。运行使用本轮流式变更前的固定二进制。发现旧cold脚本可回退备用节点，因此额外直接读取冷恢复peer的SQLite对ledger验证100000/100000，integrity=ok，文件SHA256=bcc7234641207b625148752fc31042a61c4391bc4f11f1d97b9cf5a5ec50203a（/tmp/native-epoch-cold-sqlite-proof.log）。后续脚本已改为cold前停备用节点并禁止备用URL，语法检查通过，严格新脚本尚待重跑。证据/tmp/native-epoch-stress-current.log，/tmp/hk-review-1794158867-ea5bdf-3pa_wq66。不能把该串行故障注入用例的平均速率当作并发RPS。
+
+本轮收尾（2026-11-09）：上述流式/multipart/Materialize合并读取最终状态的 make test 全仓通过、make build/vet通过；Materialize/原生PageFetcher/流式快照定向race通过5.229秒。未运行新严格版100k脚本；下一轮须继续compaction输入/输出缓冲和timestamp metadata/生产时间戳审计，不能以本轮上传及恢复性能结果代替整个goal完成。
+
+压缩流式路径修订（2026-11-09）：L1/L2/L3/L9不再GetVersion/RestoreChain保留全部正文，也不再bytes.Buffer输出；owned Objects.OpenReader打开同一对象版本，最多16个并发开流请求，校验文件名范围与100字节header一致，再由原生compactor校验CRC/合并页面到临时spool，AppendLevelFile复用不可变上传与resource fence。失败关闭全部流、删除spool；provider禁止通过流接口绕过authority记录语义。没有新增COS对象类型，页索引仍随页数增长。四包race通过；真实指定HK COS约8.48MB/2054页，禁止buffered LTX GET/PUT，逐级L1/L2/L3/L9均成功（1.344/1.622/0.866/1.178秒），L9冷恢复0.639秒，SQLite SHA256一致、integrity_check=ok，整项7.532秒，日志/tmp/native-cos-compaction-stream.log。该单次结果不是吞吐基准，也不代表timestamp metadata和最终严格fleet验收已完成。
+
+真实fleet发现并修复小spool上传生命周期错误（2026-11-09）：COS SDK单次PUT会关闭实现io.Closer的请求体，导致小于5MiB的os.File在成功上传或409冲突后无法Seek/ReadAt，出现app_create_failed。multipart使用内部分片buffer，因此此前大文件测试未覆盖。COS/OSS/S3单次流上传现在借用仅暴露Read/Seek的包装器，文件仍由调用方关闭，保留重试内容比对和上传后fence校验。新增成功/冲突两条回归均先复现file already closed，再通过修复；bucket race通过6.907秒。首次新fleet失败记录/tmp/native-stream-compaction-batch-recovery.log已清理测试namespace；修复版本正在重跑，不能把首次失败写成通过。
+
+小spool修复最终验收（2026-11-09）：make test全仓、make build、make vet通过。真实HK COS双agent batch-recovery重跑通过：owner SIGKILL后100/100确认值恢复，清空本地SQLite后的COS冷恢复100/100精确一致，首GET1.835647秒，namespace清理HTTP200。日志/tmp/native-spool-fix-batch-recovery.log，工件/tmp/hk-review-1794161476-950fc0-d1skjv3j；该结果覆盖修复后的真实小文件上传及故障恢复，不代表最终严格100k多epoch脚本完成。
+
+原生对象时间戳契约（2026-11-09）：与固定celld object_store.rs一致，原生LTX上传从100字节header读取Timestamp，负值钳为Unix epoch，写标准litestream-timestamp metadata，值为UTC RFC3339Nano（去尾零）；超出RFC3339年份范围拒绝。COS单次PUT和multipart initiation、OSS单次PUT、S3条件创建均写该属性，不额外发写请求、不新增对象文件，也不改LTX正文或不可变重试比较。bucket仍是通用字节存储，非原生正文和其他命名空间不添加此属性；replica保持原生CRC严格校验。生产capture时间戳与同watermark重复snapshot的重试身份仍待完成，不能用固定timestamp测试fixture宣称已完成生产语义。
+
+同轮provider路径纠正：真实COS HEAD发现普通字节LTX仍走AppendObject，导致continuation缺少metadata；已改为与spool相同的原生forbid-overwrite PUT，禁止回退append。源level仍保持additive，旧格式不兼容。替换旧AppendETag/HEAD回退测试为原生create/冲突/缺能力拒绝测试。真实COS复测6个对象（L0、L1/L2/L3/L9、下一epoch零页seed）均有正确litestream-timestamp=2025-01-01T00:00:00.5Z；大文件multipart、相同内容重试、逐级压缩、SQLite冷恢复SHA/integrity全部通过，总9.717秒，日志/tmp/native-cos-metadata-put.log。生产端Timestamp仍待下一步实现和重试验证。
+
+metadata/原生PUT最终验收（2026-11-09）：最终make test、make build、make vet通过，bucket race通过2.643秒。修复后真实HK COS双agent故障测试通过：100/100确认写入在owner SIGKILL后恢复，清空本地SQLite后的COS冷恢复100/100一致，首GET0.874078秒，清理HTTP200，日志/tmp/native-metadata-put-batch.log。尚未补齐生产capture时间戳和增量WAL坐标，也未运行最终严格100k脚本，goal继续。
+
+增量header坐标实施契约（2026-11-09）：WAL cursor返回本次已提交帧的实际起始字节位置与长度（不含未提交尾部），capture分块按原始帧数量推进offset/size，在页去重和截断过滤前计算；原生增量header保留本代WAL salt。与celld db.rs的info.offset/sz/rd_salt语义一致。该修订不改变快照、压缩输出或续链seed的既有坐标语义；实施与验收中。
+
+增量坐标与producer时间戳进展（2026-11-09）：WAL PollResult现返回已提交offset/size，SQL capture按chunk原始帧数推进，DO capture保留本次提交跨度；两者增量均填真实WAL salts和当前Unix毫秒Timestamp。DO快照与cellstore续链seed也填当前时间；DO失败保留原生字节，seed重试保留首次发布对象，新增测试验证时间改变仍不覆盖原字节。SQL capture快照时间戳仍未改，须先完成同watermark重复快照的幂等设计。600次重复页更新和独立baseline分块回归验证跨度精确覆盖实际WAL；损坏尾帧不进入跨度，修复后从上一已提交cut继续且不重复。四包race通过（sqlcapture35.497秒），补充最终坐标/seed定向race通过。
+
+本轮最终验收：全仓make test通过（/tmp/native-coordinate-full-test.log），build/vet通过。指定HK COS新二进制双agent测试通过：owner SIGKILL后100/100确认数据恢复，删除本地SQLite后冷恢复100/100一致，首GET0.807389秒，清理HTTP200；证据/tmp/native-coordinate-batch.log。SQL capture快照Timestamp重试身份与最终严格多epoch验收仍待完成。
+
+原生快照时间戳重试契约（2026-11-09）：SQL capture快照现按celld SnapshotReader填生成时Unix毫秒Timestamp，不消耗额外TXID。同一canonical快照范围重试仅允许生成Timestamp（header偏移32..40）及随之变化的最终file CRC不同；旧对象必须经NativeDecoder完整校验，其他header、页面、索引、trailer字节必须一致。成功重试不覆盖对象，不修改原ETag或首次timestamp metadata；真实数据/其他header不同、损坏旧CRC、增量时间戳不同仍拒绝。byte与spool路径均执行该规则，spool旧对象最多1MiB Range缓冲并检查ETag一致；普通首次上传无额外请求。该规则是同一快照重复生成的幂等性，不是旧格式兼容或额外marker。测试覆盖跨capture实例的两种提交接口、并发首次发布、页面/header冲突、旧CRC损坏及增量拒绝。
+
+快照时间戳真实COS验收（2026-11-09）：约8.48MB/2054页快照以不同Timestamp重新编码，重试保持原ETag，6个LTX对象HEAD均保留首次标准metadata；随后L1/L2/L3/L9压缩及SQLite冷恢复逐字节SHA和integrity_check通过，总9.739秒，时间戳重试1.889秒，冷恢复0.655秒（/tmp/native-cos-snapshot-timestamp.log）。刷新固定celld 90b4301双向互读：当前Go生成含Timestamp/WAL坐标文件，Rust真实Compactor输出header/pages与Go完全一致；Go再读取本次Rust输出并逐页验证通过（/tmp/native-current-rust-interop.log、/tmp/native-current-reverse-interop.log）。最终严格100k多epoch测试已启动，尚未完成；不以该单次对象测试替代fleet验收。
+
+大cell删除前证明修订（2026-11-09）：HasCompleteSnapshot改用OpenNativeFiles+ValidateChainReaders，逐页解码验证完整CRC、TXID续链、截断后页面覆盖，再证明当前epoch独立于前驱；不再readNativePlan/GetVersion保留整条链正文。页身份集合仍随数据库页数增长，所有输入流在成功/失败后关闭。新增测试禁止LTX完整GET并验证坏CRC拒绝、流无泄漏；真实COS proof用例已加入，等待当前严格100k测试释放共享锁后运行。当前运行二进制保持不变，不把其结果声称为本次证明实现的验收。
+
+无桶凭据DO原生恢复修复（2026-11-09）：审计发现httpBucket无Stat使PageFetcher失败回退整段读取，Range丢失ETag，HTTP列表只含当前epoch。新增segment HEAD大小/ETag点查，Range透传ETag，chain=1返回原生planner选出的完整前驱链；HTTPStore通过1MiB以内Range构成StreamReader。新增ProvenWatermark按流完整验证CRC和页面覆盖，DO seedCaptureWatermark在真实HTTP/直接bucket路径使用该证明，不再保留全部LTX正文；仅外部旧SegmentSource接口保留兼容适配（不涉及旧对象格式）。测试禁止LTX完整GET，验证跨epoch分页读取/水位、HEAD无body、Range版本、旧列表和完整链列表语义。当前严格100k仍使用启动时二进制，本次DO/证明修订独立测试中。
+
+严格100k与DO真实COS终态（2026-11-09）：固定快照时钟修复后二进制的10万单写线程测试已PASS，891.5秒完成全部确认写入；25026/50033/75042确认处三次SIGKILL，在线100000/100000核对，冷恢复先停止备用节点、删除活动节点SQLite且只请求冷节点，100000/100000核对，首GET2.081096秒，清理HTTP200。日志/tmp/native-final-strict-epoch-stress.log。该运行不包含运行期间新增的流式证明/HTTP适配修订，不能混称同一二进制验收。
+新增修订的独立真实COS验收通过：8.48MB/2054页快照，流式HasCompleteSnapshot证明0.323秒；真实鉴权cell-agent Handler + 无桶凭据HTTPStore跨epoch水位cut41、分页恢复SHA一致，合计1.034秒；原生metadata/时间戳重试/逐级压缩/直接冷恢复亦通过，总13.879秒，日志/tmp/native-cos-http-stream-proof.log。首次HTTP测试因fixture仅设TokenInternal未设RootKey导致401，按实际DeriveCredentials修正fixture后通过，未放宽鉴权。
+
+最终原生HTTP/证明版本验收（2026-11-09）：make test/build/vet通过；指定cellhive-e2e-hk-1376795072真实COS双节点owner SIGKILL与清空本地SQLite恢复均100/100，冷首读1.035300秒，清理HTTP200。证据/tmp/native-do-proof-full-test.log、/tmp/native-do-proof-build.log、/tmp/native-do-proof-vet.log、/tmp/native-do-proof-final-batch.log。六项协议审计见storage-and-s3.md；通用SQLite export/import产品入口仍待交付，不以本次协议验收代替。
+
+2026-11-09 大 cell 资源预算实施：按 docs/archive/plans/2026-11-09-large-cell-storage.md 执行。原生 LTX 格式不变；增量分批、可选 L9 超预算跳过并保留链，生产分页恢复错误不得悄悄退回全量缓冲。10 GiB 真实 COS 验收尚未运行，不宣称完成。
+
+2026-11-09 大 cell 优化实现与当前验收：见 docs/reports/2026-11-09-large-cell-storage.md。原生格式不变，压缩256输入/64MiB、可选L9正文前预算拒绝、进程维护/恢复/文件上传限流、64MiB本地LTX版本缓存、DO恢复错误不回退全量正文、LZ4查找表复用、磁盘缓冲和分块索引校验已实现。全量go test ./...、build/vet及相关race通过（/tmp/large-cell-verified-{test,build,vet}.log；/tmp/large-cell-latest-race.log）。原20ms压缩测试在共享磁盘负载下误失败，改为500ms取消隔离测试后连续10次通过；捕获一致性测试先完成真实owner激活及后台注册，保留精确TXID递增断言，连续20次通过。10GiB第一优化版跨epoch恢复约503秒，最终数据校验和8MiB读取批次版本复测尚在进行，不能宣称全部10GiB验收完成。
+
+大cell缓存复核：仅已有文件的快照/压缩输出在成功新建后填充本地LTX缓存，普通字节增量不额外写缓存文件，避免确认写入增加小文件IO；有专门回归约束。
+
+2026-11-09 大cell最终验收：指定HK COS的10GiB实库测试通过（SQLite10,751,451,136字节，LTX787,262,031字节），全库SHA、SQLite integrity、10,240行逐条校验一致，跨epoch恢复水位42。最终续链证明+索引+完整恢复107.672秒（上一轮502.646秒），总测试536.62秒，进程峰值RSS762,564KiB。L9只读取100字节header后按预算跳过。最新全量go test/build/vet与相关race通过，测试对象已清理。报告docs/reports/2026-11-09-large-cell-storage.md；不是部署fleet或100GB验收，默认capture8GiB配置与索引随规模增长的边界仍保留。
+
+### 2026-11-09：分页冷激活校验边界（实施中）
+
+在线冷激活对齐 celld：固定原生恢复计划，验证 header/path、结构化页索引、最终覆盖和截断语义，以 ETag 固定对象版本；不以前置完整正文 CRC 审计作为分页激活要求。`ProvenWatermark` 保持完整审计语义，复用现有 PageSource 固定索引 cut，不静默弱化原 API。单页读取错误必须失败。此设计不改变 owner/epoch fence，也不新增桶文件。workerd DO 仍需 fork 侧分页接入，未完成前不得宣称 DO 已按需激活。实施与验收计划见 `archive/plans/2026-11-09-cold-activation.md`。
+
+### 2026-11-09：原生 DO 分页接入实施契约
+
+workerd fork 的主库 VFS 通过独立 loopback 服务、每进程 capability 请求 supervisor 补齐缺页；无桶凭据。缺页只补一次，写入前先补齐原始页面，禁用分页库 mmap；截断后原始页上界只降低，避免重新扩展复活旧页。失去页面注册表、源对象版本变化或读页失败必须拒绝打开/读取。恢复后的首次捕获用原生零页 LTX 接续并抓取 WAL，后续绕过 VFS 的完整 checkpoint 快照必须先补齐缺页。实现和原生测试进行中，尚未完成生产验收/部署。
+
+2026-11-09 capture 一致性补充：主库 write/truncate 使用开始/结束计数和 generation 校验，失败 native I/O 不释放 capture 屏障。checkpoint 快照提交后，同一次 gate 必须重读并持久化当前 WAL，不能等待下一次请求。新增立即跨目录恢复回归：旧行为返回值 1（预期 42）失败，修复后返回 42 且 dosupervisor race 通过。原生 DO/COS 验收仍待新 workerd 构建完成。
+
+2026-11-09 通用 cell SQLite 迁移实施契约：管理员 GET /v1/control/cell/export?scope=ns/class/id 返回一致的完整 SQLite 文件；POST /v1/control/cell/import?scope=... 接收 SQLite 文件，仅接受无本地激活、无历史 LTX 的新目标，已有数据返回冲突。鉴权始终使用 scope 内命名空间，不能由其他 query 覆盖；二进制 body 不经过 JSON 探测。导入在上传前 integrity_check，流式编码原生 LTX，持有本地独占 admission gate 并在发布前后核验 owner/epoch，成功后从对象存储重新打开。最大导入64GiB，数据经过磁盘 spool、不整体读入内存。旧库应先导出 SQLite 后导入新目标；不新增 COS 标记文件、不改变原生格式。实施与验收中。
+
+2026-11-09 COS/fleet 验收更新：指定桶 cellhive-e2e-hk-1376795072、官方 workerd 1.20260916.1 的100k确认写入、3次owner强杀、清空本地库后100k全量验证通过；通用SQLite导出/导入及无CellHive元数据旧SQLite迁移真实COS通过，包括导入后写入、冷恢复、BLOB和索引保留、重复导入拒绝及测试命名空间清理。10GiB cellstore分页首条验证0.808s，随后全链审计49.709s通过；这不是原生workerd 10GiB验收。原生分页fork构建、全量恢复及完整性能报告仍在执行，goal保持active。证据见 docs/reports/2026-11-09-cos-fleet-acceptance.md。
+
+
+### 2026-11-09 COS multipart 分片大小修订
+
+依据真实 HK COS 三档对比，原生 LTX 上传默认每片 32MiB；当单对象超过 10000 个默认分片容量时，按 `max(32MiB, ceil(size/10000))` 选择分片字节数，最后一片可更小。除法向上取整必须避免整数溢出。仅改变 provider 上传分片，不改变 LTX 内容、对象键或原子发布契约；上传缓冲随单片大小增长，仍逐片发送。
+
+单次 PUT / multipart 切换阈值继续为 5MiB，与分片大小解耦；本次仅调整分片大小，不扩大单次 PUT 路径范围。
+
+### 2026-11-09 DO 大库快照有界传输修正（验收暴露，实施中）
+
+真实10GiB原生DO测试发现supervisor仍使用ReadDBPages整库读入及整段LTX缓冲，进程RSS超过10GiB；此路径不符合有界恢复/存储目标，不能以小库PASS接受。改为逐页编码到本地fsync spool，跳过SQLite pending-byte lock page，保留相同原生LTX单对象格式。失败重试保留同一spool与水位，成功持久化后再推进cursor/baseline。
+
+生产HTTPCommitter须流式提交完整快照；cell-agent流式落盘、验证native checksum、复核capture及DO owner后原子发布COS对象，获得bucket确认才应答。快照允许bucket RPO=0证明，普通增量仍走fleet；不得把大文件拆成私有COS marker或part文件。跨agent转发同样必须流式且不自动重放已发送的大请求；上传完成后再次检查owner。兼容测试committer的内存路径必须有明确小文件上限，不能对大文件静默退回ReadAll。
+
+2026-11-09 原生分页顺序读取修正（验收中）：连续读遇到缺页时最多预取128KiB，随机点读保持按需；命中本地页不滑动扩展窗口。预取受固定恢复下界和截断上界约束，跳过已物化/本地写入页，不改变LTX格式或新增远端对象。真实fleet全表扫描期间续租超时仍须复测，不以扩大lease掩盖失败。
+
+
+### 2026-11-09 DO 独立续租（原生分页验收修正，实施中）
+
+真实fleet扫描虽在有界预取后通过，workerd同步SQLite仍会阻塞其HTTP续租入口。受supervisor管理的运行时，将已确认DO owner的同一scope/node/epoch交给Go进程独立续租；不执行claim、不提高TTL、不增加COS对象。注册发生在已claim后的restore-host边界，覆盖慢恢复；恢复失败、续租失败、显式释放及子进程退出必须停止该身份续租。旧身份不能覆盖新epoch；失败状态不能由状态读取复活。
+
+JS保留请求前和响应后的身份检查，长请求结束时从supervisor读取该身份最新有效到期时间；不得仅因本地旧expiry而拒绝已由Go成功续租的请求，也不得接纳已失效身份。普通短请求不增加逐次begin/end网络开销。未协商独立续租的非supervised测试/运行方式保留原有续租入口。此处保持现有“持有claim即续租”的生命周期，不引入额外闲置owner永久保留策略。
+
+
+2026-11-09 大DO增量提交修正（128MiB事务验收暴露）：64MiB是现有缓冲复制接口上限，不能作为SQLite有效事务的隐式限制。超过保守编码阈值的DO WAL增量逐页编码到fsync spool，经有界流式HTTP上传，以原生L0单对象发布；仍保留原生TXID范围、WAL坐标和CRC，不拆成私有格式或半事务。成功以bucket RPO=0确认，普通小增量仍使用fleet；失败重试保留同一spool且不推进capture水位。该修正消除额外整段编码缓冲，WAL poll的事务页索引/数据内存仍与本次事务有关。
+
+2026-11-09 最终验收证据刷新：官方workerd1.20260916.1的review/queue/multinode、workflow、routing、batch、SQLite导出导入与旧SQLite迁移全部通过。100k写入经历3次owner强杀，在线及清缓存冷恢复均100000/100000一致，首次冷GET2.642489s。双节点fleet性能36组/153960请求零错误，3轮Wrangler上传/激活及真实运行版本验证通过。实际10GiB原生DO、128MiB单事务与超过租约时长扫描的先前本轮证据已逐项复核；全量快照内存、独立续租和大增量413修正完成验收。性能首轮因端口占用未启动，改用临时端口范围外26700重跑完整通过，失败日志保留。报告及边界见[最终验收报告](reports/2026-11-09-final-acceptance.md)。无提交、无生产部署。
+
+### 2026-11-10 七项性能优化（实施中，尚未验收）
+
+计划见 `archive/plans/2026-11-10-storage-performance.md`。COS multipart默认32MiB及动态10000片上限不变，改为最多4个在途缓冲/上传、源流单读者；完成列表按part number排序，失败取消并等待全部请求退出后abort，仅所有分片和长度校验通过才原子Complete。不得改变原生LTX格式、owner/epoch、鉴权TTL及resource fence边界。后续checkpoint安全续捕获、恢复seek、fork review和间隔访问延迟改动须分别有故障回归及真实COS验收；本条不是完成声明。
+
+2026-11-10 checkpoint续捕获实现契约：仅原生分页激活的CKPT_START可发起进程内证明；supervisor先持久化旧WAL已提交前缀，再绑定盐值、滚动校验、提交帧边界、库页数和主库mutation generation。复制期间gate不得确认；每次主库mutation须带同一证明，普通写入使证明失效。CKPT_DONE仅结束复制阶段，不能作为SQLite截断/sync完成证明；后续truncate只可使用匹配已持久化库大小的证明。WAL轮换必须精确匹配旧cursor位置并消费证明一次，轮换后的新事务仍须在当前gate持久化。任何缺失/失配维持全量快照fallback；不新增远端对象或LTX字段。该协议实施中、尚未通过整体验收。
+
+2026-11-10 snapshot coherence correction (implementation, acceptance pending): full snapshots now overlay the committed WAL prefix while encoding main pages. The WAL scanner retains frame references rather than page payloads; validates rolling checksums and per-page references; validates inode/header/truncation after encoding. Main-file size/mtime/identity and paging mutation generation must also remain valid. An uploaded snapshot with a lost acknowledgement must itself preserve previously acknowledged WAL data; later replay cannot be its safety proof. No native LTX format or remote object names change.
+
+2026-11-10 checkpoint owner context (implementation, acceptance pending): a claimed paging activation retains its exact shard owner identity locally. Checkpoint capture validates that identity against the supervisor managed live lease before passing it to the existing fleet commit protocol; expired, replaced or unmanaged identities fail closed. Unclaimed administrative activations retain bucket durability. No new remote metadata or owner lookup is introduced.
+
+2026-11-10 checkpoint ambiguity recovery (implementation, acceptance pending): production supervisor requires native `do-paging-fail-stop/1` support and enables process fail-stop for poisoned paged activations. Lost checkpoint-begin/end responses, failed paging callbacks and failed native main-file mutations terminate the workerd child after the existing bounded callback deadline (30s preparation, 5s ordinary callback); no certificate is reset or retried. Supervisor waits for child exit before stopping independent owner renewal, skips graceful ownership release for that dead child, and lets the existing lease expire. Recovery requires a new activation and authoritative restore; sparse local guards remain intact. This intentionally sacrifices all activations in the affected child for safe bounded recovery, creates no COS objects or new persistent metadata, and is not production acceptance.
+
+2026-11-10 bounded historical epoch discovery (implementation, acceptance pending): a successor epoch fixes predecessor upper TXID at successor minimum minus one. Discover native levels9/3/2/1/0 in descending order. Only when discovered files alone form a complete contiguous restore chain from a snapshot through that exact upper TXID may lower levels be skipped. Crossing ranges beyond the cut are excluded as before. The newest epoch has no proven upper bound and retains exhaustive discovery; a minimum-TXID seek alone cannot prove absence of an earlier crossing range. No metadata object or publication-format changes.
+
+2026-11-10 forwarded request fencing correction (implementation, acceptance pending): an already-forwarded request that reaches a node which resolves another live owner must return409 not_owner before any local data handler. The one-hop guard prevents loops, not owner validation. It must not return an unhandled result that lets a stale/non-owner local read proceed. Original ingress retains its existing single reroute on a pre-execution409; no ambiguous mutation retry is added.
+
+2026-11-10 foreign-owner forwarding follow-up: after a foreign owner is established, forwarding is terminal. If its second route lookup cannot forward (including route changes or unavailable routing), return pre-execution 409 not_owner; never fall through to a local handler without a fresh claim/fence. Applies to both admin and data requests.
+
+2026-11-10 critical owner authority regression: real COS bucket cellhive-e2e-hk-1376795072 ignores S3 PutObject If-None-Match and If-Match on own.json; repeated create and stale CAS both overwrite successfully (cos-owner-conditions.log). Nodes use append authority, so the existing nodes-only startup probe misses the distinct raw owner path. Startup diagnostics must test both nodes and cells/.../own.json conditional semantics and fail closed before serving. Queue multinode acceptance failed with node1 epoch1 writes and node2 epoch2 empty reads. Prior passing suites do not prove owner safety. LTX format remains unchanged; provider authority remedy pending resolution of COS versus strict plain owner format requirement.
+
+2026-11-10 authorized COS owner exception: user explicitly chose native conditional append for owner authority. Provider own.json now uses the existing segmented append authority (position fencing, bounded tail reads, hourly windows and8MiB cap), shared with node authority. Physical owner segment naming/content differs from celld plain JSON; native LTX names/bytes and restore chain are unchanged. No snapshot/checkpoint marker is introduced. No compatibility with prior unsafe raw owner objects is claimed. Startup probes cover both authority key families.
+
+Native authority boundary correction implementation plan: docs/archive/plans/2026-11-10-native-authority-correction.md. Replace independent time-window authority with one stable capped append root, position-fenced terminal seals, and recoverable generation publication. Retired generation payloads require same-key sentinel retention against delayed append ABA; no native LTX or snapshot marker changes. Exact limits, metadata footprint, and maintenance behavior require tests/review before acceptance. User COS native owner exception remains governing.
+
+Native authority read optimization: cache only at most4096 root descriptors (no values, tokens granting owner access, seed payloads or authorization). Every Get still reads the selected generation tail from COS. A terminal seal, retired stub, missing generation, or invalid lifetime forces authoritative root discovery. Stable root is never reset online; retired generations never admit a writer. This removes the second steady-state COS request without extending any resource-fence TTL. Cold discovery remains bounded root+generation reads.
+
+2026-11-10 paging memory refinement: supervisor hydrated-page membership uses sparse 1024-page bitmap blocks, matching the native bridge granularity. Membership is monotonic within an activation; truncation floor remains authoritative, so regrowth never resurrects removed remote pages. Duplicate marks do not increase hydrated-byte accounting. This is local in-memory representation only, with no COS files, protocol, authority or activation-lifetime change. Bitmap membership and truncation/read-ahead regressions plus allocation benchmarks are required before acceptance.
+
+2026-11-10 fence CAS atomicity: deletion/recreation decisions and retired-epoch floor updates must derive from the same owner record and version used for conditional publication. A conflicting write requires rereading and reevaluating the decision; copying an earlier fence into a later owner read is forbidden. Deterministic interleavings reproduced stale reblocking and epoch-floor regression; repair and acceptance are in progress. No TTL or object format change.
+
+2026-11-10 owner-mediated retirement plan: docs/archive/plans/2026-11-10-owner-mediated-retirement.md. Before eliminating idle resource-fence GETs, durable control intent must precede external retirement, owner admission must close and drain before exact-owner conditional retirement publication, and dead-owner cleanup must remain lease-fenced. Unreachable live owners cannot yield successful completed retirement; pending cleanup remains retryable. Preserve the existing one-second fence checks until all admission paths, authority transitions and fault tests establish the new protocol. No new COS objects or LTX fields; mixed old/new retirement writers are not supported by a future zero-network fast path. Implementation is staged and not accepted.
+
+2026-11-10 critical suffix-read version regression: real COS concurrent native fence test returned success for all eight floor updates but recovered floor6. Deterministic HTTP regressions show TailGet combined older GET bytes/ETag with a newer HEAD length, creating an invalid authority CAS token. Authority payload, byte length and version must come from one response; fallback HEAD/range must compare versions and fail on mismatch. Partial responses without valid suffix Content-Range fail closed. Repair and real COS revalidation pending; earlier functional passes alone do not establish concurrent authority safety.
+
+2026-11-10 retirement intent identity: the deletion callback must receive the exact cleanup job snapshot read under the control lifecycle lock before the durability proof. Re-reading the resource name after proof can substitute a later unproven cleanup incarnation. A deterministic test reproduces this substitution; snapshot binding is required together with releasing the lock before external callbacks.
+
+2026-11-10 suffix fallback hardening: the explicit-range fallback also validates raw HTTP status and exact start/end/total against the HEAD observation, in addition to ETag. A 200 fallback is accepted only for an offset-zero full-object request with the matching length. Malformed/missing Content-Range, wrong offset/total, or changed version fail closed. Deterministic regressions reproduced the prior acceptance and now pass; the primary same-response fix passed five real COS native-fence repetitions. Final runtime acceptance remains pending.
+
+2026-11-10 scoped node discovery: optional immediate-child logical listing filters nested recovery authorities before authority reads, collapses physical generations through the stable root, and hides tombstones. Recursive List remains unchanged; backends without the extension retain recursive discovery. Raw listing remains recursive, so this bounds authority reads rather than listed-key volume. Per-node Get/JSON errors in lease.Sample remain a separate startup fail-closed audit; no runtime/deployment acceptance is claimed.
+
+2026-11-10 owner-mediated retirement publication contract (staged): retirement publication must validate the exact drained node/session/epoch and source generation from the same owner record/token used for CAS. A CAS conflict may retry a renewal of that tuple, but a successor tuple or recreation must fail closed and be separately gated. Publication sets retired/job/floor together; an identical already-published job is idempotent. The primitive does not itself prove admission drain or control-job authority and is not enabled until coordinator integration.
+
+2026-11-10 node discovery fail-closed follow-up: Sample returns no partial peers on any listed node read error except concurrent disappearance (ErrNotFound), or invalid JSON. This enforces the existing startup compatibility gate; cancellation remains fatal. No additional Node/session field validation is introduced.
+
+2026-11-10 cleanup-only owner claim contract (staged): a separate administrative claim requires a validated durable cleanup job, exact prior owner/incarnation snapshot, and a locally closed admission gate. It refuses a fresh live owner, preserves predecessor recovery and local reset before publication, revalidates the cleanup authority immediately before conditional publication, and acquires a new monotonic epoch already marked retired. Ordinary Claim remains unable to acquire retired resources. A missing owner must be explicitly expected missing; a retained unowned lineage record keeps its epoch/floor without attempting recovery for an empty session. This helper remains unconnected until authenticated coordinator integration.
+
+2026-11-10 SQL capture checkpoint correction (targeted local race verification passed): explicit Capture.Checkpoint must serialize with the WAL poll boundary so TRUNCATE cannot race Stat/header ReadAt and terminate capture with EOF. Cell checkpoint helpers must inspect the SQLite wal_checkpoint result row and reject busy checkpoints, which Exec alone reports as successful SQL execution. Existing quiesced-writer requirement and snapshot rebaseline protocol remain unchanged; this is not deployment acceptance.
+
+2026-11-10 owner-mediated resource deletion integration (validation ongoing): KV/queue revoke now captures a cleanup lease after the intent durability barrier and prepares the actual data owner before acknowledgment. Background cleanup uses the same preparation; cleanup-data is authenticated with explicit lease credentials and expected owner, without ordinary forwarding/claim. Dead/unowned cleanup recovers the predecessor session and creates an already-retired administrative epoch whose retirement floor covers itself. Physical cleanup revalidates authority, bypasses residency Pin only for validated invalidation, releases ownership preserving lineage, and reclaims the exact local gate under released-owner exclusion. Completion persists a fresh authority floor, not a remote-stale fence cache. Stale/lost-owner gate sweeping and local generation fast proof are still integration gates; no production deployment or zero-network idle acceptance is claimed.
+
+2026-11-10 former-owner gate lifecycle: all cell-agents perform bounded process-local gate pagination before control-owner-only cleanup. A requested scope can also reclaim its old gate before admission. Reclamation drains, stops capture, serializes local owner transitions, and fresh-reads absent/foreign authority; it rejects same-process ownership at every epoch, including apparently expired leases. It discards local owned/read evidence, removes local files, refreshes generation evidence and clears only the exact drained gate. This is local cache maintenance and adds no remote object or bucket List. Remote errors/capture failure preserve the gate. Requests still use existing resource-fence checks; no local generation fast proof is enabled by this change.
+
+2026-11-10 continuous lease evidence: local owner route and local control-read proofs now bind a node lease health revision. Renewals preserve it only across uninterrupted safe deadlines; Publish detects unobserved margin gaps and recovery creates a new revision. Actual expiry remains permanently fenced. Idle access can reuse the exact owner tuple across continuous publications, while local ownership transitions invalidate its cache revision. Foreign routes keep fixed deadlines. This does not enable resource-generation fast admission, change pinned authorization TTL, or remove resource-fence reads. Targeted race regressions passed; current full verification and real performance acceptance remain pending.
+
+2026-11-10 request-bound resource proof integration (under verification): native KV/queue scope admission may derive generation from an exact retained local owner proof instead of refreshing the one-second fence cache. Validate before preparation, after taking the resource gate, and before response headers. Release evidence only after the handler finishes; cold/foreign paths keep authoritative checks. Retirement drains the same gate before publication. The node liveness compatibility identifier is now `node-lease-fence-v2-recovery-v3-retirement-v1`, rejecting live old unilateral-retirement writers; coordinated replacement is required, with no deployment performed. Pinned authorization TTL and background capture/queue/timer checks remain unchanged. No remote object or LTX-format changes. Integration/race/COS/performance acceptance is still pending.
+
+2026-11-10 native paging 生命周期实施约束（验收中）：原生 MAIN_DB 显式 attach/detach，所有分页回调绑定不透明 activation；最后 clean detach 才允许释放 native registry/bitmap。Go 保留有总数预算的小型 activation descriptor（包括固定 transport/claim、poison、递减 floor 和 checkpoint/write proof），将 immutable page index/object identity 和 hydrated bitmap 原子写入本地受 guard 保护的状态文件后释放大块 RAM；重开只加载同一 cut，不重新读取远端 head，不整库 hydrate。捕获必须显式借用/归还 cut。活跃 payload、构建中索引、descriptor 数量、本地状态字节分别有准入预算；饱和返回可恢复拒绝，不杀健康 child，不遗忘 poisoned state。guard 与本地状态不属于 COS 格式或远端 marker；进程重启不信任旧 sparse cache。预算为实施上限，不作为已测生产容量声明；真实 native reopen/churn/fault acceptance 尚未完成。
+
+2026-11-10 wake 删除竞态修订（实施/验收中）：现有 wake pointer/due JSON 增加每次发布随机 revision，同一次发布的两个对象使用同一值，避免相同到期时间/内容跨重建造成内容 ETag ABA；不增加远端文件，不改变 LTX。删除先捕获候选对象及版本，之后校验调用方 authority，再按捕获版本 ConditionalDelete，冲突不重读重删。清理旧 due、遗留条目、运维 Cleanup 也使用该边界。资源清理传入当前 cleanup lease/owner 验证；定时任务侧检查本节点有效 owner。真实 COS 的 raw If-Match DELETE 已重新验证通过，不能与其不支持原子普通 PUT 混淆。此修订处理删除竞态，不能被引用为普通 wake PUT 跨节点发布具备 CAS 的证据。
+
+Wake provider boundary: verified COS/FS conditional deletion continues to reclaim stale hints. Providers returning ErrNotSupported (including current raw OSS path) defer only physical hint reclamation; they never fall back to unconditional Delete and do not fail an authoritative timer mutation solely for unavailable hint GC. Retained hints can cause extra cold scans on those providers and are not counted as removed. Authority-validator failures still reject deletion. No COS cleanup is disabled.
+
+2026-11-10 bounded paging facet retirement follow-up: explicit loader admission precedes numeric facet native open; retirement closes admission, proves native last-close and capture/borrow/checkpoint/write quiescence, commits final durable capture without sparse full hydration, removes/syncs the complete local cache tuple, then releases descriptor/capture/claim/admission capacity. Next admit restores authoritative object identity before native open. Capture acquires file state through live admission, preventing queued scan resurrection. Failed-admit discard is allowed only for a wholly absent cache/guard/capture tuple newly constructed by that attempt; existing rejected/poisoned/uncaptured descriptors never acquire discard authority. Root Host metadata is excluded. New lifecycle capability and local native four-cycle retirement plus delayed-start/issued-open scheduling regressions do not establish final COS/10GiB retirement acceptance; see the paging review report.
+
+2026-11-10 bounded native lifecycle acceptance update: actual10GiB COS gate passed on the lifecycle-capable fork, including four cache-retirement/re-admission cycles without extra hydration, both delayed-start/issued-open races, two checkpoints without new snapshots and complete independent BLOB/counter verification. This verifies the implementation boundary above; it does not change native LTX or authorize deployment. Remaining system/performance gates are recorded in the storage-performance report.
+
+2026-11-10 storage/request optimization acceptance closure: final current-binary real COS functional/native10GiB/fleet100000-ACK cold audit and interleaved throughput gates passed; implementation contracts above are unchanged. Owner authority retains the explicitly authorized COS native conditional-append exception; native LTX remains the sole data format without auxiliary snapshot markers. Sustained throughput is approximately unchanged in these local measurements, not a claimed universal speedup. Exact identities, measurements, historical failures and limitations are in docs/reports/2026-11-10-storage-performance.md. No commit or production deployment.
+
+
+2026-11-10 权威追加容量调整：按用户要求，将共享 SegmentedAuthority 默认单段上限从 8MiB 降为 1MiB，根文件上限从 128MiB 降为 16MiB。适用于 owner、owner-gen 及使用同一适配器的节点/fleet 权威记录；不是预分配空间。每次切段描述约 64 字节，根容量约 262144 次切段（扣除初始化帧）。保持条件追加、尾部读取、旧段占位和容量耗尽失败关闭语义；不删除或重置已有权威对象。旧对象若已超过新上限会被拒绝读取，部署前须核对容量。此变更不代表已部署或已通过真实 COS 验收。
+
+
+2026-11-10 全量回归发现 COS 并发唤醒清理边界：ConditionalDelete 的 NoSuchKey/404 原先直接透传 SDK 错误，绕过 wake.deleteCandidate 对 bucket.ErrNotFound 的安全忽略，导致 Workflow sleep/event 返回500。统一映射为 ErrNotFound；412 仍是 ErrPrecondition，权限等其他错误继续传播，不降级无条件删除。HTTP适配器回归覆盖404/412/403；真实COS复验状态见 /tmp/cellhive-authority-small-acceptance/report.md。
+
+2026-11-10 容量调整与NoSuchKey修复回归结果：修复版全量Go/vet及相关race、JS/CLI、真实COS条件写/轮转、Workflow故障恢复、导入导出、队列、多节点、批量恢复及原生DO fleet复验通过；容量版10万写入三次强杀在线/冷恢复均100000/100000一致。保留首次失败证据及条件跳过，不含本轮10GiB/100epoch或生产部署。见[回归报告](reports/2026-11-10-authority-capacity-regression.md)。
+
+2026-11-10 S3 条件 PUT 控制记录适配（用户确认，实施中）：为支持不实现 DeleteObject If-Match 的 MinIO，s3:// 的 owner/owner-gen、nodes、node-logs、fleet 选举/排空以及 wake 控制记录采用原 key 上的带随机 revision 的 CAS 值/删除帧。条件创建可按已读 tombstone 的 ETag CAS 重建，删除以 If-Match PUT 发布 tombstone；不执行读后无条件 DELETE，不物理删除这些 key，避免 ABA。LTX、bundle、asset 字节与路径不变。非控制对象的条件删除必须明确声明不可用，不得继续调用忽略条件的后端 DELETE；已有 deferred-GC 行为保留。列表仅对控制 key 解码过滤，LTX 按原生前缀/游标扫描。COS/OSS 原生追加适配不变。与旧 s3:// 控制格式不混跑，需要离线迁移或空测试桶；当前未部署，测试验收中。
+
+2026-11-10 S3 适配验收补充：原 key CHC1 帧的 live/tombstone CAS 已实现，随机 revision 防止同值/删除重建 ABA；非控制对象条件物理删除明确 ErrNotSupported，控制 tombstone 不自动回收。真实 MinIO 两个 Docker 版本的适配契约、导入导出、双节点强杀/冷恢复、Workflow 故障恢复通过。另修复空 node/session 的已释放 owner 错误触发前任恢复（node-logs//.json），保留 epoch/retirement/reset/CAS；修复后真实 OSS/MinIO 删除重建隔离均通过。详细边界与原始失败见 reports/2026-11-10-oss-minio-acceptance.md。未部署。
+
+2026-11-10 上线前 review 修复契约（已回归，未部署）：DO SQLite import/export 的 cell-agent owner 仅用于传输，返回成功前必须释放，失败/取消也尝试有界释放；同 scope 的传输串行化到释放结束；runtime 对 node-lease 前任采用 session/lease 活性检查。S3 的 r2meta 纳入原 key CAS live/tombstone 帧，支持重复覆盖写。资源 retirement 对已证明 epoch <= 持久 retirement floor 的 LTX 使用与初始 purge 相同的物理删除规则；successor 永远使用更高 epoch，不能复用旧对象 key，未知/越界 key 拒绝删除。S3 wake due hint 使用每次发布的随机 revision 作为 key 的末级，ConditionalCreate 发布且不覆盖，允许物理删除该不可变 hint；ptr 仍在原 key 条件 PUT 删除。其他原生支持条件删除的 provider 保持现有 due key。LTX 文件格式不变，不增加 LTX marker。验收结果见 reports/2026-11-10-prerelease-review-fixes.md；Go 全量、vet、相关 race 与指定 MinIO/OSS E2E 通过，原生 workerd DO 迁移尚未单独 E2E，未部署。
+
+2026-11-10 原生 DO 迁移 E2E 修订（实施中）：DO 用户类 SQLite scope 与 __do__ shard owner scope 不同。非 reserved 用户类及 __do__ 的本地 cell-agent CellStore 不作为 DO SQLite 权威，不得由通用 timer 注册创建空库；export 使用该数据 scope 的原生 LTX。测试必须由真实 workerd 创建 SQLite，经 export/import 后首次加载、修改及全新 runtime 本地目录恢复，不允许只用 shard owner scope 的 Go 模型替代。
+
+DO 新对象首次加载补充：native 创建 facet 映射之后、SQLite 打开之前按对象 scope 探测并恢复原生 LTX；仅明确 ErrNoPageIndex 允许新空库，网络/恢复错误拒绝打开。首次恢复之前确认无旧 WAL/SHM/guard/capture 状态，并保留 path/failed/disposable 清理归属，避免 guard 已落盘后的失败泄漏。沿用既有本地 paging guard，不增加对象存储格式。
+
+2026-11-10 DO 迁移验收：上述修订已通过真实 workerd + MinIO/OSS 同 shard SQLite 导入导出、HTTP 读写和全新 runtime 目录恢复；双节点 fleet 分页恢复两次强杀、epoch 1→2→3 及全量 BLOB 哈希校验通过。77 包 Go、相关 race、vet 通过；未部署，见 reports/2026-11-10-native-do-transfer.md。
+
+2026-11-10 原生 DO import 并发隔离补充（已实现，未部署）：导入用户类 SQLite 前，必须由 control owner 的当前投影验证 storage_id，并取得对应既有 __do__ shard owner 的独占权。独占领取不允许同 session 重入；任一 live shard owner 均拒绝导入。同 shard 的其他对象暂时不能激活。上传、校验、发布前后验证 shard 与数据 scope owner；成功响应前释放 shard，失败/取消使用独立有界 context 释放。__do__ 是运行时 host/owner scope，不接受 SQLite 导入。不新增桶 marker 或 LTX 格式。
+
+原生 DO transfer epoch 修订：当前标准 supervisor 的 capture LTX lineage 固定为 epoch 1，cell-agent owner epoch 只是独立授权栅栏（见 TestDOCaptureSurvivesAgentEpochChange）。DO import/export 使用同一 capture epoch，不能把导入写到已递增的 agent owner epoch。import 的新 native lineage 从 TXID 1 完整快照开始；保留实际 owner epoch 验证。上传失败/租约丢失可能留下不可变对象，不保证回滚，绝不返回成功或覆盖已存在目标；重试需核对目标。
+
+2026-11-10 跨节点 SQLite import 修复契约：仅 POST /v1/control/cell/import 的 admin 转发使用30分钟总超时，沿用共享 Transport 流式传输和请求取消，不重放导入，普通请求仍为30秒。独占 shard release 失败进入进程内按 scope/epoch 去重的后台清理队列；每次条件释放只针对原 epoch，已无 owner 或 epoch 改变即移除旧任务，不重新领取。没有新远端格式；进程退出后沿用节点租约接管。已通过77包 Go、相关race、vet、独立review及真实COS跨节点暂停31秒上传/原生DO修改和冷恢复验收，未部署。
+
+2026-11-10 独占 shard 领取丢响应修复契约：ConditionalCreate/CAS 已提交但响应丢失时，领取仍报错、不读取导入 body；在写操作的失败分支将本次已分配 epoch 登记到现有进程内释放队列。后台只条件释放原 scope/epoch，写未落地、已无 owner 或已接管均安全收敛；不重试领取、不依赖请求 context继续存活、不新增对象存储记录。修复前后故障注入、相关race、77包Go、vet、独立审查及最新二进制真实COS双节点fleet强杀/冷恢复通过；未部署。
+
+2026-11-10 全量发布前审查修订（验证中，未部署）：普通 cell 全库快照排除 SQLite locking page；continuation 与 DO retirement 显式关闭 WAL cursor；分页索引缩库时释放已删除 block 的驻留预算；资源清理保留原生 retired.json 退休下界并正确跨页；worker purge 与 namespace purge 一致保留 own.json/owner-gen 单调授权记录；同 scope transfer 等待可取消且不占全局执行额度。不新增对象存储格式。
+
+2026-11-10 OSS R2 metadata 修订（验证中）：OSS 不支持原子条件 DELETE，因此 metadata 采用既有 native append authority 的条件逻辑删除与分段，不使用裸 DELETE。r2meta/<ns>/<bucket>/<sha256(key)> 固定命名防止用户对象名与 .gN 物理代际文件冲突；COS 使用相同 adapter，S3 仍走条件 PUT tombstone。LTX 与 r2 正文格式不变。旧 sidecar 不在线兼容，空目标桶或离线迁移；R2 正文 onlyIf 能力不因 metadata 修订扩大。
+
+原生 R2 sidecar 容量在正文写入前预检：序列化请求 metadata 加 1024 字节生成字段预留不得超过 authority 配置的 valueMax（默认64KiB）。超限失败不更改原对象。正文与 sidecar 仍是两个对象，既有并发发布限制不变。
+
+COS/OSS R2 正文条件替换明确失败关闭：r2/ 的 CAS 不下沉到不具备已验证原子条件 PUT 的 S3 兼容端点；返回 ErrNotSupported、不改正文。普通覆盖写及 native append metadata CAS 不受影响。S3/MinIO 的条件替换继续使用已验证的条件 PUT。
+
+2026-11-10 验收更正：COS native forbid-overwrite PUT 在真实并发不同内容创建同 key 测试中出现多个成功返回，已独立复现。此前顺序冲突、恢复及内容验证通过不能证明并发条件创建；assets/LTX 共用路径的不可变发布契约仍待根因排查，发布验收阻塞。尚未采用新的对象格式或替代发布协议。
+
+2026-11-10 R2 原子发布修订（实施中）：按 object-publication-correctness 计划，以既有 r2meta 权威记录一次 CAS 发布独立不可变正文版本和 metadata。r2 逻辑 key 仅作 listing 索引，读/删除/onlyIf 均由同一发布记录决定；读请求固定一份版本，不用内容 ETag 拼接另一次 metadata。旧布局不在线兼容。旧正文保留以保护读取/签名 URL，未实现安全在线版本 GC。COS LTX append 候选仍待单请求原子性与尺寸验证，不以计划代替验收。
+
+2026-11-10 用户确认 LTX 上传按 celld 普通覆盖语义：LTX 使用完整 PUT/multipart 发布，允许同一 epoch/level/TXID 路径的幂等重传；不要求 bucket create-if-absent，不增加发布协调记录。普通 LTX 上传不再触发冲突后下载比较。保留 owner/epoch 隔离、捕获与压缩串行、上传前完整校验、资源退休检查、Range ETag 校验。续链 seed 的既存文件语义验证仍保留，避免把业务增量当作续链占位。此决定仅针对 LTX，不放宽 owner/metadata CAS 或 assets 的条件创建契约。此前把 COS 条件创建探针失败直接等同于必须新增 LTX 协调文件的结论撤回；实际单写者/重试/恢复验收另行进行。
+
+2026-11-10 普通LTX上传验证更新：不增加发布协调文件，撤回此前等待用户许可协调状态的条目。COS普通multipart/metadata/跨epoch完整SHA恢复与cell-transfer正常流程通过。但原生DO仍固定数据epoch1，迟到导入故障注入可覆盖接管者数据；普通覆盖的整体切换尚未验收，不可上线。必须先满足原生DO的数据epoch隔离前提，不能删除或放宽这两项失主导入测试。详见 reports/2026-11-10-object-publication-fixes.md（docs下相对位置以该文件实际路径为准）。
+
+2026-11-10 原生 DO 数据 epoch 修订（实施中）：移除固定 e1。原生 DO 的 LTX 数据 epoch 使用已验证的 DO shard owner epoch；cell-agent 的 data-owner epoch仅验证接收节点权限，不能替代数据epoch。导入先独占同一shard并固定该epoch；恢复以该shard epoch为上界沿原生LTX续链查找。每个本地文件状态固定首次捕获身份，跨epoch不得重用待上传数据。旧稳定e1布局不在线兼容；无新增桶文件或防覆盖记录。普通PUT的安全前提是旧写者与接管者写入不同epoch目录，不能以写后校验替代。
+
+2026-11-10 DO数据epoch修订验收：固定e1已移除，导入/捕获/有claim恢复使用shard owner epoch。原先两项失主导入故障注入保留安全断言并通过；全量77包、全量vet、相关race及真实HK COS DO transfer/fleet paging通过。无新增桶记录，无workerd重编译，未提交或部署。详见 docs/reports/2026-11-10-object-publication-fixes.md。
+
+2026-11-10 全量 E2E/examples 验收修订（已实现并回归，未部署）：Workflow 注册校验使用资源 ID/name，binding alias 仅用于租户 env。冷 host lookup 若与 routes revision 更新竞态而丢弃结果，允许在同一请求内有界重查控制面，仍不得使用旧 revision 结果或重试租户业务执行。examples 覆盖真实源代码部署；AI 为协议 fixture、React-static 为配置模板，不能记作模型推理或 React 构建验收。报告单列环境失败和功能失败。
+
+本轮 examples 修订补充：R2 get/head/put 返回对象均在租户侧提供 writeHttpMetadata，不能经 RPC 修改 Headers 副本。DO WebSocket connect 与 invoke 一样传递已验证的 shard/owner node/epoch 至 Host actor，并覆盖来客携带的同名字段；不得依赖另一个 actor 的进程内 claims Map。冷 WebSocket 和 runtime 重启后连接列为回归门禁。
+
+2026-11-10 默认 supervisor 多租户命名空间修订（已实现并回归，未部署）：DO facet 的复制 scope 必须使用 router/loader 提供的实际应用 namespace，与 paging admission 相同；ScopePrefix 只作为未绑定内部 host 文件及旧测试 fixture 的默认值。既有 host binding 元数据携带 namespace，不新增对象类型。不得通过把 paging 身份改为进程默认 workerd 来绕过不一致。旧错误 namespace 布局不在线兼容，按既定 SQLite export/import 迁移。
+
+2026-11-10 COS assets 原子创建修订：实测普通 PUT 携带 forbid-overwrite 仍可并发多赢家，不能用于 manifest token 下的不可变文件。COS assets 改为同一个 key 的 native append(position=0)，对象前置固定 16 字节长度头（包含格式标识），空文件也占用非零长度；读接口剥离头并拒绝截断对象。Get/Stat/range/stream/list-size 返回逻辑正文语义，禁止普通 Put/CAS 绕过创建。COS assets 预签名返回不支持，由既有 authenticated agent 点读回退；OSS/S3 和 LTX 不变，不新增桶前缀或协调对象。旧 COS raw assets 不混读；应在新空桶/新 namespace 重传，或停服清理旧 assets 后重传。同内容 manifest token 不变，不能只重发同名版本。实现与真实竞争验收结果见后续报告。
+
+2026-11-10 COS assets 修订验收完成：修复前真实 COS 10 轮有 7 轮多赢家；修复后 10 轮双场景竞争及最终 3 轮复验均通过，64MiB 实际上传读回、静态 HTML/二进制/空文件公开访问、相同内容重试/不同内容冲突均通过。agent 返回逻辑 Content-Length 保留 runtime 小文件缓存。最终 77 包 Go/vet、bucket/artifacts 与相关 HTTP race 通过；未提交、未部署。见 [修复报告](reports/2026-11-10-cos-assets-atomic-create.md)。
+
+2026-11-10 文档收敛：删除已替代的 assets PUT 创建说明、旧数据路径/对象发布中间计划、P0 任务和 9 月中英文路线图；有效后续评估归入 TODO。中英文 known-issues 改为当前状态索引，逐轮记录归档并保留原始证据。此整理不修改存储设计或自动关闭未核实问题。COS assets 原失败项再次真实复验 10/10、64MiB 和公开发布 E2E 通过，详见 assets 修复报告末尾。
+
+
+2026-11-10 原生 DO 多 class 隔离修订（实施中）：host actor 的确定性 identity 改为 `<storage_id>/<storage_class>/shard<N>`（无 storage_id 时使用 namespace/worker 前缀），与 class-scoped owner shard 边界一致。invoke、connect、restore、abort/delete/restart 共享同一派生函数；storage_class alias 不随代码 class 重命名变化。facet scope 仍为 namespace/class/base64(storage_id/class/facetName)，class 从 facetName 的 class 前缀取得，不再取可被后续 Bind 覆写的 hostBinding.Class。旧共享 host 本地 cache 不在线沿用；对象原生 LTX scope 保持不变，由新 host 首次 native open 按 scope 恢复。已错误归类的数据只能在停机核对后导出/重播到正确 scope，不能把 admission 放宽为接受错 class/owner。既有 manifest/sidecar 类型保留，不新增 LTX/桶格式。必须验证同 shard 多 class、alias、相互独立写入、空缓存恢复、不同 owner epoch、idle retirement 和真实 Workbench SchedulerDO。
+
+2026-11-10 多 class 隔离验收：已实现；supervisor 全包、相关 race/vet、24 项 JS、多 class 同 shard 独立 epoch 冷恢复与 3 轮 idle、5 轮 retirement、原生 DO SQLite transfer 均通过。本地恢复实例切换修复镜像，原失败会话 events 和 SchedulerDO health/status 均 200。错放数据仅在停机、目标 LTX 不存在时校正，恢复 SQLite 字节一致；原始 volumes/备份保留。未提交，验收范围见 [报告](reports/2026-11-10-do-retirement-owner-fix.md)。
+
+2026-11-10 DO 并发 admission 修订：同一 Host/facet 的首次并发请求必须共享一个进行中的 admission promise，不能用重复 admit 响应覆写构造回调固定的身份对象。retire 关闭准入后须等待进行中的 admit 结束，再按同一 activation 退休；不得通过去掉身份校验绕过竞争。补真实 native 空缓存并发读取和 idle 重开回归，实际验收另记。
+
+2026-11-10 并发 admission 验收：26 项 JS、FS 与真实 HK COS 的 16 路冷读/5 轮 idle 重开、多 class 独立 epoch 回归通过。已切换本地恢复实例 do-runtime，指定会话 URL 48/48 HTTP 200，旧卷保留，未提交。详见 retirement-owner-fix 报告后续事件。
+
+2026-11-10 普通 cell 驻留默认值修订：用户确认将 CELLHIVE_MAX_OPEN_CELLS 默认值从 32 提高到 128，覆盖 Go、Compose、Helm 默认配置。CELLHIVE_CELL_IDLE 维持 5m，仍为含 control cell 的 LRU 驻留软上限，busy/pinned 可以超限；DO admission/facet 限制不变。此条覆盖 ADR-286 中保持默认32的历史描述，小内存节点仍可显式降低。
+
+128 默认值验收：internal/config 测试通过，Compose 配置校验、Helm 渲染通过；本地恢复实例 agent 重建后 healthy，运行时 metrics 的 max_open_cells=128、idle_ttl_seconds=300。原数据卷保留。
+
+2026-11-10 DO 重接管恢复冲突修订（方案撤回，待实现）：旧 native 数据库 registration 与新 claim 冲突时，继续禁止覆盖活跃分页视图；撤回因该冲突终止整个 workerd/supervisor 的方案。修复应在 shard 范围协调停止请求、native 句柄退出和注册清理，并验证同进程其他 DO 不受影响；未取得安全退出证明前不得删除注册或重用文件。先前整进程重启验收不构成此修复通过。既有 checkpoint ambiguity 协议不在本次撤回范围内。
+
+2026-11-10 DO 续租瞬时失败修订（实施中）：仅网络错误、请求超时、HTTP 408/429/5xx 可在最后确认租约的有效期内继续续租；不得本地延长 expiry。明确拒绝、身份不符、过期立即停止。JS 路由的 lease 查询瞬时失败也保留未过期 claim，但当前请求失败关闭，不触发重新 claim/restore。原生失权退出仍须单独验收，不能用此缓解代替局部恢复。
+
+2026-11-10 DO 版本切换修订（实施与验收中）：版本变化不再因旧 WebSocket 常驻而永久返回 do_runtime_capacity。对单 facet 合并切换，阻止新请求进入旧版本，等待已执行请求结束，关闭旧连接（1012），通过原有 native detach/retire 证明后创建新版本；不重启 workerd，不中断其他 facet。等待切换的请求不计作旧版本执行中请求；关闭旧 socket 的迟到回调不得扣减新版本连接计数。
+
+2026-11-10 DO WebSocket-only 退出捕获修订：RetirePagingLoader 在首次构造 fileState 前刷新本地 facet 映射，避免尚未经过 HTTP gate 的 facet 使用 relpath scope 发布数据，随后按 object scope 无法恢复。只读取本地目录，不增加桶 List。真实 native 版本切换测试覆盖首次 WebSocket 写入、退出、恢复后累加。
+
+2026-11-10 原生失权退出修订（实施中，未验收/未部署）：分页模式关闭 SQLite 时禁止自动 checkpoint，保留 WAL 至 supervisor 观察 native detach。checkpoint 准备在任何证书/主文件修改前因失权被明确拒绝（HTTP 412）时，仅 fence 当前原生激活的后续 I/O，允许最终 close/detach；其他不确定回调/主文件修改失败仍保持 fail-stop。旧缓存只有在新 claim 验证、旧 native 句柄全部退出且捕获已停之后才可丢弃。不得将本地丢弃伪装为持久化成功。
+
+2026-11-10 DO 局部 owner 恢复验收补记（未部署）：上述局部退出方案已实现。supervisor 使用有效的新 claim 对目标 Host 关闭 admission，等待普通/分页 native detach 与捕获退出，再清理本地旧 tuple 并恢复；同 claim 重试幂等，跨 scope 恢复拒绝，按 Host 独立互斥。真实 HK COS 连续三轮同进程接回、B→C 写入→B 接回和后续五轮 idle 重开通过，native PID 不变、无关 shard 持续可用。版本切换/WebSocket 问题另有真实 COS 验收。详见 reports/2026-11-10-do-owner-recovery.md。此记录不表示当前服务镜像已更新。

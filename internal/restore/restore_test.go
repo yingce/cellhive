@@ -12,41 +12,26 @@ import (
 	"cellhive/internal/ltx"
 )
 
-func encodePageMap(t testing.TB, pageSize, commit uint32, pages map[uint32][]byte) []byte {
+func nativeTestFile(t testing.TB, ps, commit uint32, lo, hi uint64, pages map[uint32][]byte) []byte {
 	t.Helper()
 	sorted := make([]ltx.WALPage, 0, len(pages))
-	for pgno := uint32(1); pgno <= commit; pgno++ {
-		data, ok := pages[pgno]
-		if !ok {
-			continue
+	for pg := uint32(1); pg <= commit; pg++ {
+		if data, ok := pages[pg]; ok {
+			sorted = append(sorted, ltx.WALPage{PageNo: pg, Data: data})
 		}
-		sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
 	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, sorted)
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: ps, Commit: commit, MinTXID: lo, MaxTXID: hi}, sorted)
 	if err != nil {
-		t.Fatalf("encode page map: %v", err)
+		t.Fatal(err)
 	}
-	return payload
+	return raw
 }
 
 func snapshotSegment(t testing.TB, pageSize, commit uint32, pages map[uint32][]byte) []byte {
-	t.Helper()
-	return ltx.Encode(ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0}, encodePageMap(t, pageSize, commit, pages))
+	return nativeTestFile(t, pageSize, commit, 1, 1, pages)
 }
-
 func deltaSegment(t testing.TB, pageSize, commit uint32, start uint64, pages map[uint32][]byte) []byte {
-	t.Helper()
-	sorted := make([]ltx.WALPage, 0, len(pages))
-	for pgno := uint32(1); pgno <= commit; pgno++ {
-		if data, ok := pages[pgno]; ok {
-			sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
-		}
-	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, sorted)
-	if err != nil {
-		t.Fatalf("encode delta: %v", err)
-	}
-	return ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: start, EndTxID: start}, payload)
+	return nativeTestFile(t, pageSize, commit, start+1, start+1, pages)
 }
 
 func TestApplyFileSnapshotRoundTrip(t *testing.T) {
@@ -157,26 +142,7 @@ func TestApplyFileAppliesDelta(t *testing.T) {
 	}
 }
 
-// pagedSnapshotSegments encodes a complete snapshot as ordered parts, each at
-// most maxBytes, forcing paging when the budget is small.
-func pagedSnapshotSegments(t *testing.T, h ltx.Header, pageSize, commit uint32, pages map[uint32][]byte, maxBytes int) [][]byte {
-	t.Helper()
-	sorted := make([]ltx.WALPage, 0, commit)
-	for pgno := uint32(1); pgno <= commit; pgno++ {
-		data, ok := pages[pgno]
-		if !ok {
-			t.Fatalf("snapshot missing page %d of %d", pgno, commit)
-		}
-		sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
-	}
-	parts, err := ltx.EncodeSnapshotParts(h, pageSize, commit, sorted, maxBytes)
-	if err != nil {
-		t.Fatalf("encode snapshot parts: %v", err)
-	}
-	return parts
-}
-
-func TestApplyFilePagedSnapshotAndDelta(t *testing.T) {
+func TestApplyFileNativeMultiPageSnapshotAndDelta(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, _ := cellstore.New(dir)
@@ -199,13 +165,8 @@ func TestApplyFilePagedSnapshotAndDelta(t *testing.T) {
 	if commitA < 2 {
 		t.Skipf("need more than one page to force paging, got %d", commitA)
 	}
-	// One page per part forces a multi-part snapshot.
-	parts := pagedSnapshotSegments(t,
-		ltx.Header{Kind: ltx.KindSnapshot, Epoch: 1, StartTxID: 0, EndTxID: 0},
-		pageSize, commitA, pagesA, ltx.HeaderSize+20+4+int(pageSize))
-	if len(parts) < 2 {
-		t.Fatalf("expected a paged snapshot, got %d part(s)", len(parts))
-	}
+	// Native snapshots retain every page in one indexed LTX object.
+	parts := [][]byte{snapshotSegment(t, pageSize, commitA, pagesA)}
 
 	for i := 0; i < 30; i++ {
 		if err := c.Put(ctx, key(i), []byte("v"), nil); err != nil {
@@ -299,22 +260,22 @@ func TestCompactFoldsChain(t *testing.T) {
 		deltaSegment(t, pageSizeB, commitB, 1, changed),
 	}
 
-	compacted, err := Compact(chain, 0)
+	compacted, err := Compact(chain)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
 	if len(compacted) >= len(chain) {
 		t.Fatalf("compaction did not reduce segments: %d >= %d", len(compacted), len(chain))
 	}
-	h, _, err := ltx.Decode(compacted[0])
+	h, err := ltx.ValidateNative(compacted[0])
 	if err != nil {
 		t.Fatalf("decode compacted: %v", err)
 	}
-	if h.Kind != ltx.KindSnapshot {
-		t.Fatalf("compacted kind = %d, want snapshot", h.Kind)
+	if !h.IsSnapshot() {
+		t.Fatalf("compacted header = %+v, want snapshot", h)
 	}
-	if h.StartTxID != 1 {
-		t.Fatalf("compacted watermark = %d, want 1", h.StartTxID)
+	if h.MinTXID != 1 {
+		t.Fatalf("compacted watermark = %d, want 1", h.MinTXID)
 	}
 
 	dest := filepath.Join(dir, "restored.db")
@@ -376,7 +337,7 @@ func TestApplyFileRejectsTxIDGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	// Snapshot watermark 0 with a delta starting at txid 2 (txid 1 missing).
+	// Snapshot watermark 1 with a delta starting at txid 3 (txid 2 missing).
 	dest := filepath.Join(dir, "gap.db")
 	_, err = ApplyFile(dest, [][]byte{
 		snapshotSegment(t, pageSize, commit, pages),
@@ -434,5 +395,36 @@ func TestApplyFileKeepsDestinationOnSyncFailure(t *testing.T) {
 	}
 	if leftovers, _ := filepath.Glob(dest + ".tmp-*"); len(leftovers) != 0 {
 		t.Fatalf("temporary files left behind: %v", leftovers)
+	}
+}
+
+func TestApplyFileFinalizeFailureKeepsDestination(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "restored.db")
+	if err := os.WriteFile(dest, []byte("previous-image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 7}, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("local metadata write failed")
+	_, err = ApplyFileWithFinalize(dest, [][]byte{raw}, func(path string, watermark uint64) error {
+		if path == dest || watermark != 7 {
+			t.Fatalf("published before finalization: %s watermark%d", path, watermark)
+		}
+		if err := os.WriteFile(path+"-wal", []byte("unfinished bookkeeping"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("error %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || string(got) != "previous-image" {
+		t.Fatalf("destination changed: %q %v", got, err)
+	}
+	if leftovers, _ := filepath.Glob(dest + ".tmp-*"); len(leftovers) != 0 {
+		t.Fatalf("temporary files leaked: %v", leftovers)
 	}
 }

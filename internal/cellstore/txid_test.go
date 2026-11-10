@@ -97,7 +97,7 @@ func TestTxIDsUniqueUnderConcurrency(t *testing.T) {
 	if len(seen) != n {
 		t.Fatalf("distinct txids = %d, want %d", len(seen), n)
 	}
-	for i := uint64(1); i <= n; i++ {
+	for i := uint64(2); i <= n+1; i++ {
 		if !seen[i] {
 			t.Fatalf("missing txid %d (gap)", i)
 		}

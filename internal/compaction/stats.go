@@ -11,8 +11,8 @@ import (
 )
 
 // ScopeMetrics is the last recorded diagnostic snapshot for one scope. It is
-// refreshed by Compact; the metrics endpoint reads it without doing a bucket
-// List per scrape.
+// refreshed by explicit diagnostics/admin maintenance; compaction and metrics
+// scrapes do not trigger broad diagnostic listings.
 type ScopeMetrics struct {
 	Stats     replica.BacklogStats `json:"stats"`
 	Error     string               `json:"error,omitempty"`
@@ -29,12 +29,17 @@ var (
 // truth.
 func RecordStats(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64) {
 	st, err := m.BacklogStats(ctx, s, epoch)
+	RecordStatsSnapshot(st, err)
+}
+
+// RecordStatsSnapshot reuses a diagnostic result without another bucket scan.
+func RecordStatsSnapshot(st replica.BacklogStats, err error) {
 	rec := ScopeMetrics{Stats: st, UpdatedMs: time.Now().UnixMilli()}
 	if err != nil {
 		rec.Error = err.Error()
 	}
 	metricsMu.Lock()
-	metrics[s.String()] = rec
+	metrics[st.Scope] = rec
 	metricsMu.Unlock()
 }
 

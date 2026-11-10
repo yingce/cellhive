@@ -6,7 +6,7 @@
 - **do-runtime**: The **distributed elastic execution layer** that hosts native workerd Durable Objects; local disk may be ephemeral.
 - **user-runtime**: A stateless workerd pool; north-south entry point (Worker routing/version resolution) + tenant code execution; `:8081` public, `:8088` internal dispatch.
 - **owner**: The node that holds a given cell's "working SQLite". Class A = cell-agent node; Class B (DO) = do-runtime node.
-- **owner record**: `cells/<scope>/owner.json` in the bucket, containing node/role/session/epoch/expiry/address.
+- **owner record**: `cells/<scope>/own.json` in the bucket, containing node/role/session/epoch/expiry/address.
 - **epoch**: The monotonic generation for each activation/takeover of a cell; replicated data is written under the `e<epoch>` prefix, serving as a write-validity fence.
 - **fence**: See epoch; writes from an old owner land in an abandoned prefix and are made harmless.
 - **LTX**: The replication format for SQLite transaction logs (implementation follows LiteFS/`superfly/ltx`).

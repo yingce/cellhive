@@ -93,7 +93,7 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CELLHIVE_MAX_OPEN_CELLS` | `32` | Cached handle limit; `0` disables the cap. The LRU sweeper closes the least-recently-used cells and releases SQLite handles/page cache |
+| `CELLHIVE_MAX_OPEN_CELLS` | `128` | Cached handle limit; `0` disables the cap. The LRU sweeper closes the least-recently-used cells and releases SQLite handles/page cache |
 | `CELLHIVE_CELL_IDLE` | `5m` | Close idle handles; `0` disables idle eviction |
 | `CELLHIVE_CELL_DISK_MAX` | `0` unlimited | Cell file byte budget (LRU deletes non-owned files) |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor interval |
@@ -131,12 +131,11 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 | `CELLHIVE_WAKE_REPAIR_BATCH` | `256` | Number of local cells checked per pass (rotating window, covers all after several passes) |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token validity period (shutdown wait = same value) |
 | `CELLHIVE_PAGED_RESTORE` | bool, default `true` | cell-agent: during cold restore, use fault-in VFS to page-load cells that are "compacted and whose chain ≥ MIN_BYTES" (ADR-160) |
-| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `32MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging requires an L1 page index, otherwise the chain is cloned whole; `0` = always page when the index exists |
+| `CELLHIVE_PAGED_MIN_BYTES` | bytes, default `32MiB` | Compared against SQLite image bytes (`pageSize*commit`); paging uses complete native embedded indexes; otherwise clone the chain whole; `0` = always page when complete indexes exist |
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | integer, default `16` | Background hydration rate for paged cells (MiB/s, one at a time per node); `0` = keep sparse and read each cold page from the bucket |
 | `CELLHIVE_PAGED_READAHEAD_BYTES` | bytes, default `1MiB` | Byte budget for one paged read, converted using the actual page size (at least one page) |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of concurrent child prefetch workers |
-| `CELLHIVE_LTX_COMPRESSION` | bool, default `true` | Use LZ4 for the LTX page-map (`WAL3`); `false` falls back to fixed-frame uncompressed `WAL2` (saves CPU, uses more bucket bytes; both formats are compatible for decoding/GC, ADR-161) |
-| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 off) | L0→L1 compaction |
+| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 off) | 0 disables scheduling; positive values enable fixed independent L1=30s, L2=5m, L3=1h schedules (ADR-312); the numeric value no longer overrides intervals |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | Segment count trigger |
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Byte trigger |
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` off | bundle/assets GC |

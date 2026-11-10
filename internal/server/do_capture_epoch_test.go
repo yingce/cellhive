@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
-	"cellhive/internal/ltx"
 	"cellhive/internal/sqlcapture"
 )
 
@@ -44,9 +43,9 @@ func TestDOCaptureSurvivesAgentEpochChange(t *testing.T) {
 	if err := committer.Claim(ctx, sc); err != nil {
 		t.Fatal(err)
 	}
-	segment := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: 1, StartTxID: 1, EndTxID: 1}, []byte("durable"))
+	segment := nativeTestFile(t, 1, 1, []byte("durable"))
 	if err := committer.Commit(sqlcapture.WithDOOwner(ctx, id), sc, 1, segment); err != nil {
-		t.Fatalf("DO fixed capture epoch after restart: %v", err)
+		t.Fatalf("DO shard capture epoch after agent restart: %v", err)
 	}
 	keys, err := s.Replica.ListSegments(ctx, sc, 1)
 	if err != nil || len(keys) != 1 {
@@ -79,5 +78,27 @@ func TestDOCaptureSurvivesAgentEpochChange(t *testing.T) {
 				t.Fatalf("invalid fence accepted: %d %s", rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestDODataEpochMustMatchVerifiedShard(t *testing.T) {
+	s, om, _ := newControlForwardServer(t, t.TempDir(), "agent")
+	sc := cell.Scope{Namespace: "app", Class: "Room", ID: "payload"}
+	own, err := om.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shard := cell.Scope{Namespace: "app", Class: DOClass, ID: "w~Room~shard0"}
+	claim, err := om.ClaimAs(t.Context(), shard, "runtime", "http://runtime", cell.RoleCellAgent, time.Minute, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(t.Context(), doCommitIdentityKey{}, doCommitIdentity{Scope: shard, Node: claim.Node, Epoch: claim.Epoch})
+	ctx = context.WithValue(ctx, captureOwnerEpochKey{}, own.Epoch)
+	if err := s.requireCommitOwner(ctx, sc, claim.Epoch+1); err == nil {
+		t.Fatal("accepted another data epoch under a valid shard proof")
+	}
+	if err := s.requireCommitOwner(ctx, sc, claim.Epoch); err != nil {
+		t.Fatal(err)
 	}
 }

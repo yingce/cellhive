@@ -14,7 +14,6 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
-	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/peer"
 	"cellhive/internal/recovery"
@@ -38,7 +37,7 @@ func follower(t *testing.T, dir string) (string, peer.Transport) {
 
 func ackSegment(t *testing.T, transport peer.Transport, followers []string, sc cell.Scope, epoch uint64, payload string) {
 	t.Helper()
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: epoch, StartTxID: 1, EndTxID: 1}, []byte(payload))
+	seg := nativeRecoverySegment(t, 1, []byte(payload))
 	if _, err := peer.NewManager(transport).Replicate(context.Background(), followers, sc, epoch, seg); err != nil {
 		t.Fatalf("replicate: %v", err)
 	}

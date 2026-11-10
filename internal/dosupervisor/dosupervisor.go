@@ -36,7 +36,6 @@ import (
 
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
-	"cellhive/internal/cellstore"
 	"cellhive/internal/compaction"
 	"cellhive/internal/ltx"
 	"cellhive/internal/objectstore"
@@ -76,6 +75,18 @@ type Supervisor struct {
 	// Concurrency bounds concurrent per-file capture in SyncAll (ADR-170); 0 =
 	// default (8). Each file keeps its own ordered commit stream.
 	Concurrency int
+
+	// Paging is enabled only with a paging-capable supervised workerd.
+	Paging             *Paging
+	OwnerLeases        *OwnerLeases
+	pagingLoaderOnce   sync.Once
+	pagingLoader       *pagingLoader
+	ScopedRecovery     bool
+	hostOpenLocks      map[string]*sync.RWMutex
+	recoveryMu         sync.Mutex
+	hostRecoveries     map[string]*hostRecovery
+	recoveringHosts    map[string]bool
+	hostNativeSessions map[string]string
 
 	mu     sync.Mutex
 	files  map[string]*fileState
@@ -161,6 +172,7 @@ func (s *Supervisor) rememberBlob(key string, data []byte) {
 }
 
 // SegmentSource restores the ordered LTX parts needed to rebuild a scope/epoch.
+// External implementations without PageSource retain the buffered compatibility API.
 type SegmentSource interface {
 	Restore(ctx context.Context, scope cell.Scope, epoch uint64) ([][]byte, error)
 }
@@ -297,7 +309,6 @@ type HTTPStore struct {
 // orders/dedupes them with the shared replica logic over an in-memory bucket view.
 func (h *HTTPStore) Restore(ctx context.Context, scope cell.Scope, epoch uint64) ([][]byte, error) {
 	rm := replica.New(h.bucket(scope, epoch))
-	rm.ReadOnly = true
 	segs, err := rm.Restore(ctx, scope, epoch)
 	if err != nil {
 		return nil, err
@@ -342,7 +353,6 @@ func (h *HTTPStore) RecoverScope(ctx context.Context, scope cell.Scope, claim Re
 // cold restore fetches only the pages it needs over ranged HTTP (ADR-084).
 func (h *HTTPStore) PageFetcher(ctx context.Context, scope cell.Scope, epoch uint64) (*replica.PageFetcher, error) {
 	rm := replica.New(h.bucket(scope, epoch))
-	rm.ReadOnly = true
 	return rm.NewPageFetcher(ctx, scope, epoch)
 }
 
@@ -353,7 +363,7 @@ func (h *HTTPStore) bucket(scope cell.Scope, epoch uint64) *httpBucket {
 // BlobStore is defined below; HTTPStore also implements it.
 
 func (h *HTTPStore) listKeys(ctx context.Context, cl *http.Client, scope cell.Scope, epoch uint64) ([]string, error) {
-	u := fmt.Sprintf("%s/v1/internal/segments?scope=%s&epoch=%d", strings.TrimRight(h.Base, "/"), url.QueryEscape(scope.String()), epoch)
+	u := fmt.Sprintf("%s/v1/internal/segments?scope=%s&epoch=%d&chain=1", strings.TrimRight(h.Base, "/"), url.QueryEscape(scope.String()), epoch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -379,30 +389,35 @@ func (h *HTTPStore) listKeys(ctx context.Context, cl *http.Client, scope cell.Sc
 }
 
 func (h *HTTPStore) readSegment(ctx context.Context, cl *http.Client, key string, rng string, max int64) ([]byte, int, error) {
+	data, status, _, err := h.readSegmentVersion(ctx, cl, key, rng, max)
+	return data, status, err
+}
+
+func (h *HTTPStore) readSegmentVersion(ctx context.Context, cl *http.Client, key, rng string, max int64) ([]byte, int, string, error) {
 	u := fmt.Sprintf("%s/v1/internal/segment?key=%s", strings.TrimRight(h.Base, "/"), url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	if err := bearertoken.SetInternal(req, h.Token, "internal"); err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	if rng != "" {
 		req.Header.Set("range", rng)
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("dosupervisor: read segment: %w", err)
+		return nil, 0, "", fmt.Errorf("dosupervisor: read segment: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, resp.StatusCode, bucket.ErrNotFound
+		return nil, resp.StatusCode, "", bucket.ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return nil, resp.StatusCode, fmt.Errorf("dosupervisor: read segment %s: status %d", key, resp.StatusCode)
+		return nil, resp.StatusCode, "", fmt.Errorf("dosupervisor: read segment %s: status %d", key, resp.StatusCode)
 	}
 	data, err := readBodyBounded(resp.Body, resp.ContentLength, max)
-	return data, resp.StatusCode, err
+	return data, resp.StatusCode, strings.Trim(resp.Header.Get("ETag"), `"`), err
 }
 
 var defaultStoreHTTPClient = newDefaultHTTPClient()
@@ -455,11 +470,11 @@ func (b *httpBucket) RangedGet(ctx context.Context, key string, off, length int6
 	if max > maxSegmentBytes {
 		max = maxSegmentBytes
 	}
-	data, _, err := b.store.readSegment(ctx, b.store.client(), key, fmt.Sprintf("bytes=%d-%d", off, end), max)
+	data, _, tag, err := b.store.readSegmentVersion(ctx, b.store.client(), key, fmt.Sprintf("bytes=%d-%d", off, end), max)
 	if err != nil {
 		return nil, "", err
 	}
-	return data, "", nil
+	return data, tag, nil
 }
 
 func (b *httpBucket) List(ctx context.Context, prefix string) ([]string, error) {
@@ -679,54 +694,11 @@ func (s *Supervisor) RestoreAll(ctx context.Context, outDir string) (int, error)
 			}
 		}
 		dest := filepath.Join(outDir, filepath.FromSlash(rel))
-		if s.Segments != nil {
-			if ps, ok := s.Segments.(PageSource); ok {
-				if pf, perr := ps.PageFetcher(ctx, scope, s.Epoch); perr == nil {
-					if _, merr := pf.Materialize(ctx, dest, nil); merr == nil {
-						n++
-						s.logf("restored (agent, paged) %s -> %s", rel, dest)
-						continue
-					}
-				}
-			}
-			raw, serr := s.Segments.Restore(ctx, scope, s.Epoch)
-			if serr != nil {
-				return n, fmt.Errorf("dosupervisor: restore %s: %w", rel, serr)
-			}
-			if len(raw) == 0 {
+		if err := s.restoreScope(ctx, scope, dest); err != nil {
+			if errors.Is(err, replica.ErrNoPageIndex) {
 				continue
 			}
-			if _, aerr := restore.ApplyFile(dest, raw); aerr != nil {
-				return n, fmt.Errorf("dosupervisor: apply %s: %w", rel, aerr)
-			}
-			n++
-			s.logf("restored (agent) %s -> %s", rel, dest)
-			continue
-		}
-		// Prefer a paged materialization (one ranged read per page) when a
-		// compacted index exists; fall back to full-chain restore otherwise.
-		if pf, perr := rep.NewPageFetcher(ctx, scope, s.Epoch); perr == nil {
-			_, merr := pf.Materialize(ctx, dest, nil)
-			_ = pf.Close()
-			if merr == nil {
-				n++
-				s.logf("restored (paged) %s -> %s", rel, dest)
-				continue
-			}
-		}
-		segs, err := rep.Restore(ctx, scope, s.Epoch)
-		if err != nil {
 			return n, fmt.Errorf("dosupervisor: restore %s: %w", rel, err)
-		}
-		if len(segs) == 0 {
-			continue
-		}
-		raw := make([][]byte, 0, len(segs))
-		for _, seg := range segs {
-			raw = append(raw, seg.Raw)
-		}
-		if _, err := restore.ApplyFile(dest, raw); err != nil {
-			return n, fmt.Errorf("dosupervisor: apply %s: %w", rel, err)
 		}
 		n++
 		s.logf("restored %s -> %s", rel, dest)
@@ -735,16 +707,21 @@ func (s *Supervisor) RestoreAll(ctx context.Context, outDir string) (int, error)
 }
 
 type fileState struct {
-	mu                sync.Mutex
-	path              string
-	scope             cell.Scope
-	cursor            *wal.Cursor
-	seq               uint64
-	baseline          bool
-	checkpointPending bool
-	pending           [][]byte
-	pendingEnd        uint64
-	pendingSnapshot   bool
+	dataEpoch           uint64
+	retired             bool
+	mu                  sync.Mutex
+	path                string
+	scope               cell.Scope
+	cursor              *wal.Cursor
+	seq                 uint64
+	baseline            bool
+	checkpointPending   bool
+	pending             [][]byte
+	pendingFile         string
+	pendingFileSize     int64
+	pendingEnd          uint64
+	pendingSnapshot     bool
+	pendingContinuation bool
 }
 
 func (s *Supervisor) logf(format string, args ...any) {
@@ -904,6 +881,9 @@ func (s *Supervisor) sqliteFiles() ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".cellhive-paging" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".sqlite") {
@@ -1033,6 +1013,9 @@ func (s *Supervisor) extraFiles() ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".cellhive-paging" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".sqlite") || strings.HasSuffix(path, "-wal") || strings.HasSuffix(path, "-shm") {
@@ -1081,15 +1064,56 @@ func pollStableWAL(ctx context.Context, poll func() (wal.PollResult, error)) (wa
 
 // syncFile captures one file exactly once (per-file lock).
 func (s *Supervisor) syncFile(ctx context.Context, path string) error {
-	fs := s.fileFor(path)
-	fs.mu.Lock()
+	fs, err := s.captureFile(path)
+	if err != nil || fs == nil {
+		return err
+	}
 	defer fs.mu.Unlock()
+	return s.syncFileLocked(ctx, fs)
+}
 
+func (s *Supervisor) syncFileLocked(ctx context.Context, fs *fileState) error {
+	if fs.retired {
+		return errors.New("paging: capture activation retired")
+	}
+	epoch := s.captureDataEpoch(ctx)
+	if fs.dataEpoch != 0 && fs.dataEpoch != epoch {
+		return errors.New("dosupervisor: capture activation epoch changed")
+	}
+	fs.dataEpoch = epoch
+	path := fs.path
 	if err := s.ensureClaim(ctx, fs.scope); err != nil {
 		return err
 	}
 	if err := s.flushPending(ctx, fs); err != nil {
 		return err
+	}
+	if !fs.baseline && s.Paging != nil {
+		cut, releaseCut, err := s.Paging.BorrowCut(path, fs.scope)
+		defer releaseCut()
+		if err != nil {
+			return err
+		}
+		writes, _, err := s.Paging.MainWrites(path)
+		if err != nil {
+			return err
+		}
+		if cut != nil && writes == 0 {
+			if cut.Watermark() == math.MaxUint64 {
+				return fmt.Errorf("dosupervisor: exhausted continuation txid")
+			}
+			next := cut.Watermark() + 1
+			raw, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: cut.PageSize(), Commit: cut.Commit(), MinTXID: next, MaxTXID: next, WALOffset: 32}, nil)
+			if err != nil {
+				return err
+			}
+			fs.pending, fs.pendingEnd, fs.pendingSnapshot = [][]byte{raw}, next, false
+			fs.pendingContinuation = true
+			if err = s.flushPending(ctx, fs); err != nil {
+				return err
+			}
+			fs.baseline = true
+		}
 	}
 	if !fs.baseline {
 		if err := s.seedCaptureWatermark(ctx, fs); err != nil {
@@ -1100,37 +1124,91 @@ func (s *Supervisor) syncFile(ctx context.Context, path string) error {
 		}
 		fs.baseline = true
 	}
-	res, err := pollStableWAL(ctx, func() (wal.PollResult, error) { return fs.cursor.Poll(path + "-wal") })
-	fs.checkpointPending = fs.checkpointPending || res.Checkpoint
-	if err != nil && err != wal.ErrNoWAL {
-		return fmt.Errorf("dosupervisor: wal poll %s: %w", path, err)
-	}
-	if fs.checkpointPending {
-		if err := s.snapshot(ctx, fs, "checkpoint"); err != nil {
-			return err
+	for attempt := 0; attempt < 4; attempt++ {
+		previous := fs.cursor.Position()
+		res, err := pollStableWAL(ctx, func() (wal.PollResult, error) { return fs.cursor.Poll(path + "-wal") })
+		checkpoint := res.Checkpoint
+		if s.Paging != nil {
+			writes, captured, e := s.Paging.MainWrites(path)
+			if e != nil {
+				// Poll already advanced: retry must reread uncommitted frames.
+				fs.checkpointPending = fs.checkpointPending || checkpoint
+				fs.cursor.Reset()
+				return e
+			}
+			fs.checkpointPending = fs.checkpointPending || writes > captured
+			if checkpoint && err == nil {
+				proven, e := s.Paging.consumeCheckpoint(path, previous)
+				if e != nil {
+					return e
+				}
+				checkpoint = !proven
+			}
 		}
-		fs.checkpointPending = false
-	} else if len(res.Transactions) > 0 {
-		if err := s.delta(ctx, fs, res); err != nil {
-			return err
+		fs.checkpointPending = fs.checkpointPending || checkpoint
+		if err != nil && err != wal.ErrNoWAL {
+			return fmt.Errorf("dosupervisor: wal poll %s: %w", path, err)
 		}
+		if fs.checkpointPending {
+			if err := s.snapshot(ctx, fs, "checkpoint"); err != nil {
+				return err
+			}
+			fs.checkpointPending = false
+			// Snapshot durability resets the cursor. Capture the current WAL
+			// before acknowledging the gate, including post-checkpoint writes.
+			continue
+		} else if len(res.Transactions) > 0 {
+			if err := s.delta(ctx, fs, res); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	return nil
+	return errors.New("dosupervisor: database keeps checkpointing during capture")
 }
 
 // seedCaptureWatermark runs once per file and supervisor process. DO ownership
-// can move without changing the capture scope's epoch, so a replacement must
-// continue after the durable chain rather than reusing snapshot/txid keys.
+// changes the data epoch; a replacement resumes the predecessor cut rather
+// than reusing its TXIDs without a native continuation or full baseline.
 func (s *Supervisor) seedCaptureWatermark(ctx context.Context, fs *fileState) error {
+	// Build the same fixed native index cut used for paged restoration. This
+	// validates epoch continuity, actual headers, frame locations and complete
+	// final page coverage without auditing every historical page body's CRC.
+	// ProvenWatermark remains the separate full-integrity audit API.
+	var fetch func(context.Context, cell.Scope, uint64) (*replica.PageFetcher, error)
+	if s.Segments != nil {
+		if source, ok := s.Segments.(PageSource); ok {
+			fetch = source.PageFetcher
+		}
+	} else if rep := s.store(); rep != nil {
+		fetch = rep.NewPageFetcher
+	}
+	if fetch != nil {
+		cut, err := fetch(ctx, fs.scope, s.captureDataEpoch(ctx))
+		if errors.Is(err, replica.ErrNoPageIndex) {
+			// Only an empty restore plan yields ErrNoPageIndex. Invalid or
+			// incomplete native indexes must never fall back to a fresh chain.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("dosupervisor: validate capture cut %s: %w", fs.scope, err)
+		}
+		defer cut.Close()
+		if cut.Watermark() == math.MaxUint64 {
+			return fmt.Errorf("dosupervisor: exhausted capture watermark for %s", fs.scope)
+		}
+		fs.seq = cut.Watermark() + 1
+		return nil
+	}
 	var raw [][]byte
 	if s.Segments != nil {
 		var err error
-		raw, err = s.Segments.Restore(ctx, fs.scope, s.Epoch)
+		raw, err = s.Segments.Restore(ctx, fs.scope, s.captureDataEpoch(ctx))
 		if err != nil {
 			return fmt.Errorf("dosupervisor: read capture head %s: %w", fs.scope, err)
 		}
 	} else if rep := s.store(); rep != nil {
-		segs, err := rep.Restore(ctx, fs.scope, s.Epoch)
+		segs, err := rep.Restore(ctx, fs.scope, s.captureDataEpoch(ctx))
 		if err != nil {
 			return fmt.Errorf("dosupervisor: read capture head %s: %w", fs.scope, err)
 		}
@@ -1143,18 +1221,15 @@ func (s *Supervisor) seedCaptureWatermark(ctx context.Context, fs *fileState) er
 	}
 	// A complete chain is required before publishing a newer baseline. Merely
 	// taking the maximum header would hide a missing acknowledged delta.
-	compacted, err := restore.Compact(raw, ltx.DefaultSnapshotPartBytes)
+	index, err := restore.IndexChain(raw)
 	if err != nil {
 		return fmt.Errorf("dosupervisor: invalid capture head %s: %w", fs.scope, err)
 	}
-	h, _, err := ltx.Decode(compacted[0])
-	if err != nil {
-		return err
+	// Epoch belongs to the scoped restore request, not to the native header.
+	if index.Watermark == math.MaxUint64 {
+		return fmt.Errorf("dosupervisor: exhausted capture watermark for %s", fs.scope)
 	}
-	if h.Epoch != s.Epoch || h.EndTxID == math.MaxUint64 {
-		return fmt.Errorf("dosupervisor: invalid capture head epoch/watermark for %s", fs.scope)
-	}
-	fs.seq = h.EndTxID + 1
+	fs.seq = index.Watermark + 1
 	return nil
 }
 
@@ -1207,29 +1282,58 @@ func (s *Supervisor) ensureClaim(ctx context.Context, scope cell.Scope) error {
 }
 
 func (s *Supervisor) snapshot(ctx context.Context, fs *fileState, why string) error {
-	pageSize, commit, pages, err := cellstore.ReadDBPages(fs.path)
-	if err != nil {
-		return fmt.Errorf("dosupervisor: read db (%s): %w", why, err)
-	}
-	sorted := make([]ltx.WALPage, 0, len(pages))
-	for pgno := uint32(1); pgno <= commit; pgno++ {
-		data, ok := pages[pgno]
-		if !ok {
-			return fmt.Errorf("dosupervisor: snapshot missing page %d of %d", pgno, commit)
+	ctx, span := telemetry.Tracer().Start(ctx, "do.snapshot")
+	defer span.End()
+	started := time.Now()
+	if s.Paging != nil {
+		hydrateCtx, hydrateSpan := telemetry.Tracer().Start(ctx, "do.snapshot.hydrate")
+		err := s.Paging.Hydrate(hydrateCtx, fs.path)
+		hydrateSpan.End()
+		if err != nil {
+			return fmt.Errorf("dosupervisor: hydrate before %s snapshot: %w", why, err)
 		}
-		sorted = append(sorted, ltx.WALPage{PageNo: pgno, Data: data})
 	}
-	parts, err := ltx.EncodeSnapshotParts(ltx.Header{
-		Kind: ltx.KindSnapshot, Epoch: s.Epoch, StartTxID: fs.seq, EndTxID: fs.seq,
-	}, pageSize, commit, sorted, ltx.DefaultSnapshotPartBytes)
+	hydrated := time.Now()
+	var pagingGeneration uint64
+	if s.Paging != nil {
+		var err error
+		pagingGeneration, _, err = s.Paging.MainWrites(fs.path)
+		if err != nil {
+			return err
+		}
+	}
+	watermark := fs.seq
+	if watermark == 0 {
+		watermark = 1
+	} else if why == "checkpoint" {
+		if watermark == math.MaxUint64 {
+			return fmt.Errorf("dosupervisor: exhausted snapshot txid")
+		}
+		watermark++
+	}
+	spoolCtx, spoolSpan := telemetry.Tracer().Start(ctx, "do.snapshot.encode_spool")
+	name, size, pages, err := spoolSnapshot(spoolCtx, fs.path, watermark)
+	spoolSpan.End()
+	spooled := time.Now()
 	if err != nil {
-		return err
+		return fmt.Errorf("dosupervisor: snapshot spool (%s): %w", why, err)
 	}
-	fs.pending, fs.pendingEnd, fs.pendingSnapshot = parts, fs.seq, true
-	if err := s.flushPending(ctx, fs); err != nil {
+	if s.Paging != nil {
+		if err := s.Paging.Captured(fs.path, pagingGeneration); err != nil {
+			os.Remove(name)
+			return err
+		}
+	}
+	fs.pendingFile, fs.pendingFileSize = name, size
+	fs.pendingEnd, fs.pendingSnapshot = watermark, true
+	commitCtx, commitSpan := telemetry.Tracer().Start(ctx, "do.snapshot.commit")
+	err = s.flushPending(commitCtx, fs)
+	commitSpan.End()
+	if err != nil {
 		return fmt.Errorf("dosupervisor: snapshot commit (%s): %w", why, err)
 	}
-	s.logf("%s snapshot scope=%s pages=%d commit=%d parts=%d", why, fs.scope.String(), len(sorted), commit, len(parts))
+	s.logf("%s snapshot scope=%s pages=%d commit=%d parts=%d", why, fs.scope.String(), pages, pages, 1)
+	s.logf("snapshot timing scope=%s encoded_bytes=%d hydrate_ms=%d encode_spool_ms=%d commit_ms=%d total_ms=%d", fs.scope.String(), size, hydrated.Sub(started).Milliseconds(), spooled.Sub(hydrated).Milliseconds(), time.Since(spooled).Milliseconds(), time.Since(started).Milliseconds())
 	return nil
 }
 
@@ -1246,12 +1350,24 @@ func (s *Supervisor) delta(ctx context.Context, fs *fileState, res wal.PollResul
 	if err != nil {
 		return err
 	}
-	payload, err := ltx.EncodeWALPageMap(res.Header.PageSize, commit, len(txs), pages)
+	start, end := fs.seq+1, fs.seq+uint64(len(txs))
+	header := ltx.NativeHeader{PageSize: res.Header.PageSize, Commit: commit, MinTXID: start, MaxTXID: end, Timestamp: time.Now().UnixMilli(), WALOffset: res.WALOffset, WALSize: res.WALSize, WALSalt1: res.Header.Salt1, WALSalt2: res.Header.Salt2}
+	// Include worst-case LZ4/frame/index overhead before choosing the buffered
+	// path. A large transaction is one native object, never split mid-commit.
+	if uint64(len(pages))*(uint64(res.Header.PageSize)+uint64(res.Header.PageSize)/255+64)+512 > 32<<20 {
+		name, size, err := spoolNativePages(ctx, header, pages)
+		if err != nil {
+			fs.cursor.Reset()
+			return err
+		}
+		fs.pendingFile, fs.pendingFileSize = name, size
+		fs.pendingEnd, fs.pendingSnapshot = end, false
+		return s.flushPending(ctx, fs)
+	}
+	seg, err := ltx.EncodeNativePages(header, pages)
 	if err != nil {
 		return err
 	}
-	start, end := fs.seq+1, fs.seq+uint64(len(txs))
-	seg := ltx.Encode(ltx.Header{Kind: ltx.KindDelta, Epoch: s.Epoch, StartTxID: start, EndTxID: end}, payload)
 	fs.pending, fs.pendingEnd, fs.pendingSnapshot = [][]byte{seg}, end, false
 	return s.flushPending(ctx, fs)
 }
@@ -1260,11 +1376,34 @@ func (s *Supervisor) delta(ctx context.Context, fs *fileState, res wal.PollResul
 // bytes until acknowledged, so a later gate cannot skip a failed delta or
 // replace a partially committed snapshot with different bytes at the same txid.
 func (s *Supervisor) flushPending(ctx context.Context, fs *fileState) error {
-	if len(fs.pending) == 0 {
+	if len(fs.pending) == 0 && fs.pendingFile == "" {
 		return nil
 	}
+	if fs.pendingFile != "" {
+		var err error
+		if committer, ok := s.Committer.(sqlcapture.NativeFileCommitter); ok && !fs.pendingSnapshot {
+			err = committer.CommitNativeFile(ctx, fs.scope, s.captureDataEpoch(ctx), fs.pendingEnd, fs.pendingFile, fs.pendingFileSize)
+		} else if committer, ok := s.Committer.(sqlcapture.SnapshotFileCommitter); ok && fs.pendingSnapshot {
+			err = committer.CommitSnapshotFile(ctx, fs.scope, s.captureDataEpoch(ctx), fs.pendingEnd, fs.pendingFile, fs.pendingFileSize)
+		} else if fs.pendingFileSize <= 64<<20 {
+			var raw []byte
+			raw, err = os.ReadFile(fs.pendingFile)
+			if err == nil {
+				err = s.Committer.Commit(ctx, fs.scope, s.captureDataEpoch(ctx), raw)
+			}
+		} else {
+			err = fmt.Errorf("dosupervisor: committer lacks streaming snapshot support for %d bytes", fs.pendingFileSize)
+		}
+		if err != nil {
+			return fmt.Errorf("dosupervisor: pending snapshot commit: %w", err)
+		}
+		if err = os.Remove(fs.pendingFile); err != nil {
+			s.logf("remove snapshot spool: %v", err)
+		}
+		fs.pendingFile, fs.pendingFileSize = "", 0
+	}
 	for len(fs.pending) > 0 {
-		if err := s.Committer.Commit(ctx, fs.scope, s.Epoch, fs.pending[0]); err != nil {
+		if err := s.Committer.Commit(ctx, fs.scope, s.captureDataEpoch(ctx), fs.pending[0]); err != nil {
 			return fmt.Errorf("dosupervisor: pending capture commit: %w", err)
 		}
 		fs.pending[0] = nil
@@ -1275,6 +1414,10 @@ func (s *Supervisor) flushPending(ctx context.Context, fs *fileState) error {
 		fs.cursor.Reset()
 		fs.baseline = true
 		fs.checkpointPending = false
+	}
+	if fs.pendingContinuation {
+		fs.baseline = true
+		fs.pendingContinuation = false
 	}
 	fs.pendingSnapshot = false
 	return nil
@@ -1355,6 +1498,7 @@ func (s *Supervisor) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/do/gate", gate)
 	mux.HandleFunc("POST /internal/do/bind", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
+			Namespace string `json:"namespace"`
 			HostID    string `json:"host_id"`
 			HostHash  string `json:"host_hash"`
 			StorageID string `json:"storage_id"`
@@ -1364,15 +1508,16 @@ func (s *Supervisor) Handler() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		s.Bind(req.HostID, req.HostHash, req.StorageID, req.Class)
+		s.Bind(req.HostID, req.HostHash, req.StorageID, req.Class, req.Namespace)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /internal/do/restore-host", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			HostID     string `json:"host_id"`
-			OwnerScope string `json:"owner_scope"`
-			OwnerNode  string `json:"owner_node"`
-			OwnerEpoch uint64 `json:"owner_epoch"`
+			HostID          string `json:"host_id"`
+			OwnerScope      string `json:"owner_scope"`
+			OwnerNode       string `json:"owner_node"`
+			OwnerEpoch      uint64 `json:"owner_epoch"`
+			LeaseTTLSeconds int    `json:"lease_ttl_seconds"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil || req.HostID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host_id is required"})
@@ -1388,17 +1533,84 @@ func (s *Supervisor) Handler() http.Handler {
 			}
 			claim.Node, claim.Epoch = req.OwnerNode, req.OwnerEpoch
 		}
-		n, err := s.RestoreHostClaimed(r.Context(), s.Dir, req.HostID, claim)
-		if errors.Is(err, bucket.ErrNotFound) || errors.Is(err, ErrHostNotCaptured) {
-			writeJSON(w, http.StatusOK, map[string]any{"restored": 0})
+		var lease *LeaseState
+		if s.OwnerLeases != nil && claim.Epoch != 0 {
+			ttl := time.Duration(req.LeaseTTLSeconds) * time.Second
+			if ttl <= 0 {
+				ttl = 30 * time.Second
+			}
+			state, registerErr := s.OwnerLeases.Register(r.Context(), claim, ttl)
+			if registerErr != nil {
+				writeJSON(w, 409, map[string]any{"error": registerErr.Error()})
+				return
+			}
+			lease = &state
+		}
+		var n int
+		if s.ScopedRecovery && claim.Epoch != 0 {
+			n, err = s.managedHostRestore(r.Context(), req.HostID, claim)
+		} else {
+			n, err = s.RestoreHostClaimed(r.Context(), s.Dir, req.HostID, claim)
+		}
+		if errors.Is(err, ErrHostResetRequired) {
+			writeJSON(w, 409, map[string]any{"error": "host_reset_required"})
 			return
 		}
+		if errors.Is(err, bucket.ErrNotFound) || errors.Is(err, ErrHostNotCaptured) {
+			n, err = 0, nil
+		}
 		if err != nil {
+			if s.OwnerLeases != nil {
+				s.OwnerLeases.Forget(claim)
+			}
 			s.logf("restore host %s failed after %d files: %v", req.HostID, n, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "restored": n})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"restored": n})
+		if lease != nil {
+			state, e := s.OwnerLeases.Status(claim)
+			if e != nil {
+				writeJSON(w, 409, map[string]any{"error": e.Error()})
+				return
+			}
+			lease = &state
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"restored": n, "lease": lease})
+	})
+	mux.HandleFunc("POST /internal/do/paging/admit", s.pagingLoaderHandler(false))
+	mux.HandleFunc("POST /internal/do/paging/retire", s.pagingLoaderHandler(true))
+	mux.HandleFunc("POST /internal/do/lease", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Scope  string `json:"scope"`
+			Node   string `json:"node"`
+			Epoch  uint64 `json:"epoch"`
+			Forget bool   `json:"forget"`
+		}
+		if s.OwnerLeases == nil {
+			writeJSON(w, 503, map[string]any{"error": "independent lease renewal unavailable"})
+			return
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "invalid lease request"})
+			return
+		}
+		scope, err := cell.ParseScope(req.Scope)
+		if err != nil || req.Node == "" || req.Epoch == 0 {
+			writeJSON(w, 400, map[string]any{"error": "invalid lease identity"})
+			return
+		}
+		claim := RecoveryClaim{Scope: scope, Node: req.Node, Epoch: req.Epoch}
+		if req.Forget {
+			s.OwnerLeases.Forget(claim)
+			writeJSON(w, 200, map[string]any{"forgotten": true})
+			return
+		}
+		state, err := s.OwnerLeases.Status(claim)
+		if err != nil {
+			writeJSON(w, 409, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, state)
 	})
 	mux.HandleFunc("GET /status", status)
 	mux.HandleFunc("GET /internal/do/capture/status", status)
@@ -1427,4 +1639,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// A claimed DO uses its shard generation, never the process default epoch.
+// The default is for explicitly configured standalone supervisor fixtures.
+func (s *Supervisor) captureDataEpoch(ctx context.Context) uint64 {
+	if id, ok := sqlcapture.DOOwner(ctx); ok {
+		return id.Epoch
+	}
+	return s.Epoch
 }

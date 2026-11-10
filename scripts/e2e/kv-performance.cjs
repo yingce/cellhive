@@ -7,14 +7,18 @@ const value = 'x'.repeat(1024);
 const results = [];
 const rounds = Number(process.env.PERF_ROUNDS || 2);
 if (!Number.isInteger(rounds) || rounds < 1 || rounds > 10) throw new Error('PERF_ROUNDS must be 1..10');
+const minSeconds = Number(process.env.PERF_MIN_SECONDS || 0);
+if (!Number.isFinite(minSeconds) || minSeconds < 0 || minSeconds > 60) throw new Error('PERF_MIN_SECONDS must be 0..60');
 async function measure(layer, mode, concurrency, n, round, label='warm') {
   const agent = new http.Agent({keepAlive:true, maxSockets:concurrency});
   let index=0, failures=0; const times=[], errors=[];
   const before=process.env.PERF_PEER?await commitCounts():null;
   const start=performance.now();
+  const until=start+(label==='warm'?minSeconds*1000:0);
   await Promise.all(Array.from({length:concurrency}, async()=>{
     for (;;) {
-      const i=index++; if(i>=n) break;
+      if(index>=n && performance.now()>=until) break;
+      const i=index++;
       const base=layer==='worker'?process.env.PERF_RUNTIME:layer==='forwarded'?process.env.PERF_PEER:process.env.PERF_AGENT;
       const path=layer!=='worker'?`/v1/kv/${mode}?ns=${encodeURIComponent(process.env.PERF_NS)}&key=k${i%32}`:`/${mode}?key=k${i%32}`;
       const headers=layer!=='worker'?{authorization:'Bearer '+token('scope',{ns:process.env.PERF_NS,kind:'kv',name:'KV'})}:{host:process.env.PERF_HOST};
@@ -39,7 +43,7 @@ async function measure(layer, mode, concurrency, n, round, label='warm') {
   }));
   const elapsed=performance.now()-start;agent.destroy();times.sort((a,b)=>a-b);
   const p=q=>times.length?+times[Math.min(times.length-1,Math.ceil(times.length*q)-1)].toFixed(3):null;
-  const result={layer,mode,label,round,concurrency,n,failures,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1),rps:+((n-failures)*1000/elapsed).toFixed(2),elapsed_ms:+elapsed.toFixed(2),errors};
+  const result={layer,mode,label,round,concurrency,n:index,minimum_requests:n,minimum_seconds:label==='warm'?minSeconds:0,failures,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1),rps:+((index-failures)*1000/elapsed).toFixed(2),elapsed_ms:+elapsed.toFixed(2),errors};
   if(before) { const after=await commitCounts(); result.commit_delta=Object.fromEntries(Object.keys(after).map(k=>[k,after[k]-(before[k]||0)])); }
   results.push(result);console.log(JSON.stringify(result));
   if(failures)throw new Error(`${layer}/${mode}: ${failures} failures`);
@@ -75,6 +79,12 @@ async function commitCounts() {
     if(!ready) throw new Error('no fleet acknowledgement after peer discovery');
   }
   await measure('direct','put',1,32,0,'preload');
+  if (process.env.PERF_IDLE_GAPS === '1') {
+    // Do not prime worker KV first: pinned worker authorization has its own
+    // refresh lifecycle and would hide direct-client idle misses temporarily.
+    await require('./kv-idle-performance.cjs')(value);
+    return;
+  }
   await measure('worker','get',1,1,0,'first-worker-read');
   if (process.env.PERF_PRIME_ENTRIES === '1' && process.env.PERF_PEER) {
     // Owner preloading does not warm a different entry node's routing metadata.
@@ -93,6 +103,10 @@ async function commitCounts() {
       await measure('worker','get',c,64,round);
     }
     await new Promise(r=>setTimeout(r,6000));
+    return;
+  }
+  if(process.env.PERF_WORKER_PUT_DIAG === '1') {
+    for(let round=1;round<=rounds;round++) await measure('worker','put',32,400,round);
     return;
   }
   for(let round=1;round<=rounds;round++) {

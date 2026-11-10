@@ -108,6 +108,9 @@ func TestPerKindResourceEndpoints(t *testing.T) {
 func TestPerKindStats(t *testing.T) {
 	ctx := context.Background()
 	s := newDomainServer(t)
+	for _, sc := range []cell.Scope{{Namespace: "acme", Class: "__kv__", ID: "KV"}, {Namespace: "acme", Class: "__d1__", ID: "DB"}, {Namespace: "acme", Class: "__queue__", ID: "Q"}, {Namespace: "acme", Class: "__workflow__", ID: "WF"}} {
+		claimSeededScope(t, s, sc)
+	}
 	admin := s.AdminHandler()
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
 

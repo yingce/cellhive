@@ -5,6 +5,7 @@ import (
 	"cellhive/internal/ltx"
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -23,6 +24,10 @@ type rangedCounter struct {
 	rangedGets  int
 	rangedBytes int64
 	getBytes    int64
+}
+
+func (c *rangedCounter) Stat(ctx context.Context, key string) (int64, string, error) {
+	return c.Bucket.(bucket.Statter).Stat(ctx, key)
 }
 
 func (c *rangedCounter) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
@@ -62,6 +67,11 @@ func (c *rangedCounter) bytes() int64 {
 
 // pfSource adapts replica.PageFetcher to pagedvfs.Source.
 type pfSource struct{ pf *replica.PageFetcher }
+
+func (p pfSource) TxID() uint64 { return p.pf.TxID() }
+func (p pfSource) ReadRun(pgno uint32, maxPages int) ([][]byte, error) {
+	return p.pf.ReadRun(context.Background(), pgno, maxPages)
+}
 
 func (p pfSource) PageSize() int { return int(p.pf.PageSize()) }
 func (p pfSource) Commit() int   { return int(p.pf.Commit()) }
@@ -110,7 +120,7 @@ func TestPagedCellAgentEndToEnd(t *testing.T) {
 	if err := c.CheckpointTruncate(ctx); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
-	pageSize, commit, pages, err := c.SnapshotPages(ctx)
+	watermark, pageSize, commit, pages, err := c.SnapshotConsistent(ctx)
 	if err != nil {
 		t.Fatalf("snapshot pages: %v", err)
 	}
@@ -122,10 +132,18 @@ func TestPagedCellAgentEndToEnd(t *testing.T) {
 	}
 
 	// Capture as one snapshot object and compact it so an L1 index exists.
-	if _, _, err := rep.Append(ctx, sc, epoch, snapshotSegment(t, epoch, pageSize, commit, pages)); err != nil {
+	ordered := make([]ltx.WALPage, 0, len(pages))
+	for pg := uint32(1); pg <= commit; pg++ {
+		ordered = append(ordered, ltx.WALPage{PageNo: pg, Data: pages[pg]})
+	}
+	native, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: 1, MaxTXID: watermark}, ordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rep.AppendLevel(ctx, sc, epoch, 0, native); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
-	if res, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1, GC: true}); err != nil || !res.Compacted {
+	if res, err := Compact(ctx, rep, sc, epoch, Options{MinSegments: 1}); err != nil || !res.Compacted {
 		t.Fatalf("compact: %+v, %v", res, err)
 	}
 	// Measure only the cold open from here: index + L0 metadata + faulted pages.
@@ -238,7 +256,7 @@ func TestL1SnapshotCompression(t *testing.T) {
 	for p := uint32(1); p <= commit; p++ {
 		sorted = append(sorted, ltx.WALPage{PageNo: p, Data: pages[p]})
 	}
-	payload, err := ltx.EncodeWALPageMap(pageSize, commit, 1, sorted)
+	payload, err := ltx.EncodeNativePages(ltx.NativeHeader{PageSize: pageSize, Commit: commit, MinTXID: 1, MaxTXID: 1}, sorted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,29 +265,23 @@ func TestL1SnapshotCompression(t *testing.T) {
 	if ratio >= 60 {
 		t.Fatalf("L1 payload = %d bytes, raw %d (%.1f%%): compression not effective", len(payload), raw, ratio)
 	}
-	// Every page must round-trip exactly (compressed or raw frames).
-	locs, err := ltx.PageLocs(payload)
-	if err != nil || len(locs) != int(commit) {
-		t.Fatalf("locs = %d, %v; want %d", len(locs), err, commit)
-	}
-	compressed := 0
-	for _, l := range locs {
-		if l.Codec == ltx.CodecLZ4 {
-			compressed++
-		}
-	}
-	if compressed == 0 {
-		t.Fatal("no frame compressed")
-	}
-	ps, cm, _, got, err := ltx.DecodeWALPageMap(payload)
-	if err != nil || ps != pageSize || cm != commit || len(got) != int(commit) {
-		t.Fatalf("decode = %d/%d/%d, %v", ps, cm, len(got), err)
+	// Every page must round-trip through the native frames and embedded index.
+	h, got, err := ltx.DecodeNativePages(payload)
+	if err != nil || h.PageSize != pageSize || h.Commit != commit || len(got) != int(commit) {
+		t.Fatalf("decode = %+v/%d, %v", h, len(got), err)
 	}
 	for i := range sorted {
 		if !bytes.Equal(got[i].Data, sorted[i].Data) {
 			t.Fatalf("page %d differs after compression", sorted[i].PageNo)
 		}
 	}
-	t.Logf("L1 snapshot: %d pages, %d -> %d bytes (%.1f%% of raw), %d compressed frames",
-		commit, raw, len(payload), ratio, compressed)
+	t.Logf("L1 snapshot: %d pages, %d -> %d bytes (%.1f%% of raw)",
+		commit, raw, len(payload), ratio)
+}
+
+func (b *rangedCounter) PutReader(ctx context.Context, key string, r io.ReadSeeker, size int64) (string, error) {
+	return b.Bucket.(bucket.StreamPutter).PutReader(ctx, key, r, size)
+}
+func (b *rangedCounter) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
+	return b.Bucket.(bucket.StreamReader).OpenReader(ctx, key)
 }

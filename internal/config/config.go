@@ -50,7 +50,7 @@ type Config struct {
 	PlacementAZ string
 
 	// MaxOpenCells caps the number of cached cell handles (0 = unlimited).
-	// The default is 64; the LRU sweeper closes excess handles.
+	// The default is 128; the LRU sweeper closes excess handles.
 	MaxOpenCells               int
 	HydrateParallel            int
 	HydrateInteractiveParallel int
@@ -291,10 +291,6 @@ type Config struct {
 	PagedReadAheadBytes int64
 	// PagedPrefetchWorkers bounds concurrent child prefetches.
 	PagedPrefetchWorkers int
-
-	// LTXCompression compresses page-map payloads (L1 snapshots, capture
-	// snapshots) with LZ4 (ADR-160). Disable to trade bucket bytes for CPU.
-	LTXCompression bool
 
 	// BundleGC removes content-addressed bundles no longer referenced by any
 	// worker version (ADR-110). Zero interval disables it; Grace is how long an
@@ -617,7 +613,6 @@ func FromEnv() Config {
 		PagedHydrateMBPS:             envInt("CELLHIVE_PAGED_HYDRATE_MBPS", 16),
 		PagedReadAheadBytes:          envBytes("CELLHIVE_PAGED_READAHEAD_BYTES", 1<<20),
 		PagedPrefetchWorkers:         envInt("CELLHIVE_PAGED_PREFETCH_WORKERS", 4),
-		LTXCompression:               envBool("CELLHIVE_LTX_COMPRESSION", true),
 		BundleGCInterval:             envDuration("CELLHIVE_BUNDLE_GC_INTERVAL", 0),
 		BundleGCGrace:                envDuration("CELLHIVE_BUNDLE_GC_GRACE", 24*time.Hour),
 		RESTAddr:                     env("CELLHIVE_REST_ADDR", ":7001"),
@@ -640,7 +635,7 @@ func FromEnv() Config {
 		RebalanceMaxMove:             envInt("CELLHIVE_REBALANCE_MAX_MOVE", 32),
 		PlacementWeight:              envInt("CELLHIVE_PLACEMENT_WEIGHT", 0),
 		PlacementAZ:                  env("CELLHIVE_PLACEMENT_AZ", ""),
-		MaxOpenCells:                 envInt("CELLHIVE_MAX_OPEN_CELLS", 32),
+		MaxOpenCells:                 envInt("CELLHIVE_MAX_OPEN_CELLS", 128),
 		HydrateParallel:              envInt("CELLHIVE_HYDRATE_PARALLEL", 2),
 		HydrateInteractiveParallel:   envInt("CELLHIVE_HYDRATE_INTERACTIVE", 2),
 		HydrateTimeout:               envDuration("CELLHIVE_HYDRATE_TIMEOUT", 30*time.Second),

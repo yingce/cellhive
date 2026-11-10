@@ -15,13 +15,14 @@ const maxOwnerRoutes = 4096
 
 // ownerRoute is a routing hint, never a replacement for the receiver's epoch
 // and liveness fences. Deadlines are fixed for foreign owners; only a local
-// route observed continuously within its safe lease window may be extended.
+// route bound to an uninterrupted local lease health revision may be extended.
 type ownerRoute struct {
-	owner      cell.Owner
-	etag       string
-	until      time.Time
-	wallExpiry int64
-	local      bool
+	owner         cell.Owner
+	etag          string
+	until         time.Time
+	wallExpiry    int64
+	local         bool
+	leaseRevision uint64
 }
 type routeFlight struct {
 	done  chan struct{}
@@ -54,11 +55,15 @@ func (m *Manager) ResolveRoute(ctx context.Context, s cell.Scope) (cell.Owner, s
 		now := time.Now()
 		if c, ok := m.routes[key]; ok {
 			valid := now.Before(c.until) && now.UnixMilli() < c.wallExpiry
-			if valid && c.local {
+			if c.local {
 				lm := m.localLease(c.owner)
-				valid = lm != nil && lm.Healthy(now)
+				var proof lease.HealthProof
+				if lm != nil {
+					proof = lm.HealthProof()
+				}
+				valid = proof.Healthy && proof.Revision == c.leaseRevision
 				if valid {
-					c.until = lm.HealthyUntil()
+					c.until = proof.Until
 					c.wallExpiry = c.until.UnixMilli()
 					m.routes[key] = c
 				}
@@ -95,11 +100,13 @@ func (m *Manager) ResolveRoute(ctx context.Context, s cell.Scope) (cell.Owner, s
 		m.routeFlights[key] = f
 		m.mu.Unlock()
 
-		// Sample the local lease before the bucket read. A delayed response must
-		// not be made reusable by a lease that was revived while that read waited.
+		// Sample the local lease revision before the bucket read. A delayed
+		// response cannot cross a gap, even if Publish restored health meanwhile.
 		var localUntil time.Time
+		var localProof lease.HealthProof
 		if lm, ok := m.LeaseView.(*lease.Manager); ok {
-			localUntil = lm.HealthyUntil()
+			localProof = lm.HealthProof()
+			localUntil = localProof.Until
 		}
 		issued := time.Now()
 		o, e, err := m.Resolve(ctx, s)
@@ -108,6 +115,7 @@ func (m *Manager) ResolveRoute(ctx context.Context, s cell.Scope) (cell.Owner, s
 			switch {
 			case m.localLease(o) != nil:
 				c.local = true
+				c.leaseRevision = localProof.Revision
 				c.until = localUntil
 				c.wallExpiry = localUntil.UnixMilli()
 			case o.Liveness == "node-lease" && m.LeaseView != nil:
@@ -134,8 +142,16 @@ func (m *Manager) ResolveRoute(ctx context.Context, s cell.Scope) (cell.Owner, s
 		// healthy publication cannot validate that pre-gap response, even for
 		// the current request (not merely its subsequent cache reuse).
 		retryLocal := false
-		if err == nil && c.local && !time.Now().Before(localUntil) {
-			retryLocal = m.localLease(o).Healthy(time.Now())
+		if err == nil && c.local {
+			proof := m.localLease(o).HealthProof()
+			if localProof.Healthy && proof.Healthy && proof.Revision == localProof.Revision {
+				c.until = proof.Until
+				c.wallExpiry = proof.Until.UnixMilli()
+			} else {
+				c.until = time.Time{}
+				c.wallExpiry = 0
+				retryLocal = proof.Healthy
+			}
 		}
 		m.mu.Lock()
 		current := m.cacheRev[key] == f.rev
@@ -145,11 +161,18 @@ func (m *Manager) ResolveRoute(ctx context.Context, s cell.Scope) (cell.Owner, s
 			}
 			if len(m.routes) >= maxOwnerRoutes {
 				for victim := range m.routes {
+					if m.guards[victim] > 0 {
+						continue
+					}
 					delete(m.routes, victim)
 					break
 				}
 			}
-			m.routes[key] = c
+			// All slots may be pinned by admitted requests. Return the fresh
+			// result uncached rather than invalidating their response proofs.
+			if len(m.routes) < maxOwnerRoutes {
+				m.routes[key] = c
+			}
 		}
 		f.owner, f.etag, f.err, f.retry = o, e, err, retryLocal
 		delete(m.routeFlights, key)
@@ -186,8 +209,11 @@ func (m *Manager) LocalReadGuard(sc cell.Scope) (func() bool, bool) {
 	rev := m.cacheRev[key]
 	epoch := m.cacheEpoch
 	lm := m.localLease(c.owner)
-	now := time.Now()
-	valid := ok && c.local && lm != nil && m.releasing[key] == 0 && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+	var proof lease.HealthProof
+	if lm != nil {
+		proof = lm.HealthProof()
+	}
+	valid := ok && c.local && lm != nil && m.releasing[key] == 0 && proof.Healthy && proof.Revision == c.leaseRevision
 	if valid {
 		if m.guards == nil {
 			m.guards = make(map[string]int)
@@ -203,8 +229,8 @@ func (m *Manager) LocalReadGuard(sc cell.Scope) (func() bool, bool) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		current, exists := m.routes[key]
-		now := time.Now()
-		valid := m.cacheEpoch == epoch && exists && current.owner == c.owner && m.cacheRev[key] == rev && m.releasing[key] == 0 && m.localLease(c.owner) == lm && now.Before(c.until) && now.UnixMilli() < c.wallExpiry && lm.Healthy(now)
+		proof := lm.HealthProof()
+		valid := m.cacheEpoch == epoch && exists && current.owner == c.owner && m.cacheRev[key] == rev && m.releasing[key] == 0 && m.localLease(c.owner) == lm && proof.Healthy && proof.Revision == c.leaseRevision
 		if !released {
 			m.releaseGuardLocked(key)
 			released = true

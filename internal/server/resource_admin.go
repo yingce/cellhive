@@ -216,9 +216,14 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 		return
 	}
 	if !ok {
-		if job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name); err == nil {
+		if _, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name); err == nil {
 			if err := s.capturedWrite(r.Context(), control.Scope(), func() error { return s.Control.DeleteResource(r.Context(), ns, kind, name, actorFor(r.Context())) }); err != nil {
-				writeErr(w, 503, "resource_revocation_failed", err.Error())
+				s.writeResourceRevocationError(w, r, ns, kind, name, err)
+				return
+			}
+			job, err := s.Control.ResourceCleanup(r.Context(), ns, kind, name)
+			if err != nil {
+				s.writeResourceRevocationError(w, r, ns, kind, name, err)
 				return
 			}
 			writeJSON(w, 200, map[string]any{"ok": true, "cleanup": job})
@@ -259,6 +264,10 @@ func (s *Server) doResourceDelete(w http.ResponseWriter, r *http.Request, kind s
 	}); err != nil {
 		if errors.Is(err, control.ErrResourceScopeShared) {
 			writeErr(w, 409, "resource_scope_shared", err.Error())
+			return
+		}
+		if kind == "kv" || kind == "queue" {
+			s.writeResourceRevocationError(w, r, ns, kind, name, err)
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "resource_delete_failed", err.Error())
@@ -304,4 +313,13 @@ func defaultResourceScope(ns, kind, name string) string {
 		return ""
 	}
 	return ns + "/__" + kind + "__/" + name
+}
+
+// A local pending row is useful retry identity, not evidence of a durable ACK.
+func (s *Server) writeResourceRevocationError(w http.ResponseWriter, r *http.Request, ns, kind, name string, err error) {
+	body := map[string]any{"error": "resource_revocation_failed", "message": err.Error()}
+	if job, lookupErr := s.Control.ResourceCleanup(r.Context(), ns, kind, name); lookupErr == nil {
+		body["cleanup"] = job
+	}
+	writeJSON(w, http.StatusServiceUnavailable, body)
 }

@@ -44,8 +44,8 @@ A_REST_PORT=${A_REST_PORT:-$PORT_BASE}
 A_ADMIN_PORT=${A_ADMIN_PORT:-$((PORT_BASE + 1))}
 B_REST_PORT=${B_REST_PORT:-$((PORT_BASE + 2))}
 B_ADMIN_PORT=${B_ADMIN_PORT:-$((PORT_BASE + 3))}
-COS_BUCKET_URL=cos://vwork-e2e-hk-1376795072
-COS_BUCKET_ENDPOINT=https://vwork-e2e-hk-1376795072.cos.ap-hongkong.myqcloud.com
+COS_BUCKET_URL=cos://cellhive-e2e-hk-1376795072
+COS_BUCKET_ENDPOINT=https://cellhive-e2e-hk-1376795072.cos.ap-hongkong.myqcloud.com
 TMP=$(mktemp -d /tmp/cellhive-cold-e2e.XXXXXX)
 RUN_ID="e2e-cold-$(date +%s)-$(openssl rand -hex 3)"
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost

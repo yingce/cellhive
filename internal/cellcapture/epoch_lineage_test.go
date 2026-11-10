@@ -8,6 +8,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/ltx"
 )
 
 func TestLargeCrossEpochResumeRequiresMarker(t *testing.T) {
@@ -36,7 +37,8 @@ func TestLargeCrossEpochResumeRequiresMarker(t *testing.T) {
 			m := &Manager{EpochSnapshotMaxBytes: 1,
 				HasEpoch: func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil },
 				Durable:  func(context.Context, cell.Scope, uint64) (uint64, error) { return tx, nil },
-				WriteMarker: func(_ context.Context, _ cell.Scope, epoch, cut uint64) error {
+				WriteContinuation: func(_ context.Context, _ cell.Scope, epoch uint64, header ltx.NativeHeader) error {
+					cut := header.MinTXID - 1
 					called = true
 					if epoch != 2 || cut != tx {
 						t.Fatalf("marker %d/%d", epoch, cut)
