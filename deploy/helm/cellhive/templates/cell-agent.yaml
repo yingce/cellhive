@@ -16,6 +16,39 @@ spec:
     - {name: rest, port: 7001, targetPort: 7001}
     - {name: admin, port: 8082, targetPort: 8082}
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-cell-agent-api
+  labels:
+    {{- include "cellhive.labels" . | nindent 4 }}
+    app: cell-agent
+spec:
+  selector:
+    app: cell-agent
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - {name: rest, port: 7001, targetPort: 7001}
+{{- range $i, $_ := until (int .Values.cellAgent.replicas) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-cell-agent-{{ $i }}-endpoint
+  labels:
+    {{- include "cellhive.labels" $ | nindent 4 }}
+    app: cell-agent
+spec:
+  # Peer recovery must reach a starting node before business readiness.
+  publishNotReadyAddresses: true
+  selector:
+    app: cell-agent
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    statefulset.kubernetes.io/pod-name: {{ $.Release.Name }}-cell-agent-{{ $i }}
+  ports:
+    - {name: rest, port: 7001, targetPort: 7001}
+{{- end }}
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -94,9 +127,9 @@ spec:
             # Stable Pod DNS, not the ephemeral Pod IP: owner records and
             # takeover recovery survive a StatefulSet restart with a new IP.
             - name: CELLHIVE_ADVERTISE
-              value: $(POD_NAME).{{ .Release.Name }}-cell-agent.{{ .Release.Namespace }}.svc.cluster.local:7001
+              value: $(POD_NAME)-endpoint.{{ .Release.Namespace }}.svc.cluster.local:7001
             - name: CELLHIVE_PEER_URL
-              value: http://$(POD_NAME).{{ .Release.Name }}-cell-agent.{{ .Release.Namespace }}.svc.cluster.local:7001
+              value: http://$(POD_NAME)-endpoint.{{ .Release.Namespace }}.svc.cluster.local:7001
           ports:
             - {name: rest, containerPort: 7001}
             - {name: admin, containerPort: 8082}

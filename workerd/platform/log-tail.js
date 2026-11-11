@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { fileLog } from "telemetry.js";
 import { authorized, internalHeaders } from "jwt.js";
 
 // A stuck control-plane read must not pin workerd's shared HTTP client's old
@@ -140,6 +141,7 @@ function eventRecords(events, props) {
       ? { id: String(nativeVersion.id), name: props.worker, tags: nativeVersion.tag ? [nativeVersion.tag] : [] }
       : { id: String(props.version || 0), name: props.worker, tags: [] };
     return {
+      file_exported: item.file_exported === true,
       scriptName: props.worker,
       scriptVersion: version,
       outcome: item.outcome || "unknown",
@@ -164,6 +166,33 @@ function eventRecords(events, props) {
       traceparent,
     };
   });
+}
+
+function exportTailRecords(env, props, records) {
+  for (const event of eventRecords(records, props)) {
+    const request = event.event?.request;
+    let path = "";
+    try { path = new URL(request?.url || "").pathname; } catch (_) {}
+    const attrs = {
+      "cellhive.namespace":props.namespace, "cellhive.worker":props.worker,
+      "cellhive.event_type":event.event_type, "cellhive.request_id":event.requestId,
+      "cellhive.outcome":event.outcome, "cellhive.script_version":JSON.stringify(event.scriptVersion),
+      "cellhive.resource":event.durableObjectId || "", "cellhive.method":request?.method || "",
+      "cellhive.path":path, "cellhive.exceptions":JSON.stringify(event.exceptions),
+    };
+    if (event.event?.response?.status) attrs["cellhive.status"] = event.event.response.status;
+    if (event.started_ms) attrs["cellhive.started_ms"] = event.started_ms;
+    if (event.finished_ms) attrs["cellhive.finished_ms"] = event.finished_ms;
+    // Public fetch summaries already come from the loader. DO has no loader
+    // summary, so its Tail invocation still needs export.
+    if (event.event_type !== "fetch" || event.durableObjectId) {
+      fileLog(env, {...attrs,"cellhive.invocation":true}, "invocation",
+        event.outcome==="ok"?"info":"error", event.finished_ms || event.eventTimestamp, event.traceparent);
+    }
+    for (const line of event.logs) fileLog(env, {...attrs,"cellhive.message_args":JSON.stringify(line.message)},
+      line.message.map(formatValue).join(" "),line.level,line.timestamp,event.traceparent);
+    for (const error of event.exceptions) fileLog(env,attrs,`${error.name}: ${error.message}`,"error",error.timestamp,event.traceparent);
+  }
 }
 
 // Each host service has its own bounded ring. Tail writes only JS memory; the
@@ -251,6 +280,10 @@ export class TenantTail extends WorkerEntrypoint {
       ...item,
       ...(Number.isSafeInteger(item.finished_ms) && item.finished_ms > 0 ? {} : { finished_ms: receivedAt }),
     }));
+    if (this.env.FILE_LOG_TOKEN) {
+      exportTailRecords(this.env, props, kept);
+      for (const item of kept) item.file_exported = true;
+    }
     if (kept.length) storeRecords(props.namespace, props.worker, kept, props);
   }
 }

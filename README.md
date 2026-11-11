@@ -43,14 +43,19 @@
 
 ![CellHive architecture](./docs/assets/architecture-workerd-fork.png)
 
+[Editable SVG](./docs/assets/architecture-workerd-fork.svg) · [Standalone view](./docs/assets/architecture-workerd-fork.html)
+
 | Component | Runtime | Ports | Role |
 |---|---|---|---|
 | **Traefik / edge proxy** | external | 80/443 | TLS + host routing (statically configured by the operator) |
 | **`user-runtime`** | Go + cellhive-workerd fork | `:8081` public, `:8088` internal | Entry loader: host/version routing and tenant execution |
-| **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | Native Durable Objects (facets); elastic; holds a working copy, not the authority |
-| **`do-supervisor`** (gated mode) | Go | `:18901` | DO-only output gate and PID1; replaces the default `do-runtime` supervisor in the RPO=0 production profile |
+| **`do-runtime`** | Go + cellhive-workerd fork | `:8788`, `:18901` output gate | Renders configuration, supervises native DOs, renews leases, serves paging, and gates responses on durability; local SQLite is a working copy |
 | **`cell-agent`** | Go | `:7001` internal REST, `:8082` admin | Cell storage + replication + owner/epoch leases + control plane + timer dispatch + the **only** object-store credentials |
 | **Object storage** | S3-compatible | — | Authority for cell state, worker bundles and assets |
+
+**Runtime processes.** Both runtimes have one Go entrypoint that generates Cap’n Proto configuration and supervises workerd children. `user-runtime` manages its worker process pool; `do-runtime` integrates the DO supervisor, output gate, paging and shutdown/drain lifecycle. There is no separate `do-supervisor` executable or render-then-exec shell script. `do-runtime` enables the durability gate by default; `-gate=false` is only for isolated tests without an RPO=0 guarantee. `-render-only` generates diagnostic configuration without starting services. Existing gated Service/StatefulSet names are retained to preserve routing and volume identity.
+
+**Runtime telemetry.** Trusted host logs and sampled spans enter bounded local files through the Go parent. Go batches OTLP to the centralized CellHive Vector; no Vector sidecar is required. `cell-agent` exports its telemetry to the same collector. Telemetry is best effort and never replaces or bypasses the synchronous business durability gate.
 
 **State model.** Every unit of state is a **cell** (`<namespace>/<class>/<id>`) backed by its own SQLite database. KV namespaces, queues, D1 databases, workflows and Durable Objects are all cells, so they share one lease, replication and failover story. Committed SQLite writes are captured as **LTX** and replicated to peers; a **conditional bucket write** elects the owner, and an **ownership epoch** fences writers. A single node proves durability by uploading to the bucket; a fleet proves it sooner by having peers hold the data (quorum-1 fsync). Ownership moves with a recovered log, so no acknowledged write is lost.
 
@@ -105,7 +110,7 @@ cd cli && bun install && bun run src/index.ts dev <dir>
 ## Repository layout
 
 ```
-cmd/        service and tool entrypoints (cell-agent, cellhive, user-runtime, do-runtime, do-supervisor, benches)
+cmd/        service and tool entrypoints (cell-agent, cellhive, user-runtime, do-runtime, benches)
 internal/   reusable Go packages (cellstore, bucket, owner, lease, replica, ltx, server, control, ...)
 workerd/    workerd JS platform code + capnp configs (user-runtime/, do-runtime/, platform/)
 cli/        dev CLI (Bun + Miniflare; dev-only)

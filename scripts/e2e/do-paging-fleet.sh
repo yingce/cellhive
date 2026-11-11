@@ -2,7 +2,7 @@
 # Two real agents + two supervised native runtimes; no owner stub or manual SyncAll.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-for binary in do-runtime do-supervisor; do
+for binary in do-runtime; do
   [[ -x "$E2E_BIN/$binary" ]] || e2e_fail "missing $binary; build current worktree first"
 done
 "$CELLHIVE_WORKERD" cellhive-build-info | grep -qx 'do-paging/1' || e2e_fail 'paging fork required'
@@ -32,15 +32,14 @@ start_do() { # name port gate-port state-directory
       CELLHIVE_CELL_URL="http://127.0.0.1:$E2E_AGENT_PORT" \
       CELLHIVE_DO_ADDR="127.0.0.1:$port" CELLHIVE_DO_NODE="e2epaging-$name" \
       CELLHIVE_DO_ADVERTISE="http://127.0.0.1:$port" \
-      CELLHIVE_DATA_DIR="$state" CELLHIVE_RUNTIME_DIR="$state/render" \
+      CELLHIVE_LOG_DIR="$state/logs" CELLHIVE_DATA_DIR="$state" CELLHIVE_RUNTIME_DIR="$state/render" \
       CELLHIVE_DO_RUNTIME_JS="$E2E_ROOT/workerd/do-runtime" \
       CELLHIVE_DO_GATE_URL="http://127.0.0.1:$gate" \
       E2E_DO_GATE="$gate" E2E_DO_PORT="$port" E2E_DO_SCOPE="e2epaging/__do__" \
       setsid bash -c '
-        cfg=$("$E2E_BIN/do-runtime" -render-only)
-        exec "$E2E_BIN/do-supervisor" -workerd "$CELLHIVE_WORKERD" -config "$cfg" \
-          -dir "$CELLHIVE_DATA_DIR/do" -scope-prefix "$E2E_DO_SCOPE" -listen "127.0.0.1:$E2E_DO_GATE" \
-          -do-url "http://127.0.0.1:$E2E_DO_PORT" -owner "$CELLHIVE_CELL_URL"
+
+        exec "$E2E_BIN/do-runtime" \
+          -scope-prefix "$E2E_DO_SCOPE" -listen "127.0.0.1:$E2E_DO_GATE"
       ' > "$E2E_BASE/$name.log" 2>&1 &
   echo $! > "$E2E_BASE/$name.pid"
   e2e_wait_http "http://127.0.0.1:$port/ready" 120 || e2e_fail "$name not ready"

@@ -1,9 +1,9 @@
-// Command do-supervisor captures a do-runtime's on-disk SQLite files (host actor
+// The integrated DO supervisor captures a do-runtime's on-disk SQLite files (host actor
 // + facet files) as LTX and gates do-runtime responses on cell-agent durability
 // (ADR-083). It discovers facets by parsing workerd's <hosthash>.facets table and
 // can cold-restore a captured shard through cell-agent, holding no bucket
 // credentials itself (ADR-084).
-package main
+package doruntimeapp
 
 import (
 	"cellhive/internal/bucket"
@@ -12,13 +12,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,26 +30,26 @@ import (
 	"cellhive/internal/telemetry"
 )
 
-func main() {
-	listen := flag.String("listen", ":18901", "HTTP listen address for /sync-all")
-	dir := flag.String("dir", "", "do-runtime data dir (contains the host-actor sqlite files)")
-	scopePrefix := flag.String("scope-prefix", "workerd/__do__", "scope namespace/class for derived capture scopes")
-	epoch := flag.Uint64("epoch", 1, "standalone capture epoch; claimed DOs use their shard owner epoch")
-	owner := flag.String("owner", "http://127.0.0.1:7001", "owner cell-agent URL")
-	follower := flag.String("follower", "", "comma-separated follower URLs")
-	token := flag.String("token", cellcfg.DeriveCredentials(cellcfg.LoadRootKey()).Internal, "canonical base64url internal JWT signing key (default derived from CELLHIVE_ROOT_KEY)")
-	restore := flag.Bool("restore", false, "cold-restore captured shard files into -dir via cell-agent, then exit")
-	restoreIfPresent := flag.Bool("restore-if-present", false, "cold-restore captured files when a manifest exists, then exit")
-	restoreObj := flag.String("restore-object", "", "with -restore: restore only one object as storage_id/class/name (per-object cold start)")
-	workerdBin := flag.String("workerd", "", "workerd binary to spawn/supervise (empty: auto-detect)")
-	config := flag.String("config", "", "workerd capnp config to spawn/supervise (empty: do not spawn)")
-	doURL := flag.String("do-url", "http://127.0.0.1:8788", "local do-runtime URL for lease renew/drain while supervising workerd")
-	flag.Parse()
+type supervisorOptions struct {
+	Listen, ScopePrefix, Followers, RestoreObject string
+	Epoch                                         uint64
+	Restore, RestoreIfPresent                     bool
+}
+
+func runSupervisor(runtimeCfg doruntime.Config, configPath string, opts supervisorOptions) {
+	listen, dir, scopePrefix, epoch := &opts.Listen, &runtimeCfg.DiskDir, &opts.ScopePrefix, &opts.Epoch
+	owner, token := &runtimeCfg.CellURL, &runtimeCfg.CellToken
+	follower := &opts.Followers
+	restore, restoreIfPresent, restoreObj := &opts.Restore, &opts.RestoreIfPresent, &opts.RestoreObject
+	workerdValue := os.Getenv("CELLHIVE_WORKERD")
+	workerdBin, config := &workerdValue, &configPath
+	doURLValue := localURL(runtimeCfg.Addr)
+	doURL := &doURLValue
 
 	if *dir == "" {
-		log.Fatal("-dir is required")
+		log.Fatal("runtime disk directory is required")
 	}
-	logger := log.New(os.Stderr, "do-supervisor ", log.LstdFlags)
+	logger := log.New(os.Stderr, "do-runtime ", log.LstdFlags)
 	agent := &dosupervisor.HTTPStore{Base: *owner, Token: *token}
 
 	if *restore || *restoreIfPresent {
@@ -123,7 +123,7 @@ func main() {
 	acfg := cellcfg.FromEnv()
 	svc := acfg.ServiceName
 	if os.Getenv("CELLHIVE_SERVICE_NAME") == "" {
-		svc = "cellhive-do-supervisor"
+		svc = "cellhive-do-supervisor" // Preserve the existing telemetry service identity.
 	}
 	tel, terr := telemetry.New(ctx, telemetry.Config{
 		Endpoint: acfg.OTLPEndpoint, Headers: acfg.OTLPHeaders,
@@ -182,18 +182,22 @@ func main() {
 				stop()
 			}
 		}()
-		creds := cellcfg.DeriveCredentials(cellcfg.LoadRootKey())
-		childEnv, err := doruntime.WorkerdEnv(doruntime.Config{
-			CellURL:           *owner,
-			CellToken:         *token,
-			BindingSigningKey: creds.Binding,
-			DoTicketSecret:    creds.DoTicket,
-			LogToken:          creds.Log,
-			AIURL:             os.Getenv("CELLHIVE_AI_URL"),
-			AIKey:             os.Getenv("CELLHIVE_AI_KEY"),
-			GateURL:           os.Getenv("CELLHIVE_DO_GATE_URL"),
-			PagingLifecycle:   true,
-		})
+		logDir := os.Getenv("CELLHIVE_LOG_DIR")
+		if logDir == "" {
+			logDir = filepath.Join(runtimeRoot(), "logs")
+		}
+		spool, err := runtimelog.OpenSpool(runtimelog.SpoolConfig{Dir: logDir, Stream: "do-runtime", Endpoint: os.Getenv("CELLHIVE_OTLP_ENDPOINT")})
+		if err != nil {
+			log.Fatalf("open log spool: %v", err)
+		}
+		defer func() {
+			c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = spool.Close(c)
+		}()
+		runtimeCfg.LogSpool = spool
+		runtimeCfg.PagingLifecycle = true
+		childEnv, err := doruntime.WorkerdEnv(runtimeCfg)
 		if err != nil {
 			log.Fatalf("build workerd environment: %v", err)
 		}
@@ -208,7 +212,7 @@ func main() {
 			<-childExited // join before paging.Close or any remaining lease teardown
 		}()
 		go func() {
-			err := waitForChild(func() error { return doruntime.Run(runCtx, bin, *config, childEnv) },
+			err := waitForChild(func() error { return doruntime.Run(runtimelog.WithSpool(runCtx, spool), bin, *config, childEnv) },
 				s.OwnerLeases.Close, childExited)
 			if runCtx.Err() == nil {
 				log.Printf("workerd exited: %v", err)
@@ -220,7 +224,7 @@ func main() {
 		// renew the DO owner leases and drain on shutdown (ADR-078/083).
 		// Gated hosts negotiate independent Go renewal at restore/claim time.
 		// Ungated runtimes retain the local workerd lifecycle endpoint.
-		if os.Getenv("CELLHIVE_DO_GATE_URL") == "" {
+		if runtimeCfg.GateURL == "" {
 			go doruntime.RenewLoop(ctx, *doURL, *token, doruntime.RenewEvery,
 				func(err error) { log.Printf("do renew failed: %v", err) })
 		}
@@ -231,7 +235,7 @@ func main() {
 
 	srv := &http.Server{Addr: *listen, Handler: s.Handler()}
 	go func() {
-		err := shutdownAfter(ctx, drain, cancelRun)
+		err := gatedShutdownAfter(ctx, drain, cancelRun)
 		if err != nil {
 			log.Printf("do drain failed; relying on lease expiry: %v", err)
 		} else if drain != nil {
@@ -241,7 +245,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	log.Printf("do-supervisor listening %s dir=%s owner=%s", *listen, *dir, *owner)
+	log.Printf("do-runtime gate listening %s dir=%s owner=%s", *listen, *dir, *owner)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -249,7 +253,7 @@ func main() {
 
 // shutdownAfter keeps workerd alive while the host actor drains in-flight work
 // and releases leases. cancelRun stops it only after drain finishes or times out.
-func shutdownAfter(signalCtx context.Context, drain func() error, cancelRun context.CancelFunc) error {
+func gatedShutdownAfter(signalCtx context.Context, drain func() error, cancelRun context.CancelFunc) error {
 	<-signalCtx.Done()
 	var err error
 	if drain != nil {

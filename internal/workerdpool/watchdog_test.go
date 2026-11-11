@@ -130,3 +130,71 @@ func TestExitSubscriberCannotPreventClose(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWatchdogDrainsInflightBeforeKill(t *testing.T) {
+	for _, finish := range []bool{true, false} {
+		t.Run(strconv.FormatBool(finish), func(t *testing.T) {
+			done := make(chan error, 1)
+			killed := make(chan struct{})
+			var admitted atomic.Bool
+			var once atomic.Bool
+			s := &Supervisor{Pool: &Pool{Config: Config{MaxSlots: 1}}, DrainGrace: 200 * time.Millisecond,
+				Watchdog: WatchdogConfig{Interval: time.Millisecond, ProbeTimeout: time.Millisecond, Failures: 1},
+				Launcher: LauncherFunc(func(context.Context, Slot) (*Handle, error) {
+					return &Handle{Done: done, Probe: func(context.Context) error {
+						if !admitted.Load() {
+							return nil
+						}
+						return ErrUnhealthy
+					}, Kill: func() error {
+						if once.CompareAndSwap(false, true) {
+							close(killed)
+							done <- nil
+						}
+						return nil
+					}}, nil
+				})}
+			slot, err := s.Start(context.Background(), FunctionKey{}, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := s.Pool.Select(FunctionKey{}, time.Now()); !ok {
+				t.Fatal("admission failed")
+			}
+			defer s.Close(context.Background())
+			admitted.Store(true)
+			deadline := time.After(time.Second)
+			for {
+				slots := s.Pool.Slots()
+				if len(slots) == 0 {
+					t.Fatal("killed active generation before drain completed")
+				}
+				if slots[0].Draining {
+					break
+				}
+				select {
+				case <-deadline:
+					t.Fatal("not drained")
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			select {
+			case <-killed:
+				t.Fatal("killed active request immediately")
+			case <-time.After(20 * time.Millisecond):
+			}
+			if _, ok := s.Pool.Select(FunctionKey{}, time.Now()); ok {
+				t.Fatal("draining generation admitted request")
+			}
+			if finish {
+				s.Pool.Release(slot.ID, slot.Generation, time.Now())
+			}
+			select {
+			case <-killed:
+			case <-time.After(time.Second):
+				t.Fatal("failed to bound termination")
+			}
+		})
+	}
+}

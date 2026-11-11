@@ -15,6 +15,8 @@ import (
 
 type Ports struct{ Public, Internal int }
 type Prepared struct {
+	Output io.Writer
+
 	Binary, ConfigPath, Dir string
 	// Env must be an explicit allowlisted workerd environment. Nil is empty,
 	// never the supervisor's inherited environment.
@@ -80,6 +82,9 @@ func (l WorkerdLauncher) Start(ctx context.Context, s Slot) (*Handle, error) {
 	cmd.Env = append([]string{}, prepared.Env...)
 	cmd.ExtraFiles = []*os.File{pubFile, intFile}
 	logOut := teeWriter(log, l.LogWriter)
+	if prepared.Output != nil {
+		logOut = prepared.Output
+	}
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	if err = cmd.Start(); err != nil {
@@ -101,6 +106,7 @@ func (l WorkerdLauncher) Start(ctx context.Context, s Slot) (*Handle, error) {
 		if err != nil {
 			return err
 		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("workerdpool: health HTTP %d", resp.StatusCode)

@@ -18,6 +18,7 @@ import (
 	"text/template"
 
 	"cellhive/internal/runtimeenv"
+	"cellhive/internal/runtimelog"
 	"cellhive/internal/workerdbin"
 )
 
@@ -44,6 +45,8 @@ func (c Config) OutboundAllowList() string {
 
 // Config configures one do-runtime instance.
 type Config struct {
+	LogSpool *runtimelog.Spool
+
 	// CellURL/CellToken are the cell-agent base URL and internal-role token
 	// (used to fetch tenant bundles and to authenticate /v1/do/invoke).
 	CellURL           string
@@ -140,6 +143,7 @@ const config :Workerd.Config = (
         (name = "AI_URL", fromEnvironment = "CELLHIVE_HOST_AI_URL"),
         (name = "AI_KEY", fromEnvironment = "CELLHIVE_HOST_AI_KEY"),
         (name = "LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_LOG_TOKEN"),
+        (name = "FILE_LOG_TOKEN", fromEnvironment = "CELLHIVE_HOST_FILE_LOG_TOKEN"),
         (name = "CH_LOG_CAPTURE", text = "{{if .DisableTenantLogs}}0{{else}}1{{end}}"),
         (name = "CH_TAIL_CAPTURE", text = "{{.TailCapture}}"),
         (name = "LOG_CAPTURE_URLS", text = {{.LogCaptureURLsJSON}}),
@@ -239,6 +243,7 @@ func WorkerdEnv(cfg Config) ([]string, error) {
 		"CELLHIVE_HOST_CELL_TOKEN":          cfg.CellToken,
 		"CELLHIVE_HOST_BINDING_SIGNING_KEY": cfg.BindingSigningKey,
 		"CELLHIVE_HOST_CELL_URL":            cfg.CellURL,
+		"CELLHIVE_HOST_FILE_LOG_TOKEN":      cfg.LogSpool.Token(),
 		"CELLHIVE_HOST_LOG_TOKEN":           cfg.LogToken,
 		"CELLHIVE_HOST_DO_TICKET_SECRET":    cfg.DoTicketSecret,
 		"CELLHIVE_HOST_GATE_URL":            cfg.GateURL,
@@ -276,6 +281,9 @@ func Run(ctx context.Context, workerdBin, capnpPath string, supplied ...[]string
 	cmd.Env = append(make([]string, 0, len(childEnv)), childEnv...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if output := runtimelog.Output(ctx); output != nil {
+		cmd.Stdout, cmd.Stderr = output, output
+	}
 	return cmd.Run()
 }
 

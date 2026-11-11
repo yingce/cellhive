@@ -27,3 +27,15 @@ uses authenticated, filtered `/v1/control/metrics`; admin-listener full `/metric
 requires admin or a namespace JWT explicitly granting `*`. Issuer registry CRUD
 remains bootstrap-admin-only even for wildcard issuers. See
 `../../observability/README.md`.
+
+### Runtime logs
+
+With telemetry enabled, `telemetry.fileLogs.enabled=true` mounts a bounded
+emptyDir for Go-owned rotating telemetry files and acknowledged offsets. No
+Vector sidecar is installed. The runtime forwards logs/spans in OTLP batches to
+`CELLHIVE_OTLP_ENDPOINT` from the existing Secret (CellHive Vector port4318).
+Container restart preserves the files; Pod deletion can lose telemetry.
+
+DO workloads now execute `do-runtime` directly: the same Go process renders and supervises workerd, including the durable output gate. Existing workload names and PVCs are retained. `doRuntime.gate=false` explicitly selects the non-durable test path.
+
+Agent routing uses a ready-only `-cell-agent-api` ClusterIP for ordinary calls and ordinal-specific `-cell-agent-N-endpoint` ClusterIPs for directed access. The original headless Service remains for StatefulSet discovery. Do not delete/recreate these Services during normal rollout: their stable IPs prevent long-lived workerd clients retaining retired Pod IPs. Per-node endpoints permit startup peer recovery before readiness; session/epoch checks continue to enforce authority.

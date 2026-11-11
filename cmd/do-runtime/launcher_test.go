@@ -124,7 +124,7 @@ export class Tenant extends DurableObject {
 		t.Fatal(err)
 	}
 	base := "http://" + addr
-	cmd := exec.Command(binary)
+	cmd := exec.Command(binary, "-gate=false")
 	cmd.Dir = root
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),

@@ -1,6 +1,7 @@
 # Observability pipeline (reference)
 
-CellHive **pushes** logs and traces over OTLP/HTTP; metrics are exposed in
+Runtime logs use local rotating files and Vector batch forwarding. Cell-agent
+logs and trace spans still use OTLP/HTTP; metrics are exposed in
 Prometheus text on each process. This directory holds a reference pipeline that
 keeps the platform's query surface off the public network and lets a backend own
 storage, retention, query and **tenant-facing auth**.
@@ -183,3 +184,24 @@ Prometheus pull exception.
   cheapest way to give a tenant logs on demand without exporting everything.
 - Tail sampling keeps all errors and slow requests, so low head-sample ratios
   are safe for correctness investigation.
+
+## Runtime Go collection (2026-11-11, not yet deployed)
+
+Trusted host logs and sampled spans enter the supervisor's bounded local spool.
+Go reads complete records in batches (128 records / approximately256KiB), sends
+OTLP protobuf to `CELLHIVE_OTLP_ENDPOINT`, and persists acknowledged file offsets.
+Use `http://cellhive-vector:4318`; no native port6000 or Vector sidecar is needed.
+Cell-agent retains its Go OTLP exporter to the same collector. VWork is untouched.
+
+`CELLHIVE_LOG_DIR` defaults to `.cellhive/logs`; Helm uses `/var/log/cellhive` on
+an emptyDir. Eight16MiB files bound retention; queue capacity256 bounds pending
+writes. Requests never wait for the collector. The exporter has one in-flight
+request,3second header/body deadline,64KiB response cap and1–30second retry backoff.
+Offsets survive container restart; Pod deletion and retention eviction lose
+telemetry. A crash before checkpoint or a mixed batch partial delivery can cause
+replay. OTLP partial rejection is counted and not retried. Runtime diagnostics
+stay local and are not attributed to tenants. Stats expose Written/Dropped/Errors
+and EvictedFiles (file evictions, possibly including unconsumed records).
+
+Deploy the Go exporter and the collector configuration together after acceptance.
+Earlier sidecar acceptance evidence is historical, not proof of this revision.

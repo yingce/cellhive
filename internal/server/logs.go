@@ -158,6 +158,8 @@ func (s *Server) recordTailEventWithExport(ns, worker string, event logbuf.TailE
 	if finishedMs == 0 {
 		finishedMs = event.EventTimestamp
 	}
+	// File export is best-effort and independent of live Tail reads.
+	export = export && !event.FileExported
 	method, path, route, status := routeFromTailEvent(event)
 	meta := telemetry.LogMetadata{EventType: event.EventType, ScriptVersion: event.ScriptVersion, RequestID: event.RequestID, Method: method, Path: path, Route: route, Status: status, StartedMs: event.StartedMs, FinishedMs: finishedMs, Outcome: event.Outcome}
 	if len(event.Exceptions) > 0 {

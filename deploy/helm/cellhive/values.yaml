@@ -17,6 +17,8 @@ rootKey: ""
 existingSecret: ""
 
 telemetry:
+  fileLogs:
+    enabled: true
   # Enable OTLP traces using CELLHIVE_OTLP_ENDPOINT from existingSecret.
   # Keep credential-bearing collector URLs out of values and ConfigMaps.
   enabled: false

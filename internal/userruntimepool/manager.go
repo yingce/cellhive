@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,7 +64,11 @@ func NewManager(parent context.Context, bin, dir string, cfg userruntime.Config,
 			return workerdpool.Prepared{}, err
 		}
 		env, err := userruntime.WorkerdEnv(child)
-		return workerdpool.Prepared{Binary: bin, ConfigPath: path, Dir: root, Env: env}, err
+		prepared := workerdpool.Prepared{Binary: bin, ConfigPath: path, Dir: root, Env: env}
+		if cfg.LogSpool != nil {
+			prepared.Output = cfg.LogSpool.Writer()
+		}
+		return prepared, err
 	}}
 	m.Supervisor = s
 	if _, err := s.Start(ctx, workerdpool.FunctionKey{}, time.Now()); err != nil {
@@ -140,7 +145,8 @@ func (m *Manager) control() {
 			return
 		case <-ticker.C:
 			m.reconcile()
-		case <-m.Supervisor.Events:
+		case ev := <-m.Supervisor.Events:
+			log.Printf("workerd exit slot=%s generation=%d reason=%v error=%v", ev.Slot.ID, ev.Slot.Generation, ev.Reason, ev.Err)
 			// Do not replay interrupted calls. Next request will reacquire another
 			// healthy generation or start one within admission limits.
 		}

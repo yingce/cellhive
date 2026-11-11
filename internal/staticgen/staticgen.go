@@ -6,6 +6,7 @@ package staticgen
 
 import (
 	"bytes"
+	"cellhive/internal/runtimelog"
 	"context"
 	"encoding/json"
 	"errors"
@@ -281,6 +282,9 @@ func (m *Manager) Apply(ctx context.Context, plan *Plan) error {
 	}
 	next := &generation{dir: dir, plan: validated, ports: ports, routeBy: routeBy, addrBySvc: routeBy, exited: make(chan struct{})}
 	next.cmd = exec.CommandContext(ctx, m.cfg.WorkerdBin, "serve", configPath)
+	if output := runtimelog.Output(ctx); output != nil {
+		next.cmd.Stdout, next.cmd.Stderr = output, output
+	}
 	if err := next.cmd.Start(); err != nil {
 		return fmt.Errorf("staticgen: start workerd: %w", err)
 	}

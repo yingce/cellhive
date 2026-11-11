@@ -24,7 +24,7 @@ import {
   MAX_DO_ENVELOPE_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS,
 } from "rpc-codec.js";
-import { startSpan, endSpan, flushSpans, traceparentForSpan } from "telemetry.js";
+import { startSpan, endSpan, flushSpans, traceparentForSpan, postTelemetry } from "telemetry.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
 import { CountLRU, cacheSource, sourceCache, quotaSource } from "lifecycle.js";
 
@@ -122,7 +122,7 @@ async function reportDoStats(env) {
   doStatsReported.wsNet = wsNet;
   if (!delta.alarms_ok && !delta.alarms_error && !delta.gate_timeouts && !delta.ws_sessions) return;
   try {
-    await fetch(base.replace(/\/$/, "") + "/internal/do/stats", {
+    await postTelemetry(base.replace(/\/$/, "") + "/internal/do/stats", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(delta),
@@ -218,6 +218,11 @@ async function refreshLogCapture(env) {
 
 function tailEnabled(env, ns, worker) {
   if (env.CH_LOG_CAPTURE === "0") return false;
+  if (env.FILE_LOG_TOKEN) {
+    const mode = String(env.CH_TAIL_CAPTURE || "all");
+    if (mode === "off") return false;
+    if (mode === "all") return true;
+  }
   if (captureMode === "all") return true;
   if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
   return captureWorkers.has(ns + "/" + worker);
@@ -1215,7 +1220,7 @@ export class Host extends DurableObject {
     // not replace/recreate their timers after execution. Legacy numeric alarms
     // are still mirrored while old objects migrate lazily.
     if (!state.alarmId) await reportAlarm(this.env, spec, state.dueMs);
-    await reportDoStats(this.env);
+    this.ctx.waitUntil(reportDoStats(this.env));
     // Output gate (ADR-083): do not ack until the supervisor has captured and
     // proven durability; unknown => result_unknown (do not silently ack).
     const gate = await gateSync(this.env, span, this.ctx.id.name, this.ctx.id.toString(), spec);
@@ -1225,11 +1230,11 @@ export class Host extends DurableObject {
         if (pending && typeof pending.catch === "function") pending.catch(() => {});
       } catch (e) { /* already consumed */ }
       endSpan(span, { code: 2, message: "gate_failed" });
-      await flushSpans(this.env);
+      this.ctx.waitUntil(flushSpans(this.env));
       return gate;
     }
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
-    await flushSpans(this.env);
+    this.ctx.waitUntil(flushSpans(this.env));
     const out = relayResponse(res, spec.request?.method, true);
     // Mark a tenant-produced response so the caller facade returns its status
     // rather than treating every non-2xx as a transport failure: Cloudflare's

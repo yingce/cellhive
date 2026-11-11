@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Lifetime, RuntimeCapacity } from '../platform/lifecycle.js';
 const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
+const telemetrySource = readFileSync(new URL('../platform/telemetry.js', import.meta.url), 'utf8');
+const exportHelper = telemetrySource.slice(telemetrySource.indexOf('let exportsInFlight'), telemetrySource.indexOf('function randomHex')).replace('export async function', 'async function');
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 function harness(fetch) {
   const c = vm.createContext({ internalHeaders:async()=>({}), envCache:new Map(), envInflight:new Map(), Date, encodeURIComponent, JSON, fetch, noteFailure(){}, noteSuccess(){}, hostTtlMs(){return 10000;}, routeEpoch:0 });
@@ -287,9 +289,10 @@ test('asset cache admits >1MiB frontend files and skips entries above 8MiB', asy
 
 test('direct OTLP request log posts the function_request shape and headers', async () => {
   const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
-  const fn = source.slice(source.indexOf('function otlpVarint('), source.indexOf('async function runWorker('));
+  const fn = exportHelper + source.slice(source.indexOf('function otlpVarint('), source.indexOf('async function runWorker('));
   const calls = [];
-  const fetch = async (url, init) => { calls.push([url, init]); return { ok: true, status: 200 }; };
+  let consumed = 0;
+  const fetch = async (url, init) => { calls.push([url, init]); return { ok: true, status: 200, body: {getReader: () => ({read: async () => { consumed++; return {done:true}; }, releaseLock(){}, cancel:async()=>{}})} }; };
   const c = vm.createContext({
     fetch, Headers, AbortController, URL, URLSearchParams, Uint8Array, Number, JSON, String, Object, Error,
     setTimeout, clearTimeout, Date, console, crypto: { randomUUID: () => 'uuid' }, internalHeaders: async () => ({}),
@@ -308,6 +311,7 @@ test('direct OTLP request log posts the function_request shape and headers', asy
     { namespace: 'acme' }, 'web', req, 504, 'error', 1000, 61000,
   );
   assert.equal(calls.length, 1);
+  assert.equal(consumed, 1, 'release the HTTP response before completing the log task');
   assert.equal(calls[0][0], 'http://collector:4318/v1/logs');
   assert.equal(calls[0][1].headers.get('authorization'), 'Bearer test');
   assert.equal(calls[0][1].headers.get('content-type'), 'application/x-protobuf');
@@ -321,4 +325,56 @@ test('cold host retries a response invalidated by a concurrent route revision',a
  vm.runInContext(extract('async function hostView(', '// workerEnv returns'),c);
  const view=await c.hostView({},'new-host',{});
  assert.equal(view.revision,2);assert.equal(calls,2);
+});
+
+test('request logs release fallback and rejected OTLP response bodies', async () => {
+ const source = readFileSync(new URL('./loader.js', import.meta.url), 'utf8');
+ const fn = exportHelper + source.slice(source.indexOf('function otlpVarint('), source.indexOf('async function runWorker('));
+ for (const otlp of ['', 'http://collector']) {
+  const released = [];
+  const c = vm.createContext({ Headers, AbortController, URL, Uint8Array, TextEncoder, DataView, BigInt,
+   setTimeout, clearTimeout, Date, console: {error(){}}, crypto: {randomUUID:()=> 'id'}, internalHeaders:async()=>({}),
+   fetch:async url=>({ok:!url.includes('collector'),status:url.includes('collector')?503:200,body:{getReader:()=>({read:async()=>{released.push(url);return {done:true};},releaseLock(){},cancel:async()=>{}})}})
+  });
+  vm.runInContext(fn,c);
+  await c.recordRequestLog({OTLP_LOGS_URL:otlp,CELL_URL:'http://cell',CELL_TOKEN:'test'}, {namespace:'n'}, 'w',
+   {url:'http://app/',method:'GET',headers:new Headers()},200,'ok',1,2);
+  assert.deepEqual(released, otlp ? ['http://collector/v1/logs','http://cell/v1/internal/request-log'] : ['http://cell/v1/internal/request-log']);
+ }
+});
+
+test('business response does not wait for a hung invocation-log collector', async () => {
+  let finish, settled = false;
+  const pendingLog = new Promise(resolve => { finish = resolve; });
+  const background = [];
+  const c = vm.createContext({Date, console, runWorkerInner:async()=>({status:200}), recordRequestLog:()=>pendingLog});
+  vm.runInContext(extract('async function runWorker(', 'async function runWorkerInner('), c);
+  const pendingResponse = c.runWorker({}, {CH_INVOCATION_LOGS:'1'}, {waitUntil:p=>background.push(p)}, {}, 'w').then(r=>{settled=true;return r;});
+  try {
+    for(let i=0;i<10;i++) await Promise.resolve();
+    assert.equal(settled, true);
+    assert.equal((await pendingResponse).status, 200);
+    assert.equal(background.length, 1);
+  } finally {finish();await Promise.all(background);}
+});
+
+test('concurrent cold requests share one preparation admission; distinct loads remain bounded', async () => {
+  let release, loads=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const c=vm.createContext({preparedCache:new Map(),preparedInflight:new Map(),coldLoads:0,
+    bundle:async()=>{loads++;await gate;return 'source';},bindingSpec:async()=>({}),workerPlan:()=>({workerCode:{}}),checkWorkerBudgets(){},
+    tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:false}),
+    managedStub:()=>({getEntrypoint:()=>({fetch:async()=>({status:200})})}),text:(body,status)=>({body,status}),budgetErrorBody:()=>null});
+  vm.runInContext(extract('async function runWorkerInner(', '// workerPlan contains'),c);
+  const call=w=>c.runWorkerInner({}, {}, {}, {namespace:'ns'}, w, {version:1,bundle_sha:'sha'}, {}, []);
+  const same=Array.from({length:64},()=>call('same'));
+  const other=Array.from({length:15},(_,i)=>call('other'+i));
+  try {
+    assert.equal(loads,16);
+    assert.equal(c.coldLoads,16);
+    assert.equal((await call('overflow')).status,503);
+  } finally { release(); }
+  const results=await Promise.all([...same,...other]);
+  assert.equal(results.filter(x=>x.status!==200).length,0);
+  assert.equal(c.coldLoads,0);
 });

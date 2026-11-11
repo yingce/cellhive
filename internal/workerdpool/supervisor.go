@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -186,8 +187,9 @@ func (s *Supervisor) monitor(p *running) {
 				}
 				s.mu.Unlock()
 				if current {
+					log.Printf("workerd unhealthy slot=%s generation=%d pid=%d probe_error=%v; draining", p.slot.ID, p.slot.Generation, p.h.PID, err)
 					s.Pool.Drain(p.slot.ID, p.slot.Generation)
-					p.h.Kill()
+					s.drainUnhealthy(p)
 				}
 				return
 			}
@@ -338,4 +340,36 @@ func (s *Supervisor) Close(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Admission is already closed. Preserve active responses, but do not let a
+// hung handler or a permanent stream hold an unhealthy generation forever.
+func (s *Supervisor) drainUnhealthy(p *running) {
+	grace := s.DrainGrace
+	if grace <= 0 {
+		grace = 30 * time.Second
+	}
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		default:
+		}
+		if s.Pool.CanStop(p.slot.ID, p.slot.Generation) {
+			p.h.Kill()
+			return
+		}
+		select {
+		case <-p.done:
+			return
+		case <-deadline.C:
+			p.h.Kill()
+			return
+		case <-tick.C:
+		}
+	}
 }

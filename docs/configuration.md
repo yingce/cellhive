@@ -287,7 +287,7 @@ supervisor blob/segment 读取 **64MiB**，Range 按请求长度且不超过 seg
 | `CELLHIVE_DO_PREVENT_EVICTION` | `true` | resident/evictable，须恰好 `true`/`false` |
 | `CELLHIVE_DO_LEASE` | `30s` | DO owner 租约（Go duration，转为整秒给 host actor） |
 | `CELLHIVE_DO_RUNTIME_JS` | `workerd/do-runtime` | host actor JS |
-| `CELLHIVE_DO_GATE_URL` | 空 | 输出门基址；空=不过门 |
+| `CELLHIVE_DO_GATE_URL` | 本地 gate 地址（默认 `http://127.0.0.1:18901`） | 默认由统一入口生成；仅显式 `-gate=false` 的隔离测试关闭输出门 |
 | `CELLHIVE_DO_OBJECT_INDEX` | `false` | 对象注册表持久化到桶（`true`/`1`） |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite 盘 = `<DATA_DIR>/do` |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `do-runtime/`） |

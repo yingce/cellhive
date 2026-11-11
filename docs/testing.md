@@ -233,7 +233,7 @@ OTLP/collector 端到端：`bash scripts/otlp-collector-smoke.sh`（需 docker �
 
 `go test ./...` 覆盖 **54/68** 包。无独立单测的是 **14** 个包：
 
-- 服务入口 `cmd/user-runtime`、`cmd/do-supervisor`：由集成/e2e（`internal/userruntime`、`internal/doruntime`、`cmd/cellhive` e2e）覆盖（`cmd/cell-agent`、`cmd/do-runtime`、`cmd/cellhive` 自身有单测）；
+- 服务入口 `cmd/user-runtime`、`cmd/do-runtime`：由集成/e2e（`internal/userruntime`、`internal/doruntime`、`cmd/cellhive` e2e）覆盖（`cmd/cell-agent`、`cmd/do-runtime`、`cmd/cellhive` 自身有单测）；
 - 压测/工具 `cmd/{cellbench,realbench,sqlbench,kvbench,gatebench,s3init,s3probe,walscan,recoververify,restoreverify}`：一次性 CLI，靠 `make s3-test`/`make perf-test` 触发；
 - `internal/workerdbin`：二进制发现，由 `make js-test`（真实 workerd）间接覆盖。
 

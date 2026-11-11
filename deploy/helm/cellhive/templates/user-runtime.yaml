@@ -79,6 +79,10 @@ spec:
                     app: user-runtime
                     app.kubernetes.io/instance: {{ .Release.Name }}
                 topologyKey: kubernetes.io/hostname
+      {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+      volumes:
+        {{- include "cellhive.runtimeLogVolumes" . | nindent 8 }}
+      {{- end }}
       containers:
         - name: user-runtime
           image: {{ include "cellhive.image" (dict "image" (mergeOverwrite (deepCopy .Values.image) (.Values.userRuntime.image | default dict))) | quote }}
@@ -87,6 +91,9 @@ spec:
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
           env:
+            {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+            - {name: CELLHIVE_LOG_DIR, value: /var/log/cellhive}
+            {{- end }}
             - name: POD_IP
               valueFrom: {fieldRef: {fieldPath: status.podIP}}
             {{- if .Values.telemetry.enabled }}
@@ -115,6 +122,10 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: 8081}
             periodSeconds: 10
+          {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+          volumeMounts:
+            - {name: runtime-logs, mountPath: /var/log/cellhive}
+          {{- end }}
           resources:
             {{- toYaml .Values.userRuntime.resources | nindent 12 }}
 ---

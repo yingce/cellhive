@@ -39,6 +39,7 @@ spec:
           image: cellhive:dev
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/do-runtime"]
+          args: ["-gate=false"]
           envFrom:
             - configMapRef: {name: cellhive-config}
           env:

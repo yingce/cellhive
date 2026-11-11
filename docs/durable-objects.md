@@ -16,7 +16,7 @@
 > **DO 客户端绑定（ADR-080）**：`env.DO.get(...).fetch()` → `scopeAuth("do")` 代理按 shard 放置到 `CELLHIVE_DO_RUNTIMES`；owner 冲突转发一次 + hint；`result_unknown` 语义。
 > **存储生命周期（ADR-081）**：代码变更用 **facet 级惰性重启**（版本戳 → `facets.abort()` 单个对象，storage 不变）；`migrations` 仅允许 `new_classes`/`new_sqlite_classes`，`renamed/deleted/transferred` 拒绝；**`doStorageId`** 作为稳定存储身份（重部署不变）。
 > **migrations v2（ADR-082）**：**对象注册表**（`GET /v1/do/objects` + cell-agent 聚合）；**rename**（`renamed_classes`，别名 `codeClass→storageClass`，不迁文件保数据）；**delete**（`deleted_classes` 标记 + `POST /v1/do/delete` 物理回收）；**主动重启**（`CELLHIVE_DO_EAGER_RESTART`，默认惰性）。
-> **持久性（ADR-083/084/208）**：`do-supervisor` 在请求输出门中按当前 host 捕获其 actor/facet `*.sqlite`（LTX 快照+增量 → fleet/bucket proof），并门控响应（未证明不 ack；失败 `result_unknown`）。`.facets` 已解析为对象名索引，sidecar 按 host 保存；运维 `SyncAll` 仍可全目录捕获，但不用于租户请求输出门。
+> **持久性（ADR-083/084/208）**：`do-runtime` 内置supervisor在请求输出门中按当前 host 捕获其 actor/facet `*.sqlite`（LTX 快照+增量 → fleet/bucket proof），并门控响应（未证明不 ack；失败 `result_unknown`）。`.facets` 已解析为对象名索引，sidecar 按 host 保存；运维 `SyncAll` 仍可全目录捕获，但不用于租户请求输出门。
 > **跨节点冷激活（ADR-084，部分）**：`scopeID` 可逆（base64url）+ manifest + **`RestoreAll`**（LTX `replica.Restore`+`restore.ApplyFile`，sidecar 逐字回写）；**双 runtime e2e** 通过（A 运行→捕获到 bucket→B 恢复→状态延续）。host 文件名跨进程确定性是"恢复到原路径"成立的前提。
 > **DO 内 bindings ✅（ADR-090）**：平台导出 `WorkerEntrypoint` 能力类，`ctx.exports.X({props})` stub 放入 facet env；KV/D1/R2/Queue 走 stub、DO/Workflow 经 env-patch → **`this.env` 与构造函数形参 `env` 都可**。
 > **`deleteAll()` shim ✅**：stock workerd 对 SQLite facet 的 `deleteAll()` 抛内部错误；基类改为清 KV + drop 用户表 + 清 alarm（`cellhive-do.js`）。

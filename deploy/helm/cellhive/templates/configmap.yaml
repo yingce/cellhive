@@ -4,7 +4,7 @@
 {{- end -}}
 {{- $logAgents := list -}}
 {{- range $i, $_ := until (int .Values.cellAgent.replicas) -}}
-{{- $logAgents = append $logAgents (printf "http://%s-cell-agent-%d.%s-cell-agent:7001" $.Release.Name $i $.Release.Name) -}}
+{{- $logAgents = append $logAgents (printf "http://%s-cell-agent-%d-endpoint.%s.svc.cluster.local:7001" $.Release.Name $i $.Release.Namespace) -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
@@ -13,7 +13,7 @@ metadata:
   labels:
     {{- include "cellhive.labels" . | nindent 4 }}
 data:
-  CELLHIVE_CELL_URL: {{ printf "http://%s-cell-agent:7001" .Release.Name | quote }}
+  CELLHIVE_CELL_URL: {{ printf "http://%s-cell-agent-api:7001" .Release.Name | quote }}
   CELLHIVE_LOG_REGISTER_URLS: {{ join "," $logAgents | quote }}
   CELLHIVE_DATA_DIR: {{ .Values.config.dataDir | quote }}
   CELLHIVE_MAX_OPEN_CELLS: {{ .Values.cellAgent.maxOpenCells | default 128 | quote }}

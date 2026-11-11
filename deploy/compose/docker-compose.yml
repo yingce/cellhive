@@ -120,7 +120,7 @@ services:
     memswap_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
     ulimits:
       nofile: {soft: 65536, hard: 65536}
-    command: ["do-runtime"]
+    command: ["do-runtime", "-gate=false"]
     environment:
       <<: *common-env
       CELLHIVE_DO_ADDR: "*:8788"
@@ -141,7 +141,7 @@ services:
       cell-agent:
         condition: service_healthy
 
-  # DO with the ADR-083 output gate (RPO=0), profile "rpo0": do-supervisor spawns
+  # DO with the ADR-083 output gate (RPO=0), profile "rpo0": the integrated Go supervisor spawns
   # workerd and gates responses on cell-agent durability. Use this instead of
   # do-runtime in production.
   do-runtime-gated:
@@ -151,7 +151,7 @@ services:
     memswap_limit: ${CELLHIVE_DO_RUNTIME_MEMORY:-4g}
     ulimits:
       nofile: {soft: 65536, hard: 65536}
-    command: ["do-runtime-gated"]
+    command: ["do-runtime"]
     profiles: ["rpo0"]
     environment:
       <<: *common-env

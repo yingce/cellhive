@@ -7,7 +7,8 @@ OUT="$ROOT/deploy/workerd-fork"
 mkdir -p "$OUT"
 SRC="${CELLHIVE_WORKERD_FORK_DIR:-/opt/cellhive-workerd-fork}"
 BIN="$SRC/bazel-bin/src/workerd/server/workerd"
-if [[ -f "$BIN" ]]; then
+if [[ -d "$SRC" ]]; then
+  (cd "$SRC" && bazel build --config=release --jobs=4 //src/workerd/server:workerd)
   cp "$BIN" "$OUT/workerd"
   chmod 0755 "$OUT/workerd"
   "$OUT/workerd" --version
@@ -17,7 +18,7 @@ REF="${CELLHIVE_WORKERD_FORK_REF:-cellhive-v1.20260916.1-3}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cellhive-workerd.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 git clone --depth 1 --branch "$REF" https://github.com/yingce/cellhive-workerd "$TMP"
-(cd "$TMP" && bazel build --config=release //src/workerd/server:workerd)
+(cd "$TMP" && bazel build --config=release --jobs=4 //src/workerd/server:workerd)
 cp "$TMP/bazel-bin/src/workerd/server/workerd" "$OUT/workerd"
 chmod 0755 "$OUT/workerd"
 "$OUT/workerd" --version

@@ -39,7 +39,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" \
       -trimpath -ldflags="-s -w" -o "/out/cell-agent" ./cmd/cell-agent \
- && for svc in cellhive user-runtime do-runtime do-supervisor; do \
+ && for svc in cellhive user-runtime do-runtime; do \
       CGO_ENABLED=1 go build -tags "sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook" \
         -trimpath -ldflags="-s -w" -o "/out/$svc" "./cmd/$svc" || exit 1; \
     done
@@ -60,8 +60,7 @@ COPY third_party/esbuild/LICENSE /usr/share/licenses/cellhive/esbuild/LICENSE
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/cellhive/THIRD_PARTY_NOTICES.md
 COPY workerd/ /app/workerd/
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY deploy/do-runtime-gated.sh /usr/local/bin/do-runtime-gated.sh
-RUN chmod 0755 /usr/local/bin/workerd /usr/local/bin/entrypoint.sh /usr/local/bin/do-runtime-gated.sh \
+RUN chmod 0755 /usr/local/bin/workerd /usr/local/bin/entrypoint.sh \
  && chown -R 65532:65532 /app
 
 ENV CELLHIVE_WORKERD=/usr/local/bin/workerd \

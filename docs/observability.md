@@ -91,10 +91,15 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 - Queue 批次派发失败同样只输出 `error_code`、`phase`、`target_host`（无 userinfo）、固定 `target_path=/v1/queues/dispatch`、收到响应时的 `http_status` 和已知 `worker`。错误码只接受与 timer 相同的受控集合，其他响应统一 `http_error`；不透传下游 body、message、invocation ID、配置路径、query、token 或消息 payload。
 - 非 2xx 响应最多读取 4096 字节后关闭；重试状态判定不变：仅 502/503/504 自动重试一次，其他状态（含处理器 500）保留原有最终失败与队列重试/死信语义。
 
-### 平台日志：内存 tail + 可选 OTLP 导出（ADR-172）
+### 平台日志：内存 Tail + 本地文件/Vector
 
 - `workerd/platform/log-tail.js` 是可信宿主导出的 `TenantTail extends WorkerEntrypoint`。user-runtime、内部 dispatch/service target 与 do-runtime facet 在 `workerLoader` 的 `WorkerCode.tails` 中传入宿主 `ctx.exports.TenantTail({props:{namespace,worker,version}})` 生成的真实 `Fetcher`。Tail 捕获每次调用事件（包括没有 `console.*` 的成功调用）、console 与未捕获异常，保存在所在 workerd service 的有界内存 ring；有人 Tail 订阅时，cell-agent 经受保护的 `/v1/internal/logs/events` 按游标拉取。`OTLP_LOGS=all` 时则后台持续拉取。租户身份取不可伪造的 host-bound props，不取动态事件中为 null 的 `scriptName`。log-role token 和查询能力仅在可信宿主，tenant env 仍为零平台键。runtime 重启、ring 溢出或短暂失联可能丢失实时日志。
-- **可选 OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
+- **runtime 默认文件出口（2026-11-11，本地验收、未部署）**：生产入口 user-runtime 和 do-runtime 将可信调用/console 日志写入 `CELLHIVE_LOG_DIR`（默认 runtime 根目录下的 `logs/`）。host 专用随机标记通过父进程验证后剥离，租户 stdout 不能伪造 namespace；非标记输出只存为 runtime diagnostic。父进程有256条有界队列、单行64KiB上限，异步写盘、每秒 sync；每个 stream 最多8个16MiB文件，按最旧优先轮转。队列满、超大记录、写盘失败丢弃遥测，业务请求不等待。`<stream>-stats.json` 提供 Written/Dropped/Errors 诊断计数；不提供日志RPO=0承诺。
+- **Go 转发**：父进程读取完整NDJSON行，最多128条/约256KiB一批，OTLP protobuf发送到 `CELLHIVE_OTLP_ENDPOINT`（`http://cellhive-vector:4318`）。同一stream单请求、3秒超时、响应上限64KiB；失败1至30秒退避，确认后原子保存文件/offset。OTLP部分拒收按协议计丢弃且不重试。异常退出或混合批次部分成功可重放；不承诺恰好一次。Tail事件仍带 `file_exported=true`，避免agent重复导出。
+- **容量和生命周期**：无Vector sidecar。Go日志/消费位置位于独立emptyDir，容器重启保留、Pod删除不保留；超过8×16MiB淘汰最老文件，`EvictedFiles`计文件淘汰数（可能含未发送数据），`Dropped`计已知记录丢弃数。目录锁防止并行consumer；collector不可用不影响业务。普通runtime诊断仅保留本地。
+- **Trace**：有host token时 sampled spans同样写本地pipe，由Go保留trace/span/parent身份转OTLP；无spool嵌入场景保留原agent接口。cell-agent自身OTLP仍直连集中Vector。VWork Vector不改。当前修订未部署。
+- **捕获策略**：文件模式下 `CELLHIVE_TAIL_CAPTURE=all` 不再依赖agent的OTLP开关；`tail` 保留订阅门控，`off` 不捕获console。`CELLHIVE_INVOCATION_LOGS` 仍控制user-runtime HTTP调用记录。DO span/统计导出走有界后台任务，不阻塞响应；持久化gate仍必须确认后才能返回。
+- **cell-agent及未配置文件spool的嵌入式runtime仍支持OTLP/HTTP logs 导出**（标准协议，换后端只改环境变量；与 traces 共用 endpoint/headers/resource，路径 `/v1/logs`）：`CELLHIVE_OTLP_LOGS=off|tail|all`（默认 **off**）。
   - `all`：首个配置的 cell-agent 后台按游标拉取并导出所有 runtime 日志（集中采集；量大）。该 agent 长时间失联或 runtime ring 溢出可能漏日志，属于 best-effort。
   - `tail`：**只有存在活跃订阅的 `(ns,worker)` 才导出**——`cellhive tail --worker` 每次轮询会 POST `/v1/control/logs/subscribe`（TTL 60s，自动续）；Wrangler Tail 的 WebSocket 会续订。cell-agent 在订阅有效时后台拉取对应 runtime ring，tail 退出后 ≤60s 停止导出。
   - Queue/Cron/Workflow 持久调用的完成日志（成功或失败）从记录导出整数属性 `cellhive.started_ms` / `cellhive.finished_ms`（Unix 毫秒，正值才输出）；两者有效且结束不早于开始时，另导出 `cellhive.duration_ms = finished_ms - started_ms`（允许 0）。缺失或倒序时间不臆造 duration；普通 console/Tail 无这组时间时不补值。OTLP `timeUnixNano` 仍使用 `FinishedMs`，`cellhive.request_id` 原样保留。未提供可信单一父 span，不导出 `parent_span_id`；Queue 继续用 producer links。
@@ -108,7 +113,7 @@ host actor（`workerd/do-runtime/host.js`）在每次 invoke 后用 best-effort 
 概览：对齐标准 **OpenTelemetry OTLP/HTTP**：CellHive 不存 trace，只把 span 导出到你配置的 OTLP 后端，**换后端只改 `CELLHIVE_OTLP_ENDPOINT`/`CELLHIVE_OTLP_HEADERS`**。
 
 - **开关/采样**：`CELLHIVE_OTLP_ENDPOINT` 空 = 关闭（无 span、无开销）；否则按 `CELLHIVE_TRACES_SAMPLE_RATIO` 对入口新 trace 头部采样，上游 `traceparent` 的 sampled 位优先（`ParentBased`）。
-- **Go span**（cell-agent）：`http.server`（每请求，`http.route`/`http.status_code`；绑定端点解析出 scope 后追加 `cellhive.namespace`/`cellhive.binding`，与 ADR-179 指标同维度）、`cell.durability_proof`（`Capture.Wait`）、`peer.append`（每次向 follower 发出副本，带 scope 属性）。do-supervisor 的 gate/restore 也走同一导出。
+- **Go span**（cell-agent）：`http.server`（每请求，`http.route`/`http.status_code`；绑定端点解析出 scope 后追加 `cellhive.namespace`/`cellhive.binding`，与 ADR-179 指标同维度）、`cell.durability_proof`（`Capture.Wait`）、`peer.append`（每次向 follower 发出副本，带 scope 属性）。do-runtime内置supervisor的 gate/restore 也走同一导出。
 - **JS span**（workerd，平台 worker 持 internal token）：loader 的 `http.server` 入口 span、do-runtime host 的 `do.invoke` 与 `do.gate`。JS 无法跑 OTel SDK，因此把 span 记录 best-effort `POST` 到 cell-agent 的 `/v1/internal/telemetry/spans`，由 Go 统一导出。
 - **传播**：W3C `traceparent` 入口生成/透传 → 租户 handler → props-bound binding 调用（loader 在自身 isolate 设置 `traceparent`，ADR-167 修复了 ADR-146 的"props-bound facades 不带 trace"残余）→ DO invoke spec。
 - **残余**：租户 isolate 的 `facades.js` 调用（非 props-bound 回退路径）无 internal token，不上报 span；`/v1/do/connect`/abort、compaction/upload 后台循环无独立 span；JS span 时间戳为毫秒精度。

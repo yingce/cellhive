@@ -15,6 +15,7 @@ function harness(opts = {}) {
   const deleted = [];
   const closed = [];
   const ctx = {
+    waitUntil(p) { p.catch(() => {}); },
     id: { name: 'host/0', toString: () => 'host-hash' },
     facets: {
       get(id, build) {

@@ -4116,6 +4116,28 @@ COS/OSS R2 正文条件替换明确失败关闭：r2/ 的 CAS 不下沉到不具
 
 2026-11-10 DO 局部 owner 恢复验收补记（未部署）：上述局部退出方案已实现。supervisor 使用有效的新 claim 对目标 Host 关闭 admission，等待普通/分页 native detach 与捕获退出，再清理本地旧 tuple 并恢复；同 claim 重试幂等，跨 scope 恢复拒绝，按 Host 独立互斥。真实 HK COS 连续三轮同进程接回、B→C 写入→B 接回和后续五轮 idle 重开通过，native PID 不变、无关 shard 持续可用。版本切换/WebSocket 问题另有真实 COS 验收。详见 reports/2026-11-10-do-owner-recovery.md。此记录不表示当前服务镜像已更新。
 
+### 2026-11-11 Runtime 502 correction (implementation/validation in progress)
+
+Invocation-log and span exporters consume collector response bodies before completing their tasks. Adaptive watchdog failures first remove a generation from admission, then permit bounded in-flight completion before terminating it; no automatic business-call replay. Child shutdown remains generation-scoped. Workerd CLI periodically polls I/O under continuous ready tasks. Release builds explicitly use optimized compilation, never blindly copy the current bazel-bin target. Local reproduction: fd exhaustion with unconsumed log responses and independent multi-second health I/O starvation. Production unchanged pending validation.
+
+2026-11-11 Runtime 502 本地验收：完整修复版 Hello 1/8/32 并发短测零失败，32 并发持续 120 秒 150150/150150 成功；KV 33553/33553 成功并校验内容。Hello 子进程句柄峰值79，未发生健康检查失败或重启。代码尚未部署；详见 [验收记录](reports/2026-11-11-runtime-502-fix.md)。
+
+2026-11-11 遥测慢服务隔离（实施中）：调用日志与 spans 共用每 isolate 最多16个并发导出，无等待队列；超额遥测丢弃，不影响业务数据。导出覆盖响应头及响应体的3秒超时，响应体最多64KiB，正常读取释放连接、超限取消。业务响应和 resident release 不等待导出，保留 ctx.waitUntil 生命周期管理。需验证慢响应、挂起响应体、不可用及饱和时业务请求成功。
+
+2026-11-11 冷加载 admission 修订：同一不可变 Worker 版本的 preparedInflight 等待者复用加载，不重复占用 coldLoads；保留16个不同冷加载的资源上限。避免32并发首次访问同一 Worker 时误报 cold-load capacity。
+
+2026-11-11 遥测隔离/冷加载补充验收：真实 workerd 32 并发，首次冷访问及日志服务挂起响应头/响应体、断连、503、恢复六阶段，共 131118 次请求零失败；无 unhealthy/进程退出。相关单测30/30、loader 全套49/49通过。此处为本地验证，尚未部署。
+
+2026-11-11 Runtime 本地日志出口（实施中，未部署）：user-runtime/DO 的调用和 console 日志经可信 host 专用随机标记输出到父进程管道；Go 在有界队列中异步写入独立滚动 NDJSON 文件，Vector 保存 offset 后批量上传。业务请求不等待队列、文件或 collector；内存/磁盘超限可丢遥测并计数，不能声称日志 RPO=0。记录保留原 namespace/worker/request/trace 属性；未经标记验证的租户 stdout 仅视为 runtime diagnostic，不可冒充调用记录。Tail ring 保留并标明已导出，避免轮询重复导出。DO spans 改用 waitUntil，durability gate 不改。实现计划见 superpowers/plans/2026-11-11-runtime-file-logs.md。
+
+2026-11-11 Runtime 文件日志验收补记：共享spool+Vector实现及本地验收见 reports/2026-11-11-runtime-file-logs.md。native DO在span collector挂起时仍返回；停采集器与文件轮转补采集通过。Tail ring记录file_exported后不重复OTLP导出。8x16MiB本地保留和256条内存队列均为有损遥测边界，不影响业务RPO。未部署。
+
+### Runtime telemetry transport revision (2026-11-11, implementation)
+
+The unshipped runtime Vector sidecars are superseded by a Go supervisor spool consumer. Trusted host logs and sampled spans enter local bounded rotating files; Go batches OTLP/HTTP to the CellHive regional Vector, which owns schema mapping and backend credentials. Cell-agent retains its Go OTLP exporter to that same service. No VWork Vector changes are in scope. Consumption offsets advance only after acknowledged export (or explicit terminal partial rejection); retry is at least once within bounded retention. Telemetry loss under retention pressure is permitted and counted; business persistence is unaffected. This revision is not deployed.
+
+2026-11-11 DO统一入口（实施中，未部署）：`do-runtime` 单一Go入口负责生成workerd配置、启动子进程、输出门、分页、owner续租、drain及遥测。原 `cmd/do-supervisor` 生命周期逻辑移入 `internal/doruntimeapp`，不改变 `internal/dosupervisor` 持久化协议、存储前缀或owner身份。默认启用gate；无持久化门的测试模式显式 `-gate=false`，`-render-only`仅诊断。删除独立supervisor产物及两阶段启动脚本，保持既有Service/StatefulSet名称，防止因命名变化影响PVC与路由。
+
 ### 节点续租有界 I/O 与结果确认（2026-11-11，实施中，未部署）
 
 节点租约到期仍永久 fencing，不延长未获桶确认的本地权限。每次 Publish 的总预算不超过 TTL/3 和原租约剩余时间的一半，写阶段使用总预算的一半，为读取确认留出时间。条件写超时或响应丢失后保留精确待确认 payload；仅在原租约尚未到期且权威记录逐字节等于该 payload 时接受成功。相同 session 不足以证明成功；不同记录/token 必须 fail closed。失败后加快重试，禁止并发续租。节点 authority 换段后的旧段压缩采用最多一个后台任务、2 秒截止时间；拥塞时保留已封口旧段，不能影响已发布续租结果。日志记录续租耗时、剩余租约、执行阶段与 fencing 原因，不输出凭据。此修改不能证明 14:19:59 事故中具体哪次网络请求阻塞，也不包含启动恢复 fragments.log 缺失问题的修复。
@@ -4123,3 +4145,7 @@ COS/OSS R2 正文条件替换明确失败关闭：r2/ 的 CAS 不下沉到不具
 2026-11-11 本地验收：lease/bucket/cell-agent 单测与 race、owner/server 回归、相关 go vet 通过；真实双进程 session-recovery E2E 通过（80 条已确认数据、恢复中断重试、空替代盘拒绝、SIGSTOP 超 TTL 接管与旧 session 退出）。明确 CAS 冲突且无法确认时仍立即 fencing。未做本次真实 COS 故障注入、未部署，不宣称线上根因完全闭环。
 
 2026-11-11 存储 debug 诊断：cell-agent 支持 CELLHIVE_LOG_LEVEL（默认 info）。COS/S3/OSS HTTP 逐请求记录 start/headers/body completion，允许对象路径、Range、耗时与 provider request ID；禁止 raw query、凭据、正文和带签名 URL 的错误文本。取代 S3Options.Debug 原有 SDK 正文 dump。续租成功/start 为 DEBUG，失败与 fencing 保留 WARN/ERROR。未部署。
+
+### Stable agent service addresses (2026-11-11, implementation)
+
+Keep the existing headless Service and StatefulSet serviceName unchanged. Add a ready-only ClusterIP Service `<release>-cell-agent-api` for ordinary runtime requests and one ClusterIP Service `<release>-cell-agent-<ordinal>-endpoint` selecting exactly that StatefulSet Pod for owner/peer/log-registration access. Per-node endpoints publish not-ready addresses to preserve peer-assisted startup recovery; they never select a different ordinal. Advertise and peer URLs use these stable endpoints. Session/epoch authority checks remain mandatory; stable routing does not confer ownership or authorize replay of ambiguous writes. Service addresses survive Pod replacement, not Service deletion. Validation must check service selection, rollout recovery and data continuity.

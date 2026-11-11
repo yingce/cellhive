@@ -1,11 +1,11 @@
-# 模块：do-runtime / do-supervisor（Durable Objects）
+# 模块：do-runtime（Durable Objects）
 
-用固定 **host actor + facets** 承载原生 Durable Objects（每对象 SQLite、alarm shim、可休眠 WebSocket），分布式弹性；只持工作副本，不是权威。可选 `do-supervisor` 提供**输出门**，确认响应的耐久性（RPO=0）。
+用固定 **host actor + facets** 承载原生 Durable Objects（每对象 SQLite、alarm shim、可休眠 WebSocket），分布式弹性；只持工作副本，不是权威。内置Go supervisor默认提供**输出门**，确认响应的耐久性（RPO=0）。
 
 > 配置权威来源见 [`../configuration.md`](../configuration.md) 与代码；下表是本模块相关子集。
 ## 关键接口
 
-do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim,renew,drain,abort,delete,restart,objects}`、`/v1/internal/do/alarm/upsert`、`/ready`。do-supervisor `:18901`：`/metrics`。
+do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim,renew,drain,abort,delete,restart,objects}`、`/v1/internal/do/alarm/upsert`、`/ready`。do-runtime输出门 `:18901`：`/metrics`。
 
 ## 配置（环境变量）
 
@@ -15,7 +15,7 @@ do-runtime `:8788`：`/v1/do/invoke`、`/v1/do/connect`（WS）、`/v1/do/{claim
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | DO SQLite 盘 = `<DATA_DIR>/do` |
 | `CELLHIVE_DO_ADDR` | `*:8788` | workerd 监听 |
 | `CELLHIVE_DO_ADVERTISE` | `http://127.0.0.1:8788` | 广告地址（owner 转发目标） |
-| `CELLHIVE_DO_GATE_URL` | 空 | 输出门基址；空=不过门 |
+| `CELLHIVE_DO_GATE_URL` | 本地 gate 地址（默认 `http://127.0.0.1:18901`） | 默认由统一入口生成；仅显式 `-gate=false` 的隔离测试关闭输出门 |
 | `CELLHIVE_DO_LEASE` | `30s` | DO owner 租约（Go duration，转为整秒给 host actor） |
 | `CELLHIVE_DO_NODE` | 主机名 | 节点 id |
 | `CELLHIVE_DO_OBJECT_INDEX` | `false` | 对象注册表持久化到桶（`true`/`1`） |
@@ -47,7 +47,7 @@ supervisor 默认 HTTPStore 总请求期限 60s（慢大 body 可能超时）；
 
 ## 源码位置
 
-`cmd/do-runtime/`、`cmd/do-supervisor/`；`internal/doruntime/`、`internal/dosupervisor/`；`workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`；`workerd/platform/budget.js`。
+`cmd/do-runtime/`；`internal/doruntimeapp/`；`internal/doruntime/`、`internal/dosupervisor/`；`workerd/do-runtime/{host.js,cellhive-do.js,bindings-wrapper.js}`；`workerd/platform/budget.js`。
 
 ## 测试锚点
 

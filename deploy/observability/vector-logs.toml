@@ -25,7 +25,9 @@ address = "0.0.0.0:8687"
 
 [sources.cellhive_otlp]
 type = "opentelemetry"
-use_otlp_decoding.logs = true
+# Flatten OTLP batches into individual log events for the vwork.log.v1 remap.
+# Native OTLP decoding retains the resourceLogs envelope and loses these fields.
+use_otlp_decoding.logs = false
 use_otlp_decoding.metrics = false
 use_otlp_decoding.traces = true
 

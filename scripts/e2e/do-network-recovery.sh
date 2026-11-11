@@ -37,7 +37,7 @@ docker run -d --name "$runtime" --network "$net" --add-host "recovery-cell:$old_
   -e CELLHIVE_ROOT_KEY=isolated-do-recovery-test-only \
   -e CELLHIVE_CELL_URL=http://recovery-cell:7001 \
   -e CELLHIVE_DATA_DIR=/tmp/state -e CELLHIVE_RUNTIME_DIR=/tmp/runtime \
-  --entrypoint /usr/local/bin/do-runtime "$image" >/dev/null
+  --entrypoint /usr/local/bin/do-runtime "$image" -gate=false >/dev/null
 addr=$(docker port "$runtime" 8788/tcp)
 ready="http://$addr/ready"
 for ((i=0;i<50;i++)); do

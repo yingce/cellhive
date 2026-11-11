@@ -34,7 +34,7 @@ manifest = dict(workerd=str(args.workerd.resolve()), workerd_sha256=sha(args.wor
                 scripts={name: sha(root/'scripts/e2e'/name) for name in
                          ['kv-performance.cjs', 'kv-performance.sh', 'jwt.cjs', 'lib.sh', 'hk-review.py']},
                 binaries={label: {name: sha(directory/name) for name in
-                                  ['cell-agent', 'cellhive', 'user-runtime', 'do-runtime', 'do-supervisor']}
+                                  ['cell-agent', 'cellhive', 'user-runtime', 'do-runtime']}
                           for label, directory in binaries.items()})
 (args.output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
 results = []

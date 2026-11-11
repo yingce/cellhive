@@ -7,7 +7,7 @@ CellHive exports distributed traces using **standard OpenTelemetry OTLP/HTTP** (
 
 ```
 cell-agent (Go) ──┐
-do-supervisor(Go)─┼── OTLP/HTTP (:4318 /v1/traces or /api/<org>/v1/traces) ──▶ backend
+do-runtime(Go)─┼── OTLP/HTTP (:4318 /v1/traces or /api/<org>/v1/traces) ──▶ backend
 loader/host (JS) ─┘        ▲
    └── POST /v1/internal/telemetry/spans ── cell-agent unified export
 ```
@@ -30,7 +30,7 @@ It is effective when the startup log shows `otel export enabled endpoint=… rat
 | cell-agent | `http.server` (per request) | `http.route`, `http.status_code`, `cellhive.namespace/kind/name/scope` |
 | cell-agent | `cell.durability_proof` | scope (time spent on `Capture.Wait` durability proof) |
 | cell-agent | `peer.append` | scope (each time a replica is sent to a follower) |
-| do-supervisor | gate / restore | — |
+| do-runtime | gate / restore | — |
 | workerd loader | `http.server` (entry) | `http.method`, `cellhive.namespace/worker` |
 | do-runtime host | `do.invoke` / `do.gate` | `cellhive.namespace/worker/class/do_kind` |
 
@@ -85,7 +85,7 @@ Notes:
 export CELLHIVE_OTLP_ENDPOINT=http://<openobserve-host>:5080/api/default
 export CELLHIVE_OTLP_HEADERS="authorization=Basic $(printf %s '<user>:<pass>' | base64 -w0)"
 export CELLHIVE_TRACES_SAMPLE_RATIO=0.1
-# Restart cell-agent / user-runtime / do-supervisor (with these environment variables)
+# Restart cell-agent / user-runtime / do-runtime (with these environment variables)
 ```
 
 Cloud users: `CELLHIVE_OTLP_ENDPOINT=https://api.openobserve.ai/api/default` (HTTPS automatically uses TLS).

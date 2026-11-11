@@ -50,7 +50,6 @@ build:
 	$(GO) build $(GOTAGS) -o $(BIN)/cellhive ./cmd/cellhive
 	$(GO) build $(GOTAGS) -o $(BIN)/user-runtime ./cmd/user-runtime
 	$(GO) build $(GOTAGS) -o $(BIN)/do-runtime ./cmd/do-runtime
-	$(GO) build $(GOTAGS) -o $(BIN)/do-supervisor ./cmd/do-supervisor
 	$(GO) build $(GOTAGS) -o $(BIN)/cellbench ./cmd/cellbench
 	$(GO) build $(GOTAGS) -o $(BIN)/realbench ./cmd/realbench
 	$(GO) build $(GOTAGS) -o $(BIN)/sqlbench ./cmd/sqlbench

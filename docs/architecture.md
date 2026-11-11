@@ -26,7 +26,7 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 |---|---|---|---|---|---|
 | 边缘代理（Traefik/nginx/云 LB） | 运维 ingress（非平台内构件） | 80/443 | TLS 终止、host 分流（租户 vs admin）；**静态配置**（ADR-132） | 否 | 否 |
 | `user-runtime` | Go + cellhive-workerd（`cmd/user-runtime`） | :8081 公开 / :8088 内部特权 | Worker 路由/版本解析/清头 + 租户 Worker 加载执行。**已实现**：`:8081` 公开 loader（路由投影拉取 + 版本 bundle 加载 + facade env + 清头，**ADR-068**）与 `:8088` 内部派发（queue/scheduled handler；ADR-067/070），公开侧含静态资产（ADR-069） | 否 | 否 |
-| `do-runtime` | cellhive-workerd（`cmd/do-runtime`）+ Go supervisor（`cmd/do-supervisor`） | :8788 | 原生 Durable Object 执行；**分布式弹性**。**已实现**：host-actor 骨架（facets + localDisk，ADR-077）+ 归属/栅栏/排空/驻留（ADR-078）+ supervisor 捕获/输出门（ADR-083）+ alarm（ADR-079）+ WS 1012/跨节点转发（ADR-080/084）+ 跨节点冷激活/按对象恢复（ADR-084）+ DO 内 bindings（ADR-090）+ session policy（ADR-107）+ owner epoch 栅栏/租约可配/对象索引（ADR-108/109） | 本地盘可临时（工作副本） | **是** |
+| `do-runtime` | cellhive-workerd（`cmd/do-runtime`）+ 内置Go supervisor（`internal/doruntimeapp`） | :8788 | 原生 Durable Object 执行；**分布式弹性**。**已实现**：host-actor 骨架（facets + localDisk，ADR-077）+ 归属/栅栏/排空/驻留（ADR-078）+ supervisor 捕获/输出门（ADR-083）+ alarm（ADR-079）+ WS 1012/跨节点转发（ADR-080/084）+ 跨节点冷激活/按对象恢复（ADR-084）+ DO 内 bindings（ADR-090）+ session policy（ADR-107）+ owner epoch 栅栏/租约可配/对象索引（ADR-108/109） | 本地盘可临时（工作副本） | **是** |
 | `cell-agent` | Go（固定集群） | :7001 内部 REST（Go↔Go 亦走此口，ADR-136）/ :8082 admin | cell 数据 + 复制 + 租约 + 控制面 + owner 解析 + 计时派发 + **唯一桶凭据** | 是（自己拥有 SQLite） | 否（自身处理 drain） |
 | 对象存储 | S3 兼容对象存储 | — | 权威状态 + code + assets | 是（外部） | — |
 | `cellhive` CLI | Go | — | 打包/部署/运维 | 否 | — |

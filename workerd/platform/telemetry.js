@@ -1,9 +1,8 @@
 // Span buffer for the workerd platform workers (ADR-167).
 //
 // workerd cannot run the OpenTelemetry SDK, so platform JS records lightweight
-// span records and forwards them (best-effort) to cell-agent's
-// /v1/internal/telemetry/spans, which exports them through the same OTLP
-// pipeline as the Go services. Spans are only recorded when the current trace
+// span records and forwards them through the trusted local supervisor pipe.
+// Embeddings without a file token fall back to cell-agent's internal span API. Spans are only recorded when the current trace
 // is sampled (W3C traceparent sampled bit), so an unsampled request pays
 // nothing beyond the traceparent check.
 
@@ -11,6 +10,55 @@ import { internalHeaders } from "jwt.js";
 
 const MAX_BUFFER = 256;
 let buffer = [];
+
+// Only trusted host code receives this token. The parent strips it before
+// persistence; tenant console text cannot become an attributed log record.
+export function fileLog(env, attributes, message, level = "info", at = Date.now(), tp = "") {
+  const token = env.FILE_LOG_TOKEN;
+  if (!token) return false;
+  const trace = parseTraceparent(tp);
+  const record = JSON.stringify({kind:"log", timestamp:new Date(at).toISOString(),
+    observed_timestamp:new Date().toISOString(), severity_text:level, message,
+    trace_id:trace.traceId || "", span_id:trace.spanId || "", attributes});
+  // Handled but dropped: never fall back to HTTP or allocate an unbounded pipe line.
+  if (new TextEncoder().encode(record).byteLength <= 60000) console.log("@cellhive-log:" + token + " " + record);
+  else console.log("@cellhive-log:" + token + ' {"kind":"drop"}');
+  return true;
+}
+
+// Per-isolate best-effort export budget, shared by invocation logs and spans.
+// Never queue callers behind a slow collector or retain unbounded response data.
+let exportsInFlight = 0;
+export async function postTelemetry(url, init) {
+  if (exportsInFlight >= 16) return null;
+  exportsInFlight++;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("telemetry timeout")), 3000);
+  let reader;
+  try {
+    const response = await fetch(url, {...init, signal: controller.signal});
+    if (response.body) {
+      reader = response.body.getReader();
+      let size = 0;
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 65536) throw new Error("telemetry response too large");
+      }
+    }
+    return response;
+  } catch (error) {
+    controller.abort(error);
+    // Cancellation must not hold export admission if a broken peer never ends.
+    if (reader) void reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (reader) reader.releaseLock();
+    exportsInFlight--;
+  }
+}
 
 function randomHex(bytes) {
   const b = new Uint8Array(bytes);
@@ -80,15 +128,23 @@ export function endSpan(span, opts = {}) {
   if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
 }
 
-// flushSpans posts buffered spans to cell-agent (best-effort, never throws).
+// flushSpans emits local frames, or uses cell-agent for legacy embeddings.
 export async function flushSpans(env) {
   if (buffer.length === 0) return;
   const spans = buffer;
   buffer = [];
+  if (env.FILE_LOG_TOKEN) {
+    for (const span of spans) {
+      const record = JSON.stringify({kind:"span", span});
+      if (new TextEncoder().encode(record).byteLength <= 60000) console.log("@cellhive-log:" + env.FILE_LOG_TOKEN + " " + record);
+      else console.log("@cellhive-log:" + env.FILE_LOG_TOKEN + ' {"kind":"drop"}');
+    }
+    return;
+  }
   const base = String(env.CELL_URL || "").replace(/\/$/, "");
   if (!base) return;
   try {
-    await fetch(base + "/v1/internal/telemetry/spans", {
+    await postTelemetry(base + "/v1/internal/telemetry/spans", {
       method: "POST",
       headers: {
         "content-type": "application/json",

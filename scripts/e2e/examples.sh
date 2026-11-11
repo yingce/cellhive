@@ -21,15 +21,14 @@ env -u CELLHIVE_BUCKET -u CELLHIVE_BUCKET_DIR \
  CELLHIVE_CELL_URL="http://127.0.0.1:$E2E_AGENT_PORT" \
  CELLHIVE_DO_ADDR="127.0.0.1:$((E2E_PORT_BASE+6))" CELLHIVE_DO_NODE=examples-do \
  CELLHIVE_DO_ADVERTISE="http://127.0.0.1:$((E2E_PORT_BASE+6))" \
- CELLHIVE_DATA_DIR="$E2E_BASE/do" CELLHIVE_RUNTIME_DIR="$E2E_BASE/do/render" \
+ CELLHIVE_LOG_DIR="$E2E_BASE/do/logs" CELLHIVE_DATA_DIR="$E2E_BASE/do" CELLHIVE_RUNTIME_DIR="$E2E_BASE/do/render" \
  CELLHIVE_DO_RUNTIME_JS="$E2E_ROOT/workerd/do-runtime" \
  CELLHIVE_DO_GATE_URL="http://127.0.0.1:$((E2E_PORT_BASE+8))" \
  E2E_GATE="$((E2E_PORT_BASE+8))" E2E_DO_PORT="$((E2E_PORT_BASE+6))" \
  setsid bash -c '
- cfg=$("$E2E_BIN/do-runtime" -render-only)
- exec "$E2E_BIN/do-supervisor" -workerd "$CELLHIVE_WORKERD" -config "$cfg" \
- -dir "$CELLHIVE_DATA_DIR/do" -scope-prefix demo/__do__ -listen "127.0.0.1:$E2E_GATE" \
- -do-url "http://127.0.0.1:$E2E_DO_PORT" -owner "$CELLHIVE_CELL_URL"
+
+ exec "$E2E_BIN/do-runtime" \
+ -scope-prefix demo/__do__ -listen "127.0.0.1:$E2E_GATE"
  ' > "$E2E_BASE/do.log" 2>&1 &
 echo $! > "$E2E_BASE/do.pid"
 e2e_wait_http "http://127.0.0.1:$((E2E_PORT_BASE+6))/ready" 120 || e2e_fail 'DO startup'

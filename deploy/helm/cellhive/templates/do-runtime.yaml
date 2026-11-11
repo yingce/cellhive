@@ -54,20 +54,25 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: 60
+      {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+      volumes:
+        {{- include "cellhive.runtimeLogVolumes" . | nindent 8 }}
+      {{- end }}
       containers:
         - name: do-runtime
           image: {{ include "cellhive.image" (dict "image" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.doRuntime.gate }}
-          # ADR-083/140: do-supervisor renders, spawns workerd and gates every
-          # response on cell-agent durability; it also owns lease renew/drain.
-          command: ["/usr/local/bin/do-runtime-gated.sh"]
-          {{- else }}
+          # One Go process renders and supervises workerd, including the output gate.
           command: ["/usr/local/bin/do-runtime"]
+          {{- if not .Values.doRuntime.gate }}
+          args: ["-gate=false"]
           {{- end }}
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
           env:
+            {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+            - {name: CELLHIVE_LOG_DIR, value: /var/log/cellhive}
+            {{- end }}
             {{- if .Values.telemetry.enabled }}
             - name: CELLHIVE_OTLP_ENDPOINT
               valueFrom: {secretKeyRef: {name: {{ include "cellhive.secretName" . }}, key: CELLHIVE_OTLP_ENDPOINT}}
@@ -100,6 +105,9 @@ spec:
           resources:
             {{- toYaml .Values.doRuntime.resources | nindent 12 }}
           volumeMounts:
+            {{- if and .Values.telemetry.enabled .Values.telemetry.fileLogs.enabled }}
+            - {name: runtime-logs, mountPath: /var/log/cellhive}
+            {{- end }}
             - {name: data, mountPath: /data}
   volumeClaimTemplates:
     - metadata:

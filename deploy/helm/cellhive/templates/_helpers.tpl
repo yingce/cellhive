@@ -33,3 +33,8 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 - name: CELLHIVE_FACADES_JS
   value: /app/workerd/platform/facades.js
 {{- end -}}
+
+{{- define "cellhive.runtimeLogVolumes" -}}
+- name: runtime-logs
+  emptyDir: {sizeLimit: 256Mi}
+{{- end -}}

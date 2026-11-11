@@ -9,7 +9,6 @@ if [ "$#" -gt 0 ]; then shift; fi
 
 case "$cmd" in
   /*) exec "$cmd" "$@" ;;
-  cell-agent|cellhive|user-runtime|do-runtime|do-supervisor) exec "/usr/local/bin/$cmd" "$@" ;;
-  do-runtime-gated) exec /usr/local/bin/do-runtime-gated.sh "$@" ;;
+  cell-agent|cellhive|user-runtime|do-runtime) exec "/usr/local/bin/$cmd" "$@" ;;
   *) exec "$cmd" "$@" ;;
 esac

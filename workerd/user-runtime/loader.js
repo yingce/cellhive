@@ -345,7 +345,7 @@ async function fixedFetch(req,env,ctx,app,worker,version,url){
   return runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
 }
 
-import { traceparent as newTraceparent, startSpan, endSpan, flushSpans } from "telemetry.js";
+import { traceparent as newTraceparent, startSpan, endSpan, flushSpans, postTelemetry, fileLog } from "telemetry.js";
 
 // --- worker ---------------------------------------------------------------
 
@@ -434,6 +434,20 @@ function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedM
   return new Uint8Array(otlpBytes(1, resourceLogs));
 }
 async function recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+  if (env.FILE_LOG_TOKEN) {
+    let path = "/";
+    try { path = new URL(req.url).pathname; } catch (_) {}
+    fileLog(env, {
+      "cellhive.namespace":app.namespace, "cellhive.worker":worker,
+      "cellhive.invocation":true, "cellhive.event_type":"fetch",
+      "cellhive.request_id":req.headers.get("x-request-id") || crypto.randomUUID(),
+      "cellhive.method":req.method, "cellhive.path":req.headers.get("x-vwork-path-prefix") || path,
+      "cellhive.route":"functions", "cellhive.status":status, "cellhive.outcome":outcome,
+      "cellhive.started_ms":startedMs, "cellhive.finished_ms":finishedMs,
+      "cellhive.duration_ms":Math.max(0,finishedMs-startedMs),
+    }, "invocation", status>=500?"error":"info", finishedMs, req.headers.get("traceparent") || "");
+    return;
+  }
   const base = String(env.OTLP_LOGS_URL || "").trim();
   if (base) {
     let extra = {};
@@ -441,19 +455,15 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
     const headers = new Headers({ "content-type": "application/x-protobuf" });
     for (const [k, v] of Object.entries(extra)) headers.set(k, String(v));
     const url = base.replace(/\/$/, "").replace(/\/v1\/(traces|logs)$/, "") + "/v1/logs";
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("request log timeout")), 3000);
     try {
-      const r = await fetch(url, {
-        method: "POST", headers, signal: controller.signal,
+      const r = await postTelemetry(url, {
+        method: "POST", headers,
         body: otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs),
       });
-      if (r.ok) return;
+      if (!r || r.ok) return;
       console.error(JSON.stringify({ event: "request_log_otlp_failed", status: r.status }));
     } catch (e) {
       console.error(JSON.stringify({ event: "request_log_otlp_failed", error: String(e) }));
-    } finally {
-      clearTimeout(timer);
     }
   }
   if (!env.CELL_URL || !env.CELL_TOKEN) return;
@@ -469,15 +479,9 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
     status, started_ms: startedMs, finished_ms: finishedMs, outcome,
     traceparent: req.headers.get("traceparent") || "",
   });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("request log timeout")), 3000);
-  try {
-    await fetch(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/request-log", {
-      method: "POST", headers, body, signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  await postTelemetry(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/request-log", {
+    method: "POST", headers, body,
+  });
 }
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
   const startedMs = Date.now();
@@ -499,7 +503,8 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
 }
 
 async function runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
-  const cold=!preparedCache.has(workerVersionKey(app,worker,version));
+  const key = workerVersionKey(app, worker, version);
+  const cold = !preparedCache.has(key) && !preparedInflight.has(key);
   if(cold&&coldLoads>=16)return text('runtime cold-load capacity exhausted',503);
   if(cold)coldLoads++;
   let plan;
@@ -1183,6 +1188,7 @@ function tailEnabled(env, ns, worker) {
     // flow through the all-mode exporter independently.
     return !captureOK || captureWorkers.has(ns + "/" + worker);
   }
+  if (env.FILE_LOG_TOKEN && tailCapture === "all") return true;
   if (captureMode === "all") return true;
   if (!captureOK) return true; // endpoint unavailable: preserve legacy behavior
   return captureWorkers.has(ns + "/" + worker);

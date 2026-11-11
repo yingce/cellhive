@@ -41,6 +41,26 @@ _更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表�
 
 - DO 版本变化且旧 WebSocket 常驻时返回 do_runtime_capacity：源码已改为单 facet 切换、关闭旧连接并等待 native detach；真实 fork 测试 16 并发切换、状态保留和无关连接存活通过，尚未部署。另修复 WebSocket-only facet 首次退出前映射未刷新导致的捕获 scope 错误。
 
+- 2026-11-11 Hello 并发502：已在本地复现调用日志连接积累/子进程1024句柄耗尽，以及无日志时事件循环延迟处理健康连接。响应释放、I/O公平轮询及watchdog有界排空修复验收中，尚未部署。
+
+2026-11-11 Runtime 502 本地验收：完整修复版 Hello 1/8/32 并发短测零失败，32 并发持续 120 秒 150150/150150 成功；KV 33553/33553 成功并校验内容。Hello 子进程句柄峰值79，未发生健康检查失败或重启。代码尚未部署；详见 [验收记录](reports/2026-11-11-runtime-502-fix.md)。
+
+2026-11-11 遥测慢服务隔离（实施中）：调用日志与 spans 共用每 isolate 最多16个并发导出，无等待队列；超额遥测丢弃，不影响业务数据。导出覆盖响应头及响应体的3秒超时，响应体最多64KiB，正常读取释放连接、超限取消。业务响应和 resident release 不等待导出，保留 ctx.waitUntil 生命周期管理。需验证慢响应、挂起响应体、不可用及饱和时业务请求成功。
+
+2026-11-11 冷加载 admission 修订：同一不可变 Worker 版本的 preparedInflight 等待者复用加载，不重复占用 coldLoads；保留16个不同冷加载的资源上限。避免32并发首次访问同一 Worker 时误报 cold-load capacity。
+
+2026-11-11 遥测隔离/冷加载补充验收：真实 workerd 32 并发，首次冷访问及日志服务挂起响应头/响应体、断连、503、恢复六阶段，共 131118 次请求零失败；无 unhealthy/进程退出。相关单测30/30、loader 全套49/49通过。此处为本地验证，尚未部署。
+
+2026-11-11 本地文件日志/Vector：user-runtime、DO共用有界异步spool，DO不再等待span/统计上报。真实Vector停机、重启、轮转补采集和native DO慢span测试通过；采集停机32并发27174次请求零失败。日志仍是best-effort，Pod删除/长时间积压可丢遥测。代码/Helm尚未部署，见 [验收记录](reports/2026-11-11-runtime-file-logs.md)。
+
+2026-11-11 Go遥测转发修订（未部署）：撤回未上线的Vector sidecar，改为Go读取本地spool、批量OTLP直连CellHive Vector；Trace也走可信本地pipe。真实Vector验收发现native OTLP日志解码保留resourceLogs整批envelope，与现有逐条remap不匹配，已改logs解码为Vector事件格式；traces保持原生OTLP供后端转发。日志/Trace验收和故障边界见 [Go转发报告](reports/2026-11-11-runtime-go-export.md)。VWork资源未改。
+
+2026-11-11 DO入口合并（验收中，未部署）：生产默认 `do-runtime` 一次启动即包含render和持久化supervisor，移除独立 `do-supervisor` 产物/启动脚本。原输出门、续租与退出顺序保持；隔离测试使用显式 `-gate=false`。README中英和部署入口同步，Service/PVC命名保持。
+
+2026-11-11 DO统一入口本地验收：相关Go/native测试及导入导出、多class、idle重开、双agent双runtime分页接管E2E通过；两次crash后epoch依次1→2→3，数据保持。使用本地FS bucket和真实fork，不等于本次COS验收或生产上线。见 [统一入口报告](reports/2026-11-11-unified-do-runtime.md)。
+
 - 2026-11-11 节点续租：已完成无截止时间的续租 I/O、丢失响应确认及节点换段清理阻塞的代码修复；本地 race、owner/server 回归、双进程 session-recovery E2E 通过。真实 COS 故障注入尚未进行。原租约过期仍停止服务。未部署；线上具体阻塞请求及恢复 fragments.log 缺失仍未定位。
 
 - 存储 debug 日志需在 cell-agent 启动时设置 `CELLHIVE_LOG_LEVEL=debug`；本轮未在线开启。逐 HTTP 请求的 SDK 重试标识仅在 SDK 提供时记录；本地序号不是跨节点 trace ID。
+
+2026-11-11 SG rollout exposed stale workerd HTTP-client addresses after headless agent Pod IP changes. Live user-runtime sockets continued SYN_SENT to retired 10.0.16.82:7001 while DNS returned current endpoints. Stable general/per-ordinal ClusterIP routing is being implemented; this alone does not prove every historical Capability deadline exceeded had this cause. USW also observed one lease_replaced restart after ambiguous renewal; that separate issue is not resolved by routing changes.

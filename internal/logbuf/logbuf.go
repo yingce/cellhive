@@ -52,6 +52,8 @@ type TailException struct {
 // TailEvent is one invocation, including invocations without console output.
 // It is separate from Entry so the native CLI can retain its line view.
 type TailEvent struct {
+	FileExported bool `json:"file_exported,omitempty"`
+
 	Seq                      uint64          `json:"-"`
 	RuntimeOrigin            string          `json:"-"` // direct runtime URL + process session
 	RuntimeSeq               uint64          `json:"-"`

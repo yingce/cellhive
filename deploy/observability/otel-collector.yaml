@@ -34,7 +34,7 @@ receivers:
         - job_name: cellhive
           scrape_interval: 15s
           static_configs:
-            - targets: ["cell-agent:7001", "do-supervisor:18901"]
+            - targets: ["cell-agent:7001", "do-runtime-gated:18901"]
 
 processors:
   memory_limiter:

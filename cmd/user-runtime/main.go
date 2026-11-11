@@ -67,7 +67,18 @@ func main() {
 		log.Error("invalid CELLHIVE_INVOCATION_LOGS", "err", err)
 		os.Exit(1)
 	}
+	spool, err := runtimelog.OpenSpool(runtimelog.SpoolConfig{Dir: getenv("CELLHIVE_LOG_DIR", filepath.Join(runtimeRoot(), "logs")), Stream: "user-runtime", Endpoint: os.Getenv("CELLHIVE_OTLP_ENDPOINT")})
+	if err != nil {
+		log.Error("open log spool", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = spool.Close(c)
+	}()
 	runtimeCfg := userruntime.Config{
+		LogSpool:          spool,
 		CellURL:           cellURL,
 		CellToken:         cellToken,
 		BindingSigningKey: creds.Binding,
@@ -132,6 +143,7 @@ func main() {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx = runtimelog.WithSpool(ctx, spool)
 	defer stop()
 	var frontServer *ingress.Server
 	if ingressPort := envInt("CELLHIVE_INGRESS_PORT", 0); ingressPort > 0 {
@@ -228,7 +240,7 @@ func main() {
 	// Graceful shutdown (ADR-156): on SIGTERM mark the loader not-ready so the
 	// edge stops routing to this instance, give in-flight requests a moment, then
 	// stop workerd.
-	runCtx, cancelRun := context.WithCancel(context.Background())
+	runCtx, cancelRun := context.WithCancel(runtimelog.WithSpool(context.Background(), spool))
 	defer cancelRun()
 	go func() {
 		<-ctx.Done()

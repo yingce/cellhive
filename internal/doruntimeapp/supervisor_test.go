@@ -1,4 +1,4 @@
-package main
+package doruntimeapp
 
 import (
 	"cellhive/internal/bucket"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestShutdownAfterDrainsBeforeCancel(t *testing.T) {
+func TestGatedShutdownAfterDrainsBeforeCancel(t *testing.T) {
 	signalCtx, signal := context.WithCancel(context.Background())
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	drainStarted := make(chan struct{})
@@ -15,7 +15,7 @@ func TestShutdownAfterDrainsBeforeCancel(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		done <- shutdownAfter(signalCtx, func() error {
+		done <- gatedShutdownAfter(signalCtx, func() error {
 			close(drainStarted)
 			<-allowDrain
 			return errors.New("drain failed")

@@ -41,16 +41,21 @@
 
 ![CellHive 架构](./docs/assets/architecture-workerd-fork.png)
 
+[可编辑 SVG](./docs/assets/architecture-workerd-fork.svg) · [独立查看](./docs/assets/architecture-workerd-fork.html)
+
 | 组件 | 运行时 | 端口 | 职责 |
 |---|---|---|---|
 | **Traefik / 边缘代理** | 外部 | 80/443 | TLS + host 分流（由运维静态配置） |
 | **`user-runtime`** | Go + cellhive-workerd fork | `:8081` 公开 / `:8088` 内部 | 入口 loader：host/版本路由与租户执行 |
-| **`do-runtime`** | cellhive-workerd fork + Go supervisor | `:8788` | 原生 Durable Objects（facet）；分布式弹性；只持工作副本，不是权威 |
-| **`do-supervisor`**（gated 模式） | Go | `:18901` | DO 专属输出门 + PID1；在 RPO=0 生产 profile 中替代默认 `do-runtime` supervisor |
+| **`do-runtime`** | Go + cellhive-workerd fork | `:8788`、`:18901` 输出门 | 生成配置、管理原生DO、owner续租、分页和持久化输出门；本地SQLite为工作副本 |
 | **`cell-agent`** | Go | `:7001` 内部 REST / `:8082` admin | cell 存储 + 复制 + owner/epoch 租约 + 控制面 + 计时派发 + **唯一桶凭据** |
 | **对象存储** | S3 兼容 | — | cell 状态、worker bundle、assets 的权威 |
 
 **状态模型。** 每个状态单元是一个 **cell**（`<namespace>/<class>/<id>`），各自一份 SQLite。KV namespace、queue、D1 库、workflow、Durable Object 都是 cell，因此共享同一套租约、复制与故障接管。已提交的 SQLite 写被捕获为 **LTX** 并复制到 peer；**bucket 条件写**选出 owner，**所有权 epoch** 围栏写者。单节点靠上传对象存储证明耐久，多节点靠 peer 持有证明（quorum-1 fsync）。所有权带着恢复出的日志一起迁移，已确认的写不会丢。
+
+**Runtime 进程。** user-runtime 和 do-runtime 都由一个 Go 入口生成 Cap’n Proto 配置、启动并管理 workerd。user-runtime 管理计算进程池；do-runtime 内置 DO supervisor、输出门、分页、租约和排空退出逻辑，不再需要独立的 do-supervisor 程序或两阶段 shell 启动。do-runtime 默认启用持久化门，`-gate=false` 仅用于不保证RPO=0的隔离测试；`-render-only` 仅生成诊断配置。已有 gated Service/StatefulSet 名称保留，避免改变路由和卷身份。
+
+**Runtime 遥测。** 可信宿主日志和采样span经Go父进程写入有界本地文件，再批量OTLP发送至CellHive集中Vector，不再部署Vector sidecar。cell-agent使用同一采集服务。遥测允许有损，不阻塞业务，也不替代持久化输出门。
 
 ## 设计思路
 
@@ -98,7 +103,7 @@ cd cli && bun install && bun run src/index.ts dev <dir>
 ## 目录
 
 ```
-cmd/        服务与工具入口（cell-agent、cellhive、user-runtime、do-runtime、do-supervisor、各 bench）
+cmd/        服务与工具入口（cell-agent、cellhive、user-runtime、do-runtime、各 bench）
 internal/   可复用 Go 包（cellstore、bucket、owner、lease、replica、ltx、server、control 等）
 workerd/    workerd JS 平台代码 + capnp 配置（user-runtime/、do-runtime/、platform/）
 cli/        dev CLI（Bun + Miniflare；仅开发）
