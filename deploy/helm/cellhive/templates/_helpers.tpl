@@ -19,7 +19,7 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 
 {{- define "cellhive.commonEnv" -}}
 - name: CELLHIVE_CELL_URL
-  value: "http://{{ .Release.Name }}-cell-agent:7001"
+  value: "http://{{ .Release.Name }}-cell-agent-api:7001"
 - name: CELLHIVE_DATA_DIR
   value: {{ .Values.config.dataDir | quote }}
 - name: CELLHIVE_RUNTIME_DIR
