@@ -15,3 +15,5 @@ Fresh local validation:
 - Actual DO/log-poll network recovery changed backend IP and recovered in about 2 seconds without runtime restart. Fixture ran as root because host JS bind mounts are not readable by the image UID; this is not production permission acceptance. The final image must also be verified as its non-root user.
 
 Deployment and live Pod-replacement acceptance are recorded separately in the operations release report. No full provider fault-injection or 10GiB E2E rerun is claimed. The separate USW lease_replaced observation remains open.
+
+Deployment completed: SG Helm 131 / USW Helm 118, same immutable image `sha256:127f15ba5a9cb98d458a2988a69d1e3f2e3d8e794edce515defc38fee280b3db`. All components Ready and sampled new-Pod restart counts zero. SG public KV 12/12 success, first 1675.6ms then 110.9–159.8ms; runtime sockets used fixed Service addresses, telemetry cursor progressed with zero sampled drops/errors. USW runtime-to-agent Service health passed; no public business E2E is claimed. Operations report: `/opt/cellhive-helm/reports/2026-11-11-stable-routing-runtime-release.md`.
