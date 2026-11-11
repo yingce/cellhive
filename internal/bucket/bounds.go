@@ -45,7 +45,7 @@ func newBoundedHTTPTransport() *http.Transport {
 }
 
 func newBoundedHTTPClient() *http.Client {
-	return &http.Client{Transport: newBoundedHTTPTransport()}
+	return &http.Client{Transport: debugTransport(newBoundedHTTPTransport(), nil)}
 }
 
 func readContentLength(v *int64) int64 {

@@ -35,14 +35,18 @@ func runNodeLeaseRenewal(ctx context.Context, ttl time.Duration, publish func() 
 	if interval <= 0 {
 		interval = time.Millisecond
 	}
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			_ = publish()
+		case <-timer.C:
+			delay := interval
+			if err := publish(); err != nil {
+				delay = min(interval, 100*time.Millisecond)
+			}
+			timer.Reset(delay)
 		}
 	}
 }

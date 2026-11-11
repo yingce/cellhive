@@ -60,7 +60,15 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level := slog.LevelInfo
+	if value := os.Getenv("CELLHIVE_LOG_LEVEL"); value != "" {
+		if err := level.UnmarshalText([]byte(value)); err != nil {
+			fmt.Fprintln(os.Stderr, "invalid CELLHIVE_LOG_LEVEL")
+			os.Exit(2)
+		}
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(log)
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		log.Error("invalid config", "err", err)
@@ -215,11 +223,14 @@ func main() {
 	leaseCtx, stopLease := context.WithCancel(context.Background())
 	defer stopLease()
 	publishLoad := func() error {
+		start := time.Now()
+		log.Debug("node lease publication started", "session", cfg.SessionID, "remaining", lm.Remaining())
 		owned := len(om.OwnedScopes())
 		if err := lm.Publish(leaseCtx, lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
-			log.Warn("lease publish failed", "err", err)
+			log.Warn("lease publish failed", "err", err, "elapsed", time.Since(start), "remaining", lm.Remaining(), "session", cfg.SessionID, "lease", lm.Diagnostics())
 			return err
 		}
+		log.Debug("node lease publication confirmed", "session", cfg.SessionID, "elapsed", time.Since(start), "remaining", lm.Remaining(), "lease", lm.Diagnostics())
 		return nil
 	}
 	if err := publishLoad(); err != nil {
@@ -229,7 +240,7 @@ func main() {
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	defer stopWatch()
 	go watchNodeLease(watchCtx, lm, func() {
-		log.Error("node lease permanently fenced; exiting without handoff", "session", cfg.SessionID)
+		log.Error("node lease permanently fenced; exiting without handoff", "session", cfg.SessionID, "remaining", lm.Remaining(), "lease", lm.Diagnostics())
 		os.Exit(1)
 	})
 

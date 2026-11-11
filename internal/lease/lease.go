@@ -2,6 +2,7 @@
 package lease
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -77,12 +78,16 @@ type Manager struct {
 	// publishedExpiry is the Expiry of the newest lease this node successfully
 	// wrote. Peers judge us dead once it passes, so Healthy measures from it and
 	// not from when the PUT happened to return.
-	publishedExpiry time.Time
-	healthRevision  uint64
-	healthBroken    bool
-	fenced          bool
-	publishMu       sync.Mutex
-	publishedETag   string
+	publishedExpiry    time.Time
+	healthRevision     uint64
+	healthBroken       bool
+	fenced             bool
+	fenceReason        string
+	publicationStarted time.Time
+	publicationPhase   string
+	publishMu          sync.Mutex
+	publishedETag      string
+	pending            *pendingPublication
 
 	mu         sync.Mutex
 	cached     []NodeLease
@@ -103,11 +108,29 @@ func NewManager(b bucket.Bucket, nodeID, session, advertise, peerURL string, ttl
 func (m *Manager) Publish(ctx context.Context, load Load) error {
 	m.publishMu.Lock()
 	defer m.publishMu.Unlock()
+	m.mu.Lock()
+	m.publicationStarted = time.Now()
+	m.publicationPhase = "prepare"
+	m.mu.Unlock()
 	if m.Fenced() {
 		return ErrFenced
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	m.mu.Lock()
+	budget := m.TTL / 3
+	if !m.publishedExpiry.IsZero() {
+		budget = min(budget, time.Until(m.publishedExpiry)/2)
+	}
+	m.mu.Unlock()
+	ctx, cancel := context.WithTimeout(bucket.WithDeferredAuthorityRetirement(ctx), budget)
+	defer cancel()
+	if m.pending != nil {
+		confirmed, err := m.confirmPublication(ctx)
+		if err != nil || confirmed {
+			return err
+		}
 	}
 	if load.SampledMs == 0 {
 		load.SampledMs = time.Now().UnixMilli()
@@ -131,6 +154,7 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 	}
 	expected := m.publishedETag
 	if expected == "" {
+		m.setPublicationPhase("initial_read")
 		previous, etag, rerr := m.B.Get(ctx, m.renewKey)
 		switch {
 		case errors.Is(rerr, bucket.ErrNotFound):
@@ -153,31 +177,80 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 	if m.Fenced() {
 		return ErrFenced
 	}
+	m.pending = &pendingPublication{data: data, expected: expected, expiry: expiry}
+	writeCtx, cancelWrite := context.WithTimeout(ctx, budget/2)
 	var etag string
+	m.setPublicationPhase("conditional_write")
 	if expected == "" {
-		etag, err = m.B.ConditionalCreate(ctx, m.renewKey, data)
+		etag, err = m.B.ConditionalCreate(writeCtx, m.renewKey, data)
 	} else {
-		etag, err = m.B.CAS(ctx, m.renewKey, data, expected)
+		etag, err = m.B.CAS(writeCtx, m.renewKey, data, expected)
 	}
+	cancelWrite()
+	if err != nil {
+		confirmed, confirmErr := m.confirmPublication(ctx)
+		if !confirmed && errors.Is(err, bucket.ErrPrecondition) {
+			// A definitive CAS conflict revokes authority even if the confirming
+			// read is unavailable. Only an exact successful-write proof overrides it.
+			return m.fenceReplaced()
+		}
+		if confirmErr != nil {
+			return fmt.Errorf("publish lease (%v); confirmation: %w", err, confirmErr)
+		}
+		if confirmed {
+			return nil
+		}
+		return fmt.Errorf("publish lease: %w", err)
+	}
+	m.pending = nil
+	return m.acceptPublication(etag, expiry)
+}
+
+type pendingPublication struct {
+	data     []byte
+	expected string
+	expiry   time.Time
+}
+
+// Only the exact attempted value can resolve an ambiguous write. The previous
+// deadline is checked again in acceptPublication; confirmation cannot revive it.
+func (m *Manager) confirmPublication(ctx context.Context) (bool, error) {
+	p := m.pending
+	m.setPublicationPhase("confirm_read")
+	data, etag, err := m.B.Get(ctx, m.renewKey)
+	if err != nil {
+		if errors.Is(err, bucket.ErrNotFound) && p.expected == "" {
+			m.pending = nil
+			return false, nil
+		}
+		return false, err
+	}
+	if etag == p.expected {
+		m.pending = nil
+		return false, nil
+	}
+	if bytes.Equal(data, p.data) {
+		if err := m.acceptPublication(etag, p.expiry); err != nil {
+			return false, err
+		}
+		m.pending = nil
+		return true, nil
+	}
+	return false, m.fenceReplaced()
+}
+
+func (m *Manager) acceptPublication(etag string, expiry time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
 	if m.expiredLocked(now) {
 		return ErrFenced
 	}
-	if err != nil {
-		// A changed ETag may be another process or an ambiguous earlier write.
-		// Never overwrite it or guess that authority survived.
-		if m.publishedETag != "" && errors.Is(err, bucket.ErrPrecondition) {
-			m.fenced = true
-			return fmt.Errorf("%w: lease was replaced", ErrFenced)
-		}
-		return fmt.Errorf("publish lease: %w", err)
-	}
-	if !now.Before(expiry) || now.UnixMilli() >= l.Expiry {
+	if !now.Before(expiry) || now.UnixMilli() >= expiry.UnixMilli() {
 		// An initial write that returned already expired never granted authority.
 		return fmt.Errorf("initial node lease write returned expired")
 	}
+	m.publicationPhase = "confirmed"
 	m.publishedETag = etag
 	// Check the old deadline before replacing it: requests may have been idle
 	// throughout a safety-margin gap, so Healthy alone cannot observe it.
@@ -195,6 +268,9 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 // within the original lease can still restore health without losing authority.
 func (m *Manager) expiredLocked(now time.Time) bool {
 	if !m.publishedExpiry.IsZero() && (!now.Before(m.publishedExpiry) || now.UnixMilli() >= m.publishedExpiry.UnixMilli()) {
+		if !m.fenced {
+			m.fenceReason = "lease_expired"
+		}
 		m.fenced = true
 	}
 	return m.fenced
@@ -497,4 +573,36 @@ func (m *Manager) CachedNodeLease(node string) (NodeLease, bool) {
 		}
 	}
 	return NodeLease{}, false
+}
+
+// Remaining reports only confirmed authority, never an in-flight renewal.
+func (m *Manager) Remaining() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishedExpiry.IsZero() {
+		return 0
+	}
+	return time.Until(m.publishedExpiry)
+}
+
+func (m *Manager) setPublicationPhase(phase string) {
+	m.mu.Lock()
+	m.publicationPhase = phase
+	m.mu.Unlock()
+}
+
+// Diagnostics never waits for the publication lock or bucket I/O. In particular
+// the watchdog can report which operation was pending when authority expired.
+func (m *Manager) Diagnostics() map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return map[string]any{"phase": m.publicationPhase, "started": m.publicationStarted, "confirmed_expiry": m.publishedExpiry, "fence_reason": m.fenceReason}
+}
+
+func (m *Manager) fenceReplaced() error {
+	m.mu.Lock()
+	m.fenced = true
+	m.fenceReason = "lease_replaced"
+	m.mu.Unlock()
+	return fmt.Errorf("%w: lease was replaced", ErrFenced)
 }

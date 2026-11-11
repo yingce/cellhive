@@ -175,7 +175,7 @@ func NewCOSAppender(endpoint, access, secret string) (*COSAppender, error) {
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  access,
 			SecretKey: secret,
-			Transport: newBoundedHTTPTransport(),
+			Transport: debugTransport(newBoundedHTTPTransport(), nil),
 		},
 	})
 	return &COSAppender{client: c, maxRead: DefaultMaxObjectBytes}, nil

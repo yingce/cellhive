@@ -4115,3 +4115,11 @@ COS/OSS R2 正文条件替换明确失败关闭：r2/ 的 CAS 不下沉到不具
 2026-11-10 原生失权退出修订（实施中，未验收/未部署）：分页模式关闭 SQLite 时禁止自动 checkpoint，保留 WAL 至 supervisor 观察 native detach。checkpoint 准备在任何证书/主文件修改前因失权被明确拒绝（HTTP 412）时，仅 fence 当前原生激活的后续 I/O，允许最终 close/detach；其他不确定回调/主文件修改失败仍保持 fail-stop。旧缓存只有在新 claim 验证、旧 native 句柄全部退出且捕获已停之后才可丢弃。不得将本地丢弃伪装为持久化成功。
 
 2026-11-10 DO 局部 owner 恢复验收补记（未部署）：上述局部退出方案已实现。supervisor 使用有效的新 claim 对目标 Host 关闭 admission，等待普通/分页 native detach 与捕获退出，再清理本地旧 tuple 并恢复；同 claim 重试幂等，跨 scope 恢复拒绝，按 Host 独立互斥。真实 HK COS 连续三轮同进程接回、B→C 写入→B 接回和后续五轮 idle 重开通过，native PID 不变、无关 shard 持续可用。版本切换/WebSocket 问题另有真实 COS 验收。详见 reports/2026-11-10-do-owner-recovery.md。此记录不表示当前服务镜像已更新。
+
+### 节点续租有界 I/O 与结果确认（2026-11-11，实施中，未部署）
+
+节点租约到期仍永久 fencing，不延长未获桶确认的本地权限。每次 Publish 的总预算不超过 TTL/3 和原租约剩余时间的一半，写阶段使用总预算的一半，为读取确认留出时间。条件写超时或响应丢失后保留精确待确认 payload；仅在原租约尚未到期且权威记录逐字节等于该 payload 时接受成功。相同 session 不足以证明成功；不同记录/token 必须 fail closed。失败后加快重试，禁止并发续租。节点 authority 换段后的旧段压缩采用最多一个后台任务、2 秒截止时间；拥塞时保留已封口旧段，不能影响已发布续租结果。日志记录续租耗时、剩余租约、执行阶段与 fencing 原因，不输出凭据。此修改不能证明 14:19:59 事故中具体哪次网络请求阻塞，也不包含启动恢复 fragments.log 缺失问题的修复。
+
+2026-11-11 本地验收：lease/bucket/cell-agent 单测与 race、owner/server 回归、相关 go vet 通过；真实双进程 session-recovery E2E 通过（80 条已确认数据、恢复中断重试、空替代盘拒绝、SIGSTOP 超 TTL 接管与旧 session 退出）。明确 CAS 冲突且无法确认时仍立即 fencing。未做本次真实 COS 故障注入、未部署，不宣称线上根因完全闭环。
+
+2026-11-11 存储 debug 诊断：cell-agent 支持 CELLHIVE_LOG_LEVEL（默认 info）。COS/S3/OSS HTTP 逐请求记录 start/headers/body completion，允许对象路径、Range、耗时与 provider request ID；禁止 raw query、凭据、正文和带签名 URL 的错误文本。取代 S3Options.Debug 原有 SDK 正文 dump。续租成功/start 为 DEBUG，失败与 fencing 保留 WARN/ERROR。未部署。

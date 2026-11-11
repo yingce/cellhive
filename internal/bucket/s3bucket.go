@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -66,6 +68,13 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 	if o.HTTPClient == nil {
 		o.HTTPClient = newBoundedHTTPClient()
 	}
+	clientCopy := *o.HTTPClient
+	var debugLog *slog.Logger
+	if o.Debug {
+		debugLog = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	clientCopy.Transport = debugTransport(clientCopy.Transport, debugLog)
+	o.HTTPClient = &clientCopy
 	if o.MaxReadBytes <= 0 {
 		o.MaxReadBytes = DefaultMaxObjectBytes
 	}
@@ -83,9 +92,6 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 		// default "when supported" mode warns on every successful GET, which
 		// floods stdout under a busy cell-agent. Required checks remain enabled.
 		cfg.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-	}
-	if o.Debug {
-		cfg.ClientLogMode = aws.LogRequestWithBody | aws.LogResponseWithBody
 	}
 	client := s3.NewFromConfig(cfg, func(opts *s3.Options) {
 		if o.Endpoint != "" {

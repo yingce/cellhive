@@ -40,3 +40,7 @@ _更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表�
 - DO 重接管 restore_500：整进程重启方案已撤回，源码改为目标 Host/shard 的 native detach 后清理与新 epoch 恢复。本地及真实 HK COS 同进程重新接管、跨节点写入后接回通过；尚未部署。见 [局部恢复验收](reports/2026-11-10-do-owner-recovery.md)。
 
 - DO 版本变化且旧 WebSocket 常驻时返回 do_runtime_capacity：源码已改为单 facet 切换、关闭旧连接并等待 native detach；真实 fork 测试 16 并发切换、状态保留和无关连接存活通过，尚未部署。另修复 WebSocket-only facet 首次退出前映射未刷新导致的捕获 scope 错误。
+
+- 2026-11-11 节点续租：已完成无截止时间的续租 I/O、丢失响应确认及节点换段清理阻塞的代码修复；本地 race、owner/server 回归、双进程 session-recovery E2E 通过。真实 COS 故障注入尚未进行。原租约过期仍停止服务。未部署；线上具体阻塞请求及恢复 fragments.log 缺失仍未定位。
+
+- 存储 debug 日志需在 cell-agent 启动时设置 `CELLHIVE_LOG_LEVEL=debug`；本轮未在线开启。逐 HTTP 请求的 SDK 重试标识仅在 SDK 提供时记录；本地序号不是跨节点 trace ID。

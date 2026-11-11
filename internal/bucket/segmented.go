@@ -67,6 +67,7 @@ type SegmentedAuthority struct {
 	segment                time.Duration
 	max, rootMax, valueMax int64
 	now                    func() time.Time
+	retiring               chan struct{}
 	readMu                 sync.Mutex
 	readRoots              map[string]authorityRoot
 }
@@ -89,7 +90,7 @@ func NewSegmentedAuthority(raw PositionAppender, data segmentData, opts Authorit
 	if valueMax > authorityMaxValue {
 		valueMax = authorityMaxValue
 	}
-	return &SegmentedAuthority{raw: raw, data: data, segment: opts.Segment, max: opts.MaxSegmentBytes, rootMax: opts.MaxRootBytes, valueMax: valueMax, now: opts.Now}
+	return &SegmentedAuthority{retiring: make(chan struct{}, 1), raw: raw, data: data, segment: opts.Segment, max: opts.MaxSegmentBytes, rootMax: opts.MaxRootBytes, valueMax: valueMax, now: opts.Now}
 }
 func (s *SegmentedAuthority) window() int64 { return s.now().UnixNano() / int64(s.segment) }
 func (s *SegmentedAuthority) physical(key string, generation int64) string {
@@ -307,7 +308,22 @@ func (s *SegmentedAuthority) publish(ctx context.Context, seg *authoritySegment)
 			return nil, ErrPrecondition
 		}
 	}
-	s.retire(ctx, seg.logical, seg.window)
+	if deferred, _ := ctx.Value(deferredRetirementKey{}).(bool); deferred && strings.HasPrefix(seg.logical, "nodes/") {
+		// The root is already authoritative. A sealed predecessor remains safe
+		// without compaction; do not spend the new lease's lifetime cleaning it.
+		select {
+		case s.retiring <- struct{}{}:
+			go func(key string, generation int64) {
+				defer func() { <-s.retiring }()
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				s.retire(cleanupCtx, key, generation)
+			}(seg.logical, seg.window)
+		default:
+		}
+	} else {
+		s.retire(ctx, seg.logical, seg.window)
+	}
 	return next, nil
 }
 func (s *SegmentedAuthority) latest(ctx context.Context, key string) (*authoritySegment, error) {
@@ -573,4 +589,12 @@ func (s *SegmentedAuthority) RangedGet(ctx context.Context, key string, off, len
 		return nil, "", fmt.Errorf("authority range out of bounds")
 	}
 	return v[off : off+length], t, nil
+}
+
+type deferredRetirementKey struct{}
+
+// WithDeferredAuthorityRetirement lets node lease publication return once the
+// authority root commits. Other control records retain synchronous cleanup.
+func WithDeferredAuthorityRetirement(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deferredRetirementKey{}, true)
 }
