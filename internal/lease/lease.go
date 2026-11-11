@@ -131,6 +131,7 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		if err != nil || confirmed {
 			return err
 		}
+		return m.writePendingPublication(ctx, budget)
 	}
 	if load.SampledMs == 0 {
 		load.SampledMs = time.Now().UnixMilli()
@@ -178,13 +179,24 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		return ErrFenced
 	}
 	m.pending = &pendingPublication{data: data, expected: expected, expiry: expiry}
+	return m.writePendingPublication(ctx, budget)
+}
+
+// Retry exactly the same conditional operation: a canceled request may still
+// commit remotely after a confirming read returned the previous value.
+func (m *Manager) writePendingPublication(ctx context.Context, budget time.Duration) error {
+	if m.Fenced() {
+		return ErrFenced
+	}
+	p := m.pending
 	writeCtx, cancelWrite := context.WithTimeout(ctx, budget/2)
 	var etag string
+	var err error
 	m.setPublicationPhase("conditional_write")
-	if expected == "" {
-		etag, err = m.B.ConditionalCreate(writeCtx, m.renewKey, data)
+	if p.expected == "" {
+		etag, err = m.B.ConditionalCreate(writeCtx, m.renewKey, p.data)
 	} else {
-		etag, err = m.B.CAS(writeCtx, m.renewKey, data, expected)
+		etag, err = m.B.CAS(writeCtx, m.renewKey, p.data, p.expected)
 	}
 	cancelWrite()
 	if err != nil {
@@ -203,7 +215,7 @@ func (m *Manager) Publish(ctx context.Context, load Load) error {
 		return fmt.Errorf("publish lease: %w", err)
 	}
 	m.pending = nil
-	return m.acceptPublication(etag, expiry)
+	return m.acceptPublication(etag, p.expiry)
 }
 
 type pendingPublication struct {
@@ -220,13 +232,12 @@ func (m *Manager) confirmPublication(ctx context.Context) (bool, error) {
 	data, etag, err := m.B.Get(ctx, m.renewKey)
 	if err != nil {
 		if errors.Is(err, bucket.ErrNotFound) && p.expected == "" {
-			m.pending = nil
 			return false, nil
 		}
 		return false, err
 	}
 	if etag == p.expected {
-		m.pending = nil
+		// Seeing the old version does not rule out a delayed remote commit.
 		return false, nil
 	}
 	if bytes.Equal(data, p.data) {

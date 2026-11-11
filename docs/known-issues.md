@@ -66,3 +66,5 @@ _更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表�
 2026-11-11 SG rollout exposed stale workerd HTTP-client addresses after headless agent Pod IP changes. Live user-runtime sockets continued SYN_SENT to retired 10.0.16.82:7001 while DNS returned current endpoints. Stable general/per-ordinal ClusterIP routing is being implemented; this alone does not prove every historical Capability deadline exceeded had this cause. USW also observed one lease_replaced restart after ambiguous renewal; that separate issue is not resolved by routing changes.
 
 2026-11-11 部署更新：稳定 agent ClusterIP、统一 runtime、Go 日志出口已部署 SG 131 / USW 118；新 Pod 均 Ready、采样重启为零，SG 公开 KV canary 12/12 成功。旧 Pod IP 连接残留在新 runtime 网络采样中未再出现。上述独立的 USW lease_replaced 问题保持开放；本次不宣称全部历史超时已消除。
+
+2026-11-11 USW lease_replaced 已定位并修复源码：超时后读到旧值过早清除 pending，下一次续租把自身延迟提交判为竞争者。现在保留并精确重试原条件操作；本地复现、race、真实 HK COS 4 项故障注入（含换段）及双进程恢复 E2E 通过。尚未部署，原始网络超时原因仍未确定。见 [验收记录](reports/2026-11-11-lease-delayed-commit.md)。

@@ -4151,3 +4151,9 @@ The unshipped runtime Vector sidecars are superseded by a Go supervisor spool co
 Keep the existing headless Service and StatefulSet serviceName unchanged. Add a ready-only ClusterIP Service `<release>-cell-agent-api` for ordinary runtime requests and one ClusterIP Service `<release>-cell-agent-<ordinal>-endpoint` selecting exactly that StatefulSet Pod for owner/peer/log-registration access. Per-node endpoints publish not-ready addresses to preserve peer-assisted startup recovery; they never select a different ordinal. Advertise and peer URLs use these stable endpoints. Session/epoch authority checks remain mandatory; stable routing does not confer ownership or authorize replay of ambiguous writes. Service addresses survive Pod replacement, not Service deletion. Validation must check service selection, rollout recovery and data continuity.
 
 2026-11-11 发布记录：上述 stable agent Services、runtime 统一入口与本地遥测出口已部署 SG revision 131、USW revision 118，镜像 digest `sha256:127f15ba5a9cb98d458a2988a69d1e3f2e3d8e794edce515defc38fee280b3db`。两个区域组件 Ready，采样重启为零；SG 公开 KV 12/12 成功，运行时连接采样已使用 Service IP。此前续租/debug 修正也包含在镜像内，但 USW 早前发生的 ambiguous renewal / lease_replaced 仍未闭环，不能据此声称续租问题彻底解决。详细范围与局限见 `docs/reports/2026-11-11-stable-agent-routing.md` 及运维仓发布记录。
+
+### 超时续租保持同一条件操作（2026-11-11，修复中）
+
+超时后的确认读取看见旧版本或初次创建尚不存在，不能证明服务端写入已取消。保留 pending 的完整 payload、expected token 和原 expiry；下一次 Publish 先确认，仍为旧值时仅重试同一条件操作，不重新生成 expiry/load。仅精确内容确认或条件写成功才能接受；真实竞争、确认失败的明确冲突和已过期权限仍 fail closed。此修订不增加请求重放权限、不改变桶格式，不承诺消除网络超时。
+
+2026-11-11 验收补记：精确 pending 重试已实现。本地时序复现、lease/bucket race、真实 HK COS 4 项确定性故障注入（含换段）、双进程恢复 E2E 通过；真实竞争与到期 fencing 保持。未部署，详见 `reports/2026-11-11-lease-delayed-commit.md`。
