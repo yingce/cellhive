@@ -17,3 +17,7 @@ USW 旧 agent 在 07:06:37.713Z 发起续租，客户端写超时后确认读取
 - `go vet ./internal/lease ./internal/bucket`、`git diff --check` 通过。
 
 本次为源码修复与验证，尚未部署。修复消除了已复现的延迟提交误判；不承诺对象存储不会超时，也不取消真实失去权限时的安全退出。
+
+## 发布更新
+
+2026-11-11 修复提交 `3e08b76` 已推送 main 并部署 USW revision 119、SG revision 132，仅更新 cell-agent。镜像 `sha256:932f2425dd4761a8904620104b72adaf6707c9e3a3a1e967f8f6cf631d6951fd`；四个 agent Ready、零重启，容器二进制哈希一致；采样未见 lease publish failed/fencing/ERROR。两个区域 runtime 到 agent Service 健康请求通过，USW 日志确认恢复和 fleet 写入成功。SG 公开 KV 12/12 HTTP200，计数连续 294..305。user-runtime/DO Pod UID 保持不变。此发布更新取代上文的“尚未部署”状态；网络超时原因和长期观测边界保持。
