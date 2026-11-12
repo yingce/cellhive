@@ -4159,3 +4159,19 @@ Keep the existing headless Service and StatefulSet serviceName unchanged. Add a 
 2026-11-11 验收补记：精确 pending 重试已实现。本地时序复现、lease/bucket race、真实 HK COS 4 项确定性故障注入（含换段）、双进程恢复 E2E 通过；真实竞争与到期 fencing 保持。未部署，详见 `reports/2026-11-11-lease-delayed-commit.md`。
 
 2026-11-11 pending 续租修复发布：`3e08b76` 已上线 USW revision 119、SG revision 132。仅更新 agent 镜像；发布后的权限与恢复检查、SG 公开 KV canary 通过，仍保留真实冲突/过期 fencing。详见续租修复验收报告。
+
+### Authority 分段物理回收实验（2026-11-11，未部署）
+
+保留永久根与严格递增代数，不复用物理 key。实验模式在每次读取前后校验根 instance/generation/length，跳过旧 locator 快路径；写入成功必须验证该代仍为当前权威，已推进的换段帮助路径不得返回旧代 token。根发布完成后可删除旧段；延迟 genesis 即使重建旧段也只能成为垃圾，行政批量 GC 再次清除。不承诺任意时刻固定对象数，也不解决根文件 16MiB 上限。
+
+通过 AuthorityOptions 显式启用实验回收，默认仍保留占位对象；不接入生产启动配置。启用前必须停止/排空所有旧版参与者，且旧版本不得重入该桶，否则旧 locator 读取与写确认不具备新保护。根对象禁止删除或重置。所有失败/未确认结果保持 fail closed。实验验收须包含跨读写窗口换段、延迟旧段重建、并发 GC、错误响应与真实 COS 条件追加；没有这些证据不得部署。
+
+2026-11-11 管理请求转发修复：逐节点 stable Service 必须同时暴露 7001（peer/data）和 8082（admin）。遗漏 8082 导致非 owner 接到 releases 等管理查询时转发等待 30 秒后返回 502；直接访问 owner 正常。补齐 Service 端口，不修改鉴权、owner 协议或镜像。1/2/3 副本渲染回归覆盖两个端口。
+
+2026-11-11 gN 实验优化契约：缓存只提供段地址；热读先读取该段，再点查永久根，只有 instance/generation 仍匹配才返回值或 tombstone。根验证失败不得使用缓存值；换代时回到完整发现流程。冷读保留 root/segment/root。运维回收增加显式游标分页，单轮扫描和删除均有界；根与代数不重置，旧客户端混跑限制不变。仍为未部署实验。
+
+2026-11-11 gN 分阶段启用：增加 cell-agent 独立配置 `CELLHIVE_AUTHORITY_MODE=legacy|validate|reclaim`，空值为 legacy。validate 使用与 reclaim 完全相同的根验证及写确认，但退休时仍保留 stub；reclaim 在此基础上物理删除退休段，且必须显式设置 `CELLHIVE_AUTHORITY_RECLAIM_ACK=all-readers-validated`。非 COS/OSS 禁止启用 validate/reclaim。部署必须先在同桶全部参与者完成 validate 升级、核对实际镜像/模式和健康状态，再进行 reclaim 升级；不得一步跨越。ACK 是运维确认，不是自动检测混合客户端。启用删除后不得回滚到 legacy/旧二进制，只能回到 validate。永久根不删、不重置、不复用代数；该次只启用正常换代回收，不自动遍历/删除历史 backlog，后台补扫仍未接入。USW 部署验收中，SG 不启用。
+
+2026-11-11 USW 启用结果：Helm 121 已完成全节点 validate 升级，随后 Helm 122 开启 reclaim；同桶独立 scope 验证退休段物理删除、validate 读者不接受旧代、旧 token 被拒绝。仅覆盖正常换代回收，未做历史批量清理。SG 不启用；运行时开关默认 legacy，USW 禁止降回 legacy。见 [USW 发布记录](reports/2026-11-11-usw-authority-reclamation.md)。
+
+2026-11-13 当前部署状态：SG 已完成 Helm 134 validate → 135 reclaim 两阶段启用，与 USW 一致；两 agent 实际镜像、模式及 Ready 核对通过，SG 独立 COS 探针通过。随后观察到节点租约和 waker 的 g46 已删除、g47 正常写入；历史占位、失败补扫与永久根增长仍未解决。只能回退到支持根校验的 validate 模式。见 [SG 发布记录](reports/2026-11-13-sg-authority-reclamation.md)。

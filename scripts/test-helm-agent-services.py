@@ -23,6 +23,9 @@ for replicas in (1, 2, 3):
         assert spec['selector']['statefulset.kubernetes.io/pod-name'] == f'{base}-{i}'
         assert spec['selector']['app.kubernetes.io/instance'] == 'routing-test'
         assert spec['publishNotReadyAddresses'] is True
+        ports = {p['name']: (p['port'], p['targetPort']) for p in spec['ports']}
+        assert ports.get('rest') == (7001, 7001)
+        assert ports.get('admin') == (8082, 8082), 'owner admin forwarding requires port 8082'
     sts = docs['StatefulSet', base]['spec']
     assert sts['serviceName'] == base
     assert sts['updateStrategy']['type'] == 'OnDelete'

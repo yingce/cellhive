@@ -41,6 +41,13 @@ const (
 )
 
 type AuthorityOptions struct {
+	// ReclaimRetired is experimental and requires every participant to use
+	// root-validated reads/writes. Never enable alongside older participants.
+	// It does not reclaim/reset the permanent root or bound its total growth.
+	ReclaimRetired bool
+	// ValidateRoots enables the safe reader/writer path without physical deletion,
+	// allowing a whole fleet to upgrade before any participant starts reclaiming.
+	ValidateRoots   bool
 	Segment         time.Duration
 	MaxSegmentBytes int64
 	MaxRootBytes    int64
@@ -58,8 +65,9 @@ type segmentData interface {
 
 // SegmentedAuthority serializes initial creation on a permanent append root.
 // Values append within a generation; a terminal seal atomically consumes the
-// old position before publishing a successor in the root. Root and retired
-// one-byte segment stubs must never be deleted or reset online.
+// old position before publishing a successor in the root. The root must never
+// be deleted/reset. Default mode also retains permanent one-byte segment stubs;
+// experimental ReclaimRetired validates the root to reject recreated old keys.
 // Neither discovery nor rollover uses List. Legacy layouts fail closed.
 type SegmentedAuthority struct {
 	raw                    PositionAppender
@@ -68,6 +76,8 @@ type SegmentedAuthority struct {
 	max, rootMax, valueMax int64
 	now                    func() time.Time
 	retiring               chan struct{}
+	reclaimRetired         bool
+	validateRoots          bool
 	readMu                 sync.Mutex
 	readRoots              map[string]authorityRoot
 }
@@ -90,7 +100,7 @@ func NewSegmentedAuthority(raw PositionAppender, data segmentData, opts Authorit
 	if valueMax > authorityMaxValue {
 		valueMax = authorityMaxValue
 	}
-	return &SegmentedAuthority{retiring: make(chan struct{}, 1), raw: raw, data: data, segment: opts.Segment, max: opts.MaxSegmentBytes, rootMax: opts.MaxRootBytes, valueMax: valueMax, now: opts.Now}
+	return &SegmentedAuthority{reclaimRetired: opts.ReclaimRetired, validateRoots: opts.ValidateRoots || opts.ReclaimRetired, retiring: make(chan struct{}, 1), raw: raw, data: data, segment: opts.Segment, max: opts.MaxSegmentBytes, rootMax: opts.MaxRootBytes, valueMax: valueMax, now: opts.Now}
 }
 func (s *SegmentedAuthority) window() int64 { return s.now().UnixNano() / int64(s.segment) }
 func (s *SegmentedAuthority) physical(key string, generation int64) string {
@@ -233,8 +243,9 @@ func (s *SegmentedAuthority) readSegmentAt(ctx context.Context, key string, gene
 	return &authoritySegment{logical: key, window: generation, length: n, instance: inst, deleted: op == authorityDeleted, value: v, op: op}, nil
 }
 
-// ensureGenesis is safe even for a delayed helper: retired keys retain a
-// nonzero stub, and therefore can never accept append-at-zero again.
+// Default mode prevents a delayed helper from recreating retired keys using a
+// nonzero stub. ReclaimRetired instead requires root validation before accepting
+// a result: a successful genesis append alone does not prove authority.
 func (s *SegmentedAuthority) ensureGenesis(ctx context.Context, key string, seed []byte) error {
 	err := s.raw.Append(ctx, key, 0, seed)
 	if err == nil {
@@ -253,6 +264,11 @@ func (s *SegmentedAuthority) ensureGenesis(ctx context.Context, key string, seed
 	return nil
 }
 func (s *SegmentedAuthority) retire(ctx context.Context, key string, generation int64) {
+	if s.reclaimRetired {
+		// Failure leaves garbage, never changes the current authority.
+		_ = s.collectGeneration(ctx, key, generation)
+		return
+	}
 	// This unconditional overwrite is legal ONLY after root publication, on a
 	// terminal key which will never be selected or reused again.
 	_, _ = s.data.Put(ctx, s.physical(key, generation), []byte{0})
@@ -278,6 +294,9 @@ func (s *SegmentedAuthority) publish(ctx context.Context, seg *authoritySegment)
 		return nil, ErrPrecondition
 	}
 	if r.generation > seg.window {
+		if s.validateRoots {
+			return nil, ErrPrecondition
+		}
 		return next, nil
 	}
 	if r.generation != seg.window || r.length != seg.root.length {
@@ -285,6 +304,9 @@ func (s *SegmentedAuthority) publish(ctx context.Context, seg *authoritySegment)
 	}
 	if err = s.ensureGenesis(ctx, s.physical(seg.logical, generation), seed); err != nil {
 		if curr, e := s.readRoot(ctx, seg.logical); e == nil && curr.instance == seg.instance && curr.generation >= generation {
+			if s.validateRoots {
+				return nil, ErrPrecondition
+			}
 			return next, nil
 		}
 		return nil, err
@@ -306,6 +328,11 @@ func (s *SegmentedAuthority) publish(ctx context.Context, seg *authoritySegment)
 		}
 		if curr.instance != seg.instance || curr.generation < generation {
 			return nil, ErrPrecondition
+		}
+	}
+	if s.validateRoots {
+		if err := s.validateGeneration(ctx, seg.logical, seg.instance, generation); err != nil {
+			return nil, err
 		}
 	}
 	if deferred, _ := ctx.Value(deferredRetirementKey{}).(bool); deferred && strings.HasPrefix(seg.logical, "nodes/") {
@@ -362,9 +389,24 @@ func (s *SegmentedAuthority) latest(ctx context.Context, key string) (*authority
 		if seg.instance != r.instance {
 			return nil, errors.New("bucket: authority instance mismatch")
 		}
+		if s.validateRoots {
+			current, e := s.readRoot(ctx, key)
+			if e != nil {
+				return nil, e
+			}
+			if current.instance != r.instance {
+				return nil, ErrPrecondition
+			}
+			if current.generation != r.generation || current.length != r.length {
+				continue
+			}
+		}
 		seg.root = r
 		if seg.op == authoritySeal {
 			if _, err = s.publish(ctx, seg); err != nil {
+				if s.validateRoots && errors.Is(err, ErrPrecondition) {
+					continue
+				}
 				return nil, err
 			}
 			continue
@@ -391,12 +433,29 @@ func (s *SegmentedAuthority) Get(ctx context.Context, key string) ([]byte, strin
 		// Only an ordinary value/tombstone is reusable. Seals and retirement
 		// force discovery; the descriptor is a locator, never cached data.
 		if err == nil && seg.instance == root.instance && seg.op != authoritySeal {
+			if s.validateRoots {
+				// The cached descriptor is only a locator. Read the root AFTER
+				// the segment: GC may have deleted and a late append recreated
+				// that key. A matching permanent root proves this generation
+				// remained current through the segment read. Never cache this
+				// validation or accept a value when the root cannot be read.
+				if err := s.validateGeneration(ctx, key, seg.instance, seg.window); err != nil {
+					if !errors.Is(err, ErrPrecondition) {
+						return nil, "", err
+					}
+					return s.getLatest(ctx, key)
+				}
+			}
 			if seg.deleted {
 				return nil, "", ErrNotFound
 			}
 			return seg.value, seg.token(), nil
 		}
 	}
+	return s.getLatest(ctx, key)
+}
+
+func (s *SegmentedAuthority) getLatest(ctx context.Context, key string) ([]byte, string, error) {
 	seg, err := s.latest(ctx, key)
 	if err != nil {
 		return nil, "", err
@@ -469,6 +528,11 @@ func (s *SegmentedAuthority) mutate(ctx context.Context, seg *authoritySegment, 
 		return "", err
 	}
 	seg.length += int64(len(frame))
+	if s.validateRoots {
+		if err := s.validateGeneration(ctx, seg.logical, seg.instance, seg.window); err != nil {
+			return "", err
+		}
+	}
 	return seg.token(), nil
 }
 func (s *SegmentedAuthority) ConditionalCreate(ctx context.Context, key string, data []byte) (string, error) {
@@ -496,6 +560,11 @@ func (s *SegmentedAuthority) ConditionalCreate(ctx context.Context, key string, 
 	seed := encodeAuthorityFrame(authorityValue, data, inst)
 	if err = s.ensureGenesis(ctx, s.physical(key, 0), seed); err != nil {
 		if r, e := s.readRoot(ctx, key); e != nil || r.instance != inst || r.generation == 0 {
+			return "", err
+		}
+	}
+	if s.validateRoots {
+		if err := s.validateGeneration(ctx, key, inst, 0); err != nil {
 			return "", err
 		}
 	}

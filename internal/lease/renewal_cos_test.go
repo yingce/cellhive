@@ -37,54 +37,58 @@ func TestCOSRenewalDelayedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, initial := range []bool{false, true} {
-		for _, rollover := range []bool{false, true} {
-			t.Run(fmt.Sprintf("initial=%v/rollover=%v", initial, rollover), func(t *testing.T) {
-				clock := time.Unix(1700000000, 0)
-				provider := bucket.NewProviderBucket(base, appender, bucket.AuthorityOptions{Now: func() time.Time { return clock }})
-				node := fmt.Sprintf("itest-lease-%d", time.Now().UnixNano())
-				key := Key(node)
-				t.Cleanup(func() {
-					clean, done := context.WithTimeout(context.Background(), 30*time.Second)
-					defer done()
-					// Only this run's known keys, after all synchronous test writes finish.
-					for _, k := range []string{key + ".g0", key + ".g1", key} {
-						if err := base.Delete(clean, k); err != nil {
-							t.Error(err)
+	for _, mode := range []string{"legacy", "validate", "reclaim"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, initial := range []bool{false, true} {
+				for _, rollover := range []bool{false, true} {
+					t.Run(fmt.Sprintf("initial=%v/rollover=%v", initial, rollover), func(t *testing.T) {
+						clock := time.Unix(1700000000, 0)
+						provider := bucket.NewProviderBucket(base, appender, bucket.AuthorityOptions{Now: func() time.Time { return clock }, ValidateRoots: mode == "validate", ReclaimRetired: mode == "reclaim"})
+						node := fmt.Sprintf("itest-lease-%d", time.Now().UnixNano())
+						key := Key(node)
+						t.Cleanup(func() {
+							clean, done := context.WithTimeout(context.Background(), 30*time.Second)
+							defer done()
+							// Only this run's known keys, after all synchronous test writes finish.
+							for _, k := range []string{key + ".g0", key + ".g1", key} {
+								if err := base.Delete(clean, k); err != nil {
+									t.Error(err)
+								}
+							}
+						})
+						m := NewManager(provider, node, "test-session", "", "", 60*time.Second)
+						if !initial {
+							if err := m.Publish(ctx, Load{}); err != nil {
+								t.Fatal(err)
+							}
 						}
-					}
-				})
-				m := NewManager(provider, node, "test-session", "", "", 60*time.Second)
-				if !initial {
-					if err := m.Publish(ctx, Load{}); err != nil {
-						t.Fatal(err)
-					}
+						fault := &ambiguousLeaseWrite{Bucket: provider, commitOnRetry: true}
+						m.B = fault
+						for i := 1; i <= 2; i++ {
+							if err := m.Publish(ctx, Load{OwnedCells: i}); err == nil {
+								t.Fatal("expected injected timeout")
+							}
+						}
+						if rollover {
+							clock = clock.Add(time.Hour)
+						}
+						if err := m.Publish(ctx, Load{OwnedCells: 99}); err != nil {
+							t.Fatal(err)
+						}
+						if fault.changed || m.Fenced() || m.pending != nil {
+							t.Fatal("lost exact pending operation")
+						}
+						data, _, err := provider.Get(ctx, key)
+						if err != nil || !bytes.Equal(data, fault.data) {
+							t.Fatal("different confirmed data", err)
+						}
+						m.B = provider
+						if err := m.Publish(ctx, Load{OwnedCells: 100}); err != nil {
+							t.Fatal(err)
+						}
+					})
 				}
-				fault := &ambiguousLeaseWrite{Bucket: provider, commitOnRetry: true}
-				m.B = fault
-				for i := 1; i <= 2; i++ {
-					if err := m.Publish(ctx, Load{OwnedCells: i}); err == nil {
-						t.Fatal("expected injected timeout")
-					}
-				}
-				if rollover {
-					clock = clock.Add(time.Hour)
-				}
-				if err := m.Publish(ctx, Load{OwnedCells: 99}); err != nil {
-					t.Fatal(err)
-				}
-				if fault.changed || m.Fenced() || m.pending != nil {
-					t.Fatal("lost exact pending operation")
-				}
-				data, _, err := provider.Get(ctx, key)
-				if err != nil || !bytes.Equal(data, fault.data) {
-					t.Fatal("different confirmed data", err)
-				}
-				m.B = provider
-				if err := m.Publish(ctx, Load{OwnedCells: 100}); err != nil {
-					t.Fatal(err)
-				}
-			})
-		}
+			}
+		})
 	}
 }

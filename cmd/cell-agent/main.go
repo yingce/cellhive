@@ -126,7 +126,7 @@ func main() {
 		log.Error("storage diagnose failed", "err", err)
 		os.Exit(1)
 	}
-	log.Info("storage diagnose ok")
+	log.Info("storage diagnose ok", "authority_mode", cfg.AuthorityMode)
 
 	lm := lease.NewManager(b, cfg.NodeID, cfg.SessionID, cfg.Advertise, cfg.PeerURL, cfg.LeaseTTL)
 	lm.Instance = inst.ID
@@ -1941,7 +1941,7 @@ func openBucket(ctx context.Context, cfg config.Config) (bucket.Bucket, error) {
 		if err != nil {
 			return nil, err
 		}
-		return bucket.NewProviderBucket(data, appender), nil
+		return bucket.NewProviderBucket(data, appender, bucket.AuthorityOptions{ValidateRoots: cfg.AuthorityMode == "validate" || cfg.AuthorityMode == "reclaim", ReclaimRetired: cfg.AuthorityMode == "reclaim"}), nil
 	}
 	scheme := cfg.BucketURL
 	if i := strings.Index(scheme, "://"); i >= 0 {

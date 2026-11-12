@@ -47,6 +47,8 @@ spec:
     statefulset.kubernetes.io/pod-name: {{ $.Release.Name }}-cell-agent-{{ $i }}
   ports:
     - {name: rest, port: 7001, targetPort: 7001}
+    # Authenticated control requests forward to the owner admin listener.
+    - {name: admin, port: 8082, targetPort: 8082}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -101,6 +103,10 @@ spec:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            - name: CELLHIVE_AUTHORITY_MODE
+              value: {{ .Values.cellAgent.authorityMode | default "legacy" | quote }}
+            - name: CELLHIVE_AUTHORITY_RECLAIM_ACK
+              value: {{ .Values.cellAgent.authorityReclaimACK | default "" | quote }}
             {{- with .Values.cellAgent.restoreParallel }}
             - name: CELLHIVE_RESTORE_PARALLEL
               value: {{ . | quote }}

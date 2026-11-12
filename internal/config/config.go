@@ -120,19 +120,21 @@ type Config struct {
 
 	// S3 and native OSS/COS authority providers; empty uses local filesystem.
 	// Unsupported schemes fail startup.
-	BucketURL    string
-	BucketDir    string
-	S3Endpoint   string
-	S3Region     string
-	S3AccessKey  string
-	S3SecretKey  string
-	S3PathStyle  bool
-	OSSEndpoint  string
-	OSSAccessKey string
-	OSSSecretKey string
-	COSEndpoint  string
-	COSAccessKey string
-	COSSecretKey string
+	BucketURL           string
+	AuthorityMode       string
+	AuthorityReclaimACK string
+	BucketDir           string
+	S3Endpoint          string
+	S3Region            string
+	S3AccessKey         string
+	S3SecretKey         string
+	S3PathStyle         bool
+	OSSEndpoint         string
+	OSSAccessKey        string
+	OSSSecretKey        string
+	COSEndpoint         string
+	COSAccessKey        string
+	COSSecretKey        string
 
 	// Follower spool for replicated segments.
 	PeerSpoolDir string
@@ -528,15 +530,17 @@ func FromEnv() Config {
 	nsRPS, nsBurst := envRate("CELLHIVE_NS_RATE", 0, 0)
 	s3Endpoint := env("AWS_ENDPOINT_URL", "")
 	return Config{
-		NodeID:     env("CELLHIVE_NODE_ID", "node-1"),
-		SessionID:  env("CELLHIVE_SESSION_ID", fmt.Sprintf("%d", time.Now().UnixNano())),
-		Advertise:  env("CELLHIVE_ADVERTISE", "127.0.0.1:7001"),
-		PeerURL:    env("CELLHIVE_PEER_URL", "http://127.0.0.1:7001"),
-		DataDir:    dataDir,
-		Durability: env("CELLHIVE_DURABILITY", "auto"),
-		BucketWait: envBool("CELLHIVE_BUCKET_WAIT", true),
-		BucketURL:  env("CELLHIVE_BUCKET", ""),
-		BucketDir:  env("CELLHIVE_BUCKET_DIR", "./.cellhive/bucket"),
+		NodeID:              env("CELLHIVE_NODE_ID", "node-1"),
+		SessionID:           env("CELLHIVE_SESSION_ID", fmt.Sprintf("%d", time.Now().UnixNano())),
+		Advertise:           env("CELLHIVE_ADVERTISE", "127.0.0.1:7001"),
+		PeerURL:             env("CELLHIVE_PEER_URL", "http://127.0.0.1:7001"),
+		DataDir:             dataDir,
+		Durability:          env("CELLHIVE_DURABILITY", "auto"),
+		BucketWait:          envBool("CELLHIVE_BUCKET_WAIT", true),
+		BucketURL:           env("CELLHIVE_BUCKET", ""),
+		AuthorityMode:       env("CELLHIVE_AUTHORITY_MODE", ""),
+		AuthorityReclaimACK: env("CELLHIVE_AUTHORITY_RECLAIM_ACK", ""),
+		BucketDir:           env("CELLHIVE_BUCKET_DIR", "./.cellhive/bucket"),
 		// Object storage credentials follow the AWS SDK names. Path style is on
 		// by default for a custom endpoint (MinIO/R2) and off for real AWS S3.
 		S3Endpoint:                   s3Endpoint,
@@ -824,6 +828,19 @@ func envInt(key string, def int) int {
 
 // Validate checks required fields.
 func (c Config) Validate() error {
+	switch c.AuthorityMode {
+	case "", "legacy":
+	case "validate", "reclaim":
+		if !strings.HasPrefix(c.BucketURL, "cos://") && !strings.HasPrefix(c.BucketURL, "oss://") {
+			return fmt.Errorf("authority mode requires COS/OSS")
+		}
+		if c.AuthorityMode == "reclaim" && c.AuthorityReclaimACK != "all-readers-validated" {
+			return fmt.Errorf("reclaim requires CELLHIVE_AUTHORITY_RECLAIM_ACK=all-readers-validated after every bucket participant uses validated reads")
+		}
+	default:
+		return fmt.Errorf("invalid CELLHIVE_AUTHORITY_MODE %q", c.AuthorityMode)
+	}
+
 	if c.NodeID == "" {
 		return fmt.Errorf("node id is required")
 	}

@@ -77,6 +77,9 @@ config:
   cosSecretKey: ""
 
 cellAgent:
+  # Upgrade every bucket participant to validate before enabling reclaim.
+  authorityMode: legacy
+  authorityReclaimACK: ""
   # Optional image fields merged over global image for agent-first upgrades.
   image: {}
   # Optional per-restore object-read concurrency; null leaves the process default (4).

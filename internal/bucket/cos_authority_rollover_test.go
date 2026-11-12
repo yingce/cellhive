@@ -65,6 +65,7 @@ func TestOSSAuthorityCHA3(t *testing.T) {
 }
 
 func testCloudAuthorityCHA3(t *testing.T, base *S3Bucket, raw PositionAppender) {
+	t.Run("reclaim-retired", func(t *testing.T) { testCloudAuthorityReclaim(t, base, raw) })
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
 	var err error

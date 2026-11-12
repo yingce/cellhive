@@ -70,3 +70,15 @@ _更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表�
 2026-11-11 USW lease_replaced 已定位并修复源码：超时后读到旧值过早清除 pending，下一次续租把自身延迟提交判为竞争者。现在保留并精确重试原条件操作；本地复现、race、真实 HK COS 4 项故障注入（含换段）及双进程恢复 E2E 通过。尚未部署，原始网络超时原因仍未确定。见 [验收记录](reports/2026-11-11-lease-delayed-commit.md)。
 
 2026-11-11 发布更新：上述 pending 续租修复 `3e08b76` 已部署 USW 119 / SG 132，四个 agent Ready、零重启，采样未见续租/fencing 错误；SG KV 12/12 成功。仅更新 agent，原始网络超时原因仍未确定。
+
+2026-11-11 gN 回收实验：新增显式 opt-in 的根前后验证、写确认和物理回收；默认保留占位对象，未部署。105 代正常换段只剩根＋当前段、并发 race 10 轮、真实 HK COS 旧段重建/拒绝旧权限/再次 GC 测试通过。warm Get 由 1 次变 3 次对象读取；旧进程不能混跑；根增长、生产启用与后台调度尚未解决。见 [实验报告](reports/2026-11-11-authority-reclamation-experiment.md)。
+
+2026-11-11 管理请求转发修复：逐节点 stable Service 必须同时暴露 7001（peer/data）和 8082（admin）。遗漏 8082 导致非 owner 接到 releases 等管理查询时转发等待 30 秒后返回 502；直接访问 owner 正常。补齐 Service 端口，不修改鉴权、owner 协议或镜像。1/2/3 副本渲染回归覆盖两个端口。
+
+2026-11-11 gN 实验第二轮：热读从初版 3 次对象读取降为 2 次（段读取后必须验证永久根）；冷读仍为 3 次，生产默认模式仍为 1 次。回收 API 改为显式游标分页，扫描候选/删除均有界，并保护非规范 g00 等名称；部分失败可重试。真实 HK COS 验证热读次数及回收安全。未部署，混合旧客户端、生产启用门禁、后台调度与永久根增长仍未解决，不能据此上线。详见实验报告。
+
+2026-11-11 USW 回收启用准备：增加 legacy/validate/reclaim 三种模式与显式 ACK。validate 不删除对象，但读写验证与 reclaim 相同，可分两阶段滚动升级。运行时开关已实现，部署/验收未完成；ACK 只表示运维确认，不能自动阻止未知旧客户端。回退只能到 validate，不得退到 legacy。旧 backlog 补扫和永久根增长仍未解决。
+
+2026-11-11 USW 已分阶段启用：Helm 121 全部 validate 后，Helm 122 全部 reclaim；两 agent 实际镜像/二进制和模式核对通过，真实 USW 独立 scope 回收探针通过。仅正常换代回收；历史 backlog/失败补扫与永久根增长仍未解决。回退必须保持 validate，不得回 legacy/旧二进制。SG 未启用。详见 [发布记录](reports/2026-11-11-usw-authority-reclamation.md)。
+
+2026-11-13 当前部署状态：SG 已完成 Helm 134 validate → 135 reclaim 两阶段启用，与 USW 一致；两 agent 实际镜像、模式及 Ready 核对通过，SG 独立 COS 探针通过。随后观察到节点租约和 waker 的 g46 已删除、g47 正常写入；历史占位、失败补扫与永久根增长仍未解决。只能回退到支持根校验的 validate 模式。见 [SG 发布记录](reports/2026-11-13-sg-authority-reclamation.md)。
