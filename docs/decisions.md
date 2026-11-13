@@ -4175,3 +4175,5 @@ Keep the existing headless Service and StatefulSet serviceName unchanged. Add a 
 2026-11-11 USW 启用结果：Helm 121 已完成全节点 validate 升级，随后 Helm 122 开启 reclaim；同桶独立 scope 验证退休段物理删除、validate 读者不接受旧代、旧 token 被拒绝。仅覆盖正常换代回收，未做历史批量清理。SG 不启用；运行时开关默认 legacy，USW 禁止降回 legacy。见 [USW 发布记录](reports/2026-11-11-usw-authority-reclamation.md)。
 
 2026-11-13 当前部署状态：SG 已完成 Helm 134 validate → 135 reclaim 两阶段启用，与 USW 一致；两 agent 实际镜像、模式及 Ready 核对通过，SG 独立 COS 探针通过。随后观察到节点租约和 waker 的 g46 已删除、g47 正常写入；历史占位、失败补扫与永久根增长仍未解决。只能回退到支持根校验的 validate 模式。见 [SG 发布记录](reports/2026-11-13-sg-authority-reclamation.md)。
+
+2026-11-13 同 epoch L9 回收移除：删除 `replica.ListSupersededL9`/`PruneSupersededL9`、admin `gc/scope` 的 `prune_l9`/`keep_l9` 字段与分支，以及 CLI 的 `--prune-l9`/`--keep-l9`。ADR-309 的运维入口仍只含 scope/keepPrevious/grace/dry-run，不再提供同 epoch 多余 L9 的显式清理。常态下一个 epoch 至多两张 L9：`compaction.Snapshot` 对已有 `max >= watermark` 的 L9 返回已压缩（ADR-312 的水位去重），idle 路径另要求不存在 L9，release/handoff 走同一门控；因此「两张」是按水位去重的结果，不是硬上限，水位在两次 release 之间继续推进或运维显式 `--snapshot` 仍可增加。移除后旧 L9 不影响恢复：`planEpochFiles` 取 `max` 最大的 L9 作 baseline，其余仅占存储，直到 epoch 退休时整目录回收。旧的 `prune_l9` 请求因 `decodeControl` 不做 unknown-field 拒绝而静默失效；该改动未部署。

@@ -195,7 +195,7 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷且长链的 owned cell best-effort 发布 L9；每 epoch 最多一张（已有 L9 跳过），异步、受 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 限制，不阻塞驱逐 |
 | `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |
 
-运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC，`--snapshot` 在当前 owner 上发布一次完整 L9 快照（不删除源对象，不加 epoch GC），`--prune-l9 --keep-l9 1` 在 Safe/grace 条件下删除被更新 L9 覆盖的旧 L9（保留最新 N 张，`--keep-l9` 默认 1）；`--grace` 默认 3600 秒，按对象上传时间计龄。压缩不删除源文件，已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。
+运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC，`--snapshot` 在当前 owner 上发布一次完整 L9 快照（不删除源对象，不加 epoch GC）；`--grace` 默认 3600 秒，按对象上传时间计龄。同 epoch 内多余 L9 的回收（原 `--prune-l9 --keep-l9`）已移除，暂不提供该运维入口；常态下一个 epoch 至多因 idle 与 release 各发布一张 L9，旧 L9 随 epoch 退休一并回收。压缩不删除源文件，已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。
 
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` 关 | bundle/assets GC |
 | `CELLHIVE_BUNDLE_GC_GRACE` | `24h` | 未引用保留期 |

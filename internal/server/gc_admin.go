@@ -18,8 +18,6 @@ type gcScopeRequest struct {
 	GraceSeconds int    `json:"grace_seconds"`
 	DryRun       bool   `json:"dry_run"`
 	Snapshot     bool   `json:"snapshot"`
-	PruneL9      bool   `json:"prune_l9"`
-	KeepL9       int    `json:"keep_l9"`
 }
 
 // handleControlGCScope runs explicit native maintenance on the live owner.
@@ -38,20 +36,12 @@ func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_scope", err.Error())
 		return
 	}
-	if !req.Safe && !req.DryRun && !req.Snapshot && !req.PruneL9 {
+	if !req.Safe && !req.DryRun && !req.Snapshot {
 		writeErr(w, http.StatusBadRequest, "safe_required", "Safe GC requires safe=true; use dry_run=true to inspect first")
 		return
 	}
 	if req.Snapshot && (req.Safe || req.DryRun) {
 		writeErr(w, http.StatusBadRequest, "snapshot_exclusive", "snapshot must not be combined with safe or dry_run")
-		return
-	}
-	if req.PruneL9 && req.Snapshot {
-		writeErr(w, http.StatusBadRequest, "prune_exclusive", "prune_l9 must not be combined with snapshot")
-		return
-	}
-	if req.PruneL9 && !req.Safe && !req.DryRun {
-		writeErr(w, http.StatusBadRequest, "safe_required", "prune_l9 requires safe=true; use dry_run=true to inspect candidates")
 		return
 	}
 	ctx := r.Context()
@@ -82,36 +72,6 @@ func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}}
-	if req.PruneL9 {
-		keep := req.KeepL9
-		if keep < 1 {
-			keep = 1
-		}
-		candidates, perr := s.Replica.ListSupersededL9(ctx, sc, current, keep)
-		if perr != nil {
-			writeErr(w, http.StatusInternalServerError, "prune_failed", perr.Error())
-			return
-		}
-		if req.DryRun {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"scope": sc.String(), "epoch": current, "dry_run": true,
-				"keep_l9": keep, "candidates": candidates,
-			})
-			return
-		}
-		pr, perr := s.Replica.PruneSupersededL9(ctx, sc, current, keep, replica.RetireOptions{
-			Safe: true, Grace: grace, Verify: opts.Verify,
-		})
-		if perr != nil {
-			writeErr(w, http.StatusInternalServerError, "prune_failed", perr.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"scope": sc.String(), "epoch": current, "keep_l9": keep,
-			"prune": pr,
-		})
-		return
-	}
 	if req.Snapshot {
 		snapshotOpts := opts
 		snapshotOpts.SnapshotMaxBytes = s.Cfg.CaptureEpochSnapshotMaxBytes
