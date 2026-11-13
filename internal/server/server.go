@@ -760,6 +760,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	{
+		as := bucket.AuthorityStats()
+		for _, m := range []struct {
+			name  string
+			value uint64
+		}{
+			{"cellhive_authority_retired_deleted_total", as["retired_deleted"]},
+			{"cellhive_authority_retired_delete_failures_total", as["retired_delete_failed"]},
+			{"cellhive_authority_gc_page_scans_total", as["gc_page_scans"]},
+			{"cellhive_authority_gc_page_candidates_total", as["gc_page_candidates"]},
+			{"cellhive_authority_gc_page_deleted_total", as["gc_page_deleted"]},
+			{"cellhive_authority_gc_page_delete_failures_total", as["gc_page_delete_failed"]},
+		} {
+			writeFmt(w, "# TYPE %s counter\n", m.name)
+			writeFmt(w, "%s %d\n", m.name, m.value)
+		}
+	}
+	{
 		st := pagedvfs.SnapshotStatsAll()
 		writeFmt(w, "# TYPE cellhive_paged_cells gauge\n")
 		writeFmt(w, "cellhive_paged_cells %d\n", st.Cells)

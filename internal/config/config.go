@@ -85,6 +85,10 @@ type Config struct {
 	// owner epoch with a fresh snapshot (0 disables the policy). Larger cells
 	// keep the cross-epoch chain until paged continuation is wired.
 	CaptureEpochSnapshotMaxBytes int64
+	// CaptureL9OnEvict publishes an optional L9 snapshot for an owned, idle
+	// evicted cell when its chain is long enough. It is best-effort, uses the
+	// epoch snapshot budget, and never blocks eviction.
+	CaptureL9OnEvict bool
 	// EpochGCInterval enables background epoch GC (0 disables). GC only removes
 	// epochs older than the current/previous one once the current epoch has a
 	// complete snapshot.
@@ -653,6 +657,7 @@ func FromEnv() Config {
 		CapturePipelineThreshold:     envDuration("CELLHIVE_CAPTURE_PIPELINE", 0),
 		CaptureSnapshotMaxBytes:      int64(envBytes("CELLHIVE_CAPTURE_SNAPSHOT_MAX", 8<<30)),
 		CaptureEpochSnapshotMaxBytes: int64(envBytes("CELLHIVE_EPOCH_SNAPSHOT_MAX", 256<<20)),
+		CaptureL9OnEvict:             envBool("CELLHIVE_L9_ON_EVICT", true),
 		EpochGCInterval:              envDuration("CELLHIVE_EPOCH_GC_INTERVAL", 5*time.Minute),
 		EpochGCInitial:               envDuration("CELLHIVE_EPOCH_GC_INITIAL", time.Minute),
 		EpochGCKeepPrevious:          envInt("CELLHIVE_EPOCH_GC_KEEP", 1),

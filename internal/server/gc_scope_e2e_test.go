@@ -94,3 +94,37 @@ func TestGCScopeSafeRetiresOldEpochOnOwner(t *testing.T) {
 		t.Fatalf("idempotent retry: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestGCScopeSnapshotPublishesL9(t *testing.T) {
+	s, _ := newTestServer(t)
+	ctx := context.Background()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "gc-snapshot"}
+	o, err := s.Owner.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Replica.Append(ctx, sc, o.Epoch, gcScopeSnapshot(t, o.Epoch, 3)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"scope": sc.String(), "snapshot": true,
+	})
+	rr := httptest.NewRecorder()
+	s.handleControlGCScope(rr, httptest.NewRequest(http.MethodPost, "/v1/control/gc/scope", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("snapshot status = %d: %s", rr.Code, rr.Body.String())
+	}
+	keys, err := s.Replica.ListSegments(ctx, sc, o.Epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var l9 []string
+	for _, key := range keys {
+		if strings.Contains(key, "/0009/") {
+			l9 = append(l9, key)
+		}
+	}
+	if len(l9) != 1 || !strings.Contains(l9[0], "0000000000000001-0000000000000003.ltx") {
+		t.Fatalf("L9 keys = %v, want one [1,3] snapshot", l9)
+	}
+}

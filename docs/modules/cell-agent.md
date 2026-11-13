@@ -37,6 +37,7 @@
 | `CELLHIVE_DO_EAGER_RESTART` | `false` | deploy 急切重启 DO |
 | `CELLHIVE_DO_RUNTIMES` | 空 | do-runtime 列表（DO 放置）；空则禁用 `/v1/do/invoke` |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
+| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷且长链的 owned cell best-effort 发布 L9（每 epoch 最多一张，已有 L9 跳过；受 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 限制）；不阻塞驱逐 |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
 | `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
 | `CELLHIVE_MAX_OPEN_CELLS` | `128` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |

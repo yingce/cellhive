@@ -33,9 +33,15 @@ func (s *SegmentedAuthority) collectGeneration(ctx context.Context, key string, 
 	// Advancement after this read can only retire more generations.
 	err = s.data.Delete(ctx, s.physical(key, generation))
 	if errors.Is(err, ErrNotFound) {
+		authorityReclaim.retiredDeleted.Add(1)
 		return nil
 	}
-	return err
+	if err != nil {
+		authorityReclaim.retiredDeleteFailed.Add(1)
+		return err
+	}
+	authorityReclaim.retiredDeleted.Add(1)
+	return nil
 }
 
 // CollectRetiredPage scans at most limit physical keys and removes only retired
@@ -47,6 +53,7 @@ func (s *SegmentedAuthority) CollectRetiredPage(ctx context.Context, key, after 
 	if !s.reclaimRetired {
 		return 0, after, ErrNotSupported
 	}
+	authorityReclaim.gcPageScans.Add(1)
 	if limit <= 0 || limit > 1000 {
 		return 0, after, fmt.Errorf("bucket: authority GC page limit must be 1..1000")
 	}
@@ -89,9 +96,12 @@ func (s *SegmentedAuthority) CollectRetiredPage(ctx context.Context, key, after 
 		if err := ctx.Err(); err != nil {
 			return count, after, err
 		}
+		authorityReclaim.gcPageCandidates.Add(1)
 		if err := s.data.Delete(ctx, item.Key); err != nil && !errors.Is(err, ErrNotFound) {
+			authorityReclaim.gcPageDeleteFailed.Add(1)
 			return count, after, err
 		}
+		authorityReclaim.gcPageDeleted.Add(1)
 		count++
 	}
 	return count, next, nil

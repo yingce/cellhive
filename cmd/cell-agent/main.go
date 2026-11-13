@@ -314,6 +314,11 @@ func main() {
 	// Large cells keep their continuation chain rather than forcing a full
 	// database download at every ownership change.
 	om.BeforeRelease = func(rctx context.Context, sc cell.Scope, epoch uint64) error {
+		o, _, rerr := om.Resolve(rctx, sc)
+		if rerr != nil || o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
+			log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "ownership changed")
+			return nil
+		}
 		if cfg.CaptureEpochSnapshotMaxBytes > 0 {
 			if p, err := store.Path(sc); err == nil {
 				if fi, err := os.Stat(p); err == nil && fi.Size() > cfg.CaptureEpochSnapshotMaxBytes {
@@ -321,6 +326,11 @@ func main() {
 					return nil
 				}
 			}
+		}
+		live, lerr := om.Live(rctx, o, time.Now())
+		if lerr != nil || !live {
+			log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "owner not live")
+			return nil
 		}
 		cctx, cancel := context.WithTimeout(rctx, 10*time.Second)
 		defer cancel()
@@ -332,8 +342,12 @@ func main() {
 				if rerr != nil {
 					return rerr
 				}
-				if o.Node != cfg.NodeID || o.Epoch != epoch {
+				if o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
 					return fmt.Errorf("ownership changed during pre-release compaction")
+				}
+				live, lerr := om.Live(vctx, o, time.Now())
+				if lerr != nil || !live {
+					return fmt.Errorf("owner not live during pre-release compaction")
 				}
 				return nil
 			},
@@ -359,6 +373,20 @@ func main() {
 			return fmt.Errorf("stale local cell is busy; retry ownership acquisition")
 		}
 		return nil
+	}
+	var l9OnEvict chan cell.Scope
+	if cfg.CaptureL9OnEvict {
+		l9OnEvict = make(chan cell.Scope, 64)
+		go runL9OnEvict(ctx, log, rep, om, cfg, l9OnEvict)
+	}
+	store.BeforeEvict = func(_ context.Context, sc cell.Scope, idle bool) {
+		if !idle || l9OnEvict == nil {
+			return
+		}
+		select {
+		case l9OnEvict <- sc:
+		default:
+		}
 	}
 	store.OnEvicted = func(sc cell.Scope) { om.Forget(sc, 0) }
 	store.OnForget = func(sc cell.Scope) { om.Forget(sc, 0) }
@@ -1349,6 +1377,71 @@ func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm
 }
 
 const defaultCompactionTimeout = 5 * time.Minute
+
+// runL9OnEvict publishes an optional complete snapshot after an owned cell is
+// idle-evicted. The cell handle may already be closed: compaction reads the
+// durable bucket chain, never the local SQLite file.
+func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, om *owner.Manager, cfg config.Config, ch <-chan cell.Scope) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sc := <-ch:
+			o, _, err := om.Resolve(ctx, sc)
+			if err != nil || o.Node != cfg.NodeID || o.Session != om.Session {
+				continue
+			}
+			live, err := om.Live(ctx, o, time.Now())
+			if err != nil || !live {
+				continue
+			}
+			// One L9 per epoch is enough for restore. Check this cheaply before
+			// billing a full backlog listing on every idle eviction.
+			l9Keys, err := rep.ListLevelFrom(ctx, sc, o.Epoch, 9, 0)
+			if err != nil || len(l9Keys) > 0 {
+				continue
+			}
+			stats, err := rep.BacklogStats(ctx, sc, o.Epoch)
+			if err != nil {
+				continue
+			}
+			minObjects := cfg.CompactionMinObjects
+			if minObjects <= 0 {
+				minObjects = 1
+			}
+			if stats.L0BacklogObjects < minObjects {
+				continue
+			}
+			vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			res, err := compaction.Snapshot(vctx, rep, sc, o.Epoch, compaction.Options{
+				SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
+				Verify: func(vctx context.Context) error {
+					cur, _, rerr := om.Resolve(vctx, sc)
+					if rerr != nil {
+						return rerr
+					}
+					if cur.Node != cfg.NodeID || cur.Session != om.Session || cur.Epoch != o.Epoch {
+						return fmt.Errorf("ownership changed during eviction snapshot")
+					}
+					live, lerr := om.Live(vctx, cur, time.Now())
+					if lerr != nil || !live {
+						return fmt.Errorf("owner not live during eviction snapshot")
+					}
+					return nil
+				},
+			})
+			cancel()
+			if err != nil {
+				log.Warn("l9 on evict failed", "scope", sc.String(), "err", err)
+				continue
+			}
+			if res.Compacted {
+				log.Info("l9 on evict", "scope", sc.String(), "epoch", res.Epoch,
+					"inputs", res.Inputs, "min_txid", res.MinTxID, "max_txid", res.MaxTxID)
+			}
+		}
+	}
+}
 
 type compactionScope struct {
 	scope  cell.Scope

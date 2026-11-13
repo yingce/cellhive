@@ -464,3 +464,44 @@ func TestIdleSweepDoesNotEvictFreshCellsBehindProtectedOldest(t *testing.T) {
 		})
 	}
 }
+
+func TestBeforeEvictOnlyMarksIdle(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "before-evict"}
+	if _, err := s.Cell(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	s.IdleTTL = time.Hour
+	forceIdle(t, s, sc, 2*time.Hour)
+	var idle []bool
+	s.BeforeEvict = func(_ context.Context, _ cell.Scope, got bool) { idle = append(idle, got) }
+	if !s.evictOne(ctx) {
+		t.Fatal("idle eviction did not run")
+	}
+	if len(idle) != 1 || !idle[0] {
+		t.Fatalf("idle callbacks = %v, want [true]", idle)
+	}
+
+	other := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "over-cap"}
+	if _, err := s.Cell(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	third := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "over-cap-2"}
+	if _, err := s.Cell(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	s.IdleTTL = 0
+	s.MaxOpenCells = 1
+	idle = nil
+	if !s.evictOne(ctx) {
+		t.Fatal("over-cap eviction did not run")
+	}
+	if len(idle) != 1 || idle[0] {
+		t.Fatalf("over-cap callbacks = %v, want [false]", idle)
+	}
+}

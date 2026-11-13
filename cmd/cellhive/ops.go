@@ -122,18 +122,28 @@ func newGCCommand() *cobra.Command {
 		Short: "explicit Safe replication GC for one cell scope (owner only)",
 		Args:  cobra.ExactArgs(1),
 	}
-	var safe, dryRun bool
-	var keepPrevious, graceSeconds int
-	scope.Flags().BoolVar(&safe, "safe", false, "enable native epoch GC with owner and resident-readiness checks (required unless --dry-run)")
-	scope.Flags().BoolVar(&dryRun, "dry-run", false, "show native compaction plan and storage statistics without writing or deleting")
+	var safe, dryRun, snapshot, pruneL9 bool
+	var keepPrevious, graceSeconds, keepL9 int
+	scope.Flags().BoolVar(&safe, "safe", false, "enable native epoch GC with owner and resident-readiness checks (required unless --dry-run, --snapshot or --prune-l9)")
+	scope.Flags().BoolVar(&dryRun, "dry-run", false, "show native compaction plan, L9 prune candidates and storage statistics without writing or deleting")
+	scope.Flags().BoolVar(&snapshot, "snapshot", false, "publish one complete L9 snapshot for the current epoch (owner only)")
+	scope.Flags().BoolVar(&pruneL9, "prune-l9", false, "delete superseded L9 snapshots, keeping the newest --keep-l9 ranges (owner only)")
 	scope.Flags().IntVar(&keepPrevious, "keep-previous", 1, "number of previous epochs to retain")
-	scope.Flags().IntVar(&graceSeconds, "grace", 3600, "minimum old-epoch object age in seconds")
+	scope.Flags().IntVar(&keepL9, "keep-l9", 1, "number of newest L9 snapshots to retain when pruning")
+	scope.Flags().IntVar(&graceSeconds, "grace", 3600, "minimum object age in seconds for epoch GC and L9 pruning")
 	scope.RunE = func(cmd *cobra.Command, args []string) error {
-		if !safe && !dryRun {
-			return fmt.Errorf("Safe GC requires --safe or --dry-run")
+		if !safe && !dryRun && !snapshot && !pruneL9 {
+			return fmt.Errorf("Safe GC requires --safe, --dry-run, --snapshot, or --prune-l9")
+		}
+		if snapshot && (safe || dryRun || pruneL9) {
+			return fmt.Errorf("--snapshot cannot be combined with --safe, --dry-run or --prune-l9")
+		}
+		if pruneL9 && snapshot {
+			return fmt.Errorf("--prune-l9 cannot be combined with --snapshot")
 		}
 		data, err := adminCallTimeout(http.MethodPost, "/v1/control/gc/scope", map[string]any{
-			"scope": args[0], "safe": safe, "dry_run": dryRun,
+			"scope": args[0], "safe": safe || pruneL9, "dry_run": dryRun, "snapshot": snapshot,
+			"prune_l9": pruneL9, "keep_l9": keepL9,
 			"keep_previous": keepPrevious, "grace_seconds": graceSeconds,
 		}, 60*time.Minute)
 		if err != nil {

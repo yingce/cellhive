@@ -87,6 +87,11 @@ type Store struct {
 	// is pinned: it is the hottest cell, and reopening it re-runs schema
 	// migration and forces capture to rebuild its baseline (ADR-272).
 	Pin func(sc cell.Scope) bool
+	// BeforeEvict runs after capture stops and before the local handle is
+	// closed. idle is true only for IdleTTL eviction, not an over-capacity
+	// LRU eviction. It must not block; cell-agent uses it to enqueue an
+	// optional L9 snapshot while ownership is still valid.
+	BeforeEvict func(ctx context.Context, sc cell.Scope, idle bool)
 	// OnEvicted runs after an LRU/idle eviction removed the local handle. It
 	// must not reopen the cell; cell-agent uses it to drop local bookkeeping
 	// (owned set, resume hints) while leaving the bucket owner record intact.
@@ -730,6 +735,7 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	s.mu.Lock()
 	var c *Cell
 	var path string
+	var idle bool
 	for e := s.lru.Back(); e != nil; e = e.Prev() {
 		ent := e.Value.(*lruEnt)
 		cc := s.cells[ent.path]
@@ -745,12 +751,14 @@ func (s *Store) evictOne(ctx context.Context) bool {
 		// The oldest entry may be protected. Do not let its age make a
 		// different, recently used cell eligible for idle eviction.
 		overCap := s.MaxOpenCells > 0 && len(s.cells) > s.MaxOpenCells
-		if !overCap && (s.IdleTTL <= 0 || time.Since(ent.last) < s.IdleTTL) {
+		entryIdle := s.IdleTTL > 0 && time.Since(ent.last) >= s.IdleTTL
+		if !overCap && !entryIdle {
 			continue
 		}
 		s.evicting[key] = true
 		path = ent.path
 		c = cc
+		idle = entryIdle
 		break
 	}
 	s.mu.Unlock()
@@ -760,6 +768,9 @@ func (s *Store) evictOne(ctx context.Context) bool {
 	if err := s.stopBeforeRemoval(ctx, c.Scope, c, nil); err != nil {
 		s.finishEviction(c.Scope.String())
 		return false
+	}
+	if s.BeforeEvict != nil {
+		s.BeforeEvict(ctx, c.Scope, idle)
 	}
 	s.mu.Lock()
 	delete(s.cells, path)
