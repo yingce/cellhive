@@ -67,9 +67,23 @@ var nslessListPaths = map[string]bool{
 	"/v1/control/metrics": true,
 }
 
+// controlProbeLimit bounds how much of a control request body is buffered to
+// infer a namespace. A larger body (bundle/asset upload) cannot be authorized
+// from a prefix, and must never be truncated: the handler streams it whole.
+const controlProbeLimit = 4 << 20
+
+// replayBody re-presents bytes already consumed by a bounded probe ahead of the
+// untouched remainder of the request body.
+type replayBody struct {
+	io.Reader
+	io.Closer
+}
+
 // controlTargetNS resolves the namespace a control request targets, preferring
 // the query parameter and falling back to a JSON body field. When it has to read
-// the body it returns the raw bytes so the caller can replay them.
+// the body it returns the raw bytes so the caller can replay them; for a body
+// above controlProbeLimit it returns ns="" and body=nil after restoring the
+// complete stream, so the caller leaves r.Body untouched.
 func controlTargetNS(r *http.Request) (ns string, body []byte, err error) {
 	if r.URL.Path == "/v1/control/cell/export" || r.URL.Path == "/v1/control/cell/import" {
 		sc, e := cell.ParseScope(r.URL.Query().Get("scope"))
@@ -84,9 +98,15 @@ func controlTargetNS(r *http.Request) (ns string, body []byte, err error) {
 	if r.Body == nil || r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return "", nil, nil
 	}
-	b, rerr := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	b, rerr := io.ReadAll(io.LimitReader(r.Body, controlProbeLimit+1))
 	if rerr != nil {
 		return "", nil, rerr
+	}
+	if len(b) > controlProbeLimit {
+		// Too large to authorize from a prefix. Restore the full stream for the
+		// handler instead of replacing it with the truncated probe.
+		r.Body = &replayBody{Reader: io.MultiReader(bytes.NewReader(b), r.Body), Closer: r.Body}
+		return "", nil, nil
 	}
 	body = b
 	if len(b) == 0 {
