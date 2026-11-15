@@ -158,24 +158,27 @@ const diskCacheTTL = 30 * time.Second
 // DiskUsage reports the number of cell files and their total bytes, cached for a
 // short window so metrics scrapes do not walk the tree every time.
 func (s *Store) DiskUsage() (files int, bytes int64) {
-	s.diskMu.Lock()
-	if time.Since(s.diskAt) < diskCacheTTL {
-		files, bytes = s.diskFiles, s.diskBytes
-		s.diskMu.Unlock()
-		return files, bytes
-	}
-	s.diskMu.Unlock()
+	return s.diskUsage(s.DiskFiles)
+}
 
-	list, err := s.DiskFiles()
+func (s *Store) diskUsage(scan func() ([]DiskFile, error)) (files int, bytes int64) {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	if time.Since(s.diskAt) < diskCacheTTL {
+		return s.diskFiles, s.diskBytes
+	}
+
+	// Serialize refreshes, including failed scans, so concurrent scrapes cannot
+	// amplify a slow or unavailable filesystem into parallel full-tree walks.
+	list, err := scan()
+	s.diskAt = time.Now()
 	if err != nil {
-		return 0, 0
+		return s.diskFiles, s.diskBytes
 	}
 	for _, f := range list {
 		files++
 		bytes += f.DiskBytes()
 	}
-	s.diskMu.Lock()
-	s.diskFiles, s.diskBytes, s.diskAt = files, bytes, time.Now()
-	s.diskMu.Unlock()
+	s.diskFiles, s.diskBytes = files, bytes
 	return files, bytes
 }

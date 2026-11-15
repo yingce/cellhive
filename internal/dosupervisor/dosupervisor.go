@@ -56,11 +56,14 @@ type Committer interface {
 
 // Supervisor syncs every SQLite file under Dir.
 type Supervisor struct {
-	Dir         string
-	Committer   Committer
-	Epoch       uint64
-	ScopePrefix string // namespace/class for derived scopes
-	Log         *log.Logger
+	Dir string
+	// HostStorageDir opts SyncHost into the flat workerd host layout. Empty
+	// preserves full discovery for legacy/custom layouts; SyncAll always scans.
+	HostStorageDir string
+	Committer      Committer
+	Epoch          uint64
+	ScopePrefix    string // namespace/class for derived scopes
+	Log            *log.Logger
 	// Bucket stores the capture manifest so a cold start can enumerate the
 	// captured files and restore them (ADR-084). Optional (gate-only without it).
 	Bucket bucket.Bucket
@@ -607,23 +610,29 @@ func (s *Supervisor) writeManifest(ctx context.Context, rels, rawRels []string) 
 
 // writeHostManifest publishes one host without touching other hosts' manifests.
 // The legacy global index remains best-effort for older restore tooling.
-func (s *Supervisor) writeHostManifest(ctx context.Context, hostID string, rels, rawRels []string) error {
+func (s *Supervisor) writeHostManifest(ctx context.Context, hostID string, rels, rawRels []string, snapshot *manifestDoc) error {
 	if s.Blobs == nil && s.Bucket == nil {
 		return nil
 	}
-	host := s.hostSnapshot()[hostID]
+	host := s.bindingForHost(hostID)
 	if host.HostHash == "" {
 		return fmt.Errorf("dosupervisor: unknown host %s", hostID)
 	}
 	sort.Strings(rels)
-	s.refreshFacets()
-	doc := manifestDoc{
-		Files: rels, Raw: rawRels,
-		Hosts:   map[string]hostBinding{hostID: host},
-		Objects: s.buildObjects(rels),
-	}
-	if names := s.facetSnapshot()[host.HostHash]; len(names) > 0 {
-		doc.Facets = map[string][]string{host.HostHash: names}
+	doc := manifestDoc{}
+	if snapshot != nil {
+		doc = *snapshot
+		doc.Files, doc.Raw = rels, rawRels
+	} else {
+		s.refreshFacets()
+		doc = manifestDoc{
+			Files: rels, Raw: rawRels,
+			Hosts:   map[string]hostBinding{hostID: host},
+			Objects: s.buildObjects(rels),
+		}
+		if names := s.facetSnapshot()[host.HostHash]; len(names) > 0 {
+			doc.Facets = map[string][]string{host.HostHash: names}
+		}
 	}
 	if err := s.putManifest(ctx, s.hostManifestKey(hostID), doc); err != nil {
 		return err
@@ -759,7 +768,7 @@ func (s *Supervisor) SyncHost(ctx context.Context, hostID string) (int, error) {
 func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) {
 	var hostHash string
 	if hostID != "" {
-		host := s.hostSnapshot()[hostID]
+		host := s.bindingForHost(hostID)
 		if host.HostHash == "" {
 			return 0, fmt.Errorf("dosupervisor: unknown host %s", hostID)
 		}
@@ -767,8 +776,16 @@ func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) 
 	}
 	// Refresh the facet tables first so each facet file is replicated under its
 	// object-addressed scope (ADR-084).
-	s.refreshFacets()
-	paths, err := s.sqliteFiles()
+	var paths, extras []string
+	var facetData []byte
+	var snapshot *manifestDoc
+	var err error
+	if hostHash != "" && s.HostStorageDir != "" {
+		paths, extras, facetData, snapshot, err = s.scanHost(hostID, hostHash)
+	} else {
+		s.refreshFacets()
+		paths, err = s.sqliteFiles()
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -818,9 +835,11 @@ func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) 
 		return int(synced.Load()), firstErr
 	}
 	n := len(paths)
-	extras, err := s.extraFiles()
-	if err != nil {
-		return n, err
+	if snapshot == nil {
+		extras, err = s.extraFiles()
+		if err != nil {
+			return n, err
+		}
 	}
 	if hostHash != "" {
 		extras = filterHostPaths(extras, hostHash)
@@ -833,7 +852,11 @@ func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) 
 		}
 		rel = filepath.ToSlash(rel)
 		if s.Blobs != nil || s.Bucket != nil {
-			data, rerr := os.ReadFile(p)
+			data := facetData
+			var rerr error
+			if snapshot == nil {
+				data, rerr = os.ReadFile(p)
+			}
 			if rerr != nil {
 				return n, fmt.Errorf("dosupervisor: read sidecar %s: %w", rel, rerr)
 			}
@@ -853,7 +876,7 @@ func (s *Supervisor) syncFiles(ctx context.Context, hostID string) (int, error) 
 		rawRels = append(rawRels, rel)
 	}
 	if hostID != "" {
-		err = s.writeHostManifest(ctx, hostID, rels, rawRels)
+		err = s.writeHostManifest(ctx, hostID, rels, rawRels, snapshot)
 	} else {
 		err = s.writeManifest(ctx, rels, rawRels)
 	}
@@ -907,7 +930,7 @@ type FacetFile struct {
 }
 
 // ParseFacets decodes workerd's ".facets" table: an 8-byte magic, then repeated
-// entries of uint16 flag, uint16 name length, name. Entry i (0-based) is facet
+// entries of uint16 parent ID, uint16 name length, name. Entry i (0-based) is facet
 // number i+1, i.e. "<hosthash>.<i+1>.sqlite". The format is internal to workerd;
 // this parser is best-effort and returns an error on any unexpected layout so the
 // caller can fall back to shard-granularity capture (ADR-084).
@@ -918,17 +941,26 @@ func ParseFacets(data []byte) ([]string, error) {
 	}
 	off := len(magic)
 	var names []string
+	seen := map[string]bool{}
 	for off < len(data) {
 		if off+4 > len(data) {
 			return nil, fmt.Errorf("dosupervisor: truncated .facets entry at %d", off)
 		}
-		off += 2 // flag/reserved (always 0 observed)
+		if data[off] != 0 || data[off+1] != 0 {
+			return nil, fmt.Errorf("dosupervisor: non-flat .facets parent at %d", off)
+		}
+		off += 2
 		n := int(uint16(data[off]) | uint16(data[off+1])<<8)
 		off += 2
 		if off+n > len(data) {
 			return nil, fmt.Errorf("dosupervisor: truncated .facets name at %d", off)
 		}
-		names = append(names, string(data[off:off+n]))
+		name := string(data[off : off+n])
+		if name == "" || seen[name] {
+			return nil, fmt.Errorf("dosupervisor: empty or duplicate .facets name at %d", off)
+		}
+		seen[name] = true
+		names = append(names, name)
 		off += n
 	}
 	return names, nil

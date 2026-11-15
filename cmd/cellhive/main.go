@@ -227,6 +227,7 @@ func uploadAssetsDir(ns, worker, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	manifest := make(map[string]map[string]any, len(rels))
 	for _, rel := range rels {
 		data, rerr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
 		if rerr != nil {
@@ -236,6 +237,11 @@ func uploadAssetsDir(ns, worker, dir string) (string, error) {
 		if _, err := adminCallRaw("/v1/control/asset?"+q.Encode(), data); err != nil {
 			return "", err
 		}
+		sum := sha256.Sum256(data)
+		manifest[rel] = map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(data)}
+	}
+	if _, err := adminCall("POST", "/v1/control/assets/seal", map[string]any{"namespace": ns, "worker": worker, "token": token, "manifest": manifest}); err != nil {
+		return "", err
 	}
 	fmt.Fprintf(os.Stderr, "uploaded %d assets under token %s\n", len(rels), token)
 	return token, nil

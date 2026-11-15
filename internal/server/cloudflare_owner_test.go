@@ -34,6 +34,7 @@ func newControlOwnerAndFollower(t *testing.T) (owner, follower *Server, ownerHTT
 	ctx := context.Background()
 	dir := t.TempDir()
 	owner, om, ownerHTTP := newControlForwardServer(t, dir, "owner")
+	enableReclamationCapture(t, owner)
 	follower, _, _ = newControlForwardServer(t, dir, "follower")
 	om.Advertise = ownerHTTP.URL
 	ownerAdmin := httptest.NewServer(owner.AdminHandler())

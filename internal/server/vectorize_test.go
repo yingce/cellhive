@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"cellhive/internal/cellstore"
 	"cellhive/internal/scopedtoken"
 	"cellhive/internal/vectorize"
 )
@@ -19,11 +18,7 @@ import (
 func newVectorizeServer(t *testing.T) *Server {
 	t.Helper()
 	s := newControlServer(t)
-	cs, err := cellstore.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("cellstore: %v", err)
-	}
-	s.Store = cs
+	cs := s.Store
 	s.Vectorize = vectorize.New(cs)
 	return s
 }

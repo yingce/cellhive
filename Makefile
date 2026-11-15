@@ -9,6 +9,10 @@ BIN := ./bin
 TAGS := sqlite_fts5 sqlite_dbstat sqlite_math_functions sqlite_column_metadata sqlite_preupdate_hook
 GOTAGS := -tags "$(TAGS)"
 export CGO_ENABLED := 1
+# FILESTAT's public opcode supplies the actual Unix fd for paged identity checks.
+# Keep Go's default flags and append user flags before the required feature flag.
+override CGO_CFLAGS := -O2 -g $(CGO_CFLAGS) -DSQLITE_ENABLE_FILESTAT
+export CGO_CFLAGS
 
 .PHONY: e2e-cold-write e2e-do-rps e2e-service-headers deploy-e2e crash-e2e owner-e2e takeover-e2e all build test js-test cli-test perf-test rpo-test vet fmt clean run diagnose s3-test docker-build compose-config compose-up k8s-render helm-lint ci
 

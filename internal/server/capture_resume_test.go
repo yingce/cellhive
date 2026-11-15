@@ -108,8 +108,8 @@ func TestDeployResumesCaptureWithoutSnapshot(t *testing.T) {
 	sha2 := upload("export default {v:2}")
 	deploy(sha2, "k2")
 	gotKinds := kindsNow()
-	if len(gotKinds) != 1 || gotKinds[0] != ltx.KindDelta {
-		t.Fatalf("resumed deploy commits = %v, want exactly one delta", gotKinds)
+	if len(gotKinds) != 3 || gotKinds[0] != ltx.KindDelta || gotKinds[1] != ltx.KindDelta || gotKinds[2] != ltx.KindDelta {
+		t.Fatalf("resumed upload reservation/receipt/deploy commits = %v, want three deltas", gotKinds)
 	}
 
 	// The bucket chain must still restore both immutable versions.

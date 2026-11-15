@@ -147,10 +147,15 @@ func TestAssetsSessionJWTStatelessAndScope(t *testing.T) {
 	if got := upload("acme", tail, false); got != http.StatusUnauthorized {
 		t.Fatalf("tail as assets = %d", got)
 	}
+	ctrl := s.Control
 	s.Control = nil
-	if got := upload("acme", token, false); got != http.StatusOK {
-		t.Fatalf("control outage affected session = %d", got)
+	if _, err := s.verifyAssetsClaim(t.Context(), token); err != nil {
+		t.Fatalf("control outage affected stateless credential: %v", err)
 	}
+	if got := upload("acme", token, false); got != http.StatusServiceUnavailable {
+		t.Fatalf("upload without durable reservation = %d", got)
+	}
+	s.Control = ctrl
 	admin, _ := createSessionJWT(t, s, "assets", sessionParentJWT(t, s, "token/admin", 60))
 	if got := upload("acme", admin, false); got != http.StatusOK {
 		t.Fatalf("root session = %d", got)

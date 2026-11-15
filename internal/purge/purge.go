@@ -29,6 +29,9 @@ type Purger struct {
 	// namespace cannot block a single tick; Run returns done=false and the loop
 	// retries until it drains.
 	MaxDeletes int
+	// BeforeDeleteAssets persists exact token tombstones for this already-listed
+	// page. Returning an error prevents any asset deletion in that page.
+	BeforeDeleteAssets func(context.Context, []string) error
 }
 
 func (p *Purger) budget() int {
@@ -114,6 +117,15 @@ func (p *Purger) delete(ctx context.Context, targets []target) (bool, error) {
 			items, next, err := st.ListPage(ctx, tg.dir, after, 1000)
 			if err != nil {
 				return false, err
+			}
+			if strings.HasPrefix(tg.dir, "assets/") && len(items) > 0 && p.BeforeDeleteAssets != nil {
+				keys := make([]string, 0, len(items))
+				for _, it := range items {
+					keys = append(keys, it.Key)
+				}
+				if err := p.BeforeDeleteAssets(ctx, keys); err != nil {
+					return false, err
+				}
 			}
 			for _, it := range items {
 				if tg.match != nil && !tg.match(it.Key) {

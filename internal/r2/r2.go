@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -29,9 +28,6 @@ type Store struct {
 	// MultipartTTL bounds how long an abandoned multipart upload's staged parts
 	// are retained before GC reclaims them (0 = default 24h).
 	MultipartTTL time.Duration
-
-	mu     sync.Mutex
-	lastGC time.Time
 }
 
 func (s *Store) now() time.Time {

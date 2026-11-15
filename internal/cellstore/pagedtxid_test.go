@@ -31,8 +31,8 @@ func TestPagedMarkerTxIDRoundTrip(t *testing.T) {
 	if err := writePagedMarker(p, 4096, 12, 99, true); err != nil {
 		t.Fatal(err)
 	}
-	ps, commit, txid, clean, exists, valid := readPagedMarker(p)
-	if !exists || !valid || !clean || ps != 4096 || commit != 12 || txid != 99 {
+	ps, commit, txid, clean, exists, valid, err := readPagedMarker(p)
+	if err != nil || !exists || !valid || !clean || ps != 4096 || commit != 12 || txid != 99 {
 		t.Fatalf("marker = ps=%d commit=%d txid=%d clean=%v exists=%v valid=%v", ps, commit, txid, clean, exists, valid)
 	}
 	// Older markers without a clean flag are treated as dirty (fail closed).
@@ -40,8 +40,8 @@ func TestPagedMarkerTxIDRoundTrip(t *testing.T) {
 		if err := os.WriteFile(pagedMarkerPath(p), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, _, _, clean, exists, valid = readPagedMarker(p)
-		if !exists || !valid || clean {
+		_, _, _, clean, exists, valid, err = readPagedMarker(p)
+		if err != nil || !exists || !valid || clean {
 			t.Fatalf("legacy marker %q = clean=%v exists=%v valid=%v", body, clean, exists, valid)
 		}
 	}
@@ -206,7 +206,7 @@ func TestPagedCellCrashLeavesDirtyMarkerAndFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	pagedvfs.Release(pc.Path)
-	if _, _, _, clean, exists, valid := readPagedMarker(pc.Path); !exists || !valid || clean {
+	if _, _, _, clean, exists, valid, err := readPagedMarker(pc.Path); err != nil || !exists || !valid || clean {
 		t.Fatalf("crash marker = clean=%v exists=%v valid=%v, want dirty", clean, exists, valid)
 	}
 	st2, err := New(dir)
@@ -262,7 +262,7 @@ func TestPagedCellProcessKillFailsClosed(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("helper did not crash: %s", out)
 	}
-	if _, _, _, clean, exists, valid := readPagedMarker(filepath.Join(dir, "cells", "acme", "__kv__", "kill.db")); !exists || !valid || clean {
+	if _, _, _, clean, exists, valid, err := readPagedMarker(filepath.Join(dir, "cells", "acme", "__kv__", "kill.db")); err != nil || !exists || !valid || clean {
 		t.Fatalf("process crash marker = clean=%v exists=%v valid=%v, want dirty", clean, exists, valid)
 	}
 	st, err := New(dir)
@@ -308,7 +308,7 @@ func TestPagedCacheFailsClosedWithoutSource(t *testing.T) {
 			if _, err := os.Stat(p); err != nil {
 				t.Fatalf("cache file was removed: %v", err)
 			}
-			if _, _, _, _, exists, _ := readPagedMarker(p); !exists {
+			if _, _, _, _, exists, _, err := readPagedMarker(p); err != nil || !exists {
 				t.Fatal("paged marker was removed")
 			}
 		})

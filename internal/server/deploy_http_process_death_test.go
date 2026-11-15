@@ -72,16 +72,10 @@ func TestDeployHTTPProcessDeathInsideTransaction(t *testing.T) {
 	if got := adminDo(t, admin, http.MethodPost, "/v1/control/app", "admin-tok", `{"namespace":"acme"}`); got.Code != 200 {
 		t.Fatalf("app: %d %s", got.Code, got.Body.String())
 	}
-	upload := adminDo(t, admin, http.MethodPost, "/v1/control/bundle", "admin-tok", "export default { fetch(){return new Response('ok')} }")
-	if upload.Code != 200 {
-		t.Fatalf("bundle: %d %s", upload.Code, upload.Body.String())
-	}
 	var artifact struct {
 		SHA string `json:"sha"`
 	}
-	if err := json.Unmarshal(upload.Body.Bytes(), &artifact); err != nil || artifact.SHA == "" {
-		t.Fatalf("bundle response: %s %v", upload.Body.String(), err)
-	}
+	artifact.SHA = seedReclamationBundle(t, s, "export default { fetch(){return new Response('ok')} }")
 	base := `{"namespace":"acme","worker":"api","bundle_sha":"` + artifact.SHA + `"`
 	if got := adminDo(t, admin, http.MethodPost, "/v1/control/deploy", "admin-tok", base+`}`); got.Code != 200 {
 		t.Fatalf("v1: %d %s", got.Code, got.Body.String())

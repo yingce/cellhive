@@ -25,6 +25,8 @@ Workflow 每分钟按命中的不同表达式生成独立任务。按表达式�
 
 waitForEvent 使用 (instance, step name) 作为消费幂等键，在同一 cell 事务中校验 token、读取已保存步骤或选择最早匹配事件、标记消费并保存步骤结果。响应丢失或运行时重启后可重读同一步骤；不同步骤不能消费同一事件。事件读取、选择和更新不可跨事务。无步骤名的旧内部消费接口仅保留原子单次消费语义，不宣称可在未知结果后安全重试；携带 run 的事件消费必须提供步骤名。
 
+2026-11-15 事件接收边界补充（工作区修复，未部署）：`sendEvent` 对应的事件请求体上限为 1 MiB。超限必须在追加事件与唤醒执行之前返回 HTTP 413；不得截断后返回成功。恰好上限的内容保持完整，读取错误不追加事件，长度检查依据实际字节数而非声明的 Content-Length。
+
 提前重派发遇到尚未到期的已记忆 sleep 时，必须按原 deadline 再次 park 并释放当前 run lease，不能只抛 SleepSignal 留下运行中租约。
 
 schema 迁移缓存绑定实际 cell 句柄；同 scope 删除重建或失效重开后不能复用旧句柄的已迁移标记。
@@ -236,6 +238,7 @@ Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是�
   2. 全页快照提交完成后写 `<txid>.snapshot-done` 标记；`DurableWatermark` 只把带 marker 的 snapshot 当作 baseline，避免崩溃中断的部分快照被误认为可续链。
   3. `cellcapture.Ensure` 在创建新 capture 时比较 `local txid`、cursor baseline 与 durable 水位：三者相等且 durable>0 → **跳过 Snapshot**，直接 `sqlcapture.New(..., baseline=durable)` 续 delta；本地领先（未 ack 尾巴）→ 维持全量快照兜底；本地落后于 durable → `ErrLocalBehindDurable` fail closed，避免在链上分叉。
   4. 只在创建 capture 时检查，warm `Ensure` 不读 bucket；热路径不新增 List。
+  5. 2026-11-15 安全补充（工作区已实现，未提交、未部署）：已配置的 `HasEpoch`、`DurableEpoch` 或 `Durable` 查询失败时，初始化必须保留原始错误并 fail closed，不能将未知历史当作空链而发布本地快照。失败 capture 不可服务，后续请求可重试；成功查询得到零水位的新库初始化、已验证的本地领先快照和有效 resume hint 行为不变。不得通过忽略查询错误绕过 `ErrLocalBehindDurable`。
 - **验证**：`internal/replica TestDurableWatermark`（manifest/snapshot marker/连续与 gap）、`internal/cellcapture TestEnsureContinuesDurableChain/TestEnsureFallsBackToSnapshotWhenBehind/TestEnsureFailsClosedWhenLocalBehindDurable`、`internal/server TestDeployResumesCaptureWithoutSnapshot`（模拟重启：第二次 deploy 只产生 1 条 delta，bucket 链可 restore 出 2 个版本）。
 - **补充（P1，同日）**：
   1. 控制 cell 通过 `cellstore.Store.Pin` 排除出 LRU/idle 驱逐；`Cell.Closed()` + `control.Store.cell()` 在迁移遇到已关闭 cell 时重新取 cell 重试一次，消除 `control: migrate: sql: database is closed` 竞态。
@@ -2661,6 +2664,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 ---
 
 ## ADR-142 purge 闭环：数据侧清理接线（桶 + 本地副本 + DO 段） ✅实现
+
+**2026-11-15 安全修订（工作区实施/验证中、未部署）**：以下原实现的跨节点重复执行与 pending 自动续跑不再作为当前安全保证。新执行器须在 control owner 下持久认领唯一 job/op/holder 后才物理删除；仅原存活执行器可延续已确认的 partial pass。unknown I/O、认领/完成证明不确定、进程退出后不自动接管，不靠租约过期或一次 404 解除 fence。running/uncertain 阻止重叠复活、发布、上传和回收；完成需匹配身份。资产 deleted 记录及完整清单承诺在删除后保留，防止迟到 Deploy 和子集重传复活；多文件恢复需完整 seal。未知结果的人工恢复必须先证明旧执行者及在途 I/O 已结束。旧版本不识别这些约束，升级须先排空旧回收执行者，不能混版本清理。扫描仍属冷路径，删除数量预算不等于扫描页预算。详细边界见 `known-issues.md` 的剩余数据安全修复契约。
 
 - **背景**：ADR-131 的 `purges` 作业只删控制面行；`RunPurgeLoop` 的 hook 一直是 `nil`（`cmd/cell-agent` 传 `nil`），删除 worker/app 后**数据侧永不清理**（桶前缀、各 owner 的本地 cell、DO 段），known-issues 记为"跨节点 purg/hook 仍为空"。
 - **决策**：

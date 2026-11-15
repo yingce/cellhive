@@ -11,7 +11,6 @@ import (
 	"cellhive/internal/bucket"
 	"cellhive/internal/control"
 	"cellhive/internal/objectstore"
-	"cellhive/internal/objgc"
 )
 
 const maxArtifactBytes = 64 << 20
@@ -20,7 +19,9 @@ func (s *Server) artifactStore() *artifacts.Store {
 	if s.Bucket == nil {
 		return nil
 	}
-	return artifacts.New(s.Bucket)
+	st := artifacts.New(s.Bucket)
+	st.Reserve = s.reserveArtifact
+	return st
 }
 
 // supervisorBlobs is the prefix-scoped store for do-supervisor metadata (capture
@@ -64,13 +65,7 @@ func (s *Server) runGC(w http.ResponseWriter, r *http.Request, kind string) {
 		writeErr(w, http.StatusServiceUnavailable, "no_control", "control plane/bucket not configured")
 		return
 	}
-	st := s.artifactStore()
-	var items objgc.Items = artifacts.BundleItems{Store: st}
-	if kind == "asset" {
-		items = artifacts.AssetItems{Store: st}
-	}
-	g := &objgc.GC{Items: items, Refs: control.GCRefs{S: s.Control, Kind: kind}, Grace: s.Cfg.BundleGCGrace, Log: s.Log}
-	res, err := g.Pass(r.Context())
+	res, err := s.ArtifactGCPass(r.Context(), kind)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, kind+"_gc_failed", err.Error())
 		return
@@ -80,6 +75,9 @@ func (s *Server) runGC(w http.ResponseWriter, r *http.Request, kind string) {
 
 // handleBundlePut stores a content-addressed bundle (admin).
 func (s *Server) handleBundlePut(w http.ResponseWriter, r *http.Request) {
+	if !s.requireControl(w) || s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns := r.URL.Query().Get("namespace")
 	if ns == "" {
 		ns = r.URL.Query().Get("ns")
@@ -128,6 +126,9 @@ func (s *Server) handleBundlePut(w http.ResponseWriter, r *http.Request) {
 
 // handleAssetPut stores an asset under its content hash (admin).
 func (s *Server) handleAssetPut(w http.ResponseWriter, r *http.Request) {
+	if !s.requireControl(w) || s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	st := s.artifactStore()
 	if st == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no_bucket", "object store not configured")

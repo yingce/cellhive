@@ -15,12 +15,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 /* Implemented in Go (pagedvfs.go). Returns 0 on success; on failure the VFS
 ** surfaces SQLITE_IOERR_READ and SQLite poisons the read (fail closed). */
 extern int goPagedFetch(int regId, unsigned int pgno, void *buf, int bufLen);
 /* Informs Go that pages above keepPages were truncated away (window cache). */
 extern void goPagedTruncated(int regId, unsigned int keepPages);
+extern int goPagedFileStatFD(char *json, int len);
 
 #define PAGED_MAX_REGS 64
 #define PAGED_MAX_PATH 1024
@@ -31,6 +35,10 @@ typedef struct PagedReg {
   char path[PAGED_MAX_PATH];
   uint32_t pageSize;
   uint32_t commit;
+  uint32_t cutPages; /* monotonically shrinks: removed cut pages never return */
+  int failed;
+  dev_t dev;
+  ino_t ino;
   uint8_t *hydrated; /* bitmap, page 1 at bit 0 */
   sqlite3_mutex *mu; /* guards the bitmap */
 } PagedReg;
@@ -68,11 +76,28 @@ static void bitSet(PagedReg *r, uint32_t pgno) {
   r->hydrated[i >> 3] |= (uint8_t)(1u << (i & 7));
 }
 
-static void bitClearFrom(PagedReg *r, uint32_t pgno) {
-  for (uint32_t p = pgno; p <= r->commit; p++) {
-    uint32_t i = p - 1;
-    r->hydrated[i >> 3] &= (uint8_t)~(1u << (i & 7));
+static int valid(PagedFile *pf) {
+  return pf->reg->used && pf->reg->id == pf->regId && !pf->reg->failed;
+}
+
+/* Caller holds gRegMu through both I/O and publication. Never call Go here. */
+static int installLocked(PagedReg *r, sqlite3_file *inner, int fd,
+                         uint32_t pgno, const void *page, int len) {
+  if (r->failed || len != (int)r->pageSize || pgno == 0 || pgno > r->commit)
+    return SQLITE_IOERR_WRITE;
+  if (pgno > r->cutPages || bitGet(r, pgno)) return SQLITE_OK;
+  sqlite3_int64 off = (sqlite3_int64)(pgno - 1) * r->pageSize;
+  int rc;
+  if (inner) {
+    rc = inner->pMethods->xWrite(inner, page, len, off);
+  } else {
+    ssize_t n;
+    do { n = pwrite(fd, page, (size_t)len, off); } while (n < 0 && errno == EINTR);
+    rc = n == len ? SQLITE_OK : SQLITE_IOERR_WRITE;
   }
+  if (rc == SQLITE_OK) bitSet(r, pgno);
+  else r->failed = 1; /* A short/failed write may have changed part of the page. */
+  return rc;
 }
 
 static int pagedRead(sqlite3_file *file, void *buf, int iAmt, sqlite3_int64 iOfst) {
@@ -87,6 +112,7 @@ static int pagedRead(sqlite3_file *file, void *buf, int iAmt, sqlite3_int64 iOfs
   last = (uint32_t)((iOfst + iAmt - 1) / ps) + 1;
   if (last > pf->commit) last = pf->commit;
   sqlite3_mutex_enter(gRegMu);
+  if (!valid(pf)) { sqlite3_mutex_leave(gRegMu); return SQLITE_IOERR_READ; }
   for (uint32_t pgno = first; pgno <= last; pgno++) {
     if (bitGet(r, pgno)) continue;
     sqlite3_mutex_leave(gRegMu);
@@ -95,41 +121,61 @@ static int pagedRead(sqlite3_file *file, void *buf, int iAmt, sqlite3_int64 iOfs
     unsigned char *page = (unsigned char *)sqlite3_malloc64(ps);
     if (!page) return SQLITE_NOMEM;
     int rc = goPagedFetch(pf->regId, pgno, page, (int)ps);
+    sqlite3_mutex_enter(gRegMu);
+    if (!valid(pf)) rc = SQLITE_IOERR_READ;
     if (rc == 0) {
-      rc = pf->inner->pMethods->xWrite(pf->inner, page, (int)ps,
-                                       (sqlite3_int64)(pgno - 1) * (sqlite3_int64)ps);
+      rc = installLocked(r, pf->inner, -1, pgno, page, (int)ps);
     }
     sqlite3_free(page);
-    if (rc != 0) return SQLITE_IOERR_READ;
-    sqlite3_mutex_enter(gRegMu);
-    bitSet(r, pgno);
+    if (rc != 0) { sqlite3_mutex_leave(gRegMu); return SQLITE_IOERR_READ; }
   }
+  int rc = pf->inner->pMethods->xRead(pf->inner, buf, iAmt, iOfst);
   sqlite3_mutex_leave(gRegMu);
-  return pf->inner->pMethods->xRead(pf->inner, buf, iAmt, iOfst);
+  return rc;
 }
 
 static int pagedWrite(sqlite3_file *file, const void *buf, int iAmt, sqlite3_int64 iOfst) {
   PagedFile *pf = (PagedFile *)file;
-  if (pf->reg && pf->pageSize > 0 && iAmt > 0) {
+  if (!pf->reg) return pf->inner->pMethods->xWrite(pf->inner, buf, iAmt, iOfst);
+  sqlite3_mutex_enter(gRegMu);
+  if (!valid(pf)) { sqlite3_mutex_leave(gRegMu); return SQLITE_IOERR_WRITE; }
+  /* A partial write cannot make an otherwise sparse page readable. SQLite
+  ** normally reads such a page first; fail closed if that precondition breaks. */
+  if (iAmt > 0) {
     uint32_t first = (uint32_t)(iOfst / pf->pageSize) + 1;
     uint32_t last = (uint32_t)((iOfst + iAmt - 1) / pf->pageSize) + 1;
-    sqlite3_mutex_enter(gRegMu);
-    for (uint32_t pgno = first; pgno <= last; pgno++) bitSet(pf->reg, pgno);
-    sqlite3_mutex_leave(gRegMu);
+    if ((iOfst % pf->pageSize && !bitGet(pf->reg, first)) ||
+        ((iOfst + iAmt) % pf->pageSize && !bitGet(pf->reg, last))) {
+      sqlite3_mutex_leave(gRegMu);
+      return SQLITE_IOERR_WRITE;
+    }
   }
-  return pf->inner->pMethods->xWrite(pf->inner, buf, iAmt, iOfst);
+  int rc = pf->inner->pMethods->xWrite(pf->inner, buf, iAmt, iOfst);
+  if (rc != SQLITE_OK) pf->reg->failed = 1;
+  if (rc == SQLITE_OK && pf->pageSize > 0 && iAmt > 0) {
+    uint32_t first = (uint32_t)(iOfst / pf->pageSize) + 1;
+    uint32_t last = (uint32_t)((iOfst + iAmt - 1) / pf->pageSize) + 1;
+    for (uint32_t pgno = first; pgno <= last; pgno++) bitSet(pf->reg, pgno);
+  }
+  sqlite3_mutex_leave(gRegMu);
+  return rc;
 }
 
 static int pagedTruncate(sqlite3_file *file, sqlite3_int64 size) {
   PagedFile *pf = (PagedFile *)file;
-  if (pf->reg && pf->pageSize > 0) {
+  if (!pf->reg) return pf->inner->pMethods->xTruncate(pf->inner, size);
+  sqlite3_mutex_enter(gRegMu);
+  if (!valid(pf)) { sqlite3_mutex_leave(gRegMu); return SQLITE_IOERR_TRUNCATE; }
+  int rc = pf->inner->pMethods->xTruncate(pf->inner, size);
+  if (rc != SQLITE_OK) pf->reg->failed = 1;
+  if (rc == SQLITE_OK && pf->pageSize > 0) {
     uint32_t keep = (size <= 0) ? 0 : (uint32_t)(size / pf->pageSize);
-    sqlite3_mutex_enter(gRegMu);
-    bitClearFrom(pf->reg, keep + 1);
-    sqlite3_mutex_leave(gRegMu);
-    goPagedTruncated(pf->regId, keep); /* drop stale window pages */
+    if (keep < pf->reg->cutPages) pf->reg->cutPages = keep;
+    for (uint32_t p = keep + 1; p <= pf->reg->commit; p++) bitSet(pf->reg, p);
   }
-  return pf->inner->pMethods->xTruncate(pf->inner, size);
+  sqlite3_mutex_leave(gRegMu);
+  /* Cached cut pages are harmless: installLocked checks the monotonic bound. */
+  return rc;
 }
 
 static int pagedClose(sqlite3_file *file) {
@@ -168,6 +214,28 @@ static int fwUnfetch(sqlite3_file *f, sqlite3_int64 o, void *p) { return ((Paged
 
 static sqlite3_io_methods gMethods;
 
+/* Public FILESTAT opcode, pinned diagnostic JSON contract from mattn 1.14.52
+** (SQLite 3.53.4, built with SQLITE_ENABLE_FILESTAT). This is not a generic fd
+** API: unknown versions/VFS implementations fail closed, never inspect a
+** private sqlite3_file layout or reopen/stat the path to infer its identity. */
+static int openedIdentity(sqlite3_file *file, struct stat *st) {
+  if (sqlite3_libversion_number() != 3053004 ||
+      gReal != sqlite3_vfs_find("unix")) return SQLITE_CANTOPEN;
+  sqlite3_str *s = sqlite3_str_new(0);
+  if (!s) return SQLITE_NOMEM;
+  int rc = file->pMethods->xFileControl(file, SQLITE_FCNTL_FILESTAT, s);
+  int err = sqlite3_str_errcode(s);
+  int len = sqlite3_str_length(s);
+  char *json = sqlite3_str_finish(s);
+  int fd = -1;
+  if (rc == SQLITE_OK && err == SQLITE_OK && json)
+    fd = goPagedFileStatFD(json, len);
+  sqlite3_free(json);
+  if (fd < 0 || fstat(fd, st) != 0 || !S_ISREG(st->st_mode))
+    return SQLITE_CANTOPEN;
+  return SQLITE_OK;
+}
+
 static int pagedOpen(sqlite3_vfs *vfs, sqlite3_filename zName, sqlite3_file *file,
                      int flags, int *pOutFlags) {
   int rc = gReal->xOpen(gReal, zName, file, flags, pOutFlags);
@@ -176,8 +244,19 @@ static int pagedOpen(sqlite3_vfs *vfs, sqlite3_filename zName, sqlite3_file *fil
   const char *path = (const char *)zName;
   sqlite3_mutex_enter(gRegMu);
   PagedReg *r = regFindLocked(path);
+  if (!r) { sqlite3_mutex_leave(gRegMu); return SQLITE_OK; }
+  int id = r->id;
   sqlite3_mutex_leave(gRegMu);
-  if (!r) return SQLITE_OK;
+  struct stat st;
+  rc = openedIdentity(file, &st); /* no C registry lock across the Go parser */
+  sqlite3_mutex_enter(gRegMu);
+  if (rc != SQLITE_OK || !r->used || r->id != id || r->failed ||
+      r->dev != st.st_dev || r->ino != st.st_ino) {
+    sqlite3_mutex_leave(gRegMu);
+    file->pMethods->xClose(file);
+    file->pMethods = 0;
+    return SQLITE_CANTOPEN;
+  }
 
   /* Wrap: keep the base file object right after our header and hand SQLite our
   ** methods, forwarding the rest to the base file. */
@@ -191,6 +270,7 @@ static int pagedOpen(sqlite3_vfs *vfs, sqlite3_filename zName, sqlite3_file *fil
   pf->commit = r->commit;
   pf->regId = r->id;
   pf->base.pMethods = &gMethods;
+  sqlite3_mutex_leave(gRegMu);
   return SQLITE_OK;
 }
 
@@ -240,28 +320,33 @@ int cellhive_paged_register(int id, const char *path, unsigned int pageSize, uns
   if (!gRegMu || !path || pageSize == 0 || commit == 0) return -1;
   size_t plen = strlen(path);
   if (plen == 0 || plen >= PAGED_MAX_PATH) return -1;
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
   sqlite3_mutex_enter(gRegMu);
   PagedReg *slot = 0;
   PagedReg *existing = regFindLocked(path);
   if (existing) {
     slot = existing;
-    sqlite3_free(slot->hydrated);
   } else {
     for (int i = 0; i < PAGED_MAX_REGS; i++) {
       if (!gRegs[i].used) { slot = &gRegs[i]; break; }
     }
     if (!slot) { sqlite3_mutex_leave(gRegMu); return -2; }
   }
-  size_t bytes = (size_t)((commit + 7) / 8);
+  size_t bytes = ((size_t)commit + 7) / 8;
   uint8_t *bits = (uint8_t *)sqlite3_malloc64(bytes);
   if (!bits) { sqlite3_mutex_leave(gRegMu); return -3; }
   memset(bits, 0, bytes);
+  sqlite3_free(slot->hydrated);
   memset(slot, 0, sizeof(*slot));
   slot->used = 1;
   slot->id = id;
   memcpy(slot->path, path, plen + 1);
   slot->pageSize = pageSize;
   slot->commit = commit;
+  slot->cutPages = commit;
+  slot->dev = st.st_dev;
+  slot->ino = st.st_ino;
   slot->hydrated = bits;
   sqlite3_mutex_leave(gRegMu);
   return 0;
@@ -286,6 +371,7 @@ int cellhive_paged_hydrated_count(int id) {
   sqlite3_mutex_enter(gRegMu);
   for (int i = 0; i < PAGED_MAX_REGS; i++) {
     if (gRegs[i].used && gRegs[i].id == id) {
+      if (gRegs[i].failed) break;
       for (uint32_t p = 1; p <= gRegs[i].commit; p++) {
         if (bitGet(&gRegs[i], p)) out++;
       }
@@ -300,7 +386,10 @@ int cellhive_paged_hydrated(int id, unsigned int pgno) {
   int out = 0;
   sqlite3_mutex_enter(gRegMu);
   for (int i = 0; i < PAGED_MAX_REGS; i++) {
-    if (gRegs[i].used && gRegs[i].id == id) { out = bitGet(&gRegs[i], pgno); break; }
+    if (gRegs[i].used && gRegs[i].id == id) {
+      if (!gRegs[i].failed) out = bitGet(&gRegs[i], pgno);
+      break;
+    }
   }
   sqlite3_mutex_leave(gRegMu);
   return out;
@@ -332,4 +421,36 @@ int cellhive_paged_page_size(int id) {
   }
   sqlite3_mutex_leave(gRegMu);
   return out;
+}
+
+static PagedReg *regFDLocked(int id, int fd) {
+  struct stat st;
+  if (fstat(fd, &st)) return 0;
+  for (int i = 0; i < PAGED_MAX_REGS; i++) {
+    PagedReg *r = &gRegs[i];
+    if (r->used && r->id == id && !r->failed && r->dev == st.st_dev && r->ino == st.st_ino)
+      return r;
+  }
+  return 0;
+}
+
+int cellhive_paged_install(int id, int fd, unsigned int pgno, const void *page, int len) {
+  sqlite3_mutex_enter(gRegMu);
+  PagedReg *r = regFDLocked(id, fd);
+  int rc = r ? installLocked(r, 0, fd, pgno, page, len) : SQLITE_IOERR_WRITE;
+  sqlite3_mutex_leave(gRegMu);
+  return rc;
+}
+
+int cellhive_paged_sync(int id, int fd) {
+  sqlite3_mutex_enter(gRegMu);
+  PagedReg *r = regFDLocked(id, fd);
+  int rc = SQLITE_IOERR_FSYNC;
+  if (r) {
+    int complete = 1;
+    for (uint32_t p = 1; p <= r->commit; p++) if (!bitGet(r, p)) { complete = 0; break; }
+    if (complete && fsync(fd) == 0) rc = SQLITE_OK;
+  }
+  sqlite3_mutex_leave(gRegMu);
+  return rc;
 }

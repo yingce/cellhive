@@ -56,7 +56,6 @@ func TestBundleNamespaceAuthorization(t *testing.T) {
 
 func TestBundleGrantCaptureFailureAndRecovery(t *testing.T) {
 	s, _, _ := newControlForwardServer(t, t.TempDir(), "capture-grant")
-	s.Owner = nil
 	token := testNamespaceJWT(t, s, "uploader", "tenant-a")
 	source := "export default {}"
 	sha := artifacts.Hash([]byte(source))
@@ -133,6 +132,7 @@ func TestBundleUploadRequiresExplicitNamespaceForWildcardIssuer(t *testing.T) {
 func TestBundleUploadGrantsAtControlOwner(t *testing.T) {
 	dir := t.TempDir()
 	a, om, hs := newControlForwardServer(t, dir, "grant-owner")
+	enableReclamationCapture(t, a)
 	b, _, _ := newControlForwardServer(t, dir, "grant-follower")
 	om.Advertise = hs.URL
 	if _, err := om.Claim(t.Context(), control.Scope(), time.Now()); err != nil {

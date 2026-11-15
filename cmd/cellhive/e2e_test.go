@@ -18,15 +18,37 @@ import (
 	"cellhive/internal/artifacts"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/cellcapture"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/ltx"
 	"cellhive/internal/owner"
 	"cellhive/internal/replica"
 	"cellhive/internal/server"
 	"cellhive/internal/timer"
 	"cellhive/internal/userruntime"
 )
+
+type cliReplicaCommitter struct{ replica *replica.Manager }
+
+func (c cliReplicaCommitter) Commit(ctx context.Context, sc cell.Scope, epoch uint64, segment []byte) error {
+	h, err := ltx.ValidateNative(segment)
+	if err != nil {
+		return err
+	}
+	if _, _, err := c.replica.Append(ctx, sc, epoch, segment); err != nil {
+		return err
+	}
+	watermark, err := c.replica.DurableWatermark(ctx, sc, epoch)
+	if err != nil {
+		return err
+	}
+	if watermark < h.MaxTXID {
+		return fmt.Errorf("replica watermark %d is below committed txid %d", watermark, h.MaxTXID)
+	}
+	return nil
+}
 
 func freePort(t *testing.T) int {
 	t.Helper()
@@ -75,13 +97,23 @@ func TestCLIEndToEndWithWorkerCode(t *testing.T) {
 		BucketDir:         dir, Durability: "bucket", BucketWait: true,
 	}
 	om := &owner.Manager{B: b, NodeID: "node-1", Session: "s1", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
+	rep := replica.New(b)
+	// Artifact reservations require actual capture proofs, not local-only writes.
+	capture := &cellcapture.Manager{
+		Store: cs, AutoSnapshot: true, Committer: cliReplicaCommitter{rep},
+		Owner: func(ctx context.Context, sc cell.Scope) (bool, uint64, error) {
+			o, _, err := om.Resolve(ctx, sc)
+			return o.Node == om.NodeID && o.Session == om.Session, o.Epoch, err
+		},
+	}
+	defer capture.Stop()
 	// Root key for envelope-encrypted secrets / resource configs (ADR-129).
 	envKey, err := control.NewEnvelope(bytes.Repeat([]byte{0x5}, 32))
 	if err != nil {
 		t.Fatalf("envelope: %v", err)
 	}
 	srv := server.New(server.Deps{
-		Cfg: cfg, Bucket: b, Owner: om, Replica: replica.New(b), Store: cs,
+		Cfg: cfg, Bucket: b, Owner: om, Replica: rep, Store: cs, Capture: capture,
 		Control: control.New(cs, envKey),
 		Queue:   queue.New(cs),
 		Timers:  timer.NewRegistry(),

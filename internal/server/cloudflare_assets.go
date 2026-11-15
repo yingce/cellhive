@@ -14,9 +14,10 @@ import (
 
 	"cellhive/internal/artifacts"
 	"cellhive/internal/bearertoken"
+	"cellhive/internal/control"
 )
 
-const wranglerManifestPath = "__cellhive_wrangler_manifest.json"
+const wranglerManifestPath = artifacts.WranglerManifestPath
 
 type wranglerAsset struct {
 	Hash string `json:"hash"`
@@ -113,6 +114,9 @@ func (s *Server) checkSessionIssuer(_ context.Context, c bearertoken.Claims) err
 }
 
 func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Request) {
+	if !s.requireControl(w) || s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	ns, worker := r.PathValue("account_id"), r.PathValue("script_name")
 	claims, err := s.sessionClaims(r, "assets", ns, worker, "pending", time.Hour)
 	if err != nil {
@@ -151,6 +155,14 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 	data, _ := json.Marshal(in.Manifest)
 	sum := sha256.Sum256(data)
 	token := hex.EncodeToString(sum[:])
+	if err := s.reclamationCommit(r.Context(), func() error {
+		var err error
+		token, err = s.Control.AssetSessionToken(r.Context(), ns, worker, token)
+		return err
+	}); err != nil {
+		writeErr(w, 409, "asset_session_unavailable", err.Error())
+		return
+	}
 	if _, err := st.PutAssetAt(r.Context(), ns, worker, token, wranglerManifestPath, data); err != nil {
 		writeErr(w, http.StatusInternalServerError, "session_failed", err.Error())
 		return
@@ -158,10 +170,24 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 	missing := []string{}
 	seen := map[string]bool{}
 	for path, asset := range in.Manifest {
-		if _, err := st.GetAsset(r.Context(), ns, worker, token, path); err != nil && !seen[asset.Hash] {
-			missing = append(missing, asset.Hash)
-			seen[asset.Hash] = true
+		body, err := st.GetAsset(r.Context(), ns, worker, token, path)
+		if err != nil {
+			if !seen[asset.Hash] {
+				missing = append(missing, asset.Hash)
+				seen[asset.Hash] = true
+			}
+		} else {
+			// Deduplicated legacy files still need a known-success receipt before
+			// their complete canonical manifest can acquire a durable commitment.
+			if _, err := st.PutAssetAt(r.Context(), ns, worker, token, path, body); err != nil {
+				writeErr(w, 409, "asset_receipt_failed", err.Error())
+				return
+			}
 		}
+	}
+	if _, err := s.trySealCloudflareAssets(r.Context(), ns, worker, token, in.Manifest); err != nil {
+		writeErr(w, 409, "assets_not_sealed", err.Error())
+		return
 	}
 	claim := wranglerAssetsClaim{NS: ns, Worker: worker, Token: token, Exp: claims.ExpiresAt, Single: true, ParentIssuer: claims.ParentIssuer, Subject: claims.Subject, IssuedAt: claims.IssuedAt}
 	jwt, err := s.signAssetsClaim(claim)
@@ -173,6 +199,9 @@ func (s *Server) handleCloudflareAssetsSession(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCloudflareAssetsUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.requireControl(w) || s.forwardOrClaim(w, r, control.Scope(), nil) {
+		return
+	}
 	token, err := bearertoken.Bearer(r.Header)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid asset upload token required")
@@ -231,6 +260,10 @@ func (s *Server) handleCloudflareAssetsUpload(w http.ResponseWriter, r *http.Req
 				return
 			}
 		}
+	}
+	if _, err := s.trySealCloudflareAssets(r.Context(), claim.NS, claim.Worker, claim.Token, manifest); err != nil {
+		writeErr(w, 409, "assets_not_sealed", err.Error())
+		return
 	}
 	cloudflareResult(w, map[string]any{"jwt": token})
 }

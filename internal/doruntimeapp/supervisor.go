@@ -90,13 +90,14 @@ func runSupervisor(runtimeCfg doruntime.Config, configPath string, opts supervis
 	committer := sqlcapture.NewHTTPCommitter(*owner, *token, followers, nil)
 	committer.RequireDOOwner = true // Claimed hosts recover follower tails before cold restore.
 	s := &dosupervisor.Supervisor{
-		Dir:         *dir,
-		Committer:   committer,
-		Epoch:       *epoch,
-		ScopePrefix: *scopePrefix,
-		Segments:    agent,
-		Blobs:       agent,
-		Log:         logger,
+		Dir:            *dir,
+		HostStorageDir: filepath.Join(*dir, "cellhive-do-host"),
+		Committer:      committer,
+		Epoch:          *epoch,
+		ScopePrefix:    *scopePrefix,
+		Segments:       agent,
+		Blobs:          agent,
+		Log:            logger,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -894,8 +894,8 @@ func TestPurgeSkipsResurrectedApp(t *testing.T) {
 }
 
 // TestRunPurgeLoopResumableHook: a hook that reports partial progress keeps the
-// job pending (no control-row deletion), and a completed hook finishes it. This
-// is what makes a large purge resumable across ticks and nodes (ADR-142).
+// job running (no control-row deletion), and a completed hook finishes it.
+// Only this executor may resume across ticks; no cross-process takeover.
 func TestRunPurgeLoopResumableHook(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t, false)
@@ -923,11 +923,11 @@ func TestRunPurgeLoopResumableHook(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.RunPurgeLoop(loopCtx, nil, 10*time.Millisecond, hook)
+		s.RunPurgeLoop(loopCtx, nil, 10*time.Millisecond, &PurgeExecutor{Store: s, Holder: "test", Commit: func(_ context.Context, write func() error) error { return write() }, Hook: hook})
 	}()
 	deadline := time.After(5 * time.Second)
 	for {
-		if jobs, err := s.PendingPurges(ctx, 10); err == nil && len(jobs) == 0 {
+		if releases, err := s.Releases(ctx, "acme", "api"); err == nil && len(releases) == 0 {
 			break
 		}
 		select {

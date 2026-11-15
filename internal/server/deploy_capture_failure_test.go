@@ -48,16 +48,10 @@ func TestDeployCaptureFailureReconcilesWithSameKey(t *testing.T) {
 	if app.Code != http.StatusOK {
 		t.Fatalf("app = %d %s", app.Code, app.Body.String())
 	}
-	bundle := adminDo(t, admin, http.MethodPost, "/v1/control/bundle", "admin-tok", "export default {}")
-	if bundle.Code != http.StatusOK {
-		t.Fatalf("bundle = %d %s", bundle.Code, bundle.Body.String())
-	}
 	var uploaded struct {
 		SHA string `json:"sha"`
 	}
-	if err := json.Unmarshal(bundle.Body.Bytes(), &uploaded); err != nil {
-		t.Fatal(err)
-	}
+	uploaded.SHA = seedReclamationBundle(t, s, "export default {}")
 	var failOnce atomic.Bool
 	failOnce.Store(true)
 	s.Capture = &cellcapture.Manager{

@@ -107,6 +107,12 @@ func (s *Supervisor) bindingForHash(hash string) (hostBinding, bool) {
 	return b, ok
 }
 
+func (s *Supervisor) bindingForHost(id string) hostBinding {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return s.hosts[id]
+}
+
 func (s *Supervisor) hostSnapshot() map[string]hostBinding {
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
@@ -271,6 +277,13 @@ func (s *Supervisor) objectForRel(rel string) (objectEntry, bool) {
 		return objectEntry{}, false
 	}
 	name := names[n-1]
+	return s.objectForFacet(rel, hash, n, name, b)
+}
+
+func (s *Supervisor) objectForFacet(rel, hash string, n int, name string, b hostBinding) (objectEntry, bool) {
+	if b.StorageID == "" {
+		return objectEntry{}, false
+	}
 	// A shared historical host can contain facets of multiple storage classes.
 	// Its last router binding must never redefine another facet's identity.
 	class, objectName, ok := strings.Cut(name, "/")

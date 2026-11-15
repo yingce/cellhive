@@ -336,6 +336,9 @@ CREATE INDEX IF NOT EXISTS bindings_pin    ON bindings(ns, id, pin_sha);
 CREATE TABLE IF NOT EXISTS purges (
   ns           TEXT NOT NULL,
   worker       TEXT NOT NULL DEFAULT '',
+  job_id       TEXT NOT NULL DEFAULT '',
+  op_id        TEXT NOT NULL DEFAULT '',
+  holder       TEXT NOT NULL DEFAULT '',
   state        TEXT NOT NULL DEFAULT 'pending',
   requested_ms INTEGER NOT NULL,
   updated_ms   INTEGER NOT NULL,
@@ -407,6 +410,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS workers_host_label ON workers(host_label) WHER
 // cannot add a column that already exists, so the current set is read first.
 func migrateColumns(ctx context.Context, db *sql.DB) error {
 	cols := map[string][]string{
+		"purges":             {"job_id TEXT NOT NULL DEFAULT ''", "op_id TEXT NOT NULL DEFAULT ''", "holder TEXT NOT NULL DEFAULT ''"},
 		"apps":               {"deleted_ms INTEGER NOT NULL DEFAULT 0"},
 		"workers":            {"host_label TEXT NOT NULL DEFAULT ''", "created_ms INTEGER NOT NULL DEFAULT 0", "deleted_ms INTEGER NOT NULL DEFAULT 0"},
 		"versions":           {"compat_date TEXT NOT NULL DEFAULT ''", "compat_flags TEXT NOT NULL DEFAULT '[]'", "limits TEXT NOT NULL DEFAULT '{}'", "log_policy TEXT NOT NULL DEFAULT '{}'", "secret_snapshot INTEGER NOT NULL DEFAULT 0"},
@@ -433,6 +437,10 @@ func migrateColumns(ctx context.Context, db *sql.DB) error {
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
+		}
+		// Fresh purges is installed by schemaV2 after this legacy migration.
+		if table == "purges" && len(have) == 0 {
+			continue
 		}
 		for _, def := range defs {
 			name := strings.Fields(def)[0]
@@ -511,6 +519,9 @@ func (s *Store) migrateCell(ctx context.Context, c *cellstore.Cell) error {
 	}
 	if _, err := c.DB.ExecContext(ctx, schemaV2); err != nil {
 		return fmt.Errorf("control: migrate: %w", err)
+	}
+	if _, err := c.DB.ExecContext(ctx, artifactSchema); err != nil {
+		return fmt.Errorf("control: migrate artifacts: %w", err)
 	}
 	// Historical secret values cannot be reconstructed. Pin the values known
 	// at upgrade time once, before any new version or secret write occurs.
@@ -629,6 +640,9 @@ func (s *Store) CreateApp(ctx context.Context, ns, actor string) (App, error) {
 		return App{}, err
 	}
 	err = tx(ctx, c, func(t *sql.Tx) error {
+		if err := checkPurgeFenceTx(ctx, t, ns, ""); err != nil {
+			return err
+		}
 		if _, err := t.ExecContext(ctx,
 			`INSERT INTO apps(ns, created_ms) VALUES (?,?) ON CONFLICT(ns) DO NOTHING`,
 			ns, app.CreatedMs); err != nil {
@@ -746,41 +760,48 @@ func (s *Store) PurgeAppRows(ctx context.Context, ns string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
-		var deletedMs int64
-		err := t.QueryRowContext(ctx, `SELECT deleted_ms FROM apps WHERE ns=?`, ns).Scan(&deletedMs)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			return nil // already purged: idempotent
-		case err != nil:
+		if err := checkPurgeFenceTx(ctx, t, ns, ""); err != nil {
 			return err
-		case deletedMs == 0:
-			return nil // resurrected since the job was queued
 		}
-		for _, stmt := range []string{
-			`DELETE FROM apps WHERE ns=?`,
-			`DELETE FROM workers WHERE ns=?`,
-			`DELETE FROM versions WHERE ns=?`,
-			`DELETE FROM bindings WHERE ns=?`,
-			`DELETE FROM version_bundle_refs WHERE ns=?`,
-			`DELETE FROM routes WHERE ns=?`,
-			`DELETE FROM hosts WHERE ns=?`,
-			`DELETE FROM resources WHERE ns=?`,
-			`DELETE FROM resource_cleanups WHERE ns=?`,
-			`DELETE FROM queue_transfer_destinations WHERE ns=?`,
-			`DELETE FROM secrets WHERE ns=?`,
-			`DELETE FROM version_secrets WHERE ns=?`,
-			`DELETE FROM deployment_events WHERE ns=?`,
-			`DELETE FROM do_classes WHERE ns=?`,
-			`DELETE FROM delete_locks WHERE ns=?`,
-			`DELETE FROM deploy_idempotency WHERE ns=?`,
-			`DELETE FROM rollback_idempotency WHERE ns=?`,
-		} {
-			if _, err := t.ExecContext(ctx, stmt, ns); err != nil {
-				return err
-			}
-		}
-		return nil
+		return purgeAppRowsTx(ctx, t, ns)
 	})
+}
+
+func purgeAppRowsTx(ctx context.Context, t *sql.Tx, ns string) error {
+	var deletedMs int64
+	err := t.QueryRowContext(ctx, `SELECT deleted_ms FROM apps WHERE ns=?`, ns).Scan(&deletedMs)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil // already purged: idempotent
+	case err != nil:
+		return err
+	case deletedMs == 0:
+		return nil // resurrected since the job was queued
+	}
+	for _, stmt := range []string{
+		`DELETE FROM apps WHERE ns=?`,
+		`DELETE FROM workers WHERE ns=?`,
+		`DELETE FROM versions WHERE ns=?`,
+		`DELETE FROM bindings WHERE ns=?`,
+		`DELETE FROM version_bundle_refs WHERE ns=?`,
+		`DELETE FROM routes WHERE ns=?`,
+		`DELETE FROM hosts WHERE ns=?`,
+		`DELETE FROM resources WHERE ns=?`,
+		`DELETE FROM resource_cleanups WHERE ns=?`,
+		`DELETE FROM queue_transfer_destinations WHERE ns=?`,
+		`DELETE FROM secrets WHERE ns=?`,
+		`DELETE FROM version_secrets WHERE ns=?`,
+		`DELETE FROM deployment_events WHERE ns=?`,
+		`DELETE FROM do_classes WHERE ns=?`,
+		`DELETE FROM delete_locks WHERE ns=?`,
+		`DELETE FROM deploy_idempotency WHERE ns=?`,
+		`DELETE FROM rollback_idempotency WHERE ns=?`,
+	} {
+		if _, err := t.ExecContext(ctx, stmt, ns); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- resources --------------------------------------------------------------
@@ -825,6 +846,9 @@ func (s *Store) CreateResourceWithConfig(ctx context.Context, ns, kind, name, sc
 	}
 	err = tx(ctx, c, func(t *sql.Tx) error {
 		// Registering clears any revoke tombstone (ADR-156).
+		if err := checkPurgeFenceTx(ctx, t, ns, ""); err != nil {
+			return err
+		}
 		if kind == "kv" || kind == "queue" {
 			physical, err := ResourceDataScope(ns, kind, name, scope)
 			physicalKey := ""
@@ -1206,6 +1230,9 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 	var out Version
 	err = tx(ctx, c, func(t *sql.Tx) error {
 		// Idempotent deploy: return the version created by the first call.
+		if err := checkPurgeFenceTx(ctx, t, ns, worker); err != nil {
+			return err
+		}
 		if spec.IdempotencyKey != "" {
 			var prev int
 			var previousFingerprint string
@@ -1318,9 +1345,17 @@ func (s *Store) Deploy(ctx context.Context, ns, worker string, spec DeploySpec, 
 			}
 		}
 		for sha := range refs {
+			if err := checkArtifactReferenceTx(ctx, t, "bundle", sha); err != nil {
+				return err
+			}
 			if _, err := t.ExecContext(ctx,
 				`INSERT OR IGNORE INTO version_bundle_refs(ns, worker, number, sha) VALUES (?,?,?,?)`,
 				ns, worker, next, sha); err != nil {
+				return err
+			}
+		}
+		if v.AssetsSHA != "" {
+			if err := checkArtifactReferenceTx(ctx, t, "asset", ns+"/"+worker+"/"+v.AssetsSHA); err != nil {
 				return err
 			}
 		}
@@ -1625,37 +1660,44 @@ func (s *Store) PurgeWorkerRows(ctx context.Context, ns, worker string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
-		var deletedMs int64
-		err := t.QueryRowContext(ctx, `SELECT deleted_ms FROM workers WHERE ns=? AND name=?`, ns, worker).Scan(&deletedMs)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			return nil // already purged (or never existed): idempotent
-		case err != nil:
+		if err := checkPurgeFenceTx(ctx, t, ns, worker); err != nil {
 			return err
-		case deletedMs == 0:
-			return nil // resurrected by a deploy since the job was queued
 		}
-		for _, stmt := range []string{
-			`DELETE FROM versions WHERE ns=? AND worker=?`,
-			`DELETE FROM version_secrets WHERE ns=? AND worker=?`,
-			`DELETE FROM deployment_events WHERE ns=? AND worker=?`,
-			`DELETE FROM bindings WHERE ns=? AND worker=?`,
-			`DELETE FROM version_bundle_refs WHERE ns=? AND worker=?`,
-			`DELETE FROM workers WHERE ns=? AND name=?`,
-			`DELETE FROM do_classes WHERE ns=? AND worker=?`,
-			`DELETE FROM delete_locks WHERE ns=? AND worker=?`,
-			`DELETE FROM deploy_idempotency WHERE ns=? AND worker=?`,
-			`DELETE FROM rollback_idempotency WHERE ns=? AND worker=?`,
-			`DELETE FROM secrets WHERE ns=? AND worker=?`,
-			`DELETE FROM routes WHERE ns=? AND worker=?`,
-			`DELETE FROM hosts WHERE ns=? AND kind='builtin' AND worker=?`,
-		} {
-			if _, err := t.ExecContext(ctx, stmt, ns, worker); err != nil {
-				return err
-			}
-		}
-		return nil
+		return purgeWorkerRowsTx(ctx, t, ns, worker)
 	})
+}
+
+func purgeWorkerRowsTx(ctx context.Context, t *sql.Tx, ns, worker string) error {
+	var deletedMs int64
+	err := t.QueryRowContext(ctx, `SELECT deleted_ms FROM workers WHERE ns=? AND name=?`, ns, worker).Scan(&deletedMs)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil // already purged (or never existed): idempotent
+	case err != nil:
+		return err
+	case deletedMs == 0:
+		return nil // resurrected by a deploy since the job was queued
+	}
+	for _, stmt := range []string{
+		`DELETE FROM versions WHERE ns=? AND worker=?`,
+		`DELETE FROM version_secrets WHERE ns=? AND worker=?`,
+		`DELETE FROM deployment_events WHERE ns=? AND worker=?`,
+		`DELETE FROM bindings WHERE ns=? AND worker=?`,
+		`DELETE FROM version_bundle_refs WHERE ns=? AND worker=?`,
+		`DELETE FROM workers WHERE ns=? AND name=?`,
+		`DELETE FROM do_classes WHERE ns=? AND worker=?`,
+		`DELETE FROM delete_locks WHERE ns=? AND worker=?`,
+		`DELETE FROM deploy_idempotency WHERE ns=? AND worker=?`,
+		`DELETE FROM rollback_idempotency WHERE ns=? AND worker=?`,
+		`DELETE FROM secrets WHERE ns=? AND worker=?`,
+		`DELETE FROM routes WHERE ns=? AND worker=?`,
+		`DELETE FROM hosts WHERE ns=? AND kind='builtin' AND worker=?`,
+	} {
+		if _, err := t.ExecContext(ctx, stmt, ns, worker); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- routes -----------------------------------------------------------------

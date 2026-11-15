@@ -125,7 +125,7 @@ func TestR2Multipart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if len(up) != 32 {
+	if !strings.HasPrefix(up, "v2-") || !isUploadID(strings.TrimPrefix(up, "v2-")) {
 		t.Fatalf("upload id = %q", up)
 	}
 	p1, err := s.UploadPart(ctx, "demo", "files", "big.bin", up, 1, []byte("hello "))
@@ -351,9 +351,7 @@ func TestGCStaleUploads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prefix: %v", err)
 	}
-	if _, err := s.B.Put(ctx, createMarkerKey(oldPrefix), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
-		t.Fatalf("backdate: %v", err)
-	}
+	ageMultipart(t, s, oldPrefix)
 
 	fresh, err := s.CreateMultipart(ctx, "demo", "files", "new.bin")
 	if err != nil {
@@ -376,7 +374,7 @@ func TestGCStaleUploads(t *testing.T) {
 	}
 	var haveFresh bool
 	for _, k := range keys {
-		if strings.Contains(k, old) {
+		if strings.Contains(k, old) && !isCreateMarker(k) {
 			t.Fatalf("stale upload not reclaimed: %s", k)
 		}
 		if strings.Contains(k, fresh) {
@@ -385,6 +383,22 @@ func TestGCStaleUploads(t *testing.T) {
 	}
 	if !haveFresh {
 		t.Fatalf("fresh upload was reclaimed")
+	}
+	st, _, err := s.readMultipart(ctx, createMarkerKey(oldPrefix), "old.bin")
+	if err != nil || st.State != "expired" {
+		t.Fatalf("expiry tombstone missing: %+v %v", st, err)
+	}
+}
+
+func ageMultipart(t *testing.T, s *Store, p string) {
+	t.Helper()
+	st, rev, err := s.readMultipart(context.Background(), createMarkerKey(p), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.UpdatedMs = time.Now().Add(-48 * time.Hour).UnixMilli()
+	if _, err := s.casMultipart(context.Background(), createMarkerKey(p), &st, rev); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -414,18 +428,14 @@ func TestUploadPartRefreshesMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prefix: %v", err)
 	}
-	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
-		t.Fatalf("age marker: %v", err)
-	}
+	ageMultipart(t, s, p)
 	if _, err := s.UploadPart(ctx, "demo", "files", "big.bin", up, 1, []byte("x")); err != nil {
 		t.Fatalf("upload part: %v", err)
 	}
 	if removed, err := s.GCStaleUploads(ctx, 24*time.Hour); err != nil || removed != 0 {
 		t.Fatalf("active upload reclaimed: removed=%d err=%v", removed, err)
 	}
-	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(time.Now().Add(-48*time.Hour).UnixMilli(), 10))); err != nil {
-		t.Fatalf("re-age marker: %v", err)
-	}
+	ageMultipart(t, s, p)
 	if removed, err := s.GCStaleUploads(ctx, 24*time.Hour); err != nil || removed != 1 {
 		t.Fatalf("stale upload not reclaimed: removed=%d err=%v", removed, err)
 	}

@@ -225,6 +225,57 @@ test('loader sweep queries a pinned resident and reclaims capacity after the soc
   assert.equal(capacity.reserve('other', 16), true);
 });
 
+test('/ready reclaims idle residents without blocking readiness and preserves sweep throttling', async () => {
+  for (const state of ['ready', 'draining', 'offline']) {
+    let now = 10000, releaseStatus, settled = false;
+    const capacity = new RuntimeCapacity(1, 32);
+    capacity.reserve('expired', 16);
+    const entry = { key:'expired', versionKey:'ns/w@1-sha', family:'ns/w', nonce:'nonce',
+      life:new Lifetime(), retiring:false, cleaning:null, pinned:false, lastUsed:8000 };
+    const waits = [];
+    const c = vm.createContext({
+      URL, Response, console, setTimeout, Date:{now:()=>now},
+      residents:new Map([['expired',entry]]), retiringCount:0,
+      preparedCache:new Map(), latestVersionByFamily:new Map(),
+      isolateCapacity:()=>capacity,
+      managedStub:()=>({getEntrypoint:()=>({
+        status:()=>new Promise(resolve=>{releaseStatus=()=>resolve({nonce:'nonce',idle:true,pinned:false,sockets:0});}),
+        retire:async()=>true,
+      })}),
+      internalHeaders:async()=>({}), fetch:async()=>new Response('{}',{status:state==='offline'?503:200}),
+    });
+    vm.runInContext(extract('const DEFAULT_ISOLATE_IDLE_MS', 'async function residentWorker('),c);
+    vm.runInContext(extract('let revInflight', 'function maybePollRoutes('),c);
+    if(state==='draining')vm.runInContext('draining=true;',c);
+    const start=source.indexOf('async fetch(req, env, ctx) {');
+    const end=source.indexOf('\n  },\n};',start);
+    vm.runInContext(source.slice(start,end).replace('async fetch(','async function routeFetch(')+'\n}',c);
+    const probe=()=>c.routeFetch({method:'GET',url:'http://runtime/ready'},
+      {CELL_URL:'http://agent',CH_ISOLATE_IDLE_MS:'1000'},{waitUntil:p=>waits.push(p)});
+    const pending=probe().then(r=>{settled=true;return r;});
+    for(let i=0;i<30;i++)await Promise.resolve();
+    assert.equal(settled,true,'readiness must not await child lifecycle status');
+    const response=await pending;
+    assert.equal(response.status,state==='ready'?200:503);
+    assert.deepEqual(await response.json(),state==='ready'
+      ?{ready:true,projection_age_ms:0,cell:'ok'}
+      :{ready:false,reason:state==='draining'?'draining':'cell_unreachable'});
+    assert.equal(waits.length,1,'ready must attach idle reclamation to waitUntil');
+    now+=1000;
+    await probe();
+    assert.equal(waits.length,1,'in-flight reclamation must remain single-flight');
+    releaseStatus();
+    await Promise.all(waits);
+    assert.equal(c.residents.size,0);
+    assert.equal(capacity.reserve('replacement',16),true,'idle retirement must release capacity');
+    await probe();
+    await Promise.all(waits);
+    assert.equal(waits.length,2);
+    await probe();
+    assert.equal(waits.length,2,'completed sweeps must retain interval throttling');
+  }
+});
+
 test('idle residents expire after the idle TTL, recently used ones stay', async () => {
   let retired = 0;
   const capacity = { release() {} };

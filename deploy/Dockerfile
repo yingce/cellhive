@@ -28,6 +28,8 @@ RUN curl -fsSL "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-${ESBU
 # --- Go binaries ------------------------------------------------------------
 FROM golang:1.27-bookworm AS build
 WORKDIR /src
+ARG CGO_CFLAGS=""
+ENV CGO_CFLAGS="-O2 -g ${CGO_CFLAGS} -DSQLITE_ENABLE_FILESTAT"
 # SQLite is the CGo driver mattn/go-sqlite3 plus the vendored vec1 extension
 # (ADR-159): the builder needs a C toolchain. TAGS mirror the Makefile.
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \

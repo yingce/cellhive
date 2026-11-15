@@ -20,6 +20,7 @@ import (
 	"cellhive/internal/artifacts"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/cellcapture"
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
@@ -48,7 +49,7 @@ func newControlServer(t *testing.T) *Server {
 	if _, err := om.Claim(t.Context(), control.Scope(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	return New(Deps{
+	s := New(Deps{
 		Cfg: testAuthConfig(config.Config{
 			NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", AdminToken: "admin-tok",
 		}),
@@ -57,6 +58,9 @@ func newControlServer(t *testing.T) *Server {
 		Workflows: workflow.New(cs),
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	s.Capture = &cellcapture.Manager{Store: cs, AutoSnapshot: true, Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 1, nil }, Committer: testCommitterFunc(func(context.Context, cell.Scope, uint64, []byte) error { return nil })}
+	t.Cleanup(s.Capture.Stop)
+	return s
 }
 
 // mustHost registers and verifies a custom host before routes are written
@@ -706,6 +710,9 @@ func TestWorkerDeletePurgesAssets(t *testing.T) {
 	if rr := adminDo(t, admin, http.MethodDelete, "/v1/control/worker?namespace=acme&worker=web", "admin-tok", ""); rr.Code != http.StatusOK {
 		t.Fatalf("worker delete = %d %s", rr.Code, rr.Body.String())
 	}
+	if err := s.NewPurgeExecutor().Pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if rr := do(t, data, http.MethodGet, "/v1/internal/asset?ns=acme&worker=web&token=tok1&path=index.html", "tok", nil); rr.Code != http.StatusNotFound {
 		t.Fatalf("asset get after delete = %d, want 404", rr.Code)
 	}
@@ -735,19 +742,20 @@ func TestGCAdminEndpoints(t *testing.T) {
 	if _, err := s.Control.Deploy(ctx, "acme", "w", control.DeploySpec{BundleSHA: refSHA}, "me"); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	s.Cfg.BundleGCGrace = 0 // delete on the pass after marking
+	s.Cfg.BundleGCGrace = time.Hour // successful uploads start a fresh grace period
 
 	// Pass 1 marks the orphan; nothing is deleted yet.
 	if rr := adminDo(t, admin, http.MethodPost, "/v1/control/gc/bundles", "admin-tok", ""); rr.Code != http.StatusOK {
 		t.Fatalf("gc pass 1 = %d: %s", rr.Code, rr.Body.String())
-	} else if !strings.Contains(rr.Body.String(), `"marked":1`) {
-		t.Fatalf("pass 1 body = %s, want 1 marked", rr.Body.String())
+	} else if !strings.Contains(rr.Body.String(), `"deleted":0`) {
+		t.Fatalf("pass 1 body = %s, want no deletion during upload grace", rr.Body.String())
 	}
 	if _, err := st.GetBundle(ctx, orphanSHA); err != nil {
 		t.Fatalf("orphan deleted on the marking pass: %v", err)
 	}
 
 	// Pass 2 deletes it; the referenced bundle stays.
+	s.Cfg.BundleGCGrace = 0
 	if rr := adminDo(t, admin, http.MethodPost, "/v1/control/gc/bundles", "admin-tok", ""); rr.Code != http.StatusOK {
 		t.Fatalf("gc pass 2 = %d: %s", rr.Code, rr.Body.String())
 	} else if !strings.Contains(rr.Body.String(), `"deleted":1`) {
@@ -1313,11 +1321,7 @@ func TestResourceDeleteEndpoint(t *testing.T) {
 func TestQueueStatusAndReplayDLQ(t *testing.T) {
 	ctx := context.Background()
 	s := newControlServer(t)
-	cs, err := cellstore.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Store = cs
+	cs := s.Store
 	s.Queue = queue.New(cs)
 	admin := s.AdminHandler()
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)

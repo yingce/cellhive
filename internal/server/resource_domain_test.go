@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
-	"cellhive/internal/cellstore"
 	"cellhive/internal/d1"
 	queuepkg "cellhive/internal/queue"
 	"cellhive/internal/r2"
@@ -22,11 +21,7 @@ import (
 func newDomainServer(t *testing.T) *Server {
 	t.Helper()
 	s := newControlServer(t)
-	cs, err := cellstore.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("cellstore: %v", err)
-	}
-	s.Store = cs
+	cs := s.Store
 	s.D1 = d1.New(cs)
 	s.Queue = queuepkg.New(cs)
 	s.configureQueueStore(s.Queue)

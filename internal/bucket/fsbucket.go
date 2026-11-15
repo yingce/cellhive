@@ -25,6 +25,7 @@ func (b *FSBucket) Stats() map[string]uint64 {
 		"conditional_create": b.creates.Load(),
 		"cas":                b.casOps.Load(),
 		"delete":             b.deletes.Load(),
+		"gc_scan_entries":    b.gcScanEntries.Load(),
 	}
 }
 
@@ -42,8 +43,11 @@ func (b *FSBucket) Stats() map[string]uint64 {
 type FSBucket struct {
 	root string
 
-	locksMu sync.Mutex
-	locks   map[string]*fsKeyLock
+	locksMu       sync.Mutex
+	locks         map[string]*fsKeyLock
+	gcMu          sync.Mutex
+	gcScans       map[string]*fsGCScan
+	gcScanEntries atomic.Uint64
 
 	puts    atomic.Uint64
 	gets    atomic.Uint64
@@ -262,14 +266,17 @@ func (b *FSBucket) ConditionalDelete(_ context.Context, key, expectEtag string) 
 	return nil
 }
 
-// ListSizes implements SizeLister: stat each object instead of reading it.
-func (b *FSBucket) ListSizes(_ context.Context, prefix string) ([]ObjectInfo, error) {
-	keys, err := b.List(context.Background(), prefix)
+// ListSizes implements SizeLister; object contents are read to compute ETags.
+func (b *FSBucket) ListSizes(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	keys, err := b.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]ObjectInfo, 0, len(keys))
 	for _, k := range keys {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		info, serr := os.Stat(b.path(k))
 		if serr != nil {
 			continue
@@ -287,6 +294,9 @@ func (b *FSBucket) ListSizes(_ context.Context, prefix string) ([]ObjectInfo, er
 // but keeps at most limit+1 keys >= after, so memory does not grow with the
 // prefix size.
 func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -306,6 +316,9 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 	}
 	var kept []string // ascending, len <= limit+1
 	err := filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -350,6 +363,9 @@ func (b *FSBucket) ListPage(ctx context.Context, prefix, after string, limit int
 	}
 	out := make([]ObjectInfo, 0, len(kept))
 	for _, k := range kept {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		p := b.path(k)
 		info, serr := os.Stat(p)
 		if serr != nil {
@@ -376,11 +392,17 @@ func (b *FSBucket) Delete(_ context.Context, key string) error {
 }
 
 // List implements Bucket (operator/diagnostic use only).
-func (b *FSBucket) List(_ context.Context, prefix string) ([]string, error) {
+func (b *FSBucket) List(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	b.lists.Add(1)
 	base := b.path(prefix)
 	var keys []string
 	err := filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -413,6 +435,9 @@ func (b *FSBucket) List(_ context.Context, prefix string) ([]string, error) {
 
 // CommonPrefixes implements PrefixLister by reading the immediate directory.
 func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if delimiter == "" {
 		delimiter = "/"
 	}
@@ -426,13 +451,20 @@ func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string)
 	}
 	var out []string
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !entry.IsDir() {
 			continue
 		}
 		// An object store has no empty directories: a prefix exists only while
 		// some key carries it. Deleting the last object here leaves the directory
 		// behind, so skip directories that hold no file.
-		if !dirHasFile(filepath.Join(b.path(prefix), entry.Name())) {
+		hasFile, err := dirHasFile(ctx, filepath.Join(b.path(prefix), entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if !hasFile {
 			continue
 		}
 		out = append(out, prefix+entry.Name()+delimiter)
@@ -441,9 +473,12 @@ func (b *FSBucket) CommonPrefixes(ctx context.Context, prefix, delimiter string)
 }
 
 // dirHasFile reports whether dir or any directory below it contains a file.
-func dirHasFile(dir string) bool {
+func dirHasFile(ctx context.Context, dir string) (bool, error) {
 	found := false
 	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil || found {
 			return filepath.SkipAll
 		}
@@ -456,7 +491,7 @@ func dirHasFile(dir string) bool {
 		}
 		return nil
 	})
-	return found
+	return found, ctx.Err()
 }
 
 // PresignGet implements Bucket (local dev returns a file:// style handle).

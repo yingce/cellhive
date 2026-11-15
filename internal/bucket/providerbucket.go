@@ -50,7 +50,7 @@ func authorityKey(key string) bool {
 		// require the same native append-position authority as node leases.
 		return ownKey(key) || strings.HasSuffix(key, "/owner-gen") || pointFenceKey(key)
 	}
-	return strings.HasPrefix(key, "r2meta/") || strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
+	return strings.HasPrefix(key, "r2meta/") || strings.HasPrefix(key, "r2/.mpu/v2/states/") || strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
 		key == "fleet/drain-token.json" || key == "fleet/waker.json"
 }
 

@@ -32,6 +32,12 @@ func (s *Store) GrantBundle(ctx context.Context, ns, sha, actor string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
+		if err := checkPurgeFenceTx(ctx, t, ns, ""); err != nil {
+			return err
+		}
+		if err := checkArtifactReferenceTx(ctx, t, "bundle", sha); err != nil {
+			return err
+		}
 		if _, err := t.ExecContext(ctx, `INSERT INTO bundle_grants(ns,sha,created_ms) VALUES (?,?,?) ON CONFLICT(ns,sha) DO NOTHING`, ns, sha, s.now().UnixMilli()); err != nil {
 			return err
 		}

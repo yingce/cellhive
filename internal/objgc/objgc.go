@@ -12,6 +12,7 @@ package objgc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -37,6 +38,12 @@ type Refs interface {
 // object after the Pass snapshot was taken.
 type refChecker interface {
 	IsReferenced(ctx context.Context, id string) (bool, error)
+}
+
+// Claimer atomically checks references/grace and confirms durable exclusion.
+// finish receives the actual I/O result; errors must retain an uncertain fence.
+type Claimer interface {
+	Claim(context.Context, string) (finish func(error) error, claimed bool, err error)
 }
 
 // GC runs garbage-collection passes over one kind of object.
@@ -112,11 +119,25 @@ func (g *GC) Pass(ctx context.Context) (Result, error) {
 				continue
 			}
 		}
-		if err := g.Items.Delete(ctx, id); err != nil {
-			return res, err
-		}
-		if err := g.Refs.ClearMark(ctx, id); err != nil {
-			return res, err
+		if claimer, ok := g.Refs.(Claimer); ok {
+			finish, claimed, err := claimer.Claim(ctx, id)
+			if err != nil {
+				return res, err
+			}
+			if !claimed {
+				continue
+			}
+			ioErr := g.Items.Delete(ctx, id)
+			if err := errors.Join(ioErr, finish(ioErr)); err != nil {
+				return res, err
+			}
+		} else {
+			if err := g.Items.Delete(ctx, id); err != nil {
+				return res, err
+			}
+			if err := g.Refs.ClearMark(ctx, id); err != nil {
+				return res, err
+			}
 		}
 		res.Deleted++
 		if g.Log != nil {

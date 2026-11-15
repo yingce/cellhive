@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -263,65 +264,51 @@ func TestPagedCellReopenAfterClose(t *testing.T) {
 	}
 }
 
-// TestMalformedPagedMarkerForcesRestore protects the sparse-cache invariant:
-// marker corruption must never make an incomplete file look like a normal
-// SQLite database. The cache is discarded and rebuilt from the durable source.
-func TestMalformedPagedMarkerForcesRestore(t *testing.T) {
-	ctx := context.Background()
-	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "bad-marker"}
-	src, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := src.Cell(ctx, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Put(ctx, "key", []byte("value"), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.CheckpointTruncate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	want, err := os.ReadFile(c.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	dst, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := dst.Path(sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte("incomplete sparse cache"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pagedMarkerPath(p), []byte("corrupt"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	hydrated := false
-	dst.Hydrate = func(_ context.Context, _ cell.Scope, dest string) error {
-		hydrated = true
-		return os.WriteFile(dest, want, 0o644)
-	}
-	restored, err := dst.Cell(ctx, sc)
-	if err != nil {
-		t.Fatalf("restore malformed paged cache: %v", err)
-	}
-	if !hydrated {
-		t.Fatal("malformed paged cache opened without durable restore")
-	}
-	got, _, err := restored.Get(ctx, "key")
-	if err != nil || string(got) != "value" {
-		t.Fatalf("restored value = %q, %v", got, err)
+// A corrupt marker cannot prove the replica covers the local database.
+func TestMalformedPagedMarkerPreservesLocalFiles(t *testing.T) {
+	for _, marker := range []string{"corrupt", "4096 10 invalid 1", "4096 10 -1 1", "4096 10 18446744073709551616 1"} {
+		t.Run(marker, func(t *testing.T) {
+			ctx := context.Background()
+			sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "bad-marker"}
+			dst, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := dst.Path(sc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files := map[string]string{p: "incomplete sparse cache", p + "-wal": "local WAL", p + "-shm": "local SHM", pagedMarkerPath(p): marker}
+			for path, body := range files {
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			probed, hydrated := false, false
+			dst.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+				probed = true
+				return nil, false, nil
+			}
+			dst.Hydrate = func(_ context.Context, _ cell.Scope, dest string) error {
+				hydrated = true
+				return os.WriteFile(dest, []byte("older replica"), 0o644)
+			}
+			restored, err := dst.Cell(ctx, sc)
+			if restored != nil {
+				_ = restored.Close()
+			}
+			if !errors.Is(err, ErrPagedCacheUnusable) {
+				t.Errorf("expected unusable marker error: %v", err)
+			}
+			if probed || hydrated {
+				t.Errorf("invalid marker triggered recovery: paged=%v hydrate=%v", probed, hydrated)
+			}
+			for path, want := range files {
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Errorf("local file %s changed: %q, %v", path, got, err)
+				}
+			}
+		})
 	}
 }

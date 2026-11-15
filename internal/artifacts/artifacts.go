@@ -10,8 +10,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +27,18 @@ var ErrBadPath = errors.New("artifacts: unsafe path")
 // Store reads and writes artifacts in a bucket.
 type Store struct {
 	B bucket.Bucket
+	// Reserve is installed by the control-owner server. Low-level standalone
+	// stores have no coordination; they must not be used as production writers.
+	Reserve func(context.Context, string, string, string, string) (Finish, error)
+}
+
+type Finish func(context.Context, string, int64, bool) error
+
+func (s *Store) reserve(ctx context.Context, kind, id, path, mode string) (Finish, error) {
+	if s.Reserve != nil {
+		return s.Reserve(ctx, kind, id, path, mode)
+	}
+	return func(context.Context, string, int64, bool) error { return nil }, nil
 }
 
 // New creates an artifact store.
@@ -56,12 +70,12 @@ func AssetKey(ns, worker, token, path string) (string, error) {
 }
 
 func safeComponent(s string) bool {
-	return s != "" && !strings.ContainsAny(s, "/\\")
+	return s != "" && !strings.ContainsAny(s, "/\\\x00")
 }
 
 func safePath(p string) bool {
 	p = strings.TrimSpace(p)
-	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") {
+	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") || strings.ContainsRune(p, 0) {
 		return false
 	}
 	return true
@@ -72,10 +86,16 @@ func safePath(p string) bool {
 func (s *Store) PutBundle(ctx context.Context, data []byte) (sha string, size int, err error) {
 	sha = Hash(data)
 	key := BundleKey(sha)
+	finish, err := s.reserve(ctx, "bundle", sha, "", "upload")
+	if err != nil {
+		return "", 0, err
+	}
 	if _, err := s.B.ConditionalCreate(ctx, key, data); err != nil {
-		if errors.Is(err, bucket.ErrPrecondition) {
-			return sha, len(data), nil // already present
+		if !errors.Is(err, bucket.ErrPrecondition) {
+			return "", 0, err
 		}
+	}
+	if err := finish(ctx, sha, int64(len(data)), true); err != nil {
 		return "", 0, err
 	}
 	return sha, len(data), nil
@@ -233,6 +253,10 @@ func (s *Store) PutAssetAt(ctx context.Context, ns, worker, token, path string, 
 	if err != nil {
 		return "", err
 	}
+	finish, err := s.reserve(ctx, "asset", ns+"/"+worker+"/"+token, path, "upload")
+	if err != nil {
+		return "", err
+	}
 	objects := objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts)
 	if _, err := objects.ConditionalCreate(ctx, key, data); err != nil {
 		if !errors.Is(err, bucket.ErrPrecondition) {
@@ -240,13 +264,107 @@ func (s *Store) PutAssetAt(ctx context.Context, ns, worker, token, path string, 
 		}
 		existing, readErr := objects.Get(ctx, key)
 		if readErr != nil {
-			return "", readErr
+			return "", errors.Join(readErr, finish(ctx, "", 0, false))
 		}
 		if !bytes.Equal(existing, data) {
-			return "", fmt.Errorf("artifacts: immutable asset conflict: %s", path)
+			return "", errors.Join(fmt.Errorf("artifacts: immutable asset conflict: %s", path), finish(ctx, "", 0, false))
 		}
 	}
+	if err := finish(ctx, Hash(data), int64(len(data)), true); err != nil {
+		return "", err
+	}
 	return key, nil
+}
+
+type File struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+const WranglerManifestPath = "__cellhive_wrangler_manifest.json"
+
+// ManifestToken is the native CLI's immutable path/content commitment.
+// Invalid paths have no token; NUL is reserved as the path/hash delimiter.
+func ManifestToken(manifest map[string]File) string {
+	paths := make([]string, 0, len(manifest))
+	for p := range manifest {
+		if !safePath(p) {
+			return ""
+		}
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	h := sha256.New()
+	for _, p := range paths {
+		fmt.Fprintf(h, "%s\x00%s\n", p, manifest[p].SHA256)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Seal verifies an explicit full manifest under a token-wide reservation. It
+// never lists the bucket or accepts a single successful Put as completeness.
+func (s *Store) Seal(ctx context.Context, ns, worker, token string, manifest map[string]File) error {
+	if manifest == nil || (len(manifest) == 0 && token != ManifestToken(manifest)) {
+		return fmt.Errorf("artifacts: complete manifest required")
+	}
+	for path, f := range manifest {
+		if _, err := AssetKey(ns, worker, token, path); err != nil {
+			return err
+		}
+		if !validSHA256(f.SHA256) || f.Size < 0 {
+			return fmt.Errorf("artifacts: manifest requires SHA256 and size")
+		}
+	}
+	finish, err := s.reserve(ctx, "asset", ns+"/"+worker+"/"+token, "", "seal")
+	if err != nil {
+		return err
+	}
+	if ManifestToken(manifest) != token {
+		data, err := s.GetAsset(ctx, ns, worker, token, WranglerManifestPath)
+		canonical, suffix, suffixed := strings.Cut(token, "-")
+		if !validSHA256(canonical) || (suffixed && !safeComponent(suffix)) {
+			err = fmt.Errorf("artifacts: invalid canonical asset identity")
+		}
+		var declared map[string]struct {
+			Hash string `json:"hash"`
+			Size int64  `json:"size"`
+		}
+		if err == nil && (Hash(data) != canonical || json.Unmarshal(data, &declared) != nil || len(manifest) != len(declared)+1) {
+			err = fmt.Errorf("artifacts: token does not commit this complete manifest")
+		}
+		if err == nil {
+			if _, ok := manifest[WranglerManifestPath]; !ok {
+				err = fmt.Errorf("artifacts: canonical manifest missing")
+			}
+			for p, want := range declared {
+				f, ok := manifest[p]
+				if !ok || f.Size != want.Size || want.Hash == "" {
+					err = fmt.Errorf("artifacts: incomplete canonical manifest")
+					break
+				}
+			}
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("artifacts: cannot prove complete token identity; publish a new token: %w", err), finish(ctx, "", 0, false))
+		}
+	}
+	for path, f := range manifest {
+		data, err := s.GetAsset(ctx, ns, worker, token, path)
+		if err == nil && (int64(len(data)) != f.Size || Hash(data) != f.SHA256) {
+			err = fmt.Errorf("artifacts: manifest mismatch: %s", path)
+		}
+		if err != nil {
+			return errors.Join(err, finish(ctx, "", 0, false))
+		}
+	}
+	commitment, err := json.Marshal(manifest)
+	if err != nil {
+		return errors.Join(err, finish(ctx, "", 0, false))
+	}
+	if err := finish(ctx, string(commitment), 0, true); err != nil {
+		return errors.Join(err, finish(ctx, "", 0, false))
+	}
+	return nil
 }
 
 // GetAsset returns an asset's bytes.

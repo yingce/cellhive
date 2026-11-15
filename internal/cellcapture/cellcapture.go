@@ -345,8 +345,7 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	if m.HasEpoch != nil {
 		ok, err := m.HasEpoch(ctx, scope, epoch)
 		if err != nil {
-			m.log().Warn("capture epoch lookup failed; taking a snapshot", "scope", scope.String(), "err", err)
-			return false, false, nil
+			return false, false, fmt.Errorf("cellcapture: epoch lookup for %s: %w", scope, err)
 		}
 		exists = ok
 	}
@@ -358,8 +357,7 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 		durable, err = m.Durable(ctx, scope, epoch)
 	}
 	if err != nil {
-		m.log().Warn("capture durable watermark unavailable; taking a snapshot", "scope", scope.String(), "err", err)
-		return false, false, nil
+		return false, false, fmt.Errorf("cellcapture: durable watermark for %s: %w", scope, err)
 	}
 	if durable == 0 {
 		return false, false, nil

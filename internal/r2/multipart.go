@@ -4,47 +4,89 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"cellhive/internal/bucket"
 )
 
-// Multipart upload limits (R2-compatible shape).
 const (
-	// MaxMultipartParts is the maximum number of parts in one upload.
-	MaxMultipartParts = 10000
-	// MaxMultipartBytes caps the assembled object size. Parts are assembled in
-	// memory (the bucket contract has no streaming Put), so this bound also
-	// bounds peak memory per complete call.
-	MaxMultipartBytes = 512 << 20
+	MaxMultipartParts      = 10000
+	MaxMultipartInflight   = 64
+	multipartBitmapBytes   = (MaxMultipartParts + 7) / 8
+	multipartStateMaxBytes = 64 << 10
+	// Assembly is in memory because Bucket has no streaming Put.
+	MaxMultipartBytes   = 512 << 20
+	multipartRoot       = "r2/.mpu/"
+	multipartPartsRoot  = multipartRoot + "v2/parts/"
+	multipartStatesRoot = multipartRoot + "v2/states/"
+	defaultMultipartTTL = 24 * time.Hour
+	createMarkerName    = "created"
 )
 
-// ErrBadUpload means the upload id, part number or object key is invalid.
-var ErrBadUpload = errors.New("r2: bad multipart upload")
+var (
+	ErrBadUpload         = errors.New("r2: bad multipart upload")
+	ErrMultipartTooLarge = errors.New("r2: multipart object too large")
+	ErrLegacyUpload      = errors.New("r2: legacy multipart upload; restart upload using v2")
+	ErrUploadBusy        = errors.New("r2: multipart operation in progress or outcome unknown")
+)
 
-// ErrMultipartTooLarge means the assembled object would exceed MaxMultipartBytes.
-var ErrMultipartTooLarge = errors.New("r2: multipart object too large")
-
-// Part is one uploaded part reference (Cloudflare: {partNumber, etag}).
 type Part struct {
 	PartNumber int    `json:"part_number"`
 	ETag       string `json:"etag"`
 }
 
-// multipartPrefix is the staging area for an upload's parts. It lives under
-// "r2/.mpu/" (not under "r2/<ns>/<bucket>/") so user List never sees parts.
+// Parts is a fixed registration bitmap, including uncertain writes. Inflight
+// tokens reserve a part until its writer confirms Put; they are never stolen.
+type multipartState struct {
+	Version   int            `json:"version"`
+	Key       string         `json:"key"`
+	State     string         `json:"state"`
+	Revision  string         `json:"revision"`
+	UpdatedMs int64          `json:"updated_ms"`
+	Parts     []byte         `json:"parts,omitempty"`
+	Inflight  map[int]string `json:"inflight,omitempty"`
+}
+
+func (st multipartState) hasPart(n int) bool {
+	return n >= 1 && n <= MaxMultipartParts && len(st.Parts) == multipartBitmapBytes && st.Parts[(n-1)/8]&(1<<uint((n-1)%8)) != 0
+}
+
+// isUploadID is also used for immutable final-object version identifiers.
+func isUploadID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func multipartNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 func multipartPrefix(ns, bucketName, uploadID string) (string, error) {
-	if ns == "" || bucketName == "" || !isUploadID(uploadID) {
+	if isUploadID(uploadID) {
+		return "", ErrLegacyUpload
+	}
+	if !strings.HasPrefix(uploadID, "v2-") || !isUploadID(strings.TrimPrefix(uploadID, "v2-")) {
 		return "", ErrBadUpload
 	}
-	if strings.ContainsAny(ns, "/\\") || strings.ContainsAny(bucketName, "/\\") {
-		return "", ErrBadUpload
+	if _, err := Key(ns, bucketName, "multipart"); err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("r2/.mpu/%s/%s/%s/", ns, bucketName, uploadID), nil
+	return fmt.Sprintf("%s%s/%s/%s/", multipartPartsRoot, ns, bucketName, uploadID), nil
 }
 
 func partKey(prefix string, part int) (string, error) {
@@ -54,113 +96,118 @@ func partKey(prefix string, part int) (string, error) {
 	return fmt.Sprintf("%s%05d", prefix, part), nil
 }
 
-// isUploadID reports whether s is a 32-char lowercase hex id (our minted format).
-func isUploadID(s string) bool {
-	if len(s) != 32 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+func createMarkerKey(prefix string) string {
+	return multipartStatesRoot + strings.TrimPrefix(prefix, multipartPartsRoot) + createMarkerName
 }
-
-// multipartRoot is the staging root; GC lists it to reclaim abandoned uploads.
-const multipartRoot = "r2/.mpu/"
-
-// defaultMultipartTTL is how long abandoned staged parts are retained.
-const defaultMultipartTTL = 24 * time.Hour
-
-const createMarkerName = "created"
-
-// createMarkerKey is the per-upload creation-time marker object used by GC.
-func createMarkerKey(prefix string) string { return prefix + createMarkerName }
-
-// isCreateMarker reports whether key is a GC creation marker (not a part).
 func isCreateMarker(key string) bool { return strings.HasSuffix(key, "/"+createMarkerName) }
 
-// CreateMultipart mints a new upload id for (ns, bucket, key) and records its
-// creation time so a future GC can reclaim it if the caller never completes or
-// aborts.
+func (s *Store) readMultipart(ctx context.Context, marker, key string) (multipartState, string, error) {
+	data, etag, err := s.bodyObjects().GetVersion(ctx, marker)
+	if err != nil {
+		return multipartState{}, "", err
+	}
+	var st multipartState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, "", fmt.Errorf("%w: invalid state", ErrBadUpload)
+	}
+	if st.Version != 2 || st.Key == "" || (key != "" && st.Key != key) || !isUploadID(st.Revision) || len(st.Inflight) > MaxMultipartInflight {
+		return st, "", ErrBadUpload
+	}
+	switch st.State {
+	case "active", "completing", "completed", "aborted", "expired":
+	default:
+		return st, "", ErrBadUpload
+	}
+	if len(st.Parts) != multipartBitmapBytes && !(multipartTerminal(st) && len(st.Parts) == 0 && len(st.Inflight) == 0) {
+		return st, "", ErrBadUpload
+	}
+	for n, token := range st.Inflight {
+		if !st.hasPart(n) || !isUploadID(token) {
+			return st, "", ErrBadUpload
+		}
+	}
+	return st, etag, nil
+}
+
+func (s *Store) casMultipart(ctx context.Context, marker string, st *multipartState, etag string) (string, error) {
+	rev, err := multipartNonce()
+	if err != nil {
+		return "", err
+	}
+	st.Revision = rev
+	data, err := s.encodeMultipart(marker, *st, false)
+	if err != nil {
+		return "", err
+	}
+	return s.bodyObjects().CAS(ctx, marker, data, etag)
+}
+
+// Admission includes the largest lifecycle state and timestamp. Create also
+// reserves the full bounded writer table, so accepted keys support all parts.
+func (s *Store) encodeMultipart(marker string, st multipartState, creating bool) ([]byte, error) {
+	limit := int64(multipartStateMaxBytes)
+	if b, ok := s.B.(interface{ MaxValueBytes(string) int64 }); ok {
+		if n := b.MaxValueBytes(marker); n > 0 && n < limit {
+			limit = n
+		}
+	}
+	probe := st
+	probe.State = "completing"
+	probe.UpdatedMs = -1 << 63
+	if creating {
+		probe.Inflight = make(map[int]string, MaxMultipartInflight)
+		for n := MaxMultipartParts; n > MaxMultipartParts-MaxMultipartInflight; n-- {
+			probe.Inflight[n] = strings.Repeat("f", 32)
+		}
+	}
+	data, err := json.Marshal(probe)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, ErrMultipartTooLarge
+	}
+	return json.Marshal(st)
+}
+
+func multipartBusy(st multipartState) bool { return len(st.Inflight) != 0 }
+func multipartTerminal(st multipartState) bool {
+	return st.State == "completed" || st.State == "aborted" || st.State == "expired"
+}
+func multipartPartNumbers(st multipartState) []int {
+	var numbers []int
+	for n := 1; n <= MaxMultipartParts; n++ {
+		if st.hasPart(n) {
+			numbers = append(numbers, n)
+		}
+	}
+	return numbers
+}
+
 func (s *Store) CreateMultipart(ctx context.Context, ns, bucketName, key string) (string, error) {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", err
 	}
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	id, err := multipartNonce()
+	if err != nil {
 		return "", err
 	}
-	id := hex.EncodeToString(b[:])
+	id = "v2-" + id
 	p, err := multipartPrefix(ns, bucketName, id)
 	if err != nil {
 		return "", err
 	}
-	if _, err := s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(s.now().UnixMilli(), 10))); err != nil {
+	st := multipartState{Version: 2, Key: key, State: "active", Revision: strings.TrimPrefix(id, "v2-"), UpdatedMs: s.now().UnixMilli(), Parts: make([]byte, multipartBitmapBytes)}
+	data, err := s.encodeMultipart(createMarkerKey(p), st, true)
+	if err != nil {
 		return "", err
 	}
-	s.maybeGC(ctx)
+	if _, err := s.bodyObjects().ConditionalCreate(ctx, createMarkerKey(p), data); err != nil {
+		return "", err
+	}
 	return id, nil
 }
 
-// maybeGC opportunistically reclaims stale multipart uploads, throttled to once
-// per hour per process so create stays cheap.
-func (s *Store) maybeGC(ctx context.Context) {
-	s.mu.Lock()
-	if !s.lastGC.IsZero() && s.now().Sub(s.lastGC) < time.Hour {
-		s.mu.Unlock()
-		return
-	}
-	s.lastGC = s.now()
-	s.mu.Unlock()
-	_, _ = s.GCStaleUploads(ctx, s.MultipartTTL)
-}
-
-// GCStaleUploads deletes staged parts of multipart uploads whose creation marker
-// is older than ttl, returning the number of uploads reclaimed. Uploads without
-// a marker are left alone (age cannot be proven).
-func (s *Store) GCStaleUploads(ctx context.Context, ttl time.Duration) (int, error) {
-	if ttl <= 0 {
-		ttl = defaultMultipartTTL
-	}
-	keys, err := s.B.List(ctx, multipartRoot)
-	if err != nil {
-		return 0, err
-	}
-	now := s.now()
-	cutoff := now.Add(-ttl).UnixMilli()
-	byPrefix := map[string][]string{}
-	for _, k := range keys {
-		if i := strings.LastIndexByte(k, '/'); i >= 0 {
-			byPrefix[k[:i+1]] = append(byPrefix[k[:i+1]], k)
-		}
-	}
-	removed := 0
-	for p, ks := range byPrefix {
-		data, _, err := s.B.Get(ctx, createMarkerKey(p))
-		if err != nil {
-			if errors.Is(err, bucket.ErrNotFound) {
-				continue
-			}
-			return removed, err
-		}
-		ms, perr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-		if perr != nil || ms > cutoff {
-			continue
-		}
-		for _, k := range ks {
-			if derr := s.B.Delete(ctx, k); derr != nil && !errors.Is(derr, bucket.ErrNotFound) {
-				return removed, derr
-			}
-		}
-		removed++
-	}
-	return removed, nil
-}
-
-// UploadPart stores one part and returns its etag.
 func (s *Store) UploadPart(ctx context.Context, ns, bucketName, key, uploadID string, part int, data []byte) (string, error) {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", err
@@ -173,63 +220,157 @@ func (s *Store) UploadPart(ctx context.Context, ns, bucketName, key, uploadID st
 	if err != nil {
 		return "", err
 	}
-	etag, err := s.B.Put(ctx, k, data)
+	marker := createMarkerKey(p)
+	token, err := multipartNonce()
 	if err != nil {
 		return "", err
 	}
-	// Refresh the creation marker so GC never reclaims a live upload whose parts
-	// are still arriving: the marker doubles as a heartbeat. Best effort -- a
-	// failed refresh must not fail a part that was already stored.
-	_, _ = s.B.Put(ctx, createMarkerKey(p), []byte(strconv.FormatInt(s.now().UnixMilli(), 10)))
-	return etag, nil
+	claimed := false
+	for i := 0; i < 64; i++ {
+		st, rev, err := s.readMultipart(ctx, marker, key)
+		if err != nil {
+			return "", err
+		}
+		if st.State != "active" {
+			return "", ErrBadUpload
+		}
+		if st.Inflight[part] != "" || len(st.Inflight) >= MaxMultipartInflight {
+			return "", ErrUploadBusy
+		}
+		if st.Inflight == nil {
+			st.Inflight = make(map[int]string)
+		}
+		st.Parts[(part-1)/8] |= 1 << uint((part-1)%8)
+		st.Inflight[part] = token
+		st.UpdatedMs = s.now().UnixMilli()
+		_, err = s.casMultipart(ctx, marker, &st, rev)
+		if errors.Is(err, bucket.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		claimed = true
+		break
+	}
+	if !claimed {
+		return "", ErrUploadBusy
+	}
+	etag, err := s.bodyObjects().Put(ctx, k, data)
+	// Even an error may mean a delayed Put will still arrive. Never release its
+	// token and allow another writer to reuse this mutable part key.
+	if err != nil {
+		return "", err
+	}
+	for i := 0; i < 64; i++ {
+		st, rev, err := s.readMultipart(ctx, marker, key)
+		if err != nil {
+			return "", err
+		}
+		if st.State != "active" || st.Inflight[part] != token {
+			return "", ErrBadUpload
+		}
+		delete(st.Inflight, part)
+		st.UpdatedMs = s.now().UnixMilli()
+		_, err = s.casMultipart(ctx, marker, &st, rev)
+		if errors.Is(err, bucket.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return etag, nil
+	}
+	return "", ErrUploadBusy
 }
 
-// CompleteMultipart assembles the listed parts in the given order, writes the
-// final object and removes the staged parts. Part etags (when provided) are
-// verified against the stored parts, so a mismatched part fails closed.
 func (s *Store) CompleteMultipart(ctx context.Context, ns, bucketName, key, uploadID string, parts []Part) (string, int, error) {
 	if len(parts) == 0 || len(parts) > MaxMultipartParts {
 		return "", 0, ErrBadUpload
 	}
-	_, err := Key(ns, bucketName, key)
-	if err != nil {
+	if _, err := Key(ns, bucketName, key); err != nil {
 		return "", 0, err
 	}
 	p, err := multipartPrefix(ns, bucketName, uploadID)
 	if err != nil {
 		return "", 0, err
 	}
-	total := 0
+	marker := createMarkerKey(p)
+	st, rev, err := s.readMultipart(ctx, marker, key)
+	if err != nil {
+		return "", 0, err
+	}
+	if st.State == "completing" || multipartBusy(st) {
+		return "", 0, ErrUploadBusy
+	}
+	if st.State != "active" {
+		return "", 0, ErrBadUpload
+	}
+	for _, pt := range parts {
+		if !st.hasPart(pt.PartNumber) {
+			return "", 0, ErrBadUpload
+		}
+	}
+	st.State = "completing"
+	rev, err = s.casMultipart(ctx, marker, &st, rev)
+	if err != nil {
+		return "", 0, err
+	}
+	// Until publication is invoked all failures are known not to have changed
+	// the final object. Afterwards the exclusive completing fence is permanent
+	// on uncertainty: retrying could overwrite a later ordinary Put.
+	publishing := false
+	defer func() {
+		if !publishing {
+			st.State = "active"
+			_, _ = s.casMultipart(ctx, marker, &st, rev)
+		}
+	}()
 	buf := make([]byte, 0)
 	for _, pt := range parts {
-		k, err := partKey(p, pt.PartNumber)
-		if err != nil {
-			return "", 0, err
-		}
-		data, etag, err := s.B.Get(ctx, k)
+		k, _ := partKey(p, pt.PartNumber)
+		data, etag, err := s.bodyObjects().GetVersion(ctx, k)
 		if err != nil {
 			return "", 0, err
 		}
 		if pt.ETag != "" && pt.ETag != etag {
 			return "", 0, fmt.Errorf("r2: part %d etag mismatch", pt.PartNumber)
 		}
-		if total+len(data) > MaxMultipartBytes {
+		if len(buf)+len(data) > MaxMultipartBytes {
 			return "", 0, ErrMultipartTooLarge
 		}
-		total += len(data)
 		buf = append(buf, data...)
 	}
+	publishing = true
 	etag, err := s.Put(ctx, ns, bucketName, key, buf)
 	if err != nil {
 		return "", 0, err
 	}
-	// Best-effort cleanup: a failed cleanup must not fail the completed upload.
-	_ = s.AbortMultipart(ctx, ns, bucketName, key, uploadID)
-	return etag, total, nil
+	st.State = "completed"
+	if _, err := s.casMultipart(ctx, marker, &st, rev); err != nil {
+		return "", 0, err
+	}
+	// Completion is durable independently of staging reclamation.
+	_ = s.cleanupMultipart(ctx, p, st)
+	return etag, len(buf), nil
 }
 
-// AbortMultipart deletes all staged parts of an upload (missing parts are
-// ignored, so abort is idempotent).
+func (s *Store) cleanupMultipart(ctx context.Context, p string, st multipartState) error {
+	var lastErr error
+	for _, n := range multipartPartNumbers(st) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		k, _ := partKey(p, n)
+		if err := s.bodyObjects().Delete(ctx, k); err != nil && !errors.Is(err, bucket.ErrNotFound) {
+			lastErr = err
+		}
+	}
+	// Retain all registrations, including unknown writes that can arrive after
+	// this cleanup; the background collector will revisit these tombstones.
+	return lastErr
+}
+
 func (s *Store) AbortMultipart(ctx context.Context, ns, bucketName, key, uploadID string) error {
 	if _, err := Key(ns, bucketName, key); err != nil {
 		return err
@@ -238,27 +379,27 @@ func (s *Store) AbortMultipart(ctx context.Context, ns, bucketName, key, uploadI
 	if err != nil {
 		return err
 	}
-	keys, err := s.B.List(ctx, p)
-	if err != nil {
-		return err
-	}
-	// Delete everything we can: a single failure must not leave the rest behind,
-	// so a retry sees a smaller, still-abortable set. Keep the creation marker
-	// until every part is gone; GC skips uploads without a marker, so removing it
-	// early would orphan the surviving parts forever.
-	var lastErr error
-	for _, k := range keys {
-		if isCreateMarker(k) {
+	marker := createMarkerKey(p)
+	for i := 0; i < 64; i++ {
+		st, rev, err := s.readMultipart(ctx, marker, key)
+		if err != nil {
+			return err
+		}
+		if st.State == "completing" {
+			return ErrUploadBusy
+		}
+		if multipartTerminal(st) {
+			return s.cleanupMultipart(ctx, p, st)
+		}
+		st.State = "aborted"
+		_, err = s.casMultipart(ctx, marker, &st, rev)
+		if errors.Is(err, bucket.ErrPrecondition) {
 			continue
 		}
-		if err := s.B.Delete(ctx, k); err != nil && !errors.Is(err, bucket.ErrNotFound) {
-			lastErr = err
+		if err != nil {
+			return err
 		}
+		return s.cleanupMultipart(ctx, p, st)
 	}
-	if lastErr == nil {
-		if err := s.B.Delete(ctx, createMarkerKey(p)); err != nil && !errors.Is(err, bucket.ErrNotFound) {
-			lastErr = err
-		}
-	}
-	return lastErr
+	return ErrUploadBusy
 }

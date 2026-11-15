@@ -252,7 +252,10 @@ export default {
     // Rolling-update probes (ADR-156): /ready reports projection freshness and
     // draining so the edge can pull this instance out before it stops; /drain
     // (internal token) flips that flag.
-    if (url.pathname === "/ready") return readyResponse(env);
+    if (url.pathname === "/ready") {
+      scheduleSweep(env,ctx);
+      return readyResponse(env);
+    }
     if (url.pathname === "/drain" && req.method === "POST") return drainRequest(req, env);
     if (env.CH_POOL_MODE === "1") {
       maybePollLogCapture(env, ctx);

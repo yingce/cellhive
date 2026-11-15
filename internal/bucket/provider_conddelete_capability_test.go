@@ -79,3 +79,36 @@ func TestProviderR2CASFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderMultipartStateUsesAuthority(t *testing.T) {
+	raw := newSegmentMem()
+	b := NewProviderBucket(nil, raw)
+	b.authority = NewSegmentedAuthority(raw, raw, AuthorityOptions{})
+	key := "r2/.mpu/v2/states/acme/files/v2-0123456789abcdef0123456789abcdef/created"
+	first, err := b.ConditionalCreate(t.Context(), key, []byte("active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ConditionalCreate(t.Context(), key, []byte("duplicate")); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("duplicate create = %v", err)
+	}
+	second, err := b.CAS(t.Context(), key, []byte("expired"), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.CAS(t.Context(), key, []byte("active-again"), first); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("stale writer = %v", err)
+	}
+	data, token, err := b.Get(t.Context(), key)
+	if err != nil || string(data) != "expired" || token != second {
+		t.Fatalf("state=%q token=%q err=%v", data, token, err)
+	}
+	for _, ordinary := range []string{"r2/.mpu/v2/parts/acme/files/id/1", "r2/.mpu/v2/states-other/id", "r2/acme/files/key"} {
+		if authorityKey(ordinary) {
+			t.Fatalf("ordinary object routed to authority: %s", ordinary)
+		}
+		if _, err := b.CAS(t.Context(), ordinary, nil, first); !errors.Is(err, ErrNotSupported) {
+			t.Fatalf("ordinary CAS %s = %v", ordinary, err)
+		}
+	}
+}

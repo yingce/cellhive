@@ -205,6 +205,92 @@ func TestEnsureFailsClosedWhenLocalBehindDurable(t *testing.T) {
 	}
 }
 
+func TestEnsureLookupFailureDoesNotPublishSnapshot(t *testing.T) {
+	for _, stage := range []string{"epoch", "epoch-watermark", "chain-watermark"} {
+		for _, stale := range []bool{false, true} {
+			name := stage + "/empty"
+			if stale {
+				name = stage + "/stale"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := t.Context()
+				cs, err := cellstore.New(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer cs.Close()
+				sc := cell.Scope{Namespace: "acme", Class: "__d1__", ID: "lookup-failure"}
+				c, err := cs.Cell(ctx, sc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stale {
+					if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+						_, err := tx.Exec("CREATE TABLE business(value TEXT)")
+						return err
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				local, err := c.TxID(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lookupErr := errors.New("storage lookup unavailable")
+				failing := true
+				durable := local + 10
+				var commits int
+				m := newCaptureManager(t, cs, func(context.Context, cell.Scope, uint64) (uint64, error) {
+					if failing && stage == "chain-watermark" {
+						return 0, lookupErr
+					}
+					return durable, nil
+				}, &commits)
+				defer m.Stop()
+				m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) {
+					if failing && stage == "epoch" {
+						return false, lookupErr
+					}
+					return stage == "epoch-watermark", nil
+				}
+				m.DurableEpoch = func(context.Context, cell.Scope, uint64) (uint64, error) {
+					if failing {
+						return 0, lookupErr
+					}
+					return durable, nil
+				}
+				if _, err := m.Ensure(ctx, sc); !errors.Is(err, lookupErr) {
+					t.Fatalf("Ensure error = %v, want lookup failure (commits=%d)", err, commits)
+				}
+				if commits != 0 {
+					t.Fatalf("published %d segments with unknown durable history", commits)
+				}
+				if err := m.Wait(ctx, sc, local); !errors.Is(err, ErrNotOwner) {
+					t.Fatalf("failed capture still serves Wait: %v", err)
+				}
+				if txid, err := c.TxID(ctx); err != nil || txid != local {
+					t.Fatalf("failed lookup changed local txid: %d, %v", txid, err)
+				}
+				failing = false
+				if _, err := m.Ensure(ctx, sc); !errors.Is(err, ErrLocalBehindDurable) {
+					t.Fatalf("retry with older local DB: %v", err)
+				}
+				if commits != 0 {
+					t.Fatalf("published %d segments from stale local DB", commits)
+				}
+				// A successful lookup proving no history must still permit initialization.
+				durable = 0
+				if _, err := m.Ensure(ctx, sc); err != nil {
+					t.Fatalf("retry after confirmed empty history: %v", err)
+				}
+				if commits == 0 {
+					t.Fatal("confirmed empty history did not publish initial snapshot")
+				}
+			})
+		}
+	}
+}
+
 func TestEnsureSnapshotsNewEpochForSmallCell(t *testing.T) {
 	ctx := context.Background()
 	cs, err := cellstore.New(t.TempDir())

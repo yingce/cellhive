@@ -228,9 +228,13 @@ func (s *Server) handleWorkflowEvent(w http.ResponseWriter, r *http.Request) {
 	if s.workflowGate(w, r, ns, name) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWorkflowPayloadBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read_failed", err.Error())
+		return
+	}
+	if len(body) > maxWorkflowPayloadBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "workflow_event_too_large", "workflow event exceeds 1 MiB")
 		return
 	}
 	if err := s.capturedWorkflow(r.Context(), ns, name, func() error {

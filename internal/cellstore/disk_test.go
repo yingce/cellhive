@@ -55,6 +55,40 @@ func TestPlanDiskEviction(t *testing.T) {
 	}
 }
 
+func TestDiskUsageFailedRefreshKeepsCacheAndBacksOff(t *testing.T) {
+	dir := t.TempDir()
+	badRoot := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(badRoot, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{DataDir: badRoot, diskFiles: 7, diskBytes: 1234}
+	if _, err := s.DiskFiles(); err == nil {
+		t.Fatal("fixture should make directory enumeration fail")
+	}
+	files, size := s.DiskUsage()
+	if files != 7 || size != 1234 {
+		t.Fatalf("failed scan lost last measurement: files=%d bytes=%d", files, size)
+	}
+	if s.diskAt.IsZero() {
+		t.Fatal("failed scan did not establish retry backoff")
+	}
+	// Repair the path. The next scrape must reuse the failed refresh's cache,
+	// rather than immediately walking the tree again.
+	if err := os.Remove(badRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(badRoot, "cells"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if files, size = s.DiskUsage(); files != 7 || size != 1234 {
+		t.Fatalf("scrape retried before backoff: files=%d bytes=%d", files, size)
+	}
+	s.diskAt = time.Now().Add(-diskCacheTTL)
+	if files, size = s.DiskUsage(); files != 0 || size != 0 {
+		t.Fatalf("expired cache did not refresh: files=%d bytes=%d", files, size)
+	}
+}
+
 // TestDiskFilesAndForget covers the on-disk ledger and file deletion.
 func TestDiskFilesAndForget(t *testing.T) {
 	s, err := New(t.TempDir())

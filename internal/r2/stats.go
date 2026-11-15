@@ -79,7 +79,7 @@ func (s *Store) Stats(ctx context.Context, ns, bucketName string, opts StatsOpti
 		st.Truncated = true
 	}
 
-	base := fmt.Sprintf("r2/.mpu/%s/%s/", ns, bucketName)
+	base := fmt.Sprintf("%s%s/%s/", multipartPartsRoot, ns, bucketName)
 	ups := map[string]bool{}
 	after = ""
 	for st.MultipartParts < limit {

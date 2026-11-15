@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,10 @@ import (
 
 // ErrNotFound is returned when a key does not exist.
 var ErrNotFound = errors.New("cellstore: not found")
+
+// ErrNamespaceDeleting is a temporary local admission rejection, not a
+// distributed resource tombstone. Callers must still enforce control fences.
+var ErrNamespaceDeleting = errors.New("cellstore: namespace deletion in progress")
 
 type interactiveHydrationKey struct{}
 
@@ -48,6 +53,11 @@ type Store struct {
 	// replica), which is how a fresh owner recovers cells after a crash or
 	// takeover. A nil hook leaves new cells empty.
 	Hydrate func(ctx context.Context, sc cell.Scope, dest string) error
+
+	// LocalDurable checks an existing non-paged database before cold activation.
+	// It must only query durable metadata, never reenter Cell or capture.Ensure.
+	// A nil hook preserves standalone Store behavior.
+	LocalDurable func(ctx context.Context, sc cell.Scope) (uint64, error)
 
 	// Paged, when set, takes precedence over Hydrate for a cold cell: it returns
 	// a page source for the cell's pinned replication cut, in which case the
@@ -123,6 +133,7 @@ type Store struct {
 	// unrelated cells.
 	evicting map[string]bool
 	retiring map[string]resourceRetirement
+	deleting map[string]bool // local namespace gate, protected by mu
 
 	// diskMu caches the cold-path DiskFiles walk for metrics (ADR-122).
 	diskMu    sync.Mutex
@@ -200,16 +211,25 @@ func (s *Store) BeginRequestContext(ctx context.Context, key string) (func(), er
 		return func() {}, nil
 	}
 	s.mu.Lock()
+	ns, _, _ := strings.Cut(key, "/")
+	if s.deleting[ns] {
+		s.mu.Unlock()
+		return nil, ErrNamespaceDeleting
+	}
 	if _, retired := s.retiring[key]; retired {
 		s.mu.Unlock()
 		return nil, cell.ErrResourceDeleted
 	}
 	if err := s.waitLocked(ctx, func() bool {
 		_, retired := s.retiring[key]
-		return s.evicting[key] && !retired
+		return s.evicting[key] && !retired && !s.deleting[ns]
 	}); err != nil {
 		s.mu.Unlock()
 		return nil, err
+	}
+	if s.deleting[ns] {
+		s.mu.Unlock()
+		return nil, ErrNamespaceDeleting
 	}
 	if _, retired := s.retiring[key]; retired {
 		s.mu.Unlock()
@@ -286,10 +306,10 @@ func (s *Store) hydrateContext(ctx context.Context) (context.Context, context.Ca
 // only once. The returned Cell must NOT be closed by the caller; it is released
 // by Store.Close or by an eviction sweep.
 func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
-	p, err := s.Path(sc)
-	if err != nil {
+	if err := sc.Validate(); err != nil {
 		return nil, err
 	}
+	p := filepath.Join(s.DataDir, "cells", sc.Namespace, sc.Class, sc.ID+".db")
 	key := sc.String()
 	// Classify the caller before hydrateContext adds its internal timeout.
 	_, interactive := ctx.Deadline()
@@ -303,11 +323,17 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		waitCtx = tracedCtx
 		endWait = func() { waitSpan.End() }
 	}
-	waitErr := s.waitLocked(waitCtx, func() bool { return s.evicting[key] || s.opening[key] })
+	waitErr := s.waitLocked(waitCtx, func() bool {
+		return !s.deleting[sc.Namespace] && (s.evicting[key] || s.opening[key])
+	})
 	endWait()
 	if waitErr != nil {
 		s.mu.Unlock()
 		return nil, waitErr
+	}
+	if s.deleting[sc.Namespace] {
+		s.mu.Unlock()
+		return nil, ErrNamespaceDeleting
 	}
 
 	if c, ok := s.cells[p]; ok && !c.Closed() {
@@ -332,13 +358,23 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		s.cond.Broadcast()
 		s.mu.Unlock()
 	}()
+	// Directory creation is part of opening, so namespace deletion must drain it.
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, err
+	}
 
 	ctx, openSpan := telemetry.Tracer().Start(ctx, "cell.open_uncached")
 	defer openSpan.End()
 	openSpan.SetAttributes(attribute.String("cell.scope", sc.String()))
 	_, statErr := os.Stat(p)
 	missing := errors.Is(statErr, os.ErrNotExist)
-	markerPS, markerCommit, markerTx, markerClean, markerExists, markerValid := readPagedMarker(p)
+	markerPS, markerCommit, markerTx, markerClean, markerExists, markerValid, markerErr := readPagedMarker(p)
+	if markerErr != nil {
+		return nil, markerErr
+	}
+	if markerExists && !markerValid {
+		return nil, fmt.Errorf("%w: invalid paged marker %s", ErrPagedCacheUnusable, p)
+	}
 	if missing && markerExists {
 		// A marker without its file is leftover state: drop it.
 		removePagedMarker(p)
@@ -356,6 +392,11 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 	// A sparse paged cache is not a database: it must be served by the paged VFS,
 	// never by the base VFS. Treat it like a cold cell and re-register it.
 	cold := missing || markerExists
+	if !cold && !pagedvfs.IsPaged(p) && s.LocalDurable != nil {
+		if err := s.validateLocal(ctx, sc, p, interactive); err != nil {
+			return nil, err
+		}
+	}
 	paged := false
 	var restoredTXID uint64
 	if cold && (missing || markerValid) && s.Paged != nil {
@@ -420,20 +461,8 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if cold && markerExists && !paged {
-		if markerValid {
-			// The marker records a durable local txid. Without a paged source we
-			// cannot prove the bucket cut covers it, so discarding could roll
-			// back locally acked pages (dirty marker) or pages the bucket has not
-			// observed yet (clean marker). Fail closed, same as the older-cut
-			// case above.
-			return nil, fmt.Errorf("%w: paged source unavailable for existing cache %s", ErrPagedCacheUnusable, p)
-		}
-		// A malformed marker has no trustworthy txid: discard the junk and
-		// rebuild from the durable replica rather than reading zeros.
-		if err := removeCellFileSet(p); err != nil {
-			return nil, fmt.Errorf("cellstore: discard paged cache %s: %w", sc, err)
-		}
-		missing = true
+		// Without a source we cannot prove its cut covers the local cache.
+		return nil, fmt.Errorf("%w: paged source unavailable for existing cache %s", ErrPagedCacheUnusable, p)
 	}
 	if missing && s.Hydrate != nil {
 		hctx, cancel := s.hydrateContext(ctx)
@@ -452,7 +481,9 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	if !paged && missing && s.Hydrate == nil {
-		if _, _, _, _, exists, _ := readPagedMarker(p); exists {
+		if _, _, _, _, exists, _, err := readPagedMarker(p); err != nil {
+			return nil, err
+		} else if exists {
 			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 		}
 	}
@@ -697,6 +728,16 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 		s.finishEviction(key)
 		return err
 	}
+	if c != nil {
+		if err := c.Close(); err != nil {
+			s.finishEviction(key)
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		s.finishEviction(key)
+		return err
+	}
 	s.mu.Lock()
 	if c != nil {
 		delete(s.cells, p)
@@ -707,9 +748,6 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 	}
 	s.mu.Unlock()
 
-	if c != nil {
-		_ = c.Close()
-	}
 	var removeErr error
 	for _, path := range []string{p, p + "-wal", p + "-shm", pagedMarkerPath(p)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -842,21 +880,61 @@ func (s *Store) IsOpen(sc cell.Scope) bool {
 	return ok
 }
 
-// DeleteNamespace closes and removes every cached cell under a namespace's
-// directory (app delete cleanup).
+// DeleteNamespace rejects local admission, drains opens/requests and closes
+// cached cells before removing the directory. DataDir must be exclusively owned
+// by this Store; this local gate does not replace distributed control fencing.
 func (s *Store) DeleteNamespace(ctx context.Context, ns string) error {
-	if ns == "" || strings.ContainsAny(ns, "/\\") {
+	if err := (cell.Scope{Namespace: ns, Class: "_", ID: "_"}).Validate(); err != nil {
 		return fmt.Errorf("cellstore: invalid namespace")
 	}
 	dir := filepath.Join(s.DataDir, "cells", ns)
-	prefix := dir + string(filepath.Separator)
-	// Evict every cached scope of the namespace through the regular drain path so
-	// in-flight requests finish and the capture loop is stopped (Drop) before the
-	// files disappear.
 	s.mu.Lock()
+	if s.deleting[ns] {
+		s.mu.Unlock()
+		return ErrNamespaceDeleting
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.deleting == nil {
+		s.deleting = make(map[string]bool)
+	}
+	s.deleting[ns] = true
+	// Wake Cell/BeginRequest waiters so a pinned request can be rejected and
+	// call end rather than deadlocking against its own namespace drain.
+	s.cond.Broadcast()
+	defer func() {
+		s.mu.Lock()
+		delete(s.deleting, ns)
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	}()
+	prefix := ns + "/"
+	if err := s.waitLocked(ctx, func() bool {
+		for key := range s.opening {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		for key := range s.evicting {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		for key, n := range s.busy {
+			if n > 0 && strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		return false
+	}); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	var scopes []cell.Scope
-	for p, c := range s.cells {
-		if strings.HasPrefix(p, prefix) {
+	for _, c := range s.cells {
+		if c.Scope.Namespace == ns {
 			scopes = append(scopes, c.Scope)
 		}
 	}
@@ -865,6 +943,9 @@ func (s *Store) DeleteNamespace(ctx context.Context, ns string) error {
 		if err := s.forget(ctx, sc, nil); err != nil {
 			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return os.RemoveAll(dir)
 }
@@ -960,10 +1041,17 @@ func (s *Store) LocalScopes() ([]cell.Scope, error) {
 // when the table exists but holds no pending row. A sparse (paged) cell that is
 // not mounted through the paged VFS is skipped rather than read as zeros.
 func PendingTimerMin(ctx context.Context, path string) (min int64, has bool, err error) {
-	if _, _, _, _, exists, _ := readPagedMarker(path); exists && !pagedvfs.IsPaged(path) {
+	if _, _, _, _, exists, _, err := readPagedMarker(path); err != nil {
+		return 0, false, err
+	} else if exists && !pagedvfs.IsPaged(path) {
 		return 0, false, nil
 	}
-	dsn := OpenDSN(path)
+	// The scanner may have listed this path before ownership invalidation
+	// removed it. Never recreate it: existence would suppress cold hydration
+	// and turn the next open into an empty, apparently authoritative cell.
+	// Do not force journal_mode=WAL: even a read-only scan of a valid DELETE
+	// journal database would then attempt a write and fail.
+	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: "mode=ro&_busy_timeout=5000"}).String()
 	if pagedvfs.IsPaged(path) {
 		dsn += "&vfs=" + pagedvfs.VFSName
 	}
@@ -1021,10 +1109,10 @@ func openCell(ctx context.Context, sc cell.Scope, p string, paged bool) (*Cell, 
 	if !paged {
 		paged = pagedvfs.IsPaged(p)
 	}
-	if !paged {
-		if _, _, _, _, exists, _ := readPagedMarker(p); exists {
-			return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
-		}
+	if _, _, _, _, exists, _, err := readPagedMarker(p); err != nil {
+		return nil, err
+	} else if exists && !paged {
+		return nil, fmt.Errorf("%w: %s", ErrPagedCacheUnusable, p)
 	}
 	dsn := OpenDSN(p)
 	if paged {
@@ -1232,7 +1320,7 @@ func (c *Cell) Close() error {
 		// leave it dirty so the next open fails closed instead of rebuilding from
 		// a bucket cut that may lag the local file.
 		if pagedTxKnown && err == nil {
-			persistPagedTxID(c.Path, pagedTxID, true)
+			err = persistPagedTxID(c.Path, pagedTxID, true)
 		}
 		// The local file is a cache and must be re-registered on the next open;
 		// keep the bytes (eviction snapshot) but drop the VFS registration.
@@ -1311,7 +1399,9 @@ func (c *Cell) SafeCheckpoint(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	if c.paged {
-		persistPagedTxID(c.Path, c.txid, false)
+		if err := persistPagedTxID(c.Path, c.txid, false); err != nil {
+			return 0, err
+		}
 	}
 	return c.txid, nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -29,22 +30,29 @@ func pagedMarkerPath(p string) string { return p + pagedMarkerSuffix }
 // readPagedMarker reports marker existence separately from validity. A malformed
 // marker still identifies a sparse cache and must fail closed; treating it as
 // absent could open unmaterialized pages as zeros.
-func readPagedMarker(p string) (pageSize, commit int, txid uint64, clean, exists, valid bool) {
+func readPagedMarker(p string) (pageSize, commit int, txid uint64, clean, exists, valid bool, err error) {
 	data, err := os.ReadFile(pagedMarkerPath(p))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, 0, false, false, false, nil
+	}
 	if err != nil {
-		return 0, 0, 0, false, false, false
+		return 0, 0, 0, false, false, false, err
 	}
 	parts := strings.Fields(string(data))
 	if len(parts) < 2 || len(parts) > 4 {
-		return 0, 0, 0, false, true, false
+		return 0, 0, 0, false, true, false, nil
 	}
 	ps, err1 := strconv.Atoi(parts[0])
 	cm, err2 := strconv.Atoi(parts[1])
 	if err1 != nil || err2 != nil || ps <= 0 || cm <= 0 {
-		return 0, 0, 0, false, true, false
+		return 0, 0, 0, false, true, false, nil
 	}
 	if len(parts) >= 3 {
-		txid, _ = strconv.ParseUint(parts[2], 10, 64)
+		var parseErr error
+		txid, parseErr = strconv.ParseUint(parts[2], 10, 64)
+		if parseErr != nil {
+			return 0, 0, 0, false, true, false, nil
+		}
 	}
 	if len(parts) == 4 {
 		switch parts[3] {
@@ -53,10 +61,10 @@ func readPagedMarker(p string) (pageSize, commit int, txid uint64, clean, exists
 		case "0":
 			clean = false
 		default:
-			return 0, 0, 0, false, true, false
+			return 0, 0, 0, false, true, false, nil
 		}
 	}
-	return ps, cm, txid, clean, true, true
+	return ps, cm, txid, clean, true, true, nil
 }
 
 func writePagedMarker(p string, pageSize, commit int, txid uint64, clean bool) error {
@@ -64,8 +72,34 @@ func writePagedMarker(p string, pageSize, commit int, txid uint64, clean bool) e
 	if clean {
 		flag = 1
 	}
-	return os.WriteFile(pagedMarkerPath(p),
-		[]byte(fmt.Sprintf("%d %d %d %d", pageSize, commit, txid, flag)), 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".paged-marker-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err = tmp.Chmod(0o644); err == nil {
+		_, err = fmt.Fprintf(tmp, "%d %d %d %d", pageSize, commit, txid, flag)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(name, pagedMarkerPath(p)); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(p))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func removePagedMarker(p string) {
@@ -75,10 +109,15 @@ func removePagedMarker(p string) {
 // persistPagedTxID advances the local txid recorded in an existing marker. It
 // is called at checkpoints and close, shrinking the crash window in which the
 // bucket cut can be older than the local cache.
-func persistPagedTxID(path string, txid uint64, clean bool) {
-	if ps, commit, _, _, exists, valid := readPagedMarker(path); exists && valid {
-		_ = writePagedMarker(path, ps, commit, txid, clean)
+func persistPagedTxID(path string, txid uint64, clean bool) error {
+	ps, commit, _, _, exists, valid, err := readPagedMarker(path)
+	if err != nil {
+		return err
 	}
+	if exists && valid {
+		return writePagedMarker(path, ps, commit, txid, clean)
+	}
+	return nil
 }
 
 // removeCellFileSet removes a cell's database, its WAL/SHM sidecars and the

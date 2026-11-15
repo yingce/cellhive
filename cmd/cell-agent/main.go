@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"cellhive/internal/admission"
-	"cellhive/internal/artifacts"
 	"cellhive/internal/autoscaler"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
@@ -38,11 +37,9 @@ import (
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/nodelog"
-	"cellhive/internal/objgc"
 	"cellhive/internal/owner"
 	"cellhive/internal/pagedvfs"
 	"cellhive/internal/peer"
-	"cellhive/internal/purge"
 	"cellhive/internal/queue"
 	"cellhive/internal/r2"
 	"cellhive/internal/rebalance"
@@ -435,7 +432,7 @@ func main() {
 			}
 			log.Info("paged restore", "scope", sc.String(), "epoch", ep,
 				"bytes", imageBytes, "pages", pf.Commit())
-			return pagedSource{pf: pf}, true, nil
+			return &pagedSource{pf: pf}, true, nil
 		}
 		store.PagedHydrateMBPS = cfg.PagedHydrateMBPS
 		if cfg.PagedReadAheadBytes > 0 {
@@ -444,6 +441,12 @@ func main() {
 		if cfg.PagedPrefetchWorkers > 0 {
 			pagedvfs.PrefetchWorkers = cfg.PagedPrefetchWorkers
 		}
+	}
+
+	// Existing local files need a cold activation watermark floor, including
+	// read-only requests that never start capture. Epoch zero plans all epochs.
+	store.LocalDurable = func(hctx context.Context, sc cell.Scope) (uint64, error) {
+		return rep.DurableWatermarkChain(hctx, sc, 0)
 	}
 
 	// Cold restore (ADR-092): a fresh owner hydrates a cell from its bucket
@@ -739,13 +742,6 @@ func main() {
 	projCache.src = ctrl
 	enricher.proj = projCache
 
-	// Object GC (ADR-110/111): delete bundles and asset versions no longer
-	// referenced by any worker version, after a grace period. Cold path; disabled
-	// by default (CELLHIVE_BUNDLE_GC_INTERVAL).
-	if cfg.BundleGCInterval > 0 {
-		go runGCLoop(ctx, log, b, ctrl, cfg)
-	}
-
 	// Autoscaler: read node lease signals -> recommend -> drive the (pluggable)
 	// actuator. Default actuator only logs; a deployment plugs in its orchestrator.
 	advisor := &autoscaler.Advisor{
@@ -876,6 +872,11 @@ func main() {
 		// query endpoints return 503 and `cellhive tail --worker` is unusable.
 		Logs: newLogBuffer(cfg),
 	})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		runMultipartGC(ctx, log, ticker.C, srv.R2.GCStaleUploadsPage)
+	}()
 	if telemetry.LogsMode() == telemetry.LogsAll || telemetry.LogsMode() == telemetry.LogsTail {
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)
@@ -1094,12 +1095,12 @@ func main() {
 	// Cell-handle eviction (ADR-096): bound open fds/memory by closing idle or
 	// excess cached cells. Eviction stops the cell's capture first; ownership is
 	// untouched, so the next request reopens the cell locally.
-	// Purge jobs (ADR-131): soft-deleted apps/workers are hard-deleted here. The
-	// hook drops the data side on every node that runs this loop — local cell
-	// handles plus the bucket prefixes (ADR-142); it is resumable, so a large
-	// namespace is cleaned in bounded passes.
-	purger := &purge.Purger{Bucket: b, Cells: store}
-	go ctrl.RunPurgeLoop(ctx, log, 5*time.Second, purger.Run)
+	// Reclamation requires current control ownership and a durable exclusion.
+	// Unknown I/O outcomes retain their fence instead of granting a new holder.
+	go srv.RunPurgeLoop(ctx, 5*time.Second)
+	if cfg.BundleGCInterval > 0 {
+		go srv.RunArtifactGCLoop(ctx, cfg.BundleGCInterval)
+	}
 	store.MaxOpenCells = cfg.MaxOpenCells
 	store.IdleTTL = cfg.CellIdleTTL
 	if !cfg.ForgetOnLoss && cfg.CellDiskMax <= 0 {
@@ -1749,41 +1750,6 @@ func newLogBuffer(cfg config.Config) *logbuf.Buffer {
 	return logbuf.New(cfg.LogBufferEntries, cfg.LogBufferWorkers)
 }
 
-// runGCLoop periodically garbage-collects unreferenced worker bundles and asset
-// versions (ADR-110/ADR-111). It is a cold path (bucket List) and disabled
-// unless CELLHIVE_BUNDLE_GC_INTERVAL > 0.
-func runGCLoop(ctx context.Context, log *slog.Logger, b bucket.Bucket, ctrl *control.Store, cfg config.Config) {
-	st := artifacts.New(b)
-	passes := []struct {
-		kind  string
-		items objgc.Items
-	}{
-		{"bundle", artifacts.BundleItems{Store: st}},
-		{"asset", artifacts.AssetItems{Store: st}},
-	}
-	t := time.NewTicker(cfg.BundleGCInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			for _, p := range passes {
-				g := &objgc.GC{Items: p.items, Refs: control.GCRefs{S: ctrl, Kind: p.kind}, Grace: cfg.BundleGCGrace, Log: log}
-				res, err := g.Pass(ctx)
-				if err != nil {
-					log.Warn("gc pass failed", "kind", p.kind, "err", err)
-					continue
-				}
-				if res.Marked > 0 || res.Deleted > 0 {
-					log.Info("gc pass", "kind", p.kind, "total", res.Total, "referenced", res.Referenced,
-						"marked", res.Marked, "deleted", res.Deleted)
-				}
-			}
-		}
-	}
-}
-
 func registerTimerScope(ctx context.Context, open func(context.Context, cell.Scope) (*timer.Store, error), srv *server.Server, sc cell.Scope) {
 	if err := srv.PrepareResourceAccess(ctx, sc); err != nil {
 		return
@@ -2274,17 +2240,17 @@ type pagedSource struct {
 	pf *replica.PageFetcher
 }
 
-func (p pagedSource) PageSize() int { return int(p.pf.PageSize()) }
-func (p pagedSource) Commit() int   { return int(p.pf.Commit()) }
-func (p pagedSource) TxID() uint64  { return p.pf.TxID() }
+func (p *pagedSource) PageSize() int { return int(p.pf.PageSize()) }
+func (p *pagedSource) Commit() int   { return int(p.pf.Commit()) }
+func (p *pagedSource) TxID() uint64  { return p.pf.TxID() }
 
-func (p pagedSource) Close() error { return p.pf.Close() }
+func (p *pagedSource) Close() error { return p.pf.Close() }
 
-func (p pagedSource) ReadPage(pgno uint32) ([]byte, error) {
+func (p *pagedSource) ReadPage(pgno uint32) ([]byte, error) {
 	return p.pf.Page(context.Background(), pgno)
 }
 
 // ReadRun implements pagedvfs.RunSource: one ranged read per page window.
-func (p pagedSource) ReadRun(pgno uint32, maxPages int) ([][]byte, error) {
+func (p *pagedSource) ReadRun(pgno uint32, maxPages int) ([][]byte, error) {
 	return p.pf.ReadRun(context.Background(), pgno, maxPages)
 }

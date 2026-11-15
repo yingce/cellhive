@@ -378,6 +378,8 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/control/worker", s.auth(s.handleControlWorkerDelete))
 	mux.HandleFunc("POST /v1/control/gc/bundles", s.auth(s.handleBundleGC))
 	mux.HandleFunc("POST /v1/control/gc/assets", s.auth(s.handleAssetGC))
+	mux.HandleFunc("POST /v1/control/assets/seal", s.auth(s.handleAssetSeal))
+	mux.HandleFunc("GET /v1/control/reclamation", s.auth(s.handleReclamationStatus))
 	mux.HandleFunc("GET /v1/control/host", s.auth(s.handleControlHost))
 	mux.HandleFunc("GET /v1/control/worker", s.auth(s.handleControlWorker))
 	mux.HandleFunc("GET /v1/control/binding", s.auth(s.handleControlBinding))
@@ -1713,7 +1715,10 @@ func copyForwardResponse(w http.ResponseWriter, resp *http.Response) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		// Headers are already committed; abort rather than report a clean EOF.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func (s *Server) forwardIfNonOwner(w http.ResponseWriter, r *http.Request, sc cell.Scope, preRead []byte) bool {

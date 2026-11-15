@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -34,6 +35,9 @@ type Host struct {
 
 // Purge is a delete job: worker="" means the whole namespace (ADR-131).
 type Purge struct {
+	JobID       string `json:"job_id"`
+	OpID        string `json:"-"`
+	Holder      string `json:"-"`
 	Namespace   string `json:"ns"`
 	Worker      string `json:"worker,omitempty"`
 	State       string `json:"state"`
@@ -242,12 +246,15 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 // --- purge jobs -------------------------------------------------------------
 
 func enqueuePurgeTx(ctx context.Context, t *sql.Tx, ns, worker string, now int64) error {
+	if err := checkPurgeFenceTx(ctx, t, ns, worker); err != nil {
+		return err
+	}
 	_, err := t.ExecContext(ctx,
-		`INSERT INTO purges(ns, worker, state, requested_ms, updated_ms, attempts, last_error)
-		 VALUES (?,?, 'pending', ?, ?, 0, '')
+		`INSERT INTO purges(ns, worker, state, requested_ms, updated_ms, attempts, last_error, job_id)
+		 VALUES (?,?, 'pending', ?, ?, 0, '', ?)
 		 ON CONFLICT(ns, worker) DO UPDATE SET state='pending', requested_ms=excluded.requested_ms,
-		   updated_ms=excluded.updated_ms, last_error=''`,
-		ns, worker, now, now)
+		   updated_ms=excluded.updated_ms, last_error='', job_id=excluded.job_id, op_id='', holder=''`,
+		ns, worker, now, now, rand.Text())
 	return err
 }
 
@@ -261,7 +268,7 @@ func (s *Store) PendingPurges(ctx context.Context, limit int) ([]Purge, error) {
 		return nil, err
 	}
 	rows, err := c.DB.QueryContext(ctx,
-		`SELECT ns, worker, state, requested_ms, updated_ms, attempts, last_error FROM purges
+		`SELECT ns, worker, state, requested_ms, updated_ms, attempts, last_error, job_id FROM purges
 		 WHERE state IN ('pending','failed') AND attempts < 10 ORDER BY requested_ms LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -270,7 +277,7 @@ func (s *Store) PendingPurges(ctx context.Context, limit int) ([]Purge, error) {
 	var out []Purge
 	for rows.Next() {
 		var p Purge
-		if err := rows.Scan(&p.Namespace, &p.Worker, &p.State, &p.RequestedMs, &p.UpdatedMs, &p.Attempts, &p.LastError); err != nil {
+		if err := rows.Scan(&p.Namespace, &p.Worker, &p.State, &p.RequestedMs, &p.UpdatedMs, &p.Attempts, &p.LastError, &p.JobID); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -285,6 +292,9 @@ func (s *Store) FinishPurge(ctx context.Context, ns, worker string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
+		if err := checkPurgeFenceTx(ctx, t, ns, worker); err != nil {
+			return err
+		}
 		if _, err := t.ExecContext(ctx, `DELETE FROM purges WHERE ns=? AND worker=?`, ns, worker); err != nil {
 			return err
 		}
@@ -299,6 +309,9 @@ func (s *Store) FailPurge(ctx context.Context, ns, worker, msg string) error {
 		return err
 	}
 	return tx(ctx, c, func(t *sql.Tx) error {
+		if err := checkPurgeFenceTx(ctx, t, ns, worker); err != nil {
+			return err
+		}
 		_, err := t.ExecContext(ctx,
 			`UPDATE purges SET state='failed', attempts=attempts+1, updated_ms=?, last_error=? WHERE ns=? AND worker=?`,
 			s.now().UnixMilli(), msg, ns, worker)
@@ -311,14 +324,18 @@ func (s *Store) FailPurge(ctx context.Context, ns, worker, msg string) error {
 // the job and retried with backoff semantics (attempts).
 type PurgeHook func(ctx context.Context, ns, worker string) (done bool, err error)
 
-// RunPurgeLoop drains purge jobs until ctx is done. hook (optional) lets the
-// host drop data cells and blobs before the control rows go away.
-func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval time.Duration, hook PurgeHook) {
+// RunPurgeLoop requires a durable coordinator; a bare data hook cannot authorize
+// deletion. Running jobs are resumed only by this in-memory executor.
+func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval time.Duration, executor *PurgeExecutor) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	if log == nil {
 		log = slog.Default()
+	}
+	if executor == nil || executor.Store != s {
+		log.Error("purge: missing coordinator")
+		return
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -328,41 +345,8 @@ func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval tim
 			return
 		case <-tick.C:
 		}
-		jobs, err := s.PendingPurges(ctx, 20)
-		if err != nil {
-			log.Warn("purge: list", "err", err)
-			continue
-		}
-		for _, j := range jobs {
-			if ctx.Err() != nil {
-				return
-			}
-			if hook != nil {
-				done, herr := hook(ctx, j.Namespace, j.Worker)
-				if herr != nil {
-					_ = s.FailPurge(ctx, j.Namespace, j.Worker, herr.Error())
-					log.Warn("purge: hook", "ns", j.Namespace, "worker", j.Worker, "err", herr)
-					continue
-				}
-				if !done {
-					// Partial pass (bounded deletions): leave the job pending and
-					// pick it up again next tick, before deleting the control rows.
-					continue
-				}
-			}
-			if j.Worker == "" {
-				err = s.PurgeAppRows(ctx, j.Namespace)
-			} else {
-				err = s.PurgeWorkerRows(ctx, j.Namespace, j.Worker)
-			}
-			if err != nil {
-				_ = s.FailPurge(ctx, j.Namespace, j.Worker, err.Error())
-				log.Warn("purge: rows", "ns", j.Namespace, "worker", j.Worker, "err", err)
-				continue
-			}
-			if err := s.FinishPurge(ctx, j.Namespace, j.Worker); err != nil {
-				log.Warn("purge: finish", "ns", j.Namespace, "worker", j.Worker, "err", err)
-			}
+		if err := executor.Pass(ctx); err != nil {
+			log.Warn("purge: retained", "err", err)
 		}
 	}
 }

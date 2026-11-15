@@ -1,10 +1,10 @@
 # 当前问题、限制与验收状态
 
-_更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表已部署或当前线上状态。_
+_更新：2026-11-15；历史验收按日期列出。当前数据安全修复已通过下述本地隔离验收，不代表已部署或当前线上状态。_
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
-## 已验证的本轮修复
+## 2026-11-10 验证记录
 
 - 本地 E2E 15/15、COS 矩阵 15/15、examples 26/26；Compose/Kubernetes fleet、OSS/MinIO、SQLite 导入导出及冷恢复通过。滚动期间仍有短暂 HTTP 500，经重试恢复；不能宣称零错误切换。详见 [全量报告及未测范围](reports/2026-11-10-full-e2e-examples.md)。
 - 原生 DO 不再固定数据 epoch 1；使用已验证 shard owner epoch，迟到旧写者不会覆盖接管者的数据。普通 LTX 上传不依赖 COS forbid-overwrite，也不新增发布协调文件。详见 [对象发布修复](reports/2026-11-10-object-publication-fixes.md)。
@@ -12,6 +12,62 @@ _更新：2026-11-10；仅描述当前 migration worktree 的验收，不代表�
 - 默认 supervisor namespace、Workflow binding alias、R2 HEAD、冷路由竞态及 WebSocket 示例问题已修复并复验；不再作为当前未解决项。
 
 - DO idle retirement 的 owner context 与关闭中 checkpoint 捕获已修复；本地恢复实例的原失败会话 events 复验 200，详见 [修复及剩余边界](reports/2026-11-10-do-retirement-owner-fix.md)。
+
+## 2026-11-15 本机 D1 故障补充
+
+- `PendingTimerMin` 的 SQLite 打开曾允许创建文件：扫描与 owner invalidation 交错时可能重建空库并抑制后续冷恢复。新增回归先失败，改为只读后整包测试通过；源码修复尚未部署。clai 本机业务库已从 RustFS epoch 57 链离线恢复到 TXID 1639454，临时禁用 wake repair 并延长节点租约，存储尾延迟根因和用户验收仍待闭环。范围、证据及配置边界见 [事故报告](reports/2026-11-15-local-d1-recovery.md)。
+- capture 历史查询失败的快照 fallback 已在工作区改为 fail closed（未提交、未部署）：epoch、当前 epoch 水位、跨 epoch 水位查询错误均保留原始错误，不发布本地快照，失败初始化可重试。新增空库/落后本地库 6 个场景在旧实现均复现错误快照；修复后 cellcapture 整包及该回归 race 重复 10 次通过。此为独立数据安全加固，不证明本机事故曾触发该 fallback，也不等于已实现所有本地文件可信性校验。
+- user-runtime 回收补充（工作区已实现、未提交、未部署）：公开 loader 的 `/ready` 与现有 `/healthz` 一样可调度 idle sweep；`/ready` 使用现有节流/单飞并通过请求 `waitUntil` 执行，不等待退休完成，不改变就绪检查结果。此修改仅覆盖公开 loader，不解决内部 dispatch 的容量、退休重试和 active workflow 生命周期，也不代表已证实或修复全部高 RSS 来源。
+- 本批验证：timer 相对路径 URI 回归已修复（`OmitHost`）；最终代码在独立 network/PID 命名空间、空凭据环境和显式临时路径中运行完整 `make test`（禁用测试缓存）、`make js-test` 及 `make e2e` 六套均通过。公开 loader Node 测试 25/25、真实 workerd readiness-only 退休回归通过；主动 abort 仍有既有的 termination stderr。测试不代表已发布，也未复现 RustFS 本机故障全过程。
+- 设计边界：单独的 capture fail-closed 不保护只读请求；后续已增加普通冷 activation 水位门禁，见下节，但仍不等于完整内容/身份验证或自动 repair。不得用“无业务表”判定空库，也不得在请求 gate 内阻塞式 invalidate。内部 dispatch 的无界 resident/退役失败丢追踪、TTL 可能中断 active workflow 仍待独立生命周期与 admission 设计，不以提前删除记录或强杀活动任务换取内存回收。
+
+## 2026-11-15 截断修复契约
+
+- 工作区已实现、未提交、未部署：跨节点转发不对合法上游响应静默裁剪为 1 MiB；保留上游状态和端到端响应头，正文完整流式转发。上游正文中途读取失败时中断响应，不能用正常 EOF 掩盖不完整内容；不扩大原接口的请求大小限制。
+- Workflow 事件请求体上限保持 1 MiB，按实际读取字节数检查（不信任 Content-Length）；恰好上限完整接收，超过上限返回 HTTP 413，读取失败返回错误，不追加事件或触发执行。此修复不扩大事件配额，也不改变正常事件内容。
+- 验证：真实双 Server 跨 owner 的 2 MiB KV、D1 SQL 导出、HTTP/1.1 上游中途断流，以及 Workflow 上限前/恰好上限/上限加一/2 MiB/读取失败均有红绿回归；隔离完整 `make test`（禁用缓存）、`make js-test`、`make e2e` 六套通过。转发定向 race 重复 10 次通过。HTTP/2 和 admin 大响应未单独做 wire 测试；启用 telemetry 时现有 trace wrapper 的非 defer span 收尾可能被响应 abort 跳过，属非阻断可观测性后续项，不影响中断向客户端传播。
+- 截断批次未覆盖其余并发协议；随后用户授权的数据安全修复见下节，不能将该批旧 e2e 证据套用于后续更改。GC 默认策略不变。DO WebSocket 持久化输出门仅在 fork 文档记录 TODO，本轮不实施。
+
+## 2026-11-15 数据安全修复契约（本地验证通过、未部署）
+
+最终隔离验收位于 `/tmp/kilo/data-safety-acceptance-ceE1xi/`：完整 `make test`（禁用测试缓存）、`make js-test`、`make e2e` 六套、带 `pagedvfs_test` 的 pagedvfs/cellstore race 重复 3 次、`make build vet` 全部退出码 0，runner 输出 `ALL_VALIDATION_EXIT=0`。包含末轮 NUL 清单歧义和 GC 取消进度修复；此前未完整接线/旧 fixture/脚本出错的运行不计通过。独立复审指出的问题已分别补红绿回归；这不是实网 COS/OSS、多机掉电或升级部署验收，不能覆盖所有故障组合。下列实施契约已落地，兼容和运行限制仍适用。
+
+- pagedvfs：以 cell-agent 持有数据目录独占锁为前提，后台/同步补页、前台 fault 的条件安装与 SQLite 主库写入、截断、注册失效必须共享本地原子同步域。远端取页在锁外，安装时重新验证注册身份和页面状态；不得在 C 锁内进入 Go 取页回调。旧注册或截断前的页不得覆盖新文件或复活已删除页；写入失败后不得发布 hydrated/complete。后台仅在文件 Sync 成功且当前注册完整时报告完成，失败必须保留 paged marker。本条不声称任意多进程共享 inode 安全，也不是 workerd fork 改动。
+- Source 生命周期：实现 Close 的 source 必须有可稳定识别的非 nil 指针身份；同一个 source 可以由多个注册共享，最后一个注册的在途读取结束后才关闭，关闭期间拒绝再次注册。非指针/typed-nil 可关闭 source 明确拒绝，避免不可比较动态类型 panic；不实现 Close 的旧 source 行为保留。实际 fd 身份校验采用下述 FILESTAT 构建合同，不读取私有 `unixFile` 布局。
+- paged marker：仅 ENOENT 可表示不存在；其他读取错误必须保留原错误并拒绝使用或丢弃本地数据库，不得据此删除文件或触发覆盖式恢复。marker 更新应使用同步临时文件、原子替换和父目录同步，明确传播失败；损坏 marker 与真实 I/O 错误不能混淆，但两者都不足以证明可以丢弃本地副本。格式损坏或存在非法 txid 的 marker 必须拒绝 activation 并保留文件，不再沿用“损坏即删缓存重建”的旧 fallback；缺少 clean 标志的历史格式继续按 dirty 拒绝。既有本地副本可能领先远端，不得靠忽略错误或“没有业务表”自动丢弃。
+- 新增协议须分别说明跨节点资格、失效执行者、升级兼容和故障恢复限制；热请求不得新增全桶或全目录扫描。局部回归通过不等于整批验收，未部署的新协议仍需下述兼容与异常处理验证。
+- R2 multipart v2 的 `r2/.mpu/v2/states/` 是平台保留控制记录，COS/OSS 必须走既有 native append authority，S3 control wrapper 走同样的控制记录分类；不得误用普通对象不受支持的 CAS 或把整个 `r2/` 解释为 authority。分片正文仍为普通对象。此接线必须有 provider 路由及旧 token 拒绝测试，本地 FSBucket 通过不能代替它。
+- R2 multipart v2（已实现、未部署）：新上传使用旧实现拒绝的 `v2-` ID，状态和分片置于既有保留前缀 `r2/.mpu/v2/`。状态含随机 revision 与每分片在途 token，跨 Store 通过桶 CAS 登记资格和确认；不同分片可并行，同分片不可并行覆盖。只有分片写入及移除自身 token 的 active CAS 均成功才 ACK；不确定写入不释放资格。Complete 仅在无在途分片时独占转入 completing；调用最终对象发布后结果不明时保留该状态，不自动重发或超时接管。Abort/过期 GC 先 CAS 转不可复活的终态再清理已登记分片；迟到写最多留下未确认垃圾，终态记录保留并允许后续清理。旧纯时间戳上传不自动转换/删除，新端返回明确旧协议错误，旧端不支持新 ID；升级需统一路由至新实现，已有未完成旧上传需明确重新开始，不能声称混版本透明兼容。Create 不再同步扫描全桶；清理迁至有界分页后台，每次有页/时间预算，缺分页能力不回退全量 List。默认上传寿命保持不变，不能把停止清理当作修复。
+- R2 GC 游标必须保存后端不透明 continuation，不能把返回的逻辑 key 当物理 after；空逻辑页带 continuation 合法，重复逻辑对象不能导致永久卡页。一个调度批次不能对每个状态都重新完整枚举 prefix。FS 开发后端如使用冷 GC 的稳定枚举快照，必须与恢复/权威查询的实时 List 隔离，不能引入影响数据恢复的新 TTL 缓存。状态编码须按 authority 实际 64 KiB payload 上限准入并预留最宽终态；分片号集合宜用固定上限 bitmap、只保存有界在途 token，避免每确认一片都重写不断增长的完整 map，不能缩小上传总分片上限来掩盖放大问题。在途名额用尽可明确拒绝重试，不得 ACK 未完成写入。
+- 当前 R2 实施采用 1250-byte bitmap 保持最多 10000 个分片，最多 64 个同时在途 token；只限制并行资格，不缩减总分片数。Provider 的隐藏 generation/空逻辑页需按物理 continuation 前进。FS 冷 GC 使用独立稳定 key 快照，一轮只 Walk 一次，最多两个活跃快照、闲置超时清理且 pending 页可续期；不缓存正常 List 或恢复查询。首次快照仍有 O(N) 扫描和内存成本，不宣称硬常数 I/O；目标是消除逐状态反复扫描的平方放大。定向实现证据包括 257 状态跨 37 页仅访问 257 文件，以及 10000 分片累计 CAS JSON 约 36.5 MB；这些不是整批验收或真实云端性能结论。
+- GC 分页错误也返回安全续传位置，后台必须保存该位置：只推进已明确成功或确认不存在的删除，失败/结果不明的当前分片仍留待重试。批次取消不能丢掉本批此前完成的工作，否则慢后端会在每次 deadline 后反复处理同一前缀。无新进度的错误保留原游标，错误不等于允许跳过待处理数据。
+- metrics 磁盘统计只允许一个扫描刷新者，失败也保留短期缓存/重试间隔，避免并发 scrape 击穿重复全目录枚举；该近似缓存不参与删除安全证明。
+- 本地 FSBucket 列举必须传播 context 取消，遍历和返回对象内容读取之间检查取消，避免后台预算过期仍继续全目录工作。该修复不改变分页排序或 ETag 语义；FSBucket 每页仍可能遍历完整 prefix，不能把有限返回条数描述为有限磁盘扫描，也不能据此推断 RustFS/COS 使用相同实现。
+- DO `SyncHost` 扫描边界：当前生产 workerd 的 `cellhive-do-host` 固定布局下，逐次读取目标 host 的 `.facets` 与对应 SQLite/必要 sidecar 路径，不遍历其他 host，也不以 TTL/mtime 跳过新 facet 发现。一次同步复用同一份完整解析结果生成 manifest；损坏或不可读索引不得当空列表放行。非已知布局必须显式完整发现或报错，不能用不完整列表取得成功证明；兼容 fallback 和 `SyncAll` 仍可能扫描全目录，不宣称全部扫描已消除。任意自定义 sidecar 不属于该固定布局点查契约。
+- 普通已有 SQLite 的首次 activation 增加只读水位门禁：在 opening 单飞内、迁移和 resident 发布之前读取合法的 `cell_meta.txid`，并验证权威恢复链水位。元数据缺失/无效、读取或权威查询失败、`local < durable` 均拒绝且保留 db/WAL/SHM，不做删除或自动抬高 txid。为保留现有本地领先提交/初始建链语义，合法 `local >= durable` 不被此门禁删除或降级；它只证明水位未落后，不证明相同 txid 内容一致或任意文件身份正确。新文件仍走既有恢复/建库，paged 文件服从独立 marker 契约；warm resident 不重复检查，冷验证只规划该 scope 的恢复链元数据，不新增业务热路径全桶 List。自动 repair 与完整内容身份验证不在此最小门禁的保证内。
+- purge/资产回收采用持久独占 fence（已实现、未部署）：只有 control owner 可认领任务，必须取得认领记录的远端持久化证明后才允许物理删除。pending 可取消；running/uncertain 不可超时接管、复活或同 key 重用。任务的完成/失败按唯一 job/op/holder 校验；只有原执行者确认全部同步外部 I/O 已完成、没有未知结果，才能释放 fence。上传（包括相同 SHA）、自身 bundle/service pin/assets/StageOnly 发布、资源创建与重叠清理必须共同遵守同一持久事务域。未知删除结果保留阻塞且对外可诊断；在证明旧执行者和未决请求结束之前，不提供自动解锁，不能以一次 404 或重试成功代替证明。这收紧了历史自动跨进程续跑语义：有不确定结果时优先保留数据，而非自动恢复删除能力。现有物理 key 方案要求升级前排空旧清理进程和请求，不支持旧版本与新 fence 混跑。正常成功清理后仍可重建，不能以永久禁用 GC 代替协议修复。
+- 删除完成后的引用保护：对象/token 的 deleted 记录不能随 running fence 一同消失，否则删除前已完成预查的旧 Deploy 可以在删除后发布悬空引用。bundle 仅在同 SHA 内容重新上传并取得成功 receipt 后解除 deleted；多文件 assets token 必须有显式 manifest+seal，按完整文件集合及内容校验成功后才允许复活发布，不能以单文件 Put 成功解除。采用增量兼容：未删除的旧 token 保留原行为；已删除 token 的旧逐文件接口可以写入重建草稿，但不能自行恢复可发布状态，需新 seal 流程（原生CLI/Cloudflare上传路径配套）。没有完整清单的旧客户端重用已删 token 时应返回明确需重新完成上传错误，不猜测完整性，也不通过热路径 List 推断清单。直接 DeleteWorker 的资产删除必须统一进入受保护清理路径，不能保留旁路。
+- seal 的完整性必须有可验证承诺，不能只信请求声明“这是完整清单”：原生目录 token 校验排序 `path\0sha256\n` 的内容摘要；CF token 校验其规范化 manifest 摘要及完整路径集合，不能将不透明 Wrangler hash 冒充 SHA256。已建立的 token 清单/实际 SHA256 承诺在 GC/purge 后仍保留，复活不能缩减集合或改同 token 内容。缺少可信原清单且无法由 token 重建证明的旧已删除 token 不接受任意新子集清单；明确要求重新发布新 token，而不是放松验证。明确条件失败且无在途写入的上传可以按 op/holder 持久取消预约；超时、取消或未知写入仍不得借此解除 fence。
+- 原生 manifest 的路径禁止 NUL，上传 key 与 token 计算须共同检查，防止将 `path\0sha256\n` 分隔符注入路径后产生不同文件集合的同一编码。合法本地文件名不存在 NUL，不改变既有正常 token 算法；不能仅依赖 FS 的路径拒绝来推断所有 provider 都拒绝。
+- CF 旧 token 的安全重建：普通 session 继续使用规范化 manifest 的确定性摘要；仅当该旧 token 已被删除且缺少可信历史内容承诺时，服务端可签发带该摘要及随机后缀的新不透明 session token。客户端不必改文件内容，也不能借新上传解除旧 token 的 tombstone。新 token 必须仍绑定原 canonical manifest，首次完整 seal 后持久保存实际 SHA256 清单，后续复活按该承诺验证；正常已有承诺的版本不牺牲跨 session 去重。若接口约束不能支持后缀，必须明确失败，不回退允许未知旧 token 复活。
+
+### 冻结复验及剩余扫描成本
+
+另一次最终冻结复验位于 `/tmp/kilo/data-safety-final-vGFjix/frozen-*.log`：完整无缓存 `make test`、`make js-test`、六套 e2e、分页特殊 tags 的整包 race 重复 3 次及 `make build vet` 均退出 0。验证前后所有源码及构建文件 SHA256 清单一致，runner 输出 `SOURCE_UNCHANGED=1`、`ALL_VALIDATION_EXIT=0`。末轮 NUL 路径拒绝及取消后保存 GC 已确认进度均包含在这份冻结快照中。
+
+修复重复扫描不等于消除所有冷路径遍历：FS 冷 GC 初次快照仍为 O(N) 枚举/内存与 O(N log N) 排序，极大目录可能超过首轮 deadline；普通 FSBucket 分页、wake repair 的发现、purge/资产候选发现及恢复链规划仍有枚举成本。全局 paged C 锁跨本地 I/O，慢磁盘可能阻塞其他 paged cell，尚未性能压测。RustFS 自身 capacity scan 未修改，不能把此前 512560 文件统计超时描述为本批已经消除。
+
+### 最后接线与扫描边界
+
+最终验收也包含生产 `cell-agent` 的 `pagedSource` 指针接线；接口方法仅由指针实现，避免可关闭源再次以值进入注册。专项测试先红后绿，之后重新执行完整 test/js-test/e2e、特殊分页 race 及 build/vet，均退出 0，日志位于 `/tmp/kilo/data-safety-acceptance-ceE1xi/`。
+
+已消除的放大包括单 host gate 枚举其他 host、R2 Create 同步全局扫描、multipart GC 逐状态重复全目录扫描、metrics 并发刷新击穿及取消后重复清同一前缀。FS 冷快照首次仍有 O(N) 扫描/内存和 O(N log N) 排序；普通 FSBucket 分页、wake repair 发现、purge/资产候选发现和恢复链规划仍有冷路径枚举。极大首次快照超过 deadline 时仍可能重复初始化；全局 paged C 锁跨本地 I/O，慢磁盘影响尚未基准评估。RustFS 自身 capacity scan 未修改，本批不声称解决其 512560 文件统计超时，也不代表线上文件数已下降。
+
+### 分页文件身份的受支持构建合同
+
+前台实际 inode 校验采用 pinned go-sqlite3 的公开 `SQLITE_FCNTL_FILESTAT` 操作，受支持构建显式启用 `SQLITE_ENABLE_FILESTAT`（不启用 SQLITE_DEBUG）。读取当前文件对象返回的诊断 JSON 中实际 fd，在对象仍存活时立即 fstat 比较 dev/ino；只依赖固定依赖版本的 JSON 合同，不读取私有 `unixFile` 布局、不拥有或关闭底层 fd。缺少该能力、格式错误、fd 无效或身份不符均拒绝 paged 打开，不回退为路径 stat 猜测。Makefile、Docker 与隔离验证命令须一致启用该编译选项；直接 Go 构建需提供相同 CGO_CFLAGS。升级 SQLite 必须重跑这一合同测试；非 paged SQLite 行为不改变。此前标记的前台身份阻断只有在该接线及确定性回归完成后才可关闭。
+
+namespace 本地删除也必须有完整生命周期门禁：删除开始后拒绝该 namespace 的新 request admission/Cell 打开，等待已开始 opening 完成后再枚举并逐 scope 排空、关闭和删除，最后才 RemoveAll；取消或关闭失败不能继续总目录删除。该本地门禁不替代 control owner 的持久 purge fence，也不声称跨节点互斥；其他 namespace 不受影响。不能只枚举当前 resident 而遗漏正在恢复的文件。
 
 ## 当前限制与上线边界
 

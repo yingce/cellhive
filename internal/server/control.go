@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"cellhive/internal/objectstore"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -187,6 +186,8 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("POST /v1/control/gc/bundles", s.adminAuth(s.handleBundleGC))
 	mux.HandleFunc("POST /v1/control/gc/assets", s.adminAuth(s.handleAssetGC))
 	mux.HandleFunc("POST /v1/control/asset", s.adminAuth(s.handleAssetPut))
+	mux.HandleFunc("POST /v1/control/assets/seal", s.adminAuth(s.handleAssetSeal))
+	mux.HandleFunc("GET /v1/control/reclamation", s.adminAuth(s.handleReclamationStatus))
 	// Per-domain resource registry + operator stats (ADR-157) mirror the
 	// internal listener so the operator CLI works against the admin port.
 	s.registerResourceRoutes(mux, s.adminAuth)
@@ -288,20 +289,7 @@ func (s *Server) handleControlWorkerDelete(w http.ResponseWriter, r *http.Reques
 	// the operator the worker is gone while its assets/workflows remain.
 	var failed []string
 	assets := 0
-	if s.Bucket != nil {
-		st := objectstore.NewOwned(s.Bucket, objectstore.PrefixAssets, objectstore.OwnerArtifacts)
-		keys, err := st.ListPrefix(r.Context(), "assets/"+ns+"/"+worker+"/")
-		if err != nil {
-			failed = append(failed, "asset list: "+err.Error())
-		}
-		for _, k := range keys {
-			if err := st.Delete(r.Context(), k); err != nil {
-				failed = append(failed, "asset delete "+k+": "+err.Error())
-			} else {
-				assets++
-			}
-		}
-	}
+	// Asset deletion is exclusively performed by the durable purge coordinator.
 	wfDropped := 0
 	for _, wf := range workflows {
 		if err := s.Workflows.Drop(r.Context(), ns, wf); err != nil {
@@ -320,6 +308,7 @@ func (s *Server) handleControlWorkerDelete(w http.ResponseWriter, r *http.Reques
 	}
 	resp := map[string]any{
 		"ok": len(failed) == 0, "worker": worker, "assets_deleted": assets,
+		"assets_queued":     true,
 		"workflows_dropped": wfDropped, "classes_deleted": clsDeleted,
 	}
 	if len(failed) > 0 {

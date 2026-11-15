@@ -27,6 +27,8 @@ void cellhive_paged_mark(int id, unsigned int pgno);
 int cellhive_paged_commit(int id);
 int cellhive_paged_page_size(int id);
 int cellhive_paged_hydrated_count(int id);
+int cellhive_paged_install(int id, int fd, unsigned int pgno, const void *page, int len);
+int cellhive_paged_sync(int id, int fd);
 */
 import "C"
 
@@ -36,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -84,15 +87,25 @@ var (
 	initOnce sync.Once
 	initErr  error
 
-	mu     sync.Mutex
-	nextID int
-	regs   map[int]*reg
+	mu          sync.Mutex
+	lifecycleMu sync.Mutex // registration changes and successful completion callbacks
+	nextID      int
+	regs        map[int]*reg
+	sources     = map[Source]*sourceRef{} // pointer keys only; guarded by lifecycleMu
 )
 
+type sourceRef struct {
+	refs    int // includes retired registrations until their readers finish
+	closing bool
+}
+
 type reg struct {
-	id   int
-	path string
-	src  Source
+	id      int
+	path    string
+	src     Source
+	source  *sourceRef
+	commit  int
+	readers sync.WaitGroup // Add under mu; removal prevents new readers before Wait.
 	// faults counts pages fetched from the source; runs counts fetch calls
 	// (a run fetches a whole window in one call); prefetchHits counts faults
 	// served from a prefetched child without touching the source.
@@ -138,39 +151,96 @@ func Available() bool {
 // Register declares path as a paged database backed by src. The caller must
 // have created the sparse file at path sized PageSize()*Commit() (Prepare does
 // that). Registering the same path twice replaces the source and clears the
-// hydration set.
+// hydration set. Sources implementing Close must be non-nil pointers. Such a
+// source may be shared: its last registration closes it after readers finish.
+// Registration during Close is rejected; callers must not reuse a closed source
+// unless that source's own contract explicitly permits it.
 func Register(path string, src Source) error {
-	if src == nil {
-		return errors.New("pagedvfs: nil source")
+	lifecycleMu.Lock()
+	old, err := register(path, src)
+	lifecycleMu.Unlock()
+	closeSource(old)
+	return err
+}
+
+func register(path string, src Source) (*reg, error) {
+	if err := validateSource(src); err != nil {
+		return nil, err
 	}
 	if !Available() {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ps, commit := src.PageSize(), src.Commit()
 	if ps <= 0 || commit <= 0 {
-		return fmt.Errorf("pagedvfs: bad cut (pageSize=%d commit=%d)", ps, commit)
+		return nil, fmt.Errorf("pagedvfs: bad cut (pageSize=%d commit=%d)", ps, commit)
 	}
 	cpath := C.CString(abs)
 	defer C.free(unsafe.Pointer(cpath))
 
 	mu.Lock()
-	defer mu.Unlock()
 	id := nextID
 	nextID++
 	if rc := C.cellhive_paged_register(C.int(id), cpath, C.uint(ps), C.uint(commit)); rc != 0 {
-		return fmt.Errorf("pagedvfs: register %s: rc=%d", abs, rc)
+		mu.Unlock()
+		return nil, fmt.Errorf("pagedvfs: register %s: rc=%d", abs, rc)
 	}
-	regs[id] = &reg{id: id, path: abs, src: src}
+	var old *reg
+	for oldID, r := range regs {
+		if r.path == abs {
+			old = r
+			delete(regs, oldID)
+		}
+	}
+	var shared *sourceRef
+	if _, ok := src.(interface{ Close() error }); ok {
+		shared = sources[src]
+		if shared == nil {
+			shared = &sourceRef{}
+			sources[src] = shared
+		}
+		shared.refs++
+	}
+	regs[id] = &reg{id: id, path: abs, src: src, source: shared, commit: commit}
+	mu.Unlock()
+	return old, nil
+}
+
+// Caller holds lifecycleMu, including through registration publication. Never
+// compare or index an arbitrary Source interface: its value may contain slices.
+func validateSource(src Source) error {
+	if src == nil {
+		return errors.New("pagedvfs: nil source")
+	}
+	if _, ok := src.(interface{ Close() error }); ok {
+		v := reflect.ValueOf(src)
+		if v.Kind() != reflect.Pointer || v.IsNil() {
+			return errors.New("pagedvfs: closing source must be a non-nil pointer")
+		}
+		if shared := sources[src]; shared != nil && shared.closing {
+			return errors.New("pagedvfs: source is closing")
+		}
+	}
 	return nil
 }
 
 // Prepare creates (or truncates) the sparse local file at path to the cut size
 // and registers it.
 func Prepare(path string, src Source) error {
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+	if err := validateSource(src); err != nil {
+		return err
+	}
+	if src == nil || src.PageSize() <= 0 || src.Commit() <= 0 {
+		return errors.New("pagedvfs: invalid source")
+	}
+	if IsPaged(path) {
+		return errors.New("pagedvfs: prepare of registered path")
+	}
 	if _, err := os.Stat(path); err != nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
@@ -192,7 +262,8 @@ func Prepare(path string, src Source) error {
 	for _, suffix := range []string{"-wal", "-shm"} {
 		_ = os.Remove(path + suffix)
 	}
-	return Register(path, src)
+	_, err = register(path, src)
+	return err
 }
 
 // Release unregisters path (idempotent).
@@ -204,17 +275,55 @@ func Release(path string) {
 	if err != nil {
 		return
 	}
+	lifecycleMu.Lock()
 	mu.Lock()
-	defer mu.Unlock()
+	var old *reg
 	for id, r := range regs {
 		if r.path == abs {
 			C.cellhive_paged_release(C.int(id))
-			if c, ok := r.src.(interface{ Close() error }); ok {
-				_ = c.Close()
-			}
+			old = r
 			delete(regs, id)
 		}
 	}
+	mu.Unlock()
+	lifecycleMu.Unlock()
+	closeSource(old)
+}
+
+func closeSource(r *reg) {
+	if r == nil {
+		return
+	}
+	r.readers.Wait()
+	if r.source == nil {
+		return
+	}
+	lifecycleMu.Lock()
+	r.source.refs--
+	if r.source.refs != 0 {
+		lifecycleMu.Unlock()
+		return
+	}
+	r.source.closing = true
+	lifecycleMu.Unlock()
+	// Close may block or call back into pagedvfs; keep the closing identity
+	// published, but hold no registry/lifecycle lock across user code.
+	_ = r.src.(interface{ Close() error }).Close()
+	lifecycleMu.Lock()
+	delete(sources, r.src)
+	lifecycleMu.Unlock()
+}
+
+func pinPath(abs string) *reg {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range regs {
+		if r.path == abs {
+			r.readers.Add(1)
+			return r
+		}
+	}
+	return nil
 }
 
 // IsPaged reports whether path is currently registered.
@@ -283,7 +392,15 @@ func lookup(id int) *reg {
 //
 //export goPagedFetch
 func goPagedFetch(id C.int, pgno C.uint, buf unsafe.Pointer, bufLen C.int) C.int {
-	r := lookup(int(id))
+	mu.Lock()
+	r := regs[int(id)]
+	if r != nil {
+		r.readers.Add(1)
+	}
+	mu.Unlock()
+	if r != nil {
+		defer r.readers.Done()
+	}
 	if r == nil || buf == nil || bufLen <= 0 {
 		return -1
 	}
@@ -294,7 +411,7 @@ func goPagedFetch(id C.int, pgno C.uint, buf unsafe.Pointer, bufLen C.int) C.int
 		isChild := r.isChild(pg)
 		if isChild {
 			maxPages = 1 // never pull a child's overflow neighbours
-		} else if r.windowEnd != 0 && pg == r.windowEnd+1 {
+		} else if r.sequential(pg) {
 			maxPages = windowPages(r.src.PageSize()) // sequential access: read ahead
 		}
 		pages, err := r.fetch(pg, maxPages)
@@ -315,6 +432,12 @@ func goPagedFetch(id C.int, pgno C.uint, buf unsafe.Pointer, bufLen C.int) C.int
 	dst := unsafe.Slice((*byte)(buf), int(bufLen))
 	copy(dst, page)
 	return 0
+}
+
+func (r *reg) sequential(pg uint32) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return r.windowEnd != 0 && pg == r.windowEnd+1
 }
 
 // fetch reads up to maxPages pages starting at pg (a run when supported).
@@ -623,19 +746,11 @@ func HydrateAll(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	r := func() *reg {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, rr := range regs {
-			if rr.path == abs {
-				return rr
-			}
-		}
-		return nil
-	}()
+	r := pinPath(abs)
 	if r == nil {
 		return nil // not paged: nothing to do
 	}
+	defer r.readers.Done()
 	ps, commit := r.src.PageSize(), r.src.Commit()
 	f, err := os.OpenFile(abs, os.O_WRONLY, 0o644)
 	if err != nil {
@@ -646,11 +761,7 @@ func HydrateAll(ctx context.Context, path string) error {
 		if len(page) != ps {
 			return fmt.Errorf("pagedvfs: hydrate page %d: got %d bytes, want %d", pgno, len(page), ps)
 		}
-		if _, err := f.WriteAt(page, int64(pgno-1)*int64(ps)); err != nil {
-			return err
-		}
-		C.cellhive_paged_mark(C.int(r.id), C.uint(pgno))
-		return nil
+		return installPage(r.id, f, pgno, page)
 	}
 	hydrated := func(pgno int) bool {
 		return C.cellhive_paged_hydrated(C.int(r.id), C.uint(pgno)) != 0
@@ -670,7 +781,7 @@ func HydrateAll(ctx context.Context, path string) error {
 				runLen = commit - pgno + 1
 			}
 			pages, err := rs.ReadRun(uint32(pgno), runLen)
-			if err != nil || len(pages) == 0 {
+			if err != nil || len(pages) == 0 || len(pages) > runLen {
 				return fmt.Errorf("pagedvfs: hydrate run %d: %w", pgno, err)
 			}
 			for k, page := range pages {
@@ -684,7 +795,7 @@ func HydrateAll(ctx context.Context, path string) error {
 			}
 			pgno += len(pages)
 		}
-		return f.Sync()
+		return syncPages(r.id, f)
 	}
 	for pgno := 1; pgno <= commit; pgno++ {
 		if err := ctx.Err(); err != nil {
@@ -701,12 +812,31 @@ func HydrateAll(ctx context.Context, path string) error {
 			return err
 		}
 	}
-	return f.Sync()
+	return syncPages(r.id, f)
+}
+
+func installPage(id int, f *os.File, pgno int, page []byte) error {
+	if len(page) == 0 {
+		return errors.New("pagedvfs: empty page")
+	}
+	rc := C.cellhive_paged_install(C.int(id), C.int(f.Fd()), C.uint(pgno), unsafe.Pointer(&page[0]), C.int(len(page)))
+	if rc != 0 {
+		return fmt.Errorf("pagedvfs: install page %d: rc=%d", pgno, rc)
+	}
+	return nil
+}
+
+func syncPages(id int, f *os.File) error {
+	if rc := C.cellhive_paged_sync(C.int(id), C.int(f.Fd())); rc != 0 {
+		return fmt.Errorf("pagedvfs: sync: rc=%d", rc)
+	}
+	return nil
 }
 
 // HydrateRate faults the remaining pages in the background at mbps (0 disables;
 // one background hydrator runs per node at a time, as celld does). done is
 // called with true when the file became complete. It returns a stop function.
+// done must not call Register, Prepare, Release or the returned stop function.
 func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) {
 	if mbps <= 0 || !Available() {
 		return func() {}
@@ -715,6 +845,12 @@ func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) 
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
+		notified := false
+		defer func() {
+			if !notified && done != nil {
+				done(false)
+			}
+		}()
 		select {
 		case semHydrate <- struct{}{}:
 			defer func() { <-semHydrate }()
@@ -725,26 +861,17 @@ func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) 
 		if err != nil {
 			return
 		}
-		r := func() *reg {
-			mu.Lock()
-			defer mu.Unlock()
-			for _, rr := range regs {
-				if rr.path == abs {
-					return rr
-				}
-			}
-			return nil
-		}()
+		r := pinPath(abs)
 		if r == nil {
 			return
 		}
+		defer r.readers.Done()
 		ps, commit := r.src.PageSize(), r.src.Commit()
 		f, err := os.OpenFile(abs, os.O_WRONLY, 0o644)
 		if err != nil {
 			return
 		}
 		defer f.Close()
-		defer func() { done(false) }()
 		perSecond := mbps * 1024 * 1024
 		start := time.Now()
 		budget := 0
@@ -775,15 +902,20 @@ func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) 
 				}
 				pages = [][]byte{page}
 			}
+			if len(pages) == 0 || len(pages) > runLen {
+				return
+			}
 			for k, page := range pages {
 				p := pgno + k
 				if C.cellhive_paged_hydrated(C.int(r.id), C.uint(p)) != 0 {
 					continue
 				}
-				if _, err := f.WriteAt(page, int64(p-1)*int64(ps)); err != nil {
+				if len(page) != ps {
 					return
 				}
-				C.cellhive_paged_mark(C.int(r.id), C.uint(p))
+				if err := installPage(r.id, f, p, page); err != nil {
+					return
+				}
 				budget += ps
 			}
 			pgno += len(pages)
@@ -800,8 +932,14 @@ func HydrateRate(path string, mbps int, done func(complete bool)) (stop func()) 
 				budget = 0
 			}
 		}
-		_ = f.Sync()
-		done(true)
+		lifecycleMu.Lock()
+		if ctx.Err() == nil && syncPages(r.id, f) == nil {
+			if done != nil {
+				done(true)
+			}
+			notified = true
+		}
+		lifecycleMu.Unlock()
 	}()
 	return func() { cancel(); <-finished }
 }
@@ -876,7 +1014,7 @@ func SnapshotStatsAll() SnapshotStats {
 		out.PrefetchHits += r.prefetchHits
 		out.Prefetched += r.prefetched
 		mu.Unlock()
-		out.TotalPages += r.src.Commit()
+		out.TotalPages += r.commit
 		out.HydratedPages += HydratedCount(r.path)
 	}
 	return out
@@ -901,7 +1039,7 @@ func Complete(path string) bool {
 	if r == nil {
 		return true
 	}
-	return HydratedCount(abs) >= r.src.Commit()
+	return int(C.cellhive_paged_hydrated_count(C.int(r.id))) >= r.commit
 }
 
 // HydratedPages returns how many pages are hydrated (for tests/metrics).
@@ -922,7 +1060,7 @@ func HydratedPages(path string) int {
 		return 0
 	}
 	n := 0
-	for pgno := 1; pgno <= r.src.Commit(); pgno++ {
+	for pgno := 1; pgno <= r.commit; pgno++ {
 		if C.cellhive_paged_hydrated(C.int(r.id), C.uint(pgno)) != 0 {
 			n++
 		}
