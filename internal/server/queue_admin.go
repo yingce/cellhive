@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,28 +21,30 @@ import (
 // R4 (ADR-156): queue observability and dead-letter replay for operators.
 
 // queueConsumerTarget finds the consumer config of (ns, queue) in the projection.
-func (s *Server) queueConsumerTarget(ctx context.Context, ns, queue string) (control.Consumer, bool) {
+func (s *Server) queueConsumerTarget(ctx context.Context, ns, queue string) (control.Consumer, bool, error) {
 	if s.Control == nil {
-		return control.Consumer{}, false
+		return control.Consumer{}, false, errors.New("control plane unavailable")
 	}
-	proj, err := s.projectionCached(ctx)
+	proj, err := s.BackgroundControl().Projection(ctx)
 	if err != nil {
-		return control.Consumer{}, false
+		return control.Consumer{}, false, err
 	}
-	return queueConsumerFromProjection(proj, ns, queue)
+	consumer, ok := queueConsumerFromProjection(proj, ns, queue)
+	return consumer, ok, nil
 }
 
 // queueConsumerTargetStrict resolves a consumer for a mutation (DLQ replay/ack)
 // where a stale projection could send work to the wrong dead-letter queue.
-func (s *Server) queueConsumerTargetStrict(ctx context.Context, ns, queue string) (control.Consumer, bool) {
+func (s *Server) queueConsumerTargetStrict(ctx context.Context, ns, queue string) (control.Consumer, bool, error) {
 	if s.Control == nil {
-		return control.Consumer{}, false
+		return control.Consumer{}, false, errors.New("control plane unavailable")
 	}
-	proj, err := s.projectionStrict(ctx)
+	proj, err := s.BackgroundControl().ProjectionStrict(ctx)
 	if err != nil {
-		return control.Consumer{}, false
+		return control.Consumer{}, false, err
 	}
-	return queueConsumerFromProjection(proj, ns, queue)
+	consumer, ok := queueConsumerFromProjection(proj, ns, queue)
+	return consumer, ok, nil
 }
 
 func queueConsumerFromProjection(proj control.Projection, ns, queue string) (control.Consumer, bool) {
@@ -92,13 +95,13 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 // handleControlQueueDLQPreview reads DLQ messages without Claim: attempts,
 // leases and visibility remain unchanged. The queue query names the main queue;
 // its configured independent DLQ is resolved from the projection.
-func (s *Server) deadLetterConsumer(r *http.Request, ns, name string, strict bool) (control.Consumer, bool) {
+func (s *Server) deadLetterConsumer(r *http.Request, ns, name string, strict bool) (control.Consumer, bool, error) {
 	if r.URL.Query().Get("direct") == "1" {
 		if s.Control == nil {
-			return control.Consumer{}, false
+			return control.Consumer{}, false, errors.New("control plane unavailable")
 		}
-		_, ok, err := s.Control.Binding(r.Context(), ns, "queue", name)
-		return control.Consumer{DeadLetterQueue: name}, ok && err == nil
+		ok, err := s.BackgroundControl().queueExists(r.Context(), ns, name)
+		return control.Consumer{DeadLetterQueue: name}, ok, err
 	}
 	if strict {
 		return s.queueConsumerTargetStrict(r.Context(), ns, name)
@@ -119,7 +122,11 @@ func (s *Server) handleControlQueueDLQPreview(w http.ResponseWriter, r *http.Req
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
-	consumer, ok := s.deadLetterConsumer(r, ns, name, false)
+	consumer, ok, lookupErr := s.deadLetterConsumer(r, ns, name, false)
+	if lookupErr != nil {
+		writeErr(w, 503, "control_unavailable", lookupErr.Error())
+		return
+	}
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
 		return
@@ -178,7 +185,11 @@ func (s *Server) handleControlQueueDLQAck(w http.ResponseWriter, r *http.Request
 	if !s.authorizeNS(w, r, ns) {
 		return
 	}
-	consumer, ok := s.deadLetterConsumer(r, ns, name, true)
+	consumer, ok, lookupErr := s.deadLetterConsumer(r, ns, name, true)
+	if lookupErr != nil {
+		writeErr(w, 503, "control_unavailable", lookupErr.Error())
+		return
+	}
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, 400, "no_dead_letter_queue", "queue has no configured dead letter queue")
 		return
@@ -238,7 +249,11 @@ func (s *Server) queueStatusPayload(ctx context.Context, ns, name string) (map[s
 		"depth": st.Depth, "visible": st.Visible, "leased": st.Leased,
 		"oldest_visible_ms": st.OldestVisibleMs, "max_attempts": st.MaxAttempts,
 	}
-	if consumer, ok := s.queueConsumerTarget(ctx, ns, name); ok && consumer.DeadLetterQueue != "" {
+	consumer, ok, err := s.queueConsumerTarget(ctx, ns, name)
+	if err != nil {
+		return nil, err
+	}
+	if ok && consumer.DeadLetterQueue != "" {
 		out["dead_letter_queue"] = consumer.DeadLetterQueue
 		if s.resourceReplica() != nil {
 			blocked, err := s.resourceReplica().ResourceBlocked(ctx, queuepkg.Scope(ns, consumer.DeadLetterQueue))
@@ -294,7 +309,11 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 			limit = n
 		}
 	}
-	consumer, ok := s.queueConsumerTargetStrict(r.Context(), ns, name)
+	consumer, ok, lookupErr := s.queueConsumerTargetStrict(r.Context(), ns, name)
+	if lookupErr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "control_unavailable", lookupErr.Error())
+		return
+	}
 	if !ok || consumer.DeadLetterQueue == "" {
 		writeErr(w, http.StatusBadRequest, "no_dead_letter_queue",
 			"queue "+ns+"/"+name+" has no consumer with a dead_letter_queue")

@@ -69,9 +69,25 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 namespace 本地删除也必须有完整生命周期门禁：删除开始后拒绝该 namespace 的新 request admission/Cell 打开，等待已开始 opening 完成后再枚举并逐 scope 排空、关闭和删除，最后才 RemoveAll；取消或关闭失败不能继续总目录删除。该本地门禁不替代 control owner 的持久 purge fence，也不声称跨节点互斥；其他 namespace 不受影响。不能只枚举当前 resident 而遗漏正在恢复的文件。
 
+## 2026-11-15 非 owner 后台控制读取修复（本地验证通过，2026-11-16 已部署 USW）
+
+USW `agent-1` 保留旧 control SQLite、而 `agent-0` 为有效 owner 时，后台 Queue/Cron 直接读取旧文件被水位门禁拒绝。本批统一调度 projection、跨 namespace queue registry、workflow schedules/concurrency 的读取来源：仅有效本地 owner/session 可以读取本地 control，其余通过有界、认证的内部只读请求访问当前 owner。读取前后核对 node/session/epoch；错误 receiver 拒绝，不互相递归转发，不为配置读取主动 claim/reset。失败不得回退旧 SQLite 或将 authority 故障解释为空列表/无限并发。已确认无配置可使用既有默认值。
+
+复用现有 owner 判定、请求签名和本地 read fence；资源 generation 准入和 cleanup authority 校验保持不变，不增加第二套控制库复制机制。合并并发相同读取并做短暂错误退避，避免每秒重新走落后副本的冷 List。现有 5 秒 projection 缓存只用于调度视图，strict 消费配置不得用该缓存；取消不得返回过期缓存，已知 owner 变化应失效旧视图。移除无条件启动预打开，控制写入仍由现有 `ensureControlSchema` 在 capture 前初始化。验收需保留真实旧副本，覆盖 owner 更新、切换、请求失败、并发和后续准入，不能靠删缓存或关闭 LocalDurable 让测试通过。
+
+相邻 maintenance 读取也不得继续打开非 owner 的 control：Workflow retention 的配置源走相同 reader，但实际 prune 仅在 workflow 数据 cell 的有效本地 owner/session 下，经资源准入与既有 CaptureWrite 执行；audit prune 仅由 control owner 经同样持久化路径执行。未持有数据 ownership 时跳过，不为清理主动接管，不因远程配置可读而允许改本地非 owner 副本。保留原保留时间和 SQL 条件，无主或 owner 不可用期间维护可以延迟；既有 resource cleanup bootstrap 负责正常无主接管，不在只读 reader 内引入新选主机制。
+
+缓存中的 projection 与产生它的 authority generation 成对返回；初始未读和后续失败不能用同一个空 key 命中旧结果。Cron enrichment 每次经过共享 projection cache，不再叠加独立 5 秒 TTL。已知 authority 变化或失败会失效旧视图，但调度缓存仍是最多 5 秒的非授权视图；strict consumer/policy 查询不使用该缓存。内部读取接口仅允许调度所需操作/类型，不开放通用 SQL 或任意资源 secret 读取。
+
+验收证据位于 `/tmp/kilo/control-owner-fix-jCg5FR/`。完整无缓存 `make test`、`make js-test`、六套 `make e2e`、`make vet` 通过，源码清单与最终实际运行的 cell-agent 二进制哈希已核对。定向 owner 变更/不同 session/无主不 claim/认证/单飞退避/取消/缓存交错/非 owner maintenance 保留副本回归 `-race -count=10` 通过。真实 RustFS 对照使用相同 85 秒观察预算：B 曾实际拥有 control，正常退出后 A 接管并更新 v2，B 保留原 data-dir 返回；旧发布二进制持续 `local 10 < durable 13` 且 Queue/Cron/Workflow 不执行，候选三者均执行 v2。两侧验收期间 A 的 node/session/epoch 不变，B 旧控制 DB 字节哈希不变。最初 fixture 的保留 namespace 导出拒绝和未等待 disowned 子进程退出不计为产品红灯；已改用测试进程正常退出和 pidfd 等待，没有放宽断言或线上处置。
+
+维护写的末尾 fence 是结果校验而非 SQL rollback，持久化仍依赖既有 capture/epoch fence；本批未穷尽所有并发退役、掉电或真实 COS/OSS 故障。新增内部只读接口不改变存储格式，但新 reader 遇到旧 owner 尚无该接口时会报错退避，不能回退本地，因此发布需要考虑 owner/receiver 的更新顺序。
+
+2026-11-16 USW 发布记录：Helm revision 125，仅更新两个 cell-agent，镜像 `sha256:639e0edc628eeb343c096cd95b598d4a9661810f2a8d9de1530c0354384234fa`，源码验收清单摘要 `4c694d36c4fb0b8dff112c46a15b86e36655be8527b8ed98aaacac12c794bb92`。两个 agent Ready、重启 0，user/DO runtime Pod UID 未变，SG 未操作。03:38:23–03:42:07 UTC 观察窗口内未再出现旧水位、Queue/Cron 或 retention 读取错误；非 owner 队列配置查询、隔离命名 KV 跨节点写读成功。滚动过渡的旧接口 404 已停止；非 owner `purge: retained / not the owner` 警告仍保留，不能宣称零警告或长期无故障。证据在 `/tmp/kilo/usw-control-release-WsWk2J/result.json`。
+
 ## 当前限制与上线边界
 
-1. **未部署**：以上修改尚未作为生产迁移/切换验收。历史 release 中的集群版本不是本次实时查询结果。
+1. **发布范围**：本节历史本地验收不等于所有区域已上线；USW control-reader 的已知发布状态见上段。SG 未在本次发布中变更，其他修改和时点不能从单个 release 记录类推。
 2. **离线迁移**：旧 LTX/固定 e1/旧 R2 sidecar 与新布局不混跑；数据库按 SQLite export/import 迁移。COS raw assets 需要空目标重传或停服清理后重传，仅重发同内容版本仍会命中旧 token。
 3. **COS assets 读取**：不再直接预签名物理对象，走 authenticated agent 点读并返回逻辑 Content-Length，保留 runtime 小文件缓存。增加了首次读取对 agent 的依赖，未声称性能提升。
 4. **R2 旧正文回收**：不可变版本保留以保护进行中的读取及签名 URL；安全在线版本 GC 尚未实现，物理占用可能大于逻辑 usage。见 [对象发布报告](reports/2026-11-10-object-publication-fixes.md)。

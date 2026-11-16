@@ -2263,6 +2263,8 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 ## ADR-117 单控制库 + 关系表（取代 ADR-060 的按 app 分片）✅
 
+2026-11-15 后台读取补充（已实现；2026-11-16 USW revision 125 发布，SG 未更新）：Queue/Cron、Workflow 调度/并发配置及相邻 retention 配置经 control owner 的认证只读通道读取；非 owner 保留的 SQLite 不是配置副本。reader 不 claim/reset，错误 receiver 拒绝，读取前后验证 node/session/epoch 与本地 fence；真正无主时仍由既有 resource cleanup bootstrap/正常控制入口完成接管。并发读取合并、失败有界退避；调度 projection 与本次 authority generation 配对，strict 不使用 TTL，Cron enrichment 不叠加第二层 TTL。维护写仍需相应数据 cell 的当前 owner、资源准入和 CaptureWrite，不能因为获取了远端配置就修改非 owner 的本地数据。具体范围和验收见 `known-issues.md`。
+
 - **背景**：ADR-060 把控制面元数据**按 app 分片**存进 `<ns>/__control__/main`（+ 全局 `__platform__/__control__/main`），用 KV 文档（key 前缀）表达层次。查询形态变化后暴露问题：① 按 host 点查需先知道 ns，跨 ns 聚合/GC 引用必须遍历每个 app 的 cell；② 控制面写必须打到该 ns control cell 的 owner；③ schema 演进要在 N 个分片重复；④“前缀扫描 + Go 里过滤”替代了本该是 SQL 的查询（唯一约束/索引都拿不到）。
 - **决策**：
   1. **单控制库**：所有控制面元数据进**一个** cell `__platform__/__control__/main`（`control.Scope()`；`ScopeFor(ns)`/`GlobalScope()` 保留为指向它的别名，ns 变成**列**而不是 scope）。

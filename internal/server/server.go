@@ -232,11 +232,13 @@ type Server struct {
 	// projMu guards the cached routing projection (ADR-115/117). The cache is
 	// rebuilt when the control store's revision changes; projectionTTL bounds how
 	// long a node may serve a projection built from another node's copy.
-	projMu       sync.Mutex
-	projCache    *control.Projection
-	projBuiltRev int64
-	projAt       time.Time
-	projBuilding chan struct{} // non-nil while one rebuild is in flight
+	projMu            sync.Mutex
+	projCache         *control.Projection
+	projBuiltRev      int64
+	projAt            time.Time
+	projBuilding      chan struct{} // non-nil while one rebuild is in flight
+	controlReaderOnce sync.Once
+	controlReader     *ControlReader
 }
 
 type bindingEntry struct {
@@ -304,6 +306,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/request-log", s.auth(s.handleRequestLog))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-validate", s.auth(s.handleResourceCleanupValidate))
+	mux.HandleFunc("POST /v1/internal/control/read", s.auth(s.handleControlRead))
 	mux.HandleFunc("POST /v1/internal/resource/retirement-prepare", s.auth(s.handleResourceRetirementPrepare))
 	mux.HandleFunc("POST /v1/internal/queue/remove-source", s.auth(s.handleQueueRemoveSource))
 	mux.HandleFunc("GET /v1/control/resource/cleanup", s.auth(s.handleResourceCleanupStatus))

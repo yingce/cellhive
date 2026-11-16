@@ -561,16 +561,16 @@ func main() {
 	enricher := &cronEnricher{next: dispatcher}
 	dispatcher = enricher
 	// Workflows: KindWorkflowSleep timers resume the slept instance; other kinds
-	// pass through to user-runtime (control plane is wired just below via ctrlRef).
+	// pass through to user-runtime (owner-aware control reads are wired below).
 	workflowStore := workflow.New(store)
 	workflowStore.Index = wakeIdx
 	workflowStore.Register = timerReg.Add
 	const workflowLeaseMs = int64(60_000)
-	var ctrlRef *control.Store
 	// One short-TTL projection cache serves every control-derived dispatch
 	// callback (queue consumers, cron targets, workflow targets, DO alarm
 	// bundles). Its source is wired once the control store exists.
 	projCache := &projectionCache{ttl: projectionCacheTTL}
+	var controlReads *server.ControlReader
 	wfDisp := &dispatch.WorkflowDispatcher{
 		URL: cfg.DispatchURL, Token: cfg.TokenDispatch, Log: log, Next: dispatcher,
 		Skip: workflowStore.SkipWake,
@@ -593,19 +593,25 @@ func main() {
 		},
 		Claim: func(cctx context.Context, ns, name, id string) (string, uint64, bool, error) {
 			limit := 0
-			if ctrlRef != nil {
-				if raw, err := ctrlRef.ResourceConfig(cctx, ns, "workflow", name); err == nil {
-					var policy workflow.Policy
-					if json.Unmarshal(raw, &policy) == nil {
-						limit = policy.Concurrency
-					}
+			if controlReads == nil {
+				return "", 0, false, errors.New("workflow control unavailable")
+			}
+			raw, policyErr := controlReads.ResourceConfig(cctx, ns, "workflow", name)
+			if policyErr != nil && !errors.Is(policyErr, control.ErrNotFound) {
+				return "", 0, false, policyErr
+			}
+			if policyErr == nil {
+				var policy workflow.Policy
+				if err := json.Unmarshal(raw, &policy); err != nil {
+					return "", 0, false, err
 				}
+				limit = policy.Concurrency
 			}
 			tok, gen, _, ok, err := workflowStore.ClaimRunLimited(cctx, ns, name, id, workflowLeaseMs, limit)
 			return tok, gen, ok, err
 		},
 		CreateScheduled: func(cctx context.Context, ns, name, occurrence string) (string, error) {
-			if ctrlRef == nil {
+			if controlReads == nil {
 				return "", fmt.Errorf("workflow control unavailable")
 			}
 			target, ok, err := projCache.workflowTarget(cctx, ns, name)
@@ -623,7 +629,7 @@ func main() {
 			return in.ID, nil
 		},
 		Target: func(tctx context.Context, ns, name string) (control.WorkflowTarget, bool) {
-			if ctrlRef == nil {
+			if controlReads == nil {
 				return control.WorkflowTarget{}, false
 			}
 			target, ok, err := projCache.workflowTarget(tctx, ns, name)
@@ -726,20 +732,9 @@ func main() {
 		}
 	}
 	ctrl := control.New(store, env)
-	// Install the control schema before capture starts. Control DDL runs as
-	// unnumbered SQLite transactions (it does not advance cell_meta.txid); if it
-	// executed lazily inside the first captured deploy, capture would label those
-	// DDL commits with txids and shift every later write (a concurrent SIGKILL
-	// test lost acked deploys this way). Hydrate/store callbacks are already set.
-	if initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second); true {
-		if _, ierr := ctrl.Rev(initCtx); ierr != nil {
-			log.Warn("control schema init failed", "err", ierr)
-		}
-		initCancel()
-	}
-	ctrlRef = ctrl
-	enricher.ctrl = ctrl
-	projCache.src = ctrl
+	// Server.ensureControlSchema initializes the authoritative cell before
+	// capture labels its unnumbered DDL transactions. Do not pre-open a
+	// non-owner's possibly stale SQLite at startup.
 	enricher.proj = projCache
 
 	// Autoscaler: read node lease signals -> recommend -> drive the (pluggable)
@@ -753,31 +748,6 @@ func main() {
 		advisor.Run(ctx, cfg.AutoscaleInterval, nil, log)
 	}
 
-	// Workflow retention: periodically prune terminal instances of every
-	// registered workflow definition (cold path).
-	if cfg.WorkflowRetention > 0 {
-		go func() {
-			t := time.NewTicker(10 * time.Minute)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					proj, err := ctrl.Projection(ctx)
-					if err != nil {
-						continue
-					}
-					before := time.Now().Add(-cfg.WorkflowRetention).UnixMilli()
-					for _, wt := range proj.WorkflowTargets() {
-						if n, err := workflowStore.Prune(ctx, wt.Namespace, wt.Name, before); err == nil && n > 0 {
-							log.Info("workflow retention pruned", "ns", wt.Namespace, "workflow", wt.Name, "instances", n)
-						}
-					}
-				}
-			}
-		}()
-	}
 	alarmDisp.Bundle = func(bctx context.Context, ns, worker string) (string, int, bool) {
 		v, ok, err := projCache.activeVersion(bctx, ns, worker)
 		if err != nil {
@@ -818,13 +788,19 @@ func main() {
 							if b.Type != "workflow" {
 								continue
 							}
-							if raw, e := ctrl.ResourceConfig(cctx, app.Namespace, "workflow", b.ID); e == nil {
-								var p workflow.Policy
-								if json.Unmarshal(raw, &p) == nil {
-									for _, expr := range p.Schedules {
-										out = append(out, cron.WorkflowTarget{Namespace: app.Namespace, Workflow: b.ID, Cron: expr})
-									}
-								}
+							raw, e := controlReads.ResourceConfig(cctx, app.Namespace, "workflow", b.ID)
+							if errors.Is(e, control.ErrNotFound) {
+								continue
+							}
+							if e != nil {
+								return nil, e
+							}
+							var p workflow.Policy
+							if e := json.Unmarshal(raw, &p); e != nil {
+								return nil, e
+							}
+							for _, expr := range p.Schedules {
+								out = append(out, cron.WorkflowTarget{Namespace: app.Namespace, Workflow: b.ID, Cron: expr})
 							}
 						}
 					}
@@ -833,12 +809,6 @@ func main() {
 			},
 		}
 	}
-
-	if cfg.AuditRetention > 0 {
-		go runAuditPruneLoop(ctx, log, ctrl, cfg.AuditRetention)
-
-	}
-	go runWorkflowRetentionLoop(ctx, log, ctrl, workflowStore)
 
 	srv := server.New(server.Deps{
 		PeerTargets:      targets,
@@ -872,6 +842,9 @@ func main() {
 		// query endpoints return 503 and `cellhive tail --worker` is unusable.
 		Logs: newLogBuffer(cfg),
 	})
+	controlReads = srv.BackgroundControl()
+	projCache.src = controlReads
+	enricher.ctrl = controlReads
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -1054,7 +1027,7 @@ func main() {
 						return srv.BeginResourceRequest(ctx, queue.Scope(ref.Namespace, ref.Name))
 					},
 					Queues: func(qctx context.Context) ([]queue.Ref, error) {
-						queues, err := ctrl.ResourcesByKind(qctx, "queue")
+						queues, err := controlReads.ResourcesByKind(qctx, "queue")
 						if err != nil {
 							return nil, err
 						}
@@ -1098,6 +1071,13 @@ func main() {
 	// Reclamation requires current control ownership and a durable exclusion.
 	// Unknown I/O outcomes retain their fence instead of granting a new holder.
 	go srv.RunPurgeLoop(ctx, 5*time.Second)
+	if cfg.AuditRetention > 0 {
+		go runAuditPruneLoop(ctx, log, srv, cfg.AuditRetention)
+	}
+	if cfg.WorkflowRetention > 0 {
+		go runDefaultWorkflowRetentionLoop(ctx, log, srv, cfg.WorkflowRetention)
+	}
+	go runWorkflowRetentionLoop(ctx, log, srv)
 	if cfg.BundleGCInterval > 0 {
 		go srv.RunArtifactGCLoop(ctx, cfg.BundleGCInterval)
 	}
@@ -1862,7 +1842,7 @@ func runWakeRepairLoop(ctx context.Context, log *slog.Logger, store *cellstore.S
 
 // runAuditPruneLoop hourly deletes control-plane audit records older than the
 // retention window, across all registered apps.
-func runAuditPruneLoop(ctx context.Context, log *slog.Logger, ctrl *control.Store, retention time.Duration) {
+func runAuditPruneLoop(ctx context.Context, log *slog.Logger, srv *server.Server, retention time.Duration) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
@@ -1871,23 +1851,57 @@ func runAuditPruneLoop(ctx context.Context, log *slog.Logger, ctrl *control.Stor
 			return
 		case <-t.C:
 			cutoff := time.Now().Add(-retention).UnixMilli()
-			apps, err := ctrl.Apps(ctx)
+			n, err := srv.RunOwnedMaintenance(ctx, control.Scope(), func() (int, error) {
+				apps, err := srv.Control.Apps(ctx)
+				if err != nil {
+					return 0, err
+				}
+				total := 0
+				for _, app := range apps {
+					n, err := srv.Control.PruneAudit(ctx, app.Namespace, cutoff)
+					if err != nil {
+						return total, err
+					}
+					total += n
+				}
+				return total, nil
+			})
 			if err != nil {
-				log.Warn("audit prune: list apps failed", "err", err)
+				log.Warn("audit prune failed", "err", err)
+			} else if n > 0 {
+				log.Info("audit pruned", "removed", n)
+			}
+		}
+	}
+}
+
+func runDefaultWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, srv *server.Server, retention time.Duration) {
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			proj, err := srv.BackgroundControl().Projection(ctx)
+			if err != nil {
+				log.Warn("workflow retention: projection failed", "err", err)
 				continue
 			}
-			for _, app := range apps {
-				if n, err := ctrl.PruneAudit(ctx, app.Namespace, cutoff); err != nil {
-					log.Warn("audit prune failed", "ns", app.Namespace, "err", err)
+			before := time.Now().Add(-retention).UnixMilli()
+			for _, wt := range proj.WorkflowTargets() {
+				n, err := srv.RunOwnedMaintenance(ctx, workflow.Scope(wt.Namespace, wt.Name), func() (int, error) { return srv.Workflows.Prune(ctx, wt.Namespace, wt.Name, before) })
+				if err != nil {
+					log.Warn("workflow retention failed", "ns", wt.Namespace, "workflow", wt.Name, "err", err)
 				} else if n > 0 {
-					log.Info("audit pruned", "ns", app.Namespace, "removed", n)
+					log.Info("workflow retention pruned", "ns", wt.Namespace, "workflow", wt.Name, "instances", n)
 				}
 			}
 		}
 	}
 }
 
-func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *control.Store, workflows *workflow.Store) {
+func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, srv *server.Server) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
@@ -1895,7 +1909,7 @@ func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *contr
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			proj, err := ctrl.Projection(ctx)
+			proj, err := srv.BackgroundControl().Projection(ctx)
 			if err != nil {
 				log.Warn("workflow retention: projection failed", "err", err)
 				continue
@@ -1907,8 +1921,11 @@ func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *contr
 						if b.Type != "workflow" {
 							continue
 						}
-						raw, e := ctrl.ResourceConfig(ctx, app.Namespace, "workflow", b.ID)
+						raw, e := srv.BackgroundControl().ResourceConfig(ctx, app.Namespace, "workflow", b.ID)
 						if e != nil {
+							if !errors.Is(e, control.ErrNotFound) {
+								log.Warn("workflow retention: policy failed", "ns", app.Namespace, "workflow", b.ID, "err", e)
+							}
 							continue
 						}
 						var p workflow.Policy
@@ -1926,7 +1943,7 @@ func runWorkflowRetentionLoop(ctx context.Context, log *slog.Logger, ctrl *contr
 						if p.ErrorRetentionMs > 0 {
 							eb = now - p.ErrorRetentionMs
 						}
-						if n, e := workflows.PruneRetention(ctx, app.Namespace, b.ID, sb, eb); e != nil {
+						if n, e := srv.RunOwnedMaintenance(ctx, workflow.Scope(app.Namespace, b.ID), func() (int, error) { return srv.Workflows.PruneRetention(ctx, app.Namespace, b.ID, sb, eb) }); e != nil {
 							log.Warn("workflow retention failed", "ns", app.Namespace, "workflow", b.ID, "err", e)
 						} else if n > 0 {
 							log.Info("workflow instances pruned", "ns", app.Namespace, "workflow", b.ID, "removed", n)
@@ -2029,16 +2046,20 @@ type projectionCache struct {
 	ttl time.Duration
 	now func() time.Time
 
-	mu       sync.Mutex
-	proj     *control.Projection
-	at       time.Time
-	building chan struct{} // non-nil while one rebuild is in flight
+	mu        sync.Mutex
+	proj      *control.Projection
+	at        time.Time
+	building  chan struct{} // non-nil while one rebuild is in flight
+	authority string
 }
 
 // Projection returns the cached projection, rebuilding it on expiry or on the
 // first call. Concurrent callers wait for the in-flight build instead of
 // stampeding the control cell. Errors are never cached.
 func (c *projectionCache) Projection(ctx context.Context) (control.Projection, error) {
+	if err := ctx.Err(); err != nil {
+		return control.Projection{}, err
+	}
 	if c == nil || c.src == nil {
 		return control.Projection{}, errors.New("control plane unavailable")
 	}
@@ -2051,9 +2072,13 @@ func (c *projectionCache) Projection(ctx context.Context) (control.Projection, e
 		now = time.Now
 	}
 	for {
+		authority := ""
+		if src, ok := c.src.(interface{ AuthorityKey() string }); ok {
+			authority = src.AuthorityKey()
+		}
 		c.mu.Lock()
 		cached := c.proj
-		if cached != nil && now().Sub(c.at) < ttl {
+		if cached != nil && now().Sub(c.at) < ttl && authority == c.authority {
 			p := *cached
 			c.mu.Unlock()
 			return p, nil
@@ -2065,21 +2090,27 @@ func (c *projectionCache) Projection(ctx context.Context) (control.Projection, e
 			case <-wait:
 				continue
 			case <-ctx.Done():
-				if cached != nil {
-					return *cached, nil
-				}
 				return control.Projection{}, ctx.Err()
 			}
 		}
 		c.building = make(chan struct{})
 		c.mu.Unlock()
 
-		p, err := c.src.Projection(ctx)
+		var p control.Projection
+		var err error
+		if src, ok := c.src.(interface {
+			ProjectionWithAuthority(context.Context) (control.Projection, string, error)
+		}); ok {
+			p, authority, err = src.ProjectionWithAuthority(ctx)
+		} else {
+			p, err = c.src.Projection(ctx)
+		}
 
 		c.mu.Lock()
 		if err == nil {
 			c.proj = &p
 			c.at = now()
+			c.authority = authority
 		}
 		close(c.building)
 		c.building = nil
@@ -2130,7 +2161,7 @@ func (c *projectionCache) cronTargets(ctx context.Context) ([]control.CronTarget
 // needs to run the scheduled() handler. The projection is cached briefly.
 type cronEnricher struct {
 	next timer.Dispatcher
-	ctrl *control.Store
+	ctrl projectionSource
 	proj *projectionCache
 
 	mu      sync.Mutex
@@ -2184,6 +2215,13 @@ func cronExprForSlot(targets []control.CronTarget, t timer.Timer) string {
 }
 
 func (e *cronEnricher) lookup(ctx context.Context, ns, worker string) ([]control.CronTarget, error) {
+	if e.proj != nil {
+		p, err := e.proj.Projection(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return cronDispatchTargets(p)[ns+"\x00"+worker], nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.targets == nil || time.Since(e.at) > 5*time.Second {
