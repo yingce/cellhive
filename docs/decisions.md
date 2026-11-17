@@ -4185,8 +4185,10 @@ Keep the existing headless Service and StatefulSet serviceName unchanged. Add a 
 
 2026-11-13 同 epoch L9 回收移除：删除 `replica.ListSupersededL9`/`PruneSupersededL9`、admin `gc/scope` 的 `prune_l9`/`keep_l9` 字段与分支，以及 CLI 的 `--prune-l9`/`--keep-l9`。ADR-309 的运维入口仍只含 scope/keepPrevious/grace/dry-run，不再提供同 epoch 多余 L9 的显式清理。常态下一个 epoch 至多两张 L9：`compaction.Snapshot` 对已有 `max >= watermark` 的 L9 返回已压缩（ADR-312 的水位去重），idle 路径另要求不存在 L9，release/handoff 走同一门控；因此「两张」是按水位去重的结果，不是硬上限，水位在两次 release 之间继续推进或运维显式 `--snapshot` 仍可增加。移除后旧 L9 不影响恢复：`planEpochFiles` 取 `max` 最大的 L9 作 baseline，其余仅占存储，直到 epoch 退休时整目录回收。旧的 `prune_l9` 请求因 `decodeControl` 不做 unknown-field 拒绝而静默失效；该改动未部署。
 
-### 2026-11-17 前驱 epoch 精确 cut 的 seek 优化（已部署本地，未部署 USW/SG）
+### 2026-11-17 前驱 epoch 精确 cut 的 seek 优化（已部署本地与 USW，SG 未部署）
 
 仅当后继 epoch 给出精确 `upper=successor.min-1` 时，允许利用已完整发现的高层连续链末端 `covered`，从下一层的 `covered+1` seek。候选对象仍按 `max<=upper` 裁剪；只有候选与高层组成从 TXID 1 连续、恰好结束于 upper 的完整链，才跳过该层较早对象。缺口、缺少快照、跨界文件被 seek 跳过而无法到达 cut 时回退该层完整发现；对象读取错误直接返回，不当成空尾。最新 epoch（upper=0）仍完整发现，不以本地 TXID 或快照 max 推断远端最新水位，不放宽 activation 的 local<durable 拒绝。LTX 正文验证、reader pin 与 GC 协议不变，不删除任何对象。
 
 本地部署代码为 `17ab586756`。初次镜像曾额外保留此前 D1 冷启动预算补丁，随后按用户要求撤回叠加；当前运行提交原始预算逻辑，seek 保留。部署与冷开库证据见 `known-issues.md` 同日条目。保留本地库的重启首查通过不等同于从空目录完整下载恢复验收。
+
+USW 随后发布 Helm revision 126，仅更新两个 cell-agent 至 seek 提交版本，不包含预算补丁；实际镜像、二进制、双向跨节点 KV canary 与滚动告警边界见 `known-issues.md`。SG 未操作。

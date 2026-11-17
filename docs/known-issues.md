@@ -4,13 +4,14 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
-## 2026-11-17 前驱 epoch 精确 cut 的 seek（已部署本地，未部署 USW/SG）
+## 2026-11-17 前驱 epoch 精确 cut 的 seek（已部署本地与 USW，SG 未部署）
 
 - 当后继给出精确 cut 时，已发现的高层连续链可作为下一层 seek 起点；只有补链恰好到 cut 才跳过早期对象，否则回退完整发现。最新 epoch（无 cut）仍完整发现，未改变 activation 水位门禁、LTX 正文验证或 GC。
 - 回归先红：为补 21 个尾事务扫描 100023 个键、103 页；实现后 `internal/replica` 整包隔离测试通过（1.958s），包括历史跨界/缺口回退、最新 epoch 跨界尾和覆盖 oracle。
 - 对本机 DB_WORKBENCH 原始 e68 对象只读验证 `upper=1827120`：发现 436ms，共 11 页/6254 个键，其中 L0 仅 21 个；新计划 77 段。下载校验并分别恢复新计划与事故保留的 29 段链，总计 583ms，两份 3883008 字节镜像逐字节一致，SHA-256 `72ee57e77b60a838b93981bb4ba3981a478ee40c3bdeadbbbeb18c83b4164b38`。证据 `/tmp/kilo/seek-fix-test/live-result.txt`。这是精确历史 cut 的验证，不证明 e68 作为最新 epoch 时全量发现已加速；未部署、未重启服务、未改桶对象。
 - 后续本地部署：代码提交 `17ab586756`，镜像 `sha256:a6fc261fca490e16e215cee0011c569a70cf1f4bf7226679f39e4dd56feaba0b`；镜像额外保留此前已部署、未包含在该提交中的 D1 冷启动预算补丁（`internal/d1/d1.go`、`internal/server/server.go`），不是纯提交版。三个服务均 healthy。首次验收 SQL 误用复数表名失败；改用 `task`/`user` 后再次重启 agent，无 stats 预热首查 145ms 成功，bookmark 1827151、task=120、user=3、session_index=26。该次是保留本地库的冷开库，不是删库下载恢复；证据 `/tmp/kilo/seek-release-hijGqA/`。未改现有卷或 RustFS 服务，未部署 USW/SG。
 - 随后按用户要求撤回预算叠加：当前本地镜像 `sha256:8336bc80e9608b74b1e53164f4488f6398485308df265a86564d76c4735d1f13` 从 `17ab586756` 干净归档构建，保留 seek，恢复开库与 SQL 共用 30 秒预算、普通 D1 转发超时。三个服务均 healthy，无预热首查 108ms、bookmark 1827151，业务计数仍为 120/3/26。证据 `/tmp/kilo/seek-budget-revert-dYtMH7/rollout.log`。未操作 TKE。
+- USW 后续发布：Helm revision 126，仅更新两个 cell-agent，镜像 `sha256:1182c8c9da728d3fde6e78b47e12ca37c07c1d3a3a9c5dd31fa7f419fc34e96a`，使用 `17ab586756` 原始 D1 预算。两个 agent Ready、重启 0，实际二进制 SHA-256 均为 `2c4b42c18f343e4235d6ea579d14187c309f952f0d29e145f4e2b625af7cbd35`；user/DO runtime 与 Vector Pod UID 未变，SG 未操作。独立 namespace `seek-release-20261117-0626` 双向跨 agent KV 写读成功（键 TTL 3600 秒，资源保留）。滚动期间出现 connection refused、owner unowned 和 follower prepare 告警；06:26:15–06:26:51 UTC 采样仅见既有非 owner `purge: retained` 警告，不声称零错误切换或长期无故障。此次未在 USW 复造 17.9 万对象恢复性能场景。证据 `/tmp/kilo/usw-seek-release-OJni77/`。
 
 ## 2026-11-10 验证记录
 
