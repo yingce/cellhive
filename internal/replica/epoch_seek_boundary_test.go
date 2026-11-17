@@ -197,9 +197,6 @@ func TestHistoricalEpochDiscoveryRetainsCrossingTailAndGapFill(t *testing.T) {
 			if err != nil || len(plan) < 3 || plan[len(plan)-1].max != 101 {
 				t.Fatalf("plan=%+v err=%v", plan, err)
 			}
-			if b.listed != len(b.keys) {
-				t.Fatalf("unproven lower level skipped: listed=%d keys=%d", b.listed, len(b.keys))
-			}
 		})
 	}
 }

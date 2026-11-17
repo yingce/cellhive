@@ -4,6 +4,12 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
+## 2026-11-17 前驱 epoch 精确 cut 的 seek（本地验证，未部署）
+
+- 当后继给出精确 cut 时，已发现的高层连续链可作为下一层 seek 起点；只有补链恰好到 cut 才跳过早期对象，否则回退完整发现。最新 epoch（无 cut）仍完整发现，未改变 activation 水位门禁、LTX 正文验证或 GC。
+- 回归先红：为补 21 个尾事务扫描 100023 个键、103 页；实现后 `internal/replica` 整包隔离测试通过（1.958s），包括历史跨界/缺口回退、最新 epoch 跨界尾和覆盖 oracle。
+- 对本机 DB_WORKBENCH 原始 e68 对象只读验证 `upper=1827120`：发现 436ms，共 11 页/6254 个键，其中 L0 仅 21 个；新计划 77 段。下载校验并分别恢复新计划与事故保留的 29 段链，总计 583ms，两份 3883008 字节镜像逐字节一致，SHA-256 `72ee57e77b60a838b93981bb4ba3981a478ee40c3bdeadbbbeb18c83b4164b38`。证据 `/tmp/kilo/seek-fix-test/live-result.txt`。这是精确历史 cut 的验证，不证明 e68 作为最新 epoch 时全量发现已加速；未部署、未重启服务、未改桶对象。
+
 ## 2026-11-10 验证记录
 
 - 本地 E2E 15/15、COS 矩阵 15/15、examples 26/26；Compose/Kubernetes fleet、OSS/MinIO、SQLite 导入导出及冷恢复通过。滚动期间仍有短暂 HTTP 500，经重试恢复；不能宣称零错误切换。详见 [全量报告及未测范围](reports/2026-11-10-full-e2e-examples.md)。

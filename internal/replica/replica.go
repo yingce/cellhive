@@ -99,6 +99,39 @@ func (m *Manager) listCanonicalLevelsBounded(ctx context.Context, s cell.Scope, 
 			continue
 		}
 		prefix := base + fmt.Sprintf("%04x/", level)
+		if upper != 0 {
+			prefixPlan, planErr := planEpochFiles(bounded)
+			if planErr == nil && len(prefixPlan) > 0 {
+				covered := prefixPlan[len(prefixPlan)-1].max
+				if covered < upper {
+					// Only a successor-established cut permits this shortcut.
+					// Earlier-starting ranges may be skipped only if the sought
+					// tail independently completes the entire predecessor chain.
+					after := prefix + fmt.Sprintf("%016x", covered+1)
+					tail, err := m.listLevelAfter(ctx, prefix, after)
+					if err != nil {
+						return nil, err
+					}
+					candidate := bounded[:len(bounded):len(bounded)]
+					for _, key := range tail {
+						span, ok := parseSegmentSpan(strings.TrimPrefix(key, prefix))
+						if !ok || span.start == 0 || span.end < span.start {
+							return nil, fmt.Errorf("replica: invalid native LTX path %s", key)
+						}
+						if span.end <= upper {
+							candidate = append(candidate, epochFile{key: key, epoch: epoch, level: int(level), min: span.start, max: span.end})
+						}
+					}
+					plan, err := planEpochFiles(candidate)
+					if err == nil && len(plan) > 0 && plan[len(plan)-1].max == upper {
+						out[level] = tail
+						return out, nil
+					}
+					// A crossing range or missing link can precede the seek.
+					// Discard the speculative tail and retain exhaustive discovery.
+				}
+			}
+		}
 		keys, err := m.listLevel(ctx, prefix)
 		if err != nil {
 			return nil, err
