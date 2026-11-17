@@ -4189,4 +4189,4 @@ Keep the existing headless Service and StatefulSet serviceName unchanged. Add a 
 
 仅当后继 epoch 给出精确 `upper=successor.min-1` 时，允许利用已完整发现的高层连续链末端 `covered`，从下一层的 `covered+1` seek。候选对象仍按 `max<=upper` 裁剪；只有候选与高层组成从 TXID 1 连续、恰好结束于 upper 的完整链，才跳过该层较早对象。缺口、缺少快照、跨界文件被 seek 跳过而无法到达 cut 时回退该层完整发现；对象读取错误直接返回，不当成空尾。最新 epoch（upper=0）仍完整发现，不以本地 TXID 或快照 max 推断远端最新水位，不放宽 activation 的 local<durable 拒绝。LTX 正文验证、reader pin 与 GC 协议不变，不删除任何对象。
 
-本地部署代码为 `17ab586756`，镜像额外保留此前 D1 冷启动预算补丁；部署与冷开库证据见 `known-issues.md` 同日条目。保留本地库的重启首查通过不等同于从空目录完整下载恢复验收。
+本地部署代码为 `17ab586756`。初次镜像曾额外保留此前 D1 冷启动预算补丁，随后按用户要求撤回叠加；当前运行提交原始预算逻辑，seek 保留。部署与冷开库证据见 `known-issues.md` 同日条目。保留本地库的重启首查通过不等同于从空目录完整下载恢复验收。
