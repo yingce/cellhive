@@ -25,6 +25,9 @@ var (
 	ErrRetired = errors.New("owner: resource retired")
 	// ErrEpochMismatch means the expected epoch no longer matches.
 	ErrEpochMismatch = errors.New("owner: epoch mismatch")
+	// ErrReleaseBusy means the caller refused to release while this process
+	// still holds the epoch. The owner record is unchanged.
+	ErrReleaseBusy = errors.New("owner: release busy")
 	// ErrNotOwner means this node is not the scope's owner (a non-owner replica
 	// must forward to the owner, ADR-003).
 	ErrNotOwner = errors.New("owner: caller is not the owner")
@@ -130,19 +133,27 @@ type Manager struct {
 	// BeforeRelease must not reenter same-scope Claim/Release or wait for
 	// admitted requests that might claim. It runs under the per-scope transition
 	// lock while ownership is still valid, immediately before the
-	// owner record is deleted. cell-agent uses it to fold the final L0 tail so a
-	// released/rebound cell does not leave an uncompacted predecessor epoch.
+	// owner record is deleted. Shutdown release uses it to fold the durable
+	// chain. Background rebalance and disk shed fold before taking this lock
+	// and skip the hook, so a request can claim the cell while that fold runs.
 	BeforeRelease func(context.Context, cell.Scope, uint64) error
-	mu            sync.Mutex
-	cache         map[string]cachedOwner
-	cacheRev      map[string]uint64
-	cacheRevAt    map[string]time.Time
-	cacheEpoch    uint64
-	cachePending  map[string]int
-	guards        map[string]int
-	routes        map[string]ownerRoute
-	routeFlights  map[string]*routeFlight
-	releasing     map[string]int
+	// AfterRelease runs only once this process no longer holds the epoch:
+	// the owner record was removed, or a conditional write conflicted and a
+	// fresh read shows another node, session, or epoch, or no record at all.
+	// A conflict from this node's own renew is not loss. BeforeRelease errors,
+	// ambiguous bucket errors, and a reconfirm that cannot be read also skip
+	// it, because this node may still own that epoch.
+	AfterRelease func(cell.Scope, uint64)
+	mu           sync.Mutex
+	cache        map[string]cachedOwner
+	cacheRev     map[string]uint64
+	cacheRevAt   map[string]time.Time
+	cacheEpoch   uint64
+	cachePending map[string]int
+	guards       map[string]int
+	routes       map[string]ownerRoute
+	routeFlights map[string]*routeFlight
+	releasing    map[string]int
 
 	claimMu sync.Mutex
 	claims  map[string]chan struct{}
@@ -578,6 +589,24 @@ func (m *Manager) Release(ctx context.Context, s cell.Scope, epoch uint64) error
 	return m.release(ctx, s, epoch, false)
 }
 
+// ReleaseWhen removes the owner record only when allow returns true. allow runs
+// under the per-scope claim lock, before the ownership transition, and must not
+// Claim, Release, or wait on work that needs that same lock. A false result
+// leaves the record in place. A nil allow matches Release.
+func (m *Manager) ReleaseWhen(ctx context.Context, s cell.Scope, epoch uint64, allow func() bool) error {
+	unlock, err := m.lockClaim(ctx, s.String())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if allow != nil && !allow() {
+		return ErrReleaseBusy
+	}
+	finish := m.beginOwnershipTransition(s)
+	defer finish()
+	return m.releaseLocked(ctx, s, epoch, false)
+}
+
 // ReleaseForPurge releases ownership for a resource that is being deleted. It
 // skips BeforeRelease because the cell data is fenced and purged, not handed to
 // a future owner.
@@ -651,27 +680,51 @@ func (m *Manager) releaseLocked(ctx context.Context, s cell.Scope, epoch uint64,
 		}
 		data, _ := cell.MarshalOwner(cur)
 		if _, err := m.B.CAS(ctx, Key(s), data, e); err != nil {
-			if errors.Is(err, bucket.ErrPrecondition) {
-				return ErrEpochMismatch
-			}
-			return err
+			return m.releaseConflict(ctx, s, epoch, err)
 		}
 		m.Invalidate(s)
 		m.forgetOwned(s)
+		m.afterRelease(s, epoch)
 		return nil
 	}
-	// Conditional delete: if the lease expired and a peer re-claimed between the
-	// resolve above and this delete, the CAS fails and the peer's claim survives
-	// (never break the single-writer fence).
+	// Conditional delete never removes a record that changed after the resolve.
+	// releaseConflict re-reads it: a peer's claim is left intact, and this
+	// node's own renew is not treated as lost ownership.
 	if err := m.B.ConditionalDelete(ctx, Key(s), e); err != nil {
-		if errors.Is(err, bucket.ErrPrecondition) {
-			return ErrEpochMismatch
-		}
-		return err
+		return m.releaseConflict(ctx, s, epoch, err)
 	}
 	m.Invalidate(s)
 	m.forgetOwned(s)
+	m.afterRelease(s, epoch)
 	return nil
+}
+
+// releaseConflict decides whether a failed conditional owner write means this
+// process lost the epoch. ErrPrecondition only means the etag changed. A
+// same-epoch renew keeps node, session, and epoch, so the tally must stay.
+func (m *Manager) releaseConflict(ctx context.Context, s cell.Scope, epoch uint64, err error) error {
+	if !errors.Is(err, bucket.ErrPrecondition) {
+		return err
+	}
+	cur, _, rerr := m.Resolve(ctx, s)
+	if errors.Is(rerr, ErrUnowned) {
+		m.afterRelease(s, epoch)
+		return ErrEpochMismatch
+	}
+	if rerr != nil {
+		return rerr
+	}
+	if cur.Node == m.NodeID && cur.Session == m.Session && cur.Epoch == epoch {
+		return err
+	}
+	m.afterRelease(s, epoch)
+	return ErrEpochMismatch
+}
+
+func (m *Manager) afterRelease(s cell.Scope, epoch uint64) {
+	if m.AfterRelease != nil {
+		m.AfterRelease(s, epoch)
+	}
 }
 
 // touchOwnerSegment moves a node-lease owner record into the current authority

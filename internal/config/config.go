@@ -81,9 +81,12 @@ type Config struct {
 	// CaptureSnapshotMaxBytes is the fail-closed budget for one full-page
 	// snapshot (0 = unlimited). Streaming bounds memory; this bounds mistakes.
 	CaptureSnapshotMaxBytes int64
-	// CaptureEpochSnapshotMaxBytes is the largest database that opens every new
-	// owner epoch with a fresh snapshot (0 disables the policy). Larger cells
-	// keep the cross-epoch chain until paged continuation is wired.
+	// CaptureEpochSnapshotMaxBytes is the logical-image budget for an explicit
+	// whole-database L9 (admin --snapshot) and for a newly synthesized fold L9,
+	// and the stored-byte budget of that one snapshot. Larger images are not
+	// published as L9: --snapshot skips, and fold publishes the same inputs at
+	// L2. Copying an existing L9 does not use it. Fold L2 chunks do not use it.
+	// A production epoch open writes a continuation and does not consult it.
 	CaptureEpochSnapshotMaxBytes int64
 	// CaptureL9OnEvict publishes an optional L9 snapshot for an owned, idle
 	// evicted cell when its chain is long enough. It is best-effort, uses the
@@ -116,6 +119,10 @@ type Config struct {
 	// cells hash to different lanes so they commit concurrently; per-scope order
 	// is preserved. 0 = auto (NumCPU, capped at 8).
 	UploadShards int
+	// UploadInterval is the idle flush period for async bucket uploads (default
+	// 30s). The segment cap is CompactionMinObjects. EnqueueWait and sync
+	// bucket-proof paths still wake the flusher immediately.
+	UploadInterval time.Duration
 
 	// BucketWait controls the bucket posture: true (default) waits for the
 	// covering block upload before acking (RPO=0); false acks on enqueue with a
@@ -279,12 +286,15 @@ type Config struct {
 	DrainTTL  time.Duration
 	DrainWait time.Duration
 
-	// Background L0->L1 compaction (cold path). Zero interval disables it.
-	CompactionInterval    time.Duration
+	// CompactionTimeout bounds one L0→L1 promotion. Background promotion
+	// follows a durable L0 upload and does not publish L2 or L3.
 	CompactionTimeout     time.Duration
 	CompactionMinSegments int
-	CompactionMinBytes    int64
-	CompactionMinObjects  int
+	// CompactionMinBytes starts an L1 promotion. It does not slice the batch.
+	CompactionMinBytes int64
+	// CompactionMinObjects is the shared count: async L0 upload flushes at this
+	// many segments, and L1 starts when this many uncovered L0 files are recorded.
+	CompactionMinObjects int
 
 	// Paged cold restore (ADR-160). PagedRestore enables the fault-in VFS for
 	// cell-agent cells whose restore chain is at least PagedMinBytes; smaller
@@ -611,11 +621,10 @@ func FromEnv() Config {
 		WakerTTL:                     2 * wakerInterval,
 		DrainTTL:                     drainTTL,
 		DrainWait:                    drainTTL,
-		CompactionInterval:           envDuration("CELLHIVE_COMPACTION_INTERVAL", 30*time.Second),
 		CompactionTimeout:            envDuration("CELLHIVE_COMPACTION_TIMEOUT", 5*time.Minute),
 		CompactionMinSegments:        envInt("CELLHIVE_COMPACTION_MIN_SEGMENTS", 64),
 		CompactionMinBytes:           envBytes("CELLHIVE_COMPACTION_MIN_BYTES", 64<<20),
-		CompactionMinObjects:         envInt("CELLHIVE_COMPACTION_MIN_OBJECTS", 8),
+		CompactionMinObjects:         envInt("CELLHIVE_COMPACTION_MIN_OBJECTS", 256),
 		PagedRestore:                 envBool("CELLHIVE_PAGED_RESTORE", true),
 		PagedMinBytes:                envBytes("CELLHIVE_PAGED_MIN_BYTES", 32<<20),
 		PagedHydrateMBPS:             envInt("CELLHIVE_PAGED_HYDRATE_MBPS", 16),
@@ -635,6 +644,7 @@ func FromEnv() Config {
 		ScopeSecret:                  creds.Scope,
 		BindingSigningKey:            creds.Binding,
 		UploadShards:                 envInt("CELLHIVE_UPLOAD_SHARDS", 0),
+		UploadInterval:               envDuration("CELLHIVE_UPLOAD_INTERVAL", 30*time.Second),
 		MetricsNSMax:                 envInt("CELLHIVE_METRICS_NS_MAX", 1000),
 		BindingCacheTTL:              envDuration("CELLHIVE_BINDING_CACHE", time.Second),
 		DoTicketSecret:               creds.DoTicket,
@@ -656,7 +666,7 @@ func FromEnv() Config {
 		CaptureGroupCommitWait:       envDuration("CELLHIVE_CAPTURE_GROUPCOMMIT", 0),
 		CapturePipelineThreshold:     envDuration("CELLHIVE_CAPTURE_PIPELINE", 0),
 		CaptureSnapshotMaxBytes:      int64(envBytes("CELLHIVE_CAPTURE_SNAPSHOT_MAX", 8<<30)),
-		CaptureEpochSnapshotMaxBytes: int64(envBytes("CELLHIVE_EPOCH_SNAPSHOT_MAX", 256<<20)),
+		CaptureEpochSnapshotMaxBytes: int64(envBytes("CELLHIVE_EPOCH_SNAPSHOT_MAX", 1<<30)),
 		CaptureL9OnEvict:             envBool("CELLHIVE_L9_ON_EVICT", true),
 		EpochGCInterval:              envDuration("CELLHIVE_EPOCH_GC_INTERVAL", 5*time.Minute),
 		EpochGCInitial:               envDuration("CELLHIVE_EPOCH_GC_INITIAL", time.Minute),

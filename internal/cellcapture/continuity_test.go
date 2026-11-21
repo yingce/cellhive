@@ -535,7 +535,7 @@ func TestBackgroundBaselinePublishesNativeSnapshot(t *testing.T) {
 	}, &commits)
 	m.HasEpoch = func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil } // new epoch
 	m.EpochSnapshotMaxBytes = 1 << 30
-	m.WriteContinuation = func(context.Context, cell.Scope, uint64, ltx.NativeHeader) error {
+	m.WriteContinuation = func(context.Context, cell.Scope, uint64, ltx.NativeHeader, []ltx.WALPage) error {
 		return nil
 	}
 	doneTx := make(chan uint64, 1)

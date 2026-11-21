@@ -60,11 +60,15 @@ func CompactLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 			return Result{}, err
 		}
 	}
+	pending := m.SnapshotL0Keys(s, epoch)
 	selected, seek, err := planLevel(ctx, m, s, epoch, level)
 	if err != nil {
 		return Result{}, err
 	}
 	if len(selected) == 0 {
+		if level == 1 {
+			m.DropL0(s, epoch, pending)
+		}
 		return Result{Skipped: "already compacted"}, nil
 	}
 	countEnough := (opts.MinSegments > 0 && len(selected) >= opts.MinSegments) || (opts.MinObjects > 0 && len(selected) >= opts.MinObjects)
@@ -91,7 +95,7 @@ func CompactLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 	if thresholds && !countEnough && inputBytes < opts.MinBytes && len(selected) == unboundedCount {
 		return Result{Skipped: "below threshold", Inputs: len(selected), InputBytes: inputBytes}, nil
 	}
-	if err := checkSpoolSpace(inputBytes); err != nil {
+	if err := spoolSpaceFn(inputBytes); err != nil {
 		return Result{}, err
 	}
 	out, err := os.CreateTemp("", "cellhive-compaction-*.ltx")
@@ -119,6 +123,11 @@ func CompactLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 	r := Result{Compacted: true, Inputs: len(selected), InputBytes: inputBytes, Parts: 1, MinTxID: h.MinTXID, MaxTxID: h.MaxTXID, Commit: h.Commit, Epoch: epoch}
 	if level == 1 {
 		r.NewL0 = len(selected)
+		covered := make([]string, len(selected))
+		for i, f := range selected {
+			covered[i] = f.key
+		}
+		m.DropL0(s, epoch, covered)
 	}
 
 	return r, nil
@@ -216,7 +225,7 @@ func Snapshot(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint6
 		return Result{}, err
 	}
 	defer cleanup()
-	if err := checkSpoolSpace(size); err != nil {
+	if err := spoolSpaceFn(size); err != nil {
 		return Result{}, err
 	}
 	out, err := os.CreateTemp("", "cellhive-compaction-*.ltx")

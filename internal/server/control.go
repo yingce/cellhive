@@ -177,7 +177,6 @@ func (s *Server) buildAdminHandler() http.Handler {
 	mux.HandleFunc("POST /v1/control/queue/replay-dlq", s.adminAuth(s.handleControlQueueReplayDLQ))
 	mux.HandleFunc("GET /v1/control/resource/cleanup", s.adminAuth(s.handleResourceCleanupStatus))
 	mux.HandleFunc("POST /v1/control/resource/cleanup/retry", s.adminAuth(s.handleResourceCleanupRetry))
-	mux.HandleFunc("GET /v1/control/invocations", s.adminAuth(s.handleInvocationList))
 	mux.HandleFunc("GET /v1/control/queue/dlq/messages", s.adminAuth(s.handleControlQueueDLQPreview))
 	mux.HandleFunc("POST /v1/control/queue/dlq/ack", s.adminAuth(s.handleControlQueueDLQAck))
 	mux.HandleFunc("GET /v1/control/releases", s.adminAuth(s.handleControlReleases))

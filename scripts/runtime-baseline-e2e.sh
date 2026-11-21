@@ -465,8 +465,6 @@ retry_capture WF_STATUS compose exec -T cell-agent sh -c \
   || { echo "-- workflow status --" >&2; fetch_path "/workflow/status?id=$WF_ID" >&2 || true; echo "-- workflow logs --" >&2; compose logs --tail=150 cell-agent user-runtime >&2 || true; fail "workflow did not resume from sleep and complete"; }
 [[ "$WF_STATUS" == *'"value":42'* ]] || fail "workflow output mismatch: $WF_STATUS"
 [[ "$WF_STATUS" == *'"secret":"s3cr3t"'* ]] || fail "workflow env omitted managed secret: $WF_STATUS"
-WF_INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&kind=workflow&limit=100')
-bun "$ROOT/scripts/runtime-operations-check.mjs" workflow "$WF_INVOCATIONS"
 
 WF_BATCH=$(fetch_path /workflow/batch)
 [[ "$WF_BATCH" == *'"id":"batch-a"'* && "$WF_BATCH" == *'"id":"batch-b"'* ]] \
@@ -537,16 +535,12 @@ INTERNAL_SIGNING_KEY=$(compose exec -T cell-agent cellhive creds internal | tr -
 [[ -n "$INTERNAL_SIGNING_KEY" ]] || fail "could not derive host internal signing key"
 assert_not_contains "$ENV_JSON" "$INTERNAL_SIGNING_KEY" "tenant env"
 
-echo "== durable Queue/Cron invocation ID, outcomes and console query =="
+echo "== durable Queue retry across attempts =="
 fetch_path '/queue?id=invocation-fail' >/dev/null
 INVOCATION_RECEIPT=""
 retry_capture INVOCATION_RECEIPT compose exec -T cell-agent sh -c \
   "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=invocation-fail' | grep -F '\"queue\":\"processed\"'" \
   || fail "failed queue invocation did not retry successfully"
-INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&limit=100')
-INVOCATION_ID=$(bun "$ROOT/scripts/runtime-operations-check.mjs" invocations "$INVOCATIONS")
-ONE_INVOCATION=$(admin_api "http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&invocation_id=$INVOCATION_ID")
-bun "$ROOT/scripts/runtime-operations-check.mjs" one "$ONE_INVOCATION" "$INVOCATION_ID"
 
 echo "== destructive resource cleanup and independent DLQ preservation =="
 compose exec -T cell-agent cellhive kv namespace create cleanup KV --scope cleanup/__kv__/physical >/dev/null
@@ -668,8 +662,6 @@ VERSION_RECEIPT=""
 retry_capture VERSION_RECEIPT compose exec -T cell-agent sh -c \
   "curl -fsS -H 'Host: e2e-api.cell.test' 'http://user-runtime:8081/receipt?id=version-probe' | grep -F '\"queue\":\"processed:v2\"'" \
   || { compose exec -T cell-agent cellhive queue status e2e JOBS >&2 || true; compose logs --tail=100 cell-agent user-runtime >&2 || true; fail "leased message was not redelivered to active v2"; }
-VERSION_INVOCATIONS=$(admin_api 'http://127.0.0.1:8082/v1/control/invocations?namespace=e2e&worker=api&limit=100')
-[[ "$VERSION_INVOCATIONS" == *'version-probe'* ]] || fail "version-probe invocation was not observable"
 # Both expressions must materialize a new minute after the process restart.
 # An earlier receipt cannot satisfy this probe, and the noRetry expression
 # must still have one execution per slot. Wait after Queue crash recovery so

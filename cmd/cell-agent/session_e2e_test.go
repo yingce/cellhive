@@ -116,7 +116,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 				cmd.Env = append(cmd.Env, v)
 			}
 		}
-		env := map[string]string{"CELLHIVE_ROOT_KEY": secret, "CELLHIVE_NODE_ID": a.node, "CELLHIVE_SESSION_ID": session, "CELLHIVE_DATA_DIR": a.dir, "CELLHIVE_BUCKET_DIR": filepath.Join(root, "bucket"), "CELLHIVE_REST_ADDR": a.rest, "CELLHIVE_ADMIN_ADDR": a.admin, "CELLHIVE_ADVERTISE": a.rest, "CELLHIVE_PEER_URL": "http://" + a.rest, "CELLHIVE_LEASE_TTL": "3s", "CELLHIVE_DURABILITY": "fleet", "CELLHIVE_COMPACTION_INTERVAL": "0s", "CELLHIVE_EPOCH_GC_INTERVAL": "0s", "CELLHIVE_WAKE_REPAIR_INTERVAL": "0s", "CELLHIVE_WAKER_INTERVAL": "0s", "CELLHIVE_TIMER_INTERVAL": "0s", "CELLHIVE_CRON_INTERVAL": "0s", "CELLHIVE_REBALANCE_INTERVAL": "0s", "CELLHIVE_CELL_IDLE": "0s"}
+		env := map[string]string{"CELLHIVE_ROOT_KEY": secret, "CELLHIVE_NODE_ID": a.node, "CELLHIVE_SESSION_ID": session, "CELLHIVE_DATA_DIR": a.dir, "CELLHIVE_BUCKET_DIR": filepath.Join(root, "bucket"), "CELLHIVE_REST_ADDR": a.rest, "CELLHIVE_ADMIN_ADDR": a.admin, "CELLHIVE_ADVERTISE": a.rest, "CELLHIVE_PEER_URL": "http://" + a.rest, "CELLHIVE_LEASE_TTL": "3s", "CELLHIVE_DURABILITY": "fleet", "CELLHIVE_EPOCH_GC_INTERVAL": "0s", "CELLHIVE_WAKE_REPAIR_INTERVAL": "0s", "CELLHIVE_WAKER_INTERVAL": "0s", "CELLHIVE_TIMER_INTERVAL": "0s", "CELLHIVE_CRON_INTERVAL": "0s", "CELLHIVE_REBALANCE_INTERVAL": "0s", "CELLHIVE_CELL_IDLE": "0s"}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}

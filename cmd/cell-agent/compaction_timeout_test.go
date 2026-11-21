@@ -28,7 +28,7 @@ func TestBackgroundCompactionIsNativeAndAdditive(t *testing.T) {
 	appendSegment(t, m, sc, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
 	var out bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&out, nil))
-	compactScopes(ctx, log, m, config.Config{CompactionMinSegments: 1}, []compactionScope{{scope: sc, epoch: 1}})
+	compactScopes(ctx, log, m, config.Config{CompactionMinObjects: 1}, nil, []compactionScope{{scope: sc, epoch: 1}})
 	objects, err := m.ListLevel(ctx, sc, 1, 1)
 	if err != nil || len(objects) != 1 {
 		t.Fatalf("background publication failed: %+v %v", objects, err)
@@ -44,8 +44,9 @@ func TestBackgroundCompactionIsNativeAndAdditive(t *testing.T) {
 		t.Fatal("background GC deleted the L0 snapshot payload")
 	}
 	all, err := b.List(ctx, replica.EpochPrefix(sc, 1))
-	if err != nil || len(all) != 2 {
-		t.Fatalf("expected one L0 and one L1 object: %v %v", all, err)
+	// L0 must remain. Background promotion stops at L2, and one L1 does not start it.
+	if err != nil || len(all) < 2 {
+		t.Fatalf("expected at least L0+L1 objects: %v %v", all, err)
 	}
 	for _, key := range all {
 		if !strings.HasSuffix(key, ".ltx") {
@@ -71,8 +72,12 @@ type slowGetBucket struct {
 	slow string
 }
 
+func (b *slowGetBucket) block(key string) bool {
+	return strings.Contains(key, b.slow) && strings.HasSuffix(key, ".ltx")
+}
+
 func (b *slowGetBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
-	if strings.Contains(key, b.slow) {
+	if b.block(key) {
 		<-ctx.Done()
 		return nil, "", ctx.Err()
 	}
@@ -87,9 +92,9 @@ func TestCompactionTimeoutDoesNotBlockNextScope(t *testing.T) {
 	}
 	slow := cell.Scope{Namespace: "timeout", Class: "__kv__", ID: "hung"}
 	fast := cell.Scope{Namespace: "timeout", Class: "__kv__", ID: "next"}
-	appendSegment(t, replica.New(fs), slow, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
 	b := &slowGetBucket{Bucket: fs, slow: slow.Key()}
 	rep := replica.New(b)
+	appendSegment(t, rep, slow, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
 	appendSegment(t, rep, fast, 1, snapshotSegment(t, 1, 4096, 1, map[uint32][]byte{1: make([]byte, 4096)}))
 	appendSegment(t, rep, fast, 1, deltaSegment(t, 1, 4096, 1, 2, map[uint32][]byte{1: make([]byte, 4096)}))
 
@@ -97,10 +102,10 @@ func TestCompactionTimeoutDoesNotBlockNextScope(t *testing.T) {
 	cfg := config.Config{
 		// This tests cancellation isolation, not local filesystem latency.
 		// Leave room for fsync while other integration tests exercise disk.
-		CompactionTimeout:     500 * time.Millisecond,
-		CompactionMinSegments: 1,
+		CompactionTimeout:    500 * time.Millisecond,
+		CompactionMinObjects: 1,
 	}
-	compactScopes(ctx, log, rep, cfg, []compactionScope{
+	compactScopes(ctx, log, rep, cfg, nil, []compactionScope{
 		{scope: slow, epoch: 1},
 		{scope: fast, epoch: 1},
 	})
@@ -151,7 +156,7 @@ func appendSegment(t *testing.T, m *replica.Manager, sc cell.Scope, epoch uint64
 }
 
 func (b *slowGetBucket) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
-	if strings.Contains(key, b.slow) {
+	if b.block(key) {
 		<-ctx.Done()
 		return nil, 0, "", ctx.Err()
 	}

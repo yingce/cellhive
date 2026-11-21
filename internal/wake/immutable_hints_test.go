@@ -104,3 +104,52 @@ func TestS3ImmutableWakeHintsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Real MinIO: orphan due keys (pointer dropped) drain via CleanupDrain under
+// the immutable-hint layout used when ConditionalDelete is unavailable.
+func TestS3WakeCleanupDrainIntegration(t *testing.T) {
+	ep := os.Getenv("CELLHIVE_S3_TEST_ENDPOINT")
+	if ep == "" {
+		t.Skip("real S3 opt-in")
+	}
+	ctx := t.Context()
+	raw, err := bucket.NewS3Bucket(ctx, bucket.S3Options{
+		Endpoint: ep, Region: "us-east-1", Bucket: os.Getenv("CELLHIVE_S3_TEST_BUCKET"),
+		AccessKey: os.Getenv("CELLHIVE_S3_TEST_ACCESS"), SecretKey: os.Getenv("CELLHIVE_S3_TEST_SECRET"),
+		PathStyle: true, DisableOptionalChecksums: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := bucket.NewS3ControlBucket(raw)
+	ix := New(b)
+	if !ix.immutableHints {
+		t.Fatal("S3ControlBucket must enable immutable wake hints")
+	}
+	ns := fmt.Sprintf("drain-wake-%d", time.Now().UnixNano())
+	baseMs := time.Now().Add(-3 * time.Hour).UnixMilli()
+	for n := 0; n < 8; n++ {
+		scope := fmt.Sprintf("%s/__kv__/d%d", ns, n)
+		due := baseMs + int64(n)*60000
+		if err := ix.Put(ctx, scope, due, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.Delete(ctx, ptrKey(scope)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := ix.CleanupDrain(ctx, time.Now().UnixMilli(), 3, 100, 100)
+	if err != nil || removed < 8 {
+		t.Fatalf("CleanupDrain removed=%d err=%v", removed, err)
+	}
+	keys, err := raw.List(ctx, prefixDue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if strings.Contains(k, ns) {
+			t.Fatalf("orphan remains: %s", k)
+		}
+	}
+	t.Logf("PASS wake CleanupDrain removed=%d", removed)
+}

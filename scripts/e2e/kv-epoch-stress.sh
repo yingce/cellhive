@@ -10,8 +10,8 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
-export CELLHIVE_COMPACTION_INTERVAL=${CELLHIVE_COMPACTION_INTERVAL:-3s}
-export CELLHIVE_COMPACTION_MIN_SEGMENTS=${CELLHIVE_COMPACTION_MIN_SEGMENTS:-16}
+# Promotion follows a durable L0 upload and publishes only L1. These bars are
+# lower than production so the stress run actually folds.
 export CELLHIVE_COMPACTION_MIN_BYTES=${CELLHIVE_COMPACTION_MIN_BYTES:-2097152}
 export CELLHIVE_COMPACTION_MIN_OBJECTS=${CELLHIVE_COMPACTION_MIN_OBJECTS:-8}
 export CELLHIVE_EPOCH_GC_INTERVAL=${CELLHIVE_EPOCH_GC_INTERVAL:-1h}

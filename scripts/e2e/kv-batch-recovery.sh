@@ -2,7 +2,6 @@
 # Dual-agent HTTP acknowledgement, owner crash, and cold COS restore.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-export CELLHIVE_COMPACTION_INTERVAL=1h
 start_owner() { e2e_start_agent perf "$E2E_AGENT_PORT" "$E2E_ADMIN_PORT" '' "$E2E_BASE/agent"; }
 start_peer() { e2e_start_agent peer "$((E2E_PORT_BASE+4))" "$((E2E_PORT_BASE+5))" '' "$E2E_BASE/peer"; }
 start_owner

@@ -118,7 +118,7 @@ The do-runtime supervisor actively initiates claim requests to cell-agent. Flow:
 2. **cell-agent executes claim**: conditionally write `cells/<scope>/owner.json` (`If-None-Match: *` or CAS). Content: `{node, session, epoch+1, expiry, address=do-runtime-advertise}`. **cell-agent is the only bucket writer**, completing this on behalf of do-runtime.
 3. **claim competition**: if multiple do-runtime instances issue claim at the same time, the bucket conditional write guarantees only one succeeds; losers read the winner from the response and forward requests.
 4. **claim success response**: cell-agent returns `{epoch, expiry}` to supervisor; after supervisor accepts it, it starts restore (if data already exists) and then enters ready state.
-5. **renewal**: supervisor continuously sends renew to cell-agent (carrying session+epoch), and cell-agent updates expiry via CAS. **Renewal failure (cell-agent rejection) means epoch has changed (taken over)** → supervisor must self-fence and restart.
+5. **renewal**: supervisor continuously sends renew to cell-agent (carrying session+epoch), and cell-agent updates expiry via CAS. A renew failure inside the renewal window claims again before the call runs, so the call is not dispatched on a lease that is about to expire. A concurrent call waits for that claim and is not dispatched while the host is restoring. A live lease held by another node is forwarded. The call is not returned as `renew_failed`.
 6. **claim timeout**: the output gate has a timeout (see known-issues.md #C-07); if proof cannot be obtained within the deadline, return `result_unknown`.
 
 ## DO cold activation / restore flow (C-04 fix)

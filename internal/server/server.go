@@ -37,7 +37,6 @@ import (
 	"cellhive/internal/config"
 	"cellhive/internal/control"
 	"cellhive/internal/d1"
-	"cellhive/internal/invocation"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
 	"cellhive/internal/ltx"
@@ -114,8 +113,7 @@ type Deps struct {
 	// DispatchWorkflow runs (or resumes) a workflow instance; set by cell-agent.
 	DispatchWorkflow func(ctx context.Context, ns, name, id, runToken string) error
 	// Logs is the bounded per-worker log buffer backing `cellhive tail`.
-	Logs        *logbuf.Buffer
-	Invocations *invocation.Store
+	Logs *logbuf.Buffer
 	// Capture wires cellstore-backed cells into the replication chain (nil =
 	// no capture; KV/D1 writes stay local). See internal/cellcapture.
 	Capture *cellcapture.Manager
@@ -249,9 +247,6 @@ type bindingEntry struct {
 
 // New builds a Server.
 func New(d Deps) *Server {
-	if d.Invocations == nil && d.Store != nil {
-		d.Invocations = invocation.New(d.Store)
-	}
 	s := &Server{Deps: d, ordered: newOrderedDispatcher()}
 	if d.Cfg.ProxySQLAdmin != "" {
 		ps, err := proxysql.New(d.Cfg.ProxySQLAdmin, d.Cfg.ProxySQLSave)
@@ -302,7 +297,6 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /v1/diagnose", s.auth(s.handleDiagnose))
 	mux.HandleFunc("POST /v1/internal/telemetry/spans", s.auth(s.handleTelemetrySpans))
-	mux.HandleFunc("POST /v1/internal/invocations", s.auth(s.handleInvocationPut))
 	mux.HandleFunc("POST /v1/internal/request-log", s.auth(s.handleRequestLog))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-validate", s.auth(s.handleResourceCleanupValidate))
@@ -311,7 +305,6 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/internal/queue/remove-source", s.auth(s.handleQueueRemoveSource))
 	mux.HandleFunc("GET /v1/control/resource/cleanup", s.auth(s.handleResourceCleanupStatus))
 	mux.HandleFunc("POST /v1/control/resource/cleanup/retry", s.auth(s.handleResourceCleanupRetry))
-	mux.HandleFunc("GET /v1/control/invocations", s.auth(s.handleInvocationList))
 	mux.HandleFunc("GET /v1/control/queue/dlq/messages", s.auth(s.handleControlQueueDLQPreview))
 	mux.HandleFunc("POST /v1/control/queue/dlq/ack", s.auth(s.handleControlQueueDLQAck))
 	mux.HandleFunc("GET /v1/internal/resolve", s.auth(s.handleResolve))

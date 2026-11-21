@@ -554,9 +554,31 @@ async function ensureClaim(env, spec, shard) {
   const key = `${spec.namespace}/${spec.worker}/${storageClass}/shard${shard}`;
   const pending = pendingClaims.get(key);
   if (pending) return await pending;
-  const c = claims.get(key);
   const now = Date.now();
-  if (!c) {
+  const c = claims.get(key);
+  if (c && c.expiryMs - now < GUARD_MS) {
+    try {
+      const o = await renewLease(env, c);
+      if (claims.get(key) !== c) return { resp: json({ error: "owner_unavailable", reason: "claim_changed" }, 503) };
+      c.epoch = o.epoch;
+      c.expiryMs = o.expiry_ms;
+      return null;
+    } catch {
+      // Renew failed inside the guard. Do not dispatch on this lease: the
+      // call can outlast the remaining expiry and then be reported as
+      // result_unknown after the durable object has already run. Drop it
+      // and claim again below. A concurrent request may already be claiming
+      // the replacement; wait for that instead of treating the gap as ours.
+      if (claims.get(key) === c) claims.delete(key);
+      const replacing = pendingClaims.get(key);
+      if (replacing) return await replacing;
+    }
+  } else if (c) {
+    return null;
+  }
+  const raced = pendingClaims.get(key);
+  if (raced) return await raced;
+  {
     const task = (async () => {
     const r = await post(env, "/v1/internal/do/claim", {
       namespace: spec.namespace, worker: spec.worker, class: storageClass, shard,
@@ -595,18 +617,6 @@ async function ensureClaim(env, spec, shard) {
     try { return await task; }
     finally { if (pendingClaims.get(key) === task) pendingClaims.delete(key); }
   }
-  if (c.expiryMs - now < GUARD_MS) {
-    try {
-      const o = await renewLease(env, c);
-      if (claims.get(key) !== c) return { resp: json({ error: "owner_unavailable", reason: "claim_changed" }, 503) };
-      c.epoch = o.epoch;
-      c.expiryMs = o.expiry_ms;
-    } catch (e) {
-      forgetFailedClaim(key, c, e);
-      return { resp: json({ error: "owner_unavailable", reason: "renew_failed" }, 503) };
-    }
-  }
-  return null;
 }
 
 // connect upgrades a WebSocket and hands it to the tenant DO as-is (ADR-080).

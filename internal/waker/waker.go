@@ -41,12 +41,19 @@ type Waker struct {
 	// Cleanup retires stale wake minute entries (ADR-267). Optional and
 	// leader-only; it runs at most once per wakeCleanupInterval so discovery
 	// scans stay cheap without listing the whole wake prefix every pass.
+	// Each call receives a context that ends at CleanupBudget (default one
+	// second) so one pass cannot hold the next dead-owner scan.
 	Cleanup func(ctx context.Context) (removed int, err error)
+	// CleanupBudget is the time limit for one Cleanup call. Zero uses one second.
+	CleanupBudget time.Duration
 
 	lastCleanup time.Time
 }
 
-const wakeCleanupInterval = 10 * time.Minute
+const (
+	wakeCleanupInterval = 10 * time.Minute
+	wakeCleanupBudget   = time.Second
+)
 
 func (w *Waker) nowMs() int64 {
 	if w.Now != nil {
@@ -132,14 +139,6 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 			w.log().Info("waker recovered dead nodes", "nodes", n, "segments", seg, "sessions", sess)
 		}
 	}
-	if w.Cleanup != nil && time.Since(w.lastCleanup) >= wakeCleanupInterval {
-		w.lastCleanup = time.Now()
-		if n, cerr := w.Cleanup(ctx); cerr != nil {
-			w.log().Warn("waker wake cleanup failed", "err", cerr)
-		} else if n > 0 {
-			w.log().Debug("waker retired stale wake entries", "removed", n)
-		}
-	}
 	if w.DeadScopes == nil || w.Open == nil || w.Dispatcher == nil {
 		return 0, true, nil
 	}
@@ -201,5 +200,32 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 			return n
 		}()
 	}
+	// Stale-entry cleanup is maintenance, not dispatch: run it after due timers
+	// are dispatched so a backlogged minute cannot delay real work.
+	if w.Cleanup != nil && time.Since(w.lastCleanup) >= wakeCleanupInterval {
+		w.lastCleanup = time.Now()
+		cctx, cancel := context.WithTimeout(ctx, w.cleanupBudget())
+		n, cerr := w.Cleanup(cctx)
+		cancel()
+		if cerr != nil && !cleanupStopped(cerr) {
+			w.log().Warn("waker wake cleanup failed", "err", cerr)
+		} else if n > 0 {
+			w.log().Debug("waker retired stale wake entries", "removed", n)
+		}
+	}
 	return dispatched, true, nil
+}
+
+func (w *Waker) cleanupBudget() time.Duration {
+	if w.CleanupBudget > 0 {
+		return w.CleanupBudget
+	}
+	return wakeCleanupBudget
+}
+
+func cleanupStopped(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
 }

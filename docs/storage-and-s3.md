@@ -111,7 +111,7 @@ _最后更新：2026-09-25_
 | 快照识别 | NativeHeader.IsSnapshot 仅判断 MinTXID==1；完整页面覆盖、截断再扩展、损坏 CRC 回归；不依赖独立快照标记 | 无额外私有格式路径可豁免 |
 | 原生增量 | sqlcapture/DO producer 直接编码 SQLite 页；原始 WAL offset/size/salts 和 Timestamp；600 次重复页更新跨 chunk 验证 | 严格 100k 三次 owner 崩溃切换通过 |
 | level | 仅 0/1/2/3/9；L1/L2/L3 独立 UTC 30秒/5分钟/1小时；L9 全链快照 | 本轮真实 COS 已逐级验证；不是一小时墙钟长跑 |
-| epoch 续链 | 零页 seed 为 cut+1；旧 epoch 必须恰好接到后继 cut；目录外部携带 epoch；原生 retired.json GC | 已停止备用节点并禁止 URL 回退；冷恢复 100000/100000 一致 |
+| epoch 续链 | seed 为 `[cut+1, cut+1]`，并带上换代时 cursor 不再读取的本地记账页；旧 epoch 必须恰好接到后继 cut；目录外部携带 epoch；原生 retired.json GC | 已停止备用节点并禁止 URL 回退；冷恢复 100000/100000 一致 |
 | compaction | 与参考 Compactor 同样逐输入页缓冲、选择最后版本并按 commit 截断；additive 保留源对象；流式输入/spool 输出 | 整体性能不宣称等同于 celld；不同宿主和 provider 请求路径需分开测量 |
 
 NoChecksum 是参考 celld 普通 sync 和 replica_compactor 使用的标准位，不是 CellHive 私有格式。celld 的独立 handoff snapshot_to_writer 还支持带 rolling post-apply checksum 的快照；CellHive decoder 能读该原生变体，当前 writer 使用 NoChecksum。此区别不能混写成“参考 celld 所有写入路径均禁用数据库校验和”；文件 CRC64 始终保留。
@@ -125,7 +125,7 @@ DO 的实际 HTTPStore 与直接 replica 路径现通过 ProvenWatermark 流式�
 
 ### 大 cell 资源预算（2026-11-09）
 
-原生 LTX 格式保持不变。相邻 level 每轮最多256输入、64MiB；不可拆的超大文件单独推进。可选L9在下载正文前检查最新原生header的逻辑大小：通用默认80MiB，owner释放传入现有256MiB配置；超过逻辑大小或完整链输入预算时跳过，保留原恢复链，不产生部分快照，也不授权删除前驱。
+原生 LTX 格式保持不变。后台相邻 level 每批最多 256 个整份输入，不按字节切开；显式传入字节预算的路径仍遵守该预算，不可拆的超大文件单独推进。显式整库 L9 在下载正文前检查最新原生 header 的逻辑大小，默认上限 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 为 1GiB，同一次快照的输入字节也用这个上限；超过则跳过，保留原恢复链。换代新合成的 L9 用同一上限，超过则改收到 L2。通用 `compaction.Snapshot` 未传预算时仍是 80MiB。交权/空闲 Fold 的 L2 分块是 256MiB，复制已有 L9 不看这 1GiB，Fold 不发布 L3。超过预算不产生部分快照，也不授权删除前驱。
 
 维护/恢复/文件上传各有进程并发限制；长链用短Range代替长期占用所有远端连接。大文件正文流式化，索引仍随页数增长。完整物化最多缓存8MiB解码页面，每个Range不超过8MiB编码数据，并严格限制在相同源对象/ETag及请求页范围内。生产DO分页失败直接返回错误，不退回整段缓冲。原生文件CRC继续完整验证；编码、校验使用缓冲IO，索引尾部比较不再复制完整索引。
 

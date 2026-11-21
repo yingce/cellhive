@@ -302,10 +302,10 @@ CELLHIVE_BUCKET=s3://cellhive AWS_ENDPOINT_URL=http://127.0.0.1:9000 \
 | 配置 | 2 万写后的对象数 | 说明 |
 |---|---|---|
 | 关闭 compaction | **1336** 个 L0（0 L1） | ~15 写/对象（窗口 2ms、c=64） |
-| 开启 compaction（默认 30s / ≥64 段或 64MB） | **3** 个（0 L0 + 3 L1） | `0001/<min>-<max>.ltx`（canonical range object） |
+| 开启 compaction（当时 30s / ≥64 段或 64MB） | **3** 个（0 L0 + 3 L1） | `0001/<min>-<max>.ltx`（canonical range object）。这是当时的测量，不是现行调度 |
 
-- **有自动合并**：cell-agent `runCompactionLoop` 周期扫描 **owned** scope，`>=MinSegments(64)` 或 `>=MinBytes(64MB)` 时 fold L0→L1 + GC 旧对象（fold 前校验 owner/epoch）；恢复只读 L1 + 更新的 L0（有界）。原始：`docs/archive/bench/ltx-fragmentation.txt`。
-- 碎片峰值 ≈ 两次 compaction 之间的对象数 ≈ **PUT 速率 × compaction 周期**。ADR-312 后各 level 固定独立周期（L1 30 秒、L2 5 分钟、L3 1 小时）；旧的 `CELLHIVE_COMPACTION_INTERVAL=5–10s` 调优建议已失效。
+- **有自动合并**：上面那次测量里，cell-agent 按周期扫描 owned scope，达到 64 段或 64MB 就折叠 L0→L1。原始：`docs/archive/bench/ltx-fragmentation.txt`。现行调度见下一句。
+- 碎片峰值 ≈ 两次 compaction 之间的对象数 ≈ **PUT 速率 × 距下次晋升的时间**。现行默认没有扫描周期：L0 进桶后按 256 个对象或 64MiB 收 L1。定时压缩已删除。ADR-312 的 30 秒/5 分钟/1 小时时钟，以及更早的 5–10 秒建议，都不是现行默认。
 
 
 ### 已试过、**无收益、已回退**的微优化

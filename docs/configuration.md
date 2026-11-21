@@ -187,15 +187,16 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_PAGED_HYDRATE_MBPS` | 整数，默认 `16` | paged cell 后台补齐速率（MiB/s，每节点同时一个）；`0` = 保持稀疏、每个冷页读桶 |
 | `CELLHIVE_PAGED_READAHEAD_BYTES` | 字节，默认 `1MiB` | 一次 paged read 的字节预算；按实际 pageSize 换算页数（至少 1 页） |
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
-| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 关) | 0 关闭；正值启用固定独立周期：L1 30 秒、L2 5 分钟、L3 1 小时（ADR-312；数值不再覆盖周期） |
 | `CELLHIVE_COMPACTION_TIMEOUT` | `5m` | 每个 scope 单独的 compaction deadline；非正值在循环中回退 5m，不是关闭超时 |
-| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 触发段数 |
-| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | 触发字节 |
-| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `8` | 新 L0 对象数触发阈值，与段数/存储字节阈值为 OR |
-| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷且长链的 owned cell best-effort 发布 L9；每 epoch 最多一张（已有 L9 跳过），异步、受 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 限制，不阻塞驱逐 |
+| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 保留。后台晋升不看段数 |
+| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | owner 记下的未收 L0 存放字节门槛，与文件个数是或的关系。只决定是否开始，不把一批按这个值切开，也不为这个判断列桶 |
+| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | 共用个数。异步 L0 上传凑满这么多段就刷；owner 记下的未收 L0 文件达到它就收 L1。非正值按 256。没有定时扫描 |
+| `CELLHIVE_UPLOAD_INTERVAL` | `30s` | 异步桶上传空闲合批周期；EnqueueWait/同步桶证明仍立即唤醒 |
+| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷 owned cell best-effort `FoldBaseline`。已有 L9 则跳过。没有 L9 时，owner 累计的未收 L0 文件数达到 `CELLHIVE_COMPACTION_MIN_OBJECTS` 才 Fold。交权前同样 Fold，不看这个个数。不阻塞驱逐 |
+| `CELLHIVE_EPOCH_SNAPSHOT_MAX` | `1GiB` | 显式整库 L9（`--snapshot`）和换代时新合成 L9 的逻辑库上限，也是这一次快照能吃下的输入字节。显式快照超过就跳过。换代合成超过就改收到 L2，不拆已有 L9。已有 L9 仍整份拷贝。后台 L1 不按这个值切。交权/空闲 Fold 的 L2 分块仍是 256MiB。换代续链不看这个值 |
 | `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |
 
-运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC，`--snapshot` 在当前 owner 上发布一次完整 L9 快照（不删除源对象，不加 epoch GC）；`--grace` 默认 3600 秒，按对象上传时间计龄。同 epoch 内多余 L9 的回收（原 `--prune-l9 --keep-l9`）已移除，暂不提供该运维入口；常态下一个 epoch 至多因 idle 与 release 各发布一张 L9，旧 L9 随 epoch 退休一并回收。压缩不删除源文件，已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。
+运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC，`--snapshot` 在当前 owner 上发布一次完整 L9 快照（不删除源对象，不加 epoch GC）；`--grace` 默认 3600 秒，按对象上传时间计龄。同 epoch 空闲回收：**不**提供 `--prune-l9`；自动删多余 L9 / 被覆盖 L0–L3 需 `IdleDeleteOK`（排空保护+无读者），Fold/空闲驱逐默认不删。L9 水位之上的碎 L0 在线删除仍 DEFERRED。已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。
 
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` 关 | bundle/assets GC |
 | `CELLHIVE_BUNDLE_GC_GRACE` | `24h` | 未引用保留期 |
@@ -246,7 +247,7 @@ supervisor blob/segment 读取 **64MiB**，Range 按请求长度且不超过 seg
 | `CELLHIVE_FACADES_JS` | `workerd/platform/facades.js` | facade 源 |
 | `CELLHIVE_RUNTIME_DIR` | `$TMPDIR/cellhive` | 运行目录（子目录 `user-runtime/`） |
 | `CELLHIVE_TENANT_LOG_CAPTURE` | `on` | `on` 允许按订阅挂载 native Tail（ADR-238：默认不采集，只有活跃 tail 订阅/`OTLP_LOGS=all` 时采集）；`off` 为节点硬上限，不附加 native Tail；仅接受 `on`/`off` |
-| `CELLHIVE_INVOCATION_LOGS` | `on` | 节点级 Queue/Cron/Workflow 持久调用记录开关（ADR-239）；`off` 不写记录、不导出 OTLP invocation 日志，不改变业务执行与 Queue ack；仅接受 `on`/`off` |
+| `CELLHIVE_INVOCATION_LOGS` | `on` | 节点级 Queue/Cron/Workflow 完成记录和 HTTP fetch 摘要开关（ADR-239）。`on` 时结束才导出一条 OTLP 日志，不含 console，不写 cell；有日志卷轴时先入卷轴再转发，否则直接 POST `CELLHIVE_OTLP_ENDPOINT`。`off` 不导出，不改变业务执行与 Queue ack。与 `CELLHIVE_OTLP_LOGS` 无关，后者只控制 cell-agent 从 Tail 补导出。仅接受 `on`/`off` |
 | `CELLHIVE_ISOLATE_MAX` | `128` | user-runtime 公网 loader 驻留的 warm isolate 上限（worker 版本 × tail 变体），由部署环境变量注入；正整数 |
 | `CELLHIVE_ISOLATE_BYTES` | `268435456`（128 × 2MiB） | 驻留 isolate 的估算字节预算上限（实际 RSS 会略高）；省略时按 `CELLHIVE_ISOLATE_MAX × 2MiB` 推导；整数 bytes（≥1MiB） |
 | `CELLHIVE_INGRESS_PORT` | `0` | 可选 Go ingress 监听端口（ADR-240）；0 关闭。启用后 Traefik 静态转发到该端口，ingress 按 Host 路由到静态 workerd socket 或动态 loader |

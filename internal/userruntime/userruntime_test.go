@@ -30,6 +30,9 @@ import (
 	"time"
 
 	"cellhive/internal/bearertoken"
+
+	collectorlog "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func testJWTKey(role string) string {
@@ -1318,7 +1321,6 @@ func TestWorkflowStepsStubIsScoped(t *testing.T) {
 	var seen []string
 	var attempts []map[string]any
 	var stepTraces []string
-
 	const probe = `
 import { WorkflowEntrypoint } from "cloudflare:workers";
 export class Probe extends WorkflowEntrypoint {
@@ -1333,16 +1335,38 @@ export class Probe extends WorkflowEntrypoint {
 			_, _ = w.Write([]byte(probe))
 		case "/v1/internal/worker/bindings":
 			_, _ = w.Write([]byte(`{"bindings":{},"vars":{}}`))
-		case "/v1/internal/invocations":
-			var record map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+		case "/v1/logs":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			var req collectorlog.ExportLogsServiceRequest
+			if err := proto.Unmarshal(body, &req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			mu.Lock()
-			attempts = append(attempts, record)
+			for _, resource := range req.ResourceLogs {
+				for _, scope := range resource.ScopeLogs {
+					for _, rec := range scope.LogRecords {
+						attrs := map[string]any{}
+						for _, attr := range rec.Attributes {
+							if attr.Value.GetBoolValue() {
+								attrs[attr.Key] = "true"
+								continue
+							}
+							attrs[attr.Key] = attr.Value.GetStringValue()
+						}
+						if rec.Body.GetStringValue() == "invocation" {
+							attrs["cellhive.trace_id"] = fmt.Sprintf("%x", rec.TraceId)
+							attempts = append(attempts, attrs)
+						}
+					}
+				}
+			}
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]any{"invocation": record})
+			w.WriteHeader(http.StatusOK)
 		case "/v1/internal/workflow/state", "/v1/internal/workflow/step", "/v1/internal/workflow/attempt", "/v1/internal/workflow/finish":
 			mu.Lock()
 			seen = append(seen, r.URL.RawQuery)
@@ -1375,8 +1399,8 @@ export class Probe extends WorkflowEntrypoint {
 	internalPort, publicPort := freePort(t), freePort(t)
 	capnpPath, err := Render(t.TempDir(), Config{
 		CellURL: stub.URL, CellToken: testJWTKey("internal"), DispatchToken: testJWTKey("dispatch"), BindingSigningKey: testJWTKey("scope"),
-		InvocationLogging: true,
-		InternalPort:      internalPort, PublicPort: publicPort,
+		InvocationLogging: true, OTLPLogsURL: stub.URL,
+		InternalPort: internalPort, PublicPort: publicPort,
 		PlatformJS: "../../workerd/user-runtime", FacadesJS: "../../workerd/platform/facades.js",
 	})
 	if err != nil {
@@ -1427,18 +1451,22 @@ export class Probe extends WorkflowEntrypoint {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(attempts) != 2 || attempts[0]["status"] != "running" || attempts[1]["status"] != "success" || attempts[1]["kind"] != "workflow" || attempts[1]["resource"] != "MY_WF" {
-		t.Fatalf("workflow invocation records = %+v", attempts)
+	if len(attempts) != 1 || attempts[0]["cellhive.outcome"] != "success" || attempts[0]["cellhive.event_type"] != "workflow" || attempts[0]["cellhive.resource"] != "MY_WF" {
+		t.Fatalf("workflow invocation OTLP records = %+v", attempts)
 	}
-	if attempts[0]["invocation_id"] != attempts[1]["invocation_id"] || attempts[1]["request_id"] != attempts[1]["invocation_id"] {
+	if attempts[0]["cellhive.request_id"] != attempts[0]["cellhive.invocation_id"] {
 		t.Fatalf("workflow invocation correlation = %+v", attempts)
 	}
-	if tp, ok := attempts[1]["traceparent"].(string); !ok || !regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`).MatchString(tp) {
-		t.Fatalf("workflow traceparent = %+v", attempts[1]["traceparent"])
+	if _, ok := attempts[0]["cellhive.logs"]; ok {
+		t.Fatalf("console must not be embedded in the invocation export: %+v", attempts[0])
+	}
+	wantTrace, _ := attempts[0]["cellhive.trace_id"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(wantTrace) {
+		t.Fatalf("workflow trace id = %+v", attempts[0])
 	}
 	for _, tp := range stepTraces {
-		if tp != attempts[1]["traceparent"] {
-			t.Fatalf("workflow step traceparent = %q, want %q", tp, attempts[1]["traceparent"])
+		if !regexp.MustCompile(`^00-` + wantTrace + `-`).MatchString(tp) {
+			t.Fatalf("workflow step traceparent = %q, want trace %q", tp, wantTrace)
 		}
 	}
 	if len(seen) == 0 {

@@ -398,6 +398,7 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		}
 	}
 	paged := false
+	freshSparse := false
 	var restoredTXID uint64
 	if cold && (missing || markerValid) && s.Paged != nil {
 		hctx, cancel := s.hydrateContext(ctx)
@@ -454,6 +455,11 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 					return nil, fmt.Errorf("cellstore: paged prepare %s: %v (cleanup: %w)", sc, err, rerr)
 				}
 				return nil, fmt.Errorf("cellstore: paged prepare %s: %w", sc, err)
+			} else {
+				// This process just created the sparse file. It has no locally
+				// acked pages yet, so a failed SQLite open must not leave the
+				// dirty marker that fail-closes every later open.
+				freshSparse = true
 			}
 			paged = true
 			restoredTXID = srcTx
@@ -497,11 +503,22 @@ func (s *Store) Cell(ctx context.Context, sc cell.Scope) (*Cell, error) {
 		if paged {
 			pagedvfs.Release(p)
 		}
+		if freshSparse {
+			if rerr := removeCellFileSet(p); rerr != nil {
+				return nil, fmt.Errorf("cellstore: paged open %s: %v (cleanup: %w)", sc, err, rerr)
+			}
+		}
 		return nil, err
 	}
 	if restoredTXID > 0 {
 		if err := c.AdoptRestoreTXID(ctx, restoredTXID); err != nil {
 			_ = c.Close()
+			if freshSparse {
+				pagedvfs.Release(p)
+				if rerr := removeCellFileSet(p); rerr != nil {
+					return nil, fmt.Errorf("cellstore: paged open %s: %v (cleanup: %w)", sc, err, rerr)
+				}
+			}
 			return nil, err
 		}
 	}

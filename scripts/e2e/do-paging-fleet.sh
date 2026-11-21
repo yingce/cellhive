@@ -11,7 +11,6 @@ DO_A=$((E2E_PORT_BASE+6)); DO_B=$((E2E_PORT_BASE+7))
 GATE_A=$((E2E_PORT_BASE+8)); GATE_B=$((E2E_PORT_BASE+9))
 export CELLHIVE_DO_RUNTIMES="http://127.0.0.1:$DO_A,http://127.0.0.1:$DO_B"
 export CELLHIVE_DURABILITY=auto
-export CELLHIVE_COMPACTION_INTERVAL=1h
 ROWS=${E2E_PAGING_ROWS:-256}
 [[ "$ROWS" =~ ^[0-9]+$ ]] && ((ROWS >= 256 && ROWS <= 16384)) || e2e_fail "invalid row count"
 

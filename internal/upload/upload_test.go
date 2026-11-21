@@ -46,6 +46,27 @@ func (f *fakeSink) AppendBatch(_ context.Context, _ cell.Scope, _ uint64, segmen
 	return "key", "etag", nil
 }
 
+func TestBatcherNotifiesAfterDurableUpload(t *testing.T) {
+	sink := &fakeSink{}
+	b := New(sink, nil, 64, 1<<20, time.Hour)
+	var got atomic.Int64
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}
+	b.SetOnDurable(func(s cell.Scope, epoch uint64) {
+		if s == sc && epoch == 3 {
+			got.Add(1)
+		}
+	})
+	if err := b.appendBatch(context.Background(), sc, 3, [][]byte{[]byte("a")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.appendBatch(context.Background(), sc, 3, [][]byte{[]byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+	if n := got.Load(); n != 2 {
+		t.Fatalf("durable notifications = %d, want 2", n)
+	}
+}
+
 func TestBatcherCoalesces(t *testing.T) {
 	sink := &fakeSink{}
 	b := New(sink, nil, 64, 1<<20, 10*time.Millisecond)

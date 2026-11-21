@@ -81,6 +81,7 @@ type Batcher struct {
 	deferred       atomic.Uint64
 	replayed       atomic.Uint64
 	replayInterval time.Duration
+	onDurable      atomic.Value // func(cell.Scope, uint64), called after a successful upload
 
 	closeOnce sync.Once
 }
@@ -143,6 +144,23 @@ func (b *Batcher) SetSpool(sp *Spool) {
 		b.replayInterval = 5 * time.Second
 	}
 	b.spool = sp
+}
+
+// SetOnDurable registers a non-blocking hook invoked after a batch is durable.
+// The hook must not wait for compaction; the caller may be the upload loop.
+func (b *Batcher) SetOnDurable(fn func(cell.Scope, uint64)) {
+	if fn == nil {
+		return
+	}
+	b.onDurable.Store(fn)
+}
+
+func (b *Batcher) noteDurable(s cell.Scope, epoch uint64) {
+	v := b.onDurable.Load()
+	if v == nil {
+		return
+	}
+	v.(func(cell.Scope, uint64))(s, epoch)
 }
 
 // shardFor picks the upload lane for a scope (stable, so per-scope order holds).
@@ -603,8 +621,15 @@ func (b *Batcher) appendBatch(ctx context.Context, s cell.Scope, epoch uint64, s
 	if sink, ok := b.sink.(interface {
 		UploadBatch(context.Context, cell.Scope, uint64, [][]byte) error
 	}); ok {
-		return sink.UploadBatch(ctx, s, epoch, segments)
+		if err := sink.UploadBatch(ctx, s, epoch, segments); err != nil {
+			return err
+		}
+		b.noteDurable(s, epoch)
+		return nil
 	}
-	_, _, err := b.sink.AppendBatch(ctx, s, epoch, segments)
-	return err
+	if _, _, err := b.sink.AppendBatch(ctx, s, epoch, segments); err != nil {
+		return err
+	}
+	b.noteDurable(s, epoch)
+	return nil
 }

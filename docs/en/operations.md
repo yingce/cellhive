@@ -7,17 +7,11 @@ CellHive-specific admin extensions (`:8082`, `x-cellhive-admin-token` or configu
 - `GET /v1/queue/dead-letters?namespace=acme&queue=jobs&limit=100&cursor=...`: read-only preview of the configured DLQ. Use `direct=1&queue=dlq` for an independent DLQ resource. Message bodies are base64; source queue/attempt/timestamp fields are retained.
 - `POST /v1/queue/dead-letters/ack?namespace=acme&queue=jobs`, JSON `{"message_ids":["id"]}`: idempotent selected ack, 1..100 IDs. It cannot cancel already executing handlers.
 - KV/Queue resource DELETE revokes immediately and returns a cleanup job. Query `GET /v1/control/resource/cleanup?namespace=acme&kind=queue&name=jobs`; retry `POST /v1/control/resource/cleanup/retry?...`. The job is pending/running/failed/complete with errors/backoff/attempts. Recreate is blocked until complete. Independent DLQ resources remain; only provably source-owned dead letters are removed.
-- `GET /v1/control/invocations?namespace=acme&worker=web&kind=cron&from_ms=...&to_ms=...&invocation_id=...&limit=100&cursor=...` returns execution results/errors and correlated console lines. Attempt UUIDs are distinct from logical retry IDs. Retention: seven days/10,000 attempts per namespace, bounded write-time pruning; console truncation is explicit. Unfinished crashed attempts remain running. Disabling native Tail does not disable invocation records; invocation records are controlled node-wide by `CELLHIVE_INVOCATION_LOGS` (default on, ADR-239) and have no per-worker policy.
+- Invocation attempts are OTLP log records. There is no `GET /v1/control/invocations` endpoint and no `__invocations__` cell. Node-wide `CELLHIVE_INVOCATION_LOGS` (default on) controls Queue/Cron/Workflow and HTTP fetch summaries (ADR-239, 2026-11-20 revision). Field-level formats are in the Chinese runbook [operations.md](../operations.md) section “OTLP 日志格式”.
 
-See the Chinese runbook [operations.md](../operations.md) for the current cleanup, invocation and rollout contract. The 2026-10-15 spec under `superpowers/` is historical.
+See that runbook for the current cleanup, invocation and rollout contract. The 2026-10-15 spec under `superpowers/` is historical.
 
-Queue regrouping retains per-message logical IDs/attempts and predecessor
-invocation IDs. Query `message_id` or `message_logical_id` to follow a partial
-retry across batches. Records include bounded tagged result data (8 KiB,
-explicit truncation/unsupported encoding) and per-message ack/retry delay details.
-Retirement GC obligations survive namespace purge; local generation-bound
-admission and destination transaction validation fence offline cache reuse,
-stale claimed batches and delayed source-incarnation transfers.
+Queue regrouping is followed with `cellhive.logical_id` and `cellhive.attempt`. `cellhive.producer_links` carries producer request/trace ids. Handler return values are not logged; only ack and retry counts are. Retirement GC obligations survive namespace purge; local generation-bound admission and destination transaction validation fence offline cache reuse, stale claimed batches and delayed source-incarnation transfers.
 
 ## Startup
 

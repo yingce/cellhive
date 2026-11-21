@@ -42,7 +42,8 @@ func TestNativeContinuationRetryKeepsOriginalAndRejectsDelta(t *testing.T) {
 		t.Fatal("different database shape accepted")
 	}
 	h.Commit = 1
-	delta, err := ltx.EncodeNativePages(h, []ltx.WALPage{{PageNo: 1, Data: make([]byte, 512)}})
+	h.WALSize = 24 + 512
+	delta, err := ltx.EncodeNativePages(h, []ltx.WALPage{{PageNo: 1, Data: bytes.Repeat([]byte{0x11}, 512)}})
 	if err != nil {
 		t.Fatal(err)
 	}

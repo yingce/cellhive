@@ -48,10 +48,11 @@ type Manager struct {
 	Checkpoint   time.Duration // owner re-check interval
 	AutoSnapshot bool          // emit a baseline snapshot at first capture
 	// OnLostOwner, when set, runs once when this node stops owning a scope
-	// (ownership moved or the epoch changed). The cell-agent uses it to forget
-	// the local cell so later reads re-hydrate from the bucket instead of
-	// serving a stale copy (ADR-115).
-	OnLostOwner func(scope cell.Scope)
+	// (ownership moved or the epoch changed). epoch is the generation this
+	// capture was holding. The cell-agent uses it to forget the local cell and
+	// that epoch's L0 tally so later reads re-hydrate from the bucket instead
+	// of serving a stale copy (ADR-115).
+	OnLostOwner func(scope cell.Scope, epoch uint64)
 
 	// Durable, when set, returns the highest contiguous durable txid for a
 	// scope/epoch in the bucket (cold path). Ensure uses it to continue an
@@ -70,8 +71,9 @@ type Manager struct {
 	// on every new epoch. Larger cells keep the cross-epoch chain until paged
 	// continuation is wired; 0 snapshots every new epoch.
 	EpochSnapshotMaxBytes int64
-	// WriteContinuation publishes the native zero-page [cut+1,cut+1] LTX.
-	WriteContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader) error
+	// WriteContinuation publishes the [cut+1,cut+1] epoch seed, including the
+	// local bookkeeping pages the next capture cursor will not read.
+	WriteContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader, pages []ltx.WALPage) error
 	// CheckContinuation only verifies an existing seed after an ambiguous publication.
 	CheckContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader) error
 	// PagedBaselinePoll is how often a marker-resumed paged cell checks whether
@@ -370,10 +372,21 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 	// update) failed. Retry only the single zero-page continuation; the writer
 	// validates the existing native object, rejecting a real missing delta.
 	if exists && local != ^uint64(0) && durable == local+1 && local == baseline && m.CheckContinuation != nil {
-		if _, err := c.SeedContinuation(ctx, local, func(h ltx.NativeHeader) error {
-			return m.CheckContinuation(ctx, scope, epoch, h)
-		}); err != nil {
+		// The seed's pages are already published. Repeating that SQLite
+		// rewrite would change pages the capture cursor then skips.
+		var ps, commit uint32
+		if err := c.DB.QueryRowContext(ctx, "PRAGMA page_size").Scan(&ps); err != nil {
+			return false, false, err
+		}
+		if err := c.DB.QueryRowContext(ctx, "PRAGMA page_count").Scan(&commit); err != nil {
+			return false, false, err
+		}
+		h := ltx.NativeHeader{PageSize: ps, Commit: commit, MinTXID: local + 1, MaxTXID: local + 1, WALOffset: 32}
+		if err := m.CheckContinuation(ctx, scope, epoch, h); err != nil {
 			return false, false, fmt.Errorf("cellcapture: retry continuation: %w", err)
+		}
+		if err := c.AdvanceContinuationTXID(ctx, local); err != nil {
+			return false, false, err
 		}
 		return true, true, nil
 	}
@@ -393,8 +406,8 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 			m.log().Info("capture opens new epoch with a snapshot", "scope", scope.String(), "epoch", epoch, "bytes", size)
 			return false, false, nil
 		}
-		if _, err := c.SeedContinuation(ctx, local, func(header ltx.NativeHeader) error {
-			return m.WriteContinuation(ctx, scope, epoch, header)
+		if _, err := c.SeedContinuation(ctx, local, func(header ltx.NativeHeader, pages []ltx.WALPage) error {
+			return m.WriteContinuation(ctx, scope, epoch, header, pages)
 		}); err != nil {
 			return false, false, fmt.Errorf("cellcapture: write epoch continuation: %w", err)
 		}
@@ -621,15 +634,19 @@ func (m *Manager) watchOwner(ctx context.Context, key string, scope cell.Scope, 
 				return
 			}
 			changed := st == nil || !isOwner || st.epoch != epoch
+			var lostEpoch uint64
+			if st != nil {
+				lostEpoch = st.epoch
+			}
 			if changed && st != nil {
 				m.stopLocked(key, st, false)
 			}
 			m.mu.Unlock()
 			if changed {
 				m.log().Info("cellcapture stopped", "scope", key, "owner", isOwner, "epoch", epoch)
-				if !isOwner || (st != nil && st.epoch != epoch) {
+				if !isOwner || lostEpoch != epoch {
 					if m.OnLostOwner != nil {
-						m.OnLostOwner(scope)
+						m.OnLostOwner(scope, lostEpoch)
 					}
 				}
 				return

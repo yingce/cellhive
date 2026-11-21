@@ -174,6 +174,22 @@ func TestFromEnvStorageNames(t *testing.T) {
 	}
 }
 
+func TestFromEnvEpochSnapshotMaxDefault(t *testing.T) {
+	t.Setenv("CELLHIVE_EPOCH_SNAPSHOT_MAX", "")
+	if c := FromEnv(); c.CaptureEpochSnapshotMaxBytes != 1<<30 {
+		t.Fatalf("epoch snapshot max = %d, want 1GiB", c.CaptureEpochSnapshotMaxBytes)
+	}
+}
+
+func TestFromEnvCompactionL1Bars(t *testing.T) {
+	t.Setenv("CELLHIVE_COMPACTION_MIN_OBJECTS", "")
+	t.Setenv("CELLHIVE_COMPACTION_MIN_BYTES", "")
+	c := FromEnv()
+	if c.CompactionMinObjects != 256 || c.CompactionMinBytes != 64<<20 {
+		t.Fatalf("L1 bars objects=%d bytes=%d", c.CompactionMinObjects, c.CompactionMinBytes)
+	}
+}
+
 func TestFromEnvDurationKnobs(t *testing.T) {
 	t.Setenv("CELLHIVE_PEER_LATENCY", "25ms")
 	t.Setenv("CELLHIVE_BINDING_CACHE", "2s")

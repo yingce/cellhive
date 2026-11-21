@@ -27,9 +27,9 @@
 | `CELLHIVE_CELL_DISK_MAX` | `0` 无限 | cell 文件字节预算（LRU 删非 owned） |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor 间隔 |
 | `CELLHIVE_CELL_IDLE` | `5m` | 空闲句柄关闭；`0` 关闭 TTL 驱逐 |
-| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 关) | L0→L1 压实 |
-| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | 触发字节 |
-| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 触发段数 |
+| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | owner 记下的未收 L0 存放字节门槛，与文件个数是或的关系。只决定是否开始 |
+| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 保留。后台晋升不看段数 |
+| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | 共用个数：异步 L0 凑满这么多段就上传，未收 L0 文件达到它就收 L1。没有定时扫描 |
 | `CELLHIVE_CRON_INTERVAL` | `30s` (0 关) | cron→timer 物化 |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | 本地工作目录根（spool、DO 盘等由此派生） |
 | `CELLHIVE_DISK_HIGH` | `0` 关 | 高水位→overloaded 拒 claim |
@@ -37,7 +37,7 @@
 | `CELLHIVE_DO_EAGER_RESTART` | `false` | deploy 急切重启 DO |
 | `CELLHIVE_DO_RUNTIMES` | 空 | do-runtime 列表（DO 放置）；空则禁用 `/v1/do/invoke` |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
-| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷且长链的 owned cell best-effort 发布 L9（每 epoch 最多一张，已有 L9 跳过；受 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 限制）；不阻塞驱逐 |
+| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时 Fold。已有 L9 则跳过。没有 L9 时，owner 累计的未收 L0 达到 `CELLHIVE_COMPACTION_MIN_OBJECTS` 才 Fold。交权前不看这个个数。该值默认 1GiB 只限制显式整库 L9 |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
 | `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
 | `CELLHIVE_MAX_OPEN_CELLS` | `128` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |

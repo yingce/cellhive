@@ -108,7 +108,7 @@ The previously requested general cell SQLite export/import product entry point i
 
 ### Large-cell resource budgets (2026-11-09)
 
-Native LTX format is unchanged. Adjacent-level rounds select at most256 inputs/64MiB; one indivisible large source runs alone. OptionalL9 checks the latest native header before payload reads (80MiB generic default, existing256MiB policy on owner release); over-budget logical size or full-chain inputs skip without partial publication or predecessor deletion.
+Native LTX format is unchanged. Background adjacent-level batches take at most 256 whole inputs and do not cut by size. A path that passes an explicit byte budget still honors it. One indivisible large source runs alone. An explicit whole-database L9 checks the latest native header first. `CELLHIVE_EPOCH_SNAPSHOT_MAX` defaults to 1GiB and also bounds that snapshot's stored inputs; over budget, the snapshot is skipped and the chain stays. A newly synthesized handoff L9 uses the same ceiling and is published at L2 when it does not fit. `compaction.Snapshot` without a budget still uses 80MiB. Handoff and idle L2 chunks stay 256MiB, copying an existing L9 ignores the 1GiB ceiling, and fold does not publish L3. Over-budget snapshots do not publish a partial chain or delete predecessors.
 
 Maintenance, native proof, restore/index construction and file upload have process concurrency limits. Long plans use bounded versioned ranges; materialization caches at most8MiB decoded pages with1MiB encoded requests, preserving source/ETag and sparse range boundaries. Production DO paging errors do not fall back to whole bodies. CRC remains mandatory; buffered disk IO and chunked index comparison reduce overhead. Final page-index memory still scales with page count.
 

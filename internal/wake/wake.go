@@ -22,6 +22,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -46,6 +47,9 @@ type Index struct {
 	immutableHints bool
 	// Validate runs after deletion candidates are captured, before provider mutation.
 	Validate func(context.Context, string) error
+
+	cleanupMu  sync.Mutex
+	cleanupCur wakeCursor
 }
 
 // New opens the wake index over a bucket.
@@ -53,6 +57,14 @@ func New(b bucket.Bucket) *Index {
 	i := &Index{store: objectstore.NewOwned(b, objectstore.PrefixWake, objectstore.OwnerWaker)}
 	if mode, ok := b.(interface{ ImmutableWakeHints() bool }); ok {
 		i.immutableHints = mode.ImmutableWakeHints()
+	}
+	// Providers that cannot fence ConditionalDelete on wake due keys must use
+	// revisioned immutable hints so obsolete entries are reclaimed with Delete.
+	// Otherwise reschedules silently retain every prior due object forever.
+	if !i.immutableHints {
+		if scd, ok := b.(interface{ SupportsConditionalDelete(string) bool }); ok && !scd.SupportsConditionalDelete("wake/due/probe.json") {
+			i.immutableHints = true
+		}
 	}
 	return i
 }
@@ -420,62 +432,218 @@ func (i *Index) Count(ctx context.Context) (int, error) {
 
 // Cleanup removes due-minute entries that no longer match their scope pointer:
 // the residual entries from reschedules, crashes or a scope that was deleted
-// before it could be retired. It scans minute buckets older than olderThanMs
-// and deletes at most limit entries. A pointer that still names the entry is
-// kept (an overdue timer is real work, not garbage).
+// before it could be retired. One call inspects and deletes at most limit
+// keys. A pointer that still names the entry is kept (an overdue timer is real
+// work, not garbage). A larger history continues through CleanupDrain.
 func (i *Index) Cleanup(ctx context.Context, olderThanMs int64, limit int) (int, error) {
+	n, _, err := i.CleanupPage(ctx, olderThanMs, limit, wakeCursor{})
+	return n, err
+}
+
+// CleanupDrain pages CleanupPage until the age cut is empty, maxRemoved
+// deletions are done, or maxScanned keys have been inspected. A nonpositive
+// scan budget uses maxRemoved. The resume cursor stays on this index so the
+// next leader interval continues instead of listing the same live entries.
+func (i *Index) CleanupDrain(ctx context.Context, olderThanMs int64, pageLimit, maxRemoved, maxScanned int) (int, error) {
+	if pageLimit <= 0 {
+		pageLimit = 512
+	}
+	if maxRemoved <= 0 {
+		maxRemoved = pageLimit * 32
+	}
+	if maxScanned <= 0 {
+		maxScanned = maxRemoved
+	}
+	i.cleanupMu.Lock()
+	cur := i.cleanupCur
+	i.cleanupMu.Unlock()
+	save := func(c wakeCursor) {
+		i.cleanupMu.Lock()
+		i.cleanupCur = c
+		i.cleanupMu.Unlock()
+	}
+	total := 0
+	scanned := 0
+	for total < maxRemoved && scanned < maxScanned {
+		if ctx.Err() != nil {
+			save(cur)
+			return total, nil
+		}
+		limit := pageLimit
+		if rem := maxRemoved - total; rem < limit {
+			limit = rem
+		}
+		if rem := maxScanned - scanned; rem < limit {
+			limit = rem
+		}
+		if limit < 1 {
+			break
+		}
+		n, next, err := i.CleanupPage(ctx, olderThanMs, limit, cur)
+		scanned += limit
+		total += n
+		if err != nil {
+			if next.Minute != "" || next.Key != "" {
+				save(next)
+			} else {
+				save(cur)
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return total, nil
+			}
+			if errors.Is(err, context.Canceled) {
+				return total, nil
+			}
+			return total, err
+		}
+		if next.Minute == "" && next.Key == "" {
+			save(wakeCursor{})
+			return total, nil
+		}
+		cur = next
+	}
+	save(cur)
+	return total, nil
+}
+
+// wakeCursor resumes a cleanup pass inside one minute. Both fields are
+// inclusive: a pass that stopped before removing anything re-enters the same
+// position instead of skipping it.
+type wakeCursor struct {
+	Minute string
+	Key    string
+}
+
+// CleanupPage is one budgeted pass that resumes from cursor. next is empty when
+// the age cut is drained. A non-empty Key means the pass stopped inside that
+// minute, so the next pass does not re-list it from the beginning.
+func (i *Index) CleanupPage(ctx context.Context, olderThanMs int64, limit int, cur wakeCursor) (removed int, next wakeCursor, err error) {
 	if limit <= 0 {
 		limit = 128
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, cur, err
+	}
 	prefixes, err := i.store.CommonPrefixes(ctx, prefixDue, "/")
 	if err != nil {
-		return 0, err
+		return 0, wakeCursor{}, err
 	}
-	removed := 0
+	sort.Strings(prefixes)
+	seen := 0
 	for _, prefix := range prefixes {
+		if cur.Minute != "" && prefix < cur.Minute {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			resume := wakeCursor{Minute: prefix}
+			if prefix == cur.Minute {
+				resume.Key = cur.Key
+			}
+			return removed, resume, err
+		}
 		start, ok := minuteStart(prefix)
 		if !ok || start >= olderThanMs {
 			continue
 		}
-		keys, err := i.store.ListPrefix(ctx, prefix)
-		if err != nil {
-			return removed, err
+		after := ""
+		if prefix == cur.Minute {
+			after = cur.Key
 		}
-		for _, key := range keys {
-			if removed >= limit {
-				return removed, nil
+		// Page from the cursor instead of listing the whole minute. The page is
+		// sized by the remaining budget, so one pass never re-reads keys that an
+		// earlier pass already inspected.
+		last := after
+		for {
+			size := limit - removed
+			if size < 1 {
+				size = 1
 			}
-			if !strings.HasSuffix(key, ".json") {
-				continue
+			if remain := limit - seen; remain < size {
+				size = remain
 			}
-			data, etag, gerr := i.store.GetVersion(ctx, key)
-			if gerr != nil {
-				continue
+			if size < 1 {
+				return removed, wakeCursor{Minute: prefix, Key: last}, nil
 			}
-			var e Entry
-			if json.Unmarshal(data, &e) != nil || e.Scope == "" {
-				if deleted, err := i.deleteCandidate(ctx, deleteCandidate{key: key, etag: etag, data: data}, nil); err != nil {
-					return removed, err
-				} else if deleted {
-					removed++
+			page, next, perr := i.store.ListPage(ctx, prefix, after, size)
+			if perr != nil {
+				return removed, wakeCursor{Minute: prefix, Key: last}, perr
+			}
+			for _, info := range page {
+				if err := ctx.Err(); err != nil {
+					return removed, wakeCursor{Minute: prefix, Key: last}, err
 				}
-				continue
+				seen++
+				key := info.Key
+				if !strings.HasSuffix(key, ".json") {
+					last = key
+					if seen >= limit {
+						return removed, wakeCursor{Minute: prefix, Key: last}, nil
+					}
+					continue
+				}
+				data, etag, gerr := i.store.GetVersion(ctx, key)
+				if gerr != nil {
+					if ctx.Err() != nil {
+						return removed, wakeCursor{Minute: prefix, Key: last}, ctx.Err()
+					}
+					// Unreadable right now: skip it but still advance, exactly as
+					// the pre-cursor code did. Stopping here would retry the same
+					// key every interval and never reach the rest of the minute.
+					last = key
+					if seen >= limit {
+						return removed, wakeCursor{Minute: prefix, Key: last}, nil
+					}
+					continue
+				}
+				var e Entry
+				if json.Unmarshal(data, &e) != nil || e.Scope == "" {
+					if deleted, derr := i.deleteCandidate(ctx, deleteCandidate{key: key, etag: etag, data: data}, nil); derr != nil {
+						if ctx.Err() != nil {
+							return removed, wakeCursor{Minute: prefix, Key: last}, ctx.Err()
+						}
+						return removed, wakeCursor{Minute: prefix, Key: last}, derr
+					} else if deleted {
+						removed++
+					}
+				} else {
+					curPtr, cerr := i.pointer(ctx, e.Scope)
+					if cerr != nil && !errors.Is(cerr, bucket.ErrNotFound) {
+						if ctx.Err() != nil {
+							return removed, wakeCursor{Minute: prefix, Key: last}, ctx.Err()
+						}
+						// Same as above: a transient pointer error must not pin
+						// the cursor or drop the remaining keys of this minute.
+						last = key
+						if seen >= limit {
+							return removed, wakeCursor{Minute: prefix, Key: last}, nil
+						}
+						continue
+					}
+					if curPtr == nil || i.entryKey(*curPtr) != key {
+						// A no-pointer entry cannot be an in-flight Put: Put
+						// publishes the pointer before the due entry, so this is a
+						// crash/migration orphan.
+						if deleted, derr := i.deleteCandidate(ctx, deleteCandidate{key: key, etag: etag, data: data}, nil); derr != nil {
+							if ctx.Err() != nil {
+								return removed, wakeCursor{Minute: prefix, Key: last}, ctx.Err()
+							}
+							return removed, wakeCursor{Minute: prefix, Key: last}, derr
+						} else if deleted {
+							removed++
+						}
+					}
+				}
+				// This key is fully inspected; advance the cursor past it.
+				last = key
+				if removed >= limit || seen >= limit {
+					return removed, wakeCursor{Minute: prefix, Key: last}, nil
+				}
 			}
-			cur, perr := i.pointer(ctx, e.Scope)
-			if perr != nil && !errors.Is(perr, bucket.ErrNotFound) {
-				continue
+			if next == "" || next == after {
+				break
 			}
-			if cur != nil && i.entryKey(*cur) == key {
-				continue
-			}
-			// A no-pointer entry cannot be an in-flight Put: Put publishes the
-			// pointer before the due entry, so this is a crash/migration orphan.
-			if deleted, err := i.deleteCandidate(ctx, deleteCandidate{key: key, etag: etag, data: data}, nil); err != nil {
-				return removed, err
-			} else if deleted {
-				removed++
-			}
+			after = next
 		}
 	}
-	return removed, nil
+	return removed, wakeCursor{}, nil
 }

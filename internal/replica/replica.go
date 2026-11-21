@@ -41,6 +41,10 @@ type Manager struct {
 	fenceCache   map[string]fenceCacheEntry
 	fenceRev     uint64
 	fenceFlights map[string]*fenceFlight
+
+	l0Mu   sync.Mutex
+	l0     map[string]*l0Pending
+	l0Lost map[string]uint64
 }
 
 // New creates a Manager.

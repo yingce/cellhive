@@ -251,6 +251,52 @@ func TestPagedCellCrashHelper(t *testing.T) {
 	}
 }
 
+// A fresh sparse file has no locally acked pages. If SQLite rejects it, the
+// marker written for that attempt must go away so the next open can restore
+// from the bucket. A marker left by a crashed process is a different case.
+func TestFreshPagedOpenFailureDoesNotPoisonCache(t *testing.T) {
+	if !pagedvfs.Available() {
+		t.Skip("paged VFS unavailable")
+	}
+	ctx := context.Background()
+	sc, good, _ := buildPagedCut(t, "freshfail")
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := &fileSource{pageSize: 4096, commit: 2, pages: map[uint32][]byte{}}
+	useBad := true
+	st.Paged = func(context.Context, cell.Scope, string) (pagedvfs.Source, bool, error) {
+		if useBad {
+			return bad, true, nil
+		}
+		return good, true, nil
+	}
+	st.PagedHydrateMBPS = 0
+	if _, err := st.Cell(ctx, sc); err == nil {
+		t.Fatal("bad page source opened")
+	}
+	db := filepath.Join(st.DataDir, "cells", sc.Namespace, sc.Class, sc.ID+".db")
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("sparse db remains: %v", err)
+	}
+	_, _, _, _, exists, _, merr := readPagedMarker(db)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	if exists {
+		t.Fatal("dirty marker remains after a failed fresh open")
+	}
+	useBad = false
+	pc, err := st.Cell(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pc.Get(ctx, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPagedCellProcessKillFailsClosed(t *testing.T) {
 	if !pagedvfs.Available() {
 		t.Skip("paged VFS unavailable")

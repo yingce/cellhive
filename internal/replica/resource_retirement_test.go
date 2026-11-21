@@ -9,6 +9,35 @@ import (
 	"cellhive/internal/cell"
 )
 
+func TestRetireOwnedResourceDropsL0Tally(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "retire", Class: "__kv__", ID: "tally"}
+	expected := cell.Owner{Node: "node", Session: "session", Epoch: 9, Expiry: 123}
+	raw, err := cell.MarshalOwner(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = base.Put(t.Context(), resourceFenceKey(sc), raw); err != nil {
+		t.Fatal(err)
+	}
+	m := New(base)
+	for _, epoch := range []uint64{8, 9} {
+		m.noteL0Object(sc, epoch, sc.Key()+"/ltx/e"+u64(epoch)+"/0000/0000000000000001-0000000000000001.ltx", 10)
+	}
+	if err := m.RetireOwnedResource(t.Context(), sc, "delete", expected, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := m.L0Pending(sc, 9); n != 0 {
+		t.Fatalf("retired scope still tracked: %d", n)
+	}
+	if n, _ := m.L0Pending(sc, 8); n != 0 {
+		t.Fatalf("older epoch still tracked: %d", n)
+	}
+}
+
 func TestRetireOwnedResourceValidatesEveryCASAttempt(t *testing.T) {
 	for _, mode := range []string{"publish", "renewal", "node", "session", "epoch", "recreation", "different-job", "floor"} {
 		t.Run(mode, func(t *testing.T) {

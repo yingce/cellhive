@@ -63,8 +63,10 @@ func TestLocalReadGuardReleaseAndCASFailure(t *testing.T) {
 		t.Error("accepted fresh read during release")
 	}
 	close(b.proceed)
-	if err := <-done; err != ErrEpochMismatch {
-		t.Fatalf("CAS error: %v", err)
+	// The injected conflict does not replace the owner, so release must not
+	// report the epoch as lost. The read proof stays invalidated either way.
+	if err := <-done; err != bucket.ErrPrecondition {
+		t.Fatalf("release err=%v, want ErrPrecondition", err)
 	}
 	if _, ok = m.LocalReadGuard(sc); ok {
 		t.Error("retained proof after failed release")

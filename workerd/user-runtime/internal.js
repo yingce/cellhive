@@ -3,6 +3,7 @@ import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { authorized as verifyInternal, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
 import { ByteLRU, cacheSource, sourceCache, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
+import { exportLogRecords, traceIds } from "telemetry.js";
 import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
@@ -139,28 +140,17 @@ async function dispatchTimers(req, env, ctx) {
   }
 }
 
-// Invocation logging is observability, not part of the handler's result. A
-// persistence failure (503/ownership/capture) must not turn a successful
-// handler into a retryable 500: timers would re-run side effects forever and
-// queue/workflow dispatches would repeat already-committed work.
+// Invocation records are observability, not part of the handler's result. They
+// leave the runtime as OTLP log records (or the trusted local log pipe); a
+// failure must not turn a successful handler into a retryable 500: timers would
+// re-run side effects forever and queue/workflow dispatches would repeat
+// already-committed work.
 async function finishInvocationBestEffort(env, invocation, execution) {
   try {
     await finishInvocation(env, invocation, execution);
   } catch (e) {
-    console.error("cellhive: invocation persistence failed", String(e));
+    console.error("cellhive: invocation log export failed", String(e));
   }
-}
-
-async function persistInvocation(env, record) {
-  if (!record._logging_enabled) return record;
-  const { _logging_enabled, ...payload } = record;
-  const url = new URL(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/invocations");
-  url.searchParams.set("ns", record.namespace);
-  const response = await env.PLATFORM.fetch(url, {
-    method:"POST",headers:{"content-type":"application/json",...await internalHeaders(env.CELL_TOKEN)},body:JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error("invocation persistence failed: " + response.status);
-  return { ...(await response.json()).invocation, _logging_enabled: true };
 }
 
 async function startInvocation(env,body,kind) {
@@ -185,12 +175,12 @@ async function startInvocation(env,body,kind) {
   const traceparent = body.traceparent || freshTraceparent();
   body.request_id = requestId;
   body.traceparent = traceparent;
-  return persistInvocation(env,{
+  return {
     invocation_id:invocationId,request_id:requestId,traceparent,logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||body.workflow||"",
     attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):1,
-    started_ms:Date.now(),status:"running",logs:[],messages,producer_links:producerLinks,
+    started_ms:Date.now(),status:"running",messages,producer_links:producerLinks,
     _logging_enabled: env.CH_INVOCATION_LOGS === "1",
-  });
+  };
 }
 
 function freshTraceparent() {
@@ -199,23 +189,42 @@ function freshTraceparent() {
 }
 
 async function finishInvocation(env, record, execution) {
+  if (!record._logging_enabled) return;
   const value=execution.value||{};
   const error=execution.error || (value.ok===false?value.error:"") || "";
   const retry=(value.retry||[]).length>0;
-  let result=null,resultEncoding="cellhive-tagged-json",resultTruncated=false;
-  try{result=encode(value.result);if(new TextEncoder().encode(JSON.stringify(result)).length>8192){result=null;resultTruncated=true;}}catch{resultEncoding="unsupported";result=null;}
   const retries=execution.error?[]:(value.retry||[]);
   const retryIDs=new Set(retries.map(r=>r.id));
   const ack=execution.error?[]:(record.messages||[]).filter(m=>!retryIDs.has(m.id)).map(m=>m.id);
-  const completed={
-    ...record,finished_ms:Date.now(),status:error?"failed":retry?"retry":"success",
-    error:String(error).slice(0,2048),retry_requested:retry||!!error&&!value.no_retry,no_retry:!!value.no_retry,
-    error_stack:String(execution.error_stack||value.error_stack||"").slice(0,4096),
-    logs:execution.logs||[],logs_truncated:!!execution.logs_truncated,
-    result,result_encoding:resultEncoding,result_truncated:resultTruncated,ack,retry:retries,
+  const finishedMs=Date.now();
+  const status=error?"failed":retry?"retry":"success";
+  const [traceId,spanId]=traceIds(record.traceparent);
+  const attributes={
+    "cellhive.invocation":true,
+    "cellhive.invocation_id":record.invocation_id,
+    "cellhive.namespace":record.namespace,
+    "cellhive.worker":record.worker,
+    "cellhive.event_type":record.kind,
+    "cellhive.request_id":record.request_id,
+    "cellhive.logical_id":record.logical_id,
+    "cellhive.resource":record.resource,
+    "cellhive.attempt":record.attempt,
+    "cellhive.outcome":status,
+    "cellhive.started_ms":record.started_ms,
+    "cellhive.finished_ms":finishedMs,
+    "cellhive.duration_ms":finishedMs-(record.started_ms||finishedMs),
+    "cellhive.retry_requested":status==="retry",
+    "cellhive.error":String(error).slice(0,2048),
+    "cellhive.ack_count":ack.length,
+    "cellhive.retry_count":retryIDs.size,
   };
-  while(new TextEncoder().encode(JSON.stringify(completed)).length>120*1024&&completed.logs.length){completed.logs.pop();completed.logs_truncated=true;}
-  return persistInvocation(env,completed);
+  if (record.producer_links?.length) attributes["cellhive.producer_links"]=JSON.stringify(record.producer_links);
+  // Console stays with Tail (memory ring / optional OTLP via Tail). Only the
+  // attempt metadata leaves through this path.
+  await exportLogRecords(env,[{
+    message:"invocation", atMs:finishedMs, severityText:status==="failed"?"error":"info",
+    severityNumber:status==="failed"?17:9, traceparent:record.traceparent, traceId, spanId, attributes,
+  }]);
 }
 
 function publicInvocationResult(value){

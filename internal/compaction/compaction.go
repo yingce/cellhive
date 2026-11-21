@@ -32,6 +32,13 @@ type Options struct {
 	SnapshotMaxBytes int64
 	// Verify rechecks current ownership before reading inputs and publication.
 	Verify func(context.Context) error
+	// AfterChunk runs after each successful FoldBaseline L3 chunk publish.
+	// Returning an error stops the fold so tests can assert crash mid-states.
+	AfterChunk func(Result) error
+	// IdleDeleteOK must be set only while the cell is drain-protected and no
+	// paged reader still references superseded objects. Fold/evict leave it
+	// false so automatic same-epoch prune stays off until that gate exists.
+	IdleDeleteOK bool
 }
 
 // Result reports what a compaction did.
@@ -46,6 +53,10 @@ type Result struct {
 	MaxTxID    uint64
 	Commit     uint32
 	Epoch      uint64
+	// PrunedL9 / PrunedCovered are idle same-epoch cleanups after fold:
+	// dominated L9 copies, then L0–L3 fully covered by the retained L9 max.
+	PrunedL9      int
+	PrunedCovered int
 }
 
 // Compact promotes uncovered native ranges from L0 into L1. Source objects

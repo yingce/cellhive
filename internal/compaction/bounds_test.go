@@ -138,6 +138,17 @@ func TestPromotionDefaultInputLimit(t *testing.T) {
 	}
 }
 
+func TestPromotionWithoutByteCapTakesWholeObjects(t *testing.T) {
+	m, s := nativeManager(t)
+	for tx := uint64(1); tx <= 5; tx++ {
+		appendNative(t, m, s, 0, tx, tx, 1, 2)
+	}
+	r, err := Compact(t.Context(), m, s, 1, Options{MaxInputBytes: -1})
+	if err != nil || !r.Compacted || r.Inputs != 5 || r.MinTxID != 1 || r.MaxTxID != 5 {
+		t.Fatalf("result=%+v err=%v", r, err)
+	}
+}
+
 func TestPromotionByteBudgetStopsBeforeNextSource(t *testing.T) {
 	m, s := nativeManager(t)
 	key := appendNative(t, m, s, 0, 1, 1, 1, 2)

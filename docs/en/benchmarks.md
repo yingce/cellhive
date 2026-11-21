@@ -304,8 +304,8 @@ Raw data: `docs/archive/bench/kv-d1-readwrite-s3-cgo.txt`, `single-vs-dual-captu
 | Compaction disabled | **1336** L0 objects (0 L1) | ~15 writes/object (2ms window, c=64) |
 | Compaction enabled (default 30s / ≥64 segments or 64MB) | **3** objects (0 L0 + 3 L1) | `L1/{manifest.json,<maxTx>.snapshot,index.bin}` |
 
-- **Automatic compaction exists**: the cell-agent `runCompactionLoop` periodically scans **owned** scopes, and when `>=MinSegments(64)` or `>=MinBytes(64MB)`, it folds L0→L1 + GCs old objects (verifies owner/epoch before folding); recovery reads only L1 + the updated L0 (bounded). Raw data: `docs/archive/bench/ltx-fragmentation.txt`.
-- Peak fragmentation ≈ object count between two compactions ≈ **PUT rate × compaction interval**. For remote buckets, recommended `CELLHIVE_COMPACTION_INTERVAL=5–10s`, together with window/sharding controls on PUT rate.
+- **Automatic compaction existed in that measurement**: the cell-agent scanned owned scopes on a period and folded L0→L1 at 64 segments or 64MB. Raw data: `docs/archive/bench/ltx-fragmentation.txt`. The live schedule is the next sentence.
+- Peak fragmentation ≈ object count between two compactions ≈ **PUT rate × time until the next promotion**. The live default has no scan period: a durable L0 upload promotes to L1 at 256 objects or 64MiB. Timed compaction is gone. ADR-312's 30s/5min/1h clocks, and the older 5–10s recommendation, are not the live default.
 
 
 ### Micro-optimizations tried, with **no benefit, rolled back**

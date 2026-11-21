@@ -23,7 +23,7 @@ Bearer HS256 JWT 的无状态 issuer 修订实施与验收中，未部署。以�
 
 ## DLQ / 资源清理 / Queue-Cron 调用记录（ADR-205）
 
-验收记录：[resource-operations-invocations-2026-10-15.md](archive/resource-operations-invocations-2026-10-15.md)。包含无副作用分页 preview/幂等 ack、物理 SQLite/LTX 删除、远程 owner 路由、bucket 故障 retry、重建/异步上传/恢复栅栏，以及真实 pinned workerd 并发日志和结果关联。Docker 启动/部署验收为 `bash scripts/runtime-baseline-e2e.sh`，JSON 断言由 `scripts/runtime-operations-check.mjs` 执行。
+DLQ 与资源清理的历史验收：[resource-operations-invocations-2026-10-15.md](archive/resource-operations-invocations-2026-10-15.md)。其中「持久调用记录 / 结果关联」已在 2026-11-20 删除，不要再把那份记录里的 `__invocations__` 断言当作现行门禁。现行检查是无副作用分页 preview、幂等 ack、物理删除、owner 路由和恢复栅栏。Docker 验收为 `bash scripts/runtime-baseline-e2e.sh`；`scripts/runtime-operations-check.mjs` 不再查询调用记录。完成记录的格式见 [operations.md](operations.md)「OTLP 日志格式」，对应测试是 `workerd/user-runtime/invocation-otlp.test.mjs`。
 
 ## 原版 Wrangler 4.133.0 管理协议验收
 

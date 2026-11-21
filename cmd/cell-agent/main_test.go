@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -120,6 +121,84 @@ func (failingHandoffSink) AppendBatch(context.Context, cell.Scope, uint64, [][]b
 	return "", "", errors.New("bucket unavailable")
 }
 
+func TestPerformHandoffReleasesEvenWhenFoldsExhaustTheDrainBudget(t *testing.T) {
+	ctx := context.Background()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	for i := 0; i < 4; i++ {
+		sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: fmt.Sprintf("slow-fold-%d", i)}
+		if _, err := om.Claim(ctx, sc, time.Now()); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+	}
+	// A fold that ignores its budget models the worst case: every release pays
+	// the full fold cost. Releases must still complete.
+	om.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	}
+	nl := nodelog.New(b, "n1")
+	if _, err := nl.Open(ctx, "s1", 1, nil); err != nil {
+		t.Fatalf("node-log: %v", err)
+	}
+	dm := drain.New(b, "n1", "s1", time.Minute, 10*time.Millisecond)
+	up := upload.New(handoffSink{}, nil, 8, 1<<20, time.Millisecond)
+	upCtx, upCancel := context.WithCancel(context.Background())
+	up.Start(upCtx)
+	defer func() {
+		upCancel()
+		up.Stop()
+	}()
+
+	performHandoff(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{
+		NodeID: "n1", SessionID: "s1", DrainTTL: time.Minute, DrainWait: 3 * time.Second,
+	}, nl, om, dm, up)
+
+	if got := len(om.OwnedScopes()); got != 0 {
+		t.Fatalf("owned scopes after handoff = %d, want 0", got)
+	}
+	if _, ok, err := dm.Holder(ctx); err != nil || ok {
+		t.Fatalf("drain token after handoff = ok=%v err=%v, want absent", ok, err)
+	}
+}
+
+func TestFoldBudgetForSkipsWhenTimeIsShort(t *testing.T) {
+	tests := []struct {
+		name    string
+		remain  time.Duration
+		wantOK  bool
+		maxWant time.Duration
+	}{
+		{"plenty", time.Hour, true, preReleaseFoldLimit},
+		{"just-over-reserve", preReleaseFoldReserve + preReleaseFoldMin + time.Second, true, preReleaseFoldMin + time.Second},
+		{"below-min", preReleaseFoldReserve + preReleaseFoldMin - time.Second, false, 0},
+		{"already-expired", -time.Second, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(tt.remain))
+			defer cancel()
+			got, ok := foldBudgetFor(ctx, preReleaseFoldLimit)
+			if ok != tt.wantOK {
+				t.Fatalf("ok=%v want %v (budget=%v)", ok, tt.wantOK, got)
+			}
+			if ok && got > tt.maxWant {
+				t.Fatalf("budget=%v exceeds %v", got, tt.maxWant)
+			}
+			if ok && got <= 0 {
+				t.Fatalf("non-positive budget %v with ok=true", got)
+			}
+		})
+	}
+	// No deadline: use the configured limit.
+	if got, ok := foldBudgetFor(context.Background(), 7*time.Second); !ok || got != 7*time.Second {
+		t.Fatalf("deadline-less budget=%v ok=%v", got, ok)
+	}
+}
+
 func TestPerformHandoffKeepsOwnersWhenUploadsUnproven(t *testing.T) {
 	ctx := context.Background()
 	b, err := bucket.NewFSBucket(t.TempDir())
@@ -159,5 +238,185 @@ func TestPerformHandoffKeepsOwnersWhenUploadsUnproven(t *testing.T) {
 	rec, _, err := nl.Get(ctx, "n1", "s1")
 	if err != nil || rec.Status == nodelog.StatusSealed {
 		t.Fatalf("node-log after failed drain = %+v, %v; must remain open for recovery", rec, err)
+	}
+}
+
+func TestShedIdleCellFoldsWithoutHoldingTheClaimLock(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "orders"}
+	owned, err := om.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foldedUnderLock := false
+	om.BeforeRelease = func(rctx context.Context, _ cell.Scope, _ uint64) error {
+		if !skipPreReleaseFold(rctx) {
+			foldedUnderLock = true
+		}
+		return nil
+	}
+	started := make(chan struct{})
+	releaseFold := make(chan struct{})
+	claimErr := make(chan error, 1)
+	go func() {
+		<-started
+		claimCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
+		_, cerr := om.Claim(claimCtx, sc, time.Now())
+		claimErr <- cerr
+		close(releaseFold)
+	}()
+	err = shedIdleCell(ctx, om, sc, owned.Epoch, func() bool { return true }, func(context.Context) error {
+		close(started)
+		select {
+		case <-releaseFold:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	if cerr := <-claimErr; cerr != nil {
+		t.Fatalf("claim during fold: %v", cerr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foldedUnderLock {
+		t.Fatal("release folded while holding the claim lock")
+	}
+	if _, _, err := om.Resolve(ctx, sc); !errors.Is(err, owner.ErrUnowned) {
+		t.Fatalf("resolve = %v, want unowned", err)
+	}
+}
+
+func TestShedIdleCellKeepsTheOwnerWhenTheCellOpensDuringFold(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "orders"}
+	owned, err := om.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	om.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		released = true
+		return nil
+	}
+	idle := true
+	err = shedIdleCell(ctx, om, sc, owned.Epoch, func() bool { return idle }, func(context.Context) error {
+		idle = false
+		return nil
+	})
+	if !errors.Is(err, errShedSkipped) {
+		t.Fatalf("shed err=%v, want skipped", err)
+	}
+	if released {
+		t.Fatal("opened cell was released")
+	}
+	cur, _, err := om.Resolve(ctx, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Epoch != owned.Epoch {
+		t.Fatalf("epoch=%d, want %d", cur.Epoch, owned.Epoch)
+	}
+}
+
+func TestShedIdleCellStillReleasesWhenFoldFails(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "orders"}
+	owned, err := om.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = shedIdleCell(ctx, om, sc, owned.Epoch, func() bool { return true }, func(context.Context) error {
+		return errors.New("temp disk full")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := om.Resolve(ctx, sc); !errors.Is(err, owner.ErrUnowned) {
+		t.Fatalf("resolve = %v, want unowned", err)
+	}
+}
+
+func TestShedIdleCellDoesNotFoldAnOpenCell(t *testing.T) {
+	ctx := t.Context()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "orders"}
+	if _, err := om.Claim(ctx, sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	folded := false
+	err = shedIdleCell(ctx, om, sc, 1, func() bool { return false }, func(context.Context) error {
+		folded = true
+		return nil
+	})
+	if !errors.Is(err, errShedSkipped) {
+		t.Fatalf("shed err=%v, want skipped", err)
+	}
+	if folded {
+		t.Fatal("folded an open cell")
+	}
+}
+
+func TestShedIdleCellStopsWhenTheContextEndsDuringFold(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	om := &owner.Manager{B: b, NodeID: "n1", Session: "s1", OwnerTTL: time.Minute}
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "orders"}
+	owned, err := om.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	om.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		released = true
+		return nil
+	}
+	started := make(chan struct{})
+	go func() {
+		<-started
+		cancel()
+	}()
+	err = shedIdleCell(ctx, om, sc, owned.Epoch, func() bool { return true }, func(fctx context.Context) error {
+		close(started)
+		<-fctx.Done()
+		return fctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("shed err=%v, want canceled", err)
+	}
+	if released {
+		t.Fatal("released after cancel")
+	}
+	cur, _, err := om.Resolve(context.Background(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Epoch != owned.Epoch {
+		t.Fatalf("epoch=%d, want %d", cur.Epoch, owned.Epoch)
 	}
 }

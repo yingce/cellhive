@@ -13,7 +13,6 @@ p.write_text(s)
 PYFIXTURE
 DO_A=$((E2E_PORT_BASE+6)); GATE_A=$((E2E_PORT_BASE+8))
 export CELLHIVE_DO_RUNTIMES="http://127.0.0.1:$DO_A" CELLHIVE_DURABILITY=bucket
-export CELLHIVE_COMPACTION_INTERVAL=1h
 e2e_start_agent agent-a "$E2E_AGENT_PORT" "$E2E_ADMIN_PORT" '' "$E2E_BASE/agent-a"
 e2e_cli app create e2epaging >/dev/null
 SHA=$(e2e_upload "$E2E_ROOT/scripts/e2e/fixtures/do-paging-fleet.js")

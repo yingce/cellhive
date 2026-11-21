@@ -39,7 +39,11 @@ func inputLimits(opts Options) (int, int64) {
 	if n <= 0 {
 		n = DefaultMaxInputs
 	}
-	if size <= 0 {
+	// Negative means no byte cap: take whole objects up to the count.
+	if size < 0 {
+		return n, -1
+	}
+	if size == 0 {
 		size = DefaultMaxInputBytes
 	}
 	return n, size
@@ -55,6 +59,9 @@ func boundInputs(ctx context.Context, m *replica.Manager, files []nativeRange, o
 	n, limit := inputLimits(opts)
 	if len(files) > n {
 		files = files[:n]
+	}
+	if limit < 0 {
+		return files, nil
 	}
 	objects := objectstore.NewOwned(m.B, objectstore.PrefixCells, objectstore.OwnerReplica)
 	var total int64
@@ -83,6 +90,10 @@ func boundInputs(ctx context.Context, m *replica.Manager, files []nativeRange, o
 // Serialize merges and reserve filesystem headroom before creating any output.
 // This is admission control, not permission to publish a partial output when
 // another process consumes disk later: normal write/fsync errors still abort.
+// spoolSpaceFn is the temporary-disk budget probe. It is a variable so tests
+// can assert that the budget is consulted before a body is downloaded.
+var spoolSpaceFn = checkSpoolSpace
+
 func checkSpoolSpace(inputBytes int64) error {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(os.TempDir(), &st); err != nil {

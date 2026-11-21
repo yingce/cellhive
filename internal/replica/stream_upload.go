@@ -24,8 +24,10 @@ func (m *Manager) uploadFile(ctx context.Context, sc cell.Scope, epoch uint64, k
 		return "", fmt.Errorf("replica: snapshot spool changed during upload")
 	}
 	etag, err = m.finishPublication(ctx, sc, epoch, key, etag, true)
-	if err == nil {
-		m.localCache.remember(key, etag, io.NewSectionReader(f, 0, size), size)
+	if err != nil {
+		return "", err
 	}
-	return etag, err
+	m.localCache.remember(key, etag, io.NewSectionReader(f, 0, size), size)
+	m.noteL0Object(sc, epoch, key, size)
+	return etag, nil
 }

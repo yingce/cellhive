@@ -25,7 +25,7 @@ func (m *Manager) RetireOwnedResource(ctx context.Context, sc cell.Scope, jobID 
 	if (sc.Class != "__kv__" && sc.Class != "__queue__") || jobID == "" || expected.Node == "" || expected.Session == "" || expected.Epoch == 0 {
 		return fmt.Errorf("replica: invalid owned retirement identity")
 	}
-	return m.updateResourceFence(ctx, sc, func(f *resourceFence) error {
+	if err := m.updateResourceFence(ctx, sc, func(f *resourceFence) error {
 		if (!f.Deleted && f.JobID == jobID) || (f.Deleted && f.JobID != jobID) {
 			return ErrResourceDeleted
 		}
@@ -50,5 +50,10 @@ func (m *Manager) RetireOwnedResource(ctx context.Context, sc cell.Scope, jobID 
 			return ErrResourceDeleted
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	m.ForgetScopeL0(sc)
+	m.LoseL0(sc, expected.Epoch)
+	return nil
 }

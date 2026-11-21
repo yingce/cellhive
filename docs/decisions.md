@@ -337,7 +337,7 @@ Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是�
   1. 每个 scope 写两个对象：`wake/due/<UTC minute>/<scope>.json`（到期条目，内容仍是 `{scope,due_ms,kind,token}`）和 `wake/ptr/<scope>.json`（该 scope 的当前指针，用于 O(1) 删除/过期检测）。两者都是**覆盖写**，不是 append。
   2. `Put` 先写 pointer，再写 due entry；due entry 成功后删除旧 minute 的 due entry。这个顺序保证 Cleanup 可以安全删除没有 pointer 的 due 孤儿，而不会误删一次 in-flight Put。`Delete` 按 pointer 删除 due entry + pointer。`wake/<scope>.json` 旧对象作为 legacy 保留，`Put`/`Delete` 会清理；启动时 `Migrate` 一次性把 legacy entry 搬到新布局，`List`/`Count` 在迁移期仍兼容读取（`Due` 只扫新布局，避免旧 keyspace 破坏分钟前缀扫描）。
   3. waker 的 `Due` 先通过新的 `bucket.PrefixLister.CommonPrefixes("wake/due/", "/")` 枚举分钟前缀，只打开 `minute <= now` 的桶；同一 scope 多桶时取最早 due。`objectstore.CommonPrefixes` 在 backend 不支持 delimiter 时回退到全量 `List` 后聚合（正确但较慢）。
-  4. waker leader 每 10 分钟跑一次有界 `Cleanup`（每轮最多 128 条）：删除 minute 早于 1 小时且已不被 pointer 指向的孤儿 entry；pointer 仍指向的过期 timer 保留，不能误删。
+  4. waker leader 每 10 分钟跑一次有界 `CleanupDrain`（默认每页 512、每轮最多删除 16384 条，同时最多检查 16384 个键；删不掉的 pointer 命中也计入检查预算。单次调用还有 1 秒时间上限，到点保存游标并返回，不把这一轮派发停在清理上。游标留在进程内，下一轮从上次停下的位置继续。见 2026-11-20 wake due 孤儿回收修订）：删除 minute 早于 1 小时且已不被 pointer 指向的孤儿 entry；pointer 仍指向的过期 timer 保留，不能误删。
   5. `wake/ptr/`、`wake/due/` 是保留前缀；scope 的 namespace 恰为 `ptr`/`due` 时用**路径深度**区分 pointer/due entry 与 legacy `wake/<scope>.json`，不作为普通 entry 误删。
 - **验证**：`internal/wake` 新增 `TestWakeDueMinuteBucketsAndCleanup`（future minute 不扫、孤儿 entry 清理、pointer 保留）、`TestWakeDeleteRemovesDueEntry`；原 `TestWakeIndexPutDueDelete` 继续通过；`go test ./internal/wake ./internal/waker ./internal/timer ./internal/bucket ./internal/objectstore` 通过。`internal/waker` 现有 leader/派发测试未改语义。
 - **边界/代价**：每 scope 常态两个小对象（pointer + 当前 due entry）；分钟粒度意味着最多提前一个 pass 打开（`DispatchDue` 仍按 now 过滤）；`CommonPrefixes` 在 FS/S3 实现，未知 backend 回退全量 List；旧 `wake/<scope>.json` 由启动 `Migrate`（以及 Put/Delete）迁移，未迁移成功的条目在下次启动重试；`Cleanup` 只由 waker leader 执行，长时间无 leader 时孤儿 entry 会暂时保留但不影响正确性。
@@ -646,12 +646,13 @@ Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是�
 ## ADR-239 调用记录改为节点级全局开关，移除版本级 log_policy（2026-10-20）
 
 - **背景**：ADR-238 删除了版本级 `log_policy.console`，但 `log_policy.invocation` 仍把“是否写 Queue/Cron/Workflow 调用记录”绑定在 worker 版本上。调用记录是平台级可观测能力（本地 SQLite + `GET /v1/control/invocations` + OTLP），不应由单个 worker 的部署元数据控制，且目前节点侧的 `CH_INVOCATION_LOGS` 在 `cmd/user-runtime` 里硬编码为 true，没有真正可用的全局开关。
+- **2026-11-20 修订（下线持久表）**：Queue/Cron/Workflow 与 HTTP fetch 的调用记录**不再写** `__invocations__` cell，`GET /v1/control/invocations`、`POST /v1/internal/invocations` 与 `internal/invocation` 包一并删除。有日志卷轴时完成记录先进卷轴，再由 runtime 编成 OTLP；没有卷轴才由 user-runtime 直接 POST。只在尝试结束时发一条 `cellhive.invocation=true`，没有 running 行。console 不进 Queue/Cron/Workflow 完成记录，只跟 Tail。未配 `CELLHIVE_OTLP_ENDPOINT` 则卷轴只留在本地，可丢。`CELLHIVE_INVOCATION_LOGS` 同时控制这四类导出。字段见 `docs/operations.md`「OTLP 日志格式」。
 - **决策**：
   1. 删除 `log_policy` 版本元数据（`LogPolicy` 类型、`Version.LogPolicy`、`DeploySpec.LogPolicy`、部署 API/Cloudflare 元数据字段）；旧版本 JSON 里的 `log_policy` 被忽略，versions 表保留 `log_policy` 列以兼容旧库但不再读写。
-  2. 调用记录改为**节点级**开关：`CELLHIVE_INVOCATION_LOGS=on|off`（默认 `on`），渲染为 `CH_INVOCATION_LOGS`；关闭时只影响 Queue/Cron/Workflow 的持久记录与 OTLP invocation 导出，handler 执行与 Queue ack/retry 不变。
+  2. 调用记录改为**节点级**开关：`CELLHIVE_INVOCATION_LOGS=on|off`（默认 `on`），渲染为 `CH_INVOCATION_LOGS`；关闭时不导出 Queue/Cron/Workflow 完成记录和 HTTP fetch 摘要，handler 执行与 Queue ack/retry 不变。
   3. Native Tail 采集仍由 ADR-238 的订阅驱动（`CH_LOG_CAPTURE` + 实时订阅），不引入新的版本级开关。
-- **边界**：① 不再支持按 worker 关闭调用记录（只保留节点级与未来的全局配置）；② 旧版本记录不迁移；③ 停用记录后本地历史不删除，只是不再写入新记录；④ OTLP invocation 日志仍受 `OTLP_LOGS` 模式与 endpoint 配置控制。
-- **验证**：删除字段后 `make build`、`make js-test`（真实 workerd userruntime/doruntime 集成）、`internal/control`/`internal/server`/`internal/telemetry` 测试与 `go vet` 通过；Queue/Cron/Workflow 记录的现有验收断言保持（除按 worker 关闭场景外）。
+- **边界**：① 不再支持按 worker 关闭调用记录（只保留节点级与未来的全局配置）；② 旧版本记录不迁移；③ 已经写进桶里的 `__invocations__` cell 不删除，只是不再写入；④ `CELLHIVE_OTLP_LOGS` 只控制 cell-agent 从 Tail ring 补导出，不控制完成记录和 fetch 摘要。那两条看 `CELLHIVE_INVOCATION_LOGS` 与 `CELLHIVE_OTLP_ENDPOINT`。
+- **验证**：2026-10-20 删除字段后的 `make build` / `make js-test` 记录仍有效。2026-11-20 起持久表断言已删除，替代为 `workerd/user-runtime/invocation-otlp.test.mjs` 与 `TestWorkflowStepsStubIsScoped` 的完成记录 OTLP 断言。不要再跑已删除的 `TestQueueCronInvocationLogsAreDurableAndIsolated`。
 
 ## ADR-238 user-runtime 按订阅动态挂载原生 Tail（2026-10-20）
 
@@ -660,7 +661,7 @@ Cron 调度器只为当前 `Version.Crons` 物化新 slot；已物化 slot 是�
   1. cell-agent 新增内部端点 `GET /v1/internal/log-capture`，返回 `{mode: telemetry.LogsMode(), workers: 活跃订阅 (ns/worker)}`；订阅态复用 ADR-172/173 的 `telemetry.Subscribe` + peer fan-out。
   2. user-runtime 的 `loader.js` / `internal.js` 与 do-runtime 的 `host.js` 每约 1s 轮询该端点；低频 dispatch 在加载前强制刷新。原生 Tail 的挂载条件改为：`CH_LOG_CAPTURE !== "0"` &&（`mode === "all"` 或该 worker 在活跃订阅集合中）。端点不可用/404 时保持旧行为（全挂），保证兼容与故障安全。
   3. 由于 workerd 的 `tails` 只在 worker 加载时固定：fetch 路径维护 **tail / no-tail 两个 resident 变体**并复用现有 retirement 切换；internal dispatch 的 loader id 增加变体后缀；DO facet 只在冷启动时按当前状态选择，**不强行 abort 已驻留 facet**。
-- **版本级 console 策略移除（2026-10-20 产品决策）**：`log_policy.console` 已删除；旧版本 JSON 里的 `console` 字段被忽略。采集不再有“某版本永久拒绝被观测”的语义，只由节点硬上限 + 实时订阅决定；`log_policy` 整体移除；Queue/Cron/Workflow 调用记录由节点级 `CELLHIVE_INVOCATION_LOGS` 控制（ADR-239）。
+- **版本级 console 策略移除（2026-10-20 产品决策）**：`log_policy.console` 已删除；旧版本 JSON 里的 `console` 字段被忽略。采集不再有“某版本永久拒绝被观测”的语义，只由节点硬上限 + 实时订阅决定；`log_policy` 整体移除；Queue/Cron/Workflow 完成记录和 HTTP fetch 摘要由节点级 `CELLHIVE_INVOCATION_LOGS` 控制（ADR-239，2026-11-20 起不再写 cell）。
 - **边界**：① 停止延迟由订阅 TTL 决定——Wrangler tail 每 500ms 续期 60s，关闭后最多约 60s 停止采集（后续可用短 TTL capture 订阅收紧）；② 跨节点依赖现有 fan-out（25s 节流），跨节点启动延迟相应放宽；③ `OTLP_LOGS=all` 仍要求全量采集；④ 静态托管需在渲染期使用同一判定（或混合路由），不在本 ADR 内实现。
 - **验证**：`TestLogCaptureEndpoint`、`TestUserRuntimeDynamicTailGate`（真实 workerd：无订阅→0 Tail 事件；订阅→捕获；过期→停止并切回 no-tail 变体）；`make js-test` 与 `internal/server`、`internal/telemetry` 包测试通过。本机 e2e（单 cell-agent + 单动态 user-runtime，`wrk -t4 -c64 -d15s`，load≈2.5–3.8）：无订阅 **3,060/3,215 RPS**，订阅后 **2,586 RPS（p99 1.76s）**，订阅过期后 **3,038 RPS**；端点实时反映 workers 变化，切换期间无 5xx。
 
@@ -730,15 +731,15 @@ stock workerd 对动态 RPC entrypoint 只报告 `rpcMethod`。Queue/Cron 派发
 
 ## ADR-224 Workflow 每次运行尝试的关联记录（2026-10-19）
 
-Workflow 实例 ID 是业务身份；每次领取运行 lease（首次、sleep/event 唤醒、故障恢复）产生新的 `invocation_id`、`request_id` 和 W3C traceparent，保存到与 Queue/Cron 共用的调用记录并在完成时导出 OTLP。WorkflowBridgeTarget 的 step 回调沿用该 traceparent。一次尝试的 `logical_id` 固定关联 namespace、worker、workflow 名和实例 ID，重跑保留业务身份但不复用 trace。调用记录由节点级 `CELLHIVE_INVOCATION_LOGS` 全局控制（ADR-239）。stock workerd 的 Workflow 原生 Tail 是 RPC 事件，没有 HTTP 请求头，TailItem 不伪造 requestId；关联查询以调用记录和 OTLP 为准。创建请求的 HTTP trace 不自动成为异步尝试的父级，除非后续给 Workflow cell 增加持久父链协议。
+Workflow 实例 ID 是业务身份；每次领取运行 lease（首次、sleep/event 唤醒、故障恢复）产生新的 `invocation_id`、`request_id` 和 W3C traceparent，完成时随 OTLP 日志导出（2026-11-20 起不再写入调用记录 cell，也不导出 running）。WorkflowBridgeTarget 的 step 回调沿用该 traceparent。一次尝试的 `logical_id` 固定关联 namespace、worker、workflow 名和实例 ID，重跑保留业务身份但不复用 trace。导出由节点级 `CELLHIVE_INVOCATION_LOGS` 控制（ADR-239）。stock workerd 的 Workflow 原生 Tail 是 RPC 事件，没有 HTTP 请求头，TailItem 不伪造 requestId；关联查询以完成时的 OTLP 日志为准。创建请求的 HTTP trace 不自动成为异步尝试的父级，除非后续给 Workflow cell 增加持久父链协议。
 
 ## ADR-223 Queue/Cron 异步尝试关联（2026-10-19）
 
-Queue 每次领取批次、Cron 每次 timer 派发都生成新的 `invocation_id` 和 W3C traceparent；`request_id` 默认等于该尝试的 `invocation_id`。二者随 user-runtime 派发进入租户 handler 与其 binding 调用，写入持久调用记录，并在完成后输出 OTLP 调用日志。重试保留业务 `logical_id` / message lineage，但有新的尝试 ID 与 trace，避免把两次执行合并成一次。外部入站 HTTP 的 request ID 和 traceparent 不自动冒充后台尝试的 ID；Queue 生产者上下文的持久关联由 ADR-233 补齐。stock workerd 原生 Queue/Cron Tail 事件没有 HTTP request headers，公共 Tail 不能凭空声称包含该尝试的 `requestId`；持久调用记录和 OTLP 是异步尝试的关联查询面。
+Queue 每次领取批次、Cron 每次 timer 派发都生成新的 `invocation_id` 和 W3C traceparent；`request_id` 默认等于该尝试的 `invocation_id`。二者随 user-runtime 派发进入租户 handler 与其 binding 调用，并在完成后写入 OTLP 调用日志（2026-11-20 起不再写调用记录 cell）。重试保留业务 `logical_id`，但有新的尝试 ID 与 trace，避免把两次执行合并成一次。外部入站 HTTP 的 request ID 和 traceparent 不自动冒充后台尝试的 ID；Queue 生产者上下文的持久关联由 ADR-233 补齐，消息行仍保存生产者 request/trace。stock workerd 原生 Queue/Cron Tail 事件没有 HTTP request headers，公共 Tail 不能凭空声称包含该尝试的 `requestId`；异步尝试的关联查询面是完成时的 OTLP 日志。
 
 ## ADR-222 OTLP 日志关联 ID 的后端检索（2026-10-19）
 
-stock workerd 的 Tail 事件已含 `traceparent`，`TenantTail` 将它作为内部字段上报；接收端必须解码保留，不能因为公共 TailItem 的 JSON 不展示该字段而丢失。OTLP LogRecord 保留原生 trace_id/span_id；同时在有效 ID 时写入 `cellhive.trace_id` / `cellhive.span_id` 字符串属性，供不把 LogRecord 顶层 trace_id 索引为可查询列的后端使用。公共 Wrangler Tail 消息不新增顶层 `traceparent`。不得从 request ID 推导 trace ID，也不得为空或无效 traceparent 制造虚假的关联。OpenObserve 实测以 `cellhive_trace_id` 查询到与 trace pipeline 同一 ID，验证端到端关联。
+stock workerd 的 Tail 事件已含 `traceparent`，`TenantTail` 将它作为内部字段上报；接收端必须解码保留，不能因为公共 TailItem 的 JSON 不展示该字段而丢失。OTLP LogRecord 保留原生 trace_id/span_id。cell-agent 导出在有效 ID 时再写字符串属性 `cellhive.trace_id` / `cellhive.span_id`，供不索引 LogRecord 顶层 trace 字段的后端查询。2026-11-20 起 runtime 日志卷轴和 user-runtime 直接 POST 只填 LogRecord 的 trace_id/span_id，不复制这两个属性。公共 Wrangler Tail 消息不新增顶层 `traceparent`。不得从 request ID 推导 trace ID，也不得为空或无效 traceparent 制造虚假的关联。OpenObserve 实测以 `cellhive_trace_id` 查询到与 trace pipeline 同一 ID，验证端到端关联。
 
 ## ADR-221 Wrangler 上传跨节点控制写入（2026-10-19）
 
@@ -758,7 +759,7 @@ Wrangler 的单条 WebSocket 订阅由接入的 cell-agent 同时读取本机及
 
 ## ADR-217 按 Worker 版本控制日志采集（2026-10-19）
 
-日志策略不再随版本保存（`log_policy` 于 2026-10-20 整体移除，ADR-238/239）：Queue/Cron/Workflow 的持久调用记录由节点 `CELLHIVE_INVOCATION_LOGS=on|off`（默认 on，渲染为 `CH_INVOCATION_LOGS`）全局控制；Tail/console 采集由节点 `CH_LOG_CAPTURE` 与实时 tail 订阅决定。关闭调用记录只影响持久记录与 OTLP invocation 导出，不改变业务执行与 Queue ack。
+日志策略不再随版本保存（`log_policy` 于 2026-10-20 整体移除，ADR-238/239）：Queue/Cron/Workflow 完成记录和 HTTP fetch 摘要由节点 `CELLHIVE_INVOCATION_LOGS=on|off`（默认 on，渲染为 `CH_INVOCATION_LOGS`）控制，2026-11-20 起只导出 OTLP、不写 cell；Tail/console 采集由节点 `CH_LOG_CAPTURE` 与实时 tail 订阅决定。关闭该开关不改变业务执行与 Queue ack。
 
 ## ADR-216 Queue 消费等待与重试配置（2026-10-19）
 
@@ -768,7 +769,7 @@ Queue consumer 的 `max_batch_timeout_seconds` 从最早可领取消息的可见
 
 2026-10-24 补充：持久调用完成日志透传正值 `StartedMs` / `FinishedMs` 为整数属性 `cellhive.started_ms` / `cellhive.finished_ms`（Unix 毫秒）；两者有效且结束不早于开始时导出整数 `cellhive.duration_ms`，允许 0，缺失/倒序不生成 duration。成功与失败使用相同规则，OTLP 时间戳仍取 `FinishedMs`，request ID 不变；无时间数据的 console/Tail 不补造区间。调用记录无可信单一父 span（parent invocation IDs 不是 span IDs，Queue 可有多个 producer links），本次不增加 `parent_span_id`。
 
-stock workerd Tail 事件入站后，cell-agent 除保留有界 Tail 事件外，向可选 OTLP logs 导出一条调用记录（即使没有 console 输出），再逐条导出 console/exception 记录。记录属性包含 `cellhive.event_type`、`cellhive.script_version`（原始 JSON）、`cellhive.request_id`、`cellhive.outcome`、`cellhive.exceptions`（原始 JSON）；console 记录另含 `cellhive.message_args`（原始 JSON 数组）。由事件派生的本地 `logbuf.Entry` 同样保留事件类型、结果、版本和异常。保留 `CELLHIVE_OTLP_LOGS=off|tail|all` 门控，导出是异步、best-effort，不能替代权威业务写入或持久日志。每次调用额外一条 OTLP 记录会增加日志量；按 Worker 的独立采集策略与多节点 Tail 聚合另行验收。
+stock workerd Tail 事件入站后，cell-agent 保留有界 Tail 事件。`CELLHIVE_OTLP_LOGS=tail|all` 且该事件尚未由日志卷轴导出时，cell-agent 再导出一条调用摘要和逐条 console。属性包含 `cellhive.event_type`、`cellhive.script_version`（原始 JSON）、`cellhive.request_id`、`cellhive.outcome`、`cellhive.exceptions`（原始 JSON）；console 另含 `cellhive.message_args`。**2026-11-20 修订**：普通 HTTP fetch 的调用摘要改由 user-runtime 发出，cell-agent 不再为它重复导出；cell-agent 也不再为每个异常另发一条 OTLP，异常只留在摘要的 `cellhive.exceptions`。日志卷轴路径仍会为每个异常另发一条 `{name}: {message}`。本地 `logbuf.Entry` 仍保留事件类型、结果、版本和异常。导出是异步、best-effort，不能替代权威业务写入。
 
 原版 Wrangler 4.133.0 的 Tail WebSocket 使用 `trace-v1` 子协议；服务端只在客户端请求该协议时回传它。无子协议的普通 WebSocket 客户端仍可使用。流中仅发送 TailItem，不发送 Wrangler 无法解析的自定义连接提示；Queue 事件以 `event.queue` 字符串和 `event.batchSize` 数字输出。`TestCloudflareTailWebSocket` 验证握手协商；原版客户端渲染需另做真实服务验收。
 
@@ -3344,13 +3345,13 @@ DO 的 workerd SQLite 仍由 do-runtime 持有，supervisor 把每个文件的 L
 
 ## ADR-205 DLQ 只读管理、资源数据清理与 Queue/Cron 调用记录（2026-10-15）
 
-- **复核收口**：物理 scope/共享别名检查与清理快照同事务；资源生命周期 hook 与 create/delete 串行。独立持久本地 incarnation marker 在锁内重验权威 generation 并绑定请求准入；claim 保存 consumed Queue generation，dispatch 持准入至 handler 返回，旧批次不能跨重建执行。源 Queue generation 的转移 intent 先入 control，再由目的地消息事务验证，清理发现全部历史/转移目的地。退休 GC ledger 跨 namespace purge 保留并轮转清迟到旧 epoch，payload PUT 后重验 fence；新 epoch 不受影响。调用记录保存 tagged result、逐消息 ack/retry 延迟、message logical lineage/前驱调用，重组批次仍可追踪。全部具体复核问题已关闭，见验收记录。
+- **复核收口**：物理 scope/共享别名检查与清理快照同事务；资源生命周期 hook 与 create/delete 串行。独立持久本地 incarnation marker 在锁内重验权威 generation 并绑定请求准入；claim 保存 consumed Queue generation，dispatch 持准入至 handler 返回，旧批次不能跨重建执行。源 Queue generation 的转移 intent 先入 control，再由目的地消息事务验证，清理发现全部历史/转移目的地。退休 GC ledger 跨 namespace purge 保留并轮转清迟到旧 epoch，payload PUT 后重验 fence；新 epoch 不受影响。2026-11-20 起调用结果不再保存 tagged result 或逐消息 ack 延迟；Queue 重组批次用 OTLP 上的 `cellhive.logical_id`、`cellhive.attempt` 和 `cellhive.producer_links` 追踪。全部具体复核问题已关闭，见验收记录。
 
 - **定位**：CellHive 控制面扩展，不声称 Cloudflare 提供同名、同语义 API。无副作用 DLQ peek 不得复用 claim；按 ID ack 走 owner/capture，缺失 ID 幂等成功。keyset cursor 绑定 namespace/DLQ，body 明确为 base64，返回原消息来源和失败尝试次数。
 - **删除**：KV/Queue revoke 和 cleanup job 在 control cell 同事务提交，快照物理 scope（KV 支持自定义 ID）、主 Queue 引用的 DLQ。删除栅栏先于删除成功响应建立；所有原生 data 请求/consumer 及异步副本写入点查栅栏，不依赖短 TTL binding cache。清理按 scope owner 执行，停止 capture/排空请求、删除 SQLite/WAL、wake 和全部 LTX；保留无业务数据的 owner-generation 与资源 epoch fence，拒绝旧 epoch 上传/恢复。后台 bounded pass、租约/失败次数/退避、手动 retry；完成前禁止同名/同 scope 重建，共享 scope 拒绝破坏性删除。重建沿用单调 owner epoch，旧节点本地副本按 epoch floor 失效。
 - **Queue 边界**：删 Q 覆盖 Q 的全部消息（普通/延迟/作为 DLQ 自身收到的消息）与 ledger；可按持久来源删除独立 DLQ 中由 Q 转来的 dead letters，但不删除 DLQ 资源或其他来源消息。旧消息缺 provenance 时返回可查询失败，须 preview/ack 后重试，不猜测归属。purge 保持只清空消息。异步 upload spool 遇持久删除错误丢弃旧 payload；recovery 跳过已删除 epoch，不阻塞同 session 活资源恢复。已 sealed follower recovery logs 仍服从原 session 回收生命周期，不承诺立即逐资源抹除历史副本。
-- **调用记录**：每个 Queue batch/Cron attempt 独立 UUID invocation_id；logical_id 关联相同批次/slot 重试，attempt 在 namespace invocation cell 原子分配。可信 runtime host 在执行前持久化 running，之后持久化 success/failed/retry、时间、异常/stack、console 日志；native Tail ring 继续独立工作。AsyncLocalStorage 隔离重叠调用，ctx/importable waitUntil 在执行结束前等待并记录日志。未完成 running 不能伪报成功。
-- **预算/查询**：namespace 内 `__invocations__/main` SQLite，7 天/10,000 次历史，按写入有界清理；单条记录 <=128 KiB，最多 256 条 console/8192 字符，截断显式标记。按 namespace/Worker/kind/时间/调用 ID 分页查询，日志与结果同记录。`CELLHIVE_TENANT_LOG_CAPTURE=off` 仅关闭 native Tail；执行记录为必开控制面观测。
+- **调用记录（2026-11-20 修订）**：不再有 invocation cell，也不再在执行前写 running。每个 Queue batch、Cron attempt、Workflow lease 和 HTTP fetch 在结束时导出一条 OTLP 日志；`invocation_id` 与 `logical_id` 的算法见 `docs/operations.md`。console、异常 stack 和 handler 返回值不进 Queue/Cron/Workflow 完成记录。Tail ring 继续独立工作。导出失败不能把业务成功改成 500。
+- **预算/查询**：~~namespace 内 `__invocations__/main` SQLite，7 天/10,000 次历史~~（2026-11-20 已删除该表及查询端点）。控制面不提供分页历史；console 见 Tail。`CELLHIVE_TENANT_LOG_CAPTURE=off` 仅关闭 native Tail；是否导出完成记录和 fetch 摘要仍由 `CELLHIVE_INVOCATION_LOGS` 控制。已存在的旧 cell 不因这次修订被删除。
 - **协议发布**：新旧 cleanup/fence writer 不得混跑；先升级所有副本/恢复/consumer writer 再开放删除 API。详情/接口/验收见 `operations.md`、`superpowers/specs/2026-10-15-resource-operations-and-invocations.md`。
 
 ---
@@ -3844,6 +3845,8 @@ owner 删除代次修订（2026-11-08）：删除围栏合并进 own.json 后，
 
 原生 epoch GC 实施（2026-11-09）：RetireEpochsWithOptions已整体替换为celld恢复链基线算法，使用已有epochChain而非“最新快照”猜测；必须看到当前owner epoch为最新链和最新目录，已记录退休基线高于本次基线时拒绝清理。默认一小时对象上传年龄、保护紧邻前一epoch，未知时间/截断列表/非原生对象保留。扫描后重新验证owner，再写与上游完全同名同字段的ltx/retired.json（retired_below），随后删除候选LTX；不创建每epoch seal/tombstone/gc-retired/pin文件。这个retired.json在固定celld 90b4301中确实存在，不是CellHive自定义扩展。
 
+2026-11-20 修正（年龄与删除集合）：任何对象缺少可信上传时间（`LastModifiedMs<=0`）都使该 epoch 不可删，而不是把 0 当作"无限旧"通过宽限期；分页后端不提供时间时整代保留。删除只使用年龄扫描已证明的对象清单（`deleteEpochGCKeys`），不再重新 LIST 并清空整个前缀，因此扫描后新写入的 LTX 与未知类型键不会被过期批准误删。测试：无时间后端零删除、有时间的对照仍可删除、扫描后注入新键与未知键必须保留。
+
 后台与管理GC使用AcquireResident持有本地请求门闩，不打开冷cell，分页恢复未完成则不扫描/不删除；完整扫描后再次检查本地就绪与精确owner epoch，删除中owner失效停止。默认不授权调用仍返回deferred；显式离线调用保留外部静默前提。纯判定、前一epoch保护、时间边界/时钟偏差、缺opener/旧视图/本地pinned、owner丢失前不得发布退休标记、重复清理和管理接口无私有sidecar测试通过。旧level GC辅助API、旧codec和全量验收仍待清理，尚不能宣称全部对齐或生产发布。
 
 
@@ -3860,6 +3863,16 @@ owner 删除代次修订（2026-11-08）：删除围栏合并进 own.json 后，
 原生分页恢复完整性补强（2026-11-09）：PageFetcher 在原生内嵌索引合并及截断裁剪后，验证最终 Commit 范围的每个数据页都有来源（排除 SQLite pending-byte lock page），缺页在激活前拒绝。按唯一页数 O(1) 检查，不遍历声明的巨大数据库，不增加对象存储请求。基线证明测试覆盖 0000/0001/0002/0003/0009 的 MinTXID=1、损坏、截断、范围不符和缺失对象；冷恢复及大小阈值测试迁移原生格式。相关原生测试和 race 通过；指定 COS 桶 64 MiB 分页恢复通过（8.07 秒，读取 1 MiB 查询数据使用 5 次范围读、2118004 字节）。该结果不是全量 fleet/灾难恢复验收；旧 GC 接口和其余旧测试清理仍未完成。
 
 原生压缩/GC契约收敛（2026-11-09）：以固定 celld 90b4301 的 crates/ltx/src/replica_compactor.rs 为准，level 压缩是 additive：只发布目标原生 LTX，不删除源文件，不按 L1 generation 数清理，也不写 seal、reader pin、tombstone 或 gc-retired。物理回收由原生 epoch GC 执行；一小时是旧 epoch 对象 upload-age 安全窗口，不代表活跃 epoch 的 L0/L1 一小时后自动删除。此条替代此前同 epoch pin/tombstone 和 KeepL1Generations 的设计描述。原生退休证明仍是 celld 自带的 stream 级 retired.json。显式离线单对象删除只允许外部静默且原生路径与文件内容验证通过的 LTX；不得由 Safe 布尔值独立授权。相关旧 API/测试正在删除和替换，尚未宣称全量验收完成。
+
+原生 epoch GC 大前缀排空（2026-11-20）：`retireNativeEpochs` 不再复用 `BacklogStats` 的 `maxStatsObjects` 截断结果；截断不得作为跳过整代删除的理由。GC 对每个低于恢复链 base 的候选 epoch 完整分页列举以计算 upload-age，删除时按页 List+Delete 并从前缀头续扫（对齐 celld 每轮最多 64 代）。含非原生对象的 epoch 仍整代保留。单测 `TestNativeEpochGCDrainsWhenStatsListWouldTruncate`。
+
+跨代 L9 迁基线 FoldBaseline（2026-11-20）：空闲驱逐与交权前用 `compaction.FoldBaseline`（大库不因体积 skip；Fold 失败不挡 release）。先规划 snapshot max 之后的有界 L3 分块，再从**最新 L3 向最旧**发布，最后拷/合成 L9：oldest-first 会抬高当前代 `lo`，让 `epochChain` 裁掉仍需要的前代区间，中途崩溃即 non-contiguous；newest-first 下每次成功 PUT 后切点仍可恢复。前代增量可能跨过快照水位（如 L9[1,5] 加增量 [3,10]），整块发布会让当前代从 3 起步而 L9 尚未拷贝，恢复报 "continuation at txid 3 has no complete predecessor"；因此完全被快照覆盖的输入丢弃，首个块用 `CompactNativeFrom` 裁剪到 `snap.max+1`。仅当「恢复链只依赖当前代」才视为已完成并 skip；半成品不当 base、不抬 `retired_below`。Fold/上传全程 Verify(node,session,epoch)，失主即停；重启后只对最新 own 重折。L9 复制先 `Stat` 取对象大小并检查临时盘，再下载，复制后核对实际字节数。随后由 epoch GC 删 `< base` 前代。不在换代时搬 L9；不做同盘重启继承 epoch。单测含 rehome+GC、verify 中止、L3 已落地后补拷 L9、逐块中断仍可恢复、跨水位重叠裁剪、复制前磁盘预算。
+
+空闲/交权抬 base 与压缩调度（2026-11-20）：确认抬 base 触发为**交权前**与**空闲驱逐**（同 owner、同 epoch 也可 Fold）；不是每次裸 epoch+1。再平衡和磁盘压力交还空闲 cell 时，Fold 在 claim 锁之外先做；这期间 cell 被打开，或 epoch 已不是自己的，就不删 owner。仍关闭才拿锁，最多 10 秒删 owner 记录，这次 release 不再 Fold。Fold 失败仍交还，下一任从剩下的链恢复。进程取消时不删。关机交权仍在 `BeforeRelease` 里 Fold，时间片仍是 DrainWait 里剩下的部分。后台晋升只跟在 L0 进桶之后，只做 L0→L1（2026-11-21）：未覆盖对象满 256 个或存放字节满 64MiB 才收。个数和字节是 owner 在 L0 上传成功时记下的累计，收成 L1 后去掉被盖住的文件，判断不列桶。64MiB 只决定开始，一批最多 256 个整份 LTX，合成一个输出。后台不发布 L2、L3，也没有定时扫描。`CELLHIVE_COMPACTION_INTERVAL` 与 `CELLHIVE_COMPACTION_TIMED` 已删除。连续收直到不再满足条件或没有新对象发出，一轮最多 32 批。32 批后仍超过门槛，或本轮失败且所有权未变，则延迟后再排入同一 scope：失败从 1 秒退避到 1 分钟，满批让出 50 毫秒。进程退出或所有权已经换走则不重试。仍不列桶。异步桶上传合批段数与 L1 文件数共用 `CELLHIVE_COMPACTION_MIN_OBJECTS`（默认 256），`CELLHIVE_UPLOAD_INTERVAL=30s`。`CELLHIVE_UPLOAD_MAX_SEGMENTS` 已删除；EnqueueWait/同步桶证明仍立即唤醒 flush。同 epoch 被覆盖 L0 物理删除仍 DEFERRED。`CELLHIVE_EPOCH_SNAPSHOT_MAX` 自 2026-11-21 起默认 1GiB，作为显式整库 L9 和换代时新合成 L9 的逻辑大小与输入字节上限。超过就不再合成新 L9，同一段收到 L2。已有 L9 仍整份拷进当前代，不看这 1GiB。快照之后的增量按 256MiB 收到 L2。Fold 不再发布 L3。设计见 `docs/superpowers/specs/2026-11-20-l0-batch-cascade-fold-design.md`。
+
+同 epoch 空闲物理回收（2026-11-20）：不恢复运维 `--prune-l9`。`PruneIdleEpoch` / `PruneSupersededL9` / `PruneCoveredBelowL9` 必须 `IdleDeleteOK`（调用方持有排空保护且无读者仍引用旧对象）才删；Fold/空闲驱逐默认不置位，因此自动删旧对象关闭。开启时先校验**保留** L9 正文并 `ValidateChainReaders` 证明恢复链，再删被支配对象；不得只验待删对象。不覆盖「L9 之后仍被 L3 盖住的增量 L0」的在线删除（仍 DEFERRED）。选链仍取最大 `max` 的 L9。
+
+wake due 孤儿回收（2026-11-20，实施/验收中，未部署）：后端对 `wake/due` 不支持 ConditionalDelete 时，`wake.New` 自动启用 immutable revisioned due keys，过时 hint 用无条件 Delete 回收（与 S3ControlBucket 的 `ImmutableWakeHints` 同路径）；仍不对可变 ptr 做无条件 Delete 回退。`CleanupPage`/`CleanupDrain` 按分钟前缀排序并支持 resume；cell-agent waker 每 10 分钟最多删除 16384 条，并且最多检查 16384 个键（512/页）。pointer 仍指向的条目删不掉，但也占用检查预算，本轮到键预算或 1 秒就停，下一轮从进程内游标继续，不再把整段历史扫完。到点留下游标并正常结束，不记成清理失败。这替代 ADR-267 的每轮 128 上限。单测覆盖 CD-unsupported 即时回收、CleanupPage 跨预算续扫，以及删不掉时的检查预算。
 
 原生GC清理验证（2026-11-09）：已删除 gcproto.go 中 seal/pin/tombstone/gc-retired 全部实现、旧同 epoch 删除辅助函数及其并发工具；移除 ReaderPinTTL/DisableReaderPins/ReadOnly pin 配置。EpochRetired 只读原生退休缓存；显式离线删除改为原生路径/header/CRC完整验证，并支持全部五个level。删除中断后可从已发布retired.json继续回收，保留链始终可恢复；新增测试覆盖无静默拒绝、跨epoch拒绝、校验失败/owner丢失拒绝、重复删除、原生GC中断重试。DryRun与真实compaction共用原生范围计划，不读manifest或LTX正文。新增additive测试覆盖全部晋升级别后旧PageFetcher首次读仍保持原cut、新reader得到更新且只有.ltx对象。replica/server/dosupervisor全包、相关race、build/vet通过。指定COS真实续链57→58→59、41行冷恢复、旧epoch删除6个LTX并保留直接前驱，GC后再次恢复一致；总测试4.35秒。仍有旧compaction测试和manifest/index API需清理；不代表完整fleet验收。
 

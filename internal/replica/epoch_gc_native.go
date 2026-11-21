@@ -108,7 +108,12 @@ func (m *Manager) retireNativeEpochs(ctx context.Context, s cell.Scope, current 
 		return 0, err
 	}
 	var listed []listedEpoch
-	victims := map[uint64][]string{}
+	// scannedKeys holds the exact object identity proven by the age scan. The
+	// deletion pass must use this set; re-listing the prefix and clearing it
+	// would also delete objects written after the scan, whose age was never
+	// checked (and unknown-type keys).
+	scannedKeys := map[uint64][]string{}
+	eligible := map[uint64]bool{}
 	scanned := 0
 	for _, e := range epochs {
 		if e >= chain[0] {
@@ -118,34 +123,19 @@ func (m *Manager) retireNativeEpochs(ctx context.Context, s cell.Scope, current 
 			break
 		}
 		scanned++
-		infos, known, truncated, err := m.listObjectInfos(ctx, EpochPrefix(s, e))
+		newest, n, nativeOnly, keys, err := m.scanEpochGCAge(ctx, EpochPrefix(s, e))
 		if err != nil {
 			return 0, err
 		}
-		if !known || truncated {
+		// Mixed/unknown keys or an object with no trustworthy upload time:
+		// keep the whole epoch (fail closed on delete), same as the prior
+		// truncated/invalid skip, without aborting the pass.
+		if n == 0 || !nativeOnly {
 			continue
-		} // no complete upload-age evidence
-		var newest int64
-		valid := true
-		for _, info := range infos {
-			rel := info.Key[len(EpochPrefix(s, e)):]
-			if len(rel) != 42 || rel[4] != '/' || !validLevelName(rel[:4]) || info.LastModifiedMs <= 0 {
-				valid = false
-				break
-			}
-			sp, ok := parseSegmentSpan(path.Base(info.Key))
-			if !ok || sp.start == 0 || sp.end < sp.start {
-				valid = false
-				break
-			}
-			newest = max(newest, info.LastModifiedMs)
-			victims[e] = append(victims[e], info.Key)
 		}
-		if valid && len(infos) > 0 {
-			listed = append(listed, listedEpoch{e, newest})
-		} else {
-			delete(victims, e)
-		}
+		listed = append(listed, listedEpoch{e, newest})
+		eligible[e] = true
+		scannedKeys[e] = keys
 	}
 	grace := opts.Grace
 	if grace == 0 {
@@ -182,19 +172,111 @@ func (m *Manager) retireNativeEpochs(ctx context.Context, s cell.Scope, current 
 		if keepPrevious > 1 && current-e <= uint64(keepPrevious) {
 			continue
 		}
+		if !eligible[e] {
+			continue
+		}
 		if opts.Verify != nil {
 			if err := opts.Verify(ctx); err != nil {
 				return deleted, err
 			}
 		}
-		for _, key := range victims[e] {
-			if err := m.resourceObjects().Delete(ctx, key); err != nil {
-				return deleted, err
-			}
-			deleted++
+		n, err := m.deleteEpochGCKeys(ctx, scannedKeys[e])
+		if err != nil {
+			return deleted, err
 		}
+		deleted += n
+		m.LoseL0(s, e)
 	}
 	return deleted, nil
+}
+
+// scanEpochGCAge pages the whole epoch prefix for upload-age evidence. Unlike
+// listObjectInfos, a large prefix is never treated as "skip this epoch" just
+// because it has many objects. nativeOnly is false when any non-LTX key is
+// present, or when any object reports no trustworthy upload time, so the caller
+// can refuse deletion of that epoch. keys lists the exact objects that were
+// checked; deletion must use them instead of re-listing the prefix.
+func (m *Manager) scanEpochGCAge(ctx context.Context, prefix string) (newestMS int64, objects int, nativeOnly bool, keys []string, err error) {
+	nativeOnly = true
+	err = m.forEachEpochGCObject(ctx, prefix, func(info bucket.ObjectInfo) error {
+		objects++
+		rel := info.Key[len(prefix):]
+		if len(rel) != 42 || rel[4] != '/' || !validLevelName(rel[:4]) {
+			nativeOnly = false
+			return nil
+		}
+		sp, ok := parseSegmentSpan(path.Base(info.Key))
+		if !ok || sp.start == 0 || sp.end < sp.start {
+			nativeOnly = false
+			return nil
+		}
+		// A zero time is not evidence of age: treating it as infinitely old
+		// would delete an epoch whose objects were never aged. Backends that
+		// page without LastModified therefore keep the whole epoch.
+		if info.LastModifiedMs <= 0 {
+			nativeOnly = false
+			return nil
+		}
+		newestMS = max(newestMS, info.LastModifiedMs)
+		keys = append(keys, info.Key)
+		return nil
+	})
+	if err != nil {
+		return 0, 0, false, nil, err
+	}
+	if newestMS <= 0 {
+		nativeOnly = false
+	}
+	return newestMS, objects, nativeOnly, keys, nil
+}
+
+// deleteEpochGCKeys removes only the objects the age scan approved. It never
+// re-lists the prefix, so keys written after the scan (or keys whose age was
+// never proven) survive.
+func (m *Manager) deleteEpochGCKeys(ctx context.Context, keys []string) (int, error) {
+	deleted := 0
+	for _, key := range keys {
+		if err := m.resourceObjects().Delete(ctx, key); err != nil {
+			if errors.Is(err, bucket.ErrNotFound) {
+				continue
+			}
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+func (m *Manager) forEachEpochGCObject(ctx context.Context, prefix string, fn func(bucket.ObjectInfo) error) error {
+	if _, ok := m.B.(bucket.PagedLister); ok {
+		after := ""
+		for {
+			page, next, err := m.resourceObjects().ListPage(ctx, prefix, after, 1000)
+			if err != nil {
+				return err
+			}
+			for _, info := range page {
+				if err := fn(info); err != nil {
+					return err
+				}
+			}
+			if next == "" || next == after {
+				return nil
+			}
+			after = next
+		}
+	}
+	keys, err := m.resourceObjects().ListPrefix(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := fn(bucket.ObjectInfo{Key: key, Size: -1}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func validLevelName(s string) bool {
 	return s == "0000" || s == "0001" || s == "0002" || s == "0003" || s == "0009"

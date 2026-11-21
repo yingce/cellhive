@@ -75,6 +75,7 @@ func (s *Server) handleControlGCScope(w http.ResponseWriter, r *http.Request) {
 	if req.Snapshot {
 		snapshotOpts := opts
 		snapshotOpts.SnapshotMaxBytes = s.Cfg.CaptureEpochSnapshotMaxBytes
+		snapshotOpts.MaxInputBytes = s.Cfg.CaptureEpochSnapshotMaxBytes
 		res, serr := compaction.Snapshot(ctx, s.Replica, sc, current, snapshotOpts)
 		if serr != nil {
 			writeErr(w, http.StatusInternalServerError, "snapshot_failed", serr.Error())

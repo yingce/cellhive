@@ -699,6 +699,219 @@ func TestReleaseForPurgeSkipsBeforeReleaseHook(t *testing.T) {
 	}
 }
 
+func TestReleaseReportsOutcomeOnlyWhenOwnershipEnds(t *testing.T) {
+	ctx := context.Background()
+	m, b := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "after-release"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var released []uint64
+	m.AfterRelease = func(_ cell.Scope, epoch uint64) { released = append(released, epoch) }
+	m.BeforeRelease = func(context.Context, cell.Scope, uint64) error {
+		return errors.New("fold failed")
+	}
+	if err := m.Release(ctx, sc, o.Epoch); err == nil {
+		t.Fatal("release succeeded despite BeforeRelease error")
+	}
+	if len(released) != 0 {
+		t.Fatalf("hook ran while ownership was kept: %v", released)
+	}
+
+	m.BeforeRelease = nil
+	m.B = rejectOwnerDelete{Bucket: b}
+	if err := m.Release(ctx, sc, o.Epoch); err == nil {
+		t.Fatal("ambiguous delete reported success")
+	}
+	if len(released) != 0 {
+		t.Fatalf("hook ran after an ambiguous delete: %v", released)
+	}
+	if got := m.OwnedScopes(); len(got) != 1 {
+		t.Fatalf("ownership not retained: %+v", got)
+	}
+
+	m.B = b
+	if err := m.Release(ctx, sc, o.Epoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if len(released) != 1 || released[0] != o.Epoch {
+		t.Fatalf("hook=%v, want epoch %d", released, o.Epoch)
+	}
+}
+
+type rejectOwnerDelete struct{ bucket.Bucket }
+
+func (rejectOwnerDelete) ConditionalDelete(context.Context, string, string) error {
+	return errors.New("bucket unavailable")
+}
+
+// renewBeforeConditionalDelete simulates a same-epoch Renew committing between
+// Release's read and its conditional delete. The delete then uses a stale etag.
+type renewBeforeConditionalDelete struct {
+	bucket.Bucket
+	renew func() error
+	once  sync.Once
+	err   error
+}
+
+func (b *renewBeforeConditionalDelete) ConditionalDelete(ctx context.Context, key, etag string) error {
+	b.once.Do(func() { b.err = b.renew() })
+	if b.err != nil {
+		return b.err
+	}
+	return b.Bucket.ConditionalDelete(ctx, key, etag)
+}
+
+func TestReleaseKeepsOwnershipWhenSameEpochRenewWins(t *testing.T) {
+	ctx := context.Background()
+	m, b := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "renew-release"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var released []uint64
+	m.AfterRelease = func(_ cell.Scope, epoch uint64) { released = append(released, epoch) }
+	// Node-lease renew writes only when the advertised admin address changes.
+	m.AdminAdvertise = "node-1:8082"
+	m.B = &renewBeforeConditionalDelete{Bucket: b, renew: func() error {
+		_, err := m.Renew(ctx, sc, o.Epoch, time.Now().Add(time.Second))
+		return err
+	}}
+	err = m.Release(ctx, sc, o.Epoch)
+	if !errors.Is(err, bucket.ErrPrecondition) {
+		t.Fatalf("release err=%v, want ErrPrecondition", err)
+	}
+	if len(released) != 0 {
+		t.Fatalf("lost-owner hook ran while epoch %d is still held: %v", o.Epoch, released)
+	}
+	if got := m.OwnedScopes(); len(got) != 1 || got[0].Epoch != o.Epoch {
+		t.Fatalf("ownership not retained: %+v", got)
+	}
+	cur, _, err := m.Resolve(ctx, sc)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cur.Node != m.NodeID || cur.Session != m.Session || cur.Epoch != o.Epoch {
+		t.Fatalf("record no longer ours: %+v", cur)
+	}
+	if cur.AdminAddress != "node-1:8082" {
+		t.Fatalf("renew did not commit: %+v", cur)
+	}
+}
+
+// replaceOwnerBeforeDelete commits a different owner before Release deletes,
+// so the stale conditional delete is a real loss rather than a renew.
+type replaceOwnerBeforeDelete struct {
+	bucket.Bucket
+	replace func() error
+	once    sync.Once
+	err     error
+}
+
+func (b *replaceOwnerBeforeDelete) ConditionalDelete(ctx context.Context, key, etag string) error {
+	b.once.Do(func() { b.err = b.replace() })
+	if b.err != nil {
+		return b.err
+	}
+	return b.Bucket.ConditionalDelete(ctx, key, etag)
+}
+
+func TestReleaseReportsLossWhenConflictReplacesOwner(t *testing.T) {
+	ctx := context.Background()
+	m, b := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "replace-release"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var released []uint64
+	m.AfterRelease = func(_ cell.Scope, epoch uint64) { released = append(released, epoch) }
+	m.B = &replaceOwnerBeforeDelete{Bucket: b, replace: func() error {
+		data, etag, err := b.Get(ctx, Key(sc))
+		if err != nil {
+			return err
+		}
+		cur, err := cell.UnmarshalOwner(data)
+		if err != nil {
+			return err
+		}
+		cur.Node = "node-2"
+		cur.Session = "node-2-s1"
+		cur.Epoch = o.Epoch + 1
+		raw, err := cell.MarshalOwner(cur)
+		if err != nil {
+			return err
+		}
+		_, err = b.CAS(ctx, Key(sc), raw, etag)
+		return err
+	}}
+	if err := m.Release(ctx, sc, o.Epoch); !errors.Is(err, ErrEpochMismatch) {
+		t.Fatalf("release err=%v, want ErrEpochMismatch", err)
+	}
+	if len(released) != 1 || released[0] != o.Epoch {
+		t.Fatalf("hook=%v, want epoch %d", released, o.Epoch)
+	}
+}
+
+// renewBeforeOwnerCAS lets a same-epoch Renew commit before a purge CAS, so
+// the purge uses a stale etag without another node taking the cell.
+type renewBeforeOwnerCAS struct {
+	bucket.Bucket
+	renew   func() error
+	renewed bool
+	busy    bool
+	err     error
+}
+
+func (b *renewBeforeOwnerCAS) CAS(ctx context.Context, key string, data []byte, etag string) (string, error) {
+	if !b.renewed && !b.busy {
+		b.busy = true
+		b.err = b.renew()
+		b.busy = false
+		b.renewed = true
+	}
+	if b.err != nil {
+		return "", b.err
+	}
+	return b.Bucket.CAS(ctx, key, data, etag)
+}
+
+func TestReleaseForPurgeKeepsOwnershipWhenSameEpochRenewWins(t *testing.T) {
+	ctx := context.Background()
+	m, b := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "renew-purge"}
+	o, err := m.Claim(ctx, sc, time.Now())
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var released []uint64
+	m.AfterRelease = func(_ cell.Scope, epoch uint64) { released = append(released, epoch) }
+	m.AdminAdvertise = "node-1:8082"
+	m.B = &renewBeforeOwnerCAS{Bucket: b, renew: func() error {
+		_, err := m.Renew(ctx, sc, o.Epoch, time.Now().Add(time.Second))
+		return err
+	}}
+	err = m.ReleaseForPurge(ctx, sc, o.Epoch)
+	if !errors.Is(err, bucket.ErrPrecondition) {
+		t.Fatalf("purge release err=%v, want ErrPrecondition", err)
+	}
+	if len(released) != 0 {
+		t.Fatalf("lost-owner hook ran while epoch %d is still held: %v", o.Epoch, released)
+	}
+	cur, _, err := m.Resolve(ctx, sc)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cur.Node != m.NodeID || cur.Epoch != o.Epoch || cur.Retired {
+		t.Fatalf("purge committed or owner changed: %+v", cur)
+	}
+	if cur.AdminAddress != "node-1:8082" {
+		t.Fatalf("renew did not commit: %+v", cur)
+	}
+}
+
 func TestReleaseBeforeReleaseErrorKeepsOwnership(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newManager(t, t.TempDir(), "node-1")
@@ -931,5 +1144,73 @@ func TestExclusiveClaimLostReplyIsEventuallyReleased(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReleaseWhenLeavesTheOwnerWhenTheGuardRefuses(t *testing.T) {
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "still-open"}
+	owned, err := m.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = m.ReleaseWhen(t.Context(), sc, owned.Epoch, func() bool { return false })
+	if !errors.Is(err, ErrReleaseBusy) {
+		t.Fatalf("release err=%v, want ErrReleaseBusy", err)
+	}
+	cur, _, err := m.Resolve(t.Context(), sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Node != m.NodeID {
+		t.Fatalf("owner node=%s, want %s", cur.Node, m.NodeID)
+	}
+	if cur.Epoch != owned.Epoch {
+		t.Fatalf("owner epoch=%d, want %d", cur.Epoch, owned.Epoch)
+	}
+}
+
+func TestReleaseWhenDeletesAnIdleEpoch(t *testing.T) {
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "idle"}
+	owned, err := m.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReleaseWhen(t.Context(), sc, owned.Epoch, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Resolve(t.Context(), sc); !errors.Is(err, ErrUnowned) {
+		t.Fatalf("resolve err=%v, want ErrUnowned", err)
+	}
+}
+
+func TestReleaseWhenGuardHoldsTheClaimLock(t *testing.T) {
+	m, _ := newManager(t, t.TempDir(), "node-1")
+	sc := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "locked"}
+	owned, err := m.Claim(t.Context(), sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inGuard := make(chan struct{})
+	finishGuard := make(chan struct{})
+	released := make(chan error, 1)
+	go func() {
+		released <- m.ReleaseWhen(t.Context(), sc, owned.Epoch, func() bool {
+			close(inGuard)
+			<-finishGuard
+			return true
+		})
+	}()
+	<-inGuard
+	claimCtx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	_, err = m.Claim(claimCtx, sc, time.Now())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("claim during release guard err=%v, want deadline", err)
+	}
+	close(finishGuard)
+	if err := <-released; err != nil {
+		t.Fatal(err)
 	}
 }

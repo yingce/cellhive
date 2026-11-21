@@ -32,7 +32,9 @@ type BacklogStats struct {
 	Truncated                bool   `json:"truncated"`
 }
 
-const maxStatsObjects = 50000
+// maxStatsObjects caps BacklogStats listings only. Epoch GC must not use this
+// cap as a reason to skip deleting an epoch (see retireNativeEpochs).
+var maxStatsObjects = 50000
 
 // BacklogStats lists at most maxStatsObjects objects under the epoch prefix. A
 // truncated result is deterministic (lexicographic prefix) and sets Truncated so

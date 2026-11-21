@@ -231,6 +231,37 @@ func TestManagerCapturesAndWaits(t *testing.T) {
 	}
 }
 
+func TestLostOwnerReportsTheEpochThatWasHeld(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	var epoch atomic.Uint64
+	epoch.Store(4)
+	var lost atomic.Uint64
+	m := &Manager{
+		Store: cs, Committer: &recCommitter{}, AutoSnapshot: true,
+		Checkpoint: 20 * time.Millisecond,
+		Owner:      func(context.Context, cell.Scope) (bool, uint64, error) { return true, epoch.Load(), nil },
+		OnLostOwner: func(_ cell.Scope, held uint64) {
+			lost.Store(held)
+		},
+	}
+	scope := cell.Scope{Namespace: "acme", Class: "__kv__", ID: "held"}
+	if _, err := m.Ensure(context.Background(), scope); err != nil {
+		t.Fatal(err)
+	}
+	epoch.Store(9)
+	deadline := time.Now().Add(2 * time.Second)
+	for lost.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := lost.Load(); got != 4 {
+		t.Fatalf("lost epoch=%d, want the generation this capture held", got)
+	}
+}
+
 func TestEnsureRefusesWhenNotOwner(t *testing.T) {
 	cs, _ := cellstore.New(t.TempDir())
 	defer cs.Close()

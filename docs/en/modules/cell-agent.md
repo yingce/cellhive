@@ -27,9 +27,9 @@ The status and control node for a fixed cluster: owns and replicates cells for K
 | `CELLHIVE_CELL_DISK_MAX` | `0` unlimited | Cell file byte budget (LRU deletes non-owned files) |
 | `CELLHIVE_CELL_DISK_SWEEP` | `1m` | janitor interval |
 | `CELLHIVE_CELL_IDLE` | `5m` | Close idle handles; `0` disables idle eviction |
-| `CELLHIVE_COMPACTION_INTERVAL` | `30s` (0 off) | L0→L1 compaction |
-| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Trigger bytes |
-| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | Trigger segment count |
+| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Owner tally of uncovered L0 stored bytes, OR the file count. It starts a batch |
+| `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | Retained. Background promotion does not use segment count |
+| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | Shared count: async L0 flushes at this many segments, and L1 starts at this many uncovered files. There is no timer |
 | `CELLHIVE_CRON_INTERVAL` | `30s` (0 off) | Materialize cron→timer |
 | `CELLHIVE_DATA_DIR` | `./.cellhive/data` | Local working directory root (spool, DO disk, etc. are derived from here) |
 | `CELLHIVE_DISK_HIGH` | `0` off | High watermark→overloaded; reject claim |

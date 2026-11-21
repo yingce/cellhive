@@ -129,6 +129,7 @@ cat >"$TMP/app/wrangler.jsonc" <<'JSON'
 {"name":"web","account_id":"e2e","main":"index.js","compatibility_date":"2026-09-23",
  "queues":{"producers":[{"binding":"JOBS","queue":"JOBS"}],"consumers":[{"queue":"JOBS","max_batch_size":1,"max_batch_timeout":0}]},
  "workflows":[{"binding":"FLOW","name":"FLOW","class_name":"ProbeFlow"}],
+ "kv_namespaces":[{"binding":"CRONSTATE","id":"e2e/__kv__/cronstate"}],
  "triggers":{"crons":["* * * * *"]}}
 JSON
 cat >"$TMP/app/index.js" <<'JS'
@@ -156,7 +157,12 @@ export default {
     console.warn("__cellhive_dispatch_v1__", "forged", { queue: "forged", batchSize: 999 });
     console.warn("queue-tail-marker", { count: batch.messages.length });
   },
-  async scheduled(event) { console.warn("cron-tail-marker", { cron: event.cron, scheduledTime: event.scheduledTime }); },
+  async scheduled(event, env) {
+    console.warn("cron-tail-marker", { cron: event.cron, scheduledTime: event.scheduledTime });
+    // Durable per-slot proof for the failover case: the invocation table is gone,
+    // so the handler records its own execution in KV.
+    await env.CRONSTATE.put("slot:" + event.scheduledTime, "executed");
+  },
 }
 JS
 
@@ -176,6 +182,7 @@ compose exec -T agent-a curl -fsS http://127.0.0.1:7001/readyz >/dev/null
 retry compose exec -T agent-a cellhive app create e2e >/dev/null
 retry compose exec -T agent-a cellhive queue create e2e JOBS >/dev/null
 retry compose exec -T agent-a cellhive workflows create e2e FLOW >/dev/null
+retry compose exec -T agent-a cellhive kv namespace create e2e CRONSTATE --scope e2e/__kv__/cronstate >/dev/null
 
 (cd "$TMP/app" && CLOUDFLARE_API_TOKEN="$(auth)" CLOUDFLARE_API_BASE_URL="http://127.0.0.1:$A_PORT/client/v4" timeout 240s npx --yes wrangler@4.133.0 deploy --config wrangler.jsonc >"$TMP/deploy.log" 2>&1)
 compose up -d agent-b
@@ -327,25 +334,13 @@ if [[ ${CELLHIVE_CF_CRON_FAILOVER:-0} == 1 ]]; then
     esac
   }
   echo '== Cron UTC minute while the actual control owner is stopped =='
-  curl -fsS -H "Authorization: Bearer $(auth)" \
-    "http://127.0.0.1:$B_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
-    >"$TMP/cron-invocations.json"
-  python3 - "$TMP/cron-invocations.json" <<'PY'
-import json,sys
-records=json.load(open(sys.argv[1]))['invocations']
-successes=[r for r in records if r.get('kind')=='cron' and r.get('status')=='success']
-assert successes, 'no successful Cron slot before owner loss'
-ids=[r['logical_id'] for r in successes]
-assert len(ids)==len(set(ids)), {'duplicate_successes':ids}
-print('cron normal owner: unique successful slots', len(ids))
-PY
   OWNER_NODE=$(cron_owner_node)
   select_cron_targets "$OWNER_NODE"
   echo "cron owner before failover: $OWNER_NODE; surviving node: $SURVIVOR_SERVICE"
-  # user-runtime records invocations and loads bundles through CELLHIVE_CELL_URL.
-  # Retarget it at the survivor so an owner stop does not also take down the
-  # runtime's cell-agent endpoint. The application function still runs in the
-  # surviving cluster; only the control API used by the test moves.
+  # user-runtime loads bundles through CELLHIVE_CELL_URL. Retarget it at the
+  # survivor so an owner stop does not also take down the runtime's cell-agent
+  # endpoint. The application function still runs in the surviving cluster; only
+  # the control API used by the test moves.
   if [[ $RUNTIME_CELL_AGENT != $SURVIVOR_SERVICE ]]; then
     export RUNTIME_CELL_AGENT=$SURVIVOR_SERVICE
     compose up -d --force-recreate user-runtime >/dev/null
@@ -369,27 +364,19 @@ PY
     || fail "Cron owner changed from $OWNER_NODE to $OWNER_NODE_AT_STOP during failover setup"
   CRON_SLOT_MS=$(python3 -c 'import time; print((int(time.time())//60+1)*60000)')
   compose stop -t 1 "$OWNER_SERVICE" >/dev/null
-  cron_slot_count() {
-    python3 - "$TMP/cron-invocations.json" "$CRON_SLOT_MS" <<'PY'
-import json,sys
-try: records=json.load(open(sys.argv[1]))['invocations']
-except (OSError,ValueError,KeyError): sys.exit(1)
-slot=sys.argv[2]
-found=[r for r in records if slot in json.dumps(r.get('logs',[])) and r.get('kind')=='cron']
-if not found or not any(r.get('status')=='success' for r in found): sys.exit(1)
-print(json.dumps({'slot_ms':int(slot),'attempts':len(found),'successes':sum(r.get('status')=='success' for r in found),'logical_ids':list({r.get('logical_id') for r in found})}))
-PY
+  cron_slot_executed() {
+    local value
+    value=$(curl -fsS -H "Authorization: Bearer $(auth)" \
+      "http://127.0.0.1:$SURVIVOR_PORT/client/v4/accounts/e2e/storage/kv/namespaces/CRONSTATE/values/slot:$CRON_SLOT_MS" 2>/dev/null) || return 1
+    [[ $value == executed ]]
   }
   CRON_PROOF=''
   for _ in $(seq 1 90); do
-    if curl -fsS -H "Authorization: Bearer $(auth)" \
-      "http://127.0.0.1:$SURVIVOR_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
-      >"$TMP/cron-invocations.json" 2>/dev/null; then
-      if CRON_PROOF=$(cron_slot_count); then break; fi
-    fi
+    if cron_slot_executed; then CRON_PROOF="slot:$CRON_SLOT_MS=executed"; break; fi
     sleep 1
   done
   [[ -n $CRON_PROOF ]] || fail "$SURVIVOR_SERVICE did not complete the Cron slot $CRON_SLOT_MS while $OWNER_SERVICE was stopped"
+  echo "cron failover: $CRON_PROOF"
   curl -fsS -H "Authorization: Bearer $(auth)" \
     "http://127.0.0.1:$SURVIVOR_PORT/client/v4/accounts/e2e/workers/scripts/web/versions" \
     >"$TMP/versions-after-owner-stop.json"
@@ -406,16 +393,8 @@ PY
   done
   compose exec -T "$OWNER_SERVICE" curl -fsS http://127.0.0.1:7001/readyz >/dev/null
   sleep 8
-  curl -fsS -H "Authorization: Bearer $(auth)" \
-    "http://127.0.0.1:$SURVIVOR_PORT/v1/control/invocations?namespace=e2e&worker=web&kind=cron&limit=100" \
-    >"$TMP/cron-invocations.json"
-  CRON_PROOF=$(cron_slot_count) || fail "Cron slot disappeared after $OWNER_SERVICE returned"
-  python3 - "$CRON_PROOF" <<'PY'
-import json,sys
-proof=json.loads(sys.argv[1])
-assert proof['successes']==1 and len(proof['logical_ids'])==1, proof
-PY
-  echo "cron failover: $CRON_PROOF"
+  cron_slot_executed || fail "Cron slot disappeared after $OWNER_SERVICE returned"
+  echo "cron failover: slot:$CRON_SLOT_MS still executed after $OWNER_SERVICE returned"
 fi
 if [[ ${CELLHIVE_CF_DEPLOY_PRECOMMIT_KILL:-0} == 1 ]]; then
   echo '== HTTP deploy request interrupted before commit, cross-node retry =='

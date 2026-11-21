@@ -12,19 +12,115 @@
 | 删除 KV / Queue | `DELETE /v1/kv/resources?namespace=acme&name=CACHE` / `/v1/queue/resources?...`；引用中需 `force=1` |
 | 清理状态 | `GET /v1/control/resource/cleanup?namespace=acme&kind=kv&name=CACHE` |
 | 手动重试 | `POST /v1/control/resource/cleanup/retry?namespace=acme&kind=kv&name=CACHE` |
-| 调用结果与 console | `GET /v1/control/invocations?namespace=acme&worker=web&kind=queue&from_ms=...&to_ms=...&invocation_id=...&limit=100&cursor=...` |
+| 调用结果 | OTLP 日志（collector/OpenObserve），不再有 `GET /v1/control/invocations` |
 
 预览 `messages[].body` 为 base64；`content_type` 指明解码方式，`timestamp_ms/attempts` 为 DLQ 当前记录，`source_created_ms/source_attempts/source_queue/source_id` 保留来源。预览不领取、不加 attempts、不改变投递状态。重复 ack 安全，但不能取消已开始执行的业务代码。分页为活数据 keyset，不是全队列快照。
 
 清理状态为 `pending/running/failed/complete`，含 `job_id/data_scope/attempts/last_error/next_retry_ms`；后台每 2 秒检查、失败指数退避最多自动 10 次，手动 retry 重置失败预算。每 pass 最多删除 500 replica 对象；大资源继续 pending，不消耗失败预算。删除完成前不允许重建；完成后重新创建才激活新 incarnation。删除主 Queue 不删除独立 DLQ，purge 仍只清消息。旧无来源 DLQ、共享 scope 或 bucket 失败会明确报告，不能当作清理完成。
 
-调用记录 `invocation_id` 标识一次执行；`logical_id` 关联同 batch/slot，`attempt`、`status=success/failed/retry/running` 与 `retry_requested/no_retry` 区分结果。异常包含 error/stack，console 在 `logs` 中，截断看 `logs_truncated`。调用结果以 handler 返回为准；`finishInvocation` 落库失败只记录 `cellhive: invocation persistence failed`，不会把成功结果改成 5xx 或触发 timer/queue 重试。`startInvocation` 仍在执行前写入（Queue 去重依赖它），失败会拒绝本次执行并由上游重试。保留 7 天或每 namespace 最近 10,000 次（写入时有界回收），运行中异常退出保留 running 供定位；此 API 为完成记录查询，实时 tail 继续使用原日志接口。调用记录由节点级 `CELLHIVE_INVOCATION_LOGS`（默认 on）全局控制（ADR-239），不再有 per-worker 策略。
+Queue/Cron/Workflow 与 HTTP fetch 的调用结果都是 OTLP 日志，字段见下方「OTLP 日志格式」。控制面不再有 `GET /v1/control/invocations`，也不再写 `__invocations__` cell。console 不进 Queue/Cron/Workflow 那条完成记录。是否导出由节点级 `CELLHIVE_INVOCATION_LOGS`（默认 on）控制（ADR-239 2026-11-20 修订）。
 
-Queue 部分重试后批次可能重组：使用 `messages[].logical_id/attempt` 与 `parent_invocation_ids` 追踪消息，不应把当前成员哈希当作全链路重试身份。查询可附加 `message_id` 或 `message_logical_id`。返回值在 `result`（`result_encoding=cellhive-tagged-json`，最多 8 KiB；`result_truncated` 或 `unsupported` 显式提示），`ack/retry` 保留逐消息结果及 retry delay。
+Queue 部分重试后批次可能重组：用同一 `cellhive.logical_id` 与 `cellhive.attempt` 在 OTLP 里追踪消息，`producer_links` 关联生产者 trace。handler 的返回值不进 OTLP；`ack/retry` 由 handler 返回给 dispatcher 驱动真实投递，只有计数进日志。
 
 清理完成后保留 retirement GC 义务，后续有界轮转清除迟到的旧 epoch 上传；namespace purge 也保留小型 fence/owner-generation 元数据。删除/重建的本地 incarnation 标记独立于 owner，离线节点不能复用旧 SQLite。跨 Queue 转移带源 incarnation，并在目的地事务内验证，防止迟到 DLQ 转移恢复旧数据。
 
-验收：`scripts/runtime-baseline-e2e.sh`（真实 Docker 部署）与 `TestQueueCronInvocationLogsAreDurableAndIsolated`（真实 pinned workerd 并发/异常/后台日志）。
+验收：`scripts/runtime-baseline-e2e.sh`、`scripts/cf-tail-multinode-e2e.sh`，以及 `workerd/user-runtime/invocation-otlp.test.mjs`。
+
+## OTLP 日志格式
+
+协议都是 OTLP/HTTP `ExportLogsServiceRequest` protobuf，`Content-Type: application/x-protobuf`，路径 `{CELLHIVE_OTLP_ENDPOINT 去掉末尾 /v1/logs 或 /v1/traces}/v1/logs`。属性名在后端里常被展成下划线（OpenObserve 用 `cellhive_event_type` 查询）。空字符串、`null` 不写入直接导出的那条记录。
+
+导出有三条路，属性集合相同，Resource 不同：
+
+| 路 | 何时走 | `service.name` | instrumentation scope |
+|---|---|---|---|
+| runtime 日志管道 | 进程能打开 `CELLHIVE_LOG_DIR` 卷轴时优先。workerd 打一行 `@cellhive-log:` JSON，cell-agent/runtime 再编成 OTLP。单行超过 60000 字节变成 `{"kind":"drop"}`，不进 OTLP | `user-runtime` 或 `do-runtime` | `cellhive.runtime` |
+| user-runtime 直接 POST | 没有日志卷轴、但配了 `CELLHIVE_OTLP_ENDPOINT` | `cellhive-user-runtime` | `cellhive.user-runtime` |
+| cell-agent Tail 拉取 | `CELLHIVE_OTLP_LOGS=tail\|all`，且该事件尚未由卷轴导出。`tail` 只导出有订阅的 worker；默认 `off` 不走这条 | `CELLHIVE_SERVICE_NAME`，默认 `cellhive-cell-agent`；另有 `service.version`、`service.instance.id`、`cellhive.node_id` | logger 名 `cellhive` |
+
+时间：`TimeUnixNano` 取事件毫秒 × 1e6。卷轴和直接 POST 的 `ObservedTimeUnixNano` 与之一同写入；cell-agent 的 observed 是导出当时。有效 W3C `traceparent`（`00-` + 32 hex + `-` + 16 hex）写入 LogRecord 的 `trace_id` / `span_id`。cell-agent 另外复制字符串属性 `cellhive.trace_id`、`cellhive.span_id`；另外两条路不复制这两项。
+
+严重级别：body 为字符串。`info` → 9，`debug` → 5，`warn`/`warning` → 13，`error` → 17。直接 POST 的 fetch 记录把文本写成大写 `INFO`/`ERROR`，数值仍是 9/17。
+
+### 1. Queue / Cron / Workflow 完成记录
+
+`CELLHIVE_INVOCATION_LOGS=on` 时，一次尝试**结束**才发一条。没有 running 记录，没有 console，没有 handler 返回值。失败只影响这条日志，不把业务成功改成 500。
+
+| 字段 | 值 |
+|---|---|
+| body | `invocation` |
+| `cellhive.invocation` | `true`（布尔） |
+| `cellhive.invocation_id` | 本次尝试的 UUID |
+| `cellhive.request_id` | 调度器传入的 id；没有则等于 `invocation_id` |
+| `cellhive.namespace` / `cellhive.worker` | 租户 |
+| `cellhive.event_type` | `queue`、`cron` 或 `workflow` |
+| `cellhive.logical_id` | `{kind}:` + SHA-256 hex。queue 的输入是 `[namespace, worker, queue, 排序后的 message id]`；workflow 是 `[namespace, worker, workflow, instance id]`；cron 是 `[namespace, worker, token, scheduled_time_ms, cron]` |
+| `cellhive.resource` | queue 名、cron 表达式或 workflow 名 |
+| `cellhive.attempt` | queue 为本批消息 `attempts` 的最大值（至少 1）；cron/workflow 为 1 |
+| `cellhive.outcome` | `success`、`retry` 或 `failed` |
+| `cellhive.started_ms` / `cellhive.finished_ms` / `cellhive.duration_ms` | Unix 毫秒；duration 为两者之差 |
+| `cellhive.retry_requested` | 布尔，outcome 为 `retry` 时 true |
+| `cellhive.error` | 错误文本，截断到 2048 字符；没有则省略 |
+| `cellhive.ack_count` / `cellhive.retry_count` | 本批 ack / retry 的消息个数。失败时两者都是 0 |
+| `cellhive.producer_links` | 仅 queue，且至少有一条消息带生产者 `request_id` 或 `traceparent`。JSON 数组，元素为 `{message_id, request_id, traceparent}` |
+
+severity：`failed` 为 error/17，其余为 info/9。
+
+### 2. HTTP fetch 请求记录
+
+同样受 `CELLHIVE_INVOCATION_LOGS` 控制，由 user-runtime loader 在请求结束后发出。这是 fetch 的调用摘要；Tail 路径不再为普通 fetch 另发一条 invocation，避免重复。Durable Object 例外，见第 3 节。
+
+| 字段 | 值 |
+|---|---|
+| body | `invocation` |
+| `cellhive.invocation` | `true` |
+| `cellhive.event_type` | `fetch` |
+| `cellhive.namespace` / `cellhive.worker` | 租户 |
+| `cellhive.request_id` | 请求头 `x-request-id`；没有则现场生成 UUID |
+| `cellhive.method` | HTTP 方法 |
+| `cellhive.path` | `x-vwork-path-prefix`，否则 URL pathname |
+| `cellhive.route` | 固定 `functions` |
+| `cellhive.status` | HTTP 状态；没有响应时按 500 |
+| `cellhive.outcome` | 状态 ≥ 500 为 `error`，否则 `ok` |
+| `cellhive.started_ms` / `cellhive.finished_ms` / `cellhive.duration_ms` | Unix 毫秒，duration 不小于 0 |
+
+没有 `invocation_id`、`logical_id`、`attempt`、`error` 文本。直接 POST 失败且没有卷轴时，loader 改把同一字段 POST 到 cell-agent `/v1/internal/request-log`，再由 cell-agent 按第 4 节的 Resource 导出；这一跳还受 `CELLHIVE_OTLP_LOGS` 控制。
+
+### 3. Tail 事件
+
+console 只存在于 Tail。有日志卷轴时，host 在写入内存环的同时把下面几条打进卷轴。cell-agent 拉取时若看到 `file_exported`，不再向 OTLP 发第二份。`CELLHIVE_OTLP_LOGS=off` 且没有卷轴转发时，这些记录不到 OTLP。平台生命周期 RPC（`CellHiveLifecycle`，以及无 entrypoint 的 `status`/`retire`）不导出。
+
+每条 Tail 事件先有一条调用摘要，普通 fetch 跳过（已由第 2 节发出）。带 `durableObjectId` 的 fetch 仍发。
+
+| 字段 | 值 |
+|---|---|
+| body | `invocation` |
+| `cellhive.invocation` | `true` |
+| `cellhive.event_type` | `fetch`（有 request）、`scheduled`（有 cron 或 `handleScheduled`）、`queue`（有 queue 或 `handleQueue`）、`workflow`（`handleRun`）；都没有则为空，该属性省略 |
+| `cellhive.namespace` / `cellhive.worker` | 租户 |
+| `cellhive.request_id` | Tail 事件上的 request id |
+| `cellhive.outcome` | workerd 的 outcome，例如 `ok`、`exception` |
+| `cellhive.script_version` | JSON 字符串，`{id, name, tags}` |
+| `cellhive.resource` | Durable Object id；没有则省略 |
+| `cellhive.method` / `cellhive.path` | 仅 fetch 的 request |
+| `cellhive.status` | 仅当响应带 status |
+| `cellhive.exceptions` | 异常数组的 JSON。元素含 `name`、`message`、`timestamp`，有 stack 时含 `stack` |
+| `cellhive.started_ms` / `cellhive.finished_ms` | 事件上有开始时间才带 |
+
+severity：outcome 为 `ok` 时 info，否则 error。这里的 `event_type` 用 `scheduled`，第 1 节的 Cron 完成记录用 `cron`。两边不是同一条日志。
+
+然后每条 console 单独一条：
+
+| 字段 | 值 |
+|---|---|
+| body | 各参数格式化后用空格拼接。字符串原样，bigint 加 `n`，其余 `JSON.stringify` |
+| severity | console 级别：`log` 按 info，以及 `debug` / `warn` / `error` |
+| `cellhive.message_args` | 参数数组的 JSON 字符串 |
+| 其余 | 与上面这条调用摘要相同，但**没有** `cellhive.invocation` |
+
+可信调度标记 `__cellhive_dispatch_v1__` 会从公开 logs 里拿掉，不作为 console 导出；Queue/Cron 的 `event.queue` / `event.cron` 留在 Tail 协议里，不进这条 OTLP 属性。
+
+卷轴还会为每个异常再发一条：body 为 `{name}: {message}`，severity `error`，属性与调用摘要相同且不含 `cellhive.invocation`。cell-agent 自己的导出不发这第二条，异常只留在调用摘要的 `cellhive.exceptions` 里。
 
 ## 启动
 

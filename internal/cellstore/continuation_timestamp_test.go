@@ -18,13 +18,21 @@ func TestContinuationTimestampAndCoordinates(t *testing.T) {
 	}
 	before := time.Now().UnixMilli()
 	rejected := errors.New("publish rejected")
-	if _, err := c.SeedContinuation(ctx, cut, func(h ltx.NativeHeader) error { return rejected }); !errors.Is(err, rejected) {
+	if _, err := c.SeedContinuation(ctx, cut, func(h ltx.NativeHeader, pages []ltx.WALPage) error {
+		if len(pages) == 0 {
+			t.Fatal("rejected seed had no bookkeeping pages")
+		}
+		return rejected
+	}); !errors.Is(err, rejected) {
 		t.Fatal(err)
 	}
 	if got, err := c.TxID(ctx); err != nil || got != cut {
 		t.Fatalf("failed seed advanced local cut: %d %v", got, err)
 	}
-	got, err := c.SeedContinuation(ctx, cut, func(h ltx.NativeHeader) error {
+	got, err := c.SeedContinuation(ctx, cut, func(h ltx.NativeHeader, pages []ltx.WALPage) error {
+		if len(pages) == 0 {
+			t.Fatal("seed published no bookkeeping pages")
+		}
 		raw, err := os.ReadFile(c.WALPath())
 		if err != nil {
 			return err

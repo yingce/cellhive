@@ -49,6 +49,44 @@ func (m *Manager) ListLevelFrom(ctx context.Context, s cell.Scope, epoch uint64,
 	return out, nil
 }
 
+// ListLevelInfos returns size and upload time for one canonical level.
+// Backends without page metadata yield keys only; LastModifiedMs is then 0
+// and size is -1, so an age gate does not treat them as old.
+func (m *Manager) ListLevelInfos(ctx context.Context, s cell.Scope, epoch uint64, level uint16) ([]bucket.ObjectInfo, error) {
+	if !validLevel(level) {
+		return nil, fmt.Errorf("replica: invalid level %d", level)
+	}
+	prefix := EpochPrefix(s, epoch) + fmt.Sprintf("%04x/", level)
+	if pl, ok := m.B.(bucket.PagedLister); ok {
+		var out []bucket.ObjectInfo
+		after := ""
+		for pages := 0; pages < 100000; pages++ {
+			items, next, err := pl.ListPage(ctx, prefix, after, 1000)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, items...)
+			if next == "" {
+				return out, nil
+			}
+			if next == after {
+				return nil, fmt.Errorf("replica: non-advancing list continuation for %s", prefix)
+			}
+			after = next
+		}
+		return nil, fmt.Errorf("replica: list continuation limit exceeded for %s", prefix)
+	}
+	keys, err := m.B.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]bucket.ObjectInfo, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, bucket.ObjectInfo{Key: key, Size: -1})
+	}
+	return out, nil
+}
+
 // AppendLevel publishes a complete native file, never a private manifest/index.
 func (m *Manager) AppendLevel(ctx context.Context, s cell.Scope, epoch uint64, level uint16, raw []byte) (string, string, error) {
 	if !validLevel(level) {
@@ -81,11 +119,12 @@ func (m *Manager) AppendLevel(ctx context.Context, s cell.Scope, epoch uint64, l
 	return key, etag, err
 }
 
-// AppendContinuation publishes celld's zero-page epoch seed. Retrying an
-// already published seed reuses its original bytes (including WAL salts and
-// timestamp), provided its range and database shape match. A real delta or a
+// AppendContinuation publishes the epoch seed. The seed header stays a single
+// txid with an empty WAL span. Its pages are the local bookkeeping writes the
+// next capture cursor will not read again. Retrying an already published seed
+// reuses its original bytes, provided its range and database shape match. A
 // different database shape at that key is never accepted as a continuation.
-func (m *Manager) AppendContinuation(ctx context.Context, s cell.Scope, epoch uint64, h ltx.NativeHeader) error {
+func (m *Manager) AppendContinuation(ctx context.Context, s cell.Scope, epoch uint64, h ltx.NativeHeader, pages ...ltx.WALPage) error {
 	var hash uint64
 	for _, c := range []byte(s.String()) {
 		hash = hash*131 + uint64(c)
@@ -99,7 +138,7 @@ func (m *Manager) AppendContinuation(ctx context.Context, s cell.Scope, epoch ui
 	if h.MinTXID <= 1 || h.MinTXID != h.MaxTXID || h.WALOffset != 32 || h.WALSize != 0 {
 		return fmt.Errorf("replica: invalid continuation header")
 	}
-	raw, err := ltx.EncodeNativePages(h, nil)
+	raw, err := ltx.EncodeNativePages(h, pages)
 	if err != nil {
 		return err
 	}
@@ -136,11 +175,11 @@ func (m *Manager) checkContinuation(ctx context.Context, s cell.Scope, epoch uin
 	if err != nil {
 		return err
 	}
-	old, pages, err := ltx.DecodeNativePages(existing)
+	old, _, err := ltx.DecodeNativePages(existing)
 	if err != nil {
 		return err
 	}
-	if old.MinTXID != h.MinTXID || old.MaxTXID != h.MaxTXID || old.PageSize != h.PageSize || old.Commit != h.Commit || len(pages) != 0 || old.WALOffset != 32 || old.WALSize != 0 {
+	if old.MinTXID != h.MinTXID || old.MaxTXID != h.MaxTXID || old.PageSize != h.PageSize || old.Commit != h.Commit || old.WALOffset != 32 || old.WALSize != 0 {
 		return fmt.Errorf("%w: continuation conflicts with existing LTX %s", bucket.ErrPrecondition, key)
 	}
 	fence, _, err := m.readResourceFenceFresh(ctx, s)

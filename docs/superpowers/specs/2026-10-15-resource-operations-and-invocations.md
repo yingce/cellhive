@@ -42,6 +42,13 @@ ADR-205 and [runbook](../../operations.md).
 
 ## Invocation records
 
+> **Superseded (2026-11-20, ADR-239 revision).** The `__invocations__` cell,
+> `GET /v1/control/invocations`, and the internal `POST /v1/internal/invocations`
+> endpoint were removed. Attempt metadata is now exported directly from
+> user-runtime as one OTLP log record (`cellhive.invocation=true`) when the
+> attempt finishes; console stays with Tail only. The bullets below record the
+> original SQLite contract and no longer describe the implementation.
+
 - Each Queue batch attempt/Cron attempt has an immutable invocation ID, with
   a separate stable logical/retry key. Record namespace/worker/type, start/end,
   status, attempt, error and console logs in cell SQLite. Namespace-scoped,

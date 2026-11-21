@@ -124,7 +124,7 @@ do-runtime 的 supervisor 主动向 cell-agent 发起 claim。流程：
 2. **cell-agent 执行 claim**：条件写 `cells/<scope>/owner.json`（`If-None-Match: *` 或 CAS）。内容：`{node, session, epoch+1, expiry, address=do-runtime-advertise}`。**cell-agent 是唯一写桶者**，代理 do-runtime 完成。
 3. **claim 竞争**：若多个 do-runtime 同时发 claim，bucket 条件写保证只有一个成功；失败者从响应中读到胜者，转发请求。
 4. **claim 成功响应**：cell-agent 返回 `{epoch, expiry}` 给 supervisor，supervisor 接受后开始 restore（若已有数据）再进入就绪。
-5. **续约**：supervisor 持续向 cell-agent 发 renew（携带 session+epoch），cell-agent 通过 CAS 更新 expiry。**续约失败（cell-agent 拒绝）意味着 epoch 已变（被接管）**→ supervisor 必须自 fence 并重启。
+5. **续约**：supervisor 持续向 cell-agent 发 renew（携带 session+epoch），cell-agent 通过 CAS 更新 expiry。进入续约窗口后这次调用的续约失败，先重新 claim 再执行，不带着即将到期的租约派发。并发的另一次调用等待正在进行的 claim，不在 host 恢复过程中派发。别的节点仍持有活租约则转发。不再把这次调用回成 `renew_failed`。
 6. **claim 超时**：输出门有超时（见 known-issues.md #C-07）；若无法在 deadline 内获得证明，返回 `result_unknown`。
 
 ## DO 冷激活 / 恢复流程（C-04 fix）

@@ -467,7 +467,12 @@ func (m *Manager) uploadSegment(ctx context.Context, sc cell.Scope, epoch uint64
 	if err != nil {
 		return "", err
 	}
-	return m.finishPublication(ctx, sc, epoch, key, etag, true)
+	etag, err = m.finishPublication(ctx, sc, epoch, key, etag, true)
+	if err != nil {
+		return "", err
+	}
+	m.noteL0Object(sc, epoch, key, int64(len(data)))
+	return etag, nil
 }
 
 func (m *Manager) finishPublication(ctx context.Context, sc cell.Scope, epoch uint64, key, etag string, created bool) (string, error) {

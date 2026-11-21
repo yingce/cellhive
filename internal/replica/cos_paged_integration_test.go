@@ -346,8 +346,8 @@ func TestCOSNativeLevelsColdRestore(t *testing.T) {
 	t.Logf("COS native acceptance: rows=40 updates=16 txid=%d objects=%d cold_restore=%s total=%s", last, len(keys), time.Since(restoreStart), time.Since(started))
 	// The next epoch consumes a real zero-page continuation, then a completely
 	// fresh SQLite instance recovers its watermark before producing its delta.
-	continuationTXID, err := cold.SeedContinuation(ctx, last, func(h ltx.NativeHeader) error {
-		return rep.AppendContinuation(ctx, scope, 2, h)
+	continuationTXID, err := cold.SeedContinuation(ctx, last, func(h ltx.NativeHeader, pages []ltx.WALPage) error {
+		return rep.AppendContinuation(ctx, scope, 2, h, pages...)
 	})
 	if err != nil {
 		t.Fatal(err)

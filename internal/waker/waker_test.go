@@ -170,6 +170,74 @@ func TestWakerOnlyLeaderDispatches(t *testing.T) {
 	}
 }
 
+func TestWakerCleansUpAfterDispatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	b := newBucket(t, dir)
+	cs, _ := cellstore.New(t.TempDir())
+	sc := cell.Scope{Namespace: "demo", Class: "__timers__", ID: "order"}
+	c, _ := cs.Open(ctx, sc)
+	defer c.Close()
+	st, err := timer.NewStore(ctx, c)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := st.Upsert(ctx, timer.New(1000, timer.KindDOAlarm, sc.String(), "actor")); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	d := &countingDispatcher{}
+	w := newWaker(t, b, "node-a", d, sc, st)
+	var order []string
+	w.Cleanup = func(context.Context) (int, error) {
+		order = append(order, "cleanup")
+		return 0, nil
+	}
+	w.Dispatcher = &recordingDispatcher{inner: d, order: &order, label: "dispatch"}
+
+	if _, leader, err := w.Pass(ctx); err != nil || !leader {
+		t.Fatalf("pass err=%v leader=%v", err, leader)
+	}
+	if len(order) != 2 || order[0] != "dispatch" || order[1] != "cleanup" {
+		t.Fatalf("order=%v, want dispatch before cleanup", order)
+	}
+}
+
+func TestWakerCleanupBudgetReleasesThePass(t *testing.T) {
+	ctx := context.Background()
+	w := &Waker{
+		Election:      NewElection(newBucket(t, t.TempDir()), "node-a", "s", 10*time.Second),
+		DeadScopes:    func(context.Context) ([]string, error) { return nil, nil },
+		Open:          func(context.Context, string) (*timer.Store, error) { return nil, nil },
+		Dispatcher:    &countingDispatcher{},
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		CleanupBudget: 30 * time.Millisecond,
+		Cleanup: func(ctx context.Context) (int, error) {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		},
+	}
+	started := time.Now()
+	if _, leader, err := w.Pass(ctx); err != nil || !leader {
+		t.Fatalf("pass err=%v leader=%v", err, leader)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cleanup held the pass for %s", elapsed)
+	}
+}
+
+// recordingDispatcher records when dispatch is invoked relative to cleanup.
+type recordingDispatcher struct {
+	inner timer.Dispatcher
+	order *[]string
+	label string
+}
+
+func (d *recordingDispatcher) Dispatch(ctx context.Context, t timer.Timer) error {
+	*d.order = append(*d.order, d.label)
+	return d.inner.Dispatch(ctx, t)
+}
+
 func TestWakerFailoverDispatchesAfterLeaderExpiry(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

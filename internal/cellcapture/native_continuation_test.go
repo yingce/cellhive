@@ -7,7 +7,10 @@ import (
 	"cellhive/internal/ltx"
 	"cellhive/internal/replica"
 	"context"
+	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -52,7 +55,9 @@ func TestNativeContinuationConsumesOneTXIDBeforeFirstWrite(t *testing.T) {
 			keys, err := rep.ListSegments(ctx, s, e)
 			return len(keys) > 0, err
 		},
-		WriteContinuation: rep.AppendContinuation,
+		WriteContinuation: func(ctx context.Context, s cell.Scope, epoch uint64, h ltx.NativeHeader, pages []ltx.WALPage) error {
+			return rep.AppendContinuation(ctx, s, epoch, h, pages...)
+		},
 		CheckContinuation: rep.CheckContinuation,
 		Committer: committerFunc(func(ctx context.Context, s cell.Scope, e uint64, raw []byte) error {
 			_, _, err := rep.Append(ctx, s, e, raw)
@@ -61,8 +66,8 @@ func TestNativeContinuationConsumesOneTXIDBeforeFirstWrite(t *testing.T) {
 	}
 	defer m.Stop()
 	realPublish := m.WriteContinuation
-	m.WriteContinuation = func(ctx context.Context, s cell.Scope, e uint64, h ltx.NativeHeader) error {
-		if err := realPublish(ctx, s, e, h); err != nil {
+	m.WriteContinuation = func(ctx context.Context, s cell.Scope, e uint64, h ltx.NativeHeader, pages []ltx.WALPage) error {
+		if err := realPublish(ctx, s, e, h, pages); err != nil {
 			return err
 		}
 		return errors.New("lost successful COS response")
@@ -102,10 +107,47 @@ func TestNativeContinuationConsumesOneTXIDBeforeFirstWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.MinTXID != 2 || h.MaxTXID != 2 || len(pp) != 0 || h.Commit != count || h.PageSize != ps || h.WALOffset != 32 {
+	if h.MinTXID != 2 || h.MaxTXID != 2 || len(pp) == 0 || h.Commit != count || h.PageSize != ps || h.WALOffset != 32 {
 		t.Fatalf("continuation=%+v pages%d", h, len(pp))
 	}
 	if chain[2].Header.StartTxID != 3 || chain[2].Header.EndTxID != 3 {
 		t.Fatalf("first delta=%+v", chain[2].Header)
+	}
+	img := filepath.Join(t.TempDir(), "restored.db")
+	f, err := os.Create(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range chain {
+		hdr, pages, err := ltx.DecodeNativePages(seg.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, page := range pages {
+			if _, err := f.WriteAt(page.Data, int64(page.PageNo-1)*int64(hdr.PageSize)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(cellstore.DriverName, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var status, got string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ok" {
+		t.Fatalf("restored image: %s", status)
+	}
+	if err := db.QueryRow("SELECT value FROM kv WHERE key=?", "after").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "value" {
+		t.Fatalf("restored value %q", got)
 	}
 }

@@ -68,9 +68,9 @@ PYDIAG
   e2e_cli queue stats e2emn q1 || true
   e2e_cli queue stats e2emn q1-dlq || true
   curl -fsS --max-time 20 -H "Authorization: Bearer $(e2e_token admin)" \
-    "http://127.0.0.1:$A1/v1/control/invocations?namespace=e2emn&kind=queue" \
-    > "$E2E_BASE/failed-queue-invocations.json" || true
-  cat "$E2E_BASE/failed-queue-invocations.json"
+    "http://127.0.0.1:$A1/v1/control/queue/status?namespace=e2emn&queue=q1" \
+    > "$E2E_BASE/queue-status.json" || true
+  cat "$E2E_BASE/queue-status.json"
   e2e_fail "normal messages not consumed: $n"
 fi
 e2e_log "consumed after 5: $n"

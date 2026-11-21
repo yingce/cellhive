@@ -156,3 +156,105 @@ export async function flushSpans(env) {
     /* best-effort: spans are dropped, the request path is unaffected */
   }
 }
+
+// --- Generic OTLP/HTTP log record encoding -----------------------------------
+//
+// Platform code cannot run the OpenTelemetry SDK, so requests that must reach a
+// collector directly encode a minimal ExportLogsServiceRequest by hand. Only the
+// fields CellHive actually queries are emitted.
+
+function otlpVarint(value) {
+  let v = BigInt(value);
+  const out = [];
+  while (v > 127n) { out.push(Number(v & 127n) | 128); v >>= 7n; }
+  out.push(Number(v));
+  return out;
+}
+function otlpTag(field, wire) { return otlpVarint((field << 3) | wire); }
+function otlpBytes(field, bytes) { return [...otlpTag(field, 2), ...otlpVarint(bytes.length), ...bytes]; }
+function otlpString(field, value) { return otlpBytes(field, new TextEncoder().encode(String(value))); }
+function otlpFixed64(field, value) {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return [...otlpTag(field, 1), ...bytes];
+}
+function otlpInt(field, value) { return [...otlpTag(field, 0), ...otlpVarint(value)]; }
+function otlpAny(value) {
+  if (typeof value === "boolean") return otlpInt(2, value ? 1 : 0);
+  if (typeof value === "number") return otlpInt(3, value);
+  return otlpString(1, value);
+}
+function otlpKeyValue(key, value) { return [...otlpString(1, key), ...otlpBytes(2, otlpAny(value))]; }
+function otlpHex(id) {
+  const out = new Uint8Array(id.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+// traceIds splits a W3C traceparent into its trace and span ids.
+export function traceIds(tp) {
+  const m = /^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})/.exec(String(tp || ""));
+  return m ? [m[1].toLowerCase(), m[2].toLowerCase()] : ["", ""];
+}
+
+// otlpLogsProtobuf encodes one ExportLogsServiceRequest. Every record carries
+// the supplied attributes; `message` becomes the log body.
+export function otlpLogsProtobuf(scopeName, serviceName, records) {
+  const scopeLogs = [
+    ...otlpBytes(1, otlpString(1, scopeName)),
+    ...records.flatMap((r) => otlpBytes(2, otlpLogRecord(r))),
+  ];
+  const resourceLogs = [
+    ...otlpBytes(1, otlpBytes(1, otlpKeyValue("service.name", serviceName))),
+    ...otlpBytes(2, scopeLogs),
+  ];
+  return new Uint8Array(otlpBytes(1, resourceLogs));
+}
+
+function otlpLogRecord(r) {
+  const at = Number(r.atMs) || Date.now();
+  const record = [
+    ...otlpFixed64(1, BigInt(at) * 1000000n),
+    ...otlpFixed64(11, BigInt(at) * 1000000n),
+    ...otlpInt(2, r.severityNumber || 9),
+    ...otlpString(3, r.severityText || "INFO"),
+    ...otlpBytes(5, otlpAny(r.message === undefined ? "" : String(r.message))),
+  ];
+  for (const [k, v] of Object.entries(r.attributes || {})) {
+    if (v === null || v === undefined || v === "") continue;
+    record.push(...otlpBytes(6, otlpKeyValue(k, v)));
+  }
+  if (r.traceId && r.spanId && r.traceId.length === 32 && r.spanId.length === 16) {
+    record.push(...otlpBytes(9, otlpHex(r.traceId)), ...otlpBytes(10, otlpHex(r.spanId)));
+  }
+  return record;
+}
+
+// exportLogRecords ships records to env.OTLP_LOGS_URL, falling back to the
+// trusted local log pipe when no collector is configured. Best-effort: a
+// failure never affects the caller's result.
+export async function exportLogRecords(env, records) {
+  if (!records || records.length === 0) return;
+  if (env.FILE_LOG_TOKEN) {
+    for (const r of records) {
+      fileLog(env, r.attributes || {}, r.message || "", (r.severityText || "info").toLowerCase(), r.atMs, r.traceparent || "");
+    }
+    return;
+  }
+  const base = String(env.OTLP_LOGS_URL || "").trim();
+  if (!base) return;
+  let extra = {};
+  try { extra = JSON.parse(env.OTLP_LOGS_HEADERS || "{}"); } catch (e) { extra = {}; }
+  const headers = new Headers({ "content-type": "application/x-protobuf" });
+  for (const [k, v] of Object.entries(extra)) headers.set(k, String(v));
+  const url = base.replace(/\/$/, "").replace(/\/v1\/(traces|logs)$/, "") + "/v1/logs";
+  try {
+    await postTelemetry(url, {
+      method: "POST",
+      headers,
+      body: otlpLogsProtobuf("cellhive.user-runtime", "cellhive-user-runtime", records),
+    });
+  } catch (e) {
+    /* best-effort: the invocation itself already succeeded */
+  }
+}

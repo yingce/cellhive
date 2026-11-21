@@ -36,6 +36,7 @@ import (
 	"cellhive/internal/instance"
 	"cellhive/internal/lease"
 	"cellhive/internal/logbuf"
+	"cellhive/internal/ltx"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/owner"
 	"cellhive/internal/pagedvfs"
@@ -267,7 +268,15 @@ func main() {
 	}
 	// Fleet-acked writes can coalesce in the background. Bucket waiters wake
 	// the uploader immediately; follower fsync retains its separate 2ms window.
-	uploader := upload.NewSharded(rep, log, 64, 1<<20, 200*time.Millisecond, shards)
+	uploadSegs, uploadEvery := uploadSegmentCap(cfg), cfg.UploadInterval
+	if uploadEvery <= 0 {
+		uploadEvery = 30 * time.Second
+	}
+	uploader := upload.NewSharded(rep, log, uploadSegs, 1<<20, uploadEvery, shards)
+	compactWake := newCompactionWake()
+	uploader.SetOnDurable(func(sc cell.Scope, epoch uint64) {
+		compactWake.Nudge(sc, epoch)
+	})
 	// Durable queue for the asynchronous bucket copy: a failed upload (or a
 	// restart) defers the segment instead of dropping it (ADR-143).
 	if sp, serr := upload.OpenSpool(filepath.Join(cfg.DataDir, "upload-spool"), 200000); serr != nil {
@@ -296,68 +305,29 @@ func main() {
 	shipper := peer.NewShipBatcher(shipTransport, 256, 4<<20, time.Millisecond, 4, cfg.PeerPipeline, cfg.PeerHedgeMS, cfg.PeerHedgeMaxMS)
 	shipper.Start(upCtx)
 
-	// Background L0->L1 compaction for owned scopes (cold path; never on the
-	// write-ack path). Disabled when the interval is zero.
-	if cfg.CompactionInterval > 0 {
-		go runCompactionLoop(ctx, log, om, rep, cfg)
-	}
+	// Background promotion stays off the write-ack path. A durable L0 upload
+	// nudges L1 when the object count or stored-byte bar is met.
+	go runCompactionScheduler(ctx, log, om, rep, cfg, compactWake)
 
 	store, err := cellstore.New(cfg.DataDir)
 	if err != nil {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
-	// Publish a native L9 snapshot before releasing a bounded-size cell.
-	// Large cells keep their continuation chain rather than forcing a full
-	// database download at every ownership change.
+	// Rehome the durable baseline into this epoch before release so the
+	// successor can GC predecessors. Failures never block release: a later
+	// idle fold or the next owner can retry. Large cells are not skipped.
 	om.BeforeRelease = func(rctx context.Context, sc cell.Scope, epoch uint64) error {
-		o, _, rerr := om.Resolve(rctx, sc)
-		if rerr != nil || o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
-			log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "ownership changed")
+		if skipPreReleaseFold(rctx) {
 			return nil
 		}
-		if cfg.CaptureEpochSnapshotMaxBytes > 0 {
-			if p, err := store.Path(sc); err == nil {
-				if fi, err := os.Stat(p); err == nil && fi.Size() > cfg.CaptureEpochSnapshotMaxBytes {
-					log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "cell exceeds epoch snapshot budget")
-					return nil
-				}
-			}
-		}
-		live, lerr := om.Live(rctx, o, time.Now())
-		if lerr != nil || !live {
-			log.Info("pre-release compaction skipped", "scope", sc.String(), "reason", "owner not live")
-			return nil
-		}
-		cctx, cancel := context.WithTimeout(rctx, 10*time.Second)
-		defer cancel()
-		cres, cerr := compaction.Snapshot(cctx, rep, sc, epoch, compaction.Options{
-			SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
-			MinSegments:      1, MinBytes: 1, MinObjects: 1,
-			Verify: func(vctx context.Context) error {
-				o, _, rerr := om.Resolve(vctx, sc)
-				if rerr != nil {
-					return rerr
-				}
-				if o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
-					return fmt.Errorf("ownership changed during pre-release compaction")
-				}
-				live, lerr := om.Live(vctx, o, time.Now())
-				if lerr != nil || !live {
-					return fmt.Errorf("owner not live during pre-release compaction")
-				}
-				return nil
-			},
-		})
-		if cerr != nil {
-			log.Warn("compaction before release failed", "scope", sc.String(), "epoch", epoch, "err", cerr)
-			return nil
-		}
-		if cres.Compacted {
-			log.Info("compacted before release", "scope", sc.String(), "epoch", epoch,
-				"inputs", cres.Inputs, "parts", cres.Parts, "min_txid", cres.MinTxID, "max_txid", cres.MaxTxID)
-		}
+		foldOwnedBaseline(rctx, log, om, rep, cfg, sc, epoch)
 		return nil
+	}
+	// Drop the tally only after this process no longer holds the epoch. A fold
+	// that times out must not erase the count when the release itself fails.
+	om.AfterRelease = func(sc cell.Scope, epoch uint64) {
+		rep.LoseL0(sc, epoch)
 	}
 	// Claim callbacks must not wait on a request that is itself waiting for
 	// the per-scope claim gate. Retry a busy replica without publishing owner.
@@ -713,7 +683,10 @@ func main() {
 			},
 			Log: log,
 			Cleanup: func(cctx context.Context) (int, error) {
-				return wakeIdx.Cleanup(cctx, time.Now().Add(-time.Hour).UnixMilli(), 128)
+				// Page 512 × up to 32 passes per 10m leader interval so historical
+				// wake/due orphans (especially on CD-unsupported backends) drain
+				// instead of stalling at ADR-267's former 128/pass ceiling.
+				return wakeIdx.CleanupDrain(cctx, time.Now().Add(-time.Hour).UnixMilli(), 512, 16384, 16384)
 			},
 		}
 	}
@@ -904,8 +877,10 @@ func main() {
 				return false, nil
 			},
 			EpochSnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
-			WriteContinuation:     rep.AppendContinuation,
-			CheckContinuation:     rep.CheckContinuation,
+			WriteContinuation: func(ctx context.Context, s cell.Scope, epoch uint64, h ltx.NativeHeader, pages []ltx.WALPage) error {
+				return rep.AppendContinuation(ctx, s, epoch, h, pages...)
+			},
+			CheckContinuation: rep.CheckContinuation,
 			RetireEpochsFunc: func(cctx context.Context, sc cell.Scope, epoch uint64) (int, error) {
 				c, release, err := store.AcquireResident(cctx, sc)
 				if err != nil || c == nil {
@@ -953,7 +928,10 @@ func main() {
 			},
 			// Ownership moved: forget the local cell so later reads re-hydrate
 			// from the bucket instead of serving a stale local copy (ADR-115).
-			OnLostOwner: func(sc cell.Scope) {
+			OnLostOwner: func(sc cell.Scope, epoch uint64) {
+				// Passive loss never runs BeforeRelease. Drop that epoch even
+				// when the local database file is kept for the janitor.
+				rep.LoseL0(sc, epoch)
 				if !cfg.ForgetOnLoss {
 					return // keep the file; the disk-budget janitor reclaims LRU files
 				}
@@ -1229,7 +1207,7 @@ func main() {
 		go runWakeRepairLoop(ctx, log, store, wakeIdx, om, srv, openTimer, cfg)
 	}
 	if cfg.RebalanceInterval > 0 {
-		go runRebalanceLoop(ctx, log, cfg, om, store, lm, timerReg, placementWeight)
+		go runRebalanceLoop(ctx, log, cfg, om, store, rep, lm, timerReg, placementWeight)
 	}
 
 	// Re-register timers this node owns from the wake index: after a restart the
@@ -1359,9 +1337,22 @@ func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm
 
 const defaultCompactionTimeout = 5 * time.Minute
 
-// runL9OnEvict publishes an optional complete snapshot after an owned cell is
-// idle-evicted. The cell handle may already be closed: compaction reads the
-// durable bucket chain, never the local SQLite file.
+// idleL0Ready reports whether this owner's unpublished L0 tally is large
+// enough to fold on idle eviction. It does not list the bucket.
+func idleL0Ready(rep *replica.Manager, sc cell.Scope, epoch uint64, minObjects int) bool {
+	if rep == nil {
+		return false
+	}
+	minObjects = objectCountBar(minObjects)
+	n, _ := rep.L0Pending(sc, epoch)
+	return n >= minObjects
+}
+
+// runL9OnEvict rehomes the durable restore baseline into the current epoch after
+// an owned cell is idle-evicted (copy an existing L9, or publish a new L9 or L2,
+// plus bounded L2 increments). The handle may already be closed: fold reads the
+// bucket chain only. Predecessor deletion is left to the epoch GC loop once this
+// epoch is the chain base.
 func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, om *owner.Manager, cfg config.Config, ch <-chan cell.Scope) {
 	for {
 		select {
@@ -1376,25 +1367,43 @@ func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, o
 			if err != nil || !live {
 				continue
 			}
-			// One L9 per epoch is enough for restore. Check this cheaply before
-			// billing a full backlog listing on every idle eviction.
+			// One retained L9 per epoch is enough for restore. If any exist,
+			// only prune dominated copies (idle/closed); skip a full fold.
 			l9Keys, err := rep.ListLevelFrom(ctx, sc, o.Epoch, 9, 0)
-			if err != nil || len(l9Keys) > 0 {
-				continue
-			}
-			stats, err := rep.BacklogStats(ctx, sc, o.Epoch)
 			if err != nil {
 				continue
 			}
-			minObjects := cfg.CompactionMinObjects
-			if minObjects <= 0 {
-				minObjects = 1
-			}
-			if stats.L0BacklogObjects < minObjects {
+			if len(l9Keys) > 0 {
+				verify := func(vctx context.Context) error {
+					cur, _, rerr := om.Resolve(vctx, sc)
+					if rerr != nil {
+						return rerr
+					}
+					if cur.Node != cfg.NodeID || cur.Session != om.Session || cur.Epoch != o.Epoch {
+						return fmt.Errorf("ownership changed during idle prune")
+					}
+					live, lerr := om.Live(vctx, cur, time.Now())
+					if lerr != nil || !live {
+						return fmt.Errorf("owner not live during idle prune")
+					}
+					return nil
+				}
+				l9n, covn, perr := compaction.PruneIdleEpoch(ctx, rep, sc, o.Epoch, compaction.Options{Verify: verify})
+				if perr != nil {
+					log.Warn("idle prune on evict failed", "scope", sc.String(), "err", perr)
+				} else if l9n+covn > 0 {
+					log.Info("idle prune on evict", "scope", sc.String(), "epoch", o.Epoch, "l9", l9n, "covered", covn)
+				}
 				continue
 			}
-			vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			res, err := compaction.Snapshot(vctx, rep, sc, o.Epoch, compaction.Options{
+			if !idleL0Ready(rep, sc, o.Epoch, cfg.CompactionMinObjects) {
+				continue
+			}
+			vctx, cancel := context.WithTimeout(ctx, defaultCompactionTimeout)
+			res, err := compaction.FoldBaseline(vctx, rep, sc, o.Epoch, compaction.Options{
+				// L2 chunks stay at 256MiB. SnapshotMaxBytes is the ceiling for a
+				// newly synthesized L9. Copying an existing L9 ignores it.
+				MaxInputBytes:    foldL2MaxInputBytes,
 				SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
 				Verify: func(vctx context.Context) error {
 					cur, _, rerr := om.Resolve(vctx, sc)
@@ -1402,23 +1411,25 @@ func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, o
 						return rerr
 					}
 					if cur.Node != cfg.NodeID || cur.Session != om.Session || cur.Epoch != o.Epoch {
-						return fmt.Errorf("ownership changed during eviction snapshot")
+						return fmt.Errorf("ownership changed during eviction fold")
 					}
 					live, lerr := om.Live(vctx, cur, time.Now())
 					if lerr != nil || !live {
-						return fmt.Errorf("owner not live during eviction snapshot")
+						return fmt.Errorf("owner not live during eviction fold")
 					}
 					return nil
 				},
 			})
 			cancel()
 			if err != nil {
-				log.Warn("l9 on evict failed", "scope", sc.String(), "err", err)
+				log.Warn("l9 fold on evict failed", "scope", sc.String(), "err", err)
 				continue
 			}
 			if res.Compacted {
-				log.Info("l9 on evict", "scope", sc.String(), "epoch", res.Epoch,
-					"inputs", res.Inputs, "min_txid", res.MinTxID, "max_txid", res.MaxTxID)
+				log.Info("l9 fold on evict", "scope", sc.String(), "epoch", res.Epoch,
+					"inputs", res.Inputs, "parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID)
+			} else if res.Skipped != "" {
+				log.Info("l9 fold on evict skipped", "scope", sc.String(), "reason", res.Skipped)
 			}
 		}
 	}
@@ -1430,78 +1441,299 @@ type compactionScope struct {
 	verify func(context.Context) error
 }
 
-// runCompactionLoop gives each native level its own UTC-aligned schedule.
-// A slow L1 round cannot postpone the L2/L3 clocks.
-func runCompactionLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, rep *replica.Manager, cfg config.Config) {
-	var wg sync.WaitGroup
-	for _, schedule := range compaction.CelldLevels[1:] {
-		wg.Add(1)
-		go func(schedule compaction.LevelSchedule) {
-			defer wg.Done()
-			for {
-				timer := time.NewTimer(time.Until(schedule.NextAt(time.Now())))
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-				ownedScopes := om.OwnedScopes()
-				scopes := make([]compactionScope, 0, len(ownedScopes))
-				for _, owned := range ownedScopes {
-					sc, epoch := owned.Scope, owned.Epoch
-					verify := func(vctx context.Context) error {
-						o, _, err := om.Resolve(vctx, sc)
-						if err != nil {
-							return err
-						}
-						if o.Node != cfg.NodeID || o.Epoch != epoch {
-							return fmt.Errorf("ownership changed: node=%s epoch=%d", o.Node, o.Epoch)
-						}
-						return nil
-					}
-					scopes = append(scopes, compactionScope{scope: sc, epoch: epoch, verify: verify})
-				}
-				compactScopesAtLevel(ctx, log, rep, cfg, scopes, uint16(schedule.Level))
-			}
-		}(schedule)
+// compactionNudge is one scope whose L0 just became durable.
+type compactionNudge struct {
+	scope cell.Scope
+	epoch uint64
+}
+
+// compactionWake coalesces per-scope nudges so the upload loop never waits on compaction.
+type compactionWake struct {
+	mu       sync.Mutex
+	pending  map[string]compactionNudge
+	attempts map[string]int
+	ch       chan struct{}
+}
+
+func newCompactionWake() *compactionWake {
+	return &compactionWake{pending: map[string]compactionNudge{}, ch: make(chan struct{}, 1)}
+}
+
+func (w *compactionWake) Nudge(sc cell.Scope, epoch uint64) {
+	if w == nil {
+		return
 	}
-	wg.Wait()
+	w.mu.Lock()
+	w.pending[compactionPendingKey(sc, epoch)] = compactionNudge{scope: sc, epoch: epoch}
+	w.mu.Unlock()
+	select {
+	case w.ch <- struct{}{}:
+	default:
+	}
+}
+
+func (w *compactionWake) take() []compactionNudge {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]compactionNudge, 0, len(w.pending))
+	for _, n := range w.pending {
+		out = append(out, n)
+	}
+	clear(w.pending)
+	return out
+}
+
+func compactionPendingKey(sc cell.Scope, epoch uint64) string {
+	return sc.String() + "\x00" + strconv.FormatUint(epoch, 10)
+}
+
+func (w *compactionWake) attempt(key string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.attempts[key]
+}
+
+func (w *compactionWake) noteAttempt(key string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.attempts == nil {
+		w.attempts = map[string]int{}
+	}
+	w.attempts[key]++
+}
+
+func (w *compactionWake) clearAttempt(key string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.attempts, key)
+}
+
+// runCompactionScheduler promotes a nudged scope when that level's count or
+// byte bar is met. The nudge comes from a durable L0 upload. There is no scan
+// interval.
+func runCompactionScheduler(ctx context.Context, log *slog.Logger, om *owner.Manager, rep *replica.Manager, cfg config.Config, wake *compactionWake) {
+	if wake == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake.ch:
+			compactScopes(ctx, log, rep, cfg, wake, nudgeCompactionScopes(wake.take(), om, cfg))
+		}
+	}
+}
+
+func nudgeCompactionScopes(nudges []compactionNudge, om *owner.Manager, cfg config.Config) []compactionScope {
+	scopes := make([]compactionScope, 0, len(nudges))
+	for _, n := range nudges {
+		scopes = append(scopes, compactionWork(om, cfg, n.scope, n.epoch))
+	}
+	return scopes
+}
+
+func compactionWork(om *owner.Manager, cfg config.Config, sc cell.Scope, epoch uint64) compactionScope {
+	return compactionScope{
+		scope: sc,
+		epoch: epoch,
+		verify: func(vctx context.Context) error {
+			o, _, err := om.Resolve(vctx, sc)
+			if err != nil {
+				return err
+			}
+			if o.Node != cfg.NodeID || o.Epoch != epoch {
+				return errCompactionOwnership
+			}
+			return nil
+		},
+	}
 }
 
 // compactScopes bounds each scope independently so one hung bucket operation
 // cannot delay every later owned scope. Ownership and epoch checks stay in the
 // per-scope Verify callback.
-func compactScopes(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, scopes []compactionScope) {
-	compactScopesAtLevel(ctx, log, rep, cfg, scopes, 1)
-}
-
-func compactScopesAtLevel(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, scopes []compactionScope, level uint16) {
+func compactScopes(ctx context.Context, log *slog.Logger, rep *replica.Manager, cfg config.Config, wake *compactionWake, scopes []compactionScope) {
 	timeout := cfg.CompactionTimeout
 	if timeout <= 0 {
 		timeout = defaultCompactionTimeout
 	}
-	for _, owned := range scopes {
-		sctx, cancel := context.WithTimeout(ctx, timeout)
-		opts := compaction.Options{Verify: owned.verify}
-		if level == 1 {
-			opts.MinSegments = cfg.CompactionMinSegments
-			opts.MinBytes = cfg.CompactionMinBytes
-			opts.MinObjects = cfg.CompactionMinObjects
+	compactAndFollow(ctx, log, wake, scopes, func(owned compactionScope) (bool, error) {
+		compact := levelCompactor(log, rep, owned)
+		cue := func(context.Context, uint16) (compaction.Cue, error) {
+			return compaction.UploadCue(rep, owned.scope, owned.epoch), nil
 		}
-		res, err := compaction.CompactLevel(sctx, rep, owned.scope, owned.epoch, level, opts)
-		cancel()
-		if err != nil {
+		return compactScopeCascade(ctx, timeout, cfg, cue, owned.verify, compact)
+	})
+}
+
+// errCompactionOwnership means this process no longer owns the epoch. The
+// scheduler must not retry that scope; the new owner compacts its own uploads.
+var errCompactionOwnership = errors.New("compaction ownership changed")
+
+const (
+	compactionRetryBase     = time.Second
+	compactionRetryMax      = time.Minute
+	compactionContinueDelay = 50 * time.Millisecond
+)
+
+// scheduleCompactionRetry waits, then nudges, unless the process is stopping.
+// Tests replace it so they do not sleep.
+var scheduleCompactionRetry = func(ctx context.Context, delay time.Duration, nudge func()) {
+	timer := time.NewTimer(delay)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			nudge()
+		}
+	}()
+}
+
+// compactionFollowUp decides whether one scope should be nudged again.
+// A lost owner or a shutdown is final. A storage or timeout error backs off.
+// A batch that is still over the bar yields briefly so other scopes run.
+func compactionFollowUp(again bool, err error, attempt int) (bool, time.Duration) {
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return false, 0
+		}
+		if errors.Is(err, errCompactionOwnership) {
+			return false, 0
+		}
+		return true, compactionBackoff(attempt)
+	}
+	if again {
+		return true, compactionContinueDelay
+	}
+	return false, 0
+}
+
+func compactionBackoff(attempt int) time.Duration {
+	delay := compactionRetryBase
+	for i := 0; i < attempt; i++ {
+		if delay >= compactionRetryMax/2 {
+			return compactionRetryMax
+		}
+		delay *= 2
+	}
+	if delay > compactionRetryMax {
+		return compactionRetryMax
+	}
+	return delay
+}
+
+func compactAndFollow(ctx context.Context, log *slog.Logger, wake *compactionWake, scopes []compactionScope, run func(compactionScope) (bool, error)) {
+	for _, owned := range scopes {
+		again, err := run(owned)
+		if err != nil && log != nil {
 			// Do not emit scope/key names or backend error text; those can contain
 			// tenant identifiers and object names.
 			log.Warn("compaction failed", "epoch", owned.epoch)
-		} else if res.Compacted {
+		}
+		if wake == nil {
+			continue
+		}
+		key := compactionPendingKey(owned.scope, owned.epoch)
+		retry, delay := compactionFollowUp(again, err, wake.attempt(key))
+		if !retry {
+			wake.clearAttempt(key)
+			continue
+		}
+		wake.noteAttempt(key)
+		scope, epoch := owned.scope, owned.epoch
+		scheduleCompactionRetry(ctx, delay, func() { wake.Nudge(scope, epoch) })
+	}
+}
+
+func levelCompactor(log *slog.Logger, rep *replica.Manager, owned compactionScope) levelCompactFunc {
+	return func(cctx context.Context, level uint16, opts compaction.Options) (compaction.Result, error) {
+		res, err := compaction.CompactLevel(cctx, rep, owned.scope, owned.epoch, level, opts)
+		if err != nil {
+			return res, err
+		}
+		if res.Compacted {
 			log.Info("compacted", "level", level, "epoch", owned.epoch, "inputs", res.Inputs,
 				"parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID,
 				"stored_bytes", res.InputBytes)
 		}
-
+		return res, nil
 	}
+}
+
+// levelCompactFunc is the per-level compaction hook (production wraps CompactLevel).
+type levelCompactFunc func(ctx context.Context, level uint16, opts compaction.Options) (compaction.Result, error)
+
+// levelCueFunc reports the uncovered source tail for a destination level.
+type levelCueFunc func(ctx context.Context, level uint16) (compaction.Cue, error)
+
+// compactionBatchLimit stops one pass from publishing forever if the cue does
+// not shrink. A batch takes whole LTX objects, up to the default object count,
+// and does not cut them by size.
+const compactionBatchLimit = 32
+
+// compactScopeCascade promotes L0 to L1 when the object count or stored-byte
+// bar is met. It keeps going until the bar drops or a batch publishes nothing.
+// L1 objects stay at L1.
+func compactScopeCascade(ctx context.Context, timeout time.Duration, cfg config.Config, cue levelCueFunc, verify func(context.Context) error, compact levelCompactFunc) (bool, error) {
+	policy := promotePolicy(cfg)
+	return compactWhile(ctx, timeout, 1, cue, verify, compact, func(c compaction.Cue) bool {
+		return compaction.ShouldPromote(c, policy)
+	})
+}
+
+// compactWhile publishes one level until due is false, a batch publishes
+// nothing, or compactionBatchLimit is reached. again is true when the cap
+// stopped a pass that is still due, so the caller can yield and continue
+// without listing the bucket.
+func compactWhile(ctx context.Context, timeout time.Duration, level uint16, cue levelCueFunc, verify func(context.Context) error, compact levelCompactFunc, due func(compaction.Cue) bool) (bool, error) {
+	for range compactionBatchLimit {
+		c, err := cue(ctx, level)
+		if err != nil {
+			return false, err
+		}
+		if !due(c) {
+			return false, nil
+		}
+		sctx, cancel := context.WithTimeout(ctx, timeout)
+		res, err := compact(sctx, level, compaction.Options{Verify: verify, MaxInputBytes: levelMaxInputBytes(level)})
+		cancel()
+		if err != nil {
+			return false, err
+		}
+		if !res.Compacted {
+			return false, nil
+		}
+	}
+	c, err := cue(ctx, level)
+	if err != nil {
+		return false, err
+	}
+	return due(c), nil
+}
+
+func levelMaxInputBytes(uint16) int64 {
+	return -1
+}
+
+func promotePolicy(cfg config.Config) compaction.PromotePolicy {
+	return compaction.L1PromotePolicy(objectCountBar(cfg.CompactionMinObjects), cfg.CompactionMinBytes)
+}
+
+// objectCountBar is the shared L0 file and upload-segment count. A nonpositive
+// configuration uses the default instead of disabling the count.
+func objectCountBar(n int) int {
+	if n <= 0 {
+		return compaction.L1MinObjects
+	}
+	return n
+}
+
+// uploadSegmentCap is the async L0 batch size. It is the same count as the L1
+// file bar. A nonpositive value uses that bar's default.
+func uploadSegmentCap(cfg config.Config) int {
+	return objectCountBar(cfg.CompactionMinObjects)
 }
 
 // performHandoff runs the shutdown-side of graceful handoff: acquire the bucket
@@ -1534,24 +1766,187 @@ func performHandoff(log *slog.Logger, cfg config.Config, nl *nodelog.Manager, om
 			return
 		}
 	}
+	// Optional pre-release folds run inside each release, so they share this
+	// budget. Give the release phase its own deadline: a slow upload drain must
+	// not leave the mandatory owner releases with an expired context.
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), cfg.DrainWait)
+	defer releaseCancel()
 	released := 0
 	for _, owned := range om.OwnedScopes() {
-		if err := om.Release(ctx, owned.Scope, owned.Epoch); err != nil {
+		if err := om.Release(releaseCtx, owned.Scope, owned.Epoch); err != nil {
 			log.Warn("owner release failed", "scope", owned.Scope.String(), "err", err)
 			continue
 		}
 		released++
 	}
-	if err := dm.Release(ctx); err != nil {
+	if err := dm.Release(releaseCtx); err != nil {
 		log.Warn("drain token release failed", "err", err)
 	}
 	log.Info("handoff complete", "released", released)
 }
 
+// foldL2MaxInputBytes is one handoff or idle L2 increment. It does not follow
+// CELLHIVE_EPOCH_SNAPSHOT_MAX, so raising the whole-database L9 ceiling does
+// not turn those increments into a 1GiB merge.
+const foldL2MaxInputBytes int64 = 256 << 20
+
+// Optional pre-release fold budget. The fold is best-effort: it must never hold
+// the mandatory owner releases, which run in the same context.
+var (
+	preReleaseFoldLimit   = defaultCompactionTimeout
+	preReleaseFoldReserve = 2 * time.Second
+	preReleaseFoldMin     = 2 * time.Second
+)
+
+// errShedSkipped means a background rebalance or disk shed left the owner in
+// place. The cell is open, or this process no longer owns the epoch.
+var errShedSkipped = errors.New("shed skipped")
+
+// shedReleaseBudget is the claim-lock cap for deleting the owner after a
+// background fold. The fold runs before this, without the lock.
+const shedReleaseBudget = 10 * time.Second
+
+type skipPreReleaseFoldKey struct{}
+
+func withSkipPreReleaseFold(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipPreReleaseFoldKey{}, true)
+}
+
+func skipPreReleaseFold(ctx context.Context) bool {
+	v, _ := ctx.Value(skipPreReleaseFoldKey{}).(bool)
+	return v
+}
+
+// shedIdleCell folds a closed cell without the claim lock, then deletes the
+// owner only if the cell is still closed and this process still owns epoch.
+// A fold error still releases: the successor restores whatever chain remains.
+// Cancelling ctx during the fold keeps the owner.
+func shedIdleCell(ctx context.Context, om *owner.Manager, sc cell.Scope, epoch uint64, idle func() bool, fold func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if idle != nil && !idle() {
+		return errShedSkipped
+	}
+	if fold != nil {
+		_ = fold(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if idle != nil && !idle() {
+		return errShedSkipped
+	}
+	cur, _, err := om.Resolve(ctx, sc)
+	if err != nil {
+		return err
+	}
+	if cur.Node != om.NodeID {
+		return errShedSkipped
+	}
+	if cur.Session != om.Session {
+		return errShedSkipped
+	}
+	if cur.Epoch != epoch {
+		return errShedSkipped
+	}
+	relCtx, cancel := context.WithTimeout(withSkipPreReleaseFold(ctx), shedReleaseBudget)
+	defer cancel()
+	err = om.ReleaseWhen(relCtx, sc, epoch, idle)
+	if errors.Is(err, owner.ErrReleaseBusy) {
+		return errShedSkipped
+	}
+	return err
+}
+
+// foldOwnedBaseline rehomes the durable chain into epoch. It reads the bucket
+// only and does not take the claim lock. Callers that still own the cell may
+// run it in the background; shutdown release runs it under the claim lock,
+// bounded by the release deadline.
+func foldOwnedBaseline(ctx context.Context, log *slog.Logger, om *owner.Manager, rep *replica.Manager, cfg config.Config, sc cell.Scope, epoch uint64) {
+	o, _, rerr := om.Resolve(ctx, sc)
+	owned := rerr == nil && o.Node == cfg.NodeID && o.Session == om.Session && o.Epoch == epoch
+	if !owned {
+		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "ownership changed")
+		return
+	}
+	live, lerr := om.Live(ctx, o, time.Now())
+	if lerr != nil {
+		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "owner not live")
+		return
+	}
+	if !live {
+		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "owner not live")
+		return
+	}
+	// The fold is optional: bound it to a slice of the remaining release
+	// budget and skip when that slice is too small, so the mandatory
+	// releases after it still have time.
+	budget, ok := foldBudgetFor(ctx, defaultCompactionTimeout)
+	if !ok {
+		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "insufficient release budget")
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	cres, cerr := compaction.FoldBaseline(cctx, rep, sc, epoch, compaction.Options{
+		MaxInputBytes:    foldL2MaxInputBytes,
+		SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
+		Verify: func(vctx context.Context) error {
+			o, _, rerr := om.Resolve(vctx, sc)
+			if rerr != nil {
+				return rerr
+			}
+			if o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
+				return fmt.Errorf("ownership changed during pre-release fold")
+			}
+			live, lerr := om.Live(vctx, o, time.Now())
+			if lerr != nil || !live {
+				return fmt.Errorf("owner not live during pre-release fold")
+			}
+			return nil
+		},
+	})
+	if cerr != nil {
+		log.Warn("fold before release failed", "scope", sc.String(), "epoch", epoch, "err", cerr)
+		return
+	}
+	if cres.Compacted {
+		log.Info("folded before release", "scope", sc.String(), "epoch", epoch,
+			"inputs", cres.Inputs, "parts", cres.Parts, "min_txid", cres.MinTxID, "max_txid", cres.MaxTxID,
+			"pruned_l9", cres.PrunedL9, "pruned_covered", cres.PrunedCovered)
+	} else if cres.Skipped != "" {
+		log.Info("fold before release skipped", "scope", sc.String(), "reason", cres.Skipped,
+			"pruned_l9", cres.PrunedL9, "pruned_covered", cres.PrunedCovered)
+	}
+}
+
+// foldBudgetFor reports how long an optional fold may run given the release
+// deadline. ok=false means "skip the fold": too little time remains after
+// reserving space for the release itself.
+func foldBudgetFor(ctx context.Context, limit time.Duration) (time.Duration, bool) {
+	if limit <= 0 || limit > preReleaseFoldLimit {
+		limit = preReleaseFoldLimit
+	}
+	if deadline, has := ctx.Deadline(); has {
+		remaining := time.Until(deadline) - preReleaseFoldReserve
+		if remaining <= 0 {
+			return 0, false
+		}
+		if remaining < limit {
+			limit = remaining
+		}
+	}
+	if limit < preReleaseFoldMin {
+		return 0, false
+	}
+	return limit, true
+}
+
 // runRebalanceLoop releases idle owned cells so the fleet moves toward a
 // weight-proportional ownership split (ADR-101). It only schedules or releases
 // hibernated (locally closed) cells; a peer claims them on demand.
-func runRebalanceLoop(ctx context.Context, log *slog.Logger, cfg config.Config, om *owner.Manager, store *cellstore.Store, lm *lease.Manager, timers *timer.Registry, weight int) {
+func runRebalanceLoop(ctx context.Context, log *slog.Logger, cfg config.Config, om *owner.Manager, store *cellstore.Store, rep *replica.Manager, lm *lease.Manager, timers *timer.Registry, weight int) {
 	t := time.NewTicker(cfg.RebalanceInterval)
 	defer t.Stop()
 	for {
@@ -1580,8 +1975,13 @@ func runRebalanceLoop(ctx context.Context, log *slog.Logger, cfg config.Config, 
 				if err != nil {
 					continue
 				}
-				if err := om.Release(ctx, sc, m.Epoch); err != nil {
-					log.Warn("rebalance release failed", "scope", m.Scope, "err", err)
+				if err := shedIdleCell(ctx, om, sc, m.Epoch, func() bool { return !store.IsOpen(sc) }, func(fctx context.Context) error {
+					foldOwnedBaseline(fctx, log, om, rep, cfg, sc, m.Epoch)
+					return nil
+				}); err != nil {
+					if !errors.Is(err, errShedSkipped) {
+						log.Warn("rebalance release failed", "scope", m.Scope, "err", err)
+					}
 					continue
 				}
 				timers.Remove(m.Scope)
@@ -1637,8 +2037,13 @@ func runCellDiskLoop(ctx context.Context, log *slog.Logger, store *cellstore.Sto
 					if o.Scope.Class == control.ControlClass || store.IsOpen(o.Scope) {
 						continue
 					}
-					if err := om.Release(ctx, o.Scope, o.Epoch); err != nil {
-						log.Warn("disk pressure release failed", "scope", o.Scope.String(), "err", err)
+					if err := shedIdleCell(ctx, om, o.Scope, o.Epoch, func() bool { return !store.IsOpen(o.Scope) }, func(fctx context.Context) error {
+						foldOwnedBaseline(fctx, log, om, rep, cfg, o.Scope, o.Epoch)
+						return nil
+					}); err != nil {
+						if !errors.Is(err, errShedSkipped) {
+							log.Warn("disk pressure release failed", "scope", o.Scope.String(), "err", err)
+						}
 						continue
 					}
 					log.Info("disk pressure: released idle cell", "scope", o.Scope.String(), "epoch", o.Epoch)
