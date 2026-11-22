@@ -266,8 +266,9 @@ func main() {
 			shards = 8
 		}
 	}
-	// Fleet-acked writes can coalesce in the background. Bucket waiters wake
-	// the uploader immediately; follower fsync retains its separate 2ms window.
+	// Owner uploads, including a single node and a write with no follower,
+	// coalesce on this interval after the local spool fsync. Follower fsync
+	// keeps its own 2ms window below.
 	uploadSegs, uploadEvery := uploadSegmentCap(cfg), cfg.UploadInterval
 	if uploadEvery <= 0 {
 		uploadEvery = 30 * time.Second

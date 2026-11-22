@@ -70,3 +70,42 @@ func TestAsyncWindowCoalescesSpacedWrites(t *testing.T) {
 		t.Fatalf("batches=%d segments=%d, want 1/5", sink.batches, sink.segments)
 	}
 }
+
+func TestSpooledQueueIsNotReplayedBeforeFlush(t *testing.T) {
+	sink := &fakeSink{}
+	sp, err := OpenSpool(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := New(sink, nil, 256, 1<<20, time.Hour)
+	b.SetSpool(sp)
+	b.replayInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	b.Start(ctx)
+	defer func() {
+		cancel()
+		b.Stop()
+	}()
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "held"}
+	if err := b.EnqueueSpool(ctx, sc, 1, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.EnqueueSpool(ctx, sc, 1, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	sink.mu.Lock()
+	early := sink.batches
+	sink.mu.Unlock()
+	if early != 0 {
+		t.Fatalf("replay uploaded %d batches while the segments were still queued", early)
+	}
+	if err := b.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.batches != 1 || sink.segments != 2 {
+		t.Fatalf("batches=%d segments=%d, want 1/2", sink.batches, sink.segments)
+	}
+}

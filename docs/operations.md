@@ -193,7 +193,7 @@ bin/cellhive vectorize drop-ann demo docs         # 回到 flat
 | `epoch_mismatch` 频发 | 节点时钟/续租异常，或 owner 漂移 |
 | 输出门超时 | 检查 follower 可达、bucket 延迟、`pressured` |
 | 冷激活慢 | 页未命中；检查 paging 与对象布局 |
-| 写入延迟高 | 是否降级到单节点（等 bucket）；检查 ensemble 数 |
+| 写入延迟高 | 单节点应答在本地 spool，对象最多晚一个上传周期；检查 ensemble 数 |
 | `list_calls_total > 0` | 代码回归：热路径不应 List |
 | host 返回 404 | 未注册 host（`cellhive domain ls`）；内置域需 `CELLHIVE_BASE_DOMAIN` 且边缘有通配符 |
 | `diagnose` 点名 `conditional delete (reject-stale)` | 桶**忽略 `If-Match`**（条件删除退化为无条件）；更换供应商/端点，owner 条件释放与 fence 依赖该语义 |

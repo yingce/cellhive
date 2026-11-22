@@ -40,6 +40,32 @@ func appendNative(t *testing.T, m *replica.Manager, s cell.Scope, level uint16, 
 	return key
 }
 
+func TestCompactLevelRecountsFromTheL1Cursor(t *testing.T) {
+	m, s := nativeManager(t)
+	appendNative(t, m, s, 0, 1, 3, 1)
+	appendNative(t, m, s, 0, 2, 2, 1)
+	appendNative(t, m, s, 0, 4, 4, 1)
+	if n, _ := m.L0Pending(s, 1); n != 3 {
+		t.Fatalf("pending before fold = %d", n)
+	}
+	res, err := CompactLevel(t.Context(), m, s, 1, 1, Options{MaxInputs: 1})
+	if err != nil || !res.Compacted || res.MaxTxID != 3 {
+		t.Fatalf("fold=%+v err=%v", res, err)
+	}
+	if n, _ := m.L0Pending(s, 1); n != 1 {
+		t.Fatalf("pending after fold = %d, want the one file past the cursor", n)
+	}
+	appendNative(t, m, s, 0, 3, 3, 1)
+	if n, _ := m.L0Pending(s, 1); n != 1 {
+		t.Fatalf("pending after covered upload = %d", n)
+	}
+	appendNative(t, m, s, 0, 5, 5, 1)
+	n, bytes := m.L0Pending(s, 1)
+	if n != 2 || bytes <= 0 {
+		t.Fatalf("pending after new upload = %d bytes=%d", n, bytes)
+	}
+}
+
 func TestNativeLevelsPromoteIncrementalRangesAndSnapshot(t *testing.T) {
 	m, s := nativeManager(t)
 	appendNative(t, m, s, 0, 1, 1, 1, 2)

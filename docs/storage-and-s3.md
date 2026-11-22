@@ -88,9 +88,9 @@ s3:// 的非控制对象不提供未经验证的条件 DELETE，返回 ErrNotSup
 - 所有原生 LTX（字节增量、续链 seed、spool）在 COS/OSS 统一使用 forbid-overwrite PUT；不再使用 AppendObject。AppendObject 仍用于独立的控制记录条件写。LTX 对象携带从 header 导出的标准 `litestream-timestamp` metadata（UTC RFC3339Nano）；multipart 在初始化时设置，不生成 sidecar。
 - 原生 codec、恢复页写入及快照 spool 支持流式处理；完整校验后通过普通 PUT/multipart 发布，不依赖 If-None-Match/forbid-overwrite 或重传后的全量下载比较。COS 超过5MiB进入 multipart，默认32MiB/片；更大对象按10000片限制自适应增加片大小。失败时 abort 未完成上传。L1/L2/L3/L9 compaction 使用原生流输入和本地 spool，页索引内存仍随页数增长；普通 Get/RestoreChain 为缓冲接口。默认单对象 Get 上限512MiB，不能等同于流式上传上限。当前验收见下方报告链接。
 
-- 桶**同区/就近**；fleet 模式下 S3 **后台合批上传，不在写 ack 路径**；
-- 每 ack 的对象 PUT 数应远小于 1（group commit）；
-- 单节点降级才逐笔等 bucket（~90ms）。
+- 桶**同区/就近**。有 follower 时 S3 在写 ack 之后后台合批。没有 follower 时 ack 在本地 spool fsync 之后，S3 仍按同一周期合批。
+- 每 ack 的对象 PUT 数应远小于 1（group commit）。
+- spool 写不下去才等这一次上传。
 
 ## 待细化
 

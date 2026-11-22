@@ -748,8 +748,9 @@ func TestRebaselineSnapshotReflectsCommittedWrites(t *testing.T) {
 	}
 }
 
-// TestHTTPCommitterProofModes pins the durability semantics: fleet/bucket/
-// bucket-batch are RPO=0 proofs; bucket-async (and anything unknown) is rejected.
+// TestHTTPCommitterProofModes pins the durability semantics. A follower fsync,
+// a finished object upload, and a local spool fsync are accepted. bucket-async
+// acks before either exists, so it is rejected.
 func TestHTTPCommitterProofModes(t *testing.T) {
 	segment := []byte("opaque HTTP transport fixture")
 	cases := []struct {
@@ -759,6 +760,7 @@ func TestHTTPCommitterProofModes(t *testing.T) {
 		{"fleet", true},
 		{"bucket", true},
 		{"bucket-batch", true},
+		{"bucket-spool", true},
 		{"bucket-async", false},
 		{"weird", false},
 	}

@@ -160,43 +160,44 @@ Before a write is acknowledged to the caller, it must be proven durable:
 
 | Mode (`CELLHIVE_DURABILITY`) | Proof |
 |---|---|
-| **fleet** (preferred; `auto` selects it when there is a live follower) | The owner sends the write to 1–2 followers (other `cell-agent` nodes), and **acknowledges once at least 1 follower has fsynced it to disk**; object storage upload happens asynchronously after acknowledgement. **If no peer is available, it does not error**, and degrades to "wait for bucket" (see below), ensuring RPO=0 |
-| **bucket** | Use only object storage: upload by block and wait for that block to complete (`CELLHIVE_BUCKET_WAIT=true`, ~90ms in-region) |
+| **fleet** (preferred; `auto` selects it when there is a live follower) | The owner sends the write to 1–2 followers (other `cell-agent` nodes), and **acknowledges once at least 1 follower has fsynced it to disk**; object storage upload happens asynchronously after acknowledgement. **If no peer is available, it does not error**. The segment is fsynced to the local spool and then acknowledged. The object joins the 30s, 256-segment, or 1MiB flush |
+| **bucket** | Fsync the local spool, then acknowledge. The object joins the 30s, 256-segment, or 1MiB flush. Only a spool that cannot persist the segment waits for that one upload |
 
-> `fleet`/`bucket` is a **durability requirement**, not "a peer must exist": when `fleet` has no peer, it degrades to waiting for the bucket (writes wait for the bucket), and does not silently ack.
+> `fleet`/`bucket` is a **durability requirement**, not "a peer must exist": when `fleet` has no peer, it fsyncs the local spool before acknowledging, and does not silently ack.
 
 - The owner's local commit counts as 1 copy; **plus ≥1 follower landing on disk** constitutes the proof, so **2 cell-agent nodes are sufficient** (owner + 1 follower).
 - The owner recruits **at most 2 followers** (at most 3 replicas); as long as 1 follower remains, fleet acknowledgement continues, with no need to fall back to waiting for bucket per write.
 - The follower must be **another node** (the owner never counts itself as a follower).
 - **S3 is not on the write ack path** (fleet mode): steady-state in-region write latency is about ~25ms, determined by follower fsync.
 - In multi-node deployments, **bucket upload is asynchronous in the background and can be batched/periodic** (LTX segment merge / group commit), **not one PUT per write**; the bucket remains the long-term authority and recovery source.
-- Only when **no follower is available** (single node, or ensemble unavailable and degraded) does ack degrade to **waiting for bucket block upload** (`bucket-batch`, ~90ms in-region); explicit `BUCKET_WAIT=false` changes it to ack-on-enqueue (RPO>0).
+- When **no follower is available** (single node, or the ensemble is unavailable), ack also returns after the local spool fsync (`bucket-spool`). Consecutive requests can therefore share one PUT. The object is still uploaded on the 30s, 256-segment, or 1MiB flush. A spool that cannot persist the segment waits for that one upload (`bucket-batch`). Explicit `BUCKET_WAIT=false` still acks on enqueue, and can leave nothing behind when the spool write also fails.
 - Backend B (DO): after do-runtime reports to cell-agent, that cell-agent acts as owner and performs the same ensemble proof with other cell-agents (followers).
 - The write ack path for backend B is: workerd commit → supervisor capture → **cell-agent (possibly cross-node)** → proof → output gate; cross-node intranet latency must be included in the P0 performance gate.
 - When the response body is streamed, each chunk is also constrained by the output gate—the caller will not act on a value that "may be lost".
-- **RPO=0**: acknowledged writes will not be lost due to a single-node failure.
+- **With a follower**: an acknowledged write has at least one follower fsync, so a local process crash does not drop it. **Without a follower**: acknowledgement is the local spool fsync. A process restart replays those segments. If this machine's disk fails before the object upload, acknowledged writes inside that window are lost.
 
 ### Single-node (bucket) mode (`CELLHIVE_DURABILITY` / `CELLHIVE_BUCKET_WAIT`)
 
-A single node has no follower, so write acknowledgement degrades to object storage proof. Configuration has two axes:
+A single node has no follower. Acknowledgement is the local spool fsync, and the object upload follows the background batch. Configuration has two axes:
 
 - **`CELLHIVE_DURABILITY`** = `auto` (default) | `fleet` | `bucket`: selects the proof method.
   - `auto`: uses fleet when there is a live follower; otherwise uses bucket.
   - `bucket`: uses only bucket and does not attempt peers.
-  - `fleet`: **requires RPO=0**; with peers, uses follower fsync; **without peers, degrades to "wait for bucket" and alerts** (does not silently ack). Therefore `fleet` + `CELLHIVE_BUCKET_WAIT=false` is a contradictory configuration and is rejected at startup.
-- **`CELLHIVE_BUCKET_WAIT`** = `true` (default) | `false`: in bucket posture, **whether to wait for that block upload to complete**. (`fleet` always waits.)
+  - `fleet`: with peers, uses follower fsync; **without peers, fsyncs the local spool before acknowledging and alerts** (does not silently ack). Therefore `fleet` + `CELLHIVE_BUCKET_WAIT=false` is a contradictory configuration and is rejected at startup.
+- **`CELLHIVE_BUCKET_WAIT`** = `true` (default) | `false`: `true` persists the spool before acknowledging, and waits for that one upload only when the spool cannot. `false` acknowledges on enqueue. `fleet` is always `true`.
 bucket commits are performed **in "blocks"** (a batch of writes for the same `(scope, epoch)` is accumulated into one object; block names use ordered txid ranges):
 
 | bucket sub-mode | ack timing | RPO | Trigger |
 |---|---|---|---|
-| `batch` (default) | Accumulate blocks; ack **after that block has been committed** (flush immediately when idle; concurrency naturally batches) | 0 | `BUCKET_WAIT=true`, or `DURABILITY=fleet` downgrade |
-| `async` | **Ack on enqueue**; blocks are **committed serially and asynchronously** in the background (bounded queue; overflow falls back to synchronous) | **>0** (a crash may lose the window) | `BUCKET_WAIT=false` |
+| `spool` (default) | Fsync the segment to the local spool, then upload it on the 30s, 256-segment, or 1MiB flush. Consecutive requests do not each wait for a PUT | A process restart can replay; disk loss drops the window | `BUCKET_WAIT=true` and the spool is available |
+| `batch` | When the spool cannot persist the segment, ack **after that upload finishes** | The object is already in the bucket | Spool unavailable, including a `DURABILITY=fleet` downgrade whose spool write failed |
+| `async` | **Ack on enqueue**; blocks upload in the background (bounded queue; overflow falls back to synchronous) | A process crash may lose the window | `BUCKET_WAIT=false` |
 
-- Both modes share the `internal/upload` batcher; `batch` uses `EnqueueWait`, and `async` uses `Enqueue`. When **no batcher is configured**, it degrades to direct per-write PUT (`mode:"bucket"`).
-- There is **no longer a separate `sync` mode**: with single concurrency (flush immediately every time), `batch` is equivalent to per-write synchronous PUT and has the same RPO, so it is folded into `batch`.
+- All three paths share the `internal/upload` batcher. `spool` uses `EnqueueSpool`, `batch` uses `EnqueueWait`, and `async` uses `Enqueue`. When **no batcher is configured**, it degrades to direct per-write PUT (`mode:"bucket"`).
+- A spool entry still sitting on the upload queue is not uploaded early by the 5s replay. Replay only covers entries left by a failed upload or a process restart.
 - **Ordering guarantee**: the batcher is a **single loop**—it will not accept the next batch before `AppendBatch` completes, so the same `(scope, epoch)` **will not have two blocks uploading concurrently**; writes are packed in write order within a block, block names use increasing `txid ranges`; `Restore` reorders by txid. Covered by test `TestBatcherBlocksOrderedAndSerial` (forms blocks `< N`, order `0..N-1`, `maxInflight == 1`).
 - **Constraint**: LTX keys encode epoch and TXID range. TXIDs advance within a writer epoch. Ordinary PUT/multipart permits idempotent retries of the same range; new transactions must not reuse published TXIDs. Ownership fencing and serialized capture/compaction provide writer isolation.
-- With **remote/transoceanic object storage**, `bucket` (RPO=0) tail latency of several seconds is unusable; in that case either run ≥2 nodes with fleet, or explicitly accept `async` with RPO>0.
+- With **remote/transoceanic object storage**, a single node no longer waits for that PUT. The object still arrives on the batch interval. Keeping an acknowledged write after this machine's disk fails needs at least one follower.
 
 ### Takeover
 

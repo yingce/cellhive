@@ -84,7 +84,7 @@ Roll each service according to `docs/deployment.md`; replace `do-runtime` elasti
 | Frequent `epoch_mismatch` | Node clock/lease renewal anomaly, or owner drift |
 | Output gate timeout | Check follower reachability, bucket latency, and `pressured` |
 | Slow cold activation | Page miss; check paging and object layout |
-| High write latency | Check whether it has degraded to single-node mode (waiting for bucket); check ensemble size |
+| High write latency | A single node acks after the local spool fsync; the object can lag by one upload interval. Check the ensemble size |
 | `list_calls_total > 0` | Code regression: hot paths should not List |
 | host returns 404 | host is not registered (`cellhive domain ls`); built-in domains require `CELLHIVE_BASE_DOMAIN` and a wildcard at the edge |
 | `diagnose` names `conditional delete (reject-stale)` | The bucket **ignores `If-Match`** (conditional delete degrades to unconditional); switch provider/endpoint, because owner conditional release and fencing depend on this semantic |

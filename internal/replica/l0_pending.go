@@ -7,11 +7,20 @@ import (
 	"cellhive/internal/cell"
 )
 
+// l0File is one published L0 object still past the fold cursor.
+type l0File struct {
+	min, max uint64
+	size     int64
+}
+
 // l0Pending is the owner's record of L0 objects it has published for one
-// scope and epoch and has not yet folded into L1. The promotion gate reads
-// this tally. It does not list the bucket.
+// scope and epoch. covered is the last L1 transaction. uploaded is the last
+// L0 transaction. The promotion gate counts only files past covered. It does
+// not list the bucket.
 type l0Pending struct {
-	files map[string]int64
+	files    map[string]l0File
+	covered  uint64
+	uploaded uint64
 }
 
 func (m *Manager) initL0() {
@@ -38,23 +47,28 @@ func u64(n uint64) string {
 	return string(buf[i:])
 }
 
-// l0KeySize reports the stored size when key is one canonical L0 object.
-func l0KeySize(key string, size int64) (int64, bool) {
+// l0Span reports the transaction range of one canonical L0 object.
+func l0Span(key string) (min, max uint64, ok bool) {
 	const marker = "/0000/"
 	i := strings.LastIndex(key, marker)
-	if i < 0 || size < 0 {
-		return 0, false
+	if i < 0 {
+		return 0, 0, false
 	}
 	name := key[i+len(marker):]
-	if strings.Contains(name, "/") || !strings.HasSuffix(name, ".ltx") {
-		return 0, false
+	if strings.Contains(name, "/") || len(name) != 37 || name[16] != '-' || !strings.HasSuffix(name, ".ltx") {
+		return 0, 0, false
 	}
-	return size, true
+	min, errMin := strconv.ParseUint(name[:16], 16, 64)
+	max, errMax := strconv.ParseUint(name[17:33], 16, 64)
+	if errMin != nil || errMax != nil || min == 0 || max < min {
+		return 0, 0, false
+	}
+	return min, max, true
 }
 
 func (m *Manager) noteL0Object(s cell.Scope, epoch uint64, key string, size int64) {
-	n, ok := l0KeySize(key, size)
-	if !ok {
+	min, max, ok := l0Span(key)
+	if !ok || size < 0 {
 		return
 	}
 	m.l0Mu.Lock()
@@ -62,21 +76,31 @@ func (m *Manager) noteL0Object(s cell.Scope, epoch uint64, key string, size int6
 	if m.l0Lost != nil && epoch <= m.l0Lost[s.String()] && m.l0Lost[s.String()] != 0 {
 		return
 	}
-	m.initL0()
-	slot := l0PendingKey(s, epoch)
-	p := m.l0[slot]
-	if p == nil {
-		p = &l0Pending{files: map[string]int64{}}
-		m.l0[slot] = p
+	p := m.l0Slot(s, epoch)
+	if max > p.uploaded {
+		p.uploaded = max
 	}
 	if _, exists := p.files[key]; exists {
 		return
 	}
-	p.files[key] = n
+	if max <= p.covered {
+		return
+	}
+	p.files[key] = l0File{min: min, max: max, size: size}
 }
 
-// L0Pending returns the L0 file count and stored bytes this owner has
-// published for the scope and epoch and not yet dropped after an L1 fold.
+func (m *Manager) l0Slot(s cell.Scope, epoch uint64) *l0Pending {
+	m.initL0()
+	slot := l0PendingKey(s, epoch)
+	p := m.l0[slot]
+	if p == nil {
+		p = &l0Pending{files: map[string]l0File{}}
+		m.l0[slot] = p
+	}
+	return p
+}
+
+// L0Pending returns the L0 file count and stored bytes past the fold cursor.
 func (m *Manager) L0Pending(s cell.Scope, epoch uint64) (int, int64) {
 	m.l0Mu.Lock()
 	defer m.l0Mu.Unlock()
@@ -84,11 +108,26 @@ func (m *Manager) L0Pending(s cell.Scope, epoch uint64) (int, int64) {
 	if p == nil {
 		return 0, 0
 	}
+	var n int
 	var bytes int64
-	for _, n := range p.files {
-		bytes += n
+	for _, f := range p.files {
+		if f.max <= p.covered {
+			continue
+		}
+		n++
+		bytes += f.size
 	}
-	return len(p.files), bytes
+	return n, bytes
+}
+
+func (m *Manager) l0Cursors(s cell.Scope, epoch uint64) (covered, uploaded uint64) {
+	m.l0Mu.Lock()
+	defer m.l0Mu.Unlock()
+	p := m.l0[l0PendingKey(s, epoch)]
+	if p == nil {
+		return 0, 0
+	}
+	return p.covered, p.uploaded
 }
 
 // SnapshotL0Keys copies the L0 keys currently in the owner's tally.
@@ -169,9 +208,33 @@ func (m *Manager) ForgetScopeL0(s cell.Scope) {
 	m.markL0Lost(s, max)
 }
 
+// CoverL0 moves the fold cursor to txid and recounts. Files whose whole
+// range is at or before that transaction leave the tally. A later L0 upload
+// uses the same cursor, so a replay inside it does not count again.
+func (m *Manager) CoverL0(s cell.Scope, epoch, txid uint64) {
+	if m == nil || txid == 0 {
+		return
+	}
+	m.l0Mu.Lock()
+	defer m.l0Mu.Unlock()
+	if m.l0Lost != nil && epoch <= m.l0Lost[s.String()] && m.l0Lost[s.String()] != 0 {
+		return
+	}
+	p := m.l0Slot(s, epoch)
+	if txid <= p.covered {
+		return
+	}
+	p.covered = txid
+	for key, f := range p.files {
+		if f.max <= p.covered {
+			delete(p.files, key)
+		}
+	}
+}
+
 // DropL0 removes keys folded into L1, or keys already covered when a
 // promotion finds nothing left to read. Keys published after the snapshot
-// stay in the tally.
+// stay in the tally. The fold cursor is kept.
 func (m *Manager) DropL0(s cell.Scope, epoch uint64, keys []string) {
 	if len(keys) == 0 {
 		return
@@ -185,7 +248,7 @@ func (m *Manager) DropL0(s cell.Scope, epoch uint64, keys []string) {
 	for _, key := range keys {
 		delete(p.files, key)
 	}
-	if len(p.files) == 0 {
+	if len(p.files) == 0 && p.covered == 0 {
 		delete(m.l0, l0PendingKey(s, epoch))
 	}
 }

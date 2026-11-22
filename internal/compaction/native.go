@@ -60,14 +60,14 @@ func CompactLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 			return Result{}, err
 		}
 	}
-	pending := m.SnapshotL0Keys(s, epoch)
 	selected, seek, err := planLevel(ctx, m, s, epoch, level)
 	if err != nil {
 		return Result{}, err
 	}
 	if len(selected) == 0 {
 		if level == 1 {
-			m.DropL0(s, epoch, pending)
+			// seek is the destination floor when nothing remains to read.
+			m.CoverL0(s, epoch, seek)
 		}
 		return Result{Skipped: "already compacted"}, nil
 	}
@@ -123,11 +123,7 @@ func CompactLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 	r := Result{Compacted: true, Inputs: len(selected), InputBytes: inputBytes, Parts: 1, MinTxID: h.MinTXID, MaxTxID: h.MaxTXID, Commit: h.Commit, Epoch: epoch}
 	if level == 1 {
 		r.NewL0 = len(selected)
-		covered := make([]string, len(selected))
-		for i, f := range selected {
-			covered[i] = f.key
-		}
-		m.DropL0(s, epoch, covered)
+		m.CoverL0(s, epoch, h.MaxTXID)
 	}
 
 	return r, nil
@@ -320,7 +316,7 @@ func planLevel(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint
 		next = f.max + 1
 	}
 	if len(selected) == 0 {
-		return nil, 0, nil
+		return nil, floor, nil
 	}
 	return selected, seek, nil
 }

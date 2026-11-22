@@ -80,9 +80,9 @@ r2/<ns>/<bucket_name>/<object-key>
 
 ## Performance
 
-- Buckets should be in the **same region/nearby**; in fleet mode, S3 uploads are **batched in the background and not on the write ack path**;
-- The number of object PUTs per ack should be much less than 1 (group commit);
-- Only single-node degradation waits for the bucket per record (~90ms).
+- Buckets should be in the **same region/nearby**. With a follower, S3 uploads are batched after the write ack. Without a follower, ack is the local spool fsync and S3 still uses that same batch.
+- The number of object PUTs per ack should be much less than 1 (group commit).
+- Only a spool that cannot persist the segment waits for that one upload.
 
 ## To Be Refined
 

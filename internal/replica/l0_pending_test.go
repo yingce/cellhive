@@ -96,6 +96,49 @@ func TestLoseL0DropsTheEpochAndIgnoresALateUpload(t *testing.T) {
 	}
 }
 
+func TestL0CursorRecountsAfterUploadAndFold(t *testing.T) {
+	m := newManager(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "cursor"}
+	wide := nativeBlob(t, 1, 3, 'a')
+	inside := nativeBlob(t, 2, 2, 'b')
+	if _, _, err := m.Append(t.Context(), sc, 1, wide); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Append(t.Context(), sc, 1, inside); err != nil {
+		t.Fatal(err)
+	}
+	n, bytes := m.L0Pending(sc, 1)
+	if n != 2 || bytes != int64(len(wide)+len(inside)) {
+		t.Fatalf("before fold files=%d bytes=%d", n, bytes)
+	}
+	covered, uploaded := m.l0Cursors(sc, 1)
+	if covered != 0 || uploaded != 3 {
+		t.Fatalf("after upload covered=%d uploaded=%d", covered, uploaded)
+	}
+	m.CoverL0(sc, 1, 3)
+	n, bytes = m.L0Pending(sc, 1)
+	if n != 0 || bytes != 0 {
+		t.Fatalf("folded files=%d bytes=%d, want 0", n, bytes)
+	}
+	m.noteL0Object(sc, 1, sc.Key()+"/ltx/e1/0000/0000000000000002-0000000000000002.ltx", int64(len(inside)))
+	n, bytes = m.L0Pending(sc, 1)
+	if n != 0 || bytes != 0 {
+		t.Fatalf("covered overlap files=%d bytes=%d", n, bytes)
+	}
+	tail := nativeBlob(t, 4, 4, 'c')
+	if _, _, err := m.Append(t.Context(), sc, 1, tail); err != nil {
+		t.Fatal(err)
+	}
+	n, bytes = m.L0Pending(sc, 1)
+	if n != 1 || bytes != int64(len(tail)) {
+		t.Fatalf("tail files=%d bytes=%d, want 1/%d", n, bytes, len(tail))
+	}
+	covered, uploaded = m.l0Cursors(sc, 1)
+	if covered != 3 || uploaded != 4 {
+		t.Fatalf("after tail covered=%d uploaded=%d", covered, uploaded)
+	}
+}
+
 func TestL0PendingDropKeepsFilesPublishedDuringCompact(t *testing.T) {
 	m := newManager(t)
 	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "main"}

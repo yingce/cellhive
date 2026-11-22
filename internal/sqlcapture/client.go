@@ -209,10 +209,10 @@ func (c *HTTPCommitter) commitReader(ctx context.Context, scope cell.Scope, epoc
 		return fmt.Errorf("sqlcapture: decode commit response: %w", err)
 	}
 	switch result.Mode {
-	case "fleet", "bucket", "bucket-batch":
-		// All three are RPO=0 proofs: fleet = follower fsync ack; bucket = the
-		// object store acked the write; bucket-batch = the group-commit block was
-		// acked. Only async uploads are not durable.
+	case "fleet", "bucket", "bucket-batch", "bucket-spool":
+		// fleet waits for a follower fsync. bucket and bucket-batch wait for the
+		// object store. bucket-spool waits for the local upload spool; the object
+		// follows in the batch. bucket-async can ack with nothing durable.
 		return nil
 	case "bucket-async":
 		return fmt.Errorf("sqlcapture: durability not proven (mode %q uploads in background, RPO>0)", result.Mode)

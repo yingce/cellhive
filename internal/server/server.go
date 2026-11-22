@@ -3326,8 +3326,10 @@ func splitHeader(value string) []string {
 	return out
 }
 
-// captureCommitter adapts commitSegmentCore to cellcapture.Committer; it only
-// accepts RPO=0 proofs (fleet/bucket/bucket-batch), never bucket-async.
+// captureCommitter adapts commitSegmentCore to cellcapture.Committer. It
+// accepts a follower fsync, a completed bucket upload, and a local spool fsync
+// whose object upload is still batched. It rejects bucket-async, which can
+// ack before anything durable exists.
 type captureCommitter struct{ s *Server }
 
 func (c captureCommitter) Commit(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte) error {
@@ -3336,7 +3338,7 @@ func (c captureCommitter) Commit(ctx context.Context, scope cell.Scope, epoch ui
 		return err
 	}
 	switch res.Mode {
-	case "fleet", "bucket", "bucket-batch":
+	case "fleet", "bucket", "bucket-batch", "bucket-spool":
 		return nil
 	default:
 		return fmt.Errorf("cellcapture: commit was not durable (mode %q)", res.Mode)
@@ -3404,7 +3406,7 @@ func (s *Server) commitSegmentBatchCore(ctx context.Context, sc cell.Scope, epoc
 						return
 					}
 					switch res.Mode {
-					case "fleet", "bucket", "bucket-batch":
+					case "fleet", "bucket", "bucket-batch", "bucket-spool":
 					default:
 						errCh <- fmt.Errorf("cellcapture: batch commit was not durable (mode %q)", res.Mode)
 					}
@@ -3667,9 +3669,11 @@ type commitResult struct {
 
 // commitSegmentCore replicates one segment with the configured durability
 // posture and returns its proof. Fleet (peer fsync) is preferred; the bucket
-// upload is asynchronous/batched. "fleet" degrades to a bucket wait when no
-// peer is eligible (never a silent ack). Shared by the HTTP commit handlers and
-// the cellstore capture committer.
+// upload is asynchronous/batched. With no eligible peer the segment is fsynced
+// to the local spool and acknowledged; the object joins the same flush as a
+// follower-acked upload. A spool that cannot persist the segment still waits
+// for its own upload. Shared by the HTTP commit handlers and the cellstore
+// capture committer.
 func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uint64, seg []byte, followers []string, prebatched, requireBucket bool) (result commitResult, commitErr error) {
 	started := time.Now()
 	stage := started
@@ -3771,7 +3775,7 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 
 	// Bucket posture. Both wait modes submit a block per (scope,epoch).
 	if tryFleet && s.Cfg.Durability == "fleet" {
-		s.Log.Warn("fleet durability requested but no eligible peer; writes wait for the bucket")
+		s.Log.Warn("fleet durability requested but no eligible peer; write is spooled for a later bucket batch")
 	}
 	wait := requireBucket || s.Cfg.BucketWait || s.Cfg.Durability == "fleet"
 	switch {
@@ -3785,6 +3789,15 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	default:
 		if s.Uploader != nil {
 			bucketStart := time.Now()
+			// One machine and a two-machine fallback both keep the segment on
+			// the local spool and share the async flush. Serial requests would
+			// otherwise each wait for their own object.
+			if err := s.Uploader.EnqueueSpool(ctx, sc, epoch, seg); err == nil {
+				bucketTime = time.Since(bucketStart)
+				s.commits.Add(1)
+				s.recordCommit("bucket-spool")
+				return commitResult{Mode: "bucket-spool"}, nil
+			}
 			err := s.Uploader.EnqueueWait(ctx, sc, epoch, seg)
 			bucketTime = time.Since(bucketStart)
 			if err != nil {

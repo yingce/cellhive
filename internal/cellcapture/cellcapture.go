@@ -30,8 +30,8 @@ var ErrNotOwner = errors.New("cellcapture: not owner")
 // until the cell is restored/evicted (fail closed).
 var ErrLocalBehindDurable = errors.New("cellcapture: local cell is behind the durable chain")
 
-// Committer proves one LTX segment durable (fleet/bucket). It must return nil
-// only for an RPO=0 proof (fleet, bucket, or bucket-batch).
+// Committer proves one LTX segment durable. Nil means a follower fsync, a
+// finished object upload, or a local spool fsync.
 type Committer interface {
 	Commit(ctx context.Context, scope cell.Scope, epoch uint64, segment []byte) error
 }

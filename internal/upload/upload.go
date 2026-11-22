@@ -83,6 +83,12 @@ type Batcher struct {
 	replayInterval time.Duration
 	onDurable      atomic.Value // func(cell.Scope, uint64), called after a successful upload
 
+	// spoolHeld marks entries already sitting on a flush queue. Replay must not
+	// upload them early; a crash drops this set and the next process replays
+	// whatever files remain.
+	spoolHoldMu sync.Mutex
+	spoolHeld   map[uint64]struct{}
+
 	closeOnce sync.Once
 }
 
@@ -233,6 +239,9 @@ func (b *Batcher) replayEntries(ctx context.Context, entries []SpoolEntry) {
 		if ctx.Err() != nil {
 			return
 		}
+		if b.spoolIsHeld(e.ID) {
+			continue
+		}
 		if retiredSink, ok := b.sink.(interface {
 			EpochRetired(context.Context, cell.Scope, uint64) (bool, error)
 		}); ok {
@@ -377,9 +386,11 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 				if it.spoolID != 0 && b.spool != nil {
 					if err := b.spool.Remove(it.spoolID); err != nil {
 						b.spoolErrors.Add(1)
+						b.releaseSpool(it.spoolID)
 						continue
 					}
 				}
+				b.releaseSpool(it.spoolID)
 				b.discarded.Add(1)
 			}
 		} else if err != nil {
@@ -387,6 +398,7 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 			// segment we could not persist is really dropped (counted + alerted).
 			b.errors.Add(1)
 			for _, it := range g.items {
+				b.releaseSpool(it.spoolID)
 				if it.spoolID != 0 {
 					b.deferred.Add(1)
 				} else {
@@ -403,6 +415,7 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 				if it.spoolID != 0 && b.spool != nil {
 					_ = b.spool.Remove(it.spoolID)
 				}
+				b.releaseSpool(it.spoolID)
 			}
 		}
 		for _, it := range g.items {
@@ -410,6 +423,50 @@ func (b *Batcher) flushGroup(ctx context.Context, items []item) {
 				it.done <- err
 			}
 		}
+	}
+}
+
+// errUploadSpoolUnavailable means the segment was not made durable locally, so
+// the caller must upload it before acknowledging the write.
+var errUploadSpoolUnavailable = errors.New("upload: spool unavailable")
+
+// EnqueueSpool persists one segment and leaves it on the async flush queue.
+// The caller may acknowledge after this returns. The segment joins the next
+// 30s, segment-count, or 1MiB flush instead of becoming its own object. A
+// missing or failed spool returns an error and does not acknowledge.
+func (b *Batcher) EnqueueSpool(ctx context.Context, s cell.Scope, epoch uint64, seg []byte) error {
+	if b == nil || b.spool == nil {
+		return errUploadSpoolUnavailable
+	}
+	id, err := b.spool.Append(s, epoch, [][]byte{seg})
+	if err != nil {
+		b.spoolErrors.Add(1)
+		return err
+	}
+	b.holdSpool(id)
+	sh := b.shardFor(s)
+	select {
+	case sh.ch <- item{scope: s, epoch: epoch, seg: seg, spoolID: id}:
+		return nil
+	default:
+		if err := b.appendBatch(ctx, s, epoch, [][]byte{seg}); err != nil {
+			if errors.Is(err, cell.ErrResourceDeleted) {
+				_ = b.spool.Remove(id)
+				b.releaseSpool(id)
+				return err
+			}
+			// The spool file is the acknowledgement. Replay uploads it; the
+			// caller must not start a second PUT for the same segment.
+			b.releaseSpool(id)
+			b.errors.Add(1)
+			b.deferred.Add(1)
+			return nil
+		}
+		_ = b.spool.Remove(id)
+		b.releaseSpool(id)
+		b.batches.Add(1)
+		b.segments.Add(1)
+		return nil
 	}
 }
 
@@ -506,6 +563,7 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 			spoolID = id
 		}
 	}
+	b.holdSpool(spoolID)
 	sh := b.shardFor(s)
 	select {
 	case sh.ch <- item{scope: s, epoch: epoch, seg: seg, spoolID: spoolID}:
@@ -525,6 +583,7 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 			if b.log != nil {
 				b.log.Warn("sync upload failed", "scope", s.String(), "epoch", epoch, "spooled", spoolID != 0, "err", err)
 			}
+			b.releaseSpool(spoolID)
 			return
 		}
 		b.batches.Add(1)
@@ -532,7 +591,39 @@ func (b *Batcher) Enqueue(ctx context.Context, s cell.Scope, epoch uint64, seg [
 		if spoolID != 0 {
 			_ = b.spool.Remove(spoolID)
 		}
+		b.releaseSpool(spoolID)
 	}
+}
+
+func (b *Batcher) holdSpool(id uint64) {
+	if b == nil || id == 0 {
+		return
+	}
+	b.spoolHoldMu.Lock()
+	if b.spoolHeld == nil {
+		b.spoolHeld = map[uint64]struct{}{}
+	}
+	b.spoolHeld[id] = struct{}{}
+	b.spoolHoldMu.Unlock()
+}
+
+func (b *Batcher) releaseSpool(id uint64) {
+	if b == nil || id == 0 {
+		return
+	}
+	b.spoolHoldMu.Lock()
+	delete(b.spoolHeld, id)
+	b.spoolHoldMu.Unlock()
+}
+
+func (b *Batcher) spoolIsHeld(id uint64) bool {
+	if b == nil || id == 0 {
+		return false
+	}
+	b.spoolHoldMu.Lock()
+	_, ok := b.spoolHeld[id]
+	b.spoolHoldMu.Unlock()
+	return ok
 }
 
 // Flush pushes a barrier through every shard, so all segments accepted before

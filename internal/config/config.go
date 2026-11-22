@@ -119,14 +119,16 @@ type Config struct {
 	// cells hash to different lanes so they commit concurrently; per-scope order
 	// is preserved. 0 = auto (NumCPU, capped at 8).
 	UploadShards int
-	// UploadInterval is the idle flush period for async bucket uploads (default
-	// 30s). The segment cap is CompactionMinObjects. EnqueueWait and sync
-	// bucket-proof paths still wake the flusher immediately.
+	// UploadInterval is the idle flush period for bucket uploads (default 30s).
+	// The segment cap is CompactionMinObjects. A spooled write, including a
+	// single-node commit and a commit with no follower, joins that flush.
+	// EnqueueWait remains for a spool that cannot persist the segment.
 	UploadInterval time.Duration
 
-	// BucketWait controls the bucket posture: true (default) waits for the
-	// covering block upload before acking (RPO=0); false acks on enqueue with a
-	// background upload (RPO>0). Forced true when Durability is "fleet".
+	// BucketWait controls the bucket posture. True (default) fsyncs the local
+	// spool before acking and lets the segment join the upload batch. A spool
+	// that cannot persist the segment waits for that upload. False acks on
+	// enqueue. Forced true when Durability is "fleet".
 	BucketWait bool
 
 	// S3 and native OSS/COS authority providers; empty uses local filesystem.
@@ -293,7 +295,8 @@ type Config struct {
 	// CompactionMinBytes starts an L1 promotion. It does not slice the batch.
 	CompactionMinBytes int64
 	// CompactionMinObjects is the shared count: async L0 upload flushes at this
-	// many segments, and L1 starts when this many uncovered L0 files are recorded.
+	// many segments, and L1 starts when this many L0 files remain past the L1
+	// cursor. The cursor is recounted after each L0 upload and each L1.
 	CompactionMinObjects int
 
 	// Paged cold restore (ADR-160). PagedRestore enables the fault-in VFS for

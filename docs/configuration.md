@@ -97,7 +97,7 @@ cellhive wrangler deploy --name web
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `CELLHIVE_DURABILITY` | `auto` | ack 姿态：`auto`/`fleet`/`bucket`；`fleet` 必须 follower fsync，绝不静默 ack |
-| `CELLHIVE_BUCKET_WAIT` | `true` | true=等桶上传后 ack（RPO=0）；false=入队即 ack；`fleet` 必须 true |
+| `CELLHIVE_BUCKET_WAIT` | `true` | true=先 fsync 本地 spool 再 ack，对象按上传周期合成；spool 写失败才等这一次上传。false=入队即 ack。`fleet` 必须 true |
 | `CELLHIVE_LEASE_TTL` | `10s` | owner 租约，必须为正 |
 | `CELLHIVE_PEER_LATENCY` | `0` | 合成单向延迟（压测，往返 ×2） |
 | `CELLHIVE_PEER_PIPELINE` | `4` | 每 lane 在途批次数，1=关流水线 |
@@ -189,9 +189,9 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | 整数，默认 `4` | child 并发预取 worker 数 |
 | `CELLHIVE_COMPACTION_TIMEOUT` | `5m` | 每个 scope 单独的 compaction deadline；非正值在循环中回退 5m，不是关闭超时 |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | 保留。后台晋升不看段数 |
-| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | owner 记下的未收 L0 存放字节门槛，与文件个数是或的关系。只决定是否开始，不把一批按这个值切开，也不为这个判断列桶 |
-| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | 共用个数。异步 L0 上传凑满这么多段就刷；owner 记下的未收 L0 文件达到它就收 L1。非正值按 256。没有定时扫描 |
-| `CELLHIVE_UPLOAD_INTERVAL` | `30s` | 异步桶上传空闲合批周期；EnqueueWait/同步桶证明仍立即唤醒 |
+| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | L1 光标之后的 L0 存放字节门槛，与文件个数是或的关系。每次 L0 上传和每次 L1 都按光标重算。只决定是否开始，不把一批按这个值切开，也不为这个判断列桶 |
+| `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | 共用个数。异步 L0 上传凑满这么多段就刷；L1 光标之后的 L0 文件达到它就收 L1。非正值按 256。没有定时扫描 |
+| `CELLHIVE_UPLOAD_INTERVAL` | `30s` | 桶上传合批周期。单机和没有备机确认的写先 fsync 到本地 spool 再返回，和后台队列一起按这个周期、256 段或 1MiB 合成一次上传。spool 写失败才立即上传 |
 | `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷 owned cell best-effort `FoldBaseline`。已有 L9 则跳过。没有 L9 时，owner 累计的未收 L0 文件数达到 `CELLHIVE_COMPACTION_MIN_OBJECTS` 才 Fold。交权前同样 Fold，不看这个个数。不阻塞驱逐 |
 | `CELLHIVE_EPOCH_SNAPSHOT_MAX` | `1GiB` | 显式整库 L9（`--snapshot`）和换代时新合成 L9 的逻辑库上限，也是这一次快照能吃下的输入字节。显式快照超过就跳过。换代合成超过就改收到 L2，不拆已有 L9。已有 L9 仍整份拷贝。后台 L1 不按这个值切。交权/空闲 Fold 的 L2 分块仍是 256MiB。换代续链不看这个值 |
 | `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |

@@ -71,7 +71,7 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 | Variable | Default | Purpose |
 |---|---|---|
 | `CELLHIVE_DURABILITY` | `auto` | ack posture: `auto`/`fleet`/`bucket`; `fleet` requires follower fsync and never silently acks |
-| `CELLHIVE_BUCKET_WAIT` | `true` | true=ack after waiting for bucket upload (RPO=0); false=ack after enqueue; `fleet` must be true |
+| `CELLHIVE_BUCKET_WAIT` | `true` | true=fsync the local spool before ack and upload on the batch interval; a failed spool write waits for that one upload. false=ack on enqueue. `fleet` must be true |
 | `CELLHIVE_LEASE_TTL` | `10s` | owner lease, must be positive |
 | `CELLHIVE_PEER_LATENCY` | `0` | Synthetic one-way latency (load testing, round trip ×2) |
 | `CELLHIVE_PEER_PIPELINE` | `4` | Number of in-flight batches per lane, 1=disable pipelining |
@@ -137,7 +137,7 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 | `CELLHIVE_PAGED_PREFETCH_WORKERS` | integer, default `4` | Number of concurrent child prefetch workers |
 | `CELLHIVE_COMPACTION_TIMEOUT` | `5m` | Per-scope compaction deadline; a nonpositive value falls back to 5m inside the loop and does not disable the deadline |
 | `CELLHIVE_COMPACTION_MIN_SEGMENTS` | `64` | Retained. Background promotion does not use segment count |
-| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Owner tally of uncovered L0 stored bytes, OR the file count. It starts a batch and does not slice one. The decision does not list the bucket |
+| `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | Stored bytes of L0 files past the L1 cursor, or the file count. Recounted after each L0 upload and each L1. It starts a batch and does not slice one. The decision does not list the bucket |
 | `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | Shared count. An async L0 upload flushes at this many segments, and L1 starts when the owner tally reaches this many files. A nonpositive value uses 256. There is no timer |
 | `CELLHIVE_EPOCH_SNAPSHOT_MAX` | `1GiB` | Logical-image ceiling for an explicit whole-database L9 (`--snapshot`) and for a newly synthesized handoff L9, and the stored bytes that snapshot may read. An explicit snapshot over budget is skipped. A handoff synthesis over budget is published at L2. An existing L9 is still copied whole. Background L1 promotion does not cut on this value. Handoff and idle L2 chunks stay 256MiB. Epoch continuation does not use this value |
 | `CELLHIVE_BUNDLE_GC_INTERVAL` | `0` off | bundle/assets GC |
