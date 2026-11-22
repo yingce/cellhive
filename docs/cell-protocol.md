@@ -147,7 +147,7 @@ KV/Queue 的删除 fencing 与 celld owner lineage 一致，状态保存在 `cel
 - SQLite 提交事务被捕获为 **LTX**（事务日志段），上传到当前 epoch 前缀（普通 PUT）。
 - 后端 A：`cell-agent` 直接捕获自己拥有的 SQLite（**ADR-092**：KV/D1/Queue/Workflow/Vectorize/timer/control 写路径经 `internal/cellcapture` 接 `sqlcapture` → LTX → fleet 证明，bucket 异步；冷恢复经 `cellstore.Hydrate` + `replica.LatestEpoch`；`/v1/internal/{append,commit}` 亦可供外部 committer）。
 - 后端 B：`do-runtime` 的 supervisor 捕获 WAL 段，**上报给 cell-agent**，由 cell-agent 执行复制与证明（见 [`durable-objects.md`](./durable-objects.md)）。
-- 快照是全库逻辑基线；恢复组合快照及后续各 level/epoch 的连续增量。大 cell 可按内嵌索引分页读取，不要求接管时物化全库，也不要求每次 epoch 切换都产生 L9。
+- 快照是全库逻辑基线；恢复组合快照及后续各 level/epoch 的连续增量。大 cell 可按内嵌索引分页读取，不要求接管时物化全库，也不要求每次 epoch 切换都产生 L9。换代只写 `[cut+1, cut+1]` 续链：有 L9 就继续读上一代 L9，没有就读上一代 L1 和它后面的 L0。不在换代时再上传一份整库对象。空闲驱逐或交权把这条链收进本代 L9，放不下就收进 L2。
 - 冷恢复与分页索引选择**能接上完整、连续增量后缀的最新快照**。跨越快照水位的批量增量不能整段丢弃；若没有较早快照能提供连续链，则拒绝恢复，不能把重叠段当作已包含的事务。
 - 初始快照先流式写入本地临时 spool，完成并 fsync 后以一个 `ltx/e<epoch>/<level-4hex>/<min>-<max>.ltx` 完整对象发布，允许同名幂等重传。生产路径不创建 `snapshot-started`、`snapshot-done`、`epoch-cut` 或其它完成 sidecar；恢复只信任完整原生 LTX 对象及其内嵌页索引。
 - **compaction**：后台把大量 L0 段折叠为 L1（`min_txids` / `min_mb` 触发），使接管只读少量对象而非成千上万。

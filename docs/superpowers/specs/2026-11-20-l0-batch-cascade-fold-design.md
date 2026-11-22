@@ -11,7 +11,7 @@
 
 ### 1. 换代抬 base
 
-- **触发**：优雅交权前（`BeforeRelease`）与空闲驱逐（`L9_ON_EVICT` → `FoldBaseline`）。owner 和 epoch 都不变。空闲路径在没有 L9 时，用 owner 的未收 L0 文件累计和 `CELLHIVE_COMPACTION_MIN_OBJECTS` 比较，不列桶；交权前不看这个个数。再平衡和磁盘压力也先 Fold，但不在 claim 锁里做：cell 被打开或所有权已变就不交还；仍关闭才用最多 10 秒删 owner，这次不再 Fold。关机交权仍在锁里 Fold。
+- **触发**：优雅交权前（`BeforeRelease`）与空闲驱逐（`L9_ON_EVICT` → `FoldBaseline`）。owner 和 epoch 都不变。换代只写续链 seed，恢复继续读上一代 L9；没有 L9 就读上一代 L1 和它后面的 L0。不在换代时再上传一份整库 L0。空闲路径在没有 L9、并且恢复链还读着上一代时直接 Fold；链已经在本代时，才用 owner 的未收 L0 文件累计和 `CELLHIVE_COMPACTION_MIN_OBJECTS` 比较，不列桶。交权前不看这个个数。再平衡和磁盘压力也先 Fold，但不在 claim 锁里做：cell 被打开或所有权已变就不交还；仍关闭才用最多 10 秒删 owner，这次不再 Fold。关机交权仍在锁里 Fold。
 - **发布顺序**：当前代还不能单独恢复时，把快照之后的增量切成有界 L2，**先发最新块，最后再复制或合成基线**。基线在逻辑库和输入字节都不超过 `CELLHIVE_EPOCH_SNAPSHOT_MAX` 时是 L9；超过则同一段收到 L2，不合成新 L9。已有 L9 仍整份拷贝。当前代已经自包含则跳过，原因 `already compacted`。Fold 不发布 L3。
 - **重叠**：前代增量如果跨过快照水位（例如 L9 覆盖到 tx 5，下一段从 tx 3 开始），第一段裁到 `snap.max+1`，完全落在快照里的输入丢掉。不裁就发布会让恢复链在 L9 落地前断开。
 - **预算**：关机交权的 Fold 最多用 5 分钟，并给随后的 owner release 留 2 秒。剩余时间不够就跳过。Fold 失败也不挡住 release。再平衡和磁盘压力的 Fold 用同一个 5 分钟上限，但在锁外；随后的删除最多 10 秒。

@@ -31,6 +31,36 @@ func appendNativeAt(t *testing.T, m *replica.Manager, s cell.Scope, epoch uint64
 	return key
 }
 
+func TestFoldBaselineRehomesPredecessorL1WithoutANewL0Snapshot(t *testing.T) {
+	m, s := nativeManager(t)
+	s.ID = "fold-reuse-l1"
+	appendNativeAt(t, m, s, 1, 1, 1, 3, 1, 1, 2)
+	appendNativeAt(t, m, s, 2, 0, 4, 4, 2, 1)
+	res, err := FoldBaseline(t.Context(), m, s, 2, Options{SnapshotMaxBytes: 1 << 30})
+	if err != nil || !res.Compacted {
+		t.Fatalf("fold=%+v err=%v", res, err)
+	}
+	keys, err := m.RestoreChainKeys(t.Context(), s, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l9 := false
+	for _, key := range keys {
+		if strings.Contains(key, "/e1/") {
+			t.Fatalf("chain still reads the predecessor: %s", key)
+		}
+		if strings.Contains(key, "/0000/") && !strings.Contains(key, "0000000000000004-0000000000000004") {
+			t.Fatalf("new L0 snapshot: %s", key)
+		}
+		if strings.Contains(key, "/0009/") {
+			l9 = true
+		}
+	}
+	if !l9 {
+		t.Fatalf("chain=%v, want an L9 in this epoch", keys)
+	}
+}
+
 func TestFoldBaselineNewestFirstKeepsRestoreAfterEachChunk(t *testing.T) {
 	m, s := nativeManager(t)
 	s.ID = "fold-newest-first"

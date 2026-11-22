@@ -511,8 +511,9 @@ func TestEvictionKeepsResumeHint(t *testing.T) {
 	m.Stop()
 }
 
-// A continued epoch publishes one native snapshot at its image watermark.
-func TestBackgroundBaselinePublishesNativeSnapshot(t *testing.T) {
+// A continued epoch keeps the predecessor chain. It must not publish another
+// full image into this epoch's L0.
+func TestEpochContinueDoesNotPublishAnotherSnapshot(t *testing.T) {
 	ctx := context.Background()
 	cs, err := cellstore.New(t.TempDir())
 	if err != nil {
@@ -556,10 +557,7 @@ func TestBackgroundBaselinePublishesNativeSnapshot(t *testing.T) {
 	}
 	select {
 	case txid := <-doneTx:
-		if txid != local+1 {
-			t.Fatalf("native snapshot for txid %d, want continuation watermark %d", txid, local+1)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("background baseline was not published")
+		t.Fatalf("epoch continue published a snapshot at txid %d", txid)
+	case <-time.After(time.Second):
 	}
 }

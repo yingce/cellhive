@@ -1338,6 +1338,45 @@ func runEpochGCLoop(ctx context.Context, log *slog.Logger, om *owner.Manager, cm
 
 const defaultCompactionTimeout = 5 * time.Minute
 
+// idleShouldFold reports whether an idle cell should rehome its restore chain.
+// A chain that still reads a predecessor epoch folds immediately. A chain that
+// already lives in this epoch waits for the owner's L0 tally. Neither check
+// lists the bucket; the predecessor check reads the restore plan.
+func idleShouldFold(ctx context.Context, rep *replica.Manager, sc cell.Scope, epoch uint64, minObjects int) (bool, error) {
+	if rep == nil {
+		return false, nil
+	}
+	keys, err := rep.RestoreChainKeys(ctx, sc, epoch)
+	if err != nil {
+		return false, err
+	}
+	for _, key := range keys {
+		got, ok := ltxEpoch(key)
+		if ok && got != epoch {
+			return true, nil
+		}
+	}
+	return idleL0Ready(rep, sc, epoch, minObjects), nil
+}
+
+func ltxEpoch(key string) (uint64, bool) {
+	const marker = "/ltx/e"
+	i := strings.Index(key, marker)
+	if i < 0 {
+		return 0, false
+	}
+	rest := key[i+len(marker):]
+	j := strings.IndexByte(rest, '/')
+	if j <= 0 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(rest[:j], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
 // idleL0Ready reports whether this owner's unpublished L0 tally is large
 // enough to fold on idle eviction. It does not list the bucket.
 func idleL0Ready(rep *replica.Manager, sc cell.Scope, epoch uint64, minObjects int) bool {
@@ -1351,9 +1390,10 @@ func idleL0Ready(rep *replica.Manager, sc cell.Scope, epoch uint64, minObjects i
 
 // runL9OnEvict rehomes the durable restore baseline into the current epoch after
 // an owned cell is idle-evicted (copy an existing L9, or publish a new L9 or L2,
-// plus bounded L2 increments). The handle may already be closed: fold reads the
-// bucket chain only. Predecessor deletion is left to the epoch GC loop once this
-// epoch is the chain base.
+// plus bounded L2 increments). A chain that still reads the predecessor folds
+// without waiting for this epoch to accumulate L0. The handle may already be
+// closed: fold reads the bucket chain only. Predecessor deletion is left to the
+// epoch GC loop once this epoch is the chain base.
 func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, om *owner.Manager, cfg config.Config, ch <-chan cell.Scope) {
 	for {
 		select {
@@ -1397,7 +1437,12 @@ func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, o
 				}
 				continue
 			}
-			if !idleL0Ready(rep, sc, o.Epoch, cfg.CompactionMinObjects) {
+			fold, ferr := idleShouldFold(ctx, rep, sc, o.Epoch, cfg.CompactionMinObjects)
+			if ferr != nil {
+				log.Warn("idle fold check failed", "scope", sc.String(), "err", ferr)
+				continue
+			}
+			if !fold {
 				continue
 			}
 			vctx, cancel := context.WithTimeout(ctx, defaultCompactionTimeout)

@@ -74,6 +74,29 @@ func TestUploadSegmentCapUsesTheL1ObjectCount(t *testing.T) {
 	}
 }
 
+func TestIdleFoldRehomesPredecessorWithoutWaitingForL0(t *testing.T) {
+	b, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := replica.New(b)
+	sc := cell.Scope{Namespace: "idle", Class: "__kv__", ID: "chain"}
+	page := bytes.Repeat([]byte{3}, 512)
+	appendSegment(t, m, sc, 1, snapshotSegment(t, 1, 512, 1, map[uint32][]byte{1: page}))
+	appendSegment(t, m, sc, 2, deltaSegment(t, 2, 512, 1, 2, map[uint32][]byte{1: page}))
+	if idleL0Ready(m, sc, 2, 256) {
+		t.Fatal("one new segment must not meet the L0 bar")
+	}
+	fold, err := idleShouldFold(t.Context(), m, sc, 2, 256)
+	if err != nil || !fold {
+		t.Fatalf("predecessor chain fold=%v err=%v", fold, err)
+	}
+	fold, err = idleShouldFold(t.Context(), m, sc, 1, 256)
+	if err != nil || fold {
+		t.Fatalf("self-contained epoch fold=%v err=%v", fold, err)
+	}
+}
+
 func TestIdleFoldUsesOwnerL0Tally(t *testing.T) {
 	b, err := bucket.NewFSBucket(t.TempDir())
 	if err != nil {

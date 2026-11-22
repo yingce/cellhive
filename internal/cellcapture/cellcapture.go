@@ -64,21 +64,17 @@ type Manager struct {
 	// epoch: a 57KB KV cell paid ~9s in List for that.
 	DurableEpoch func(ctx context.Context, scope cell.Scope, epoch uint64) (uint64, error)
 	// HasEpoch reports whether the bucket already has LTX data for this epoch.
-	// A new owner epoch normally opens with a whole-database snapshot (celld
-	// format 1); only a large cell may continue its predecessor's chain.
+	// A new epoch writes a continuation seed and keeps reading the predecessor
+	// chain. It does not publish another full image.
 	HasEpoch func(ctx context.Context, scope cell.Scope, epoch uint64) (bool, error)
-	// EpochSnapshotMaxBytes bounds the database size that takes a fresh snapshot
-	// on every new epoch. Larger cells keep the cross-epoch chain until paged
-	// continuation is wired; 0 snapshots every new epoch.
+	// EpochSnapshotMaxBytes bounds a fresh snapshot only when no continuation
+	// writer is configured. A configured writer always keeps the predecessor chain.
 	EpochSnapshotMaxBytes int64
 	// WriteContinuation publishes the [cut+1,cut+1] epoch seed, including the
 	// local bookkeeping pages the next capture cursor will not read.
 	WriteContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader, pages []ltx.WALPage) error
 	// CheckContinuation only verifies an existing seed after an ambiguous publication.
 	CheckContinuation func(ctx context.Context, scope cell.Scope, epoch uint64, header ltx.NativeHeader) error
-	// PagedBaselinePoll is how often a marker-resumed paged cell checks whether
-	// its background hydrate finished before taking its baseline (0 = 2s).
-	PagedBaselinePoll time.Duration
 	// RetireEpochs, when set, deletes epoch prefixes below the current one after
 	// the current epoch has a complete snapshot. Runs from the background GC
 	// loop, not on the request path.
@@ -316,14 +312,9 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		finishInit()
 		cap.Start(cctx)
 		go m.watchOwner(cctx, key, scope, st)
-		if crossEpoch {
-			go func() {
-				defer close(st.backgroundDone)
-				m.backgroundBaseline(cctx, c, cap, scope, epoch)
-			}()
-		} else {
-			close(st.backgroundDone)
-		}
+		// The predecessor chain stays in place. Idle eviction and release fold
+		// it into this epoch's L9; a second full image would copy those pages.
+		close(st.backgroundDone)
 		close(ready)
 		// Drop may have cancelled initialization just as it finished.
 		if err := cctx.Err(); err != nil {
@@ -512,39 +503,6 @@ func (m *Manager) takeHint(key string, epoch, baseline uint64) bool {
 		delete(m.hints, key)
 	}
 	return ok && h.epoch == epoch && h.durable == baseline
-}
-
-// backgroundBaseline gives a continued epoch its own complete native snapshot
-// from a detached SQLite backup image. Upload does not
-// occupy the capture loop or the cell write lock; epoch GC retires predecessors.
-func (m *Manager) backgroundBaseline(ctx context.Context, c *cellstore.Cell, cap *sqlcapture.Capture, scope cell.Scope, epoch uint64) {
-	if !c.PagedComplete() {
-		// A sparse paged image would make the snapshot HydrateAll inside the
-		// capture loop and stall every write's durability proof. Wait for the
-		// background hydrate to finish, then take the baseline from a full image.
-		interval := m.PagedBaselinePoll
-		if interval <= 0 {
-			interval = 2 * time.Second
-		}
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for !c.PagedComplete() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
-		}
-	}
-	_, err := cap.RequestBaseline(ctx)
-	if err != nil {
-		m.log().Warn("background baseline failed", "scope", scope.String(), "epoch", epoch, "err", err)
-		return
-	}
-	// Epoch GC is periodic: the background loop lists old epochs, and doing it
-	// here would add those Lists to the cold-open latency measured by E2E. The
-	// current epoch now has a complete snapshot, so the next GC pass can retire
-	// the predecessor.
 }
 
 // ForgetHint drops a resume hint after a local file is deleted or ownership is
