@@ -75,9 +75,15 @@ func (r *ControlReader) ProjectionStrict(ctx context.Context) (control.Projectio
 	return out, err
 }
 func (r *ControlReader) ResourcesByKind(ctx context.Context, kind string) ([]control.ResourceRef, error) {
-	var out []control.ResourceRef
-	_, err := r.read(ctx, controlReadQuery{Op: "resources", Kind: kind}, &out, false)
+	out, _, err := r.ResourcesByKindWithAuthority(ctx, kind)
 	return out, err
+}
+
+// ResourcesByKindWithAuthority binds discovery data to its own validated read.
+func (r *ControlReader) ResourcesByKindWithAuthority(ctx context.Context, kind string) ([]control.ResourceRef, string, error) {
+	var out []control.ResourceRef
+	key, err := r.read(ctx, controlReadQuery{Op: "resources", Kind: kind}, &out, false)
+	return out, key, err
 }
 func (r *ControlReader) ResourceConfig(ctx context.Context, ns, kind, name string) ([]byte, error) {
 	var out []byte
@@ -198,21 +204,24 @@ func (r *ControlReader) load(ctx context.Context, q controlReadQuery) (value con
 			return value, e
 		}
 		if before.Node == r.s.Cfg.NodeID {
-			result, err = r.s.readLocalControl(ctx, q)
-		} else if before.Address == "" {
-			return value, owner.ErrNotOwner
+			// Reuse this call's authoritative initial sample. The helper still
+			// fences the local read and rechecks authority after reading SQLite.
+			result, err = r.s.readLocalControlOwned(ctx, q, &before)
 		} else {
+			if before.Address == "" {
+				return value, owner.ErrNotOwner
+			}
 			err = r.s.cleanupRPC(ctx, before.Address, "/v1/internal/control/read", q, &result)
-		}
-		if err != nil {
-			return value, err
-		}
-		after, e := r.s.cleanupControlOwner(ctx, "")
-		if e != nil {
-			return value, e
-		}
-		if !sameCleanupControlOwner(before, after) || !sameCleanupControlOwner(before, result.Owner) {
-			return value, owner.ErrNotOwner
+			if err != nil {
+				return value, err
+			}
+			after, e := r.s.cleanupControlOwner(ctx, "")
+			if e != nil {
+				return value, e
+			}
+			if !sameCleanupControlOwner(before, after) || !sameCleanupControlOwner(before, result.Owner) {
+				return value, owner.ErrNotOwner
+			}
 		}
 	}
 	if err != nil {
@@ -226,15 +235,27 @@ func (r *ControlReader) load(ctx context.Context, q controlReadQuery) (value con
 }
 
 func (s *Server) readLocalControl(ctx context.Context, q controlReadQuery) (controlReadReply, error) {
+	return s.readLocalControlOwned(ctx, q, nil)
+}
+
+// initial is only supplied by load after its fresh authority read, never from
+// a cache or an RPC argument. The internal endpoint obtains its own sample.
+func (s *Server) readLocalControlOwned(ctx context.Context, q controlReadQuery, initial *cell.Owner) (controlReadReply, error) {
 	var result controlReadReply
 	if s.Control == nil {
 		return result, errors.New("control plane unavailable")
 	}
 	var check func() bool
 	if s.Owner != nil {
-		before, err := s.cleanupControlOwner(ctx, "")
-		if err != nil {
-			return result, err
+		var before cell.Owner
+		if initial != nil {
+			before = *initial
+		} else {
+			var err error
+			before, err = s.cleanupControlOwner(ctx, "")
+			if err != nil {
+				return result, err
+			}
 		}
 		if before.Node != s.Cfg.NodeID || before.Session != s.Owner.Session || !s.ackAllowed(time.Now()) {
 			return result, owner.ErrNotOwner

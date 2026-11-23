@@ -952,6 +952,7 @@ func main() {
 		// proof, so a queue has exactly one consumer and RPO=0 (ADR-119).
 		if cfg.QueueInterval > 0 {
 			if qd := queue.NewHTTP(cfg.DispatchURL, cfg.TokenDispatch); qd != nil {
+				resources := &queueResourceCache{src: controlReads}
 				(&queue.Runner{
 					Store:        srv.Queue,
 					Dispatch:     qd,
@@ -991,7 +992,7 @@ func main() {
 						return srv.BeginResourceRequest(ctx, queue.Scope(ref.Namespace, ref.Name))
 					},
 					Queues: func(qctx context.Context) ([]queue.Ref, error) {
-						queues, err := controlReads.ResourcesByKind(qctx, "queue")
+						queues, err := resources.Resources(qctx)
 						if err != nil {
 							return nil, err
 						}

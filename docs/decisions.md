@@ -4243,3 +4243,11 @@ Queue 冷开/重开首先只读检查 schema；已完整迁移的库不执行空
 2026-11-23 发布验收：源码 `9dcacebc` 已部署本地与 USW revision 133，真实生产测试 namespace 收发/ACK/重试/DLQ 通过；604 秒观察的 11 次采样均通过，六个服务 Pod 全程 Ready、零重启。SG 未部署，旧错误 jobs 路径保留。完整边界与日志说明见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
 
 2026-11-23 SG 发布：复用 USW 已验证的源码 `9dcacebc` 镜像，SG revision 136→137；原生 Queue 收发/ACK/重试/DLQ 与 DO SQL 写读通过。601 秒观察中服务 Pod 全部 Ready、零重启，HPA 3→2 缩容导致两次本机端口转发探针断连，重连后通过。另有 vwork-105/pageverra-api scheduled 聚合任务主动抛错、Cron 500 持续，具体子任务未确认，未修改租户代码。保留 authority/storage 配置，USW 未再次更改。见 [SG 发布记录](reports/2026-11-23-sg-queue-release.md)。
+
+### 2026-11-23 Queue 发现缓存与控制面重复读收敛（本地验证通过，未部署）
+
+Queue 消费者发现资源列表最多缓存 5 秒，TTL 从刷新开始计时；合并并发刷新，成功结果绑定该次查询返回的 authority identity，已知换主或读取错误使旧缓存失效。过期查询失败不回退旧值，取消不返回缓存；资源变化最多延迟 5 秒进入发现视图，实际消费继续通过资源删除代次、owner gate、dispatch 校验与持久化门禁。严格配置/授权/删除查询不使用发现缓存。
+
+本地 ControlReader 外层已点查的 owner 作为同一次本地读取的起始样本，保留读取结束后的权威点查以及 node/session/epoch、ACK、本地 ReadFence 验证；不重复做外层结束校验。跨节点读取仍保留调用端前后校验、接收端前后校验和响应 owner 一致性检查。不得缓存或跳过 authority 根验证。性能结论以调用计数测试为准，SG 全量 COS 降幅需发布后另行采样。
+
+本批 make test/build/vet、相关 race 与 owner GET 计数检查通过；本地读取两个 owner GET，跨节点仍为两端各两个。30 次每秒发现轮询仅刷新 6 次。生产 COS 总降幅尚未验证，见 [验证报告](reports/2026-11-23-control-read-cost.md)。
