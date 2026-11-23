@@ -4296,6 +4296,8 @@ Pinned KV 改为请求驱动、维持现有授权 TTL 和失效规则，删除�
 
 本批最终工作区 make test/build/vet 与相关 race 通过；实际恢复候选在封存前额外权威读取 lease，避免缓存的前任 session 误伤新活跃 session。已从独立发布分支部署 SG / USW / GZ，未包含主分支其他待发布改动；版本与验收见 [发布记录](reports/2026-11-24-three-region-read-reuse-release.md)。
 
-### 2026-11-24 Peer 与 Recovery 有界复用（本地验证通过，未部署）
+### 2026-11-24 Peer 与 Recovery 有界复用（已部署 SG / USW / GZ）
 
 后台 peer 与 Recovery 发现共同复用最近 min(TTL/2, 5s) 内成功权威观察，且原 expiry 必须覆盖下一次本地刷新；复用不更新观察时间。显式 NodeLeaseFresh、接管与实际恢复前校验仍读桶。Recovery 默认 30 秒一轮，保留现有选主，已知候选后台死亡发现最多多等一个周期加执行耗时；60 秒历史发现与请求触发同步恢复不变。不改变 node-log 格式、不取消恢复互锁、不改变自身续租和 authority 根校验。此条替代前述 1 秒发现复用和 5 秒 Recovery 默认周期，详见 [设计与验证](reports/2026-11-24-peer-recovery-read-reuse.md)。
+
+2026-11-24 发布：独立源码 `892c9797`，SG revision 147、USW 139、GZ 3；租约 TTL 保持 10s，三地区十分钟验证与 GET 采样见 [记录](reports/2026-11-24-peer-recovery-release.md)。

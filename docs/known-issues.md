@@ -212,4 +212,4 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - 2026-11-24：已本地实现并验证 pinned KV 按需授权、sealed node-log 发现过滤与 discovery lease 有界观察复用；全量 test/build/vet 和相关 race 通过，已从独立发布分支部署 SG / USW / GZ；总量与剩余来源见 [发布验收](reports/2026-11-24-three-region-read-reuse-release.md)，不代表所有后台 GET 已消除。见 [设计与验证](reports/2026-11-24-celld-read-reuse.md)。
 
-- 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已本地实现，全量 test/build/vet 与相关 race 通过，未部署。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。
+- 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已从独立源码 `892c9797` 部署 SG/USW/GZ，租约 TTL 仍为 10 秒；全量 test/build/vet、相关 race 和十分钟生产健康验证通过，见 [发布记录](reports/2026-11-24-peer-recovery-release.md)。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。

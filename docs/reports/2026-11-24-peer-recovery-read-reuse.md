@@ -16,7 +16,7 @@ peer 地址/session/load 观察可比原来更旧，正常 TTL=10s 时复用最�
 
 ## 状态
 
-本地验证通过；未部署。测量只报告本地计数与源码频率，不推断生产总 GET 降幅。
+已部署 SG / USW / GZ。测量只报告本地计数与源码频率，不推断生产总 GET 降幅。
 
 ## 本地对照结果
 
@@ -26,6 +26,6 @@ peer 地址/session/load 观察可比原来更旧，正常 TTL=10s 时复用最�
 
 新测试覆盖 3 秒旧但仍有效观察的双路径复用、超过 5 秒刷新、临近到期、未来观察不复用及 Fresh 强制读到替换 session。原有换主/删除、失败/取消、慢响应与扫描竞态、新 session 不能被旧 lease 误封存、死亡恢复回归保留。两项旧恢复用例等待由 15ms 改为 60ms，以越过其 100ms TTL 对应的新半周期观察窗口，未移除恢复与读取断言。
 
-原始验证日志位于 `/var/tmp/cellhive-peer-recovery-20261124/`。没有发布到本地服务或 SG/USW/GZ；上一轮诊断的 Helm/doc 改动保持原样，本批未提交。
+原始验证日志位于 `/var/tmp/cellhive-peer-recovery-20261124/`。已从独立发布分支部署 SG/USW/GZ，源码 `892c9797`；未更新本地运行服务。主工作区的同批实现仍未提交，发布分支已提交并推送。上一轮诊断的本地 Helm/doc 改动保持原样。
 
-最终验证：`make test`、`make build`、`make vet` 全量通过；`go test -race`（项目 SQLite tags）覆盖 internal/lease 与 internal/recovery 通过。`git diff --check` 通过。对应 test.log、build.log、vet-final.log、race-final.log。线上降幅待实际部署后采样。
+最终验证：`make test`、`make build`、`make vet` 全量通过；`go test -race`（项目 SQLite tags）覆盖 internal/lease 与 internal/recovery 通过。`git diff --check` 通过。对应 test.log、build.log、vet-final.log、race-final.log。线上版本、采样及验证见 [发布记录](2026-11-24-peer-recovery-release.md)。
