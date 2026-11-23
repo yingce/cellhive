@@ -14,8 +14,8 @@ e2e_start_runtime rt2 "http://127.0.0.1:$N2" "$R2" "$I2"
 e2e_cli app create e2emn >/dev/null
 e2e_cli domain add e2emn e2e-mn.test >/dev/null
 e2e_cli resource create e2emn kv KV >/dev/null
-e2e_cli queue create e2emn q1 >/dev/null
-e2e_cli queue create e2emn q1-dlq >/dev/null
+e2e_cli queue create e2emn q1 --scope e2emn/__queue__/queue_1 >/dev/null
+e2e_cli queue create e2emn q1-dlq --scope e2emn/__queue__/queue_2 >/dev/null
 SHA=$(e2e_upload "$E2E_ROOT/scripts/e2e/fixtures/queue-multinode.js")
 [[ -n "$SHA" && "$SHA" != "null" ]] || e2e_fail "bundle upload failed"
 cat >"$E2E_BASE/deploy.json" <<JSON
@@ -84,6 +84,16 @@ for i in $(seq 1 40); do
 done
 [[ "$dlq" -ge 1 ]] || e2e_fail "message did not reach DLQ"
 e2e_log "DLQ depth=$dlq"
+
+# Startup control writes can use local spool before peer discovery. Make those
+# prerequisites available remotely before testing queue failover, as in the
+# session recovery process test. This does not test loss of a spool-only owner.
+for i in $(seq 1 60); do
+  pending=$(find "$E2E_BASE/n1/upload-spool" -name '*.spool' 2>/dev/null | wc -l)
+  [[ "$pending" -eq 0 ]] && break
+  sleep 1
+done
+[[ "$pending" -eq 0 ]] || e2e_fail "startup spool did not flush"
 
 kill -9 "$(cat "$E2E_BASE/rt1.pid")" "$(cat "$E2E_BASE/n1.pid")" 2>/dev/null || true
 e2e_log "killed n1; waiting lease"

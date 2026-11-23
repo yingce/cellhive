@@ -17,8 +17,9 @@ import (
 
 // Ref identifies a queue to poll and the worker that consumes it.
 type Ref struct {
-	Namespace string
-	Name      string
+	Namespace   string
+	Name        string // physical storage ID
+	BindingName string // business name exposed to the worker; empty means Name
 	// Worker and BundleSHA identify the consuming worker's active version, so the
 	// dispatch endpoint (user-runtime) can load it without resolving routing.
 	Worker    string
@@ -36,6 +37,13 @@ type Ref struct {
 	// MaxConcurrency is how many batches may be in flight for this queue at once
 	// (0/1 = sequential).
 	MaxConcurrency int
+}
+
+func (r Ref) BusinessName() string {
+	if r.BindingName != "" {
+		return r.BindingName
+	}
+	return r.Name
 }
 
 // Dispatcher delivers a claimed batch to the worker that consumes the queue.
@@ -498,7 +506,7 @@ func (d *HTTPDispatcher) DispatchDetailed(ctx context.Context, ref Ref, msgs []M
 	}
 	body, err := json.Marshal(map[string]any{
 		"namespace":  ref.Namespace,
-		"queue":      ref.Name,
+		"queue":      ref.BusinessName(),
 		"worker":     ref.Worker,
 		"bundle_sha": ref.BundleSHA,
 		"version":    ref.Version,

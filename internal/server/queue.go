@@ -13,6 +13,15 @@ import (
 
 const maxQueueBodyBytes = 128 * 1024
 
+// Preserve the original URL for forwarding/authentication. Only local storage
+// and ownership use the physical ID resolved by binding authorization.
+func queueStorageName(r *http.Request) string {
+	if id, ok := r.Context().Value(ctxQueueStorage).(string); ok && id != "" {
+		return id
+	}
+	return r.URL.Query().Get("queue")
+}
+
 func (s *Server) handleQueueTransfer(w http.ResponseWriter, r *http.Request) {
 	if !s.requireQueue(w) {
 		return
@@ -96,7 +105,7 @@ func (s *Server) handleQueueSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if s.queueGate(w, r, s.scopeNS(r), q.Get("queue")) {
+	if s.queueGate(w, r, s.scopeNS(r), queueStorageName(r)) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxQueueBodyBytes+1))
@@ -122,7 +131,7 @@ func (s *Server) handleQueueSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id string
-	ns, queue := s.scopeNS(r), q.Get("queue")
+	ns, queue := s.scopeNS(r), queueStorageName(r)
 	producerID, producerTrace := queueProducerContext(r)
 	producer := queuepkg.SendMessage{Body: body, ContentType: contentType, DelaySeconds: delay, IdempotencyKey: q.Get("idempotency_key"), ProducerRequestID: producerID, ProducerTraceparent: producerTrace}
 	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, queue), func() error {
@@ -154,8 +163,7 @@ func (s *Server) handleQueueSendBatch(w http.ResponseWriter, r *http.Request) {
 	if !s.requireQueue(w) {
 		return
 	}
-	q := r.URL.Query()
-	ns, name := s.scopeNS(r), q.Get("queue")
+	ns, name := s.scopeNS(r), queueStorageName(r)
 	if s.queueGate(w, r, ns, name) {
 		return
 	}
@@ -188,7 +196,7 @@ func (s *Server) handleQueueClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if s.queueGate(w, r, s.scopeNS(r), q.Get("queue")) {
+	if s.queueGate(w, r, s.scopeNS(r), queueStorageName(r)) {
 		return
 	}
 	limit := 0
@@ -199,7 +207,7 @@ func (s *Server) handleQueueClaim(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("lease_ms"); v != "" {
 		lease, _ = strconv.ParseInt(v, 10, 64)
 	}
-	msgs, err := s.Queue.Claim(r.Context(), s.scopeNS(r), q.Get("queue"), limit, lease)
+	msgs, err := s.Queue.Claim(r.Context(), s.scopeNS(r), queueStorageName(r), limit, lease)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "queue_claim_failed", err.Error())
 		return
@@ -221,11 +229,11 @@ func (s *Server) handleQueueAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if s.queueGate(w, r, s.scopeNS(r), q.Get("queue")) {
+	if s.queueGate(w, r, s.scopeNS(r), queueStorageName(r)) {
 		return
 	}
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), q.Get("queue")), func() error {
-		return s.Queue.Ack(r.Context(), s.scopeNS(r), q.Get("queue"), q.Get("id"))
+	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), queueStorageName(r)), func() error {
+		return s.Queue.Ack(r.Context(), s.scopeNS(r), queueStorageName(r), q.Get("id"))
 	}); err != nil {
 		s.captureErr(w, err, "queue_ack_failed")
 		return
@@ -238,15 +246,15 @@ func (s *Server) handleQueueRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if s.queueGate(w, r, s.scopeNS(r), q.Get("queue")) {
+	if s.queueGate(w, r, s.scopeNS(r), queueStorageName(r)) {
 		return
 	}
 	delay := int64(0)
 	if v := q.Get("delay_ms"); v != "" {
 		delay, _ = strconv.ParseInt(v, 10, 64)
 	}
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), q.Get("queue")), func() error {
-		return s.Queue.Retry(r.Context(), s.scopeNS(r), q.Get("queue"), q.Get("id"), delay)
+	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), queueStorageName(r)), func() error {
+		return s.Queue.Retry(r.Context(), s.scopeNS(r), queueStorageName(r), q.Get("id"), delay)
 	}); err != nil {
 		s.captureErr(w, err, "queue_retry_failed")
 		return

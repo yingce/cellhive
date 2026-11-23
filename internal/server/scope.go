@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cellhive/internal/cell"
 	"cellhive/internal/scopedtoken"
 	"context"
 	"encoding/json"
@@ -32,6 +33,7 @@ const (
 	// remainder of one request. Authorization still performs the control-plane
 	// check once; scope/owner routing must not repeat that lookup.
 	ctxResolvedResource
+	ctxQueueStorage
 )
 
 // scopeResourceParam maps a binding kind to the query parameter that carries
@@ -67,6 +69,18 @@ func (s *Server) scopeAuth(kind string) func(http.HandlerFunc) http.HandlerFunc 
 				return
 			}
 			ctx := r.Context()
+			if kind == "queue" && resolved != "" {
+				ref := resolved
+				if !strings.Contains(ref, "/") {
+					ref = claims.Namespace + "/__queue__/" + ref
+				}
+				sc, err := cell.ParseScope(ref)
+				if err != nil || sc.Namespace != claims.Namespace || sc.Class != "__queue__" {
+					writeErr(w, http.StatusForbidden, "queue_scope_invalid", "invalid queue storage scope")
+					return
+				}
+				ctx = context.WithValue(ctx, ctxQueueStorage, sc.ID)
+			}
 			if resolved != "" {
 				ctx = context.WithValue(ctx, ctxResolvedResource, resolved)
 			}

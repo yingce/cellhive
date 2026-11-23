@@ -11,8 +11,9 @@ e2e_cli app create e2eq >/dev/null
 e2e_cli domain add e2eq e2e-q.test >/dev/null
 e2e_cli resource create e2eq kv KV >/dev/null
 e2e_cli resource create e2eq r2 BUCKET >/dev/null
-e2e_cli queue create e2eq q1 >/dev/null
-e2e_cli queue create e2eq q1-dlq >/dev/null
+# Keep binding names distinct from storage IDs, as in production registrations.
+e2e_cli queue create e2eq q1 --scope e2eq/__queue__/queue_1 >/dev/null
+e2e_cli queue create e2eq q1-dlq --scope e2eq/__queue__/queue_2 >/dev/null
 SHA=$(e2e_upload "$E2E_ROOT/scripts/e2e/fixtures/queue.js")
 [[ -n "$SHA" && "$SHA" != "null" ]] || e2e_fail "bundle upload failed"
 cat >"$E2E_BASE/deploy.json" <<JSON
@@ -41,5 +42,8 @@ for i in $(seq 1 40); do
 done
 [[ "$dlq" -ge 1 ]] || e2e_fail "message did not reach DLQ"
 e2e_log "retry exhausted -> DLQ depth=$dlq"
+
+[[ ! -e "$E2E_BASE/agent/cells/e2eq/__queue__/q1.db" ]] || e2e_fail "created logical-name queue storage"
+[[ ! -e "$E2E_BASE/agent/cells/e2eq/__queue__/q1-dlq.db" ]] || e2e_fail "created logical-name DLQ storage"
 
 echo "E2E-QUEUE: PASS"

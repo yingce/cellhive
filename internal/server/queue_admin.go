@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"cellhive/internal/cell"
 	"cellhive/internal/control"
 	"cellhive/internal/ownerclient"
 	queuepkg "cellhive/internal/queue"
@@ -29,8 +30,7 @@ func (s *Server) queueConsumerTarget(ctx context.Context, ns, queue string) (con
 	if err != nil {
 		return control.Consumer{}, false, err
 	}
-	consumer, ok := queueConsumerFromProjection(proj, ns, queue)
-	return consumer, ok, nil
+	return s.queueConsumerFromResources(ctx, proj, ns, queue)
 }
 
 // queueConsumerTargetStrict resolves a consumer for a mutation (DLQ replay/ack)
@@ -43,17 +43,70 @@ func (s *Server) queueConsumerTargetStrict(ctx context.Context, ns, queue string
 	if err != nil {
 		return control.Consumer{}, false, err
 	}
-	consumer, ok := queueConsumerFromProjection(proj, ns, queue)
-	return consumer, ok, nil
+	return s.queueConsumerFromResources(ctx, proj, ns, queue)
 }
 
-func queueConsumerFromProjection(proj control.Projection, ns, queue string) (control.Consumer, bool) {
-	for _, t := range proj.QueueTargets() {
-		if t.Namespace == ns && t.Queue == queue {
-			return t.Consumer, true
-		}
+// queueConsumerFromResources accepts a canonical storage ID, not a binding name.
+func (s *Server) queueConsumerFromResources(ctx context.Context, proj control.Projection, ns, storage string) (control.Consumer, bool, error) {
+	resources, err := s.BackgroundControl().ResourcesByKind(ctx, "queue")
+	if err != nil {
+		return control.Consumer{}, false, err
 	}
-	return control.Consumer{}, false
+	for _, target := range proj.QueueTargets() {
+		if target.Namespace != ns {
+			continue
+		}
+		sc, err := control.QueueResourceScope(resources, ns, target.Queue)
+		if err != nil {
+			continue
+		}
+		if sc.ID != storage {
+			continue
+		}
+		c := target.Consumer
+		if c.DeadLetterQueue != "" {
+			dlq, err := control.QueueResourceScope(resources, ns, c.DeadLetterQueue)
+			if errors.Is(err, control.ErrNotFound) {
+				return c, true, cell.ErrResourceDeleted
+			}
+			if err != nil {
+				return control.Consumer{}, false, err
+			}
+			c.DeadLetterQueue = dlq.ID
+		}
+		return c, true, nil
+	}
+	return control.Consumer{}, false, nil
+}
+
+// Legacy admin endpoints accept either a registered business name or a storage
+// ID. Reject an ambiguous spelling rather than choosing the wrong queue.
+func (s *Server) queueAdminStorage(ctx context.Context, ns, name string) (string, error) {
+	resources, err := s.BackgroundControl().ResourcesByKind(ctx, "queue")
+	if err != nil {
+		return "", err
+	}
+	found := ""
+	for _, r := range resources {
+		if r.Namespace != ns || r.Kind != "queue" {
+			continue
+		}
+		sc, err := control.QueueResourceScope(resources, ns, r.Name)
+		if err != nil {
+			return "", err
+		}
+		if r.Name != name && sc.ID != name {
+			continue
+		}
+		if found != "" && found != sc.ID {
+			return "", fmt.Errorf("ambiguous queue name %q", name)
+		}
+		found = sc.ID
+	}
+	if found == "" {
+		return "", control.ErrNotFound
+	}
+	return found, nil
 }
 
 // handleControlQueueStatus reports a queue's depth plus its dead-letter queue's
@@ -69,6 +122,12 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !s.authorizeNS(w, r, ns) {
+		return
+	}
+	var resolveErr error
+	name, resolveErr = s.queueAdminStorage(r.Context(), ns, name)
+	if resolveErr != nil {
+		writeErr(w, 404, "queue_not_found", resolveErr.Error())
 		return
 	}
 	if err := s.PrepareResourceAccess(r.Context(), queuepkg.Scope(ns, name)); err != nil {
@@ -96,12 +155,17 @@ func (s *Server) handleControlQueueStatus(w http.ResponseWriter, r *http.Request
 // leases and visibility remain unchanged. The queue query names the main queue;
 // its configured independent DLQ is resolved from the projection.
 func (s *Server) deadLetterConsumer(r *http.Request, ns, name string, strict bool) (control.Consumer, bool, error) {
+	storage, err := s.queueAdminStorage(r.Context(), ns, name)
+	if err != nil {
+		return control.Consumer{}, false, err
+	}
+	name = storage
+
 	if r.URL.Query().Get("direct") == "1" {
 		if s.Control == nil {
 			return control.Consumer{}, false, errors.New("control plane unavailable")
 		}
-		ok, err := s.BackgroundControl().queueExists(r.Context(), ns, name)
-		return control.Consumer{DeadLetterQueue: name}, ok, err
+		return control.Consumer{DeadLetterQueue: name}, true, nil
 	}
 	if strict {
 		return s.queueConsumerTargetStrict(r.Context(), ns, name)
@@ -123,6 +187,10 @@ func (s *Server) handleControlQueueDLQPreview(w http.ResponseWriter, r *http.Req
 		return
 	}
 	consumer, ok, lookupErr := s.deadLetterConsumer(r, ns, name, false)
+	if errors.Is(lookupErr, cell.ErrResourceDeleted) {
+		writeErr(w, 410, "resource_deleted", lookupErr.Error())
+		return
+	}
 	if lookupErr != nil {
 		writeErr(w, 503, "control_unavailable", lookupErr.Error())
 		return
@@ -186,6 +254,10 @@ func (s *Server) handleControlQueueDLQAck(w http.ResponseWriter, r *http.Request
 		return
 	}
 	consumer, ok, lookupErr := s.deadLetterConsumer(r, ns, name, true)
+	if errors.Is(lookupErr, cell.ErrResourceDeleted) {
+		writeErr(w, 410, "resource_deleted", lookupErr.Error())
+		return
+	}
 	if lookupErr != nil {
 		writeErr(w, 503, "control_unavailable", lookupErr.Error())
 		return
@@ -250,6 +322,10 @@ func (s *Server) queueStatusPayload(ctx context.Context, ns, name string) (map[s
 		"oldest_visible_ms": st.OldestVisibleMs, "max_attempts": st.MaxAttempts,
 	}
 	consumer, ok, err := s.queueConsumerTarget(ctx, ns, name)
+	if errors.Is(err, cell.ErrResourceDeleted) {
+		out["dead_letter_deleted"] = true
+		return out, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +385,17 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 			limit = n
 		}
 	}
+	storage, resolveErr := s.queueAdminStorage(r.Context(), ns, name)
+	if resolveErr != nil {
+		writeErr(w, 404, "queue_not_found", resolveErr.Error())
+		return
+	}
+	name = storage
 	consumer, ok, lookupErr := s.queueConsumerTargetStrict(r.Context(), ns, name)
+	if errors.Is(lookupErr, cell.ErrResourceDeleted) {
+		writeErr(w, 410, "resource_deleted", lookupErr.Error())
+		return
+	}
 	if lookupErr != nil {
 		writeErr(w, http.StatusServiceUnavailable, "control_unavailable", lookupErr.Error())
 		return

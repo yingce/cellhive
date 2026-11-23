@@ -47,9 +47,11 @@ CREATE TABLE IF NOT EXISTS queue_meta (key TEXT PRIMARY KEY);
 
 // Store persists queue messages in a cell.
 type Store struct {
-	cs                 *cellstore.Store
-	now                func() time.Time
-	migrated           sync.Map // scope string -> migrated once per process
+	cs       *cellstore.Store
+	now      func() time.Time
+	migrated sync.Map // scope string -> *schemaState
+	// SchemaWrite proves actual schema changes durable before reads proceed.
+	SchemaWrite        func(context.Context, cell.Scope, func() error) error
 	ResourceGeneration func(context.Context, string, string) (string, error)
 }
 
@@ -70,39 +72,67 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 	if err != nil {
 		return nil, err
 	}
-	if previous, ok := s.migrated.Load(scope.String()); ok && previous == c {
+	stateValue, _ := s.migrated.LoadOrStore(scope.String(), &schemaState{})
+	state := stateValue.(*schemaState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.cell != c {
+		state.cell, state.ready, state.pending = c, false, false
+	}
+	if state.ready {
 		return c, nil
 	}
-	// The schema is idempotent; run it once per process so a read API does not
-	// advance the capture txid on every call (read traffic -> replication).
-	if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, schema)
+	if !state.pending {
+		current, err := schemaCurrent(ctx, c.DB)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		for _, stmt := range []string{
-			`ALTER TABLE messages ADD COLUMN idempotency_fingerprint TEXT`,
-			`ALTER TABLE messages ADD COLUMN metadata TEXT`,
-			`ALTER TABLE messages ADD COLUMN producer_request_id TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE messages ADD COLUMN producer_traceparent TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE messages ADD COLUMN source_queue TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE messages ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE messages ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE messages ADD COLUMN source_attempts INTEGER NOT NULL DEFAULT 0`,
-			`ALTER TABLE messages ADD COLUMN source_created_ms INTEGER NOT NULL DEFAULT 0`,
-		} {
-			if _, e := tx.ExecContext(ctx, stmt); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
-				return e
+		if current {
+			state.ready = true
+			return c, nil
+		}
+	}
+	state.pending = true
+	migrate := func() error {
+		// Only missing schema or a previously unproven migration reaches here.
+		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, schema)
+			if err != nil {
+				return err
 			}
-		}
-		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_source ON messages(source_queue)`); err != nil {
+			for _, stmt := range []string{
+				`ALTER TABLE messages ADD COLUMN idempotency_fingerprint TEXT`,
+				`ALTER TABLE messages ADD COLUMN metadata TEXT`,
+				`ALTER TABLE messages ADD COLUMN producer_request_id TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE messages ADD COLUMN producer_traceparent TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE messages ADD COLUMN source_queue TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE messages ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE messages ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE messages ADD COLUMN source_attempts INTEGER NOT NULL DEFAULT 0`,
+				`ALTER TABLE messages ADD COLUMN source_created_ms INTEGER NOT NULL DEFAULT 0`,
+			} {
+				if _, e := tx.ExecContext(ctx, stmt); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+					return e
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_source ON messages(source_queue)`); err != nil {
+				return err
+			}
+			return migrateIdempotency(ctx, tx, s.now().UnixMilli())
+		}); err != nil {
 			return err
 		}
-		return migrateIdempotency(ctx, tx, s.now().UnixMilli())
-	}); err != nil {
+		return nil
+	}
+	if s.SchemaWrite != nil {
+		err = s.SchemaWrite(ctx, scope, migrate)
+	} else {
+		err = migrate()
+	}
+	if err != nil {
 		return nil, err
 	}
-	s.migrated.Store(scope.String(), c)
+	state.ready, state.pending = true, false
 	return c, nil
 }
 

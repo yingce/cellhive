@@ -14,7 +14,13 @@ import (
 )
 
 func (s *Server) configureQueueStore(store *queuepkg.Store) {
-	if store == nil || s.resourceReplica() == nil {
+	if store == nil {
+		return
+	}
+	store.SchemaWrite = func(ctx context.Context, sc cell.Scope, write func() error) error {
+		return s.CaptureWrite(ctx, sc, write)
+	}
+	if s.resourceReplica() == nil {
 		return
 	}
 	store.ResourceGeneration = func(ctx context.Context, ns, name string) (string, error) {

@@ -1,9 +1,11 @@
 package queue
 
 import (
+	"cellhive/internal/cell"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -437,5 +439,84 @@ func TestClaimQueryUsesOrderIndex(t *testing.T) {
 	}
 	if strings.Contains(plan.String(), "TEMP B-TREE") {
 		t.Fatalf("claim query still sorts:\n%s", plan.String())
+	}
+}
+
+func TestReopenedQueueReadDoesNotAdvanceTxID(t *testing.T) {
+	ctx := t.Context()
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	first := New(cs)
+	if _, err := first.Send(ctx, "acme", "queue_1", []byte("durable"), "text", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	c, err := cs.Cell(ctx, Scope("acme", "queue_1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := cellstore.New(cs.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	reopened := New(fresh)
+	if n, err := reopened.Depth(ctx, "acme", "queue_1"); err != nil || n != 1 {
+		t.Fatalf("depth=%d err=%v", n, err)
+	}
+	c, err = fresh.Cell(ctx, Scope("acme", "queue_1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := c.TxID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("reopening initialized queue advanced txid: %d -> %d", before, after)
+	}
+}
+
+func TestSchemaProofFailureRetriesBeforeRead(t *testing.T) {
+	cs, err := cellstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	s := New(cs)
+	calls := 0
+	s.SchemaWrite = func(ctx context.Context, sc cell.Scope, write func() error) error {
+		calls++
+		if err := write(); err != nil {
+			return err
+		}
+		if calls == 1 {
+			return fmt.Errorf("proof unavailable")
+		}
+		return nil
+	}
+	if _, err := s.Depth(t.Context(), "acme", "queue_1"); err == nil {
+		t.Fatal("read accepted unproven migration")
+	}
+	if _, err := s.Depth(t.Context(), "acme", "queue_1"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("schema proof was not retried: %d", calls)
+	}
+	if _, err := s.Depth(t.Context(), "acme", "queue_1"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("ready schema was rewritten: %d", calls)
 	}
 }

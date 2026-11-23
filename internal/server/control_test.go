@@ -1327,6 +1327,7 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/app", `{"namespace":"acme"}`)
 	mustAdmin(t, admin, http.MethodPost, "/v1/control/resource",
 		`{"namespace":"acme","kind":"queue","name":"q","scope":"acme/__queue__/q"}`)
+	mustAdmin(t, admin, http.MethodPost, "/v1/control/resource", `{"namespace":"acme","kind":"queue","name":"qdlq","scope":"acme/__queue__/qdlq"}`)
 	b := mustAdmin(t, admin, http.MethodPost, "/v1/control/bundle", "export default {}")
 	var bo struct {
 		Sha string `json:"sha"`
@@ -1371,6 +1372,9 @@ func TestQueueStatusAndReplayDLQ(t *testing.T) {
 		t.Fatalf("dlq after replay = %s", dlq.Body.String())
 	}
 	// A queue without a DLQ consumer is a clear bad request.
+	if _, err := s.Control.CreateResource(ctx, "acme", "queue", "nope", queue.Scope("acme", "nope").String(), "ops"); err != nil {
+		t.Fatal(err)
+	}
 	rr = adminDo(t, admin, http.MethodPost, "/v1/control/queue/replay-dlq?namespace=acme&queue=nope", "admin-tok", "")
 	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "no_dead_letter_queue") {
 		t.Fatalf("replay without dlq = %d %s", rr.Code, rr.Body.String())

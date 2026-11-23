@@ -689,3 +689,37 @@ func TestRunnerLegacyHugeConcurrencyEmptyQueue(t *testing.T) {
 		t.Fatalf("Pass = %d, %v", n, err)
 	}
 }
+
+func TestRunnerStorageIdentityAndBusinessDispatch(t *testing.T) {
+	ctx := t.Context()
+	st := newStore(t)
+	if _, err := st.Send(ctx, "demo", "queue_1", []byte("hello"), "text", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	var received string
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Queue string `json:"queue"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		received = body.Queue
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer remote.Close()
+	ref := queue.Ref{Namespace: "demo", Name: "queue_1", BindingName: "jobs"}
+	run := &queue.Runner{Store: st, Dispatch: queue.NewHTTP(remote.URL, ""), Queues: func(context.Context) ([]queue.Ref, error) { return []queue.Ref{ref}, nil }, Commit: func(ctx context.Context, ns, name string, fn func() error) error {
+		if name != "queue_1" {
+			t.Errorf("commit addressed %q", name)
+		}
+		return fn()
+	}}
+	n, err := run.Pass(ctx)
+	if err != nil || n != 1 || received != "jobs" {
+		t.Fatalf("pass=%d queue=%q err=%v", n, received, err)
+	}
+	if n, err := st.Depth(ctx, "demo", "queue_1"); err != nil || n != 0 {
+		t.Fatalf("ack depth=%d err=%v", n, err)
+	}
+}

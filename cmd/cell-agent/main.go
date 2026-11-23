@@ -999,28 +999,11 @@ func main() {
 						if err != nil {
 							return nil, err
 						}
-						// Map a queue to the worker that consumes it (and its active
-						// bundle) so user-runtime can load the handler directly.
-						consumers := map[string]queue.Ref{}
-						for _, t := range targets {
-							consumers[t.Namespace+"\x00"+t.Queue] = queue.Ref{
-								Namespace: t.Namespace, Name: t.Queue,
-								Worker: t.Worker, BundleSHA: t.BundleSHA, Version: t.Version,
-								MaxRetries:             t.Consumer.MaxRetries,
-								RetryDelaySeconds:      t.Consumer.RetryDelaySeconds,
-								DeadLetterQueue:        t.Consumer.DeadLetterQueue,
-								MaxBatchSize:           t.Consumer.MaxBatchSize,
-								MaxBatchTimeoutSeconds: t.Consumer.MaxBatchTimeoutSeconds,
-								MaxConcurrency:         t.Consumer.MaxConcurrency,
-							}
+						refs, err := resolveQueueRefs(queues, targets)
+						if err != nil {
+							log.Warn("queue consumer resource resolution failed", "err", err)
 						}
-						out := make([]queue.Ref, 0, len(queues))
-						for _, r := range queues {
-							if ref, ok := consumers[r.Namespace+"\x00"+r.Name]; ok {
-								out = append(out, ref)
-							}
-						}
-						return out, nil
+						return refs, nil
 					},
 				}).Start(ctx)
 			}

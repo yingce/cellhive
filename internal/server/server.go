@@ -1415,6 +1415,9 @@ func (s *Server) gateScope(ctx context.Context, kind, ns, name string, q url.Val
 			return d1.Scope(ns, db), true
 		}
 	case "queue":
+		if id, ok := ctx.Value(ctxQueueStorage).(string); ok && id != "" {
+			return queue.Scope(ns, id), true
+		}
 		if n := q.Get("queue"); n != "" {
 			return queue.Scope(ns, n), true
 		}

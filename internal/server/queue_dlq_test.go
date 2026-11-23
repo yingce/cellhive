@@ -16,6 +16,11 @@ func TestDLQPreviewIsReadOnlyAndAckIsIdempotent(t *testing.T) {
 	if _, err := s.Control.CreateApp(ctx, "acme", "ops"); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"jobs", "dlq"} {
+		if _, err := s.Control.CreateResource(ctx, "acme", "queue", name, queue.Scope("acme", name).String(), "ops"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := s.Control.Deploy(ctx, "acme", "web", control.DeploySpec{BundleSHA: "sha", Consumers: []control.Consumer{{Queue: "jobs", DeadLetterQueue: "dlq"}}}, "ops"); err != nil {
 		t.Fatal(err)
 	}
