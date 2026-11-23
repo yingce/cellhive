@@ -50,7 +50,7 @@ type objectClassTag struct{}
 
 func WithReadSource(ctx context.Context, s ReadSource) context.Context {
 	switch s {
-	case RouteProjection, ResourceCleanup, TransferCleanup, CompactionRead, UploadRead, WorkflowRetention, MaintenanceRead, PeerHTTP, ControlHTTP, DOHTTP, BindingHTTP, HealthHTTP, OtherHTTP, SharedSchedule,
+	case RouteProjection, ResourceCleanup, TransferCleanup, CompactionRead, UploadRead, WorkflowRetention, MaintenanceRead, PeerHTTP, ControlHTTP, DOHTTP, BindingHTTP, HealthHTTP, OtherHTTP,
 		QueueDispatch, QueueReconcile, CronPlan, CronDispatch, CronRetry, WakeScan, WakeRepair, TimerDispatch, RecoveryRead, OwnerRead, LeaseRead, PurgeRead, KVRefresh, RebalanceRead, EpochGCRead, EpochFoldRead:
 		return context.WithValue(ctx, sourceTag{}, s)
 	}
