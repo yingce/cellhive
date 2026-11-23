@@ -137,9 +137,12 @@ type Server struct {
 	Deps
 	doPointers              sync.Map // capture scope -> persisted doRecoveryPointer
 	resourceRep             *replica.Manager
+	resourceCleanupWake     chan struct{}
 	resourceCleanupMu       sync.Mutex
 	resourceCleanupPrunedAt time.Time
 	retirementAfter         string
+	retirementPendingAfter  string
+	retirementRescanAt      time.Time
 	localRetirementAfter    string
 
 	// timerRegPending dedupes asynchronous pending-timer registration for a
@@ -248,7 +251,7 @@ type bindingEntry struct {
 
 // New builds a Server.
 func New(d Deps) *Server {
-	s := &Server{Deps: d, ordered: newOrderedDispatcher()}
+	s := &Server{Deps: d, resourceCleanupWake: make(chan struct{}, 1), ordered: newOrderedDispatcher()}
 	if d.Cfg.ProxySQLAdmin != "" {
 		ps, err := proxysql.New(d.Cfg.ProxySQLAdmin, d.Cfg.ProxySQLSave)
 		if err != nil {
@@ -778,6 +781,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	{
+		writeFmt(w, "# TYPE cellhive_bucket_http_responses_total counter\n")
+		for labels, n := range bucket.StorageResponses() {
+			writeFmt(w, "cellhive_bucket_http_responses_total{source=%q,key_class=%q,method=%q,status=\"%d\"} %d\n", labels.Source, labels.KeyClass, labels.Method, labels.Status, n)
+		}
 		writeFmt(w, "# TYPE cellhive_bucket_get_attempts_total counter\n")
 		for labels, n := range bucket.ObjectGetAttempts() {
 			writeFmt(w, "cellhive_bucket_get_attempts_total{source=%q,key_class=%q,via=%q} %d\n", labels.Source, labels.KeyClass, labels.Via, n)

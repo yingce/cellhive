@@ -336,8 +336,26 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Compare the previous two-stage discovery against the same 100 records.
+	priorNodes, err := nl.Nodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range priorNodes {
+		if _, err := nl.ListNode(ctx, node); err != nil {
+			t.Fatal(err)
+		}
+	}
+	priorLists := b.lists
+	b.gets, b.lists = 0, 0
 	pass()
 	lists, gets := b.lists, b.gets
+	if priorLists != 2 || gets != 100 {
+		t.Fatalf("old lists=%d fresh record reads=%d", priorLists, gets)
+	}
+	if lists != 1 {
+		t.Fatalf("full discovery used %d lists", lists)
+	}
 	for i := 0; i < 11; i++ {
 		now = now.Add(5 * time.Second)
 		pass()
@@ -348,6 +366,9 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 	// A session change is discovered before the periodic deadline.
 	publish("replacement", now.Add(time.Hour))
 	pass()
+	if got, ok := runner.Lease.CachedNodeLease("n"); !ok || got.Session != "replacement" {
+		t.Fatalf("fresh recovery lease was not shared with peer refresh: %+v %v", got, ok)
+	}
 	if b.lists != lists+1 {
 		t.Fatalf("session change did not refresh: %d", b.lists)
 	}
@@ -379,7 +400,16 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 	lists = b.lists
 	leader = true
 	pass()
-	if b.lists != lists+2 {
+	if b.lists != lists+1 {
 		t.Fatalf("new leader must discover again: %d -> %d", lists, b.lists)
+	}
+	// If a lease changes on a global refresh, its node must be listed again
+	// after that lease read; the earlier key set can predate the new session.
+	now = now.Add(time.Minute)
+	publish("next", now.Add(time.Hour))
+	lists = b.lists
+	pass()
+	if b.lists != lists+2 {
+		t.Fatalf("lease transition during discovery: lists %d -> %d", lists, b.lists)
 	}
 }

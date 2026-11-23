@@ -101,6 +101,20 @@ func (s *Store) PendingResourceCleanups(ctx context.Context, limit int) ([]Resou
 	return out, rows.Err()
 }
 
+// NextResourceCleanup returns the earliest durable retry or abandoned lease deadline.
+func (s *Store) NextResourceCleanup(ctx context.Context) (time.Time, error) {
+	c, err := s.cell(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var ms sql.NullInt64
+	err = c.DB.QueryRowContext(ctx, `SELECT MIN(CASE WHEN state='running' THEN lease_until_ms ELSE next_retry_ms END) FROM resource_cleanups WHERE state IN ('pending','failed','running') AND attempts<10`).Scan(&ms)
+	if err != nil || !ms.Valid {
+		return time.Time{}, err
+	}
+	return time.UnixMilli(ms.Int64), nil
+}
+
 func (s *Store) ClaimResourceCleanup(ctx context.Context, j ResourceCleanup) (ResourceCleanup, bool, error) {
 	c, err := s.cell(ctx)
 	if err != nil {

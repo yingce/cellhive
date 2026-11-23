@@ -169,6 +169,7 @@ func (s *Server) revokeResource(ctx context.Context, ns, kind, name string, j co
 	if j.State == "complete" {
 		return nil
 	}
+	defer s.notifyResourceCleanup()
 	s.invalidateBindings(ns)
 	var leased control.ResourceCleanup
 	var claimed bool
@@ -193,46 +194,73 @@ func (s *Server) revokeResource(ctx context.Context, ns, kind, name string, j co
 	return prepareErr
 }
 
+func (s *Server) notifyResourceCleanup() {
+	select {
+	case s.resourceCleanupWake <- struct{}{}:
+	default:
+	}
+}
+
 func (s *Server) RunResourceCleanupLoop(ctx context.Context) {
-	tick := time.NewTicker(2 * time.Second)
-	defer tick.Stop()
+	reconcile := time.NewTicker(time.Minute)
+	defer reconcile.Stop()
+	due := time.NewTimer(0)
+	defer due.Stop()
+	maintenance := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			if err := s.ResourceCleanupPass(ctx); err != nil {
-				s.Log.Warn("resource cleanup failed", "err", err)
-			}
+		case <-reconcile.C:
+			maintenance = true
+		case <-s.resourceCleanupWake:
+		case <-due.C:
+		}
+		next, err := s.resourceCleanupPass(ctx, maintenance)
+		maintenance = false
+		if err != nil {
+			s.Log.Warn("resource cleanup failed", "err", err)
+		}
+		due.Stop()
+		if !next.IsZero() {
+			due.Reset(max(2*time.Second, time.Until(next)))
 		}
 	}
 }
+
 func (s *Server) ResourceCleanupPass(ctx context.Context) error {
+	_, err := s.resourceCleanupPass(ctx, true)
+	return err
+}
+
+func (s *Server) resourceCleanupPass(ctx context.Context, maintenance bool) (time.Time, error) {
 	// A pass can wait on control/cleanup I/O; do not queue another one behind it.
 	// The periodic caller simply skips this tick and retries later.
 	if !s.resourceCleanupMu.TryLock() {
-		return nil
+		return time.Time{}, nil
 	}
 	defer s.resourceCleanupMu.Unlock()
-	if err := s.sweepLocalRetirementGates(ctx); err != nil && s.Log != nil {
-		s.Log.Warn("local retirement gate reclamation pending", "err", err)
+	if maintenance {
+		if err := s.sweepLocalRetirementGates(ctx); err != nil && s.Log != nil {
+			s.Log.Warn("local retirement gate reclamation pending", "err", err)
+		}
 	}
 	if s.Control == nil || s.Store == nil || s.resourceReplica() == nil {
-		return nil
+		return time.Time{}, nil
 	}
 	if s.Owner != nil {
 		o, _, err := s.Owner.Resolve(ctx, control.Scope())
 		if err != nil || !s.ownerLive(ctx, o, time.Now()) {
 			if err := s.invalidateStaleLocal(ctx, control.Scope()); err != nil {
-				return err
+				return time.Time{}, err
 			}
 			o, err = s.Owner.Claim(ctx, control.Scope(), time.Now())
 			if err != nil {
-				return err
+				return time.Time{}, err
 			}
 		}
 		if o.Node != s.Cfg.NodeID {
-			return nil
+			return time.Time{}, nil
 		}
 	}
 	// Completed jobs are kept for idempotent retries, but not forever: prune
@@ -247,7 +275,7 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 	}
 	jobs, err := s.Control.PendingResourceCleanups(ctx, 20)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	for _, candidate := range jobs {
 		var j control.ResourceCleanup
@@ -257,7 +285,7 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 			j, claimed, err = s.Control.ClaimResourceCleanup(ctx, candidate)
 			return err
 		}); err != nil {
-			return err
+			return time.Time{}, err
 		}
 		if !claimed {
 			continue
@@ -288,28 +316,37 @@ func (s *Server) ResourceCleanupPass(ctx context.Context) error {
 		cancel()
 		if err == nil && !done {
 			if err := s.capturedWrite(ctx, control.Scope(), func() error { return s.Control.ContinueResourceCleanup(ctx, j) }); err != nil {
-				return err
+				return time.Time{}, err
 			}
 			continue
 		}
 		if finishErr := s.capturedWrite(ctx, control.Scope(), func() error { return s.Control.FinishResourceCleanup(ctx, j, err) }); finishErr != nil {
-			return finishErr
+			return time.Time{}, finishErr
 		}
 	}
-	return s.sweepResourceRetirements(ctx)
+	if maintenance {
+		if err := s.sweepResourceRetirements(ctx, time.Now()); err != nil {
+			return time.Time{}, err
+		}
+	}
+	return s.Control.NextResourceCleanup(ctx)
 }
 
-func (s *Server) sweepResourceRetirements(ctx context.Context) error {
-	rows, err := s.Control.ResourceRetirements(ctx, s.retirementAfter, 20)
+func (s *Server) sweepResourceRetirements(ctx context.Context, now time.Time) error {
+	const batch = 20
+	list := s.Control.ResourceRetirements
+	cursor := &s.retirementAfter
+	full := !now.Before(s.retirementRescanAt)
+	if !full {
+		list = s.Control.PendingRetirementSweeps
+		cursor = &s.retirementPendingAfter
+	}
+	rows, err := list(ctx, *cursor, batch)
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		s.retirementAfter = ""
-		return nil
-	}
 	for _, r := range rows {
-		s.retirementAfter = r.DataScope
+		*cursor = r.DataScope
 		sc, err := cell.ParseScope(r.DataScope)
 		if err != nil {
 			return err
@@ -322,6 +359,13 @@ func (s *Server) sweepResourceRetirements(ctx context.Context) error {
 		}
 		if sweepErr != nil {
 			return sweepErr
+		}
+	}
+	if len(rows) < batch {
+		*cursor = ""
+		if full {
+			s.retirementRescanAt = now.Add(time.Hour)
+			s.retirementPendingAfter = ""
 		}
 	}
 	return nil
@@ -512,6 +556,7 @@ func (s *Server) handleResourceCleanupRetry(w http.ResponseWriter, r *http.Reque
 		writeErr(w, 409, "cleanup_retry_failed", err.Error())
 		return
 	}
+	s.notifyResourceCleanup()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

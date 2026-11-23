@@ -57,6 +57,7 @@ type Store struct {
 
 	mu         sync.Mutex
 	migrated   map[*cellstore.Cell]bool
+	purgeWake  chan struct{}
 	projBuilds atomic.Int64
 	resourceMu sync.Mutex
 	// Set only by fault tests to stop after all deploy rows are
@@ -80,7 +81,7 @@ func (s *Store) SetDeployBeforeCommitForTest(hook func()) {
 
 // New builds a control store. env may be nil when secrets are unused.
 func New(cs *cellstore.Store, env *Envelope) *Store {
-	return &Store{cs: cs, env: env, now: time.Now, migrated: map[*cellstore.Cell]bool{}}
+	return &Store{cs: cs, env: env, now: time.Now, purgeWake: make(chan struct{}, 1), migrated: map[*cellstore.Cell]bool{}}
 }
 
 // Scope is the single control cell scope (ADR-117).
@@ -368,6 +369,9 @@ CREATE TABLE IF NOT EXISTS resource_retirements (
   epoch_floor INTEGER NOT NULL, gc_cursor TEXT NOT NULL DEFAULT '',
   last_error TEXT NOT NULL DEFAULT '', updated_ms INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS resource_retirements_pending_sweep ON resource_retirements(data_scope)
+  WHERE gc_cursor<>'' OR last_error<>'';
 
 -- Target-side allowlist for service bindings (ADR-144): (ns, worker) may be
 -- bound from callers in caller_ns. Same-namespace bindings do not need a row.
@@ -731,7 +735,7 @@ func (s *Store) DeleteApp(ctx context.Context, ns, actor string) error {
 		return err
 	}
 	now := s.now().UnixMilli()
-	return tx(ctx, c, func(t *sql.Tx) error {
+	err = tx(ctx, c, func(t *sql.Tx) error {
 		if _, err := t.ExecContext(ctx, `UPDATE apps SET deleted_ms=? WHERE ns=?`, now, ns); err != nil {
 			return err
 		}
@@ -750,6 +754,10 @@ func (s *Store) DeleteApp(ctx context.Context, ns, actor string) error {
 		}
 		return txAudit(ctx, t, ns, actor, "app.delete", ns)
 	})
+	if err == nil {
+		s.notifyPurge()
+	}
+	return err
 }
 
 // PurgeAppRows hard-deletes an app's control metadata (called by the purge
@@ -1632,7 +1640,7 @@ func (s *Store) DeleteWorker(ctx context.Context, ns, worker, actor string) erro
 		return err
 	}
 	now := s.now().UnixMilli()
-	return tx(ctx, c, func(t *sql.Tx) error {
+	err = tx(ctx, c, func(t *sql.Tx) error {
 		res, err := t.ExecContext(ctx, `UPDATE workers SET deleted_ms=? WHERE ns=? AND name=?`, now, ns, worker)
 		if err != nil {
 			return err
@@ -1651,6 +1659,10 @@ func (s *Store) DeleteWorker(ctx context.Context, ns, worker, actor string) erro
 		}
 		return txAudit(ctx, t, ns, actor, "worker.delete", ns+"/"+worker)
 	})
+	if err == nil {
+		s.notifyPurge()
+	}
+	return err
 }
 
 // PurgeWorkerRows hard-deletes one worker's control metadata.

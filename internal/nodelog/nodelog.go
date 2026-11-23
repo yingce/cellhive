@@ -263,6 +263,10 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.readRecords(ctx, keys)
+}
+
+func (m *Manager) readRecords(ctx context.Context, keys []string) ([]Record, error) {
 	out := make([]Record, 0, len(keys))
 	for _, k := range keys {
 		data, _, err := m.get(ctx, k)
@@ -287,11 +291,25 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 // path (bucket List) used only by recovery orchestration / operations, never on
 // the request hot path.
 func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
+	listing, err := m.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return listing.Nodes(), nil
+}
+
+// Listing holds only keys from one discovery pass. Record contents are read fresh.
+type Listing struct {
+	manager *Manager
+	keys    map[string][]string
+}
+
+func (m *Manager) Discover(ctx context.Context) (*Listing, error) {
 	keys, err := m.list(ctx, "node-logs/")
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
+	listing := &Listing{manager: m, keys: make(map[string][]string)}
 	for _, k := range keys {
 		rest, ok := strings.CutPrefix(k, "node-logs/")
 		if !ok {
@@ -299,15 +317,22 @@ func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
 		}
 		node, _, ok := strings.Cut(rest, "/")
 		if ok && node != "" {
-			seen[node] = true
+			listing.keys[node] = append(listing.keys[node], k)
 		}
 	}
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
+	return listing, nil
+}
+
+func (l *Listing) Records(ctx context.Context, node string) ([]Record, error) {
+	return l.manager.readRecords(ctx, l.keys[node])
+}
+func (l *Listing) Nodes() []string {
+	out := make([]string, 0, len(l.keys))
+	for node := range l.keys {
+		out = append(out, node)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out
 }
 
 // Checkpoint persists only fragments already uploaded to the bucket. CAS

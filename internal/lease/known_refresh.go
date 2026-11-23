@@ -57,13 +57,23 @@ func (m *Manager) knownRefreshInterval() time.Duration {
 func (m *Manager) refreshKnown(ctx context.Context) {
 	// Recently expired peers get a bounded recovery window; historical dead
 	// records do not add permanent point-read traffic.
-	floor := time.Now().Add(-m.knownTTL()).UnixMilli()
+	now := time.Now()
+	interval := m.knownRefreshInterval()
+	recent := now.Add(-interval / 2)
+	nextTick := now.Add(interval)
+	floor := now.Add(-m.knownTTL()).UnixMilli()
 	m.mu.Lock()
 	nodes := make([]string, 0, len(m.cached))
 	for _, l := range m.cached {
-		if l.Node != "" && l.Node != m.NodeID && l.Expiry > floor {
-			nodes = append(nodes, l.Node)
+		if l.Node == "" || l.Node == m.NodeID || l.Expiry <= floor {
+			continue
 		}
+		// A recent bucket read already sampled this peer. Never defer a
+		// near-expiry lease, even if its last observation was just received.
+		if m.observed[l.Node].After(recent) && l.Live(nextTick) {
+			continue
+		}
+		nodes = append(nodes, l.Node)
 	}
 	m.mu.Unlock()
 	if len(nodes) == 0 {

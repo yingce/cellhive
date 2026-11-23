@@ -806,11 +806,7 @@ func main() {
 	controlReads = srv.BackgroundControl()
 	projCache.src = controlReads
 	enricher.ctrl = controlReads
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		runMultipartGC(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, ticker.C, srv.R2.GCStaleUploadsPage)
-	}()
+	go runMultipartGC(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, srv.R2.GCStaleUploadsPage)
 	if telemetry.LogsMode() == telemetry.LogsAll || telemetry.LogsMode() == telemetry.LogsTail {
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)

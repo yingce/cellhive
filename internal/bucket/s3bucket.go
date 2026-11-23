@@ -73,7 +73,11 @@ func NewS3Bucket(ctx context.Context, o S3Options) (*S3Bucket, error) {
 	if o.Debug {
 		debugLog = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
-	clientCopy.Transport = debugTransport(clientCopy.Transport, debugLog)
+	transport := *debugTransport(clientCopy.Transport, debugLog)
+	if o.PathStyle {
+		transport.pathBucket = o.Bucket
+	}
+	clientCopy.Transport = &transport
 	o.HTTPClient = &clientCopy
 	if o.MaxReadBytes <= 0 {
 		o.MaxReadBytes = DefaultMaxObjectBytes

@@ -289,6 +289,9 @@ func TestPointLookupBootstrapsKnownRefresh(t *testing.T) {
 	next := old
 	next.Expiry += 1000
 	putKnownTest(t, b, next)
+	m.mu.Lock()
+	m.observed[old.Node] = time.Now().Add(-m.knownRefreshInterval())
+	m.mu.Unlock()
 	m.refreshKnown(t.Context())
 	if got, ok := m.CachedNodeLease(old.Node); !ok || got.Expiry != next.Expiry {
 		t.Fatalf("known refresh missing: %+v", got)
@@ -309,5 +312,54 @@ func TestPointLookupRegistrationBounded(t *testing.T) {
 	m.applyKnownRead("extra", NodeLease{Node: "extra", Session: "s", Expiry: time.Now().Add(time.Minute).UnixMilli()}, nil, time.Now())
 	if len(m.cached) != 4096 {
 		t.Fatal("unbounded lookup registration")
+	}
+}
+
+type countedLeaseReads struct {
+	bucket.Bucket
+	gets atomic.Int32
+}
+
+func (b *countedLeaseReads) Get(ctx context.Context, key string) ([]byte, string, error) {
+	b.gets.Add(1)
+	return b.Bucket.Get(ctx, key)
+}
+
+func TestRecentAuthorityReadSuppressesOnlyBackgroundLeaseGet(t *testing.T) {
+	base, err := bucket.NewFSBucket(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &countedLeaseReads{Bucket: base}
+	m := NewManager(b, "self", "s", "", "", 10*time.Second)
+	peer := NodeLease{Node: "peer", Session: "old", Expiry: time.Now().Add(time.Minute).UnixMilli()}
+	putKnownTest(t, b, peer)
+	ctx := t.Context()
+	fresh := func(want bool) {
+		t.Helper()
+		got, found, err := m.NodeLeaseFresh(ctx, peer.Node)
+		if err != nil || found != want || (found && got.Session != peer.Session) {
+			t.Fatalf("fresh authority = %+v, %v, %v", got, found, err)
+		}
+	}
+	fresh(true)
+	m.refreshKnown(ctx)
+	if n := b.gets.Load(); n != 1 {
+		t.Fatalf("fresh read followed by maintenance used %d GETs, want 1", n)
+	}
+	peer.Session = "replacement"
+	peer.Expiry = time.Now().Add(time.Second).UnixMilli()
+	putKnownTest(t, b, peer)
+	fresh(true)
+	m.refreshKnown(ctx)
+	if n := b.gets.Load(); n != 3 {
+		t.Fatalf("replacement and near-expiry refresh: %d GETs, want 3", n)
+	}
+	if err := base.Delete(ctx, Key(peer.Node)); err != nil {
+		t.Fatal(err)
+	}
+	fresh(false)
+	if _, ok := m.CachedNodeLease(peer.Node); ok {
+		t.Fatal("fresh 404 retained cached peer")
 	}
 }

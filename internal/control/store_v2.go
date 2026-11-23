@@ -324,6 +324,14 @@ func (s *Store) FailPurge(ctx context.Context, ns, worker, msg string) error {
 // the job and retried with backoff semantics (attempts).
 type PurgeHook func(ctx context.Context, ns, worker string) (done bool, err error)
 
+// notifyPurge coalesces committed jobs. Another process discovers them on reconciliation.
+func (s *Store) notifyPurge() {
+	select {
+	case s.purgeWake <- struct{}{}:
+	default:
+	}
+}
+
 // RunPurgeLoop requires a durable coordinator; a bare data hook cannot authorize
 // deletion. Running jobs are resumed only by this in-memory executor.
 func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval time.Duration, executor *PurgeExecutor) {
@@ -337,17 +345,24 @@ func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval tim
 		log.Error("purge: missing coordinator")
 		return
 	}
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-s.purgeWake:
+		case <-timer.C:
 		}
-		if err := executor.Pass(ctx); err != nil {
+		err := executor.Pass(ctx)
+		if err != nil {
 			log.Warn("purge: retained", "err", err)
 		}
+		next := max(time.Minute, interval)
+		if len(executor.active) > 0 || (err == nil && executor.fullBatch) {
+			next = interval
+		}
+		timer.Reset(next)
 	}
 }
 

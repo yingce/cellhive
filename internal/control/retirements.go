@@ -30,6 +30,15 @@ type ResourceRetirement struct {
 }
 
 func (s *Store) ResourceRetirements(ctx context.Context, after string, limit int) ([]ResourceRetirement, error) {
+	return s.listResourceRetirements(ctx, after, limit, false)
+}
+
+// PendingRetirementSweeps lists unfinished pages and failed sweeps between full audits.
+func (s *Store) PendingRetirementSweeps(ctx context.Context, after string, limit int) ([]ResourceRetirement, error) {
+	return s.listResourceRetirements(ctx, after, limit, true)
+}
+
+func (s *Store) listResourceRetirements(ctx context.Context, after string, limit int, pendingOnly bool) ([]ResourceRetirement, error) {
 	c, err := s.cell(ctx)
 	if err != nil {
 		return nil, err
@@ -37,7 +46,11 @@ func (s *Store) ResourceRetirements(ctx context.Context, after string, limit int
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := c.DB.QueryContext(ctx, `SELECT ns,data_scope,job_id,epoch_floor,gc_cursor,last_error,updated_ms FROM resource_retirements WHERE data_scope>? ORDER BY data_scope LIMIT ?`, after, limit)
+	query := `SELECT ns,data_scope,job_id,epoch_floor,gc_cursor,last_error,updated_ms FROM resource_retirements WHERE data_scope>?`
+	if pendingOnly {
+		query += ` AND (gc_cursor<>'' OR last_error<>'')`
+	}
+	rows, err := c.DB.QueryContext(ctx, query+` ORDER BY data_scope LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
 	}
