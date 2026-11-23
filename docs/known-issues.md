@@ -206,4 +206,4 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 本批 make test/build/vet 与相关 race 通过，计数与生产验证边界见 [报告](reports/2026-11-23-control-read-cost.md)。未提交、未部署，不能认为线上 88 次/秒已消除。
 
-- 2026-11-23：recovery 每 5 秒重复读取历史 node-log 放大 COS GET；已实现 60 秒有界发现缓存与 lease 变化即时刷新，保留同步恢复和权威校验；尚未部署或证明线上降幅。
+- 2026-11-23：recovery 每 5 秒重复读取历史 node-log 放大 COS GET；已实现 60 秒有界发现缓存与 lease 变化即时刷新，保留同步恢复和权威校验；已发布 SG revision 139；稳定窗口 GET 从 82.85/s 降至 49.92/s（约 39.75%），剩余后台读取未消除。
