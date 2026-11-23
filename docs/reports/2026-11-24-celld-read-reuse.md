@@ -1,4 +1,4 @@
-# 借鉴 celld 的后台读取复用（本地验证通过，未部署）
+# 借鉴 celld 的后台读取复用（已部署 SG / USW / GZ）
 
 本批只改变本进程调度与发现，不改变 COS owner/epoch 仲裁、恢复记录格式或复制耐久证明。celld 的节点级恢复摘要需要单独的跨版本协议迁移，本批不实施。
 
@@ -16,7 +16,7 @@
 
 ## 验收
 
-KV：缓存请求计数、token 到期独立校验、不同授权身份隔离、TTL 到期/撤权/失败/取消，以及无定时器注册。Recovery：真实 provider 统计第一次 sealed 验证与后续零 GET、新 session、解码错误、重启冷扫描、普通 List 未受影响。Lease：新鲜成功观察复用、临近到期/旧观察/失败强制读取、NodeLeaseFresh 始终读取。运行相关 race、全量 test/build/vet。尚未提交、部署或声明线上降幅。
+KV：缓存请求计数、token 到期独立校验、不同授权身份隔离、TTL 到期/撤权/失败/取消，以及无定时器注册。Recovery：真实 provider 统计第一次 sealed 验证与后续零 GET、新 session、解码错误、重启冷扫描、普通 List 未受影响。Lease：新鲜成功观察复用、临近到期/旧观察/失败强制读取、NodeLeaseFresh 始终读取。运行相关 race、全量 test/build/vet。本地与独立发布分支验证通过，生产验收见下方发布记录。
 
 ## 本地验证结果
 
@@ -26,4 +26,4 @@ KV：缓存请求计数、token 到期独立校验、不同授权身份隔离、
 - Provider 真正的分段 authority 发现测试：全部 key 已终态时零 authority GET，部分过滤只读取剩余 key，普通 List 保留完整校验。nodelog 测试覆盖冷重启、新 session、损坏正文和身份不匹配；objectstore 验证前缀隔离。
 - 有效 lease 观察可复用，但近到期/过旧/失败不授权恢复；NodeLeaseFresh 始终读取；新活跃 session 不会被缓存前任 lease 误封存。
 
-未提交、未部署；线上实际 GET 降幅尚未测量。首次发现、进程重启和超过终态缓存容量时仍可能读取历史记录；不声称完全消除 recovery 扫描或节点 lease 读取。
+已从独立发布分支部署 SG / USW / GZ；部署版本与实际采样见 [三地区发布验收](2026-11-24-three-region-read-reuse-release.md)。首次发现、进程重启和超过终态缓存容量时仍可能读取历史记录；不声称完全消除 recovery 扫描或节点 lease 读取。

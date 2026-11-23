@@ -226,4 +226,4 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - 2026-11-23：资源清理分钟级对账与 recovery 同轮枚举复用在本地实施。漏通知的任务可能多等一个对账周期；长退役列表每轮仅推进一页。两区实际 COS 404 与总请求降幅待发布采样。
 
-- 2026-11-24：已本地实现并验证 pinned KV 按需授权、sealed node-log 发现过滤与 discovery lease 有界观察复用；全量 test/build/vet 和相关 race 通过，尚未提交、部署，不能宣称当前线上读请求已进一步降低。见 [设计与验证](reports/2026-11-24-celld-read-reuse.md)。
+- 2026-11-24：已本地实现并验证 pinned KV 按需授权、sealed node-log 发现过滤与 discovery lease 有界观察复用；全量 test/build/vet 和相关 race 通过，已从独立发布分支部署 SG / USW / GZ；总量与剩余来源见 [发布验收](reports/2026-11-24-three-region-read-reuse-release.md)，不代表所有后台 GET 已消除。见 [设计与验证](reports/2026-11-24-celld-read-reuse.md)。
