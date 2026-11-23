@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +129,19 @@ func TestRunnerRecoversDeadNodeSkipsLiveAndSelf(t *testing.T) {
 	if nodes, segments, sessions, err = runner.Pass(ctx); err != nil || nodes != 0 || segments != 0 || sessions != 0 {
 		t.Fatalf("second pass = %d,%d,%d,%v; want 0,0,0,nil", nodes, segments, sessions, err)
 	}
+	// A known live session becoming dead recovers on the next warm pass,
+	// without waiting for the historical discovery interval.
+	expired, _ := json.Marshal(lease.NodeLease{Node: "node-2", Session: "s1", Expiry: time.Now().Add(-time.Second).UnixMilli(), Liveness: lease.NodeLeaseLiveness})
+	if _, err := shared.Put(ctx, lease.Key("node-2"), expired); err != nil {
+		t.Fatal(err)
+	}
+	if nodes, segments, sessions, err = runner.Pass(ctx); err != nil || nodes != 1 || segments != 1 || sessions != 1 {
+		t.Fatalf("warm death recovery = %d,%d,%d,%v", nodes, segments, sessions, err)
+	}
+	if got, _ := rep.ListSegments(ctx, sc2, 1); len(got) != 1 {
+		t.Fatalf("warm recovery lost acknowledged segment: %v", got)
+	}
+
 }
 
 // TestRunnerExpiredLeaseIsDead verifies an expired lease counts as dead.
@@ -266,5 +281,105 @@ func TestRunnerBacksOffFailedSession(t *testing.T) {
 	rec, _, _ := nl.Get(ctx, "dead", "old")
 	if rec.Status != nodelog.StatusRecovering {
 		t.Fatal("failed session lost")
+	}
+}
+
+// Count at the bucket boundary: a logical production List also resolves every
+// authority key. Avoiding the List is necessary to avoid those hidden GETs.
+type discoveryMeter struct {
+	bucket.Bucket
+	lists, gets int
+	failList    bool
+}
+
+func (b *discoveryMeter) List(ctx context.Context, prefix string) ([]string, error) {
+	b.lists++
+	if b.failList {
+		return nil, errors.New("discovery unavailable")
+	}
+	return b.Bucket.List(ctx, prefix)
+}
+func (b *discoveryMeter) Get(ctx context.Context, key string) ([]byte, string, error) {
+	if strings.HasPrefix(key, "node-logs/") {
+		b.gets++
+	}
+	return b.Bucket.Get(ctx, key)
+}
+
+func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
+	ctx := context.Background()
+	fs, _ := bucket.NewFSBucket(t.TempDir())
+	b := &discoveryMeter{Bucket: fs}
+	nl := nodelog.New(b, "n")
+	for i := 0; i < 100; i++ {
+		session := fmt.Sprintf("old-%d", i)
+		if _, err := nl.Open(ctx, session, 1, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := nl.Seal(ctx, "n", session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	publish := func(session string, expiry time.Time) {
+		data, _ := json.Marshal(lease.NodeLease{Node: "n", Session: session, Expiry: expiry.UnixMilli(), Liveness: lease.NodeLeaseLiveness})
+		if _, err := fs.Put(ctx, lease.Key("n"), data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish("current", now.Add(time.Hour))
+	leader := true
+	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "s", "", "", time.Minute), Recovery: recovery.New(replica.New(b), nil), Now: func() time.Time { return now }, IsLeader: func(context.Context) (bool, error) { return leader, nil }}
+	pass := func() {
+		t.Helper()
+		if _, _, _, err := runner.Pass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pass()
+	lists, gets := b.lists, b.gets
+	for i := 0; i < 11; i++ {
+		now = now.Add(5 * time.Second)
+		pass()
+	}
+	if b.lists != lists || b.gets != gets {
+		t.Fatalf("historical reads on warm passes: list %d->%d get %d->%d", lists, b.lists, gets, b.gets)
+	}
+	// A session change is discovered before the periodic deadline.
+	publish("replacement", now.Add(time.Hour))
+	pass()
+	if b.lists != lists+1 {
+		t.Fatalf("session change did not refresh: %d", b.lists)
+	}
+	// A newly published log for the same session must be found after expiry,
+	// and a failed refresh must not extend the deadline.
+	if _, err := nl.Open(ctx, "replacement", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	b.failList = true
+	if _, _, _, err := runner.Pass(ctx); err == nil {
+		t.Fatal("discovery failure hidden")
+	}
+	b.failList = false
+	pass()
+	rec, _, err := nl.Get(ctx, "n", "replacement")
+	if err != nil || rec.Status != nodelog.StatusOpen {
+		t.Fatalf("live record recovered: %+v %v", rec, err)
+	}
+	lists = b.lists
+	publish("replacement", now.Add(-time.Second))
+	pass()
+	if b.lists != lists+1 {
+		t.Fatal("lease expiry did not refresh records")
+	}
+	// Leadership loss forces a full discovery on reacquisition.
+	leader = false
+	pass()
+	lists = b.lists
+	leader = true
+	pass()
+	if b.lists != lists+2 {
+		t.Fatalf("new leader must discover again: %d -> %d", lists, b.lists)
 	}
 }

@@ -21,7 +21,20 @@ type retryState struct {
 	delay time.Duration
 }
 
+type discoveredNode struct {
+	records   []nodelog.Record
+	refreshed time.Time
+	session   string
+	live      bool
+}
+
 type Runner struct {
+	// DiscoveryInterval bounds candidate staleness, never authority freshness.
+	DiscoveryInterval time.Duration
+	discovered        map[string]discoveredNode
+	nodeList          []string
+	discoveredAt      time.Time
+
 	mu             sync.Mutex
 	retries        map[string]retryState
 	AttemptTimeout time.Duration
@@ -60,6 +73,8 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 	if r.IsLeader != nil {
 		ok, err := r.IsLeader(ctx)
 		if err != nil || !ok {
+			r.discoveredAt = time.Time{}
+			r.discovered = nil
 			return 0, 0, 0, err
 		}
 	}
@@ -69,24 +84,49 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 	if r.Lease == nil {
 		return 0, 0, 0, fmt.Errorf("recovery: lease manager is required")
 	}
-	nodeList, err := r.Nodelog.Nodes(ctx)
-	if err != nil {
-		return 0, 0, 0, err
-	}
 	now := r.now()
-	for _, node := range nodeList {
+	interval := r.DiscoveryInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	if r.discovered == nil {
+		r.discovered = make(map[string]discoveredNode)
+	}
+	if r.discoveredAt.IsZero() || now.Sub(r.discoveredAt) >= interval {
+		nodeList, discoverErr := r.Nodelog.Nodes(ctx)
+		if discoverErr != nil {
+			return 0, 0, 0, discoverErr
+		}
+		r.nodeList = nodeList
+		r.discoveredAt = now
+		// Bound memory to the last successful discovery snapshot.
+		next := make(map[string]discoveredNode, len(nodeList))
+		for _, node := range nodeList {
+			next[node] = r.discovered[node]
+		}
+		r.discovered = next
+	}
+	for _, node := range r.nodeList {
 		l, lerr := r.Lease.Get(ctx, node)
 		if lerr != nil && !errors.Is(lerr, bucket.ErrNotFound) {
 			r.log().Warn("recovery: lease read failed; skipping node", "node", node, "err", lerr)
 			continue
 		}
-		recs, rerr := r.Nodelog.ListNode(ctx, node)
-		if rerr != nil {
-			r.log().Warn("recovery: list sessions failed", "node", node, "err", rerr)
-			continue
+		state := r.discovered[node]
+		live := lerr == nil && l.Live(now)
+		if state.refreshed.IsZero() || now.Sub(state.refreshed) >= interval || state.session != l.Session || state.live != live {
+			started := r.now()
+			recs, readErr := r.Nodelog.ListNode(ctx, node)
+			if readErr != nil {
+				r.log().Warn("recovery: list sessions failed", "node", node, "err", readErr)
+				continue
+			}
+			state = discoveredNode{records: recs, refreshed: started, session: l.Session, live: live}
+			r.discovered[node] = state
 		}
+		recs := state.records
 		recovered := false
-		for _, rec := range recs {
+		for i, rec := range recs {
 			if rec.Status == nodelog.StatusSealed || (lerr == nil && l.Live(now) && l.Session == rec.Session) {
 				continue
 			}
@@ -117,6 +157,7 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 				continue
 			}
 			delete(r.retries, key)
+			recs[i].Status = nodelog.StatusSealed
 			recovered = true
 			segments += n
 			sessions++
