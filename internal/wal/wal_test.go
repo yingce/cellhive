@@ -1,4 +1,4 @@
-package wal
+package wal_test
 
 import (
 	"context"
@@ -10,6 +10,13 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/wal"
+)
+
+// SQLite WAL wire-format sizes, independent of the reader implementation.
+const (
+	walHeaderSize = 32
+	frameHdrSize  = 24
 )
 
 func openCell(t *testing.T) (*cellstore.Cell, context.Context) {
@@ -34,7 +41,7 @@ func TestReadCommittedFrames(t *testing.T) {
 			t.Fatalf("put: %v", err)
 		}
 	}
-	snap, err := Read(c.WALPath())
+	snap, err := wal.Read(c.WALPath())
 	if err != nil {
 		t.Fatalf("read wal: %v", err)
 	}
@@ -51,7 +58,7 @@ func TestReadCommittedFrames(t *testing.T) {
 
 func TestCursorDetectsNewCommits(t *testing.T) {
 	c, ctx := openCell(t)
-	cur := NewCursor()
+	cur := wal.NewCursor()
 
 	// Consume initial state.
 	if _, err := cur.Poll(c.WALPath()); err != nil {
@@ -73,7 +80,7 @@ func TestCursorDetectsNewCommits(t *testing.T) {
 
 func TestCursorGroupsTransactions(t *testing.T) {
 	c, ctx := openCell(t)
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	if _, err := cur.Poll(c.WALPath()); err != nil {
 		t.Fatalf("baseline poll: %v", err)
 	}
@@ -113,7 +120,7 @@ func TestCursorReadsOnlyNewWALTail(t *testing.T) {
 			t.Fatalf("baseline put: %v", err)
 		}
 	}
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	defer cur.Close()
 	baseline, err := cur.Poll(c.WALPath())
 	if err != nil {
@@ -151,7 +158,7 @@ func TestCursorDetectsCheckpoint(t *testing.T) {
 	c, ctx := openCell(t)
 	_ = c.Put(ctx, "a", []byte("1"), nil)
 
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	if _, err := cur.Poll(c.WALPath()); err != nil {
 		t.Fatalf("initial poll: %v", err)
 	}
@@ -175,7 +182,7 @@ func TestCursorPositionSurvivesCheckpointAsValue(t *testing.T) {
 	if err := c.Put(ctx, "before", []byte("one"), nil); err != nil {
 		t.Fatal(err)
 	}
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	defer cur.Close()
 	res, err := cur.Poll(c.WALPath())
 	if err != nil {
@@ -224,11 +231,11 @@ func TestReadRejectsCorruptCommitFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wal: %v", err)
 	}
-	h, err := parseHeader(data[:walHeaderSize])
+	original, err := wal.Read(c.WALPath())
 	if err != nil {
 		t.Fatalf("header: %v", err)
 	}
-	frameSize := int(frameHdrSize) + int(h.PageSize)
+	frameSize := int(frameHdrSize) + int(original.Header.PageSize)
 	total := (len(data) - walHeaderSize) / frameSize
 	if total == 0 {
 		t.Fatal("no frames written")
@@ -236,17 +243,17 @@ func TestReadRejectsCorruptCommitFrame(t *testing.T) {
 	// Flip every page byte of the last frame while leaving its pgno/dbsize and
 	// stored checksum untouched. A checksum-validating reader must reject it.
 	off := walHeaderSize + (total-1)*frameSize + frameHdrSize
-	for i := off; i < off+int(h.PageSize); i++ {
+	for i := off; i < off+int(original.Header.PageSize); i++ {
 		data[i] ^= 0xff
 	}
 	path := filepath.Join(t.TempDir(), "torn-wal")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Read(path); !errors.Is(err, ErrChecksum) {
-		t.Fatalf("Read(corrupt) error = %v, want ErrChecksum", err)
+	if _, err := wal.Read(path); !errors.Is(err, wal.ErrChecksum) {
+		t.Fatalf("Read(corrupt) error = %v, want wal.ErrChecksum", err)
 	}
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	defer cur.Close()
 	prefix, err := cur.Poll(path)
 	if err != nil {
@@ -255,10 +262,10 @@ func TestReadRejectsCorruptCommitFrame(t *testing.T) {
 	if prefix.WALOffset != 32 || prefix.WALSize != int64(len(prefix.NewCommitted)*frameSize) || prefix.WALOffset+prefix.WALSize >= int64(len(data)) {
 		t.Fatalf("invalid committed prefix: offset=%d size=%d", prefix.WALOffset, prefix.WALSize)
 	}
-	if _, err := cur.Poll(path); !errors.Is(err, ErrChecksum) {
+	if _, err := cur.Poll(path); !errors.Is(err, wal.ErrChecksum) {
 		t.Fatalf("torn tail accepted: %v", err)
 	}
-	for i := off; i < off+int(h.PageSize); i++ {
+	for i := off; i < off+int(original.Header.PageSize); i++ {
 		data[i] ^= 0xff
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
@@ -287,7 +294,7 @@ func TestCursorReopensReplacedWAL(t *testing.T) {
 	if err := c.Put(context.Background(), "a", []byte("1"), nil); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	cur := NewCursor()
+	cur := wal.NewCursor()
 	if _, err := cur.Poll(c.WALPath()); err != nil {
 		t.Fatalf("baseline poll: %v", err)
 	}

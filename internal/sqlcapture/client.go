@@ -26,7 +26,8 @@ type HTTPCommitter struct {
 	token     string
 	followers []string
 	client    *http.Client
-	// RequireBucket waits for the authoritative bucket before ack. DO cold
+	// RequireBucket waits for the authoritative object store before ack.
+	// Local upload-spool fsync and fleet-only proofs are rejected. DO cold
 	// restore reads bucket objects, so a fleet-only proof is insufficient.
 	RequireBucket bool
 	// RequireDOOwner keeps administrative whole-directory captures on bucket
@@ -177,7 +178,8 @@ func (c *HTTPCommitter) commitReader(ctx context.Context, scope cell.Scope, epoc
 		req.Header.Set("x-cellhive-do-owner-node", doOwner.Node)
 		req.Header.Set("x-cellhive-do-owner-epoch", strconv.FormatUint(doOwner.Epoch, 10))
 	}
-	if c.RequireBucket || (c.RequireDOOwner && (!hasDOOwner || doOwner.Epoch == 0)) {
+	wantBucket := c.RequireBucket || (c.RequireDOOwner && (!hasDOOwner || doOwner.Epoch == 0))
+	if wantBucket {
 		req.Header.Set("x-cellhive-bucket-proof", "1")
 	}
 	client := c.client
@@ -207,6 +209,18 @@ func (c *HTTPCommitter) commitReader(ctx context.Context, scope cell.Scope, epoc
 	}
 	if err := json.Unmarshal(response, &result); err != nil {
 		return fmt.Errorf("sqlcapture: decode commit response: %w", err)
+	}
+	if wantBucket {
+		// Explicit bucket proof must see the object. Local spool fsync
+		// (bucket-spool) and follower-only fleet acks are not enough.
+		switch result.Mode {
+		case "bucket", "bucket-batch":
+			return nil
+		case "bucket-spool", "fleet", "bucket-async":
+			return fmt.Errorf("sqlcapture: durability not proven (mode %q is not an object-store proof)", result.Mode)
+		default:
+			return fmt.Errorf("sqlcapture: unexpected commit proof %q", result.Mode)
+		}
 	}
 	switch result.Mode {
 	case "fleet", "bucket", "bucket-batch", "bucket-spool":

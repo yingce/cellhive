@@ -47,6 +47,9 @@ type Manager struct {
 	Log          *slog.Logger
 	Checkpoint   time.Duration // owner re-check interval
 	AutoSnapshot bool          // emit a baseline snapshot at first capture
+	// PrepareContinuation performs required schema initialization under the
+	// resident maintenance gate, before capture fixes its initial WAL cursor.
+	PrepareContinuation func(context.Context, cell.Scope) error
 	// OnLostOwner, when set, runs once when this node stops owning a scope
 	// (ownership moved or the epoch changed). epoch is the generation this
 	// capture was holding. The cell-agent uses it to forget the local cell and
@@ -141,10 +144,33 @@ func (m *Manager) log() *slog.Logger {
 	return slog.Default()
 }
 
+// EnsureContinuation initializes capture for an already restored, resident cell.
+// It never hydrates a missing cell or falls back to a whole-database snapshot.
+// The expected epoch prevents stale maintenance from initializing a successor.
+func (m *Manager) EnsureContinuation(ctx context.Context, scope cell.Scope, epoch uint64) error {
+	if m.Store == nil || m.Owner == nil || m.Committer == nil || epoch <= 1 || !m.AutoSnapshot || m.Durable == nil || m.HasEpoch == nil || m.WriteContinuation == nil {
+		return errors.New("cellcapture: continuation maintenance is not configured")
+	}
+	c, release, err := m.Store.AcquireResident(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return errors.New("cellcapture: continuation waits for resident cell")
+	}
+	defer release()
+	_, err = m.ensure(ctx, scope, epoch)
+	return err
+}
+
 // Ensure starts capture for a scope (idempotent) and returns the current txid
 // baseline. It fails with ErrNotOwner when this node does not own the scope.
 // Call it before the write that must be captured.
 func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) {
+	return m.ensure(ctx, scope, 0)
+}
+
+func (m *Manager) ensure(ctx context.Context, scope cell.Scope, expectedEpoch uint64) (uint64, error) {
 	start := time.Now()
 	mode := "error"
 	defer func() {
@@ -161,12 +187,17 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		if err != nil {
 			return 0, err
 		}
-		if !isOwner {
+		if !isOwner || (expectedEpoch != 0 && epoch != expectedEpoch) {
 			return 0, ErrNotOwner
 		}
 		c, err := m.Store.Cell(ctx, scope)
 		if err != nil {
 			return 0, err
+		}
+		if expectedEpoch != 0 && m.PrepareContinuation != nil {
+			if err := m.PrepareContinuation(ctx, scope); err != nil {
+				return 0, err
+			}
 		}
 		baseline, err := c.TxID(ctx)
 		if err != nil {
@@ -297,6 +328,9 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 				mode = "resume"
 				m.log().Info("capture continues durable chain", "scope", key, "txid", baseline)
 			} else {
+				if expectedEpoch != 0 {
+					return failInit(errors.New("cellcapture: maintenance cannot resume durable chain"))
+				}
 				err := cap.Snapshot(initCtx)
 				if err != nil {
 					return failInit(err)
@@ -312,8 +346,8 @@ func (m *Manager) Ensure(ctx context.Context, scope cell.Scope) (uint64, error) 
 		finishInit()
 		cap.Start(cctx)
 		go m.watchOwner(cctx, key, scope, st)
-		// The predecessor chain stays in place. Idle eviction and release fold
-		// it into this epoch's L9; a second full image would copy those pages.
+		// The predecessor chain stays in place until asynchronous epoch Fold
+		// publishes a current-epoch baseline. Existing paged readers keep it.
 		close(st.backgroundDone)
 		close(ready)
 		// Drop may have cancelled initialization just as it finished.
@@ -398,6 +432,13 @@ func (m *Manager) canResume(ctx context.Context, c *cellstore.Cell, scope cell.S
 			return false, false, nil
 		}
 		if _, err := c.SeedContinuation(ctx, local, func(header ltx.NativeHeader, pages []ltx.WALPage) error {
+			owned, current, err := m.Owner(ctx, scope)
+			if err != nil {
+				return err
+			}
+			if !owned || current != epoch {
+				return ErrNotOwner
+			}
 			return m.WriteContinuation(ctx, scope, epoch, header, pages)
 		}); err != nil {
 			return false, false, fmt.Errorf("cellcapture: write epoch continuation: %w", err)

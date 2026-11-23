@@ -4205,3 +4205,23 @@ Keep the existing headless Service and StatefulSet serviceName unchanged. Add a 
 本地部署代码为 `17ab586756`。初次镜像曾额外保留此前 D1 冷启动预算补丁，随后按用户要求撤回叠加；当前运行提交原始预算逻辑，seek 保留。部署与冷开库证据见 `known-issues.md` 同日条目。保留本地库的重启首查通过不等同于从空目录完整下载恢复验收。
 
 USW 随后发布 Helm revision 126，仅更新两个 cell-agent 至 seek 提交版本，不包含预算补丁；实际镜像、二进制、双向跨节点 KV canary 与滚动告警边界见 `known-issues.md`。SG 未操作。
+
+### 2026-11-22 换代后异步 Fold（实施中，未部署）
+
+本修订取代 2026-11-20/21 的空闲驱逐、交权前自动 Fold：同代仅 L0→L1，L9/L2 不按 idle、L1 数量或周期刷新。接管先恢复服务，本代持久化接链对象可见后，后台固定输入切点异步收敛跨代链。预算内合成完整新 L9，超预算搬基线并有界生成 L2；self-contained 后停止，失败退避且不阻止交权。中间代未完成维护时沿实际链跨代续做。显式快照入口、GC 读者保护、不可变对象与持久化协议不变。不承诺长期同代 L1 对象数有界。详见 [设计](superpowers/specs/2026-11-22-epoch-fold-design.md)。
+
+本修订已在本地实现，完整验证结果及既有全量测试阻塞见 [报告](reports/2026-11-22-epoch-fold.md)，未提交、未部署。
+
+2026-11-23 纯读接管修订：GET/List 不初始化 capture，原异步 Fold 会持续等待本代接链。后台现对已驻留 cell 安全初始化 continuation，限定预期 epoch、发布前复核 owner，复用 capture 初始化串行化；不冷开库、不回退完整 snapshot，保留 Fold 未接链保护。原测试手动预置本代对象不能证明纯读路径，已替换为真实 HTTP GET 接管、无后续业务写入的回归，并增加失败安全用例。本地验证、未部署；详见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+2026-11-23 空链 Fold 优化：恢复规划成功且链为空时休眠，只比较本进程的 L0 上传水位；水位变化、换代或重启后重新发现。扫描前记录水位，避免并发上传丢失唤醒；L1 覆盖 pending 不影响唤醒。读取失败和等待 continuation 仍退避重试，已自包含 epoch 不刷新。不增加通知队列或桶轮询。FS bucket 定向 race 验证空闲窗口 List 由 4 次降为 2 次，后续零新增；未做真实 COS 负载验证，未部署。详见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+2026-11-23 同 owner 重开维护登记修复（本地验证通过，未部署）：驱逐会 Forget 本地 OwnedScopes，但请求快路径确认同 node/session 后直接服务，未重新登记，导致 GC 与异步 Fold 漏掉重开的 cell。请求已验证 live owner 后恢复本地 advisory 登记，不新增桶 I/O、不改变 owner/epoch，不将其他 node/session 或退休记录加入本地集合；后台执行前仍重新校验 owner 和恢复链。回归覆盖真实请求驱逐重开及安全过滤，结果见 epoch Fold 验证报告。
+
+
+2026-11-23 本地部署验收更新：当前未提交改动已部署本地 cell-agent/do-runtime/user-runtime，生产未部署。独立真实 MinIO 多节点验证通过纯读接管、GET/List/PUT 驱逐重开登记、固定切点并发尾部、L9/L2 两种预算路径、跨未完成中间代 Fold、Safe GC、SIGKILL 后已确认数据恢复、旧 epoch 拒绝、空链休眠/上传唤醒和阻塞 PUT 的 bucket-proof；实际 GiB 普通测试通过。独立 GC 仍会扫描空链，不能把 Fold 休眠解释为整个服务无桶扫描。既有 session 进程测试缺少 B 控制库文件，在新旧镜像都失败；全仓 WAL 测试导入环仍开放。默认一小时 GC 自动删除与真实 COS/生产负载尚未验收。完整证据及测试配置见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+
+2026-11-23 测试阻塞修订：WAL 集成测试改为外部测试包以解除导入环；session 进程测试显式构造缺少注册的旧控制库，并在故障注入前等待准备阶段 spool 上传，避免依赖非 owner 自动建库及误删启动阶段唯一持久副本。生产协议与部署不变。真实双进程恢复原有断言通过，相关用例 race 驱动下连续三次通过；详见 [报告](reports/2026-11-22-epoch-fold.md) 文末。此记录取代此前两项测试阻塞开放的状态。
+
+2026-11-23 最终复验：上述测试修订后的 `make test`、`make vet` 全仓通过，独立目录 `make build` 与 `git diff --check` 通过。此前 WAL 导入环和 session 缺文件阻塞已解除；生产未部署。

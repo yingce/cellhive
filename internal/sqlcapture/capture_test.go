@@ -791,6 +791,39 @@ func TestHTTPCommitterProofModes(t *testing.T) {
 	}
 }
 
+// Explicit bucket proof must not treat a local upload spool as the object store.
+func TestHTTPCommitterRequireBucketRejectsSpool(t *testing.T) {
+	cases := []struct {
+		mode string
+		ok   bool
+	}{
+		{"bucket", true},
+		{"bucket-batch", true},
+		{"bucket-spool", false},
+		{"fleet", false},
+		{"bucket-async", false},
+	}
+	for _, c := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/internal/commit_binary" || r.Header.Get("x-cellhive-bucket-proof") != "1" {
+				http.Error(w, "bucket proof header missing", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"mode":"` + c.mode + `"}`))
+		}))
+		client := NewHTTPCommitter(server.URL, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil, nil)
+		client.RequireBucket = true
+		err := client.Commit(context.Background(), cell.Scope{Namespace: "demo", Class: "__do__", ID: "proof"}, 1, []byte("segment"))
+		server.Close()
+		if c.ok && err != nil {
+			t.Fatalf("mode %q: err = %v, want nil", c.mode, err)
+		}
+		if !c.ok && err == nil {
+			t.Fatalf("mode %q: err = nil, want rejection", c.mode)
+		}
+	}
+}
+
 func TestHTTPCommitterDOEpochConflictDoesNotReplay(t *testing.T) {
 	var resolves, commits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

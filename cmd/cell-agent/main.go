@@ -315,16 +315,6 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
-	// Rehome the durable baseline into this epoch before release so the
-	// successor can GC predecessors. Failures never block release: a later
-	// idle fold or the next owner can retry. Large cells are not skipped.
-	om.BeforeRelease = func(rctx context.Context, sc cell.Scope, epoch uint64) error {
-		if skipPreReleaseFold(rctx) {
-			return nil
-		}
-		foldOwnedBaseline(rctx, log, om, rep, cfg, sc, epoch)
-		return nil
-	}
 	// Drop the tally only after this process no longer holds the epoch. A fold
 	// that times out must not erase the count when the release itself fails.
 	om.AfterRelease = func(sc cell.Scope, epoch uint64) {
@@ -341,20 +331,6 @@ func main() {
 			return fmt.Errorf("stale local cell is busy; retry ownership acquisition")
 		}
 		return nil
-	}
-	var l9OnEvict chan cell.Scope
-	if cfg.CaptureL9OnEvict {
-		l9OnEvict = make(chan cell.Scope, 64)
-		go runL9OnEvict(ctx, log, rep, om, cfg, l9OnEvict)
-	}
-	store.BeforeEvict = func(_ context.Context, sc cell.Scope, idle bool) {
-		if !idle || l9OnEvict == nil {
-			return
-		}
-		select {
-		case l9OnEvict <- sc:
-		default:
-		}
 	}
 	store.OnEvicted = func(sc cell.Scope) { om.Forget(sc, 0) }
 	store.OnForget = func(sc cell.Scope) { om.Forget(sc, 0) }
@@ -859,6 +835,12 @@ func main() {
 			Store:        store,
 			Committer:    srv.CaptureCommitter(),
 			AutoSnapshot: true,
+			PrepareContinuation: func(cctx context.Context, sc cell.Scope) error {
+				if sc == control.Scope() {
+					return ctrl.EnsureSchema(cctx)
+				}
+				return nil
+			},
 			Durable: func(cctx context.Context, sc cell.Scope, epoch uint64) (uint64, error) {
 				return rep.DurableWatermarkChain(cctx, sc, epoch)
 			},
@@ -959,6 +941,9 @@ func main() {
 			}
 		}
 		srv.Capture = captureMgr
+		// Start only after capture wiring is complete. Read-only takeovers
+		// need background continuation initialization before Fold can proceed.
+		go runEpochFoldLoop(ctx, log, rep, om, cfg, captureMgr.EnsureContinuation)
 		go runEpochGCLoop(ctx, log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
 		// Queue consumer dispatch: poll registered queues and deliver claimed batches
 		// to the consuming worker via the dispatch endpoint (docs/bindings.md). Only
@@ -1388,99 +1373,6 @@ func idleL0Ready(rep *replica.Manager, sc cell.Scope, epoch uint64, minObjects i
 	return n >= minObjects
 }
 
-// runL9OnEvict rehomes the durable restore baseline into the current epoch after
-// an owned cell is idle-evicted (copy an existing L9, or publish a new L9 or L2,
-// plus bounded L2 increments). A chain that still reads the predecessor folds
-// without waiting for this epoch to accumulate L0. The handle may already be
-// closed: fold reads the bucket chain only. Predecessor deletion is left to the
-// epoch GC loop once this epoch is the chain base.
-func runL9OnEvict(ctx context.Context, log *slog.Logger, rep *replica.Manager, om *owner.Manager, cfg config.Config, ch <-chan cell.Scope) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case sc := <-ch:
-			o, _, err := om.Resolve(ctx, sc)
-			if err != nil || o.Node != cfg.NodeID || o.Session != om.Session {
-				continue
-			}
-			live, err := om.Live(ctx, o, time.Now())
-			if err != nil || !live {
-				continue
-			}
-			// One retained L9 per epoch is enough for restore. If any exist,
-			// only prune dominated copies (idle/closed); skip a full fold.
-			l9Keys, err := rep.ListLevelFrom(ctx, sc, o.Epoch, 9, 0)
-			if err != nil {
-				continue
-			}
-			if len(l9Keys) > 0 {
-				verify := func(vctx context.Context) error {
-					cur, _, rerr := om.Resolve(vctx, sc)
-					if rerr != nil {
-						return rerr
-					}
-					if cur.Node != cfg.NodeID || cur.Session != om.Session || cur.Epoch != o.Epoch {
-						return fmt.Errorf("ownership changed during idle prune")
-					}
-					live, lerr := om.Live(vctx, cur, time.Now())
-					if lerr != nil || !live {
-						return fmt.Errorf("owner not live during idle prune")
-					}
-					return nil
-				}
-				l9n, covn, perr := compaction.PruneIdleEpoch(ctx, rep, sc, o.Epoch, compaction.Options{Verify: verify})
-				if perr != nil {
-					log.Warn("idle prune on evict failed", "scope", sc.String(), "err", perr)
-				} else if l9n+covn > 0 {
-					log.Info("idle prune on evict", "scope", sc.String(), "epoch", o.Epoch, "l9", l9n, "covered", covn)
-				}
-				continue
-			}
-			fold, ferr := idleShouldFold(ctx, rep, sc, o.Epoch, cfg.CompactionMinObjects)
-			if ferr != nil {
-				log.Warn("idle fold check failed", "scope", sc.String(), "err", ferr)
-				continue
-			}
-			if !fold {
-				continue
-			}
-			vctx, cancel := context.WithTimeout(ctx, defaultCompactionTimeout)
-			res, err := compaction.FoldBaseline(vctx, rep, sc, o.Epoch, compaction.Options{
-				// L2 chunks stay at 256MiB. SnapshotMaxBytes is the ceiling for a
-				// newly synthesized L9. Copying an existing L9 ignores it.
-				MaxInputBytes:    foldL2MaxInputBytes,
-				SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
-				Verify: func(vctx context.Context) error {
-					cur, _, rerr := om.Resolve(vctx, sc)
-					if rerr != nil {
-						return rerr
-					}
-					if cur.Node != cfg.NodeID || cur.Session != om.Session || cur.Epoch != o.Epoch {
-						return fmt.Errorf("ownership changed during eviction fold")
-					}
-					live, lerr := om.Live(vctx, cur, time.Now())
-					if lerr != nil || !live {
-						return fmt.Errorf("owner not live during eviction fold")
-					}
-					return nil
-				},
-			})
-			cancel()
-			if err != nil {
-				log.Warn("l9 fold on evict failed", "scope", sc.String(), "err", err)
-				continue
-			}
-			if res.Compacted {
-				log.Info("l9 fold on evict", "scope", sc.String(), "epoch", res.Epoch,
-					"inputs", res.Inputs, "parts", res.Parts, "min_txid", res.MinTxID, "max_txid", res.MaxTxID)
-			} else if res.Skipped != "" {
-				log.Info("l9 fold on evict skipped", "scope", sc.String(), "reason", res.Skipped)
-			}
-		}
-	}
-}
-
 type compactionScope struct {
 	scope  cell.Scope
 	epoch  uint64
@@ -1905,68 +1797,6 @@ func shedIdleCell(ctx context.Context, om *owner.Manager, sc cell.Scope, epoch u
 	return err
 }
 
-// foldOwnedBaseline rehomes the durable chain into epoch. It reads the bucket
-// only and does not take the claim lock. Callers that still own the cell may
-// run it in the background; shutdown release runs it under the claim lock,
-// bounded by the release deadline.
-func foldOwnedBaseline(ctx context.Context, log *slog.Logger, om *owner.Manager, rep *replica.Manager, cfg config.Config, sc cell.Scope, epoch uint64) {
-	o, _, rerr := om.Resolve(ctx, sc)
-	owned := rerr == nil && o.Node == cfg.NodeID && o.Session == om.Session && o.Epoch == epoch
-	if !owned {
-		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "ownership changed")
-		return
-	}
-	live, lerr := om.Live(ctx, o, time.Now())
-	if lerr != nil {
-		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "owner not live")
-		return
-	}
-	if !live {
-		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "owner not live")
-		return
-	}
-	// The fold is optional: bound it to a slice of the remaining release
-	// budget and skip when that slice is too small, so the mandatory
-	// releases after it still have time.
-	budget, ok := foldBudgetFor(ctx, defaultCompactionTimeout)
-	if !ok {
-		log.Info("pre-release fold skipped", "scope", sc.String(), "reason", "insufficient release budget")
-		return
-	}
-	cctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-	cres, cerr := compaction.FoldBaseline(cctx, rep, sc, epoch, compaction.Options{
-		MaxInputBytes:    foldL2MaxInputBytes,
-		SnapshotMaxBytes: cfg.CaptureEpochSnapshotMaxBytes,
-		Verify: func(vctx context.Context) error {
-			o, _, rerr := om.Resolve(vctx, sc)
-			if rerr != nil {
-				return rerr
-			}
-			if o.Node != cfg.NodeID || o.Session != om.Session || o.Epoch != epoch {
-				return fmt.Errorf("ownership changed during pre-release fold")
-			}
-			live, lerr := om.Live(vctx, o, time.Now())
-			if lerr != nil || !live {
-				return fmt.Errorf("owner not live during pre-release fold")
-			}
-			return nil
-		},
-	})
-	if cerr != nil {
-		log.Warn("fold before release failed", "scope", sc.String(), "epoch", epoch, "err", cerr)
-		return
-	}
-	if cres.Compacted {
-		log.Info("folded before release", "scope", sc.String(), "epoch", epoch,
-			"inputs", cres.Inputs, "parts", cres.Parts, "min_txid", cres.MinTxID, "max_txid", cres.MaxTxID,
-			"pruned_l9", cres.PrunedL9, "pruned_covered", cres.PrunedCovered)
-	} else if cres.Skipped != "" {
-		log.Info("fold before release skipped", "scope", sc.String(), "reason", cres.Skipped,
-			"pruned_l9", cres.PrunedL9, "pruned_covered", cres.PrunedCovered)
-	}
-}
-
 // foldBudgetFor reports how long an optional fold may run given the release
 // deadline. ok=false means "skip the fold": too little time remains after
 // reserving space for the release itself.
@@ -2021,10 +1851,7 @@ func runRebalanceLoop(ctx context.Context, log *slog.Logger, cfg config.Config, 
 				if err != nil {
 					continue
 				}
-				if err := shedIdleCell(ctx, om, sc, m.Epoch, func() bool { return !store.IsOpen(sc) }, func(fctx context.Context) error {
-					foldOwnedBaseline(fctx, log, om, rep, cfg, sc, m.Epoch)
-					return nil
-				}); err != nil {
+				if err := shedIdleCell(ctx, om, sc, m.Epoch, func() bool { return !store.IsOpen(sc) }, nil); err != nil {
 					if !errors.Is(err, errShedSkipped) {
 						log.Warn("rebalance release failed", "scope", m.Scope, "err", err)
 					}
@@ -2083,10 +1910,7 @@ func runCellDiskLoop(ctx context.Context, log *slog.Logger, store *cellstore.Sto
 					if o.Scope.Class == control.ControlClass || store.IsOpen(o.Scope) {
 						continue
 					}
-					if err := shedIdleCell(ctx, om, o.Scope, o.Epoch, func() bool { return !store.IsOpen(o.Scope) }, func(fctx context.Context) error {
-						foldOwnedBaseline(fctx, log, om, rep, cfg, o.Scope, o.Epoch)
-						return nil
-					}); err != nil {
+					if err := shedIdleCell(ctx, om, o.Scope, o.Epoch, func() bool { return !store.IsOpen(o.Scope) }, nil); err != nil {
 						if !errors.Is(err, errShedSkipped) {
 							log.Warn("disk pressure release failed", "scope", o.Scope.String(), "err", err)
 						}

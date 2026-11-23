@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,5 +115,78 @@ func TestSerialBucketCommitsShareOneUpload(t *testing.T) {
 	defer sink.mu.Unlock()
 	if sink.calls != 1 || sink.segs != 2 {
 		t.Fatalf("flush calls=%d segs=%d, want 1 call of 2 segments", sink.calls, sink.segs)
+	}
+}
+
+// blockedUploadSink holds AppendBatch until release is closed. It models a
+// stalled object PUT so callers can tell spool acknowledgement from bucket proof.
+type blockedUploadSink struct {
+	release <-chan struct{}
+	calls   atomic.Uint64
+}
+
+func (s *blockedUploadSink) AppendBatch(ctx context.Context, _ cell.Scope, _ uint64, _ [][]byte) (string, string, error) {
+	s.calls.Add(1)
+	select {
+	case <-s.release:
+		return "blocked-key", "etag", nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+}
+
+func TestRequireBucketWaitsForObjectPutWhileSpoolReturns(t *testing.T) {
+	s, _ := newTestServer(t)
+	sc := cell.Scope{Namespace: "demo", Class: "__kv__", ID: "bucket-proof-wait"}
+	rr := do(t, s.Handler(), http.MethodPost, "/v1/internal/claim", "tok", []byte(`{"scope":"`+sc.String()+`"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rr.Code, rr.Body.String())
+	}
+	release := make(chan struct{})
+	sink := &blockedUploadSink{release: release}
+	ctx, cancel := context.WithCancel(t.Context())
+	up := upload.New(sink, s.Log, 256, 1<<20, time.Hour)
+	spool, err := upload.OpenSpool(t.TempDir(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up.SetSpool(spool)
+	up.Start(ctx)
+	defer func() {
+		close(release)
+		cancel()
+		up.Stop()
+	}()
+	s.Uploader = up
+	s.Lease = nil
+
+	spoolRes, err := s.commitSegmentCore(ctx, sc, 1, nativeTestFile(t, 1, 1, []byte("spool")), nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spoolRes.Mode != "bucket-spool" {
+		t.Fatalf("ordinary write mode = %q, want bucket-spool", spoolRes.Mode)
+	}
+	if sink.calls.Load() != 0 {
+		t.Fatalf("ordinary write uploaded before ack: calls=%d", sink.calls.Load())
+	}
+
+	proofCtx, proofCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer proofCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.commitSegmentCore(proofCtx, sc, 1, nativeTestFile(t, 2, 2, []byte("proof")), nil, false, true)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("requireBucket returned while the object PUT was still blocked")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("requireBucket err = %v, want context deadline while PUT blocked", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("requireBucket neither returned nor cancelled while PUT blocked")
 	}
 }

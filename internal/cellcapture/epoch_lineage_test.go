@@ -34,7 +34,8 @@ func TestLargeCrossEpochResumeRequiresMarker(t *testing.T) {
 			}
 			called := false
 			markerErr := errors.New("marker unavailable")
-			m := &Manager{EpochSnapshotMaxBytes: 1,
+			m := &Manager{
+				Owner: func(context.Context, cell.Scope) (bool, uint64, error) { return true, 2, nil }, EpochSnapshotMaxBytes: 1,
 				HasEpoch: func(context.Context, cell.Scope, uint64) (bool, error) { return false, nil },
 				Durable:  func(context.Context, cell.Scope, uint64) (uint64, error) { return tx, nil },
 				WriteContinuation: func(_ context.Context, _ cell.Scope, epoch uint64, header ltx.NativeHeader, _ []ltx.WALPage) error {

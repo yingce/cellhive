@@ -753,6 +753,24 @@ func (m *Manager) touchOwnerSegment(ctx context.Context, s cell.Scope, now time.
 	}
 }
 
+// TrackLocal restores advisory maintenance membership after a local reopen.
+// The caller must have validated this owner and its liveness. This performs no
+// bucket I/O and grants no authority: background users must still verify ownership.
+func (m *Manager) TrackLocal(s cell.Scope, o cell.Owner) {
+	if o.Node != m.NodeID || o.Session != m.Session || o.Epoch == 0 || o.Retired {
+		return
+	}
+	m.ownedMu.Lock()
+	defer m.ownedMu.Unlock()
+	if m.owned == nil {
+		m.owned = map[string]OwnedScope{}
+	}
+	if current, ok := m.owned[s.String()]; ok && current.Epoch >= o.Epoch {
+		return
+	}
+	m.owned[s.String()] = OwnedScope{Scope: s, Epoch: o.Epoch}
+}
+
 func (m *Manager) rememberOwned(s cell.Scope, epoch uint64) {
 	m.ownedMu.Lock()
 	if m.owned == nil {

@@ -37,7 +37,7 @@
 | `CELLHIVE_DO_EAGER_RESTART` | `false` | deploy 急切重启 DO |
 | `CELLHIVE_DO_RUNTIMES` | 空 | do-runtime 列表（DO 放置）；空则禁用 `/v1/do/invoke` |
 | `CELLHIVE_DRAIN_TTL` | `30s` | drain token 有效期（关停等待 = 同值） |
-| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时 Fold。已有 L9 则跳过。没有 L9 时，owner 累计的未收 L0 达到 `CELLHIVE_COMPACTION_MIN_OBJECTS` 才 Fold。交权前不看这个个数。该值默认 1GiB 只限制显式整库 L9 |
+| `CELLHIVE_L9_ON_EVICT` | `true` | 已弃用，仅兼容解析，不再生效。自动 Fold 改为换代后异步执行；空闲和交权不触发同代刷新 |
 | `CELLHIVE_LOG_BUFFER` | `1000:200` | 日志尾缓冲 `<entries>:<workers>`（`cellhive tail --worker`） |
 | `CELLHIVE_LTX_COMPRESSION` | bool，默认 `true` | LTX page-map 用 LZ4（`WAL3`）；`false` 退回 `WAL2` 固定帧不压缩（省 CPU、桶字节更多；解码/GC 两者兼容，ADR-161） |
 | `CELLHIVE_MAX_OPEN_CELLS` | `128` | 缓存句柄上限；`0` = 不限。超过后由 LRU sweeper 关闭最久未使用的 cell，释放 SQLite 句柄与 page cache |

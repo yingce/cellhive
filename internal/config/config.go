@@ -88,9 +88,8 @@ type Config struct {
 	// L2. Copying an existing L9 does not use it. Fold L2 chunks do not use it.
 	// A production epoch open writes a continuation and does not consult it.
 	CaptureEpochSnapshotMaxBytes int64
-	// CaptureL9OnEvict publishes an optional L9 snapshot for an owned, idle
-	// evicted cell when its chain is long enough. It is best-effort, uses the
-	// epoch snapshot budget, and never blocks eviction.
+	// CaptureL9OnEvict is parsed for compatibility only. Automatic Fold now
+	// runs after epoch takeover, never from idle eviction.
 	CaptureL9OnEvict bool
 	// EpochGCInterval enables background epoch GC (0 disables). GC only removes
 	// epochs older than the current/previous one once the current epoch has a

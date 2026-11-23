@@ -192,8 +192,8 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_COMPACTION_MIN_BYTES` | `64MiB` | L1 光标之后的 L0 存放字节门槛，与文件个数是或的关系。每次 L0 上传和每次 L1 都按光标重算。只决定是否开始，不把一批按这个值切开，也不为这个判断列桶 |
 | `CELLHIVE_COMPACTION_MIN_OBJECTS` | `256` | 共用个数。异步 L0 上传凑满这么多段就刷；L1 光标之后的 L0 文件达到它就收 L1。非正值按 256。没有定时扫描 |
 | `CELLHIVE_UPLOAD_INTERVAL` | `30s` | 桶上传合批周期。单机和没有备机确认的写先 fsync 到本地 spool 再返回，和后台队列一起按这个周期、256 段或 1MiB 合成一次上传。spool 写失败才立即上传 |
-| `CELLHIVE_L9_ON_EVICT` | `true` | 空闲驱逐时对冷 owned cell best-effort `FoldBaseline`。已有 L9 则跳过。恢复链还读着上一代时直接 Fold，不看本代 L0 个数。链已经在本代时，未收 L0 文件数达到 `CELLHIVE_COMPACTION_MIN_OBJECTS` 才 Fold。交权前同样 Fold，不看这个个数。换代只写续链 seed，不再上传一份本代整库 L0。不阻塞驱逐 |
-| `CELLHIVE_EPOCH_SNAPSHOT_MAX` | `1GiB` | 显式整库 L9（`--snapshot`）和换代时新合成 L9 的逻辑库上限，也是这一次快照能吃下的输入字节。显式快照超过就跳过。换代合成超过就改收到 L2，不拆已有 L9。已有 L9 仍整份拷贝。后台 L1 不按这个值切。交权/空闲 Fold 的 L2 分块仍是 256MiB。换代续链不看这个值 |
+| `CELLHIVE_L9_ON_EVICT` | `true` | 已弃用，仅兼容解析，不再生效。自动 Fold 改为换代后异步执行；空闲和交权不触发同代刷新 |
+| `CELLHIVE_EPOCH_SNAPSHOT_MAX` | `1GiB` | 显式整库 L9（`--snapshot`）和换代时新合成 L9 的逻辑库上限，也是这一次快照能吃下的输入字节。显式快照超过就跳过。换代合成超过就改收到 L2，不拆已有 L9。已有 L9 仍整份拷贝。后台 L1 不按这个值切。换代后台 Fold 的 L2 分块仍是 256MiB。换代续链不看这个值 |
 | `CELLHIVE_EPOCH_GC_KEEP` | `1` | Safe 退休时保留的上一代 epoch 数 |
 
 运维使用 `cellhive gc scope <ns/class/id> --dry-run` 查看原生压缩计划和存储统计，`--safe` 执行原生 epoch GC，`--snapshot` 在当前 owner 上发布一次完整 L9 快照（不删除源对象，不加 epoch GC）；`--grace` 默认 3600 秒，按对象上传时间计龄。同 epoch 空闲回收：**不**提供 `--prune-l9`；自动删多余 L9 / 被覆盖 L0–L3 需 `IdleDeleteOK`（排空保护+无读者），Fold/空闲驱逐默认不删。L9 水位之上的碎 L0 在线删除仍 DEFERRED。已移除 `--keep-l1`。后台仅在 resident cell 已完成分页补齐且 owner 验证通过时回收旧 epoch。

@@ -32,7 +32,7 @@ type Options struct {
 	SnapshotMaxBytes int64
 	// Verify rechecks current ownership before reading inputs and publication.
 	Verify func(context.Context) error
-	// AfterChunk runs after each successful FoldBaseline L3 chunk publish.
+	// AfterChunk runs after each successful FoldBaseline/FoldEpoch L2 chunk publish.
 	// Returning an error stops the fold so tests can assert crash mid-states.
 	AfterChunk func(Result) error
 	// IdleDeleteOK must be set only while the cell is drain-protected and no

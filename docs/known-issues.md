@@ -163,3 +163,23 @@ USW `agent-1` 保留旧 control SQLite、而 `agent-0` 为有效 owner 时，后
 2026-11-11 USW 已分阶段启用：Helm 121 全部 validate 后，Helm 122 全部 reclaim；两 agent 实际镜像/二进制和模式核对通过，真实 USW 独立 scope 回收探针通过。仅正常换代回收；历史 backlog/失败补扫与永久根增长仍未解决。回退必须保持 validate，不得回 legacy/旧二进制。SG 未启用。详见 [发布记录](reports/2026-11-11-usw-authority-reclamation.md)。
 
 2026-11-13 当前部署状态：SG 已完成 Helm 134 validate → 135 reclaim 两阶段启用，与 USW 一致；两 agent 实际镜像、模式及 Ready 核对通过，SG 独立 COS 探针通过。随后观察到节点租约和 waker 的 g46 已删除、g47 正常写入；历史占位、失败补扫与永久根增长仍未解决。只能回退到支持根校验的 validate 模式。见 [SG 发布记录](reports/2026-11-13-sg-authority-reclamation.md)。
+
+## 2026-11-22 换代后异步 Fold（实施中，未部署）
+
+设计改为接管后后台收敛恢复链，取消同代 idle/pre-release 自动 Fold。同代仅 L0→L1，长期热 cell 的 L1 与冷恢复成本仍可增长。预算内完整 L9，超预算旧基线加 L2；旧读者不自动切换，GC 安全门保持。单元回归、真实桶/故障与部署验收状态另行补记。见 [设计](superpowers/specs/2026-11-22-epoch-fold-design.md)。
+
+2026-11-22 本地实现验证：换代后台维护与完整快照策略已实现，8 个新增定向用例含 race 通过，make build 与相关包 vet 通过。make test 的 75 个包通过，但 WAL 测试导入环导致全量失败；完整 compaction race 的 GiB 用例超时。未提交、未部署，真实桶/多节点故障未验收。见 [验证报告](reports/2026-11-22-epoch-fold.md)。
+
+2026-11-23 纯读接管修订：GET/List 不初始化 capture，原异步 Fold 会持续等待本代接链。后台现对已驻留 cell 安全初始化 continuation，限定预期 epoch、发布前复核 owner，复用 capture 初始化串行化；不冷开库、不回退完整 snapshot，保留 Fold 未接链保护。原测试手动预置本代对象不能证明纯读路径，已替换为真实 HTTP GET 接管、无后续业务写入的回归，并增加失败安全用例。本地验证、未部署；详见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+2026-11-23 空链 Fold 优化：恢复规划成功且链为空时休眠，只比较本进程的 L0 上传水位；水位变化、换代或重启后重新发现。扫描前记录水位，避免并发上传丢失唤醒；L1 覆盖 pending 不影响唤醒。读取失败和等待 continuation 仍退避重试，已自包含 epoch 不刷新。不增加通知队列或桶轮询。FS bucket 定向 race 验证空闲窗口 List 由 4 次降为 2 次，后续零新增；未做真实 COS 负载验证，未部署。详见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+2026-11-23 同 owner 重开维护登记修复（本地验证通过，未部署）：驱逐会 Forget 本地 OwnedScopes，但请求快路径确认同 node/session 后直接服务，未重新登记，导致 GC 与异步 Fold 漏掉重开的 cell。请求已验证 live owner 后恢复本地 advisory 登记，不新增桶 I/O、不改变 owner/epoch，不将其他 node/session 或退休记录加入本地集合；后台执行前仍重新校验 owner 和恢复链。回归覆盖真实请求驱逐重开及安全过滤，结果见 epoch Fold 验证报告。
+
+
+2026-11-23 本地部署验收更新：当前未提交改动已部署本地 cell-agent/do-runtime/user-runtime，生产未部署。独立真实 MinIO 多节点验证通过纯读接管、GET/List/PUT 驱逐重开登记、固定切点并发尾部、L9/L2 两种预算路径、跨未完成中间代 Fold、Safe GC、SIGKILL 后已确认数据恢复、旧 epoch 拒绝、空链休眠/上传唤醒和阻塞 PUT 的 bucket-proof；实际 GiB 普通测试通过。独立 GC 仍会扫描空链，不能把 Fold 休眠解释为整个服务无桶扫描。既有 session 进程测试缺少 B 控制库文件，在新旧镜像都失败；全仓 WAL 测试导入环仍开放。默认一小时 GC 自动删除与真实 COS/生产负载尚未验收。完整证据及测试配置见 [报告](reports/2026-11-22-epoch-fold.md)。
+
+
+2026-11-23 测试阻塞修订：WAL 集成测试改为外部测试包以解除导入环；session 进程测试显式构造缺少注册的旧控制库，并在故障注入前等待准备阶段 spool 上传，避免依赖非 owner 自动建库及误删启动阶段唯一持久副本。生产协议与部署不变。真实双进程恢复原有断言通过，相关用例 race 驱动下连续三次通过；详见 [报告](reports/2026-11-22-epoch-fold.md) 文末。此记录取代此前两项测试阻塞开放的状态。
+
+2026-11-23 最终复验：上述测试修订后的 `make test`、`make vet` 全仓通过，独立目录 `make build` 与 `git diff --check` 通过。此前 WAL 导入环和 session 缺文件阻塞已解除；生产未部署。

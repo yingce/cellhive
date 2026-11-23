@@ -120,6 +120,14 @@ func (m *Manager) L0Pending(s cell.Scope, epoch uint64) (int, int64) {
 	return n, bytes
 }
 
+// L0Uploaded returns this process's durable L0 watermark, without bucket I/O.
+// L1 covering pending objects preserves it. It is a wake hint, not a remote
+// durability proof; ownership loss/retirement can discard the local tally.
+func (m *Manager) L0Uploaded(s cell.Scope, epoch uint64) uint64 {
+	_, uploaded := m.l0Cursors(s, epoch)
+	return uploaded
+}
+
 func (m *Manager) l0Cursors(s cell.Scope, epoch uint64) (covered, uploaded uint64) {
 	m.l0Mu.Lock()
 	defer m.l0Mu.Unlock()

@@ -20,7 +20,9 @@ import (
 	"cellhive/internal/bearertoken"
 	"cellhive/internal/bucket"
 	"cellhive/internal/cell"
+	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
+	"cellhive/internal/control"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/owner"
@@ -116,7 +118,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 				cmd.Env = append(cmd.Env, v)
 			}
 		}
-		env := map[string]string{"CELLHIVE_ROOT_KEY": secret, "CELLHIVE_NODE_ID": a.node, "CELLHIVE_SESSION_ID": session, "CELLHIVE_DATA_DIR": a.dir, "CELLHIVE_BUCKET_DIR": filepath.Join(root, "bucket"), "CELLHIVE_REST_ADDR": a.rest, "CELLHIVE_ADMIN_ADDR": a.admin, "CELLHIVE_ADVERTISE": a.rest, "CELLHIVE_PEER_URL": "http://" + a.rest, "CELLHIVE_LEASE_TTL": "3s", "CELLHIVE_DURABILITY": "fleet", "CELLHIVE_EPOCH_GC_INTERVAL": "0s", "CELLHIVE_WAKE_REPAIR_INTERVAL": "0s", "CELLHIVE_WAKER_INTERVAL": "0s", "CELLHIVE_TIMER_INTERVAL": "0s", "CELLHIVE_CRON_INTERVAL": "0s", "CELLHIVE_REBALANCE_INTERVAL": "0s", "CELLHIVE_CELL_IDLE": "0s"}
+		env := map[string]string{"CELLHIVE_ROOT_KEY": secret, "CELLHIVE_NODE_ID": a.node, "CELLHIVE_SESSION_ID": session, "CELLHIVE_DATA_DIR": a.dir, "CELLHIVE_BUCKET_DIR": filepath.Join(root, "bucket"), "CELLHIVE_REST_ADDR": a.rest, "CELLHIVE_ADMIN_ADDR": a.admin, "CELLHIVE_ADVERTISE": a.rest, "CELLHIVE_PEER_URL": "http://" + a.rest, "CELLHIVE_LEASE_TTL": "3s", "CELLHIVE_DURABILITY": "fleet", "CELLHIVE_UPLOAD_INTERVAL": "100ms", "CELLHIVE_EPOCH_GC_INTERVAL": "0s", "CELLHIVE_WAKE_REPAIR_INTERVAL": "0s", "CELLHIVE_WAKER_INTERVAL": "0s", "CELLHIVE_TIMER_INTERVAL": "0s", "CELLHIVE_CRON_INTERVAL": "0s", "CELLHIVE_REBALANCE_INTERVAL": "0s", "CELLHIVE_CELL_IDLE": "0s"}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -169,9 +171,28 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	}
 	put(a, "ka", "base", "baseline-a")
 	put(c, "kb", "base", "baseline-b")
-	// Wait for the first full snapshot to reach the bucket. The fault below only
-	// removes objects created after this baseline, so restore remains well formed.
-	time.Sleep(500 * time.Millisecond)
+	// Startup writes can be spool-only before a follower is eligible. The
+	// injected fault later discards local spools, so first persist the setup
+	// (including control registrations) instead of deleting its only copy.
+	setupDeadline := time.Now().Add(5 * time.Second)
+	for {
+		pending := 0
+		for _, v := range []*agent{a, c} {
+			entries, err := filepath.Glob(filepath.Join(v.dir, "upload-spool", "*.spool"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending += len(entries)
+		}
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(setupDeadline) {
+			t.Fatalf("setup uploads did not drain: %d pending", pending)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Preserve the baseline; subsequent business objects are removed below.
 	snapshots := map[string]map[string][]byte{}
 	for _, name := range []string{"ka", "kb"} {
 		prefix := "cells/sessiontest/__kv__/" + name + "/ltx/"
@@ -214,7 +235,28 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 		}
 	}
 	staleControlPath := filepath.Join(c.dir, "cells", "__platform__", "__control__", "main.db")
-	staleControl, err := os.ReadFile(staleControlPath)
+	// Non-owner control reads no longer create a local SQLite replica. Build
+	// the obsolete schema-only replica explicitly instead of depending on a
+	// startup side effect. It must lack the registrations recovered below.
+	staleDir := t.TempDir()
+	staleStore, err := cellstore.New(staleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = staleStore.Close() })
+	staleMetadata := control.New(staleStore, nil)
+	if err := staleMetadata.EnsureSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resources, err := staleMetadata.Resources(context.Background(), "sessiontest", "kv")
+	if err != nil || len(resources) != 0 {
+		t.Fatalf("stale fixture must lack registrations: %+v %v", resources, err)
+	}
+	// Close checkpoints the fixture, so copying main.db alone is sufficient.
+	if err := staleStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	staleControl, err := os.ReadFile(filepath.Join(staleDir, "cells", "__platform__", "__control__", "main.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +331,7 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	ready(a)
 	ready(c)
 	// B must take over control and hydrate the acknowledged registrations,
-	// even though its startup schema initialization pinned an older local DB.
+	// even though the test left an obsolete schema-only local DB.
 	code, body, err := call(c.admin, "GET", "/v1/control/resources?namespace=sessiontest", "Authorization", adminToken(), nil)
 	if err != nil || code != 200 || !bytes.Contains(body, []byte(`"name":"ka"`)) || !bytes.Contains(body, []byte(`"name":"kb"`)) {
 		t.Fatalf("pinned control takeover lost registrations: %d %s %v", code, body, err)

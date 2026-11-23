@@ -1255,6 +1255,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 	case err == nil && s.routeLive(r.Context(), sc, o, now):
 		if o.Node == s.Cfg.NodeID {
 			if o.Session == s.Owner.Session {
+				s.Owner.TrackLocal(sc, o)
 				return false
 			}
 			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
@@ -1293,6 +1294,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 				return s.forwardNonOwner(w, r, sc, preRead, admin)
 			}
 			if claimed.Node == s.Cfg.NodeID && claimed.Session == s.Owner.Session {
+				s.Owner.TrackLocal(sc, claimed)
 				return false
 			}
 			writeErr(w, http.StatusServiceUnavailable, "owner_session_mismatch", "scope belongs to another process session")
@@ -1302,6 +1304,7 @@ func (s *Server) forwardOrClaimMode(w http.ResponseWriter, r *http.Request, sc c
 			// node may have won, in which case this request can proceed locally.
 			if o2, _, rerr := s.Owner.ResolveCached(r.Context(), sc, 0); rerr == nil {
 				if o2.Node == s.Cfg.NodeID && o2.Session == s.Owner.Session && s.ownerLive(r.Context(), o2, time.Now()) {
+					s.Owner.TrackLocal(sc, o2)
 					return false
 				}
 				if o2.Node != s.Cfg.NodeID && s.ownerLive(r.Context(), o2, time.Now()) && o2.Address != "" {
@@ -1564,6 +1567,7 @@ func (s *Server) claimForRead(ctx context.Context, sc cell.Scope) error {
 		if o.Node == s.Cfg.NodeID && o.Session != s.Owner.Session {
 			return owner.ErrNotOwner
 		}
+		s.Owner.TrackLocal(sc, o)
 		return nil
 	}
 	if err != nil && !errors.Is(err, owner.ErrUnowned) {
@@ -3777,6 +3781,8 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	if tryFleet && s.Cfg.Durability == "fleet" {
 		s.Log.Warn("fleet durability requested but no eligible peer; write is spooled for a later bucket batch")
 	}
+	// Explicit bucket proof must wait for the object PUT; local spool fsync
+	// is not enough for x-cellhive-bucket-proof / RequireBucket callers.
 	wait := requireBucket || s.Cfg.BucketWait || s.Cfg.Durability == "fleet"
 	switch {
 	case !wait:
@@ -3789,6 +3795,16 @@ func (s *Server) commitSegmentCore(ctx context.Context, sc cell.Scope, epoch uin
 	default:
 		if s.Uploader != nil {
 			bucketStart := time.Now()
+			if requireBucket {
+				err := s.Uploader.EnqueueWait(ctx, sc, epoch, seg)
+				bucketTime = time.Since(bucketStart)
+				if err != nil {
+					return commitResult{}, err
+				}
+				s.commits.Add(1)
+				s.recordCommit("bucket-batch")
+				return commitResult{Mode: "bucket-batch"}, nil
+			}
 			// One machine and a two-machine fallback both keep the segment on
 			// the local spool and share the async flush. Serial requests would
 			// otherwise each wait for their own object.

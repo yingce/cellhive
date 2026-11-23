@@ -16,6 +16,20 @@ import (
 	"cellhive/internal/replica"
 )
 
+// SkipEmptyRestoreChain means discovery succeeded with no durable objects.
+// Unlike a missing baseline in a nonempty chain, it can wait for new uploads.
+const SkipEmptyRestoreChain = "empty restore chain"
+
+// FoldEpoch is the automatic post-takeover maintenance path. It waits for a
+// durable current-epoch opener and prefers one complete snapshot at a fixed cut.
+// A self-contained epoch is never refreshed by this operation.
+func FoldEpoch(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64, opts Options) (Result, error) {
+	if epoch <= 1 {
+		return Result{Skipped: "initial epoch", Epoch: epoch}, nil
+	}
+	return foldBaseline(ctx, m, s, epoch, opts, true)
+}
+
 // FoldBaseline publishes the durable restore chain into epoch so this epoch
 // becomes the chain base. Predecessor epochs can then be retired by native
 // epoch GC. A new baseline is L9 when its logical image and stored inputs fit
@@ -24,6 +38,10 @@ import (
 // An existing remote L9 is streamed into the current epoch without re-checking
 // that budget.
 func FoldBaseline(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64, opts Options) (Result, error) {
+	return foldBaseline(ctx, m, s, epoch, opts, false)
+}
+
+func foldBaseline(ctx context.Context, m *replica.Manager, s cell.Scope, epoch uint64, opts Options, transition bool) (Result, error) {
 	release, err := acquireJob(ctx)
 	if err != nil {
 		return Result{}, err
@@ -51,11 +69,33 @@ func FoldBaseline(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 		return Result{}, err
 	}
 	if len(chainKeys) == 0 {
+		if transition {
+			return Result{Skipped: SkipEmptyRestoreChain, Epoch: epoch}, nil
+		}
 		return Result{Skipped: "no snapshot baseline"}, nil
 	}
 	files, err := nativeRangesOrdered(chainKeys)
 	if err != nil {
 		return Result{}, err
+	}
+	if transition {
+		current := false
+		for _, f := range files {
+			current = current || epochOfKey(f.key) == epoch
+		}
+		if !current {
+			return Result{Skipped: "waiting for current epoch", Epoch: epoch}, nil
+		}
+		maxInputs, _ := inputLimits(opts)
+		if len(files) <= maxInputs {
+			fits, err := newL9Fits(ctx, m, files, opts.SnapshotMaxBytes)
+			if err != nil {
+				return Result{}, err
+			}
+			if fits {
+				return mergePublishFrom(ctx, m, s, epoch, 9, files, 0, false, opts)
+			}
+		}
 	}
 	snapIdx := -1
 	for i, f := range files {
@@ -211,9 +251,11 @@ func FoldBaseline(ctx context.Context, m *replica.Manager, s cell.Scope, epoch u
 	if !ok {
 		return Result{}, fmt.Errorf("compaction: fold left predecessor dependency")
 	}
-	wm, err := m.DurableWatermarkChain(ctx, s, epoch)
-	if err != nil || wm == 0 {
-		return Result{}, fmt.Errorf("compaction: fold restore watermark: %w", err)
+	var wm uint64
+	for _, f := range files {
+		if f.max > wm {
+			wm = f.max
+		}
 	}
 	l9n, covn, err := maybePruneIdleEpoch(ctx, m, s, epoch, opts)
 	if err != nil {
