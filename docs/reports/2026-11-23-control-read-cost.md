@@ -20,3 +20,5 @@ SG 两台 agent 的 172 秒采样共记录 15099 次 GET 类操作（包含 Rang
 ## 发布边界
 
 本批仅修改工作区，未提交、未部署；SG/USW 镜像与线上请求率没有因本批修改而变化。后续部署需验证真实 Queue 收发/ACK/重试/DLQ，并在相同业务负载下采样 COS 请求。证据日志位于 /var/tmp/cellhive-control-read-*.log；线上基线位于 /var/tmp/cellhive-sg-cos-read-20261123/。
+
+后续发布：源码 `0620be29` 已推送并发布 SG revision 138，真实 Queue 与 10 分钟观察通过，但 COS 总 GET 请求没有显著下降。USW 未发布。见 [SG 发布报告](2026-11-23-sg-control-read-release.md)。

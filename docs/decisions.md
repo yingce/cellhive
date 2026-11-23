@@ -4252,6 +4252,8 @@ Queue 消费者发现资源列表最多缓存 5 秒，TTL 从刷新开始计时�
 
 本批 make test/build/vet、相关 race 与 owner GET 计数检查通过；本地读取两个 owner GET，跨节点仍为两端各两个。30 次每秒发现轮询仅刷新 6 次。生产 COS 总降幅尚未验证，见 [验证报告](reports/2026-11-23-control-read-cost.md)。
 
+2026-11-23 本方案已随源码 `0620be29` 发布 SG revision 138，只更新 cell-agent；Queue 功能通过，线上总 GET 请求未见显著下降，保留后续归因事项。USW 未更新，见 [发布报告](reports/2026-11-23-sg-control-read-release.md)。
+
 ### 2026-11-23 Recovery 历史发现限频止血（已发布 SG revision 139）
 
 恢复 runner 保留 5 秒选主与已知节点 lease 权威点查；历史 node-log 全局发现及每节点记录刷新默认最多缓存 60 秒（从读取开始计时）。启动、重新取得领导权、已知节点 lease session 或存活状态变化立即刷新发现。缓存仅用于恢复候选发现，不提供 owner/lease 权威证明；Recover 仍重新读取 session 并执行原有恢复校验。发现失败不得推进成功刷新时间，不把缺失/错误记录视为 sealed；周期补扫保证晚发布记录和未知节点最终可发现，新增未知节点后台发现延迟最多一个补扫周期加执行耗时。请求触发的同步恢复不受影响。本批不改变 authority 根校验、Queue 或存储格式。
