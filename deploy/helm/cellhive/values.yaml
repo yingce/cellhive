@@ -77,6 +77,8 @@ config:
   cosSecretKey: ""
 
 cellAgent:
+  # Temporary diagnostics only; unset after collection (default info).
+  logLevel: ""
   # Upgrade every bucket participant to validate before enabling reclaim.
   authorityMode: legacy
   authorityReclaimACK: ""

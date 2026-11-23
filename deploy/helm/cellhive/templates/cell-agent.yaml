@@ -103,6 +103,10 @@ spec:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            {{- with .Values.cellAgent.logLevel }}
+            - name: CELLHIVE_LOG_LEVEL
+              value: {{ . | quote }}
+            {{- end }}
             - name: CELLHIVE_AUTHORITY_MODE
               value: {{ .Values.cellAgent.authorityMode | default "legacy" | quote }}
             - name: CELLHIVE_AUTHORITY_RECLAIM_ACK

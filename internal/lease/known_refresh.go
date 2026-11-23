@@ -54,13 +54,20 @@ func (m *Manager) knownRefreshInterval() time.Duration {
 	return d
 }
 
+// reusableObservationLocked only suppresses advisory discovery reads. It does
+// not extend the lease, refresh its timestamp, or authorize takeover. Caller
+// holds m.mu. A future timestamp (e.g. clock rollback) forces a new observation.
+func (m *Manager) reusableObservationLocked(l NodeLease, now time.Time) bool {
+	observed := m.observed[l.Node]
+	maxAge := min(m.knownTTL()/2, 5*time.Second)
+	return !observed.IsZero() && !observed.After(now) && now.Sub(observed) < maxAge &&
+		l.Live(now.Add(m.knownRefreshInterval()))
+}
+
 func (m *Manager) refreshKnown(ctx context.Context) {
 	// Recently expired peers get a bounded recovery window; historical dead
 	// records do not add permanent point-read traffic.
 	now := time.Now()
-	interval := m.knownRefreshInterval()
-	recent := now.Add(-interval / 2)
-	nextTick := now.Add(interval)
 	floor := now.Add(-m.knownTTL()).UnixMilli()
 	m.mu.Lock()
 	nodes := make([]string, 0, len(m.cached))
@@ -70,7 +77,7 @@ func (m *Manager) refreshKnown(ctx context.Context) {
 		}
 		// A recent bucket read already sampled this peer. Never defer a
 		// near-expiry lease, even if its last observation was just received.
-		if m.observed[l.Node].After(recent) && l.Live(nextTick) {
+		if m.reusableObservationLocked(l, now) {
 			continue
 		}
 		nodes = append(nodes, l.Node)

@@ -132,7 +132,8 @@ func TestRunnerRecoversDeadNodeSkipsLiveAndSelf(t *testing.T) {
 	// A known live session becoming dead recovers after the bounded observation,
 	// without waiting for the historical discovery interval.
 	runner.Lease.TTL = 100 * time.Millisecond
-	time.Sleep(15 * time.Millisecond)
+	// Outlive the half-TTL observation window (TTL is 100 ms here).
+	time.Sleep(60 * time.Millisecond)
 	expired, _ := json.Marshal(lease.NodeLease{Node: "node-2", Session: "s1", Expiry: time.Now().Add(-time.Second).UnixMilli(), Liveness: lease.NodeLeaseLiveness})
 	if _, err := shared.Put(ctx, lease.Key("node-2"), expired); err != nil {
 		t.Fatal(err)
@@ -334,7 +335,8 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "s", "", "", 100*time.Millisecond), Recovery: recovery.New(replica.New(b), nil), Now: func() time.Time { return now }, IsLeader: func(context.Context) (bool, error) { return leader, nil }}
 	pass := func() {
 		t.Helper()
-		time.Sleep(15 * time.Millisecond)
+		// Outlive the half-TTL observation window (TTL is 100 ms here).
+		time.Sleep(60 * time.Millisecond)
 		if _, _, _, err := runner.Pass(ctx); err != nil {
 			t.Fatal(err)
 		}

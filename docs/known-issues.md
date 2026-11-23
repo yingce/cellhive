@@ -227,3 +227,7 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 - 2026-11-23：资源清理分钟级对账与 recovery 同轮枚举复用在本地实施。漏通知的任务可能多等一个对账周期；长退役列表每轮仅推进一页。两区实际 COS 404 与总请求降幅待发布采样。
 
 - 2026-11-24：已本地实现并验证 pinned KV 按需授权、sealed node-log 发现过滤与 discovery lease 有界观察复用；全量 test/build/vet 和相关 race 通过，已从独立发布分支部署 SG / USW / GZ；总量与剩余来源见 [发布验收](reports/2026-11-24-three-region-read-reuse-release.md)，不代表所有后台 GET 已消除。见 [设计与验证](reports/2026-11-24-celld-read-reuse.md)。
+
+- 2026-11-24：剩余 GET 已完成 SG 限时 HTTP debug 与三地区来源采样；SG revision 146 已恢复普通日志。确认正常续租 4 GET + 1 Append、2 秒 peer 刷新、Recovery 5 秒选主与 Cron/wake 多阶段读取是主要开销。agent-1 日志存在轮转缺口，双节点 metrics 完整；无任务 span，不能称完整分布式 trace。本次未改请求逻辑，见 [诊断报告](reports/2026-11-24-get-trace.md)。
+
+- 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已从独立源码 `892c9797` 部署 SG/USW/GZ，租约 TTL 仍为 10 秒；全量 test/build/vet、相关 race 和十分钟生产健康验证通过，见 [发布记录](reports/2026-11-24-peer-recovery-release.md)。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。

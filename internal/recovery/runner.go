@@ -189,11 +189,15 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 	return nodes, segments, sessions, nil
 }
 
+// DefaultInterval bounds eager recovery discovery when no requests arrive.
+// Actual takeover still rechecks authority; this is not a lease lifetime.
+const DefaultInterval = 30 * time.Second
+
 // Run is independent of timer dispatch. One unavailable follower must not hold
 // the fleet waker's pass or cron materialization behind a recovery timeout.
 func (r *Runner) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = DefaultInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
