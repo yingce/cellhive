@@ -27,4 +27,14 @@
 
 ## 发布状态
 
-本地已部署并验证。USW 新批次尚未发布，SG 未发布。
+- 本地已部署并验证；本地原来关闭的 queue runner 已启用为 1s，dispatch 指向 user-runtime 内部端口。重启后只读请求保持主队列深度 0、DLQ 深度 1。后台为主队列 e3 与 DLQ e2 建立 continuation 并完成 Fold。
+- 源码 `9dcacebc` 已推送，镜像从干净提交 archive 构建。
+- USW 已经 wrapper 升级至 Helm revision **133**（原 132），preflight/diff 通过，diff 仅镜像更新。
+- 镜像 digest：`sha256:fd4b214c75d8ebcf34f3dc65e7be05fccb59d922180f92706f4bfb3ac05b51ac`。
+- 六个服务 Pod 实际 imageID 一致，全部 Ready、零重启；workerd 使用上一版相同二进制。
+- 独立 namespace `queue-fix-usw-20261123` 原生 Worker 收发、ACK、重试、DLQ 通过；真实 COS 只存在 `queue_1`、`queue_2`，无 q1/q1-dlq 错误路径。
+- 原业务 jobs/jobs-dlq 只读 stats 解析至 queue_1/queue_1-dlq，深度均为 0；此前测试的 20 个 KV 值与原生 DO 计数 133 保留。
+- 使用 Host 请求到 user-runtime 的服务端口验证；不等同于公网 DNS/TLS 验收。
+- SG 未部署，运维仓 SG 原有改动保留。发布后连续观察 604 秒，11 次 Queue 读探针全部通过，六个服务 Pod 全程 Ready、零重启、imageID 匹配。
+
+观察日志中未见服务 ERROR。滚动替换时两次 Queue 控制面读取短暂失败，随后恢复；另有 4 次 COS 租约发布超时重试，剩余租约约 4.8 秒以上，未导致 session 切换或重启。一次 Fold 延期来自控制 cell 的本地水位领先，不是旧 jobs；未持续重复。测试预期的一次死信日志和非 owner purge 保留记录不作为异常消费处理。

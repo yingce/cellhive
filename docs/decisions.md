@@ -4230,7 +4230,7 @@ USW 随后发布 Helm revision 126，仅更新两个 cell-agent 至 seek 提交�
 2026-11-23 USW 发布：epoch Fold/纯读接链/重开维护登记/空链休眠/bucket-proof 批次 `351c23b7` 已发布 USW Helm revision 132。真实 KV、原生 DO 和 Worker 服务路由通过；TEST 只读重开后自动完成 e17 Fold，生产后台 GC 删除 e14/e15 共 630 个对象、保留 e16/e17，退休下界推进到 17。另有 `vwork-1/__queue__/jobs` epoch=29 因 local TXID=2、durable=1 安全拒绝 continuation，跨代维护仍延期，未修复或人工改数据。SG 未部署。详情见 [发布记录](reports/2026-11-23-usw-epoch-fold-release.md)。
 
 
-### 2026-11-23 Queue 资源寻址与 schema 捕获修订（实施中）
+### 2026-11-23 Queue 资源寻址与 schema 捕获修订（已部署本地与 USW）
 
 消费者以资源登记的 `<ns>/__queue__/<storage-id>` 为唯一数据/owner/claim/ack/retry/删除代次身份；业务名称仅用于消费者配置匹配、日志和发送给 handler 的 `batch.queue`。DLQ 同样从本 namespace 的 queue 资源登记解析，不把业务名直接拼为存储路径；缺失或无效映射必须拒绝该消费者，不能退回名称建库。跨 namespace/class 的 scope 拒绝。
 
@@ -4239,3 +4239,5 @@ Queue 冷开/重开首先只读检查 schema；已完整迁移的库不执行空
 - 真实 Worker 回归补充：Queue binding 授权已解析的 scope 必须贯穿发送、批量发送、claim、ACK/retry 与 admission/owner gate；转发保留原请求名称以便接收节点重新鉴权，禁止改写 URL 后造成 token 名称不匹配。
 
 本地验收通过；Queue 接管测试必须明确启动 spool 已上传的前提，不能作为 spool-only 写在节点丢失后可恢复的证据。该已有策略窗口与本批 Queue 修复分开记录。见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
+
+2026-11-23 发布验收：源码 `9dcacebc` 已部署本地与 USW revision 133，真实生产测试 namespace 收发/ACK/重试/DLQ 通过；604 秒观察的 11 次采样均通过，六个服务 Pod 全程 Ready、零重启。SG 未部署，旧错误 jobs 路径保留。完整边界与日志说明见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
