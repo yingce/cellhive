@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"cellhive/internal/bearertoken"
 	"cellhive/internal/control"
 	"cellhive/internal/owner"
 	"cellhive/internal/scopedtoken"
@@ -43,7 +46,7 @@ func TestPinnedAuthorizationRevocation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A background renewal must cache the denial, without requiring a local invalidation event.
+			// An explicit refresh must cache the denial, without requiring a local invalidation event.
 			if ok, err := s.pinnedBindingAllowed(t.Context(), p, true); err != nil || ok {
 				t.Fatalf("revocation %v %v", ok, err)
 			}
@@ -80,49 +83,44 @@ func TestPinnedAuthorizationFailureNeverExtendsLease(t *testing.T) {
 	}
 }
 
-func TestPinnedWarmRetentionBound(t *testing.T) {
+func TestPinnedAuthorizationDemandCache(t *testing.T) {
 	s, p := pinnedAuthFixture(t)
-	s.notePinnedAuth(p)
-	s.hotKVAccessMu.Lock()
-	e := s.hotKVAccesses[pinnedAuthKey(p)]
-	e.lastAccess = time.Now().Add(-3 * time.Second)
-	e.next = time.Now().Add(time.Hour)
-	s.hotKVAccessMu.Unlock()
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { s.runKVReadWarmLoop(ctx); close(done) }()
-	time.Sleep(150 * time.Millisecond)
-	s.hotKVAccessMu.Lock()
-	_, retained := s.hotKVAccesses[pinnedAuthKey(p)]
-	e.lastAccess = time.Now().Add(-61 * time.Second)
-	s.hotKVAccessMu.Unlock()
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	<-done
-	s.hotKVAccessMu.Lock()
-	_, expired := s.hotKVAccesses[pinnedAuthKey(p)]
-	s.hotKVAccessMu.Unlock()
-	if !retained || expired {
-		t.Fatalf("retention retained=%v expired=%v", retained, expired)
-	}
-}
-
-func TestPinnedAuthorizationBackgroundRenewal(t *testing.T) {
-	s, p := pinnedAuthFixture(t)
+	claimSeededScope(t, s, control.Scope())
+	b := &bindingCountBucket{Bucket: s.Bucket, entered: make(chan struct{}), release: make(chan struct{})}
+	close(b.release)
+	s.Owner.B = b
 	if ok, err := s.pinnedBindingAllowed(t.Context(), p, false); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
-	s.notePinnedAuth(p)
+	initial := b.reads.Load()
+	if initial == 0 {
+		t.Fatal("fixture did not read owner")
+	}
+	for i := 0; i < 100; i++ {
+		p.ExpiresMs = time.Now().Add(time.Duration(i+1) * time.Minute).UnixMilli()
+		if ok, err := s.pinnedBindingAllowed(t.Context(), p, false); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+	}
+	if b.reads.Load() != initial {
+		t.Fatalf("equivalent token claims repeated owner reads: %d -> %d", initial, b.reads.Load())
+	}
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { s.runKVReadWarmLoop(ctx); close(done) }()
-	// Past both the authorization TTL and the old two-second hot-set lifetime.
-	time.Sleep(2200 * time.Millisecond)
 	cancel()
-	<-done
-	s.Owner = &owner.Manager{B: s.Bucket, NodeID: "absent", Session: "absent"}
+	if ok, err := s.pinnedBindingAllowed(ctx, p, false); err != context.Canceled || ok {
+		t.Fatal("cancelled request accepted cached authorization", ok, err)
+	}
+	// Expire the entry without sleeping; next demand must query authority.
+	s.bindMu.Lock()
+	e := s.bindCache[pinnedAuthKey(p)]
+	e.exp = time.Now().Add(-time.Second)
+	s.bindCache[pinnedAuthKey(p)] = e
+	s.bindMu.Unlock()
 	if ok, err := s.pinnedBindingAllowed(t.Context(), p, false); err != nil || !ok {
-		t.Fatalf("warm authorization should need no owner read: %v %v", ok, err)
+		t.Fatal(ok, err)
+	}
+	if b.reads.Load() <= initial {
+		t.Fatal("expired entry reused")
 	}
 }
 
@@ -140,5 +138,31 @@ func TestPinnedAuthorizationUsesExactVersion(t *testing.T) {
 		if ok, err := s.pinnedBindingAllowed(t.Context(), other, true); err != nil || ok {
 			t.Fatalf("wrong fixed identity: %v %v", ok, err)
 		}
+	}
+}
+
+func TestPinnedAuthorizationSharedCacheDoesNotExtendTokenLifetime(t *testing.T) {
+	s, p := pinnedAuthFixture(t)
+	if ok, err := s.pinnedBindingAllowed(t.Context(), p, false); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	// Same declaration, but a different already-expired credential. A warm
+	// authorization entry must not bypass authentication on the HTTP path.
+	s.Cfg.RootKey = testRootKey()
+	key, err := s.jwtKey("token/scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	token, err := bearertoken.Mint(key, "token/scope", bearertoken.Claims{Ver: 1, Audience: "cellhive", Subject: "test", Type: "binding", Namespace: p.Namespace, Kind: p.Kind, Name: p.Name, Worker: p.Worker, Version: p.Version, Resource: p.Resource, IssuedAt: now - 120, ExpiresAt: now - 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v1/kv/get?ns=acme&key=k", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != 403 || !strings.Contains(rr.Body.String(), "scope_invalid") {
+		t.Fatalf("expired token admitted with cached declaration: %d %s", rr.Code, rr.Body.String())
 	}
 }

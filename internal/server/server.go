@@ -213,14 +213,10 @@ type Server struct {
 
 	// bindMu guards bindCache: scoped-token binding declarations, cached so a
 	// hot write does not read the control cell on every request.
-	bindMu               sync.Mutex
-	bindCache            map[string]bindingEntry
-	bindRev              uint64
-	bindFlights          map[string]*bindingFlight
-	hotKVAccessMu        sync.Mutex
-	hotKVAccesses        map[string]*hotKVAccess
-	hotKVRefreshes       atomic.Uint64
-	hotKVRefreshFailures atomic.Uint64
+	bindMu      sync.Mutex
+	bindCache   map[string]bindingEntry
+	bindRev     uint64
+	bindFlights map[string]*bindingFlight
 
 	// vectorizeMu guards vectorizeCfg: index configs (dimensions + metric) cached
 	// so insert/query do not read the control cell on every request.
@@ -712,10 +708,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeFmt(w, "cellhive_requests_total %d\n", s.requests.Load())
 	writeFmt(w, "# TYPE cellhive_claims_total counter\n")
 	writeFmt(w, "cellhive_claims_total %d\n", s.claims.Load())
+	// Retain retired warm-loop counters at zero for dashboard compatibility.
 	writeFmt(w, "# TYPE cellhive_hot_kv_access_refreshes_total counter\n")
-	writeFmt(w, "cellhive_hot_kv_access_refreshes_total %d\n", s.hotKVRefreshes.Load())
+	writeFmt(w, "cellhive_hot_kv_access_refreshes_total 0\n")
 	writeFmt(w, "# TYPE cellhive_hot_kv_access_refresh_failures_total counter\n")
-	writeFmt(w, "cellhive_hot_kv_access_refresh_failures_total %d\n", s.hotKVRefreshFailures.Load())
+	writeFmt(w, "cellhive_hot_kv_access_refresh_failures_total 0\n")
 	writeFmt(w, "# TYPE cellhive_append_total counter\n")
 	writeFmt(w, "cellhive_append_total %d\n", s.appends.Load())
 	writeFmt(w, "# TYPE cellhive_segments_read_total counter\n")
@@ -4088,10 +4085,6 @@ func (s *Server) followerSampleTTL() time.Duration {
 
 // Run starts the HTTP server and serves until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
-	warmCtx, stopWarm := context.WithCancel(ctx)
-	warmDone := make(chan struct{})
-	defer func() { stopWarm(); <-warmDone }()
-	go func() { s.runKVReadWarmLoop(warmCtx); close(warmDone) }()
 	var shutdown func(context.Context) error
 	var errCh chan error
 	if s.StartupListener != nil {

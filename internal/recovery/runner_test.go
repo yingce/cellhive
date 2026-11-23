@@ -129,8 +129,10 @@ func TestRunnerRecoversDeadNodeSkipsLiveAndSelf(t *testing.T) {
 	if nodes, segments, sessions, err = runner.Pass(ctx); err != nil || nodes != 0 || segments != 0 || sessions != 0 {
 		t.Fatalf("second pass = %d,%d,%d,%v; want 0,0,0,nil", nodes, segments, sessions, err)
 	}
-	// A known live session becoming dead recovers on the next warm pass,
+	// A known live session becoming dead recovers after the bounded observation,
 	// without waiting for the historical discovery interval.
+	runner.Lease.TTL = 100 * time.Millisecond
+	time.Sleep(15 * time.Millisecond)
 	expired, _ := json.Marshal(lease.NodeLease{Node: "node-2", Session: "s1", Expiry: time.Now().Add(-time.Second).UnixMilli(), Liveness: lease.NodeLeaseLiveness})
 	if _, err := shared.Put(ctx, lease.Key("node-2"), expired); err != nil {
 		t.Fatal(err)
@@ -329,9 +331,10 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 	}
 	publish("current", now.Add(time.Hour))
 	leader := true
-	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "s", "", "", time.Minute), Recovery: recovery.New(replica.New(b), nil), Now: func() time.Time { return now }, IsLeader: func(context.Context) (bool, error) { return leader, nil }}
+	runner := &recovery.Runner{Nodelog: nl, Lease: lease.NewManager(b, "w", "s", "", "", 100*time.Millisecond), Recovery: recovery.New(replica.New(b), nil), Now: func() time.Time { return now }, IsLeader: func(context.Context) (bool, error) { return leader, nil }}
 	pass := func() {
 		t.Helper()
+		time.Sleep(15 * time.Millisecond)
 		if _, _, _, err := runner.Pass(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -406,10 +409,43 @@ func TestRunnerDiscoveryBoundedAndInvalidated(t *testing.T) {
 	// If a lease changes on a global refresh, its node must be listed again
 	// after that lease read; the earlier key set can predate the new session.
 	now = now.Add(time.Minute)
+	if _, err := nl.Open(ctx, "next", 1, nil); err != nil {
+		t.Fatal(err)
+	}
 	publish("next", now.Add(time.Hour))
 	lists = b.lists
 	pass()
 	if b.lists != lists+2 {
 		t.Fatalf("lease transition during discovery: lists %d -> %d", lists, b.lists)
+	}
+}
+
+func TestRunnerCachedLeaseCannotSealNewLiveSession(t *testing.T) {
+	ctx := t.Context()
+	b, _ := bucket.NewFSBucket(t.TempDir())
+	nl := nodelog.New(b, "node")
+	lm := lease.NewManager(b, "waker", "self", "", "", time.Minute)
+	publish := func(session string) {
+		raw, _ := json.Marshal(lease.NodeLease{Node: "node", Session: session, Expiry: time.Now().Add(time.Minute).UnixMilli(), Liveness: lease.NodeLeaseLiveness})
+		if _, err := b.Put(ctx, lease.Key("node"), raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish("old")
+	if _, _, err := lm.NodeLeaseFresh(ctx, "node"); err != nil {
+		t.Fatal(err)
+	}
+	// A new live session appears after the cached observation and before discovery.
+	publish("new")
+	if _, err := nl.Open(ctx, "new", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recovery.Runner{Nodelog: nl, Lease: lm, Recovery: recovery.New(replica.New(b), nil)}
+	if _, _, sessions, err := runner.Pass(ctx); err != nil || sessions != 0 {
+		t.Fatal(sessions, err)
+	}
+	rec, _, err := nl.Get(ctx, "node", "new")
+	if err != nil || rec.Status != nodelog.StatusOpen {
+		t.Fatal("new live session sealed by cached predecessor", rec, err)
 	}
 }

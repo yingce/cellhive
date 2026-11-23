@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -174,4 +175,76 @@ func (m *listFailureAppender) TailGet(ctx context.Context, key string, n int) ([
 		return nil, 0, "", errors.New("injected authority read failure")
 	}
 	return m.segmentMem.TailGet(ctx, key, n)
+}
+
+// A terminal discovery filter must run before authority resolution, including
+// generation aliases. Ordinary List must still resolve the same objects.
+func TestProviderTerminalDiscoveryAvoidsAuthorityReads(t *testing.T) {
+	ctx := t.Context()
+	mem := newSegmentMem()
+	meter := &terminalReadMeter{segmentMem: mem}
+	auth := NewSegmentedAuthority(mem, meter, AuthorityOptions{ValidateRoots: true})
+	old := "node-logs/n/old.json"
+	active := "node-logs/n/active.json"
+	for _, key := range []string{old, active} {
+		if _, err := auth.ConditionalCreate(ctx, key, []byte("record")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") != "2" {
+			t.Error("unexpected point request")
+			w.WriteHeader(500)
+			return
+		}
+		keys, err := mem.List(ctx, "node-logs/")
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(500)
+			return
+		}
+		type item struct{ Key string }
+		listing := struct {
+			XMLName  xml.Name `xml:"ListBucketResult"`
+			Contents []item
+		}{}
+		for _, key := range keys {
+			listing.Contents = append(listing.Contents, item{key})
+		}
+		_ = xml.NewEncoder(w).Encode(listing)
+	}))
+	defer service.Close()
+	base, err := NewS3Bucket(ctx, S3Options{Endpoint: service.URL, Region: "us-east-1", Bucket: "test", AccessKey: "test", SecretKey: "test", PathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &ProviderBucket{S3Bucket: base, authority: auth}
+	meter.reads.Store(0)
+	keys, values, err := b.ListWithResolvedValuesExcept(ctx, "node-logs/", map[string]bool{old: true, active: true})
+	if err != nil || len(keys) != 0 || len(values) != 0 || meter.reads.Load() != 0 {
+		t.Fatalf("filtered discovery %v %v reads=%d", keys, err, meter.reads.Load())
+	}
+	keys, values, err = b.ListWithResolvedValuesExcept(ctx, "node-logs/", map[string]bool{old: true})
+	if err != nil || len(keys) != 1 || keys[0] != active || string(values[active]) != "record" || meter.reads.Load() == 0 {
+		t.Fatal(keys, values, err, meter.reads.Load())
+	}
+	meter.reads.Store(0)
+	keys, err = b.List(ctx, "node-logs/")
+	if err != nil || len(keys) != 2 || meter.reads.Load() == 0 {
+		t.Fatal("ordinary List lost authority validation", keys, err)
+	}
+}
+
+type terminalReadMeter struct {
+	*segmentMem
+	reads atomic.Int64
+}
+
+func (m *terminalReadMeter) TailGet(ctx context.Context, k string, n int) ([]byte, int64, string, error) {
+	m.reads.Add(1)
+	return m.segmentMem.TailGet(ctx, k, n)
+}
+func (m *terminalReadMeter) RangedGet(ctx context.Context, k string, off, n int64) ([]byte, string, error) {
+	m.reads.Add(1)
+	return m.segmentMem.RangedGet(ctx, k, off, n)
 }

@@ -109,8 +109,5 @@ func (s *Server) authorizeBinding(w http.ResponseWriter, r *http.Request, kind s
 			return "", false
 		}
 	}
-	if claims.Worker != "" || claims.Version != 0 {
-		s.notePinnedAuth(claims)
-	}
 	return resolved, true
 }

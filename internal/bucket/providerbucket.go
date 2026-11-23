@@ -217,7 +217,7 @@ func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length 
 // List returns logical keys. Physical generation objects are collapsed into their
 // logical key and tombstoned records are hidden, matching the Bucket contract.
 func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, error) {
-	return b.listLogical(ctx, prefix, false, nil)
+	return b.listLogical(ctx, prefix, false, nil, nil)
 }
 
 // ListImmediate filters logical children before reading authority records.
@@ -225,19 +225,28 @@ func (b *ProviderBucket) ListImmediate(ctx context.Context, prefix string) ([]st
 	if !strings.HasSuffix(prefix, "/") {
 		return nil, fmt.Errorf("immediate listing prefix must end in slash")
 	}
-	return b.listLogical(ctx, prefix, true, nil)
+	return b.listLogical(ctx, prefix, true, nil, nil)
 }
 
 func (b *ProviderBucket) ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error) {
 	values := make(map[string][]byte)
-	keys, err := b.listLogical(ctx, prefix, false, values)
+	keys, err := b.listLogical(ctx, prefix, false, values, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 	return keys, values, nil
 }
 
-func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immediate bool, values map[string][]byte) ([]string, error) {
+func (b *ProviderBucket) ListWithResolvedValuesExcept(ctx context.Context, prefix string, terminal map[string]bool) ([]string, map[string][]byte, error) {
+	values := make(map[string][]byte)
+	keys, err := b.listLogical(ctx, prefix, false, values, terminal)
+	if err != nil {
+		return nil, nil, err
+	}
+	return keys, values, nil
+}
+
+func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immediate bool, values map[string][]byte, terminal map[string]bool) ([]string, error) {
 	keys, err := b.S3Bucket.List(ctx, prefix)
 	if err != nil {
 		return nil, err
@@ -250,6 +259,9 @@ func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immedia
 		logical := key
 		if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
 			logical = base
+		}
+		if terminal[logical] {
+			continue
 		}
 		if immediate && (!strings.HasPrefix(logical, prefix) || strings.Contains(strings.TrimPrefix(logical, prefix), "/")) {
 			continue
