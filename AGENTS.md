@@ -52,5 +52,5 @@ make fmt     # gofmt -w .
 
 - 不在本仓内 patch / fork workerd；workerd 改动提交到 `yingce/cellhive-workerd`；
 - 不引入第二套 JS 引擎；
-- 不引入 NATS/kvrocks/etcd/APISIX 等（发现用 bucket + 内置 DNS）；
+- 默认 cluster 调度使用本地 deadline 与现有 bucket 发现；显式 shared 调度可使用 Redis/Kvrocks 辅助索引。写权和耐久证明沿用 COS 与 cell 协议。不引入 NATS/etcd/APISIX；
 - 不在热路径 List bucket。

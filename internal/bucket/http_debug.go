@@ -22,17 +22,18 @@ import (
 var storageRequestSequence atomic.Uint64
 
 type storageDebugTransport struct {
-	base http.RoundTripper
-	log  *slog.Logger
+	base       http.RoundTripper
+	log        *slog.Logger
+	pathBucket string
 }
 
-func debugTransport(base http.RoundTripper, log *slog.Logger) http.RoundTripper {
+func debugTransport(base http.RoundTripper, log *slog.Logger) *storageDebugTransport {
 	if base == nil {
 		base = http.DefaultTransport
 	}
 	if existing, ok := base.(*storageDebugTransport); ok {
 		if log == nil {
-			return base
+			return existing
 		}
 		base = existing.base
 	}
@@ -119,7 +120,9 @@ func (t *storageDebugTransport) RoundTrip(r *http.Request) (*http.Response, erro
 		log = slog.Default()
 	}
 	if !log.Enabled(r.Context(), slog.LevelDebug) {
-		return t.base.RoundTrip(r)
+		resp, err := t.base.RoundTrip(r)
+		countStorageResponse(r, resp, t.pathBucket)
+		return resp, err
 	}
 	start := time.Now()
 	id := storageRequestSequence.Add(1)
@@ -186,6 +189,7 @@ func (t *storageDebugTransport) RoundTrip(r *http.Request) (*http.Response, erro
 		request.Body = &countedUpload{ReadCloser: r.Body, n: &sent}
 	}
 	response, err := t.base.RoundTrip(request)
+	countStorageResponse(r, response, t.pathBucket)
 	mu.Lock()
 	timings := []any{"dns_ms", dnsMS, "connect_ms", connectMS, "tls_ms", tlsMS, "first_byte_ms", firstMS, "connection_reused", reused, "remote", remote}
 	mu.Unlock()

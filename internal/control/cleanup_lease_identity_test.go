@@ -107,3 +107,38 @@ func TestValidateResourceCleanupLeaseRejectsEmptyDurableToken(t *testing.T) {
 		t.Fatalf("empty durable token accepted: %v", err)
 	}
 }
+
+func TestNextResourceCleanupDeadline(t *testing.T) {
+	s := newStore(t, false)
+	ctx := t.Context()
+	now := time.Unix(100000, 0)
+	s.now = func() time.Time { return now }
+	check := func(want time.Time) {
+		t.Helper()
+		got, err := s.NextResourceCleanup(ctx)
+		if err != nil || !got.Equal(want) {
+			t.Fatalf("next=%v want=%v err=%v", got, want, err)
+		}
+	}
+	check(time.Time{})
+	if _, err := s.CreateResource(ctx, "acme", "kv", "CACHE", "physical", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteResource(ctx, "acme", "kv", "CACHE", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	check(time.UnixMilli(0))
+	pending, err := s.ResourceCleanup(ctx, "acme", "kv", "CACHE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, ok, err := s.ClaimResourceCleanup(ctx, pending)
+	if !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	check(time.UnixMilli(job.LeaseUntilMs))
+	if err := s.FinishResourceCleanup(ctx, job, errors.New("retry")); err != nil {
+		t.Fatal(err)
+	}
+	check(now.Add(2 * time.Second))
+}

@@ -64,11 +64,33 @@ func TestProviderListAttributesPhysicalOwnerProbe(t *testing.T) {
 	defer srv.Close()
 	b := NewProviderBucket(newBoundsTestS3(t, srv.URL, 4096), newSegmentMem())
 	l := GetLabels{WakeScan, "owner", "list"}
+	label := ResponseLabels{WakeScan, "owner", "GET", 404}
+	missingBefore := StorageResponses()[label]
 	before := ObjectGetAttempts()[l]
 	if _, err := b.List(WithReadSource(t.Context(), WakeScan), "cells/"); err != nil {
 		t.Fatal(err)
 	}
+	if n := StorageResponses()[label] - missingBefore; n != uint64(reads.Load()) {
+		t.Fatalf("404s=%d on wire=%d", n, reads.Load())
+	}
 	if n := ObjectGetAttempts()[l] - before; n == 0 || n != uint64(reads.Load()) {
 		t.Fatalf("listed GETs=%d HTTP=%d", n, reads.Load())
+	}
+}
+
+func TestResponseAttributionOnHeadWithoutGetContext(t *testing.T) {
+	labels := ResponseLabels{ResourceCleanup, "owner", "HEAD", 404}
+	before := StorageResponses()[labels]
+	transport := debugTransport(debugRoundTripFunc(func(*http.Request) (*http.Response, error) { return &http.Response{StatusCode: 404}, nil }), nil)
+	transport.pathBucket = "testbucket"
+	req, err := http.NewRequestWithContext(WithReadSource(t.Context(), ResourceCleanup), "HEAD", "https://example.invalid/testbucket/cells/private/c/id/own.json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if n := StorageResponses()[labels] - before; n != 1 {
+		t.Fatalf("HEAD 404 count=%d", n)
 	}
 }

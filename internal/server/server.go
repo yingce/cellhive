@@ -104,11 +104,12 @@ type Deps struct {
 	// :7001 routing-projection read).
 	Control *control.Store
 	// D1/R2/Queue/Workflows back the tenant binding data endpoints (docs/bindings.md).
-	D1         *d1.Store
-	R2         *r2.Store
-	Queue      *queue.Store
-	QueueNudge func(ns, name string)
-	Workflows  *workflow.Store
+	D1              *d1.Store
+	R2              *r2.Store
+	Queue           *queue.Store
+	QueueNudge      func(ns, name string)
+	QueueLocalNudge func(ns, name string)
+	Workflows       *workflow.Store
 	// Vectorize backs the Cloudflare-compatible vector index binding (ADR-158).
 	Vectorize *vectorize.Store
 	// DispatchWorkflow runs (or resumes) a workflow instance; set by cell-agent.
@@ -137,9 +138,12 @@ type Server struct {
 	Deps
 	doPointers              sync.Map // capture scope -> persisted doRecoveryPointer
 	resourceRep             *replica.Manager
+	resourceCleanupWake     chan struct{}
 	resourceCleanupMu       sync.Mutex
 	resourceCleanupPrunedAt time.Time
 	retirementAfter         string
+	retirementPendingAfter  string
+	retirementRescanAt      time.Time
 	localRetirementAfter    string
 
 	// timerRegPending dedupes asynchronous pending-timer registration for a
@@ -248,7 +252,7 @@ type bindingEntry struct {
 
 // New builds a Server.
 func New(d Deps) *Server {
-	s := &Server{Deps: d, ordered: newOrderedDispatcher()}
+	s := &Server{Deps: d, resourceCleanupWake: make(chan struct{}, 1), ordered: newOrderedDispatcher()}
 	if d.Cfg.ProxySQLAdmin != "" {
 		ps, err := proxysql.New(d.Cfg.ProxySQLAdmin, d.Cfg.ProxySQLSave)
 		if err != nil {
@@ -299,6 +303,9 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /v1/diagnose", s.auth(s.handleDiagnose))
 	mux.HandleFunc("POST /v1/internal/telemetry/spans", s.auth(s.handleTelemetrySpans))
 	mux.HandleFunc("POST /v1/internal/request-log", s.auth(s.handleRequestLog))
+	if s.Cfg.ScheduleMode == "shared" {
+		mux.HandleFunc("POST /v1/internal/schedule/hint", s.auth(s.handleScheduleHint))
+	}
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-data", s.auth(s.handleResourceCleanupData))
 	mux.HandleFunc("POST /v1/internal/resource/cleanup-validate", s.auth(s.handleResourceCleanupValidate))
 	mux.HandleFunc("POST /v1/internal/control/read", s.auth(s.handleControlRead))
@@ -778,6 +785,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	{
+		writeFmt(w, "# TYPE cellhive_bucket_http_responses_total counter\n")
+		for labels, n := range bucket.StorageResponses() {
+			writeFmt(w, "cellhive_bucket_http_responses_total{source=%q,key_class=%q,method=%q,status=\"%d\"} %d\n", labels.Source, labels.KeyClass, labels.Method, labels.Status, n)
+		}
 		writeFmt(w, "# TYPE cellhive_bucket_get_attempts_total counter\n")
 		for labels, n := range bucket.ObjectGetAttempts() {
 			writeFmt(w, "cellhive_bucket_get_attempts_total{source=%q,key_class=%q,via=%q} %d\n", labels.Source, labels.KeyClass, labels.Via, n)

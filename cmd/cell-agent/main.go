@@ -47,6 +47,7 @@ import (
 	"cellhive/internal/recovery"
 	"cellhive/internal/replica"
 	"cellhive/internal/restore"
+	"cellhive/internal/scheduleindex"
 	"cellhive/internal/server"
 	"cellhive/internal/telemetry"
 	"cellhive/internal/timer"
@@ -71,6 +72,16 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Error("invalid config", "err", err)
 		os.Exit(2)
+	}
+	var shared *scheduleindex.Index
+	if cfg.ScheduleMode == "shared" {
+		index, err := scheduleindex.New(cfg.ScheduleRedisURL, cfg.ScheduleRegion, log)
+		if err != nil {
+			log.Error("invalid shared scheduling configuration", "err", err)
+			os.Exit(2)
+		}
+		shared = index
+		defer shared.Close()
 	}
 	inst, err := instance.Acquire(cfg.DataDir)
 	if err != nil {
@@ -478,6 +489,10 @@ func main() {
 		})
 	}
 
+	var timerIndex timer.Index = wakeIdx
+	if shared != nil {
+		timerIndex = scheduleindex.TimerIndex{Durable: wakeIdx, Shared: shared}
+	}
 	openTimer := func(tctx context.Context, sc cell.Scope) (*timer.Store, error) {
 		if sc.Class == "__kv__" || sc.Class == "__queue__" {
 			blocked, err := rep.ResourceBlocked(tctx, sc)
@@ -496,7 +511,7 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		st.Index = wakeIdx
+		st.Index = timerIndex
 		return st, nil
 	}
 	var dispatcher timer.Dispatcher = timer.NoopDispatcher{Log: log}
@@ -510,7 +525,7 @@ func main() {
 	// Workflows: KindWorkflowSleep timers resume the slept instance; other kinds
 	// pass through to user-runtime (owner-aware control reads are wired below).
 	workflowStore := workflow.New(store)
-	workflowStore.Index = wakeIdx
+	workflowStore.Index = timerIndex
 	workflowStore.Register = timerReg.Add
 	const workflowLeaseMs = int64(60_000)
 	// One short-TTL projection cache serves every control-derived dispatch
@@ -806,11 +821,7 @@ func main() {
 	controlReads = srv.BackgroundControl()
 	projCache.src = controlReads
 	enricher.ctrl = controlReads
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		runMultipartGC(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, ticker.C, srv.R2.GCStaleUploadsPage)
-	}()
+	go runMultipartGC(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, srv.R2.GCStaleUploadsPage)
 	if telemetry.LogsMode() == telemetry.LogsAll || telemetry.LogsMode() == telemetry.LogsTail {
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)
@@ -1015,7 +1026,17 @@ func main() {
 						return refs, nil
 					},
 				}
+				srv.QueueLocalNudge = runner.Nudge
 				srv.QueueNudge = runner.Nudge
+				if shared != nil {
+					runner.ProjectDeadline = func(ns, name string, at time.Time) {
+						shared.Notify(scheduleindex.Hint{Kind: "queue", Scope: queue.Scope(ns, name).String(), Due: at.UnixMilli()})
+					}
+					srv.QueueNudge = func(ns, name string) {
+						runner.Nudge(ns, name)
+						shared.Notify(scheduleindex.Hint{Kind: "queue", Scope: queue.Scope(ns, name).String()})
+					}
+				}
 				runner.Start(bucket.WithReadSource(ctx, bucket.QueueDispatch))
 			}
 		}
@@ -1218,6 +1239,12 @@ func main() {
 		}
 	}()
 	go srv.RunHyperdriveProxyHealthLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead))
+	if shared != nil {
+		indexCtx, stopIndex := context.WithCancel(ctx)
+		indexDone := make(chan struct{})
+		go func() { defer close(indexDone); shared.Run(indexCtx, srv.DeliverScheduleHint) }()
+		defer func() { stopIndex(); <-indexDone }()
+	}
 	srv.SetReady(true)
 	go srv.RunResourceCleanupLoop(bucket.WithReadSource(ctx, bucket.ResourceCleanup))
 	go srv.RunCellTransferCleanupLoop(bucket.WithReadSource(ctx, bucket.TransferCleanup))

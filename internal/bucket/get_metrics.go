@@ -2,6 +2,8 @@ package bucket
 
 import (
 	"context"
+	"maps"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -23,6 +25,7 @@ const (
 	BindingHTTP       ReadSource = "binding_http"
 	HealthHTTP        ReadSource = "health_http"
 	OtherHTTP         ReadSource = "other_http"
+	SharedSchedule    ReadSource = "shared_schedule"
 	QueueDispatch     ReadSource = "queue_dispatch"
 	QueueReconcile    ReadSource = "queue_reconcile"
 	CronPlan          ReadSource = "cron_plan"
@@ -47,7 +50,7 @@ type objectClassTag struct{}
 
 func WithReadSource(ctx context.Context, s ReadSource) context.Context {
 	switch s {
-	case RouteProjection, ResourceCleanup, TransferCleanup, CompactionRead, UploadRead, WorkflowRetention, MaintenanceRead, PeerHTTP, ControlHTTP, DOHTTP, BindingHTTP, HealthHTTP, OtherHTTP,
+	case RouteProjection, ResourceCleanup, TransferCleanup, CompactionRead, UploadRead, WorkflowRetention, MaintenanceRead, PeerHTTP, ControlHTTP, DOHTTP, BindingHTTP, HealthHTTP, OtherHTTP, SharedSchedule,
 		QueueDispatch, QueueReconcile, CronPlan, CronDispatch, CronRetry, WakeScan, WakeRepair, TimerDispatch, RecoveryRead, OwnerRead, LeaseRead, PurgeRead, KVRefresh, RebalanceRead, EpochGCRead, EpochFoldRead:
 		return context.WithValue(ctx, sourceTag{}, s)
 	}
@@ -59,6 +62,10 @@ func GetReadSource(ctx context.Context) ReadSource {
 }
 
 func objectGetContext(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, objectClassTag{}, objectKeyClass(key))
+}
+
+func objectKeyClass(key string) string {
 	if base, _, ok := ParsePhysicalAuthorityKey(key); ok {
 		key = base
 	}
@@ -86,7 +93,7 @@ func objectGetContext(ctx context.Context, key string) context.Context {
 	case "fleet", "wake", "r2", "r2meta", "r2usage", "assets", "bundles", "dosupervisor", "deploys":
 		class = prefix
 	}
-	return context.WithValue(ctx, objectClassTag{}, class)
+	return class
 }
 
 type GetLabels struct {
@@ -125,4 +132,58 @@ func ObjectGetAttempts() map[GetLabels]uint64 {
 		out[labels] = n
 	}
 	return out
+}
+
+type ResponseLabels struct {
+	Source           ReadSource
+	KeyClass, Method string
+	Status           int
+}
+
+var responseCounters = struct {
+	sync.Mutex
+	counts map[ResponseLabels]uint64
+}{counts: make(map[ResponseLabels]uint64)}
+
+func countStorageResponse(r *http.Request, response *http.Response, pathBucket string) {
+	if response == nil {
+		return
+	}
+	ctx := r.Context()
+	source := GetReadSource(ctx)
+	if source == "" {
+		source = "other"
+	}
+	class, ok := ctx.Value(objectClassTag{}).(string)
+	if !ok {
+		key := strings.TrimPrefix(r.URL.Path, "/")
+		if pathBucket != "" {
+			if key == pathBucket {
+				key = ""
+			} else {
+				key = strings.TrimPrefix(key, pathBucket+"/")
+			}
+		}
+		if key == "" {
+			class = "bucket"
+		} else {
+			class = objectKeyClass(key)
+		}
+	}
+	method := r.Method
+	switch method {
+	case "GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS":
+	default:
+		method = "other"
+	}
+	label := ResponseLabels{source, class, method, response.StatusCode}
+	responseCounters.Lock()
+	responseCounters.counts[label]++
+	responseCounters.Unlock()
+}
+
+func StorageResponses() map[ResponseLabels]uint64 {
+	responseCounters.Lock()
+	defer responseCounters.Unlock()
+	return maps.Clone(responseCounters.counts)
 }

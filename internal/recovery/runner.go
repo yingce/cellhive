@@ -2,13 +2,11 @@ package recovery
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
-	"cellhive/internal/bucket"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
 )
@@ -92,11 +90,14 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 	if r.discovered == nil {
 		r.discovered = make(map[string]discoveredNode)
 	}
+	var listing *nodelog.Listing
 	if r.discoveredAt.IsZero() || now.Sub(r.discoveredAt) >= interval {
-		nodeList, discoverErr := r.Nodelog.Nodes(ctx)
+		var discoverErr error
+		listing, discoverErr = r.Nodelog.Discover(ctx)
 		if discoverErr != nil {
 			return 0, 0, 0, discoverErr
 		}
+		nodeList := listing.Nodes()
 		r.nodeList = nodeList
 		r.discoveredAt = now
 		// Bound memory to the last successful discovery snapshot.
@@ -107,16 +108,23 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 		r.discovered = next
 	}
 	for _, node := range r.nodeList {
-		l, lerr := r.Lease.Get(ctx, node)
-		if lerr != nil && !errors.Is(lerr, bucket.ErrNotFound) {
+		l, found, lerr := r.Lease.NodeLeaseFresh(ctx, node)
+		if lerr != nil {
 			r.log().Warn("recovery: lease read failed; skipping node", "node", node, "err", lerr)
 			continue
 		}
 		state := r.discovered[node]
-		live := lerr == nil && l.Live(now)
-		if state.refreshed.IsZero() || now.Sub(state.refreshed) >= interval || state.session != l.Session || state.live != live {
+		live := found && l.Live(now)
+		leaseChanged := !state.refreshed.IsZero() && (state.session != l.Session || state.live != live)
+		if state.refreshed.IsZero() || now.Sub(state.refreshed) >= interval || leaseChanged {
 			started := r.now()
-			recs, readErr := r.Nodelog.ListNode(ctx, node)
+			read := r.Nodelog.ListNode
+			// A lease transition can postdate the global listing. Rediscover that node
+			// after the lease read so newly published sessions are visible.
+			if listing != nil && !leaseChanged {
+				read = listing.Records
+			}
+			recs, readErr := read(ctx, node)
 			if readErr != nil {
 				r.log().Warn("recovery: list sessions failed", "node", node, "err", readErr)
 				continue
@@ -127,7 +135,7 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 		recs := state.records
 		recovered := false
 		for i, rec := range recs {
-			if rec.Status == nodelog.StatusSealed || (lerr == nil && l.Live(now) && l.Session == rec.Session) {
+			if rec.Status == nodelog.StatusSealed || (live && l.Session == rec.Session) {
 				continue
 			}
 			key := node + "/" + rec.Session

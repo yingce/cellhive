@@ -334,13 +334,20 @@ func TestCompletedCleanupSweepsLateOldEpochButKeepsSuccessor(t *testing.T) {
 	if _, _, err := s.resourceReplica().Append(ctx, sc, 2, current); err != nil {
 		t.Fatal(err)
 	}
-	s.retirementAfter = "" // a restarted coordinator resumes the durable GC index
-	if err := s.ResourceCleanupPass(ctx); err != nil {
+	if s.retirementRescanAt.IsZero() {
+		t.Fatal("full audit did not enter cooldown")
+	}
+	if err := s.sweepResourceRetirements(ctx, s.retirementRescanAt.Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	oldKeys, err := s.resourceReplica().ListSegments(ctx, sc, 1)
-	if err != nil || len(oldKeys) != 0 {
-		t.Fatalf("late payload remained after completed job: %v %v", oldKeys, err)
+	if _, _, err := s.Bucket.Get(ctx, replica.Prefix(sc, 1)+"1-1.ltx"); err != nil {
+		t.Fatalf("physical payload before full audit: %v", err)
+	}
+	if err := s.sweepResourceRetirements(ctx, s.retirementRescanAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Bucket.Get(ctx, replica.Prefix(sc, 1)+"1-1.ltx"); !errors.Is(err, bucket.ErrNotFound) {
+		t.Fatalf("physical payload after full audit: %v", err)
 	}
 	live, err := s.resourceReplica().ListSegments(ctx, sc, 2)
 	if err != nil || len(live) != 1 {
@@ -451,7 +458,7 @@ func TestNamespacePurgePreservesRetirementGC(t *testing.T) {
 	if _, err := s.Bucket.Put(ctx, replica.Prefix(sc, 1)+"1-1.ltx", old); err != nil {
 		t.Fatal(err)
 	}
-	s.retirementAfter = ""
+	s.retirementRescanAt = time.Time{} // a restarted coordinator audits persistent history
 	if err := s.ResourceCleanupPass(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -459,4 +466,50 @@ func TestNamespacePurgePreservesRetirementGC(t *testing.T) {
 	if err != nil || len(keys) != 0 {
 		t.Fatalf("late data escaped namespace lifecycle: %v %v", keys, err)
 	}
+}
+
+func TestCleanupLoopSleepsUntilDelete(t *testing.T) {
+	s := newDomainServer(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	if _, err := s.Control.CreateResource(ctx, "acme", "kv", "CACHE", "physical", "ops"); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	count := &fenceCountingBucket{Bucket: s.Owner.B}
+	s.Owner.B = count
+	// The former two-second ticker ran one full pass over these same resources.
+	if err := s.ResourceCleanupPass(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if count.gets.Swap(0) == 0 {
+		cancel()
+		t.Fatal("baseline pass missed owner read")
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); s.RunResourceCleanupLoop(ctx) }()
+	defer func() { cancel(); <-done }()
+	wait := func(check func() bool) {
+		t.Helper()
+		for until := time.Now().Add(5 * time.Second); time.Now().Before(until); {
+			if check() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("cleanup deadline exceeded")
+	}
+	wait(func() bool { return count.gets.Load() > 0 })
+	s.resourceCleanupMu.Lock()
+	before := count.gets.Load()
+	s.resourceCleanupMu.Unlock()
+	time.Sleep(2200 * time.Millisecond)
+	if n := count.gets.Load() - before; n != 0 {
+		t.Fatalf("idle owner GETs=%d", n)
+	}
+	mustAdmin(t, s.AdminHandler(), http.MethodDelete, "/v1/kv/resources?namespace=acme&name=CACHE", "")
+	wait(func() bool {
+		j, err := s.Control.ResourceCleanup(ctx, "acme", "kv", "CACHE")
+		return err == nil && j.State == "complete"
+	})
 }

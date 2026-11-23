@@ -217,7 +217,7 @@ func (b *ProviderBucket) RangedGet(ctx context.Context, key string, off, length 
 // List returns logical keys. Physical generation objects are collapsed into their
 // logical key and tombstoned records are hidden, matching the Bucket contract.
 func (b *ProviderBucket) List(ctx context.Context, prefix string) ([]string, error) {
-	return b.listLogical(ctx, prefix, false)
+	return b.listLogical(ctx, prefix, false, nil)
 }
 
 // ListImmediate filters logical children before reading authority records.
@@ -225,10 +225,19 @@ func (b *ProviderBucket) ListImmediate(ctx context.Context, prefix string) ([]st
 	if !strings.HasSuffix(prefix, "/") {
 		return nil, fmt.Errorf("immediate listing prefix must end in slash")
 	}
-	return b.listLogical(ctx, prefix, true)
+	return b.listLogical(ctx, prefix, true, nil)
 }
 
-func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immediate bool) ([]string, error) {
+func (b *ProviderBucket) ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error) {
+	values := make(map[string][]byte)
+	keys, err := b.listLogical(ctx, prefix, false, values)
+	if err != nil {
+		return nil, nil, err
+	}
+	return keys, values, nil
+}
+
+func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immediate bool, values map[string][]byte) ([]string, error) {
 	keys, err := b.S3Bucket.List(ctx, prefix)
 	if err != nil {
 		return nil, err
@@ -253,13 +262,19 @@ func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immedia
 			out = append(out, key)
 		}
 	}
+	var valuesMu sync.Mutex
 	logical, err := resolveListedWindows(context.WithValue(ctx, listTag{}, true), windows, func(ctx context.Context, logical string, _ int64) (bool, error) {
-		_, _, err := b.Get(ctx, logical)
+		data, _, err := b.Get(ctx, logical)
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
 		}
 		if err != nil {
 			return false, fmt.Errorf("list authority %s: %w", logical, err)
+		}
+		if values != nil {
+			valuesMu.Lock()
+			values[logical] = data
+			valuesMu.Unlock()
 		}
 		return true, nil
 	})

@@ -263,16 +263,27 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.readRecords(ctx, keys, nil)
+}
+
+func (m *Manager) readRecords(ctx context.Context, keys []string, values map[string][]byte) ([]Record, error) {
 	out := make([]Record, 0, len(keys))
 	for _, k := range keys {
-		data, _, err := m.get(ctx, k)
-		if err != nil {
-			if errors.Is(err, bucket.ErrNotFound) {
-				continue
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		data, ok := values[k]
+		if !ok {
+			var err error
+			data, _, err = m.get(ctx, k)
+			if err != nil {
+				if errors.Is(err, bucket.ErrNotFound) {
+					continue
+				}
+				// Recovery must fail closed: treating an unreadable session as absent
+				// would skip the only copy of follower-acked segments.
+				return nil, fmt.Errorf("nodelog: read %s: %w", k, err)
 			}
-			// Recovery must fail closed: treating an unreadable session as absent
-			// would skip the only copy of follower-acked segments.
-			return nil, fmt.Errorf("nodelog: read %s: %w", k, err)
 		}
 		var r Record
 		if err := json.Unmarshal(data, &r); err != nil {
@@ -287,11 +298,33 @@ func (m *Manager) ListNode(ctx context.Context, node string) ([]Record, error) {
 // path (bucket List) used only by recovery orchestration / operations, never on
 // the request hot path.
 func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
-	keys, err := m.list(ctx, "node-logs/")
+	listing, err := m.Discover(ctx)
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
+	return listing.Nodes(), nil
+}
+
+// Listing is a single discovery pass, including bodies resolved by the provider.
+type Listing struct {
+	manager *Manager
+	keys    map[string][]string
+	values  map[string][]byte
+}
+
+func (m *Manager) Discover(ctx context.Context) (*Listing, error) {
+	var keys []string
+	var values map[string][]byte
+	var err error
+	if m.Objs != nil {
+		keys, values, err = m.Objs.ListWithResolvedValues(ctx, objectstore.PrefixNodeLogs)
+	} else {
+		keys, err = m.list(ctx, objectstore.PrefixNodeLogs)
+	}
+	if err != nil {
+		return nil, err
+	}
+	listing := &Listing{manager: m, values: values, keys: make(map[string][]string)}
 	for _, k := range keys {
 		rest, ok := strings.CutPrefix(k, "node-logs/")
 		if !ok {
@@ -299,15 +332,22 @@ func (m *Manager) Nodes(ctx context.Context) ([]string, error) {
 		}
 		node, _, ok := strings.Cut(rest, "/")
 		if ok && node != "" {
-			seen[node] = true
+			listing.keys[node] = append(listing.keys[node], k)
 		}
 	}
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
+	return listing, nil
+}
+
+func (l *Listing) Records(ctx context.Context, node string) ([]Record, error) {
+	return l.manager.readRecords(ctx, l.keys[node], l.values)
+}
+func (l *Listing) Nodes() []string {
+	out := make([]string, 0, len(l.keys))
+	for node := range l.keys {
+		out = append(out, node)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out
 }
 
 // Checkpoint persists only fragments already uploaded to the bucket. CAS

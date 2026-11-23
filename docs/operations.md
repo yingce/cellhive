@@ -16,7 +16,24 @@
 
 预览 `messages[].body` 为 base64；`content_type` 指明解码方式，`timestamp_ms/attempts` 为 DLQ 当前记录，`source_created_ms/source_attempts/source_queue/source_id` 保留来源。预览不领取、不加 attempts、不改变投递状态。重复 ack 安全，但不能取消已开始执行的业务代码。分页为活数据 keyset，不是全队列快照。
 
-清理状态为 `pending/running/failed/complete`，含 `job_id/data_scope/attempts/last_error/next_retry_ms`；后台每 2 秒检查、失败指数退避最多自动 10 次，手动 retry 重置失败预算。每 pass 最多删除 500 replica 对象；大资源继续 pending，不消耗失败预算。删除完成前不允许重建；完成后重新创建才激活新 incarnation。删除主 Queue 不删除独立 DLQ，purge 仍只清消息。旧无来源 DLQ、共享 scope 或 bucket 失败会明确报告，不能当作清理完成。
+清理状态为 `pending/running/failed/complete`，含 `job_id/data_scope/attempts/last_error/next_retry_ms`；删除和手动重试唤醒本机，按持久化截止时间调度，空闲每分钟对账，失败指数退避最多自动 10 次，手动 retry 重置失败预算。每 pass 最多删除 500 replica 对象；大资源继续 pending，不消耗失败预算。删除完成前不允许重建；完成后重新创建才激活新 incarnation。删除主 Queue 不删除独立 DLQ，purge 仍只清消息。旧无来源 DLQ、共享 scope 或 bucket 失败会明确报告，不能当作清理完成。
+
+删除任务完成后保留退役代次记录，以回收迟到的旧文件。启动时开始历史巡检，每个维护周期最多处理 20 条退役记录、每条一页。完整遍历后至少间隔一小时才再次从头扫描；期间只从控制 SQLite 的部分索引选取有未完分页或错误的记录访问对象存储。新删除仍直接清理。重启会提前重新开始历史巡检。永久退出需要系统证明覆盖所有写入者、在途 PUT、待重试和可重放 spool。当前没有跨节点的完整证明，所有完成的记录仍保留低频兜底，不提供人工跳过入口。
+
+## cell-agent 后台定时访问
+
+下表为源码默认值，实际周期以区域配置为准。一个 tick 可能只检查内存，也可能触发多次 COS 操作。生产 GET 归因用 `cellhive_bucket_get_attempts_total` 的 source、key_class 和 via 核对。
+
+| 路径 | 默认周期或触发 | 可能的远端工作 |
+|---|---|---|
+| 节点租约 | TTL 10 秒，每 TTL/3 续租，已知节点至多每 2 秒刷新 | 发布节点权威、点查已知 peer。最近半个刷新周期已有成功的桶读且租约覆盖下一 tick 时，本轮省去重复点查。另有至多每 100ms 一次的本机自我隔离检查。 |
+| Recovery | 每 5 秒，发现快照默认 1 分钟 | 参与 waker 选举，读租约，刷新 node-log 候选；租约变化可提前刷新。 |
+| 资源清理、app/worker purge | 删除事件、到期重试，空闲每分钟对账 | 检查控制 owner，按持久任务执行；purge 有分批工作时按 5 秒推进。退役历史另走上述小时级补扫。 |
+| Queue、Timer、Cron | Queue 收到通知或到期时派发，每分钟对账；驻留 timer 默认 1 秒；Cron 按 UTC 分钟，失败时默认 30 秒重试 | 按候选做 owner、持久状态检查与派发。shared 模式另有每秒 Redis 到期查询。 |
+| 孤儿 wake、wake 修复 | waker 默认 1 分钟，过期索引清理间隔 10 分钟，本机修复默认 5 分钟 | 检查持久到期索引、接管孤儿、修复已知 scope。 |
+| Fold、epoch GC、复制上传 | fold 每秒检查本机候选，epoch GC 默认首次 1 分钟后、之后每 5 分钟；上传刷新默认 30 秒 | 按 scope 和条件做归并、回收或上传；常规 compaction 由事件唤醒。 |
+| R2 multipart、Workflow、审计 | multipart 启动 1 分钟后扫第一页，整轮结束后间隔 1 小时，续页和错误重试间隔 1 分钟；Workflow 策略每分钟、启用默认保留策略时每 10 分钟；审计保留每小时 | multipart 检查旧上传；其余按控制面投影、owner 和保留策略执行。 |
+| 交权补偿、磁盘维护、代理 | 交权每 5 秒先检查本机待重试集合；启用磁盘维护时默认 1 分钟；ProxySQL 配置后每 30 秒、Hyperdrive 代理健康每 5 秒 | 交权集合为空时没有 COS 请求；代理健康探测访问代理端点。按需启用的 rebalance 和 bundle/asset GC 默认关闭。 |
 
 Queue/Cron/Workflow 与 HTTP fetch 的调用结果都是 OTLP 日志，字段见下方「OTLP 日志格式」。控制面不再有 `GET /v1/control/invocations`，也不再写 `__invocations__` cell。console 不进 Queue/Cron/Workflow 那条完成记录。是否导出由节点级 `CELLHIVE_INVOCATION_LOGS`（默认 on）控制（ADR-239 2026-11-20 修订）。
 

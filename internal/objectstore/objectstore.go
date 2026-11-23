@@ -290,6 +290,30 @@ func (o *Objects) ListPrefix(ctx context.Context, prefix string) ([]string, erro
 	return o.B.List(ctx, prefix)
 }
 
+// ListWithResolvedValues exposes already-read bodies for cold discovery.
+func (o *Objects) ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error) {
+	if _, err := o.key(prefix); err != nil {
+		return nil, nil, err
+	}
+	if l, ok := o.B.(bucket.ResolvedLister); ok {
+		keys, values, err := l.ListWithResolvedValues(ctx, prefix)
+		if err != nil {
+			return nil, nil, err
+		}
+		for k := range values {
+			if _, err := o.key(k); err != nil {
+				return nil, nil, err
+			}
+			if !strings.HasPrefix(k, prefix) {
+				return nil, nil, ErrBadKey
+			}
+		}
+		return keys, values, nil
+	}
+	keys, err := o.ListPrefix(ctx, prefix)
+	return keys, nil, err
+}
+
 // CommonPrefixes returns immediate child prefixes under prefix when the
 // backend supports delimiter listings; otherwise it derives them from a full
 // listing (still correct, just less efficient on very large prefixes).

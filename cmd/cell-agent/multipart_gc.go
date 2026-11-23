@@ -6,14 +6,16 @@ import (
 	"time"
 )
 
-func runMultipartGC(ctx context.Context, log *slog.Logger, ticks <-chan time.Time, collect func(context.Context, time.Duration, string, int) (int, string, error)) {
+func runMultipartGC(ctx context.Context, log *slog.Logger, collect func(context.Context, time.Duration, string, int) (int, string, error)) {
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
 	cursor := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-ticks:
-			if !ok || ctx.Err() != nil {
+		case <-timer.C:
+			if ctx.Err() != nil {
 				return
 			}
 		}
@@ -23,11 +25,13 @@ func runMultipartGC(ctx context.Context, log *slog.Logger, ticks <-chan time.Tim
 		// The collector retains the failed item while advancing past completed
 		// work; losing this progress can starve later parts on every timeout.
 		cursor = next
-		if err != nil {
-			if log != nil && ctx.Err() == nil {
-				log.Warn("multipart GC page failed", "err", err)
-			}
-			continue
+		if err != nil && log != nil && ctx.Err() == nil {
+			log.Warn("multipart GC page failed", "err", err)
 		}
+		delay := time.Hour
+		if err != nil || next != "" {
+			delay = time.Minute
+		}
+		timer.Reset(delay)
 	}
 }

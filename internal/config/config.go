@@ -17,11 +17,14 @@ import (
 
 // Config is the cell-agent runtime configuration.
 type Config struct {
-	NodeID    string
-	SessionID string
-	Advertise string
-	PeerURL   string
-	DataDir   string
+	ScheduleMode     string
+	ScheduleRedisURL string
+	ScheduleRegion   string
+	NodeID           string
+	SessionID        string
+	Advertise        string
+	PeerURL          string
+	DataDir          string
 
 	// Durability is the write-acknowledgement posture:
 	//   "auto"   (default) - fleet when a live follower exists, else bucket
@@ -548,6 +551,9 @@ func FromEnv() Config {
 	nsRPS, nsBurst := envRate("CELLHIVE_NS_RATE", 0, 0)
 	s3Endpoint := env("AWS_ENDPOINT_URL", "")
 	return Config{
+		ScheduleMode:        env("CELLHIVE_SCHEDULE_MODE", "cluster"),
+		ScheduleRedisURL:    os.Getenv("CELLHIVE_SCHEDULE_REDIS_URL"),
+		ScheduleRegion:      os.Getenv("CELLHIVE_SCHEDULE_REGION"),
 		NodeID:              env("CELLHIVE_NODE_ID", "node-1"),
 		SessionID:           env("CELLHIVE_SESSION_ID", fmt.Sprintf("%d", time.Now().UnixNano())),
 		Advertise:           env("CELLHIVE_ADVERTISE", "127.0.0.1:7001"),
@@ -847,6 +853,15 @@ func envInt(key string, def int) int {
 
 // Validate checks required fields.
 func (c Config) Validate() error {
+	switch c.ScheduleMode {
+	case "", "cluster":
+	case "shared":
+		if c.ScheduleRedisURL == "" || c.ScheduleRegion == "" || strings.ContainsAny(c.ScheduleRegion, "{}") {
+			return fmt.Errorf("shared scheduling requires CELLHIVE_SCHEDULE_REDIS_URL and a valid CELLHIVE_SCHEDULE_REGION")
+		}
+	default:
+		return fmt.Errorf("invalid CELLHIVE_SCHEDULE_MODE %q", c.ScheduleMode)
+	}
 	switch c.AuthorityMode {
 	case "", "legacy":
 	case "validate", "reclaim":

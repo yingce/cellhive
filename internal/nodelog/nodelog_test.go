@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"cellhive/internal/bucket"
@@ -165,5 +166,79 @@ func TestAcceptedLossResolutionSurvivesTerminalUpdate(t *testing.T) {
 	}
 	if _, err = m.SetStatus(ctx, r.Node, r.Session, StatusRecovering); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("reopen: %v", err)
+	}
+}
+
+// resolvingBucket models a provider that reads each logical value during List.
+type resolvingBucket struct {
+	bucket.Bucket
+	gets int
+}
+
+func (b *resolvingBucket) Get(ctx context.Context, key string) ([]byte, string, error) {
+	b.gets++
+	return b.Bucket.Get(ctx, key)
+}
+func (b *resolvingBucket) ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error) {
+	keys, err := b.Bucket.List(ctx, prefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	values := make(map[string][]byte, len(keys))
+	for _, k := range keys {
+		data, _, err := b.Get(ctx, k)
+		if err != nil {
+			return nil, nil, err
+		}
+		values[k] = data
+	}
+	return keys, values, nil
+}
+func (b *resolvingBucket) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, _, err := b.ListWithResolvedValues(ctx, prefix)
+	return keys, err
+}
+func TestDiscoveryReusesResolvedRecords(t *testing.T) {
+	ctx := t.Context()
+	b := &resolvingBucket{Bucket: newMgr(t).B}
+	m := New(b, "node-1")
+	const count = 100
+	for i := 0; i < count; i++ {
+		if _, err := m.Open(ctx, fmt.Sprint(i), 1, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hide the optional capability to measure the original List + Get path.
+	legacy := New(struct{ bucket.Bucket }{b}, "node-1")
+	for _, tc := range []struct {
+		name    string
+		manager *Manager
+		want    int
+	}{{"keys only", legacy, 2 * count}, {"resolved", m, count}} {
+		b.gets = 0
+		listing, err := tc.manager.Discover(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, err := listing.Records(ctx, "node-1")
+		if err != nil || len(records) != count || b.gets != tc.want {
+			t.Fatalf("%s: records=%d gets=%d err=%v", tc.name, len(records), b.gets, err)
+		}
+		t.Logf("%s: %d record GETs", tc.name, b.gets)
+	}
+	listing, err := m.Discover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Seal(ctx, "node-1", "0"); err != nil {
+		t.Fatal(err)
+	}
+	records, err := listing.Records(ctx, "node-1")
+	if err != nil || len(records) == 0 || records[0].Session != "0" || records[0].Status != StatusOpen {
+		t.Fatalf("listing lost snapshot: %v", err)
+	}
+	fresh, err := m.ListNode(ctx, "node-1")
+	if err != nil || len(fresh) == 0 || fresh[0].Status != StatusSealed {
+		t.Fatalf("targeted refresh missed seal: %v", err)
 	}
 }

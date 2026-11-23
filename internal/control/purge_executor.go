@@ -10,11 +10,12 @@ import (
 // Commit must establish current control ownership and return only after remote
 // durability covers write.
 type PurgeExecutor struct {
-	Store  *Store
-	Holder string
-	Commit func(context.Context, func() error) error
-	Hook   PurgeHook
-	active map[string]Purge
+	Store     *Store
+	Holder    string
+	Commit    func(context.Context, func() error) error
+	Hook      PurgeHook
+	active    map[string]Purge
+	fullBatch bool
 }
 
 func (e *PurgeExecutor) Pass(ctx context.Context) error {
@@ -26,10 +27,12 @@ func (e *PurgeExecutor) Pass(ctx context.Context) error {
 	if err := e.Commit(ctx, func() error { return nil }); err != nil {
 		return err
 	}
-	jobs, err := e.Store.PendingPurges(ctx, 20)
+	const limit = 20
+	jobs, err := e.Store.PendingPurges(ctx, limit)
 	if err != nil {
 		return err
 	}
+	e.fullBatch = len(jobs) == limit
 	if e.active == nil {
 		e.active = make(map[string]Purge)
 	}

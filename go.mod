@@ -13,6 +13,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.75
 	go.opentelemetry.io/otel v1.46.0
@@ -57,8 +58,9 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0 // indirect
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect

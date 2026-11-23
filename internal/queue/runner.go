@@ -65,10 +65,12 @@ type Runner struct {
 	RetryDelayMs int64
 	Interval     time.Duration
 	// Resolve reads the current consumer by physical queue identity.
-	Resolve   func(context.Context, string, string) (Ref, bool, error)
-	wakeMu    sync.Mutex
-	deadlines map[[2]string]time.Time
-	Log       *slog.Logger
+	Resolve func(context.Context, string, string) (Ref, bool, error)
+	// ProjectDeadline receives future local schedule changes. It must not block.
+	ProjectDeadline func(string, string, time.Time)
+	wakeMu          sync.Mutex
+	deadlines       map[[2]string]time.Time
+	Log             *slog.Logger
 	// Filter, when set, decides whether this node should consume a queue (e.g.
 	// OwnerGate: only queues whose cell this node owns, ADR-119). An error skips
 	// the queue for this pass.
@@ -179,6 +181,9 @@ func (r *Runner) schedule(ns, name string, at time.Time) {
 	key := [2]string{ns, name}
 	if old, ok := r.deadlines[key]; !ok || at.Before(old) {
 		r.deadlines[key] = at
+		if !at.IsZero() && r.ProjectDeadline != nil {
+			r.ProjectDeadline(ns, name, at)
+		}
 	}
 }
 

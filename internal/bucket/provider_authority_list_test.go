@@ -71,6 +71,10 @@ func TestProviderListsAuthorityViaStableRoot(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != live {
 		t.Fatalf("list=%v err=%v", got, err)
 	}
+	resolvedKeys, values, err := b.ListWithResolvedValues(ctx, "cells/")
+	if err != nil || len(resolvedKeys) != 1 || resolvedKeys[0] != live || len(values) != 1 || string(values[live]) != "current" {
+		t.Fatalf("resolved keys=%v values=%q err=%v", resolvedKeys, values, err)
+	}
 	sizes, err := b.ListSizes(ctx, "cells/")
 	if err != nil || len(sizes) != 1 || sizes[0].Key != live || sizes[0].Size != int64(len("current")) {
 		t.Fatalf("sizes=%v err=%v", sizes, err)
