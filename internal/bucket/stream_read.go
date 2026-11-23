@@ -19,7 +19,7 @@ type StreamReader interface {
 
 func (b *S3Bucket) OpenReader(ctx context.Context, key string) (io.ReadCloser, int64, string, error) {
 	b.gets.Add(1)
-	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key})
+	out, err := b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key})
 	if err != nil {
 		if isNotFound(err) {
 			err = ErrNotFound

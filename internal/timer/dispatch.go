@@ -1,6 +1,7 @@
 package timer
 
 import (
+	"cellhive/internal/bucket"
 	"context"
 	"errors"
 	"log/slog"
@@ -24,7 +25,7 @@ type Commit func(ctx context.Context, fn func() error) error
 // gate. cronMaxAttempts bounds the retry budget of one cron occurrence; <= 0
 // keeps the legacy unbounded behavior (ADR-305).
 func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs int64, batch int, firedTTL time.Duration, cronMaxAttempts int, log *slog.Logger, commit Commit) (int, error) {
-	write := func(fn func() error) error {
+	write := func(ctx context.Context, fn func() error) error {
 		if commit != nil {
 			return commit(ctx, fn)
 		}
@@ -45,8 +46,16 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 	}
 	n := 0
 	for _, t := range due {
+		dispatchCtx := ctx
+		if t.Kind == KindCron {
+			source := bucket.CronDispatch
+			if t.retrying {
+				source = bucket.CronRetry
+			}
+			dispatchCtx = bucket.WithReadSource(ctx, source)
+		}
 		started := time.Now()
-		if err := d.Dispatch(ctx, t); err != nil {
+		if err := d.Dispatch(dispatchCtx, t); err != nil {
 			attrs := []slog.Attr{slog.String("token", t.Token), slog.String("kind", string(t.Kind)), slog.Int64("scheduled_time_ms", t.DueAtMs), slog.Int64("duration_ms", time.Since(started).Milliseconds())}
 			if sc, parseErr := cell.ParseScope(t.Scope); parseErr == nil {
 				attrs = append(attrs, slog.String("scope", sc.String()), slog.String("ns", sc.Namespace))
@@ -75,7 +84,7 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 				var retryAt int64
 				var attempt int
 				var exhausted bool
-				retryErr := write(func() error {
+				retryErr := write(bucket.WithReadSource(ctx, bucket.CronRetry), func() error {
 					var err error
 					retryAt, attempt, exhausted, err = st.ScheduleRetryBounded(ctx, t.Token, nowMs, cronMaxAttempts, nowMs+firedTTL.Milliseconds())
 					return err
@@ -93,7 +102,7 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 			}
 			continue
 		}
-		if err := write(func() error { return st.MarkFired(ctx, t.Token, nowMs+firedTTL.Milliseconds()) }); err != nil {
+		if err := write(dispatchCtx, func() error { return st.MarkFired(dispatchCtx, t.Token, nowMs+firedTTL.Milliseconds()) }); err != nil {
 			observeFire(string(t.Kind), "failed")
 			log.Warn("timer mark fired failed", "token", t.Token, "err", err)
 			continue
@@ -104,7 +113,7 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 	if expired, err := st.HasExpiredFired(ctx, nowMs); err != nil {
 		log.Warn("timer prune check failed", "err", err)
 	} else if expired {
-		if err := write(func() error { _, err := st.Prune(ctx, nowMs); return err }); err != nil {
+		if err := write(ctx, func() error { _, err := st.Prune(ctx, nowMs); return err }); err != nil {
 			log.Warn("timer prune failed", "err", err)
 		}
 	}

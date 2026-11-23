@@ -211,7 +211,7 @@ func COSServiceEndpoint(bucketURL, name string) (string, string, error) {
 }
 
 func (c *COSAppender) Read(ctx context.Context, key string) ([]byte, error) {
-	r, err := c.client.Object.Get(ctx, key, nil)
+	r, err := c.client.Object.Get(objectGetContext(ctx, key), key, nil)
 	if err != nil {
 		return nil, nativeCOSError(err)
 	}

@@ -125,7 +125,7 @@ func (b *S3ControlBucket) filter(ctx context.Context, in []ObjectInfo) ([]Object
 	out := make([]ObjectInfo, 0, len(in))
 	for _, o := range in {
 		if s3ControlKey(o.Key) {
-			v, e, err := b.Get(ctx, o.Key)
+			v, e, err := b.Get(context.WithValue(ctx, listTag{}, true), o.Key)
 			if errors.Is(err, ErrNotFound) {
 				continue
 			}

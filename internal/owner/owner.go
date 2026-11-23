@@ -330,6 +330,9 @@ func (m *Manager) invalidateLocked(key string) {
 
 // Resolve returns the current owner record and its etag, or ErrUnowned.
 func (m *Manager) Resolve(ctx context.Context, s cell.Scope) (cell.Owner, string, error) {
+	if bucket.GetReadSource(ctx) == "" {
+		ctx = bucket.WithReadSource(ctx, bucket.OwnerRead)
+	}
 	ctx, span := telemetry.Tracer().Start(ctx, "cell.owner_bucket_read")
 	defer span.End()
 	data, e, err := m.B.Get(ctx, Key(s))

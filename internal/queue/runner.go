@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"cellhive/internal/bearertoken"
+	"cellhive/internal/bucket"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -152,6 +153,7 @@ func (r *Runner) Start(ctx context.Context) {
 
 func (r *Runner) scheduledPass(ctx context.Context, now, reconcileAt time.Time) time.Time {
 	if !now.Before(reconcileAt) {
+		ctx = bucket.WithReadSource(ctx, bucket.QueueReconcile)
 		if err := r.reconcile(ctx); err != nil {
 			r.log().Warn("queue reconciliation failed", "err", err)
 			reconcileAt = now.Add(5 * time.Second)

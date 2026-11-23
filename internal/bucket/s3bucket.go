@@ -131,7 +131,7 @@ func isNotFound(err error) bool {
 // Get implements Bucket.
 func (b *S3Bucket) Get(ctx context.Context, key string) ([]byte, string, error) {
 	b.gets.Add(1)
-	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key})
+	out, err := b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key})
 	if err != nil {
 		if isNotFound(err) {
 			return nil, "", ErrNotFound
@@ -156,7 +156,7 @@ func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64)
 	}
 	b.gets.Add(1)
 	rng := fmt.Sprintf("bytes=%d-%d", off, off+length-1)
-	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng})
+	out, err := b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng})
 	if err != nil {
 		if isNotFound(err) {
 			return nil, "", ErrNotFound
@@ -184,7 +184,7 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 	var fallbackSize, fallbackOffset int64
 	var fallbackETag string
 	rng := fmt.Sprintf("bytes=-%d", n)
-	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
+	out, err := b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
 		o.APIOptions = append(o.APIOptions, awsmiddleware.AddRawResponseToMetadata)
 	})
 	if err != nil {
@@ -211,7 +211,7 @@ func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int6
 		fallback, fallbackSize, fallbackOffset, fallbackETag = true, size, off, etag
 		rng = fmt.Sprintf("bytes=%d-%d", off, size-1)
 		b.gets.Add(1)
-		out, err = b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
+		out, err = b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key, Range: &rng}, func(o *s3.Options) {
 			o.APIOptions = append(o.APIOptions, awsmiddleware.AddRawResponseToMetadata)
 		})
 		if err != nil {

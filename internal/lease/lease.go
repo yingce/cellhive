@@ -427,6 +427,9 @@ func (m *Manager) NodeLeaseFresh(ctx context.Context, node string) (NodeLease, b
 
 // Get reads a single node lease.
 func (m *Manager) Get(ctx context.Context, node string) (NodeLease, error) {
+	if bucket.GetReadSource(ctx) == "" {
+		ctx = bucket.WithReadSource(ctx, bucket.LeaseRead)
+	}
 	data, _, err := m.B.Get(ctx, Key(node))
 	if err != nil {
 		return NodeLease{}, err
@@ -463,6 +466,9 @@ func HasShedTarget(leases []NodeLease, self string, now time.Time) bool {
 
 // Sample lists all node leases (operator/diagnostic use; never on hot path).
 func (m *Manager) Sample(ctx context.Context) ([]NodeLease, error) {
+	if bucket.GetReadSource(ctx) == "" {
+		ctx = bucket.WithReadSource(ctx, bucket.LeaseRead)
+	}
 	var keys []string
 	var err error
 	if lister, ok := m.B.(bucket.ImmediateLister); ok {

@@ -183,7 +183,7 @@ func (s *Store) RemoveByOccurrence(ctx context.Context, occurrence string) error
 // Due returns timers due at or before nowMs, ascending by due time, excluding
 // tokens already fired within their TTL. limit <= 0 means no limit.
 func (s *Store) Due(ctx context.Context, nowMs int64, limit int) ([]Timer, error) {
-	q := `SELECT t.token, t.due_ms, t.kind, t.scope, t.occurrence FROM timers t
+	q := `SELECT t.token, t.due_ms, t.kind, t.scope, t.occurrence, r.token IS NOT NULL FROM timers t
 	      LEFT JOIN timer_retry r ON r.token=t.token
 	      WHERE t.due_ms <= ? AND COALESCE(r.retry_after_ms, 0) <= ?
 	        AND t.token NOT IN (SELECT token FROM fired WHERE expires_ms > ?)
@@ -202,7 +202,7 @@ func (s *Store) Due(ctx context.Context, nowMs int64, limit int) ([]Timer, error
 	for rows.Next() {
 		var t Timer
 		var kind string
-		if err := rows.Scan(&t.Token, &t.DueAtMs, &kind, &t.Scope, &t.Occurrence); err != nil {
+		if err := rows.Scan(&t.Token, &t.DueAtMs, &kind, &t.Scope, &t.Occurrence, &t.retrying); err != nil {
 			return nil, err
 		}
 		t.Kind = Kind(kind)

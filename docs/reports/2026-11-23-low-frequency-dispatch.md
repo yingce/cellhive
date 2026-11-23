@@ -14,3 +14,7 @@
 - Queue 的确定性计数测试覆盖漏通知后连续 59 个空闲 tick 无新增发现、owner 或消费者配置查询，以及第 60 秒对账补投。另测延迟、批次、租约、重启、配置变更和派发期间并发写入。workerd 端到端验证消费、R2 副作用、重试入 DLQ、并发消费和 SIGKILL owner 后继续消费。
 - Cron 的计数测试覆盖稳定版本、稀疏计划与控制面 owner 切换。真实 workerd 验证每分钟触发器执行 `scheduled()`。验收脚本改为读取 user-runtime 的租户日志 NDJSON。
 - 真实 DO Alarm 示例验证驻留时的唤醒。孤儿索引计数测试覆盖新旧键格式、跨分钟去重和当前分钟精确时间读取。60 秒为正常运行的孤儿扫描周期，恢复耗时另计。
+
+## 生产 GET 的归因口径
+
+新增 `cellhive_bucket_get_attempts_total{source,key_class,via}`，按 S3 兼容客户端与原生 COS 客户端实际发出的对象 GET HTTP 尝试计数，包括 Range、失败和 SDK 重试。LIST 请求本身排除，逻辑枚举为确认结果而发出的对象 GET 标记为 `via="list"`。标签只取预定义类别，不记录对象名、租户或 URL。共享调用归到发起实际读取的上下文，无法传递来源的路径归入 other；该计数与 SDK 层操作计数的差异可用于核对口径。

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cellhive/internal/bucket"
 	"cellhive/internal/telemetry"
 	"context"
 	"encoding/json"
@@ -443,6 +444,9 @@ func (s *Server) cleanupRPC(ctx context.Context, address, path string, payload, 
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
+	if path == "/v1/internal/control/read" {
+		req.Header.Set("X-Cellhive-Read-Source", string(bucket.GetReadSource(ctx)))
+	}
 	if err := s.setInternalAuthorization(req, "internal"); err != nil {
 		return err
 	}

@@ -224,7 +224,7 @@ func main() {
 		start := time.Now()
 		log.Debug("node lease publication started", "session", cfg.SessionID, "remaining", lm.Remaining())
 		owned := len(om.OwnedScopes())
-		if err := lm.Publish(leaseCtx, lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
+		if err := lm.Publish(bucket.WithReadSource(leaseCtx, bucket.LeaseRead), lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
 			log.Warn("lease publish failed", "err", err, "elapsed", time.Since(start), "remaining", lm.Remaining(), "session", cfg.SessionID, "lease", lm.Diagnostics())
 			return err
 		}
@@ -247,7 +247,7 @@ func main() {
 	knownDone := make(chan struct{})
 	go func() {
 		defer close(knownDone)
-		lm.RunKnownRefresh(knownCtx)
+		lm.RunKnownRefresh(bucket.WithReadSource(knownCtx, bucket.LeaseRead))
 	}()
 	defer func() { stopKnown(); <-knownDone }()
 
@@ -285,11 +285,11 @@ func main() {
 	} else {
 		uploader.SetSpool(sp)
 	}
-	uploader.Start(upCtx)
+	uploader.Start(bucket.WithReadSource(upCtx, bucket.UploadRead))
 	// Follower-side group commit: coalesce replicated appends into one spool
 	// fsync per batch (short window; the owner's ack waits on it).
 	peerUploader := upload.New(spool, log, 64, 1<<20, 2*time.Millisecond)
-	peerUploader.Start(upCtx)
+	peerUploader.Start(bucket.WithReadSource(upCtx, bucket.UploadRead))
 	// Fleet log group commit: coalesce concurrent commits into one framed batch
 	// per follower set (1ms window, up to 256 segments), mirroring celld's
 	// CELLD_LOG_GROUP_COMMIT_MS + CELLD_LOG_PIPELINE=4. StreamTransport uses
@@ -304,11 +304,11 @@ func main() {
 		shipTransport = peer.NewLatencyTransport(shipTransport, cfg.PeerLatency)
 	}
 	shipper := peer.NewShipBatcher(shipTransport, 256, 4<<20, time.Millisecond, 4, cfg.PeerPipeline, cfg.PeerHedgeMS, cfg.PeerHedgeMaxMS)
-	shipper.Start(upCtx)
+	shipper.Start(bucket.WithReadSource(upCtx, bucket.UploadRead))
 
 	// Background promotion stays off the write-ack path. A durable L0 upload
 	// nudges L1 when the object count or stored-byte bar is met.
-	go runCompactionScheduler(ctx, log, om, rep, cfg, compactWake)
+	go runCompactionScheduler(bucket.WithReadSource(ctx, bucket.CompactionRead), log, om, rep, cfg, compactWake)
 
 	store, err := cellstore.New(cfg.DataDir)
 	if err != nil {
@@ -622,7 +622,7 @@ func main() {
 		Log:      log,
 	}
 	recoveryRunner.IsLeader = waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL).Acquire
-	go recoveryRunner.Run(ctx, 5*time.Second)
+	go recoveryRunner.Run(bucket.WithReadSource(ctx, bucket.RecoveryRead), 5*time.Second)
 	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
 		wakerRunner = &waker.Waker{
@@ -809,7 +809,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
-		runMultipartGC(ctx, log, ticker.C, srv.R2.GCStaleUploadsPage)
+		runMultipartGC(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, ticker.C, srv.R2.GCStaleUploadsPage)
 	}()
 	if telemetry.LogsMode() == telemetry.LogsAll || telemetry.LogsMode() == telemetry.LogsTail {
 		go func() {
@@ -954,8 +954,8 @@ func main() {
 		srv.Capture = captureMgr
 		// Start only after capture wiring is complete. Read-only takeovers
 		// need background continuation initialization before Fold can proceed.
-		go runEpochFoldLoop(ctx, log, rep, om, cfg, captureMgr.EnsureContinuation)
-		go runEpochGCLoop(ctx, log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
+		go runEpochFoldLoop(bucket.WithReadSource(ctx, bucket.EpochFoldRead), log, rep, om, cfg, captureMgr.EnsureContinuation)
+		go runEpochGCLoop(bucket.WithReadSource(ctx, bucket.EpochGCRead), log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
 		// Queue consumer dispatch: reconcile registered queues each minute and use
 		// owner-local mutation hints and message deadlines to deliver claimed batches
 		// to the consuming worker via the dispatch endpoint (docs/bindings.md). Only
@@ -1016,7 +1016,7 @@ func main() {
 					},
 				}
 				srv.QueueNudge = runner.Nudge
-				runner.Start(ctx)
+				runner.Start(bucket.WithReadSource(ctx, bucket.QueueDispatch))
 			}
 		}
 		// Capture keeps running until HTTP has quiesced; the shutdown path below
@@ -1028,16 +1028,16 @@ func main() {
 	// untouched, so the next request reopens the cell locally.
 	// Reclamation requires current control ownership and a durable exclusion.
 	// Unknown I/O outcomes retain their fence instead of granting a new holder.
-	go srv.RunPurgeLoop(ctx, 5*time.Second)
+	go srv.RunPurgeLoop(bucket.WithReadSource(ctx, bucket.PurgeRead), 5*time.Second)
 	if cfg.AuditRetention > 0 {
-		go runAuditPruneLoop(ctx, log, srv, cfg.AuditRetention)
+		go runAuditPruneLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, srv, cfg.AuditRetention)
 	}
 	if cfg.WorkflowRetention > 0 {
-		go runDefaultWorkflowRetentionLoop(ctx, log, srv, cfg.WorkflowRetention)
+		go runDefaultWorkflowRetentionLoop(bucket.WithReadSource(ctx, bucket.WorkflowRetention), log, srv, cfg.WorkflowRetention)
 	}
-	go runWorkflowRetentionLoop(ctx, log, srv)
+	go runWorkflowRetentionLoop(bucket.WithReadSource(ctx, bucket.WorkflowRetention), log, srv)
 	if cfg.BundleGCInterval > 0 {
-		go srv.RunArtifactGCLoop(ctx, cfg.BundleGCInterval)
+		go srv.RunArtifactGCLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead), cfg.BundleGCInterval)
 	}
 	store.MaxOpenCells = cfg.MaxOpenCells
 	store.IdleTTL = cfg.CellIdleTTL
@@ -1052,7 +1052,7 @@ func main() {
 	var diskPressure atomic.Bool
 	srv.Overloaded = diskPressure.Load
 	if cfg.CellDiskMax > 0 || cfg.DiskHigh > 0 {
-		go runCellDiskLoop(ctx, log, store, om, rep, lm, cfg, &diskPressure)
+		go runCellDiskLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, store, om, rep, lm, cfg, &diskPressure)
 	}
 	if captureMgr != nil {
 		store.Drop = captureMgr.Drop
@@ -1144,7 +1144,7 @@ func main() {
 		}
 		timerRunner.Admit = timerAdmit
 		timerRunner.Commit = timerCommit
-		timerRunner.Start(ctx)
+		timerRunner.Start(bucket.WithReadSource(ctx, bucket.TimerDispatch))
 	}
 	if wakerRunner != nil {
 		wakerRunner.Own = func(tctx context.Context, scope string) (bool, error) {
@@ -1163,7 +1163,7 @@ func main() {
 		}
 		wakerRunner.Admit = timerAdmit
 		wakerRunner.Commit = timerCommit
-		wakerRunner.Start(ctx)
+		wakerRunner.Start(bucket.WithReadSource(ctx, bucket.WakeScan))
 	}
 	if cronScheduler != nil {
 		cronScheduler.Own = func(tctx context.Context, sc cell.Scope) (bool, error) {
@@ -1181,13 +1181,13 @@ func main() {
 		cronScheduler.Commit = func(tctx context.Context, sc cell.Scope, fn func() error) error {
 			return timerCommit(tctx, sc.String(), fn)
 		}
-		cronScheduler.Start(ctx)
+		cronScheduler.Start(bucket.WithReadSource(ctx, bucket.CronPlan))
 	}
 	if cfg.WakeRepairInterval > 0 {
-		go runWakeRepairLoop(ctx, log, store, wakeIdx, om, srv, openTimer, cfg)
+		go runWakeRepairLoop(bucket.WithReadSource(ctx, bucket.WakeRepair), log, store, wakeIdx, om, srv, openTimer, cfg)
 	}
 	if cfg.RebalanceInterval > 0 {
-		go runRebalanceLoop(ctx, log, cfg, om, store, rep, lm, timerReg, placementWeight)
+		go runRebalanceLoop(bucket.WithReadSource(ctx, bucket.RebalanceRead), log, cfg, om, store, rep, lm, timerReg, placementWeight)
 	}
 
 	// Re-register timers this node owns from the wake index: after a restart the
@@ -1217,11 +1217,11 @@ func main() {
 			registerTimerScope(ctx, openTimer, srv, sc)
 		}
 	}()
-	go srv.RunHyperdriveProxyHealthLoop(ctx)
+	go srv.RunHyperdriveProxyHealthLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead))
 	srv.SetReady(true)
-	go srv.RunResourceCleanupLoop(ctx)
-	go srv.RunCellTransferCleanupLoop(ctx)
-	go srv.RunProxySQLReconcileLoop(ctx)
+	go srv.RunResourceCleanupLoop(bucket.WithReadSource(ctx, bucket.ResourceCleanup))
+	go srv.RunCellTransferCleanupLoop(bucket.WithReadSource(ctx, bucket.TransferCleanup))
+	go srv.RunProxySQLReconcileLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead))
 
 	// Graceful handoff (cell-protocol §7): mark draining as soon as shutdown
 	// begins so no new cell is claimed, then serialize the actual handoff with

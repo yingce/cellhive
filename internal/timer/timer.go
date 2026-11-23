@@ -48,6 +48,7 @@ type Occurrence string
 
 // Timer is a unified timed event.
 type Timer struct {
+	retrying   bool
 	DueAtMs    int64
 	Kind       Kind
 	Scope      string

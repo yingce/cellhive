@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cellhive/internal/bucket"
 	"context"
 	"sync"
 	"time"
@@ -66,7 +67,7 @@ func (s *Server) runKVReadWarmLoop(ctx context.Context) {
 					defer workers.Done()
 					defer func() { <-sem }()
 					work, cancel := context.WithTimeout(ctx, time.Second)
-					err := s.refreshHotKVAccess(work, e)
+					err := s.refreshHotKVAccess(bucket.WithReadSource(work, bucket.KVRefresh), e)
 					cancel()
 					s.hotKVRefreshes.Add(1)
 					if err != nil {

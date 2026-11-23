@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cellhive/internal/bucket"
 	"context"
 	"encoding/json"
 	"errors"
@@ -393,7 +394,7 @@ func (s *Server) handleControlRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Never forward here: stale clients must not recurse through wrong owners.
-	result, err := s.readLocalControl(r.Context(), q)
+	result, err := s.readLocalControl(bucket.WithReadSource(r.Context(), bucket.ReadSource(r.Header.Get("X-Cellhive-Read-Source"))), q)
 	if err != nil {
 		writeErr(w, 503, "control_read_unavailable", err.Error())
 		return

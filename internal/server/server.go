@@ -458,7 +458,26 @@ func (s *Server) buildHandler() http.Handler {
 // request-driven cold work before any storage helper adds its own timeout.
 func (s *Server) interactiveHydration(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(cellstore.WithInteractiveHydration(r.Context())))
+		source := bucket.OtherHTTP
+		path := r.URL.Path
+		switch {
+		case path == "/metrics" || path == "/healthz" || path == "/readyz":
+			source = bucket.HealthHTTP
+		case path == "/v1/control/routes":
+			source = bucket.RouteProjection
+		case path == "/v1/internal/resolve" || path == "/v1/internal/renew":
+			source = bucket.OwnerRead
+		case strings.HasPrefix(path, "/v1/control/") || strings.HasPrefix(path, "/v1/internal/control/"):
+			source = bucket.ControlHTTP
+		case strings.HasPrefix(path, "/v1/peer/"):
+			source = bucket.PeerHTTP
+		case strings.HasPrefix(path, "/v1/do/") || strings.HasPrefix(path, "/v1/internal/do/"):
+			source = bucket.DOHTTP
+		case strings.HasPrefix(path, "/v1/kv/") || strings.HasPrefix(path, "/v1/queue/") || strings.HasPrefix(path, "/v1/internal/worker/"):
+			source = bucket.BindingHTTP
+		}
+		ctx := bucket.WithReadSource(r.Context(), source)
+		next.ServeHTTP(w, r.WithContext(cellstore.WithInteractiveHydration(ctx)))
 	})
 }
 
@@ -759,6 +778,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	{
+		writeFmt(w, "# TYPE cellhive_bucket_get_attempts_total counter\n")
+		for labels, n := range bucket.ObjectGetAttempts() {
+			writeFmt(w, "cellhive_bucket_get_attempts_total{source=%q,key_class=%q,via=%q} %d\n", labels.Source, labels.KeyClass, labels.Via, n)
+		}
 		as := bucket.AuthorityStats()
 		for _, m := range []struct {
 			name  string

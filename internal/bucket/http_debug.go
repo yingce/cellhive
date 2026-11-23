@@ -111,6 +111,9 @@ func storageOperation(r *http.Request) string {
 	return r.Method
 }
 func (t *storageDebugTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodGet {
+		countObjectGet(r.Context())
+	}
 	log := t.log
 	if log == nil {
 		log = slog.Default()

@@ -253,7 +253,7 @@ func (b *ProviderBucket) listLogical(ctx context.Context, prefix string, immedia
 			out = append(out, key)
 		}
 	}
-	logical, err := resolveListedWindows(ctx, windows, func(ctx context.Context, logical string, _ int64) (bool, error) {
+	logical, err := resolveListedWindows(context.WithValue(ctx, listTag{}, true), windows, func(ctx context.Context, logical string, _ int64) (bool, error) {
 		_, _, err := b.Get(ctx, logical)
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -304,7 +304,7 @@ func (b *ProviderBucket) ListSizes(ctx context.Context, prefix string) ([]Object
 			continue
 		}
 		seen[logical] = struct{}{}
-		size, token, serr := b.Stat(ctx, logical)
+		size, token, serr := b.Stat(context.WithValue(ctx, listTag{}, true), logical)
 		if errors.Is(serr, ErrNotFound) {
 			continue
 		}
@@ -341,7 +341,7 @@ func (b *ProviderBucket) ListPage(ctx context.Context, prefix, after string, lim
 			continue
 		}
 		seen[logical] = struct{}{}
-		size, token, serr := b.Stat(ctx, logical)
+		size, token, serr := b.Stat(context.WithValue(ctx, listTag{}, true), logical)
 		if errors.Is(serr, ErrNotFound) {
 			continue
 		}
