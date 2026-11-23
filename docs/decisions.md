@@ -4225,3 +4225,6 @@ USW 随后发布 Helm revision 126，仅更新两个 cell-agent 至 seek 提交�
 2026-11-23 测试阻塞修订：WAL 集成测试改为外部测试包以解除导入环；session 进程测试显式构造缺少注册的旧控制库，并在故障注入前等待准备阶段 spool 上传，避免依赖非 owner 自动建库及误删启动阶段唯一持久副本。生产协议与部署不变。真实双进程恢复原有断言通过，相关用例 race 驱动下连续三次通过；详见 [报告](reports/2026-11-22-epoch-fold.md) 文末。此记录取代此前两项测试阻塞开放的状态。
 
 2026-11-23 最终复验：上述测试修订后的 `make test`、`make vet` 全仓通过，独立目录 `make build` 与 `git diff --check` 通过。此前 WAL 导入环和 session 缺文件阻塞已解除；生产未部署。
+
+
+2026-11-23 USW 发布：epoch Fold/纯读接链/重开维护登记/空链休眠/bucket-proof 批次 `351c23b7` 已发布 USW Helm revision 132。真实 KV、原生 DO 和 Worker 服务路由通过；TEST 只读重开后自动完成 e17 Fold，生产后台 GC 删除 e14/e15 共 630 个对象、保留 e16/e17，退休下界推进到 17。另有 `vwork-1/__queue__/jobs` epoch=29 因 local TXID=2、durable=1 安全拒绝 continuation，跨代维护仍延期，未修复或人工改数据。SG 未部署。详情见 [发布记录](reports/2026-11-23-usw-epoch-fold-release.md)。
