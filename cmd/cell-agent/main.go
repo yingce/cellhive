@@ -622,7 +622,7 @@ func main() {
 		Log:      log,
 	}
 	recoveryRunner.IsLeader = waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL).Acquire
-	go recoveryRunner.Run(bucket.WithReadSource(ctx, bucket.RecoveryRead), 5*time.Second)
+	go recoveryRunner.Run(bucket.WithReadSource(ctx, bucket.RecoveryRead), recovery.DefaultInterval)
 	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
 		wakerRunner = &waker.Waker{

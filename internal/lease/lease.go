@@ -414,17 +414,11 @@ func (m *Manager) NodeLeaseForDiscovery(ctx context.Context, node string) (NodeL
 		return NodeLease{}, false, err
 	}
 	now := time.Now()
-	maxAge := m.knownTTL() / 10
-	if maxAge > time.Second {
-		maxAge = time.Second
-	}
 	m.mu.Lock()
-	if observed := m.observed[node]; !observed.IsZero() && !observed.After(now) && now.Sub(observed) < maxAge {
-		for _, l := range m.cached {
-			if l.Node == node && l.Live(now.Add(m.knownRefreshInterval())) {
-				m.mu.Unlock()
-				return l, true, nil
-			}
+	for _, l := range m.cached {
+		if l.Node == node && m.reusableObservationLocked(l, now) {
+			m.mu.Unlock()
+			return l, true, nil
 		}
 	}
 	m.mu.Unlock()

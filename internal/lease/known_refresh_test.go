@@ -290,7 +290,7 @@ func TestPointLookupBootstrapsKnownRefresh(t *testing.T) {
 	next.Expiry += 1000
 	putKnownTest(t, b, next)
 	m.mu.Lock()
-	m.observed[old.Node] = time.Now().Add(-m.knownRefreshInterval())
+	m.observed[old.Node] = time.Now().Add(-m.knownTTL())
 	m.mu.Unlock()
 	m.refreshKnown(t.Context())
 	if got, ok := m.CachedNodeLease(old.Node); !ok || got.Expiry != next.Expiry {

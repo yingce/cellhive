@@ -211,3 +211,5 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 - 2026-11-23：Queue、Cron、孤儿 Alarm 已在本地改为分钟级正常对账。Queue 每轮对账的工作量仍随已登记的消费者数和节点数增长，漏通知和孤儿唤醒可多等一个周期，再加 lease 到期、恢复和执行耗时。节点续租、恢复、授权刷新等仍会访问桶。生产 COS 降幅待部署验证，见[本地对比](reports/2026-11-23-low-frequency-dispatch.md)。
 
 - 2026-11-24：已本地实现并验证 pinned KV 按需授权、sealed node-log 发现过滤与 discovery lease 有界观察复用；全量 test/build/vet 和相关 race 通过，已从独立发布分支部署 SG / USW / GZ；总量与剩余来源见 [发布验收](reports/2026-11-24-three-region-read-reuse-release.md)，不代表所有后台 GET 已消除。见 [设计与验证](reports/2026-11-24-celld-read-reuse.md)。
+
+- 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已本地实现，全量 test/build/vet 与相关 race 通过，未部署。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。

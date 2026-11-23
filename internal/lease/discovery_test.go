@@ -46,7 +46,7 @@ func TestDiscoveryLeaseObservationIsNotTakeoverProof(t *testing.T) {
 	}
 	// Old observations and near-expiry values never suppress a point read.
 	m.mu.Lock()
-	m.observed["peer"] = time.Now().Add(-2 * time.Second)
+	m.observed["peer"] = time.Now().Add(-6 * time.Second)
 	m.mu.Unlock()
 	b.fail = true
 	if _, _, err := m.NodeLeaseForDiscovery(t.Context(), "peer"); err == nil {
@@ -77,5 +77,57 @@ func TestDiscoveryLeaseObservationIsNotTakeoverProof(t *testing.T) {
 	cancel()
 	if _, _, err := m.NodeLeaseForDiscovery(ctx, "peer"); err != context.Canceled {
 		t.Fatal(err)
+	}
+}
+
+// Discovery and independent maintenance share the same bounded observation.
+// Reusing an observation must neither move its timestamp nor delay Fresh reads.
+func TestBackgroundReadersShareBoundedLeaseObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		age, remaining time.Duration
+		reads          int
+	}{
+		{"within_half_ttl", 3 * time.Second, 8 * time.Second, 0},
+		{"too_old", 6 * time.Second, 8 * time.Second, 1},
+		{"near_expiry", time.Millisecond, time.Second, 1},
+		{"future_observation", -time.Second, 8 * time.Second, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, _ := bucket.NewFSBucket(t.TempDir())
+			b := &discoveryBucket{Bucket: fs}
+			m := NewManager(b, "self", "s", "", "", 10*time.Second)
+			old := NodeLease{Node: "peer", Session: "old", Expiry: time.Now().Add(tc.remaining).UnixMilli()}
+			next := old
+			next.Session = "new"
+			next.Expiry = time.Now().Add(10 * time.Second).UnixMilli()
+			putKnownTest(t, fs, next)
+			observed := time.Now().Add(-tc.age)
+			m.cached = []NodeLease{old}
+			m.observed = map[string]time.Time{"peer": observed}
+			m.refreshKnown(t.Context())
+			if b.reads != tc.reads {
+				t.Fatalf("background GETs=%d want %d", b.reads, tc.reads)
+			}
+			if _, ok, err := m.NodeLeaseForDiscovery(t.Context(), "peer"); err != nil || !ok {
+				t.Fatal(ok, err)
+			}
+			want := tc.reads
+			// Future observations cannot be overwritten by an older response:
+			// keep forcing authority reads rather than extending stale proof.
+			if tc.age < 0 {
+				want++
+			}
+			if b.reads != want {
+				t.Fatalf("GETs=%d want %d", b.reads, want)
+			}
+			if tc.reads == 0 && !m.observed["peer"].Equal(observed) {
+				t.Fatal("reuse extended observation")
+			}
+			fresh, ok, err := m.NodeLeaseFresh(t.Context(), "peer")
+			if err != nil || !ok || fresh.Session != "new" || b.reads != want+1 {
+				t.Fatalf("fresh=%+v ok=%v err=%v reads=%d", fresh, ok, err, b.reads)
+			}
+		})
 	}
 }
