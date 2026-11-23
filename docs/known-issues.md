@@ -197,3 +197,5 @@ Queue 冷开/重开首先只读检查 schema；已完整迁移的库不执行空
 - 真实 Worker 回归补充：Queue binding 授权已解析的 scope 必须贯穿发送、批量发送、claim、ACK/retry 与 admission/owner gate；转发保留原请求名称以便接收节点重新鉴权，禁止改写 URL 后造成 token 名称不匹配。
 
 2026-11-23 Queue 修复本地验收通过：真实别名生产/消费/ACK/重试/DLQ、启动 spool 上传后的双节点接管、schema 升级恢复均通过，全量 Go test/build/vet 与相关 race 通过。已有启动 spool-only 窗口不能由另一节点恢复，旧二进制亦复现，本批未修改该策略。旧 jobs 副本只读检查为空，未删数据。USW 已发布 revision 133，604 秒/11 次采样通过，六个服务 Pod 全程 Ready、零重启。见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
+
+2026-11-23 SG 发布：复用 USW 已验证的源码 `9dcacebc` 镜像，SG revision 136→137；原生 Queue 收发/ACK/重试/DLQ 与 DO SQL 写读通过。601 秒观察中服务 Pod 全部 Ready、零重启，HPA 3→2 缩容导致两次本机端口转发探针断连，重连后通过。另有 vwork-105/pageverra-api scheduled 聚合任务主动抛错、Cron 500 持续，具体子任务未确认，未修改租户代码。保留 authority/storage 配置，USW 未再次更改。见 [SG 发布记录](reports/2026-11-23-sg-queue-release.md)。

@@ -4241,3 +4241,5 @@ Queue 冷开/重开首先只读检查 schema；已完整迁移的库不执行空
 本地验收通过；Queue 接管测试必须明确启动 spool 已上传的前提，不能作为 spool-only 写在节点丢失后可恢复的证据。该已有策略窗口与本批 Queue 修复分开记录。见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
 
 2026-11-23 发布验收：源码 `9dcacebc` 已部署本地与 USW revision 133，真实生产测试 namespace 收发/ACK/重试/DLQ 通过；604 秒观察的 11 次采样均通过，六个服务 Pod 全程 Ready、零重启。SG 未部署，旧错误 jobs 路径保留。完整边界与日志说明见 [验证报告](reports/2026-11-23-queue-scope-durability.md)。
+
+2026-11-23 SG 发布：复用 USW 已验证的源码 `9dcacebc` 镜像，SG revision 136→137；原生 Queue 收发/ACK/重试/DLQ 与 DO SQL 写读通过。601 秒观察中服务 Pod 全部 Ready、零重启，HPA 3→2 缩容导致两次本机端口转发探针断连，重连后通过。另有 vwork-105/pageverra-api scheduled 聚合任务主动抛错、Cron 500 持续，具体子任务未确认，未修改租户代码。保留 authority/storage 配置，USW 未再次更改。见 [SG 发布记录](reports/2026-11-23-sg-queue-release.md)。
