@@ -28,6 +28,12 @@ type ImmediateLister interface {
 	ListImmediate(ctx context.Context, prefix string) ([]string, error)
 }
 
+// ResolvedLister also returns bodies already read to resolve logical keys.
+// Keys without a body need a point read. An error invalidates the whole result.
+type ResolvedLister interface {
+	ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error)
+}
+
 // SizeLister is an optional Bucket extension: list keys with their sizes
 // without reading object bodies (S3 list responses carry sizes; local files are
 // stat'ed). Callers fall back to Get-based sizing when absent.
