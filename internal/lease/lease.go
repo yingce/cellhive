@@ -406,6 +406,31 @@ func (m *Manager) NodeLease(ctx context.Context, node string) (NodeLease, bool, 
 	return l, true, nil
 }
 
+// NodeLeaseForDiscovery may reuse a recent, still-live authoritative observation.
+// It never uses cached expiry/absence as evidence for recovery or takeover.
+// Callers needing authority at the time of a decision use NodeLeaseFresh.
+func (m *Manager) NodeLeaseForDiscovery(ctx context.Context, node string) (NodeLease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return NodeLease{}, false, err
+	}
+	now := time.Now()
+	maxAge := m.knownTTL() / 10
+	if maxAge > time.Second {
+		maxAge = time.Second
+	}
+	m.mu.Lock()
+	if observed := m.observed[node]; !observed.IsZero() && !observed.After(now) && now.Sub(observed) < maxAge {
+		for _, l := range m.cached {
+			if l.Node == node && l.Live(now.Add(m.knownRefreshInterval())) {
+				m.mu.Unlock()
+				return l, true, nil
+			}
+		}
+	}
+	m.mu.Unlock()
+	return m.NodeLeaseFresh(ctx, node)
+}
+
 // NodeLeaseFresh reads node's lease straight from the bucket. Takeover
 // decisions use it: the cached snapshot can lag by minutes when its background
 // refresh keeps failing, and judging a live owner dead from a stale snapshot is

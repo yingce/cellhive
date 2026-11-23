@@ -34,6 +34,13 @@ type ResolvedLister interface {
 	ListWithResolvedValues(ctx context.Context, prefix string) ([]string, map[string][]byte, error)
 }
 
+// FilteredResolvedLister omits caller-proven terminal keys BEFORE resolving
+// authority. The filter is for cold discovery only, never an existence proof.
+// Ordinary List remains authoritative and unaffected.
+type FilteredResolvedLister interface {
+	ListWithResolvedValuesExcept(ctx context.Context, prefix string, terminal map[string]bool) ([]string, map[string][]byte, error)
+}
+
 // SizeLister is an optional Bucket extension: list keys with their sizes
 // without reading object bodies (S3 list responses carry sizes; local files are
 // stat'ed). Callers fall back to Get-based sizing when absent.

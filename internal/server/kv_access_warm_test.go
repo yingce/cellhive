@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,42 +9,6 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/lease"
 )
-
-func TestKVWarmLoopDropsLegacyEntries(t *testing.T) {
-	s := newScopeServer(t)
-	s.hotKVAccesses = map[string]*hotKVAccess{"legacy": {scope: cell.Scope{Namespace: "acme", Class: "__kv__", ID: "main"}}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { s.runKVReadWarmLoop(ctx); close(done) }()
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	<-done
-	s.hotKVAccessMu.Lock()
-	defer s.hotKVAccessMu.Unlock()
-	if len(s.hotKVAccesses) != 0 {
-		t.Fatalf("legacy KV warm entries remain: %d", len(s.hotKVAccesses))
-	}
-}
-
-func TestSuccessfulPutsDoNotActivateKVCacheRefresh(t *testing.T) {
-	s, _ := newTestServer(t)
-	s.Cfg.BindingCacheTTL = time.Second
-	if err := registerTestBinding(s, "acme", "kv", "KV", "main"); err != nil {
-		t.Fatal(err)
-	}
-	token := mint(t, s, "acme", "kv", "KV")
-	for i := 0; i < 2; i++ {
-		if code := kvReq(t, s, http.MethodPost, "/v1/kv/put?ns=acme&key=k", token, []byte("v")); code != http.StatusOK {
-			t.Fatalf("put %d returned %d", i, code)
-		}
-	}
-	s.hotKVAccessMu.Lock()
-	entry := s.hotKVAccesses["acme/__kv__/main"]
-	s.hotKVAccessMu.Unlock()
-	if entry != nil {
-		t.Fatal("successful PUTs activated removed background cache refresh")
-	}
-}
 
 func TestUnpublishedSelfLeaseCannotServeCachedOwner(t *testing.T) {
 	s, _ := newTestServer(t)

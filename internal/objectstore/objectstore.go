@@ -314,6 +314,46 @@ func (o *Objects) ListWithResolvedValues(ctx context.Context, prefix string) ([]
 	return keys, nil, err
 }
 
+// ListWithResolvedValuesExcept is cold discovery with caller-proven terminal
+// objects removed before authority reads where supported. It never proves absence.
+func (o *Objects) ListWithResolvedValuesExcept(ctx context.Context, prefix string, terminal map[string]bool) ([]string, map[string][]byte, error) {
+	if _, err := o.key(prefix); err != nil {
+		return nil, nil, err
+	}
+	var keys []string
+	var values map[string][]byte
+	var err error
+	if l, ok := o.B.(bucket.FilteredResolvedLister); ok {
+		keys, values, err = l.ListWithResolvedValuesExcept(ctx, prefix, terminal)
+	} else {
+		keys, values, err = o.ListWithResolvedValues(ctx, prefix)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, err := o.key(k); err != nil {
+			return nil, nil, err
+		}
+		if !strings.HasPrefix(k, prefix) {
+			return nil, nil, ErrBadKey
+		}
+		if !terminal[k] {
+			out = append(out, k)
+		}
+	}
+	for k := range values {
+		if _, err := o.key(k); err != nil {
+			return nil, nil, err
+		}
+		if !strings.HasPrefix(k, prefix) {
+			return nil, nil, ErrBadKey
+		}
+	}
+	return out, values, nil
+}
+
 // CommonPrefixes returns immediate child prefixes under prefix when the
 // backend supports delimiter listings; otherwise it derives them from a full
 // listing (still correct, just less efficient on very large prefixes).

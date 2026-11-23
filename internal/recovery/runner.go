@@ -93,7 +93,7 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 	var listing *nodelog.Listing
 	if r.discoveredAt.IsZero() || now.Sub(r.discoveredAt) >= interval {
 		var discoverErr error
-		listing, discoverErr = r.Nodelog.Discover(ctx)
+		listing, discoverErr = r.Nodelog.DiscoverPending(ctx)
 		if discoverErr != nil {
 			return 0, 0, 0, discoverErr
 		}
@@ -108,7 +108,7 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 		r.discovered = next
 	}
 	for _, node := range r.nodeList {
-		l, found, lerr := r.Lease.NodeLeaseFresh(ctx, node)
+		l, found, lerr := r.Lease.NodeLeaseForDiscovery(ctx, node)
 		if lerr != nil {
 			r.log().Warn("recovery: lease read failed; skipping node", "node", node, "err", lerr)
 			continue
@@ -118,7 +118,7 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 		leaseChanged := !state.refreshed.IsZero() && (state.session != l.Session || state.live != live)
 		if state.refreshed.IsZero() || now.Sub(state.refreshed) >= interval || leaseChanged {
 			started := r.now()
-			read := r.Nodelog.ListNode
+			read := r.Nodelog.ListPendingNode
 			// A lease transition can postdate the global listing. Rediscover that node
 			// after the lease read so newly published sessions are visible.
 			if listing != nil && !leaseChanged {
@@ -141,6 +141,17 @@ func (r *Runner) Pass(ctx context.Context) (nodes, segments, sessions int, err e
 			key := node + "/" + rec.Session
 			retry := r.retries[key]
 			if retry.after.After(now) {
+				continue
+			}
+			// Discovery may have reused a live lease for a different session.
+			// Never let that stale identity authorize sealing a newly published
+			// session. Recheck authority after loading the candidate record.
+			current, exists, leaseErr := r.Lease.NodeLeaseFresh(ctx, node)
+			if leaseErr != nil {
+				r.log().Warn("recovery: candidate lease read failed", "node", node, "err", leaseErr)
+				continue
+			}
+			if exists && current.Live(r.now()) && current.Session == rec.Session {
 				continue
 			}
 			timeout := r.AttemptTimeout

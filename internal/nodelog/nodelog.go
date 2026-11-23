@@ -14,6 +14,7 @@ import (
 	"maps"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cellhive/internal/bucket"
@@ -74,9 +75,11 @@ var ErrEnsembleMismatch = errors.New("nodelog: session ensemble mismatch")
 
 // Manager reads and writes node-log records.
 type Manager struct {
-	B      bucket.Bucket
-	Objs   *objectstore.Objects
-	NodeID string
+	terminalMu sync.Mutex
+	terminal   map[string]bool
+	B          bucket.Bucket
+	Objs       *objectstore.Objects
+	NodeID     string
 }
 
 // New creates a node-log manager for a node. The owned object view enforces
@@ -289,6 +292,9 @@ func (m *Manager) readRecords(ctx context.Context, keys []string, values map[str
 		if err := json.Unmarshal(data, &r); err != nil {
 			return nil, fmt.Errorf("nodelog: decode %s: %w", k, err)
 		}
+		if r.Node == "" || r.Session == "" || Key(r.Node, r.Session) != k {
+			return nil, fmt.Errorf("nodelog: identity mismatch for %s", k)
+		}
 		out = append(out, r)
 	}
 	return out, nil
@@ -310,6 +316,7 @@ type Listing struct {
 	manager *Manager
 	keys    map[string][]string
 	values  map[string][]byte
+	pending bool
 }
 
 func (m *Manager) Discover(ctx context.Context) (*Listing, error) {
@@ -339,6 +346,9 @@ func (m *Manager) Discover(ctx context.Context) (*Listing, error) {
 }
 
 func (l *Listing) Records(ctx context.Context, node string) ([]Record, error) {
+	if l.pending {
+		return l.manager.pendingRecords(ctx, l.keys[node], l.values)
+	}
 	return l.manager.readRecords(ctx, l.keys[node], l.values)
 }
 func (l *Listing) Nodes() []string {
