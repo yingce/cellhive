@@ -57,6 +57,32 @@ func OwnerGateWithReset(om *owner.Manager, reset func(context.Context, cell.Scop
 	}
 }
 
+// PreparedOwnerGate skips a live peer before doing any local generation or
+// retirement work. Local consumption and takeover still run preparation before
+// the gate, since preparation may discard the previous generation's route.
+func PreparedOwnerGate(om *owner.Manager, prepare, reset func(context.Context, cell.Scope) error) func(context.Context, Ref) (bool, error) {
+	gate := OwnerGateWithReset(om, reset)
+	return func(ctx context.Context, ref Ref) (bool, error) {
+		sc := Scope(ref.Namespace, ref.Name)
+		if om != nil {
+			o, _, err := om.ResolveRoute(ctx, sc)
+			if err != nil && !errors.Is(err, owner.ErrUnowned) {
+				return false, err
+			}
+			if err == nil && (o.Node != om.NodeID || o.Session != om.Session) {
+				live, err := om.LiveRoute(ctx, sc, o, time.Now())
+				if err != nil || live {
+					return false, err
+				}
+			}
+		}
+		if err := prepare(ctx, sc); err != nil {
+			return false, err
+		}
+		return gate(ctx, ref)
+	}
+}
+
 // OwnerCheck verifies dispatch authority without acquiring or resetting a cell.
 // It is safe to call while holding resource admission.
 func OwnerCheck(om *owner.Manager) func(context.Context, Ref) (bool, error) {

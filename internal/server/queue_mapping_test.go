@@ -94,9 +94,18 @@ func TestQueueAdminUsesRegisteredMainAndDLQScopes(t *testing.T) {
 	if _, err := s.Control.Deploy(ctx, "acme", "worker", control.DeploySpec{BundleSHA: "sha", Consumers: []control.Consumer{{Queue: "jobs", DeadLetterQueue: "failed"}}}, "test"); err != nil {
 		t.Fatal(err)
 	}
+	ref, ok, err := s.BackgroundControl().QueueConsumer(ctx, "acme", "queue_1")
+	if err != nil || !ok || ref.BindingName != "jobs" || ref.Name != "queue_1" || ref.DeadLetterQueue != "queue_2" || ref.Worker != "worker" || ref.Version != 1 {
+		t.Fatalf("strict scheduled consumer: ref=%+v ok=%t err=%v", ref, ok, err)
+	}
+	var nudges []string
+	s.QueueNudge = func(ns, name string) { nudges = append(nudges, ns+"/"+name) }
 	producer := scopeDo(t, s, http.MethodPost, "/v1/queue/send?ns=acme&queue=jobs", mint(t, s, "acme", "queue", "jobs"), []byte("producer"))
 	if producer.Code != http.StatusOK {
 		t.Fatalf("producer: %d %s", producer.Code, producer.Body.String())
+	}
+	if len(nudges) != 1 || nudges[0] != "acme/queue_1" {
+		t.Fatalf("producer owner nudges=%v", nudges)
 	}
 	claimSeededScope(t, s, queue.Scope("acme", "queue_2"))
 	id, err := s.Queue.Send(ctx, "acme", "queue_2", []byte("dead letter"), "text", 0, "")

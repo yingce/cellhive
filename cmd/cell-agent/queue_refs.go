@@ -26,11 +26,7 @@ func resolveQueueRefs(resources []control.ResourceRef, targets []control.QueueTa
 			}
 			dlq = dest.ID
 		}
-		out = append(out, queue.Ref{Namespace: sc.Namespace, Name: sc.ID, BindingName: t.Queue,
-			Worker: t.Worker, BundleSHA: t.BundleSHA, Version: t.Version,
-			MaxRetries: t.Consumer.MaxRetries, RetryDelaySeconds: t.Consumer.RetryDelaySeconds,
-			DeadLetterQueue: dlq, MaxBatchSize: t.Consumer.MaxBatchSize,
-			MaxBatchTimeoutSeconds: t.Consumer.MaxBatchTimeoutSeconds, MaxConcurrency: t.Consumer.MaxConcurrency})
+		out = append(out, t.ResolvedRef(sc, dlq))
 	}
 	return out, errors.Join(failures...)
 }

@@ -77,9 +77,11 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 ## 定稿（ADR-152）
 
 **Queue（消费者）**
-- 轮询 `CELLHIVE_QUEUE_INTERVAL`（默认 1s，0=关）；单批大小 `CELLHIVE_QUEUE_BATCH`（0=store 默认）；可见性租约 `CELLHIVE_QUEUE_LEASE`（0=store 默认）。
+- 本地通知和到期时间检查用 `CELLHIVE_QUEUE_INTERVAL`（默认 1s，0=关）；单批大小 `CELLHIVE_QUEUE_BATCH`（0=store 默认）；可见性租约 `CELLHIVE_QUEUE_LEASE`（0=store 默认）。
 - 失败重投优先使用 per-consumer `retry_delay`（秒），未配置时使用 `CELLHIVE_QUEUE_RETRY_DELAY`（默认 **30s**）；显式 `retry({delaySeconds})` 优先于两者。`max_batch_timeout_seconds` 从最早可见消息起算，满批立即派发。`max_retries` 省略或旧值 0 时按首次投递后 3 次重试，超限进 `dead_letter_queue`；无 DLQ 时确认并记录丢弃（ADR-216）。
 - 语义：at-least-once（claim→dispatch→ack/retry；整个 bat​ch 失败即整批重投），只有 owner 消费（`OwnerGate`），每次 store 变更走捕获证明（ADR-119）。
+
+Queue 启动时及正常运行期间每分钟对账已登记的消费者，发现失败后 5 秒再试。Cron 启动及每个 UTC 分钟边界校验控制面版本，版本变化时加载计划，到期时物化 timer。发现或物化未完成时按 `CELLHIVE_CRON_INTERVAL` 重试。
 
 **Timer（派发）**
 - 轮询 `CELLHIVE_TIMER_INTERVAL`（默认 1s，0=关）；单 pass 到期上限 `CELLHIVE_TIMER_BATCH`（默认 **256**）；fired 标记保留 `CELLHIVE_TIMER_FIRED_TTL`（默认 **24h**，防重复派发）。
@@ -89,7 +91,7 @@ kind ∈ { do-alarm, cron, queue-delay, queue-retry, workflow-sleep, workflow-ti
 - 已物化的 Cron slot 在移除或修改触发器后仍按原计划时间和原表达式投递给当前活跃 worker；活跃 worker 没有新 Cron 也可接收待投递 slot。控制面暂时不可读或 worker 已不存在时保留 timer 并退避，不发送缺失身份的请求（ADR-281）。
 
 **Waker（单 fleet wake + 死节点恢复）**
-- 轮询 `CELLHIVE_WAKER_INTERVAL`（默认 5s，0=关）；租约 TTL = **2×interval**；单 pass `CELLHIVE_WAKER_BATCH`（默认 256）；fired TTL `CELLHIVE_WAKER_FIRED_TTL`（默认 24h）。
+- 轮询 `CELLHIVE_WAKER_INTERVAL`（默认 60s，0=关）；租约 TTL = **min(2×interval, 10s)**；单 pass `CELLHIVE_WAKER_BATCH`（默认 256）；fired TTL `CELLHIVE_WAKER_FIRED_TTL`（默认 24h）。
 - **退避**：连续错误时循环延迟按 `interval·2^fails` 增长，封顶 `CELLHIVE_WAKER_BACKOFF_MAX`（默认 **1m**）；成功后立即复位。空闲（0 派发）不触发退避。
 
 **timer cell 的 resident/pinned 策略（决定）**

@@ -63,7 +63,7 @@
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 关) | 到期计时派发 |
 | `CELLHIVE_WAKER_BACKOFF_MAX` | `1m` | 连续错误时的退避封顶（base=interval，`interval·2^fails`） |
 | `CELLHIVE_WAKER_BATCH` / `_FIRED_TTL` | `256` / `24h` | 单 pass 上限 / fired 标记保留 |
-| `CELLHIVE_WAKER_INTERVAL` | `5s` (0 关) | fleet waker（TTL 自动取 2×） |
+| `CELLHIVE_WAKER_INTERVAL` | `60s` (0 关) | fleet waker（TTL 取 2×interval，上限 10s） |
 | `CELLHIVE_WAKE_REPAIR_BATCH` | `256` | 单 pass 检查的本地 cell 数（轮转窗口，几趟覆盖全部） |
 | `CELLHIVE_WAKE_REPAIR_INTERVAL` | `5m` (0 关) | 本地 wake 索引修复扫描（ADR-177）；启动先跑一次 |
 | `CELLHIVE_WORKFLOW_RETENTION` | `0` 永久 | 终态实例修剪 |

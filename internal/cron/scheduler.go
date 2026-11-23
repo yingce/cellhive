@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -37,15 +38,54 @@ type Scheduler struct {
 	Now             func() time.Time
 	Log             *slog.Logger
 
-	mu          sync.Mutex
-	cache       map[string]cacheEntry
-	writtenSlot int64
-	written     map[string]bool
+	// Version returns the authority and control revision observed by a fresh
+	// read. An unchanged version permits reuse of the compiled target plan.
+	Version func(context.Context) (string, error)
+
+	mu           sync.Mutex
+	nextCheck    time.Time
+	lastCheck    time.Time
+	workerPlan   schedulePlan
+	workflowPlan schedulePlan
+	writtenSlot  time.Time
+	written      map[string]bool
 }
 
-type cacheEntry struct {
-	sch Schedule
-	ok  bool
+type trigger struct {
+	scope cell.Scope
+	expr  string
+}
+
+type triggerGroup struct {
+	schedule Schedule
+	next     time.Time
+	scopes   []cell.Scope
+}
+
+// Plans share a deadline across all targets using the same expression.
+type schedulePlan struct {
+	version string
+	groups  map[string]*triggerGroup
+}
+
+func (p *schedulePlan) compile(targets []trigger, version string, slot time.Time, log *slog.Logger) {
+	groups := make(map[string]*triggerGroup)
+	for _, t := range targets {
+		group, seen := groups[t.expr]
+		if !seen {
+			sch, err := Parse(t.expr)
+			if err != nil {
+				log.Warn("cron: bad expression; skipping", "expr", t.expr, "err", err)
+			} else {
+				group = &triggerGroup{schedule: sch, next: sch.nextAtOrAfter(slot)}
+			}
+			groups[t.expr] = group
+		}
+		if group != nil {
+			group.scopes = append(group.scopes, t.scope)
+		}
+	}
+	p.version, p.groups = version, groups
 }
 
 func (s *Scheduler) now() time.Time {
@@ -69,164 +109,192 @@ func (s *Scheduler) Start(ctx context.Context) {
 		if interval <= 0 {
 			interval = 30 * time.Second
 		}
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
+		for ctx.Err() == nil {
+			if _, err := s.Pass(ctx); err != nil && ctx.Err() == nil {
+				s.log().Warn("cron pass failed", "err", err)
+			}
+			now := s.now()
+			s.mu.Lock()
+			next := s.nextCheck
+			s.mu.Unlock()
+			// Failed discovery or unfinished writes retry at Interval, still
+			// waking at the next UTC minute for freshly deployed schedules.
+			delay := now.Truncate(time.Minute).Add(time.Minute).Sub(now)
+			if next.IsZero() {
+				delay = min(interval, delay)
+			} else {
+				delay = min(next.Sub(now), delay)
+			}
+			t := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
 			case <-t.C:
-				if _, err := s.Pass(ctx); err != nil {
-					s.log().Warn("cron pass failed", "err", err)
-				}
 			}
 		}
 	}()
 }
 
-// Pass materializes the current minute's slots for matching targets and returns
-// how many timers were upserted.
+// Pass materializes only the current minute. Concurrent callers share the
+// plan and per-slot successes, including the retry path after partial writes.
 func (s *Scheduler) Pass(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if s.Targets == nil || s.Open == nil {
 		return 0, nil
 	}
-	targets, err := s.Targets(ctx)
-	if err != nil {
-		return 0, err
+	now := s.now().UTC()
+	if !now.Before(s.lastCheck) && now.Before(s.nextCheck) {
+		return 0, nil
 	}
-	slot := s.now().UTC().Truncate(time.Minute)
-	s.mu.Lock()
-	if s.writtenSlot != slot.UnixMilli() {
-		s.writtenSlot = slot.UnixMilli()
-		s.written = map[string]bool{}
+	slot := now.Truncate(time.Minute)
+	if now.Before(s.lastCheck) {
+		s.workerPlan, s.workflowPlan = schedulePlan{}, schedulePlan{}
 	}
-	s.mu.Unlock()
-	upserts := 0
-	for _, tg := range targets {
-		sch, ok := s.schedule(tg.Cron)
-		if !ok {
-			continue
-		}
-		if !sch.Matches(slot) {
-			continue
-		}
-		sc := cell.Scope{Namespace: tg.Namespace, Class: CronClass, ID: tg.Worker}
-		key := sc.String() + "\x00" + tg.Cron
-		if s.wasWritten(slot.UnixMilli(), key) {
-			continue
-		}
-		if s.Own != nil {
-			owned, err := s.Own(ctx, sc)
-			if err != nil {
-				s.log().Warn("cron ownership check failed", "scope", sc.String(), "err", err)
-				continue
-			}
-			if !owned {
-				continue
-			}
-		}
-		st, err := s.Open(ctx, sc)
+	s.nextCheck = time.Time{}
+	s.lastCheck = now
+	if !slot.Equal(s.writtenSlot) {
+		s.writtenSlot, s.written = slot, make(map[string]bool)
+	}
+	version := ""
+	if s.Version != nil {
+		var err error
+		version, err = s.Version(ctx)
 		if err != nil {
-			s.log().Warn("cron open store failed", "scope", sc.String(), "err", err)
-			continue
+			return 0, err
 		}
-		t := timer.New(slot.UnixMilli(), timer.KindCron, sc.String(), Occurrence(slot, tg.Cron))
-		write := func() error { return st.Upsert(ctx, t) }
-		if s.Commit != nil {
-			err = s.Commit(ctx, sc, write)
-		} else {
-			err = write()
-		}
-		if err != nil {
-			s.log().Warn("cron upsert failed", "scope", sc.String(), "err", err)
-			continue
-		}
-		s.markWritten(slot.UnixMilli(), key)
-		if s.Register != nil {
-			s.Register(sc.String())
-		}
-		upserts++
 	}
+	if version == "" || version != s.workerPlan.version {
+		targets, err := s.Targets(ctx)
+		if err != nil {
+			return 0, err
+		}
+		triggers := make([]trigger, 0, len(targets))
+		for _, t := range targets {
+			triggers = append(triggers, trigger{cell.Scope{Namespace: t.Namespace, Class: CronClass, ID: t.Worker}, t.Cron})
+		}
+		s.workerPlan.compile(triggers, version, slot, s.log())
+	}
+	upserts, done := s.materialize(ctx, &s.workerPlan, slot, timer.KindCron)
 	if s.WorkflowTargets != nil {
-		wfs, err := s.WorkflowTargets(ctx)
-		if err != nil {
-			return upserts, err
-		}
-		// Preserve the legacy minute token for one deterministically chosen
-		// matching expression, including during rolling upgrades.
-		primary := map[string]string{}
-		for _, tg := range wfs {
-			sch, ok := s.schedule(tg.Cron)
-			if !ok || !sch.Matches(slot) {
-				continue
+		if version == "" || version != s.workflowPlan.version {
+			targets, err := s.WorkflowTargets(ctx)
+			if err != nil {
+				return upserts, err
 			}
-			key := tg.Namespace + "\x00" + tg.Workflow
-			if cur, exists := primary[key]; !exists || tg.Cron < cur {
-				primary[key] = tg.Cron
-			}
-		}
-		for _, tg := range wfs {
-			sch, ok := s.schedule(tg.Cron)
-			if !ok || !sch.Matches(slot) {
-				continue
-			}
-			sc := cell.Scope{Namespace: tg.Namespace, Class: "__workflow__", ID: tg.Workflow}
-			key := sc.String() + "\x00" + tg.Cron
-			if s.wasWritten(slot.UnixMilli(), key) {
-				continue
-			}
-			if s.Own != nil {
-				owned, err := s.Own(ctx, sc)
+			// Resource policies are point reads made after the projection.
+			// Discard the batch if the authority or revision changed meanwhile.
+			if s.Version != nil {
+				after, err := s.Version(ctx)
 				if err != nil {
-					s.log().Warn("workflow schedule ownership check failed", "scope", sc.String(), "err", err)
-					continue
+					return upserts, err
 				}
-				if !owned {
-					continue
+				if after != version {
+					return upserts, errors.New("cron: control version changed during workflow discovery")
 				}
 			}
-			st, err := s.Open(ctx, sc)
-			if err != nil {
-				s.log().Warn("workflow schedule open failed", "scope", sc.String(), "err", err)
-				continue
+			triggers := make([]trigger, 0, len(targets))
+			for _, t := range targets {
+				triggers = append(triggers, trigger{cell.Scope{Namespace: t.Namespace, Class: "__workflow__", ID: t.Workflow}, t.Cron})
 			}
-			occurrence := strconv.FormatInt(slot.Unix()/60, 10)
-			if tg.Cron != primary[tg.Namespace+"\x00"+tg.Workflow] {
-				occurrence += fmt.Sprintf("-%x", sha256.Sum256([]byte(tg.Cron)))
-			}
-			t := timer.New(slot.UnixMilli(), timer.KindWorkflowSchedule, sc.String(), occurrence)
-			write := func() error { return st.Upsert(ctx, t) }
-			if s.Commit != nil {
-				err = s.Commit(ctx, sc, write)
-			} else {
-				err = write()
-			}
-			if err != nil {
-				s.log().Warn("workflow schedule upsert failed", "scope", sc.String(), "err", err)
-				continue
-			}
-			s.markWritten(slot.UnixMilli(), key)
-			if s.Register != nil {
-				s.Register(sc.String())
-			}
-			upserts++
+			s.workflowPlan.compile(triggers, version, slot, s.log())
 		}
+		n, finished := s.materialize(ctx, &s.workflowPlan, slot, timer.KindWorkflowSchedule)
+		upserts += n
+		done = done && finished
+	}
+	if done {
+		s.nextCheck = slot.Add(time.Minute)
 	}
 	return upserts, nil
 }
 
-func (s *Scheduler) wasWritten(slot int64, key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writtenSlot == slot && s.written[key]
+func (s *Scheduler) materialize(ctx context.Context, plan *schedulePlan, slot time.Time, kind timer.Kind) (int, bool) {
+	primary := make(map[cell.Scope]string)
+	due := make(map[string]*triggerGroup)
+	for expr, group := range plan.groups {
+		if group == nil || group.next.IsZero() || group.next.After(slot) {
+			continue
+		}
+		if group.next.Before(slot) {
+			group.next = group.schedule.nextAtOrAfter(slot)
+			if !group.next.Equal(slot) {
+				continue
+			}
+		}
+		due[expr] = group
+		if kind == timer.KindWorkflowSchedule {
+			for _, sc := range group.scopes {
+				if old, ok := primary[sc]; !ok || expr < old {
+					primary[sc] = expr
+				}
+			}
+		}
+	}
+	upserts, finished := 0, true
+	for expr, group := range due {
+		for _, sc := range group.scopes {
+			key := sc.String() + "\x00" + expr
+			if s.written[key] {
+				continue
+			}
+			occurrence := Occurrence(slot, expr)
+			if kind == timer.KindWorkflowSchedule {
+				occurrence = strconv.FormatInt(slot.Unix()/60, 10)
+				if expr != primary[sc] {
+					occurrence += fmt.Sprintf("-%x", sha256.Sum256([]byte(expr)))
+				}
+			}
+			wrote, err := s.upsert(ctx, sc, timer.New(slot.UnixMilli(), kind, sc.String(), occurrence))
+			if err != nil {
+				s.log().Warn("cron materialization failed", "scope", sc.String(), "err", err)
+			}
+			if !wrote {
+				finished = false
+				continue
+			}
+			s.written[key] = true
+			upserts++
+		}
+	}
+	// Keep coincident expressions in the primary election until the entire
+	// batch succeeds. Successful writes are suppressed independently.
+	if finished {
+		for _, group := range due {
+			group.next = group.schedule.nextAtOrAfter(slot.Add(time.Minute))
+		}
+	}
+	return upserts, finished
 }
 
-func (s *Scheduler) markWritten(slot int64, key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.writtenSlot == slot {
-		s.written[key] = true
+func (s *Scheduler) upsert(ctx context.Context, sc cell.Scope, t timer.Timer) (bool, error) {
+	if s.Own != nil {
+		owned, err := s.Own(ctx, sc)
+		if err != nil || !owned {
+			return false, err
+		}
 	}
+	st, err := s.Open(ctx, sc)
+	if err != nil {
+		return false, err
+	}
+	write := func() error { return st.Upsert(ctx, t) }
+	if s.Commit != nil {
+		err = s.Commit(ctx, sc, write)
+	} else {
+		err = write()
+	}
+	if err != nil {
+		return false, err
+	}
+	if s.Register != nil {
+		s.Register(sc.String())
+	}
+	return true, nil
 }
 
 // Occurrence keeps coincident expressions distinct while repeated scheduler
@@ -248,23 +316,4 @@ func Expression(occurrence string) string {
 		return ""
 	}
 	return v.Cron
-}
-
-func (s *Scheduler) schedule(expr string) (Schedule, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cache == nil {
-		s.cache = map[string]cacheEntry{}
-	}
-	if e, ok := s.cache[expr]; ok {
-		return e.sch, e.ok
-	}
-	sch, err := Parse(expr)
-	if err != nil {
-		s.log().Warn("cron: bad expression; skipping", "expr", expr, "err", err)
-		s.cache[expr] = cacheEntry{ok: false}
-		return Schedule{}, false
-	}
-	s.cache[expr] = cacheEntry{sch: sch, ok: true}
-	return sch, true
 }

@@ -115,10 +115,51 @@ func (s Schedule) Matches(t time.Time) bool {
 	if !s.min.bits[t.Minute()] || !s.hour.bits[t.Hour()] || !s.month.bits[int(t.Month())] {
 		return false
 	}
+	return s.matchesDay(t)
+}
+
+func (s Schedule) matchesDay(t time.Time) bool {
 	dom := s.dom.bits[t.Day()]
 	dow := s.dow.bits[int(t.Weekday())]
 	if !s.dom.star && !s.dow.star {
 		return dom || dow
 	}
 	return dom && dow
+}
+
+// nextAtOrAfter finds the first matching UTC minute at or after a minute
+// boundary. Eight years includes the longest gap between leap days, even
+// across an omitted century leap day. Impossible dates have no deadline.
+func (s Schedule) nextAtOrAfter(slot time.Time) time.Time {
+	slot = slot.UTC().Truncate(time.Minute)
+	day := time.Date(slot.Year(), slot.Month(), slot.Day(), 0, 0, 0, 0, time.UTC)
+	limit := day.AddDate(8, 0, 1)
+	for day.Before(limit) {
+		if !s.month.bits[day.Month()] {
+			day = time.Date(day.Year(), day.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+			continue
+		}
+		if s.matchesDay(day) {
+			start := 0
+			if day.Before(slot) {
+				start = slot.Hour()
+			}
+			for h := start; h < 24; h++ {
+				if !s.hour.bits[h] {
+					continue
+				}
+				startMin := 0
+				if day.Before(slot) && h == slot.Hour() {
+					startMin = slot.Minute()
+				}
+				for m := startMin; m < 60; m++ {
+					if s.min.bits[m] {
+						return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute)
+					}
+				}
+			}
+		}
+		day = day.AddDate(0, 0, 1)
+	}
+	return time.Time{}
 }

@@ -171,11 +171,11 @@ CELLHIVE_CELL_IDLE=5m
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 关) | 到期计时派发 |
 | `CELLHIVE_TIMER_BATCH` / `_FIRED_TTL` | `256` / `24h` | 单 pass 到期上限 / fired 标记保留 |
 | `CELLHIVE_CRON_MAX_ATTEMPTS` | `10` | 单个 cron occurrence 的终止重试预算；达到后消费 slot（ADR-305）。0=保持旧的无上限行为 |
-| `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 关) | queue 消费 |
+| `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 关) | Queue 本地通知和到期检查，正常对账每分钟一次 |
 | `CELLHIVE_QUEUE_BATCH` / `_LEASE` | `0`（store 默认） | 单批消息数 / 可见性租约 |
 | `CELLHIVE_QUEUE_RETRY_DELAY` | `30s` | 失败批次的重投延迟（重试上限/DLQ 由 per-consumer 配置） |
-| `CELLHIVE_CRON_INTERVAL` | `30s` (0 关) | cron→timer 物化 |
-| `CELLHIVE_WAKER_INTERVAL` | `5s` (0 关) | fleet waker（TTL 自动取 2×） |
+| `CELLHIVE_CRON_INTERVAL` | `30s` (0 关) | Cron 未完成物化或发现失败的重试间隔，正常按 UTC 分钟检查 |
+| `CELLHIVE_WAKER_INTERVAL` | `60s` (0 关) | fleet waker（TTL 取 2×interval，上限 10s） |
 | `CELLHIVE_WAKER_BATCH` / `_FIRED_TTL` | `256` / `24h` | 单 pass 上限 / fired 标记保留 |
 | `CELLHIVE_WAKER_BACKOFF_MAX` | `1m` | 连续错误时的退避封顶（base=interval，`interval·2^fails`） |
 | `CELLHIVE_WAKE_REPAIR_INTERVAL` | `5m` (0 关) | 本地 wake 索引修复扫描（ADR-177）；启动先跑一次 |

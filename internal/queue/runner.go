@@ -63,7 +63,11 @@ type Runner struct {
 	// RetryDelayMs is how long a failed batch stays invisible before retry.
 	RetryDelayMs int64
 	Interval     time.Duration
-	Log          *slog.Logger
+	// Resolve reads the current consumer by physical queue identity.
+	Resolve   func(context.Context, string, string) (Ref, bool, error)
+	wakeMu    sync.Mutex
+	deadlines map[[2]string]time.Time
+	Log       *slog.Logger
 	// Filter, when set, decides whether this node should consume a queue (e.g.
 	// OwnerGate: only queues whose cell this node owns, ADR-119). An error skips
 	// the queue for this pass.
@@ -127,17 +131,77 @@ func (r *Runner) Start(ctx context.Context) {
 		}
 		t := time.NewTicker(interval)
 		defer t.Stop()
+		var reconcileAt time.Time
 		for {
+			now := time.Now()
+			if r.Resolve == nil {
+				if _, err := r.Pass(ctx); err != nil {
+					r.log().Warn("queue pass failed", "err", err)
+				}
+			} else {
+				reconcileAt = r.scheduledPass(ctx, now, reconcileAt)
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if _, err := r.Pass(ctx); err != nil {
-					r.log().Warn("queue runner pass failed", "err", err)
-				}
 			}
 		}
 	}()
+}
+
+func (r *Runner) scheduledPass(ctx context.Context, now, reconcileAt time.Time) time.Time {
+	if !now.Before(reconcileAt) {
+		if err := r.reconcile(ctx); err != nil {
+			r.log().Warn("queue reconciliation failed", "err", err)
+			reconcileAt = now.Add(5 * time.Second)
+		} else {
+			reconcileAt = now.Add(time.Minute)
+		}
+	}
+	r.runRefs(ctx, r.takeDue(now), true)
+	return reconcileAt
+}
+
+// Nudge marks a queue dirty after its owner commits a message change.
+func (r *Runner) Nudge(ns, name string) {
+	r.schedule(ns, name, time.Time{})
+}
+
+func (r *Runner) schedule(ns, name string, at time.Time) {
+	r.wakeMu.Lock()
+	defer r.wakeMu.Unlock()
+	if r.deadlines == nil {
+		r.deadlines = make(map[[2]string]time.Time)
+	}
+	key := [2]string{ns, name}
+	if old, ok := r.deadlines[key]; !ok || at.Before(old) {
+		r.deadlines[key] = at
+	}
+}
+
+func (r *Runner) reconcile(ctx context.Context) error {
+	refs, err := r.Queues(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		r.Nudge(ref.Namespace, ref.Name)
+	}
+	return nil
+}
+
+func (r *Runner) takeDue(now time.Time) []Ref {
+	r.wakeMu.Lock()
+	defer r.wakeMu.Unlock()
+	var refs []Ref
+	for key, at := range r.deadlines {
+		if !at.After(now) {
+			refs = append(refs, Ref{Namespace: key[0], Name: key[1]})
+			delete(r.deadlines, key)
+		}
+	}
+	return refs
 }
 
 // Pass runs one poll pass: for every queue, claim a batch and dispatch it.
@@ -150,6 +214,13 @@ func (r *Runner) Pass(ctx context.Context) (dispatched int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	return r.runRefs(ctx, refs, false), nil
+}
+
+func (r *Runner) runRefs(ctx context.Context, refs []Ref, scheduled bool) (dispatched int) {
+	if len(refs) == 0 {
+		return 0
+	}
 	// Bound cross-queue fan-out independently of each queue's batch limit.
 	jobs := make(chan Ref)
 	var wg sync.WaitGroup
@@ -159,20 +230,7 @@ func (r *Runner) Pass(ctx context.Context) (dispatched int, err error) {
 		go func() {
 			defer wg.Done()
 			for ref := range jobs {
-				if ctx.Err() != nil {
-					continue
-				}
-				if r.Filter != nil {
-					ok, err := r.Filter(ctx, ref)
-					if err != nil {
-						r.log().Warn("queue filter failed", "ns", ref.Namespace, "queue", ref.Name, "err", err)
-						continue
-					}
-					if !ok {
-						continue
-					}
-				}
-				n := r.dispatchRef(ctx, ref)
+				n := r.runRef(ctx, ref, scheduled)
 				mu.Lock()
 				dispatched += n
 				mu.Unlock()
@@ -195,7 +253,50 @@ submit:
 	}
 	close(jobs)
 	wg.Wait()
-	return dispatched, nil
+	return dispatched
+}
+
+func (r *Runner) runRef(ctx context.Context, ref Ref, scheduled bool) int {
+	if ctx.Err() != nil {
+		return 0
+	}
+	if r.Filter != nil {
+		ok, err := r.Filter(ctx, ref)
+		if err != nil {
+			r.log().Warn("queue filter failed", "ns", ref.Namespace, "queue", ref.Name, "err", err)
+			return 0
+		}
+		if !ok {
+			return 0
+		}
+	}
+	if scheduled {
+		// Read the local deadline before consulting the control plane. An
+		// empty queue needs no consumer lookup until the next mutation.
+		now := r.Store.now()
+		at, err := r.nextBatch(ctx, ref, 1, now)
+		if err != nil {
+			r.log().Warn("queue readiness failed", "queue", ref.Name, "err", err)
+			return 0
+		}
+		if at.IsZero() {
+			return 0
+		}
+		if at.After(now) {
+			r.schedule(ref.Namespace, ref.Name, at)
+			return 0
+		}
+		current, ok, err := r.Resolve(ctx, ref.Namespace, ref.Name)
+		if err != nil {
+			r.log().Warn("queue consumer lookup failed", "queue", ref.Name, "err", err)
+			return 0
+		}
+		if !ok {
+			return 0
+		}
+		ref = current
+	}
+	return r.dispatchRef(ctx, ref, scheduled)
 }
 
 // MaxConsumerConcurrency bounds queue batch fan-out and allocation.
@@ -206,7 +307,7 @@ const MaxConsumerConcurrency = 100
 // takes the next wave, so a pass never blocks indefinitely on a busy queue.
 // Batch order within a wave is not guaranteed, which matches the queue's
 // at-least-once contract.
-func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
+func (r *Runner) dispatchRef(ctx context.Context, ref Ref, scheduled bool) int {
 	conc := min(max(ref.MaxConcurrency, 1), MaxConsumerConcurrency)
 	batch := r.Batch
 	if ref.MaxBatchSize > 0 {
@@ -217,12 +318,16 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 	}
 	batches := make([][]Message, 0, conc)
 	for i := 0; i < conc; i++ {
-		ready, rerr := r.batchReady(ctx, ref, batch)
+		now := r.Store.now()
+		at, rerr := r.nextBatch(ctx, ref, batch, now)
 		if rerr != nil {
 			r.log().Warn("queue batch readiness failed", "ns", ref.Namespace, "queue", ref.Name, "err", rerr)
 			break
 		}
-		if !ready {
+		if at.IsZero() || at.After(now) {
+			if scheduled && len(batches) == 0 && !at.IsZero() {
+				r.schedule(ref.Namespace, ref.Name, at)
+			}
 			break
 		}
 		var msgs []Message
@@ -257,18 +362,28 @@ func (r *Runner) dispatchRef(ctx context.Context, ref Ref) int {
 		}(msgs)
 	}
 	wg.Wait()
+	if scheduled {
+		// Settlements, failed acknowledgments and remaining backlog can each
+		// change the next wake. A concurrent producer's earlier nudge wins.
+		at, err := r.nextBatch(ctx, ref, batch, r.Store.now())
+		if err != nil {
+			r.log().Warn("queue settlement readiness failed", "queue", ref.Name, "err", err)
+		} else if !at.IsZero() {
+			r.schedule(ref.Namespace, ref.Name, at)
+		}
+	}
 	return total
 }
 
-func (r *Runner) batchReady(ctx context.Context, ref Ref, batch int) (bool, error) {
+func (r *Runner) nextBatch(ctx context.Context, ref Ref, batch int, now time.Time) (time.Time, error) {
 	if r.AdmitRead != nil {
 		release, err := r.AdmitRead(ctx, ref)
 		if err != nil {
-			return false, err
+			return time.Time{}, err
 		}
 		defer release()
 	}
-	return r.Store.BatchReady(ctx, ref.Namespace, ref.Name, batch, ref.MaxBatchTimeoutSeconds)
+	return r.Store.nextBatch(ctx, ref.Namespace, ref.Name, batch, ref.MaxBatchTimeoutSeconds, now)
 }
 
 // dispatchBatch delivers one claimed batch and acks (or retries/dead-letters)
@@ -304,6 +419,13 @@ func (r *Runner) dispatchBatch(ctx context.Context, ref Ref, msgs []Message) int
 			if m.ClaimGeneration != current {
 				return 0
 			}
+		}
+	}
+	if r.Resolve != nil {
+		current, ok, err := r.Resolve(ctx, ref.Namespace, ref.Name)
+		if err != nil || !ok || current != ref {
+			// Leave the claim leased. The next pass uses the new configuration.
+			return 0
 		}
 	}
 	if r.ValidateDispatch != nil {

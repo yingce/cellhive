@@ -13,6 +13,7 @@ import (
 	"cellhive/internal/cell"
 	"cellhive/internal/control"
 	"cellhive/internal/owner"
+	"cellhive/internal/queue"
 )
 
 // ControlReader supplies the configuration consumed by background dispatchers.
@@ -69,6 +70,20 @@ func (r *ControlReader) ProjectionWithAuthority(ctx context.Context) (control.Pr
 	key, err := r.read(ctx, controlReadQuery{Op: "projection"}, &out, false)
 	return out, key, err
 }
+
+// RevisionWithAuthority requests only the ETag. Older owners ignore the field
+// selector and return a full projection carrying the same ETag.
+func (r *ControlReader) RevisionWithAuthority(ctx context.Context) (string, string, error) {
+	var result struct {
+		ETag string `json:"etag"`
+	}
+	key, err := r.read(ctx, controlReadQuery{Op: "projection", Kind: "revision"}, &result, false)
+	if err == nil && result.ETag == "" {
+		err = errors.New("control revision missing")
+	}
+	return result.ETag, key, err
+}
+
 func (r *ControlReader) ProjectionStrict(ctx context.Context) (control.Projection, error) {
 	var out control.Projection
 	_, err := r.read(ctx, controlReadQuery{Op: "projection"}, &out, true)
@@ -89,6 +104,62 @@ func (r *ControlReader) ResourceConfig(ctx context.Context, ns, kind, name strin
 	var out []byte
 	_, err := r.read(ctx, controlReadQuery{Op: "config", Namespace: ns, Kind: kind, Name: name}, &out, true)
 	return out, err
+}
+
+func (r *ControlReader) QueueConsumer(ctx context.Context, ns, id string) (queue.Ref, bool, error) {
+	// An older owner ignores the selector and returns the full projection.
+	// ETag distinguishes that legacy wire reply from a resolved queue.Ref.
+	var reply struct {
+		queue.Ref
+		ETag string `json:"etag"`
+	}
+	key, err := r.read(ctx, controlReadQuery{Op: "projection", Kind: "queue-consumer", Namespace: ns, Name: id}, &reply, true)
+	if errors.Is(err, control.ErrNotFound) {
+		return queue.Ref{}, false, nil
+	}
+	if err != nil {
+		return queue.Ref{}, false, err
+	}
+	if reply.ETag == "" {
+		if reply.Ref.Namespace != ns || reply.Ref.Name != id {
+			return queue.Ref{}, false, errors.New("control returned a different queue identity")
+		}
+		return reply.Ref, true, nil
+	}
+	var resources []control.ResourceRef
+	resourceKey, err := r.read(ctx, controlReadQuery{Op: "resources", Kind: "queue"}, &resources, true)
+	if err != nil {
+		return queue.Ref{}, false, err
+	}
+	// The legacy reads span multiple SQLite snapshots. A control revision
+	// change or ownership transfer invalidates their combined result.
+	var current control.Projection
+	revisionKey, err := r.read(ctx, controlReadQuery{Op: "projection"}, &current, true)
+	if err != nil {
+		return queue.Ref{}, false, err
+	}
+	if current.ETag != reply.ETag || key != resourceKey || key != revisionKey {
+		return queue.Ref{}, false, errors.New("queue configuration changed during legacy lookup")
+	}
+	for _, target := range current.QueueTargets() {
+		if target.Namespace != ns {
+			continue
+		}
+		sc, err := control.QueueResourceScope(resources, ns, target.Queue)
+		if err != nil || sc.ID != id {
+			continue
+		}
+		dest := ""
+		if target.Consumer.DeadLetterQueue != "" {
+			dlq, err := control.QueueResourceScope(resources, ns, target.Consumer.DeadLetterQueue)
+			if err != nil {
+				return queue.Ref{}, false, err
+			}
+			dest = dlq.ID
+		}
+		return target.ResolvedRef(sc, dest), true, nil
+	}
+	return queue.Ref{}, false, nil
 }
 
 func (r *ControlReader) queueExists(ctx context.Context, ns, name string) (bool, error) {
@@ -271,6 +342,18 @@ func (s *Server) readLocalControlOwned(ctx context.Context, q controlReadQuery, 
 	var value any
 	var err error
 	switch {
+	case q.Op == "projection" && q.Kind == "revision":
+		var rev int64
+		rev, err = s.Control.Rev(ctx)
+		value = struct {
+			ETag string `json:"etag"`
+		}{fmt.Sprintf(`"r%d"`, rev)}
+	case q.Op == "projection" && q.Kind == "queue-consumer" && q.Namespace != "" && q.Name != "":
+		var ok bool
+		value, ok, err = s.Control.ResolveQueueConsumer(ctx, q.Namespace, q.Name)
+		if err == nil && !ok {
+			err = control.ErrNotFound
+		}
 	case q.Op == "projection":
 		value, err = s.Control.Projection(ctx)
 	case q.Op == "resources" && q.Kind == "queue":

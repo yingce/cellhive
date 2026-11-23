@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
   created_ms      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_claim ON messages(visible_at_ms, id);
+CREATE INDEX IF NOT EXISTS messages_available ON messages(MAX(visible_at_ms,lease_until_ms), id);
 DROP INDEX IF EXISTS messages_visible;
 CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, message_id TEXT NOT NULL, fingerprint TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idempotency_expiry ON idempotency(expires_ms);
@@ -398,43 +399,51 @@ func normalizeContentType(v string) string {
 // Retried messages are dispatched as soon as they become visible; new partial
 // batches wait until the oldest visible message reaches maxWaitSeconds.
 func (s *Store) BatchReady(ctx context.Context, ns, name string, batchSize, maxWaitSeconds int) (bool, error) {
-	if maxWaitSeconds <= 0 {
-		return true, nil
-	}
+	now := s.now()
+	next, err := s.nextBatch(ctx, ns, name, batchSize, maxWaitSeconds, now)
+	return !next.IsZero() && !next.After(now), err
+}
+
+// nextBatch returns zero for an empty queue. A future visibility or lease
+// expiration can fill a partial batch before its oldest message times out.
+func (s *Store) nextBatch(ctx context.Context, ns, name string, batchSize, maxWaitSeconds int, now time.Time) (time.Time, error) {
 	if batchSize <= 0 || batchSize > 100 {
 		batchSize = 10
 	}
 	c, err := s.cell(ctx, ns, name)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
-	now := s.now().UnixMilli()
-	rows, err := c.DB.QueryContext(ctx, `SELECT visible_at_ms, attempts FROM messages
-		WHERE visible_at_ms<=? AND lease_until_ms<=? ORDER BY visible_at_ms,id LIMIT ?`, now, now, batchSize)
+	rows, err := c.DB.QueryContext(ctx, `SELECT MAX(visible_at_ms,lease_until_ms), attempts FROM messages
+		ORDER BY MAX(visible_at_ms,lease_until_ms),id LIMIT ?`, batchSize)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	defer rows.Close()
+	var deadline time.Time
 	count := 0
-	var oldest int64
 	for rows.Next() {
-		var visible int64
+		var available int64
 		var attempts int
-		if err := rows.Scan(&visible, &attempts); err != nil {
-			return false, err
+		if err := rows.Scan(&available, &attempts); err != nil {
+			return time.Time{}, err
 		}
-		if count == 0 {
-			oldest = visible
+		at := time.UnixMilli(available)
+		if at.After(now) {
+			if deadline.IsZero() || at.Before(deadline) {
+				deadline = at
+			}
+			break
 		}
 		count++
-		if attempts > 0 {
-			return true, nil
+		if attempts > 0 || maxWaitSeconds <= 0 || count == batchSize {
+			return now, nil
+		}
+		if count == 1 {
+			deadline = at.Add(time.Duration(maxWaitSeconds) * time.Second)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	return count >= batchSize || (count > 0 && now-oldest >= int64(maxWaitSeconds)*1000), nil
+	return deadline, rows.Err()
 }
 
 // Claim returns up to limit visible messages and leases them until now+leaseMs.

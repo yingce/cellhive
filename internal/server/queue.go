@@ -11,6 +11,17 @@ import (
 	queuepkg "cellhive/internal/queue"
 )
 
+// queueWrite publishes a local scheduling hint only after durable capture.
+func (s *Server) queueWrite(ctx context.Context, ns, name string, write func() error) error {
+	if err := s.capturedWrite(ctx, queuepkg.Scope(ns, name), write); err != nil {
+		return err
+	}
+	if s.QueueNudge != nil {
+		s.QueueNudge(ns, name)
+	}
+	return nil
+}
+
 const maxQueueBodyBytes = 128 * 1024
 
 // Preserve the original URL for forwarding/authentication. Only local storage
@@ -50,7 +61,7 @@ func (s *Server) handleQueueTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer end()
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error {
+	if err := s.queueWrite(r.Context(), ns, name, func() error {
 		var err error
 		id, err = s.Queue.TransferValidated(r.Context(), ns, name, message, func(ctx context.Context) error { return s.validateQueueTransfer(ctx, ns, message) })
 		return err
@@ -134,7 +145,7 @@ func (s *Server) handleQueueSend(w http.ResponseWriter, r *http.Request) {
 	ns, queue := s.scopeNS(r), queueStorageName(r)
 	producerID, producerTrace := queueProducerContext(r)
 	producer := queuepkg.SendMessage{Body: body, ContentType: contentType, DelaySeconds: delay, IdempotencyKey: q.Get("idempotency_key"), ProducerRequestID: producerID, ProducerTraceparent: producerTrace}
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, queue), func() error {
+	if err := s.queueWrite(r.Context(), ns, queue, func() error {
 		var e error
 		var ids []string
 		ids, e = s.Queue.SendBatch(r.Context(), ns, queue, []queuepkg.SendMessage{producer})
@@ -184,7 +195,7 @@ func (s *Server) handleQueueSendBatch(w http.ResponseWriter, r *http.Request) {
 		msgs[i] = queuepkg.SendMessage{Body: body, ContentType: m.ContentType, DelaySeconds: m.DelaySeconds, IdempotencyKey: m.IdempotencyKey, Metadata: m.Metadata, ProducerRequestID: producerID, ProducerTraceparent: producerTrace}
 	}
 	var ids []string
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, name), func() error { var e error; ids, e = s.Queue.SendBatch(r.Context(), ns, name, msgs); return e }); err != nil {
+	if err := s.queueWrite(r.Context(), ns, name, func() error { var e error; ids, e = s.Queue.SendBatch(r.Context(), ns, name, msgs); return e }); err != nil {
 		s.captureErr(w, err, "queue_send_batch_failed")
 		return
 	}
@@ -207,9 +218,14 @@ func (s *Server) handleQueueClaim(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("lease_ms"); v != "" {
 		lease, _ = strconv.ParseInt(v, 10, 64)
 	}
-	msgs, err := s.Queue.Claim(r.Context(), s.scopeNS(r), queueStorageName(r), limit, lease)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "queue_claim_failed", err.Error())
+	ns, name := s.scopeNS(r), queueStorageName(r)
+	var msgs []queuepkg.Message
+	if err := s.queueWrite(r.Context(), ns, name, func() error {
+		var err error
+		msgs, err = s.Queue.Claim(r.Context(), ns, name, limit, lease)
+		return err
+	}); err != nil {
+		s.captureErr(w, err, "queue_claim_failed")
 		return
 	}
 	out := make([]map[string]any, 0, len(msgs))
@@ -232,7 +248,7 @@ func (s *Server) handleQueueAck(w http.ResponseWriter, r *http.Request) {
 	if s.queueGate(w, r, s.scopeNS(r), queueStorageName(r)) {
 		return
 	}
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), queueStorageName(r)), func() error {
+	if err := s.queueWrite(r.Context(), s.scopeNS(r), queueStorageName(r), func() error {
 		return s.Queue.Ack(r.Context(), s.scopeNS(r), queueStorageName(r), q.Get("id"))
 	}); err != nil {
 		s.captureErr(w, err, "queue_ack_failed")
@@ -253,7 +269,7 @@ func (s *Server) handleQueueRetry(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("delay_ms"); v != "" {
 		delay, _ = strconv.ParseInt(v, 10, 64)
 	}
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(s.scopeNS(r), queueStorageName(r)), func() error {
+	if err := s.queueWrite(r.Context(), s.scopeNS(r), queueStorageName(r), func() error {
 		return s.Queue.Retry(r.Context(), s.scopeNS(r), queueStorageName(r), q.Get("id"), delay)
 	}); err != nil {
 		s.captureErr(w, err, "queue_retry_failed")

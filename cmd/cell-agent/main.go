@@ -514,7 +514,7 @@ func main() {
 	workflowStore.Register = timerReg.Add
 	const workflowLeaseMs = int64(60_000)
 	// One short-TTL projection cache serves every control-derived dispatch
-	// callback (queue consumers, cron targets, workflow targets, DO alarm
+	// callback (queue consumers, workflow targets, DO alarm
 	// bundles). Its source is wired once the control store exists.
 	projCache := &projectionCache{ttl: projectionCacheTTL}
 	var controlReads *server.ControlReader
@@ -635,21 +635,17 @@ func main() {
 			// timer) and keeps only those whose owner is gone, so the waker covers
 			// timers/alarms after an owner dies without listing every cell.
 			DeadScopes: func(wctx context.Context) ([]string, error) {
-				entries, err := wakeIdx.Due(wctx, time.Now().UnixMilli())
+				scopes, err := wakeIdx.DueScopes(wctx, time.Now().UnixMilli())
 				if err != nil {
 					return nil, err
 				}
 				now := time.Now()
-				out := make([]string, 0, len(entries))
-				for _, e := range entries {
-					sc, perr := cell.ParseScope(e.Scope)
-					if perr != nil {
-						continue
-					}
+				out := make([]string, 0, len(scopes))
+				for _, sc := range scopes {
 					o, _, rerr := om.Resolve(wctx, sc)
 					live, lerr := om.Live(wctx, o, now)
 					if rerr != nil || lerr != nil || !live {
-						out = append(out, e.Scope)
+						out = append(out, sc.String())
 					}
 				}
 				return out, nil
@@ -710,16 +706,42 @@ func main() {
 	// timer runner then dispatches them (enriched with worker/bundle, ADR-070).
 	var cronScheduler *cron.Scheduler
 	if cfg.CronInterval > 0 {
+		// Pass serializes these callbacks. Bracket the first projection used
+		// to compile a version because Projection reads its revision last.
+		var workflowRefs map[control.ResourceRef]struct{}
+		var cronVersion string
 		cronScheduler = &cron.Scheduler{
 			Interval: cfg.CronInterval,
+			Version: func(ctx context.Context) (string, error) {
+				etag, authority, err := controlReads.RevisionWithAuthority(ctx)
+				if err != nil {
+					return "", err
+				}
+				cronVersion = authority + "/" + etag
+				return cronVersion, nil
+			},
 			Log:      log,
 			Open:     openTimer,
 			Register: func(scope string) { timerReg.Add(scope) },
 			Targets: func(cctx context.Context) ([]cron.Target, error) {
-				ct, err := projCache.cronTargets(cctx)
+				proj, authority, err := controlReads.ProjectionWithAuthority(cctx)
 				if err != nil {
 					return nil, err
 				}
+				if authority+"/"+proj.ETag != cronVersion {
+					return nil, errors.New("cron: control version changed during worker discovery")
+				}
+				workflowRefs = make(map[control.ResourceRef]struct{})
+				for _, app := range proj.Apps {
+					for _, worker := range app.Workers {
+						for _, binding := range worker.Version.Bindings {
+							if binding.Type == "workflow" {
+								workflowRefs[control.ResourceRef{Namespace: app.Namespace, Name: binding.ID}] = struct{}{}
+							}
+						}
+					}
+				}
+				ct := proj.CronTargets()
 				out := make([]cron.Target, 0, len(ct))
 				for _, t := range ct {
 					out = append(out, cron.Target{Namespace: t.Namespace, Worker: t.Worker, Cron: t.Cron})
@@ -727,32 +749,21 @@ func main() {
 				return out, nil
 			},
 			WorkflowTargets: func(cctx context.Context) ([]cron.WorkflowTarget, error) {
-				proj, err := projCache.Projection(cctx)
-				if err != nil {
-					return nil, err
-				}
 				out := []cron.WorkflowTarget{}
-				for _, app := range proj.Apps {
-					for _, wk := range app.Workers {
-						for _, b := range wk.Version.Bindings {
-							if b.Type != "workflow" {
-								continue
-							}
-							raw, e := controlReads.ResourceConfig(cctx, app.Namespace, "workflow", b.ID)
-							if errors.Is(e, control.ErrNotFound) {
-								continue
-							}
-							if e != nil {
-								return nil, e
-							}
-							var p workflow.Policy
-							if e := json.Unmarshal(raw, &p); e != nil {
-								return nil, e
-							}
-							for _, expr := range p.Schedules {
-								out = append(out, cron.WorkflowTarget{Namespace: app.Namespace, Workflow: b.ID, Cron: expr})
-							}
-						}
+				for ref := range workflowRefs {
+					raw, err := controlReads.ResourceConfig(cctx, ref.Namespace, "workflow", ref.Name)
+					if errors.Is(err, control.ErrNotFound) {
+						continue
+					}
+					if err != nil {
+						return nil, err
+					}
+					var policy workflow.Policy
+					if err := json.Unmarshal(raw, &policy); err != nil {
+						return nil, err
+					}
+					for _, expr := range policy.Schedules {
+						out = append(out, cron.WorkflowTarget{Namespace: ref.Namespace, Workflow: ref.Name, Cron: expr})
 					}
 				}
 				return out, nil
@@ -945,7 +956,8 @@ func main() {
 		// need background continuation initialization before Fold can proceed.
 		go runEpochFoldLoop(ctx, log, rep, om, cfg, captureMgr.EnsureContinuation)
 		go runEpochGCLoop(ctx, log, om, captureMgr, cfg.EpochGCInterval, cfg.EpochGCInitial)
-		// Queue consumer dispatch: poll registered queues and deliver claimed batches
+		// Queue consumer dispatch: reconcile registered queues each minute and use
+		// owner-local mutation hints and message deadlines to deliver claimed batches
 		// to the consuming worker via the dispatch endpoint (docs/bindings.md). Only
 		// the node that owns a queue's cell consumes it (OwnerGate claims unowned or
 		// expired cells), and every store mutation is captured with a durability
@@ -953,20 +965,16 @@ func main() {
 		if cfg.QueueInterval > 0 {
 			if qd := queue.NewHTTP(cfg.DispatchURL, cfg.TokenDispatch); qd != nil {
 				resources := &queueResourceCache{src: controlReads}
-				(&queue.Runner{
+				runner := &queue.Runner{
 					Store:        srv.Queue,
+					Resolve:      controlReads.QueueConsumer,
 					Dispatch:     qd,
 					Interval:     cfg.QueueInterval,
 					Batch:        cfg.QueueBatch,
 					LeaseMs:      cfg.QueueLease.Milliseconds(),
 					RetryDelayMs: cfg.QueueRetryDelay.Milliseconds(),
 					Log:          log,
-					Filter: func(qctx context.Context, ref queue.Ref) (bool, error) {
-						if err := srv.PrepareResourceAccess(qctx, queue.Scope(ref.Namespace, ref.Name)); err != nil {
-							return false, err
-						}
-						return queue.OwnerGateWithReset(om, resetLocal)(qctx, ref)
-					},
+					Filter:       queue.PreparedOwnerGate(om, srv.PrepareResourceAccess, resetLocal),
 					Commit: func(cctx context.Context, ns, name string, fn func() error) error {
 						sc := queue.Scope(ns, name)
 						end, err := srv.BeginResourceRequest(cctx, sc)
@@ -1006,7 +1014,9 @@ func main() {
 						}
 						return refs, nil
 					},
-				}).Start(ctx)
+				}
+				srv.QueueNudge = runner.Nudge
+				runner.Start(ctx)
 			}
 		}
 		// Capture keeps running until HTTP has quiesced; the shutdown path below
@@ -2297,7 +2307,7 @@ type projectionSource interface {
 }
 
 // projectionCache is a short-TTL, single-flight cache of the routing projection.
-// The queue runner, cron scheduler, workflow dispatcher and DO alarm dispatcher
+// The queue runner, workflow dispatcher and DO alarm dispatcher
 // all resolve through it, so a batch of N callbacks performs at most one build
 // per TTL instead of one per item.
 type projectionCache struct {
@@ -2405,14 +2415,6 @@ func (c *projectionCache) queueTargets(ctx context.Context) ([]control.QueueTarg
 		return nil, err
 	}
 	return p.QueueTargets(), nil
-}
-
-func (c *projectionCache) cronTargets(ctx context.Context) ([]control.CronTarget, error) {
-	p, err := c.Projection(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return p.CronTargets(), nil
 }
 
 // cronEnricher resolves a cron timer's dispatch target (worker + active bundle)

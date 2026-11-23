@@ -115,7 +115,7 @@ func (s *Server) acceptLocalQueueTransfer(ctx context.Context, ns, name string, 
 		return err
 	}
 	defer end()
-	return s.capturedWrite(ctx, queuepkg.Scope(ns, name), func() error {
+	return s.queueWrite(ctx, ns, name, func() error {
 		_, err := s.Queue.TransferValidated(ctx, ns, name, m, func(ctx context.Context) error { return s.validateQueueTransfer(ctx, ns, m) })
 		return err
 	})

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"cellhive/internal/bucket"
+	"cellhive/internal/cell"
 	"cellhive/internal/objectstore"
 )
 
@@ -270,15 +271,13 @@ func (i *Index) pointer(ctx context.Context, scope string) (*Entry, error) {
 	return &e, nil
 }
 
-// Due returns entries whose due minute is at or before now. It lists only the
-// wake/due/ minute prefixes, then opens the due minute buckets; future
-// minutes and the rest of the bucket are never listed.
-func (i *Index) Due(ctx context.Context, nowMs int64) ([]Entry, error) {
+// visitDueKeys enumerates past and current minutes, oldest first.
+func (i *Index) visitDueKeys(ctx context.Context, nowMs int64, visit func(prefix, key string)) error {
 	prefixes, err := i.store.CommonPrefixes(ctx, prefixDue, "/")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	byScope := map[string]Entry{}
+	sort.Strings(prefixes)
 	for _, prefix := range prefixes {
 		start, ok := minuteStart(prefix)
 		if !ok || start > nowMs {
@@ -286,27 +285,81 @@ func (i *Index) Due(ctx context.Context, nowMs int64) ([]Entry, error) {
 		}
 		keys, err := i.store.ListPrefix(ctx, prefix)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, key := range keys {
-			if !strings.HasSuffix(key, ".json") {
-				continue
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			data, gerr := i.store.Get(ctx, key)
-			if gerr != nil {
-				continue // raced delete
+			if strings.HasSuffix(key, ".json") {
+				visit(prefix, key)
 			}
-			var e Entry
-			if json.Unmarshal(data, &e) != nil || e.Scope == "" {
-				continue
+		}
+	}
+	return ctx.Err()
+}
+
+func (i *Index) readDue(ctx context.Context, key string, nowMs int64) (Entry, bool) {
+	data, err := i.store.Get(ctx, key)
+	if err != nil {
+		return Entry{}, false // A listed hint can disappear before the read.
+	}
+	var e Entry
+	if json.Unmarshal(data, &e) != nil || e.Scope == "" || (e.DueMs != 0 && e.DueMs > nowMs) {
+		return Entry{}, false
+	}
+	return e, true
+}
+
+// DueScopes returns discovery hints for the fleet waker. Both published key
+// layouts identify the scope. An elapsed minute is sufficient evidence to
+// consider its scopes. The current minute requires the exact due time.
+// Ownership and the authoritative SQLite timer are checked before dispatch.
+func (i *Index) DueScopes(ctx context.Context, nowMs int64) ([]cell.Scope, error) {
+	currentPrefix := duePrefix(nowMs)
+	out := []cell.Scope{}
+	seen := map[cell.Scope]bool{}
+	err := i.visitDueKeys(ctx, nowMs, func(prefix, key string) {
+		name, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			return
+		}
+		name = strings.TrimSuffix(name, ".json")
+		if bucket.ImmutableWakeHintKey(key) {
+			name = name[:strings.LastIndexByte(name, '/')]
+		}
+		scope, err := cell.ParseScope(name)
+		if err != nil || seen[scope] {
+			return
+		}
+		if prefix == currentPrefix {
+			if e, due := i.readDue(ctx, key, nowMs); !due || e.Scope != name {
+				return
 			}
-			if e.DueMs != 0 && e.DueMs > nowMs {
-				continue
-			}
+		}
+		seen[scope] = true
+		out = append(out, scope)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Due returns entries whose due minute is at or before now. It lists only the
+// wake/due/ minute prefixes, then opens the due minute buckets; future
+// minutes and the rest of the bucket are never listed.
+func (i *Index) Due(ctx context.Context, nowMs int64) ([]Entry, error) {
+	byScope := map[string]Entry{}
+	err := i.visitDueKeys(ctx, nowMs, func(_, key string) {
+		if e, due := i.readDue(ctx, key, nowMs); due {
 			if prev, ok := byScope[e.Scope]; !ok || earlier(e.DueMs, prev.DueMs) {
 				byScope[e.Scope] = e
 			}
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	out := make([]Entry, 0, len(byScope))
 	for _, e := range byScope {

@@ -202,6 +202,18 @@ func TestFromEnvDurationKnobs(t *testing.T) {
 	}
 }
 
+func TestOrphanAlarmScanDoesNotDelayRecoveryElection(t *testing.T) {
+	t.Setenv("CELLHIVE_WAKER_INTERVAL", "")
+	cfg := FromEnv()
+	if cfg.WakerInterval != time.Minute || cfg.WakerTTL != 10*time.Second {
+		t.Fatalf("default scan interval %v, shared election TTL %v", cfg.WakerInterval, cfg.WakerTTL)
+	}
+	t.Setenv("CELLHIVE_WAKER_INTERVAL", "5m")
+	if ttl := FromEnv().WakerTTL; ttl != 10*time.Second {
+		t.Fatalf("slow orphan scan extended recovery election TTL to %v", ttl)
+	}
+}
+
 func TestFromEnvMergedKnobs(t *testing.T) {
 	t.Setenv("CELLHIVE_LOG_BUFFER", "500:50")
 	t.Setenv("CELLHIVE_NS_RATE", "100/200")

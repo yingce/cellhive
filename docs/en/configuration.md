@@ -120,11 +120,11 @@ Static `CELLHIVE_ADMIN_TOKEN` overrides and `CELLHIVE_OIDC_*` authentication are
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 off) | Expiration timer dispatch |
 | `CELLHIVE_TIMER_BATCH` / `_FIRED_TTL` | `256` / `24h` | Expiration limit per pass / fired marker retention |
 | `CELLHIVE_CRON_MAX_ATTEMPTS` | `10` | Terminal retry budget for one cron occurrence; consumes the slot when reached (ADR-305). `0` keeps unbounded retries |
-| `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 off) | queue consumption |
+| `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 off) | local queue notification/deadline tick, with minute reconciliation |
 | `CELLHIVE_QUEUE_BATCH` / `_LEASE` | `0` (store default) | Messages per batch / visibility lease |
 | `CELLHIVE_QUEUE_RETRY_DELAY` | `30s` | Redelivery delay for failed batches (retry limit/DLQ are configured per consumer) |
-| `CELLHIVE_CRON_INTERVAL` | `30s` (0 off) | cron→timer materialization |
-| `CELLHIVE_WAKER_INTERVAL` | `5s` (0 off) | fleet waker (TTL is automatically 2×) |
+| `CELLHIVE_CRON_INTERVAL` | `30s` (0 off) | retry interval for incomplete cron passes, with normal checks on UTC minute boundaries |
+| `CELLHIVE_WAKER_INTERVAL` | `60s` (0 off) | fleet waker (TTL is twice the interval, capped at 10s) |
 | `CELLHIVE_WAKER_BATCH` / `_FIRED_TTL` | `256` / `24h` | Limit per pass / fired marker retention |
 | `CELLHIVE_WAKER_BACKOFF_MAX` | `1m` | Backoff cap on consecutive errors (base=interval, `interval·2^fails`) |
 | `CELLHIVE_WAKE_REPAIR_INTERVAL` | `5m` (0 off) | Local wake index repair scan (ADR-177); runs once at startup first |

@@ -418,7 +418,7 @@ var legacyEnv = map[string]string{
 	"CELLHIVE_NS_BURST":               "use CELLHIVE_NS_RATE",
 	"CELLHIVE_LOG_BUFFER_ENTRIES":     "use CELLHIVE_LOG_BUFFER=<entries>:<workers>",
 	"CELLHIVE_LOG_BUFFER_WORKERS":     "use CELLHIVE_LOG_BUFFER=<entries>:<workers>",
-	"CELLHIVE_WAKER_TTL":              "removed: derived as 2x CELLHIVE_WAKER_INTERVAL",
+	"CELLHIVE_WAKER_TTL":              "removed: derived from the faster of recovery and waker polling",
 	"CELLHIVE_DRAIN_WAIT":             "removed: derived from CELLHIVE_DRAIN_TTL",
 	"CELLHIVE_USER_RUNTIME_URL":       "removed (ADR-132): the platform does not push edge config",
 	"CELLHIVE_ADMIN_HOST":             "removed (ADR-132)",
@@ -540,7 +540,9 @@ func FromEnv() Config {
 	// One root secret derives every role credential (ADR-137).
 	rootKey := LoadRootKey()
 	creds := DeriveCredentials(rootKey)
-	wakerInterval := envDuration("CELLHIVE_WAKER_INTERVAL", 5*time.Second)
+	wakerInterval := envDuration("CELLHIVE_WAKER_INTERVAL", time.Minute)
+	// Recovery renews the shared election every five seconds, even during slow orphan scans.
+	wakerTTL := 2 * min(wakerInterval, 5*time.Second)
 	drainTTL := envDuration("CELLHIVE_DRAIN_TTL", 30*time.Second)
 	logEntries, logWorkers := envPair("CELLHIVE_LOG_BUFFER", 1000, 200)
 	nsRPS, nsBurst := envRate("CELLHIVE_NS_RATE", 0, 0)
@@ -620,7 +622,7 @@ func FromEnv() Config {
 		WakerBatch:                   envInt("CELLHIVE_WAKER_BATCH", 256),
 		WakerFiredTTL:                envDuration("CELLHIVE_WAKER_FIRED_TTL", 24*time.Hour),
 		WakerBackoffMax:              envDuration("CELLHIVE_WAKER_BACKOFF_MAX", time.Minute),
-		WakerTTL:                     2 * wakerInterval,
+		WakerTTL:                     wakerTTL,
 		DrainTTL:                     drainTTL,
 		DrainWait:                    drainTTL,
 		CompactionTimeout:            envDuration("CELLHIVE_COMPACTION_TIMEOUT", 5*time.Minute),

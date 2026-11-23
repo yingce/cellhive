@@ -301,7 +301,7 @@ func (s *Server) handleControlQueueDLQAck(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	if err := s.capturedWrite(r.Context(), scope, func() error { return s.Queue.AckMany(r.Context(), ns, consumer.DeadLetterQueue, ids) }); err != nil {
+	if err := s.queueWrite(r.Context(), ns, consumer.DeadLetterQueue, func() error { return s.Queue.AckMany(r.Context(), ns, consumer.DeadLetterQueue, ids) }); err != nil {
 		writeErr(w, 500, "dlq_ack_failed", err.Error())
 		return
 	}
@@ -430,7 +430,7 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 	}
 
 	var msgs []queuepkg.Message
-	if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, dlq), func() error {
+	if err := s.queueWrite(r.Context(), ns, dlq, func() error {
 		var e error
 		msgs, e = s.Queue.Claim(r.Context(), ns, dlq, limit, 30_000)
 		return e
@@ -445,7 +445,7 @@ func (s *Server) handleControlQueueReplayDLQ(w http.ResponseWriter, r *http.Requ
 			failed = append(failed, fmt.Sprintf("%s: %v", m.ID, err))
 			continue
 		}
-		if err := s.capturedWrite(r.Context(), queuepkg.Scope(ns, dlq), func() error {
+		if err := s.queueWrite(r.Context(), ns, dlq, func() error {
 			return s.Queue.Ack(r.Context(), ns, dlq, m.ID)
 		}); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: ack: %v", m.ID, err))

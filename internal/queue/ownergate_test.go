@@ -21,7 +21,9 @@ func TestOwnerGate(t *testing.T) {
 	}
 	omA := &owner.Manager{B: b, NodeID: "node-1", Session: "s1", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
 	omB := &owner.Manager{B: b, NodeID: "node-2", Session: "s2", Role: cell.RoleCellAgent, OwnerTTL: time.Minute}
-	gateA, gateB := queue.OwnerGate(omA), queue.OwnerGate(omB)
+	prepared := 0
+	gateA := queue.OwnerGate(omA)
+	gateB := queue.PreparedOwnerGate(omB, func(context.Context, cell.Scope) error { prepared++; return nil }, nil)
 	ref := queue.Ref{Namespace: "app", Name: "jobs"}
 
 	// Unowned: A claims and consumes; B skips (A holds a live lease).
@@ -30,6 +32,10 @@ func TestOwnerGate(t *testing.T) {
 	}
 	if ok, err := gateB(ctx, ref); err != nil || ok {
 		t.Fatalf("B gate while A owns = %v, %v; want skip", ok, err)
+	}
+
+	if prepared != 0 {
+		t.Fatalf("performed resource preparation for live peer %d times", prepared)
 	}
 
 	// A releases: B claims and consumes.
@@ -45,6 +51,9 @@ func TestOwnerGate(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	if ok, err := gateB(ctx, ref); err != nil || !ok {
 		t.Fatalf("B gate after release = %v, %v; want claim", ok, err)
+	}
+	if prepared != 1 {
+		t.Fatalf("takeover prepared %d times", prepared)
 	}
 	if ok, err := gateA(ctx, ref); err != nil || ok {
 		t.Fatalf("A gate after B claimed = %v, %v; want skip", ok, err)

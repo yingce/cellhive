@@ -364,3 +364,136 @@ func TestCronMinuteFailoverPreservesSlotAndDocumentsAtLeastOnceBoundary(t *testi
 		t.Fatalf("fired occurrence replayed: %d, %v", n, err)
 	}
 }
+
+func TestSparseCronReconciliationReadCounts(t *testing.T) {
+	now := utc(2026, time.January, 5, 9, 58)
+	start := now
+	version := "owner1/r1"
+	checks, workers, workflows, admissions := 0, 0, 0, 0
+	s := Scheduler{
+		Now:     func() time.Time { return now },
+		Version: func(context.Context) (string, error) { checks++; return version, nil },
+		Targets: func(context.Context) ([]Target, error) {
+			workers++
+			if version != "owner1/r1" {
+				return nil, nil
+			}
+			return []Target{{"demo", "w", "0 10 * * *"}}, nil
+		},
+		WorkflowTargets: func(context.Context) ([]WorkflowTarget, error) {
+			workflows++
+			if version != "owner1/r1" {
+				return nil, nil
+			}
+			return []WorkflowTarget{{"demo", "wf", "0 10 * * *"}}, nil
+		},
+		Open: func(context.Context, cell.Scope) (*timer.Store, error) {
+			t.Fatal("obsolete target was opened")
+			return nil, nil
+		},
+		Own: func(context.Context, cell.Scope) (bool, error) { admissions++; return false, nil },
+	}
+	for sec := 0; sec < 120; sec++ {
+		now = start.Add(time.Duration(sec) * time.Second)
+		if _, err := s.Pass(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if checks != 3 || workers != 1 || workflows != 1 || admissions != 0 {
+		t.Fatalf("idle checks=%d workers=%d workflows=%d admissions=%d", checks, workers, workflows, admissions)
+	}
+	now = start.Add(2 * time.Minute)
+	version = "owner2/r1" // Matching control revision on a new authority.
+	if _, err := s.Pass(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 5 || workers != 2 || workflows != 2 || admissions != 0 {
+		t.Fatalf("removed target checks=%d workers=%d workflows=%d admissions=%d", checks, workers, workflows, admissions)
+	}
+}
+
+func TestNewDeploymentAndFailedVersionReadRetryInCurrentMinute(t *testing.T) {
+	now := utc(2026, time.January, 5, 9, 59).Add(55 * time.Second)
+	version := "r1"
+	available := true
+	admissions := 0
+	s := Scheduler{
+		Now: func() time.Time { return now },
+		Version: func(context.Context) (string, error) {
+			if !available {
+				return "", context.DeadlineExceeded
+			}
+			return version, nil
+		},
+		Targets: func(context.Context) ([]Target, error) {
+			if version == "r1" {
+				return nil, nil
+			}
+			return []Target{{"demo", "w", "0 10 * * *"}}, nil
+		},
+		Own: func(context.Context, cell.Scope) (bool, error) { admissions++; return false, nil },
+		Open: func(context.Context, cell.Scope) (*timer.Store, error) {
+			t.Fatal("foreign target opened")
+			return nil, nil
+		},
+	}
+	if _, err := s.Pass(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	version = "r2"
+	now = now.Add(5 * time.Second)
+	available = false
+	if _, err := s.Pass(t.Context()); err == nil || admissions != 0 {
+		t.Fatalf("failed version read err=%v admissions=%d", err, admissions)
+	}
+	available = true
+	now = now.Add(10 * time.Second)
+	if _, err := s.Pass(t.Context()); err != nil || admissions != 1 {
+		t.Fatalf("retry err=%v admissions=%d", err, admissions)
+	}
+}
+
+func TestNextSparseSchedules(t *testing.T) {
+	start := utc(2096, time.February, 29, 0, 1)
+	for expr, want := range map[string]time.Time{
+		"0 0 29 2 *":  utc(2104, time.February, 29, 0, 0),
+		"0 0 31 2 *":  {},
+		"0 0 31 2 3":  utc(2097, time.February, 6, 0, 0),
+		"3,5 0 * * *": utc(2096, time.February, 29, 0, 3),
+	} {
+		s, err := Parse(expr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := s.nextAtOrAfter(start); !got.Equal(want) {
+			t.Errorf("%s: got %v want %v", expr, got, want)
+		}
+	}
+}
+
+func TestWorkflowPlanRejectedAcrossControlVersionChange(t *testing.T) {
+	version := "owner/r1"
+	moving := true
+	admissions := 0
+	s := Scheduler{
+		Now:     func() time.Time { return utc(2026, time.January, 5, 10, 0) },
+		Version: func(context.Context) (string, error) { return version, nil },
+		Targets: func(context.Context) ([]Target, error) { return nil, nil },
+		WorkflowTargets: func(context.Context) ([]WorkflowTarget, error) {
+			if moving {
+				version = "successor/r1"
+				return []WorkflowTarget{{"demo", "wf", "* * * * *"}}, nil
+			}
+			return nil, nil
+		},
+		Own:  func(context.Context, cell.Scope) (bool, error) { admissions++; return false, nil },
+		Open: func(context.Context, cell.Scope) (*timer.Store, error) { t.Fatal("stale workflow"); return nil, nil },
+	}
+	if _, err := s.Pass(t.Context()); err == nil || admissions != 0 {
+		t.Fatalf("superseded batch err=%v admissions=%d", err, admissions)
+	}
+	moving = false
+	if _, err := s.Pass(t.Context()); err != nil || admissions != 0 {
+		t.Fatalf("refreshed batch err=%v admissions=%d", err, admissions)
+	}
+}

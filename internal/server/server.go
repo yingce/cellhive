@@ -104,10 +104,11 @@ type Deps struct {
 	// :7001 routing-projection read).
 	Control *control.Store
 	// D1/R2/Queue/Workflows back the tenant binding data endpoints (docs/bindings.md).
-	D1        *d1.Store
-	R2        *r2.Store
-	Queue     *queue.Store
-	Workflows *workflow.Store
+	D1         *d1.Store
+	R2         *r2.Store
+	Queue      *queue.Store
+	QueueNudge func(ns, name string)
+	Workflows  *workflow.Store
 	// Vectorize backs the Cloudflare-compatible vector index binding (ADR-158).
 	Vectorize *vectorize.Store
 	// DispatchWorkflow runs (or resumes) a workflow instance; set by cell-agent.

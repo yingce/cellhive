@@ -46,10 +46,10 @@ func schemaCurrent(ctx context.Context, db *sql.DB) (bool, error) {
 		}
 	}
 	var indices, done int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='index' AND name IN ('messages_claim','messages_source','messages_idem','idempotency_expiry')`).Scan(&indices); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='index' AND name IN ('messages_claim','messages_source','messages_idem','idempotency_expiry','messages_available')`).Scan(&indices); err != nil {
 		return false, err
 	}
-	if indices != 4 {
+	if indices != 5 {
 		return false, nil
 	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM queue_meta WHERE key='idempotency-v1'`).Scan(&done); err != nil {

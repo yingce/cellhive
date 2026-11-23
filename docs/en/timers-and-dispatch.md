@@ -68,9 +68,11 @@ Timing/dispatch is unified in `cell-agent` (ADR-009): it is consistent with cell
 ## Finalized (ADR-152)
 
 **Queue (Consumers)**
-- Polling `CELLHIVE_QUEUE_INTERVAL` (default 1s, 0=off); single batch size `CELLHIVE_QUEUE_BATCH` (0=store default); visibility lease `CELLHIVE_QUEUE_LEASE` (0=store default).
+- The local queue notification and deadline tick uses `CELLHIVE_QUEUE_INTERVAL` (default 1s, 0=off); single batch size `CELLHIVE_QUEUE_BATCH` (0=store default); visibility lease `CELLHIVE_QUEUE_LEASE` (0=store default).
 - Failed redelivery uses per-consumer `retry_delay` (seconds), falling back to `CELLHIVE_QUEUE_RETRY_DELAY` (default **30s**); explicit `retry({delaySeconds})` takes precedence. `max_batch_timeout_seconds` starts when the oldest message becomes visible, and a full batch dispatches immediately. Omitted or legacy zero `max_retries` means three retries after the initial delivery; exhausted messages move to the DLQ, or are acknowledged and logged when no DLQ exists (ADR-216).
 - Semantics: at-least-once (claim→dispatch→ack/retry; if the whole batch fails, the whole batch is redelivered), only the owner consumes (`OwnerGate`), and every store mutation goes through capture proof (ADR-119).
+
+Queue reconciles registered consumers at startup and once per minute, retrying failed discovery after five seconds. Cron checks the control revision at startup and each UTC minute boundary, reloads changed schedules and materializes due slots. Incomplete passes retry at `CELLHIVE_CRON_INTERVAL`.
 
 **Timer (Dispatch)**
 - Polling `CELLHIVE_TIMER_INTERVAL` (default 1s, 0=off); per-pass due limit `CELLHIVE_TIMER_BATCH` (default **256**); fired marker retention `CELLHIVE_TIMER_FIRED_TTL` (default **24h**, prevents duplicate dispatch).
@@ -78,7 +80,7 @@ Timing/dispatch is unified in `cell-agent` (ADR-009): it is consistent with cell
 - One cron occurrence gets at most `CELLHIVE_CRON_MAX_ATTEMPTS` (default **10**) attempts. On exhaustion the cell writes a fired marker, removes the timer/retry rows, and logs `timer dispatch exhausted` with `retry_scheduled=false`; `0` keeps the legacy unbounded behavior. Tenants can still stop permanent errors early with `controller.noRetry()` (ADR-305).
 
 **Waker (Single fleet wake + dead-node recovery)**
-- Polling `CELLHIVE_WAKER_INTERVAL` (default 5s, 0=off); lease TTL = **2×interval**; per-pass `CELLHIVE_WAKER_BATCH` (default 256); fired TTL `CELLHIVE_WAKER_FIRED_TTL` (default 24h).
+- Polling `CELLHIVE_WAKER_INTERVAL` (default 60s, 0=off); lease TTL = **min(2×interval, 10s)**; per-pass `CELLHIVE_WAKER_BATCH` (default 256); fired TTL `CELLHIVE_WAKER_FIRED_TTL` (default 24h).
 - **Backoff**: on consecutive errors, the loop delay grows by `interval·2^fails`, capped by `CELLHIVE_WAKER_BACKOFF_MAX` (default **1m**); it resets immediately after success. Idleness (0 dispatches) does not trigger backoff.
 
 **resident/pinned Policy for timer cells (Decision)**

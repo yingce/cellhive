@@ -88,10 +88,6 @@ func TestProjectionCacheOneBuildPerTTL(t *testing.T) {
 			_, _, err := c.workflowTarget(context.Background(), "acme", "wf")
 			return err
 		}},
-		{"cron", func(c *projectionCache) error {
-			_, err := c.cronTargets(context.Background())
-			return err
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &countingProjectionSource{proj: dispatchProjection()}

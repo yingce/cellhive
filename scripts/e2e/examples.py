@@ -81,7 +81,7 @@ def check(name):
   ident=obj(name,'/create?seed=4')['id'];poll(lambda:obj(name,'/status?id='+ident)['status']=='complete');assert obj(name,'/status?id='+ident)['output']['value']==10
  elif name=='cron':
   assert b'runs every minute' in fetch(name)
-  poll(lambda:'cron fired' in (base/'rt.log').read_text(),seconds=75)
+  poll(lambda:any('cron fired' in log.read_text() for log in (base/'rt'/'logs').glob('user-runtime-*.ndjson')),seconds=75)
  elif name=='assets':assert b'Static asset' in fetch(name);assert obj(name,'/api')['from']=='worker'
  elif name=='react-static':assert b'template-fixture' in fetch(name,'/nested/path')
  elif name=='astro-ssr':assert b'Astro SSR on CellHive' in fetch(name);assert b'About this example' in fetch(name,'/about');assert len(fetch(name,'/style.css'))>0
