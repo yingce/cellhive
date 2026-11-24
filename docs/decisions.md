@@ -4406,3 +4406,7 @@ Redis ListPage 使用每批最多 128 个键的原子元数据读取，返回 HS
 ### 2026-11-24 后续本机部署
 
 Redis review 后续优化与 invocation 日志诊断已随源码 `8fa81f58` 部署本机 Compose，未推送、未发布云端。无权威数据迁移；Vector 配置仅本地实际日志重放验证，本机未配置持续 OTLP 采集。功能验收及保留告警见 [部署记录](reports/2026-11-24-local-redis-logging-review-release.md)。
+
+### 2026-11-24 Redis / invocation 日志优化三区发布
+
+源码 `8fa81f58` 已推送并发布 SG revision 154、USW 146、GZ 13；GZ 经停写备份完成恢复权威 v3 迁移，不能回退旧 v2 写者。三区业务验证、各十分钟观察、真实失败日志经 Vector 进入 SLS 的分类与脱敏检查通过。既有 Cron 失败、部分 fold deferred 未修复，托管 Redis 主从回退安全未验收。详情见 [发布记录](reports/2026-11-24-redis-logging-three-regions-release.md)。
