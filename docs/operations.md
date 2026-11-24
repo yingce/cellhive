@@ -263,7 +263,7 @@ GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 Statefu
 须确认旧进程已隔离，不能以可用性为由放宽协调版本单调性。
 切换时将 `userRuntime.autoscalingEnabled=false`，停止 runtime 和全部 agent，
 备份协调元数据后执行初始化；激活后恢复副本数和 HPA。不要回滚到旧 COS 写入者。
-GZ 已完成离线切换（revision 6）；发布与验证记录见 [GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。SG/USW 未切换。
+GZ 已完成离线切换及 outbox 读放大修复（revision 7）；发布与验证记录见 [GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。SG/USW 未切换。
 
 默认 `CELLHIVE_COORDINATION_BACKEND=object`。Redis 模式配置：
 

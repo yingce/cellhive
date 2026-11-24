@@ -4349,3 +4349,5 @@ GZ 从独立发布分支 `e7577f8c` 构建 agent-only 镜像，revision 4 先部
 ### 2026-11-24 shared outbox 本地数据库边界
 
 GZ 发布采样发现：owned scope 包含原生 DO 的 host/actor，而 outbox relay 对非驻留 scope 无条件调用 Store.Cell，会反复触发不属于 agent 本地 SQLite 的 LTX 恢复。relay 只检查已有 agent 本地数据库，文件不存在时不 hydration；正常接管/Queue/Timer 恢复负责打开冷 cell，之后 relay 才处理其 outbox。已有且被驱逐的本地文件仍能重新打开、证明耐久并发布。新增来源归因 shared_schedule，不能用丢弃 pending revision 或关闭耐久证明降低请求量。
+
+2026-11-24 GZ revision 7：`d5a0d38f` 已发布 outbox 本地数据库边界修复；真实 KV、Queue/重试、Cron、Alarm 验证通过。180 秒稳定窗口 COS GET 5.215→0.215 次/秒，LIST 0.161→0.242 次/秒；负载未固定，不作账单降幅承诺。详细证据与稳定性结果见上述 GZ 发布记录。

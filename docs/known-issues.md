@@ -248,9 +248,9 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - 2026-11-24 配置已收敛为 `CELLHIVE_COORDINATION_BACKEND=redis://...` / `rediss://...` 自动启用共享调度，无独立 SCHEDULE_MODE。namespace 从 bucket 配置生成，旧实验 region 的 binding 不自动迁移；旧拆分环境项会报错而非静默忽略。Redis/Kvrocks 单参数业务调度、快速故障恢复、双进程恢复及默认 object Bindings 验收通过，详见 [协调报告](reports/2026-11-24-redis-authority.md)。未部署生产。
 
-- 2026-11-24：已切换本机常驻 Compose，保留原 MinIO/数据卷；KV、Queue 重试、Cron、Alarm 和持久卷重启验证通过。GZ 切换已按用户要求停止，生产仍用原后端。见 [本地部署记录](reports/2026-11-24-local-redis-compose.md)。
+- 2026-11-24：已切换本机常驻 Compose，保留原 MinIO/数据卷；KV、Queue 重试、Cron、Alarm 和持久卷重启验证通过。当时 GZ 切换按用户要求暂停；后续已完成 GZ revision 7 发布，见下文。见 [本地部署记录](reports/2026-11-24-local-redis-compose.md)。
 - 同日本机改为双 agent fleet，独立卷并验证实际 follower 确认；仍为同一宿主机，不能抵抗宿主机故障。无 peer 时按现有协议先落本地 spool。
 
-- GZ 使用集群内单实例持久 Redis，AOF always/noeviction；未使用可能回退已确认版本的托管 Redis 副本提升。节点失联不得强删 Redis Pod/强挂卷。切换启动期间 agent-1 连接 Redis 被拒绝并重启一次后恢复；稳定性观察与剩余遥测告警见发布记录。
+- GZ 使用集群内单实例持久 Redis，AOF always/noeviction；未使用可能回退已确认版本的托管 Redis 副本提升。节点失联不得强删 Redis Pod/强挂卷。最终版本两个 agent 启动时连接 Redis 被拒绝，各重启一次后恢复；稳定性观察与剩余遥测告警见发布记录。
 
-- GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已定位并准备限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。
+- GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已在 revision 7 发布限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。
