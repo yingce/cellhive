@@ -103,6 +103,20 @@ spec:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ include "cellhive.secretName" . }}}
           env:
+            {{- with .Values.cellAgent.durability }}
+            {{- if not (has . (list "auto" "fleet" "bucket")) }}
+            {{- fail "cellAgent.durability must be auto, fleet or bucket" }}
+            {{- end }}
+            - name: CELLHIVE_DURABILITY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.cellAgent.coordinationSecret }}
+            - name: CELLHIVE_COORDINATION_BACKEND
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: CELLHIVE_COORDINATION_BACKEND
+            {{- end }}
             {{- with .Values.cellAgent.logLevel }}
             - name: CELLHIVE_LOG_LEVEL
               value: {{ . | quote }}

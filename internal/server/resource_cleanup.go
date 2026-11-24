@@ -195,6 +195,14 @@ func (s *Server) revokeResource(ctx context.Context, ns, kind, name string, j co
 }
 
 func (s *Server) notifyResourceCleanup() {
+	s.NudgeResourceCleanup()
+	if s.ProjectMaintenance != nil {
+		s.ProjectMaintenance("resource-cleanup", time.Now())
+	}
+}
+
+// NudgeResourceCleanup wakes this process without republishing a received hint.
+func (s *Server) NudgeResourceCleanup() {
 	select {
 	case s.resourceCleanupWake <- struct{}{}:
 	default:
@@ -223,7 +231,13 @@ func (s *Server) RunResourceCleanupLoop(ctx context.Context) {
 		}
 		due.Stop()
 		if !next.IsZero() {
-			due.Reset(max(2*time.Second, time.Until(next)))
+			// Shared wakeups preserve the same retry floor as the local loop.
+			now := time.Now()
+			delay := max(2*time.Second, next.Sub(now))
+			if s.ProjectMaintenance != nil {
+				s.ProjectMaintenance("resource-cleanup", now.Add(delay))
+			}
+			due.Reset(delay)
 		}
 	}
 }

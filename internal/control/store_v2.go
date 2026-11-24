@@ -326,6 +326,14 @@ type PurgeHook func(ctx context.Context, ns, worker string) (done bool, err erro
 
 // notifyPurge coalesces committed jobs. Another process discovers them on reconciliation.
 func (s *Store) notifyPurge() {
+	s.NudgePurge()
+	if s.SchedulePurge != nil {
+		s.SchedulePurge(s.now())
+	}
+}
+
+// NudgePurge wakes this process without republishing a received scheduling hint.
+func (s *Store) NudgePurge() {
 	select {
 	case s.purgeWake <- struct{}{}:
 	default:
@@ -361,6 +369,9 @@ func (s *Store) RunPurgeLoop(ctx context.Context, log *slog.Logger, interval tim
 		next := max(time.Minute, interval)
 		if len(executor.active) > 0 || (err == nil && executor.fullBatch) {
 			next = interval
+		}
+		if s.SchedulePurge != nil {
+			s.SchedulePurge(s.now().Add(next))
 		}
 		timer.Reset(next)
 	}

@@ -42,6 +42,11 @@ type Scheduler struct {
 	// read. An unchanged version permits reuse of the compiled target plan.
 	Version func(context.Context) (string, error)
 
+	// ProjectNext publishes the earliest planned trigger as a scheduling hint.
+	// A zero deadline means the current plans contain no future trigger.
+	ProjectNext func(context.Context, time.Time) error
+	wake        chan struct{}
+
 	mu           sync.Mutex
 	nextCheck    time.Time
 	lastCheck    time.Time
@@ -102,8 +107,28 @@ func (s *Scheduler) log() *slog.Logger {
 	return slog.Default()
 }
 
+// Nudge forces fresh version checks without discarding successful slot writes.
+func (s *Scheduler) Nudge() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextCheck = time.Time{}
+	if s.wake == nil {
+		s.wake = make(chan struct{}, 1)
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
 // Start runs the scheduler loop until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.wake == nil {
+		s.wake = make(chan struct{}, 1)
+	}
+	wake := s.wake
+	s.mu.Unlock()
 	go func() {
 		interval := s.Interval
 		if interval <= 0 {
@@ -131,6 +156,11 @@ func (s *Scheduler) Start(ctx context.Context) {
 				t.Stop()
 				return
 			case <-t.C:
+			case <-wake:
+				t.Stop()
+				s.mu.Lock()
+				s.nextCheck = time.Time{}
+				s.mu.Unlock()
 			}
 		}
 	}()
@@ -206,6 +236,19 @@ func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 		n, finished := s.materialize(ctx, &s.workflowPlan, slot, timer.KindWorkflowSchedule)
 		upserts += n
 		done = done && finished
+	}
+	if s.ProjectNext != nil {
+		var next time.Time
+		for _, plan := range []*schedulePlan{&s.workerPlan, &s.workflowPlan} {
+			for _, group := range plan.groups {
+				if group != nil && !group.next.IsZero() && (next.IsZero() || group.next.Before(next)) {
+					next = group.next
+				}
+			}
+		}
+		if err := s.ProjectNext(ctx, next); err != nil {
+			return upserts, err
+		}
 	}
 	if done {
 		s.nextCheck = slot.Add(time.Minute)

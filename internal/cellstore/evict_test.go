@@ -505,3 +505,59 @@ func TestBeforeEvictOnlyMarksIdle(t *testing.T) {
 		t.Fatalf("over-cap callbacks = %v, want [false]", idle)
 	}
 }
+
+func TestSweepSkipsDeferredEvictionAndRetriesLater(t *testing.T) {
+	for _, capacity := range []bool{false, true} {
+		t.Run(map[bool]string{false: "idle", true: "capacity"}[capacity], func(t *testing.T) {
+			ctx := t.Context()
+			s, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			pending := cell.Scope{Namespace: "acme", Class: "clock", ID: "pending"}
+			clean := cell.Scope{Namespace: "acme", Class: "clock", ID: "clean"}
+			for _, sc := range []cell.Scope{pending, clean} {
+				if _, err := s.Cell(ctx, sc); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if capacity {
+				s.MaxOpenCells = 1
+			} else {
+				s.IdleTTL = time.Hour
+				forceIdle(t, s, pending, 2*time.Hour)
+				forceIdle(t, s, clean, 2*time.Hour)
+			}
+			ready := false
+			stopped := map[string]int{}
+			s.EvictionReady = func(_ context.Context, c *Cell) bool { return c.Scope != pending || ready }
+			s.Drop = func(_ context.Context, sc cell.Scope) error { stopped[sc.String()]++; return nil }
+			if got := s.Sweep(ctx); got != 1 {
+				t.Fatalf("deferred oldest blocked clean eviction: got %d, want 1", got)
+			}
+			if !s.IsOpen(pending) || s.IsOpen(clean) {
+				t.Fatal("wrong scope evicted")
+			}
+			if stopped[pending.String()] != 0 || stopped[clean.String()] != 1 {
+				t.Fatalf("capture stop before readiness: %v", stopped)
+			}
+			// Deferring releases the eviction gate, permitting the relay to publish.
+			end, err := s.BeginRequestContext(ctx, pending.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			end()
+			ready = true
+			s.MaxOpenCells = 0
+			s.IdleTTL = time.Hour
+			forceIdle(t, s, pending, 2*time.Hour)
+			if got := s.Sweep(ctx); got != 1 {
+				t.Fatalf("cleaned candidate not retried: %d", got)
+			}
+			if s.IsOpen(pending) || stopped[pending.String()] != 1 {
+				t.Fatal("cleaned candidate not stopped and evicted")
+			}
+		})
+	}
+}

@@ -17,14 +17,18 @@ import (
 
 // Config is the cell-agent runtime configuration.
 type Config struct {
-	ScheduleMode     string
-	ScheduleRedisURL string
-	ScheduleRegion   string
-	NodeID           string
-	SessionID        string
-	Advertise        string
-	PeerURL          string
-	DataDir          string
+	coordinationError    error
+	CoordinationBackend  string
+	CoordinationRedisURL string
+	CoordinationRegion   string
+	ScheduleMode         string
+	ScheduleRedisURL     string
+	ScheduleRegion       string
+	NodeID               string
+	SessionID            string
+	Advertise            string
+	PeerURL              string
+	DataDir              string
 
 	// Durability is the write-acknowledgement posture:
 	//   "auto"   (default) - fleet when a live follower exists, else bucket
@@ -550,21 +554,26 @@ func FromEnv() Config {
 	logEntries, logWorkers := envPair("CELLHIVE_LOG_BUFFER", 1000, 200)
 	nsRPS, nsBurst := envRate("CELLHIVE_NS_RATE", 0, 0)
 	s3Endpoint := env("AWS_ENDPOINT_URL", "")
+	coord := coordinationFromEnv(env("CELLHIVE_BUCKET", ""), env("CELLHIVE_BUCKET_DIR", "./.cellhive/bucket"), s3Endpoint)
 	return Config{
-		ScheduleMode:        env("CELLHIVE_SCHEDULE_MODE", "cluster"),
-		ScheduleRedisURL:    os.Getenv("CELLHIVE_SCHEDULE_REDIS_URL"),
-		ScheduleRegion:      os.Getenv("CELLHIVE_SCHEDULE_REGION"),
-		NodeID:              env("CELLHIVE_NODE_ID", "node-1"),
-		SessionID:           env("CELLHIVE_SESSION_ID", fmt.Sprintf("%d", time.Now().UnixNano())),
-		Advertise:           env("CELLHIVE_ADVERTISE", "127.0.0.1:7001"),
-		PeerURL:             env("CELLHIVE_PEER_URL", "http://127.0.0.1:7001"),
-		DataDir:             dataDir,
-		Durability:          env("CELLHIVE_DURABILITY", "auto"),
-		BucketWait:          envBool("CELLHIVE_BUCKET_WAIT", true),
-		BucketURL:           env("CELLHIVE_BUCKET", ""),
-		AuthorityMode:       env("CELLHIVE_AUTHORITY_MODE", ""),
-		AuthorityReclaimACK: env("CELLHIVE_AUTHORITY_RECLAIM_ACK", ""),
-		BucketDir:           env("CELLHIVE_BUCKET_DIR", "./.cellhive/bucket"),
+		coordinationError:    coord.coordinationError,
+		CoordinationBackend:  coord.CoordinationBackend,
+		CoordinationRedisURL: coord.CoordinationRedisURL,
+		CoordinationRegion:   coord.CoordinationRegion,
+		ScheduleMode:         coord.ScheduleMode,
+		ScheduleRedisURL:     coord.ScheduleRedisURL,
+		ScheduleRegion:       coord.ScheduleRegion,
+		NodeID:               env("CELLHIVE_NODE_ID", "node-1"),
+		SessionID:            env("CELLHIVE_SESSION_ID", fmt.Sprintf("%d", time.Now().UnixNano())),
+		Advertise:            env("CELLHIVE_ADVERTISE", "127.0.0.1:7001"),
+		PeerURL:              env("CELLHIVE_PEER_URL", "http://127.0.0.1:7001"),
+		DataDir:              dataDir,
+		Durability:           env("CELLHIVE_DURABILITY", "auto"),
+		BucketWait:           envBool("CELLHIVE_BUCKET_WAIT", true),
+		BucketURL:            env("CELLHIVE_BUCKET", ""),
+		AuthorityMode:        env("CELLHIVE_AUTHORITY_MODE", ""),
+		AuthorityReclaimACK:  env("CELLHIVE_AUTHORITY_RECLAIM_ACK", ""),
+		BucketDir:            env("CELLHIVE_BUCKET_DIR", "./.cellhive/bucket"),
 		// Object storage credentials follow the AWS SDK names. Path style is on
 		// by default for a custom endpoint (MinIO/R2) and off for real AWS S3.
 		S3Endpoint:                   s3Endpoint,
@@ -853,11 +862,24 @@ func envInt(key string, def int) int {
 
 // Validate checks required fields.
 func (c Config) Validate() error {
+	if c.coordinationError != nil {
+		return c.coordinationError
+	}
+	switch c.CoordinationBackend {
+	case "", "object":
+	case "redis":
+		if c.CoordinationRedisURL == "" || c.CoordinationRegion == "" || strings.ContainsAny(c.CoordinationRegion, "{}\x00\r\n") {
+			return fmt.Errorf("redis coordination requires a valid URL and derived bucket namespace")
+		}
+	default:
+		return fmt.Errorf("invalid CELLHIVE_COORDINATION_BACKEND %q", c.CoordinationBackend)
+	}
+
 	switch c.ScheduleMode {
 	case "", "cluster":
 	case "shared":
 		if c.ScheduleRedisURL == "" || c.ScheduleRegion == "" || strings.ContainsAny(c.ScheduleRegion, "{}") {
-			return fmt.Errorf("shared scheduling requires CELLHIVE_SCHEDULE_REDIS_URL and a valid CELLHIVE_SCHEDULE_REGION")
+			return fmt.Errorf("shared scheduling requires the Redis coordination URL and namespace")
 		}
 	default:
 		return fmt.Errorf("invalid CELLHIVE_SCHEDULE_MODE %q", c.ScheduleMode)

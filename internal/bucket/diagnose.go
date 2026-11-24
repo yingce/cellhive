@@ -14,10 +14,8 @@ import (
 //
 // It returns an error naming the first failing property.
 func Diagnose(ctx context.Context, b Bucket) error {
-	if preflight, ok := b.(interface{ diagnosePreflight(context.Context) error }); ok {
-		if err := preflight.diagnosePreflight(ctx); err != nil {
-			return fmt.Errorf("bucket preflight failed: %w", err)
-		}
+	if err := CheckPreflight(ctx, b); err != nil {
+		return fmt.Errorf("bucket preflight failed: %w", err)
 	}
 	base := fmt.Sprintf("probe/%d", time.Now().UnixNano())
 	if err := diagnoseOwnerConditions(ctx, b, "cells/"+base+"/own.json"); err != nil {
@@ -120,6 +118,17 @@ func diagnoseOwnerConditions(ctx context.Context, b Bucket, key string) error {
 	}
 	if _, _, err = b.Get(ctx, key); !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("delete left record: %v", err)
+	}
+	return nil
+}
+
+// CheckPreflight preserves provider capability/AZ checks through routing adapters.
+func CheckPreflight(ctx context.Context, b Bucket) error {
+	if p, ok := b.(interface{ StoragePreflight(context.Context) error }); ok {
+		return p.StoragePreflight(ctx)
+	}
+	if p, ok := b.(interface{ diagnosePreflight(context.Context) error }); ok {
+		return p.diagnosePreflight(ctx)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cellhive/internal/cellstore"
+	"cellhive/internal/scheduleoutbox"
 )
 
 // Store persists timers in the owning cell's SQLite. Due records and the fired
@@ -68,10 +69,16 @@ func NewStore(ctx context.Context, c *cellstore.Cell) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("timer: check schema: %w", err)
 	}
-	if objects != 7 {
+	outboxCurrent, err := scheduleoutbox.Current(ctx, c.DB, scheduleoutbox.Timer)
+	if err != nil {
+		return nil, fmt.Errorf("timer: check outbox: %w", err)
+	}
+	if objects != 7 || !outboxCurrent {
 		if _, err := c.Tx(ctx, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, schema)
-			return err
+			if _, err := tx.ExecContext(ctx, schema); err != nil {
+				return err
+			}
+			return scheduleoutbox.Install(ctx, tx, scheduleoutbox.Timer)
 		}); err != nil {
 			return nil, fmt.Errorf("timer: migrate: %w", err)
 		}

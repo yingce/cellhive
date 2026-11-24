@@ -102,6 +102,10 @@ type Store struct {
 	// LRU eviction. It must not block; cell-agent uses it to enqueue an
 	// optional L9 snapshot while ownership is still valid.
 	BeforeEvict func(ctx context.Context, sc cell.Scope, idle bool)
+	// EvictionReady may defer eviction for durable maintenance still pending.
+	// Called outside the store mutex, with the scope eviction gate held, before
+	// capture is stopped. It must not reenter Store or perform remote I/O.
+	EvictionReady func(context.Context, *Cell) bool
 	// OnEvicted runs after an LRU/idle eviction removed the local handle. It
 	// must not reopen the cell; cell-agent uses it to drop local bookkeeping
 	// (owned set, resume hints) while leaving the bucket owner record intact.
@@ -787,63 +791,75 @@ func (s *Store) forget(ctx context.Context, sc cell.Scope, verify func() error) 
 }
 
 func (s *Store) evictOne(ctx context.Context) bool {
-	s.mu.Lock()
-	var c *Cell
-	var path string
-	var idle bool
-	for e := s.lru.Back(); e != nil; e = e.Prev() {
-		ent := e.Value.(*lruEnt)
-		cc := s.cells[ent.path]
-		if cc == nil {
+	// A deferred oldest cell must not block unrelated eligible cells.
+	skipped := make(map[string]bool)
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		s.mu.Lock()
+		var c *Cell
+		var path string
+		var idle bool
+		for e := s.lru.Back(); e != nil; e = e.Prev() {
+			ent := e.Value.(*lruEnt)
+			cc := s.cells[ent.path]
+			if cc == nil {
+				s.lru.Remove(e)
+				delete(s.byPath, ent.path)
+				continue
+			}
+			key := cc.Scope.String()
+			if skipped[key] || s.busy[key] > 0 || s.evicting[key] || s.opening[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
+				continue
+			}
+			// The oldest entry may be protected. Do not let its age make a
+			// different, recently used cell eligible for idle eviction.
+			overCap := s.MaxOpenCells > 0 && len(s.cells) > s.MaxOpenCells
+			entryIdle := s.IdleTTL > 0 && time.Since(ent.last) >= s.IdleTTL
+			if !overCap && !entryIdle {
+				continue
+			}
+			s.evicting[key] = true
+			path = ent.path
+			c = cc
+			idle = entryIdle
+			break
+		}
+		s.mu.Unlock()
+		if c == nil {
+			return false
+		}
+		if s.EvictionReady != nil && !s.EvictionReady(ctx, c) {
+			s.finishEviction(c.Scope.String())
+			skipped[c.Scope.String()] = true
+			continue
+		}
+		if err := s.stopBeforeRemoval(ctx, c.Scope, c, nil); err != nil {
+			s.finishEviction(c.Scope.String())
+			return false
+		}
+		if s.BeforeEvict != nil {
+			s.BeforeEvict(ctx, c.Scope, idle)
+		}
+		s.mu.Lock()
+		delete(s.cells, path)
+		if e := s.byPath[path]; e != nil {
 			s.lru.Remove(e)
-			delete(s.byPath, ent.path)
-			continue
+			delete(s.byPath, path)
 		}
-		key := cc.Scope.String()
-		if s.busy[key] > 0 || s.evicting[key] || s.opening[key] || (s.Pin != nil && s.Pin(cc.Scope)) {
-			continue
+		s.mu.Unlock()
+		_ = c.Close()
+		s.mu.Lock()
+		delete(s.evicting, c.Scope.String())
+		s.cond.Broadcast()
+		s.mu.Unlock()
+		if s.OnEvicted != nil {
+			s.OnEvicted(c.Scope)
 		}
-		// The oldest entry may be protected. Do not let its age make a
-		// different, recently used cell eligible for idle eviction.
-		overCap := s.MaxOpenCells > 0 && len(s.cells) > s.MaxOpenCells
-		entryIdle := s.IdleTTL > 0 && time.Since(ent.last) >= s.IdleTTL
-		if !overCap && !entryIdle {
-			continue
-		}
-		s.evicting[key] = true
-		path = ent.path
-		c = cc
-		idle = entryIdle
-		break
+		s.evicted.Add(1)
+		return true
 	}
-	s.mu.Unlock()
-	if c == nil {
-		return false
-	}
-	if err := s.stopBeforeRemoval(ctx, c.Scope, c, nil); err != nil {
-		s.finishEviction(c.Scope.String())
-		return false
-	}
-	if s.BeforeEvict != nil {
-		s.BeforeEvict(ctx, c.Scope, idle)
-	}
-	s.mu.Lock()
-	delete(s.cells, path)
-	if e := s.byPath[path]; e != nil {
-		s.lru.Remove(e)
-		delete(s.byPath, path)
-	}
-	s.mu.Unlock()
-	_ = c.Close()
-	s.mu.Lock()
-	delete(s.evicting, c.Scope.String())
-	s.cond.Broadcast()
-	s.mu.Unlock()
-	if s.OnEvicted != nil {
-		s.OnEvicted(c.Scope)
-	}
-	s.evicted.Add(1)
-	return true
 }
 
 // The eviction gate excludes new opens, but the resident entry stays intact

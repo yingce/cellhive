@@ -334,3 +334,16 @@ _最后更新：2026-09-22_
 ### Object storage debug logging
 
 Set `CELLHIVE_LOG_LEVEL=debug` on cell-agent to enable request diagnostics (default: `info`; also accepts `warn` and `error`). This is a startup setting and requires a process rollout; it is not enabled in production by this change. Logs include operation, HTTP method, host, escaped object path, byte range, numeric multipart part/append position, SDK attempt/retry marker when supplied, local request sequence, provider request ID, status, DNS/connect/TLS/first-byte timing, connection reuse/remote address, deadline remaining, uploaded/downloaded bytes, and body completion/early close. Each HTTP retry has its own local sequence. No raw query string, authorization, signature, upload ID, request/response body, or raw network error text is logged. Paths are operational metadata and should only be visible to operators. An unfinished request has a start record without completion; lease failures/fencing remain WARN/ERROR. Debug performs synchronous logging and should be enabled for diagnosis, not throughput benchmarks.
+
+## Redis/Kvrocks 协调后端
+
+- 只需 `CELLHIVE_COORDINATION_BACKEND=redis://host:6379/0`（或 TLS `rediss://...`）：同时启用 Redis/Kvrocks 协调权威与共享调度。凭据通过 secret 注入。
+- Helm 使用 `cellAgent.coordinationSecret` 指向包含 `CELLHIVE_COORDINATION_BACKEND` 的独立 Secret，仅注入 cell-agent，避免向业务 runtime 分发 Redis 凭据。默认空值不注入。
+- Helm 可用 `cellAgent.durability: fleet` 显式启用既有 fleet 证明策略（空值保持进程默认 auto；仅接受 auto/fleet/bucket）。协调后端与业务数据复制是两个配置维度；fleet 无 peer 时仍按协议使用本地 spool。
+- 不设置、`object` 或 `cos`：使用既有对象存储权威和 cluster 调度；桶地址仍由现有 `CELLHIVE_BUCKET` 配置决定，不限定实际 provider 必须 COS。
+- 独立 `CELLHIVE_SCHEDULE_MODE`、`CELLHIVE_SCHEDULE_REDIS_URL`、`CELLHIVE_SCHEDULE_REGION`、`CELLHIVE_COORDINATION_REDIS_URL`、`CELLHIVE_COORDINATION_REGION` 已移除；即使设置为空也报错，需从配置中删除。
+- Redis namespace 根据 bucket URL + endpoint（本地 FS 使用规范化绝对目录）自动生成，同一桶所有 agent 与离线初始化使用一致配置。Redis URL 的凭据轮换不改变 namespace；一个 namespace 使用一个 hash slot。
+- 初始化仍需停止所有写者并执行 `cell-agent coordination-init --offline`，详见 [运维](operations.md)。旧实验 region 的绑定不能直接用新 namespace 启动，也不能删绑定绕过校验；不提供自动迁移/重建。
+- Queue/Timer 通过持久 outbox 补发；Cron/purge/resource-cleanup 投影下一 deadline，失效 owner 的到期提示触发现有 CAS 接管门。低频对账保留，索引不授予业务写权。详见 [调度报告](reports/2026-11-24-redis-scheduling.md)。
+
+无效 URL 会报错，Redis 故障不回退 object；业务数据、恢复日志与 R2 数据仍使用原桶。未部署。

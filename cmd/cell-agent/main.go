@@ -29,6 +29,7 @@ import (
 	"cellhive/internal/compaction"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/coordination"
 	"cellhive/internal/cron"
 	"cellhive/internal/d1"
 	"cellhive/internal/dispatch"
@@ -100,6 +101,32 @@ func main() {
 	b, err := openBucket(context.Background(), cfg)
 	if err != nil {
 		log.Error("open bucket", "err", err)
+		os.Exit(1)
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "coordination-init" {
+		if len(os.Args) != 3 || os.Args[2] != "--offline" || cfg.CoordinationBackend != "redis" {
+			log.Error("coordination-init requires --offline, stopped writers and redis backend")
+			os.Exit(2)
+		}
+		if err := coordination.Initialize(context.Background(), b, cfg.CoordinationRedisURL, cfg.CoordinationRegion); err != nil {
+			log.Error("coordination initialization failed", "err", err)
+			os.Exit(1)
+		}
+		log.Info("coordination initialized; start all participants with redis backend")
+		return
+	}
+	var coordinationBucket *coordination.Bucket
+	if cfg.CoordinationBackend == "redis" {
+		coordinationBucket, err = coordination.Open(context.Background(), b, cfg.CoordinationRedisURL, cfg.CoordinationRegion)
+		if err != nil {
+			log.Error("open coordination authority failed", "err", err)
+			os.Exit(1)
+		}
+		defer coordinationBucket.Close()
+		b = coordinationBucket
+	} else if err = coordination.CheckObjectMode(context.Background(), b); err != nil {
+		log.Error("coordination binding check failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -199,6 +226,19 @@ func main() {
 		defer cleanup()
 	}
 	rep.RestoreParallel = cfg.RestoreParallel
+	// Replay the previous process's acknowledged local uploads before recovery
+	// can inspect/cache a bucket cut or invalidate its original SQLite file.
+	startupSpool, err := upload.OpenSpool(filepath.Join(cfg.DataDir, "upload-spool"), 200000)
+	if err != nil {
+		log.Error("open startup upload spool", "err", err)
+		os.Exit(1)
+	}
+	startupUploads := upload.New(rep, log, 64, 1<<20, time.Millisecond)
+	startupUploads.SetSpool(startupSpool)
+	if err := startupUploads.ReplaySpool(ctx); err != nil {
+		log.Error("startup upload replay stopped", "err", err)
+		os.Exit(1)
+	}
 	takeoverRecovery := recovery.New(rep, peer.NewHTTPTransport(cfg.TokenPeer, nil))
 	takeoverRecovery.Lease = lm
 	takeoverRecovery.LocalInstanceLocked = true
@@ -231,11 +271,33 @@ func main() {
 	}
 	leaseCtx, stopLease := context.WithCancel(context.Background())
 	defer stopLease()
+	var loadStore atomic.Pointer[cellstore.Store]
+	loadSampler := newNodeLoadSampler()
 	publishLoad := func() error {
 		start := time.Now()
 		log.Debug("node lease publication started", "session", cfg.SessionID, "remaining", lm.Remaining())
-		owned := len(om.OwnedScopes())
-		if err := lm.Publish(bucket.WithReadSource(leaseCtx, bucket.LeaseRead), lease.Load{OwnedCells: owned, ResidentCells: owned, Weight: placementWeight, SampledMs: time.Now().UnixMilli()}); err != nil {
+		load := loadSampler.Sample()
+		load.Weight = placementWeight
+		load.OwnedCells = len(om.OwnedScopes())
+		if coordinationBucket != nil {
+			count, cerr := coordinationBucket.Store.OwnedCount(leaseCtx, cfg.NodeID, cfg.SessionID)
+			if cerr == nil {
+				load.OwnedCells = count
+				load.OwnedComplete = true
+			}
+		}
+		if st := loadStore.Load(); st != nil {
+			load.ResidentCells, _, _ = st.Stats()
+			for _, owned := range om.OwnedScopes() {
+				if st.IsOpen(owned.Scope) {
+					load.OwnedResidentCells++
+				}
+			}
+		}
+		if load.OwnedComplete {
+			load.DormantCells = max(0, load.OwnedCells-load.OwnedResidentCells)
+		}
+		if err := lm.Publish(bucket.WithReadSource(leaseCtx, bucket.LeaseRead), load); err != nil {
 			log.Warn("lease publish failed", "err", err, "elapsed", time.Since(start), "remaining", lm.Remaining(), "session", cfg.SessionID, "lease", lm.Diagnostics())
 			return err
 		}
@@ -326,6 +388,7 @@ func main() {
 		log.Error("open cell store", "err", err)
 		os.Exit(1)
 	}
+	loadStore.Store(store)
 	// Drop the tally only after this process no longer holds the epoch. A fold
 	// that times out must not erase the count when the release itself fails.
 	om.AfterRelease = func(sc cell.Scope, epoch uint64) {
@@ -1049,6 +1112,22 @@ func main() {
 	// untouched, so the next request reopens the cell locally.
 	// Reclamation requires current control ownership and a durable exclusion.
 	// Unknown I/O outcomes retain their fence instead of granting a new holder.
+	if shared != nil {
+		store.EvictionReady = srv.ScheduleOutboxEvictionReady
+		srv.ProjectMaintenance = func(kind string, at time.Time) {
+			shared.Notify(scheduleindex.Hint{Kind: kind, Scope: control.Scope().String(), Due: at.UnixMilli()})
+		}
+		srv.Control.SchedulePurge = func(at time.Time) { srv.ProjectMaintenance("purge", at) }
+		if cronScheduler != nil {
+			srv.CronNudge = cronScheduler.Nudge
+			cronScheduler.ProjectNext = func(ctx context.Context, at time.Time) error {
+				if at.IsZero() {
+					return nil
+				}
+				return shared.Publish(ctx, scheduleindex.Hint{Kind: "cron", Scope: control.Scope().String(), Due: at.UnixMilli()})
+			}
+		}
+	}
 	go srv.RunPurgeLoop(bucket.WithReadSource(ctx, bucket.PurgeRead), 5*time.Second)
 	if cfg.AuditRetention > 0 {
 		go runAuditPruneLoop(bucket.WithReadSource(ctx, bucket.MaintenanceRead), log, srv, cfg.AuditRetention)
@@ -1122,6 +1201,9 @@ func main() {
 			}
 		}
 		return true, nil
+	}
+	if shared != nil {
+		srv.ScheduleAcquire = timerOwn
 	}
 	timerCommit := func(tctx context.Context, scope string, fn func() error) error {
 		sc, err := cell.ParseScope(scope)
@@ -1243,6 +1325,9 @@ func main() {
 		indexCtx, stopIndex := context.WithCancel(ctx)
 		indexDone := make(chan struct{})
 		go func() { defer close(indexDone); shared.Run(indexCtx, srv.DeliverScheduleHint) }()
+		outboxDone := make(chan struct{})
+		go func() { defer close(outboxDone); srv.RunScheduleOutbox(indexCtx, shared.Publish) }()
+		defer func() { stopIndex(); <-outboxDone }()
 		defer func() { stopIndex(); <-indexDone }()
 	}
 	srv.SetReady(true)

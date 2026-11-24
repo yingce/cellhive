@@ -16,6 +16,7 @@ import (
 
 	"cellhive/internal/cell"
 	"cellhive/internal/cellstore"
+	"cellhive/internal/scheduleoutbox"
 )
 
 const schema = `
@@ -119,7 +120,10 @@ func (s *Store) cell(ctx context.Context, ns, name string) (*cellstore.Cell, err
 			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_source ON messages(source_queue)`); err != nil {
 				return err
 			}
-			return migrateIdempotency(ctx, tx, s.now().UnixMilli())
+			if err := migrateIdempotency(ctx, tx, s.now().UnixMilli()); err != nil {
+				return err
+			}
+			return scheduleoutbox.Install(ctx, tx, scheduleoutbox.Queue)
 		}); err != nil {
 			return err
 		}

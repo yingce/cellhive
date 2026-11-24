@@ -7,7 +7,7 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 设计信条：
 
 1. **workerd 改动只在 fork 仓库。** 计算层使用 `cellhive-workerd`（跟踪上游并加入 CellHive 逐调用限额）；本仓不内联 patch workerd，只通过 `workerLoader`、bindings、capnp 配置和进程开关集成。
-2. **状态一切皆 cell。** 每个状态单元是一个有名字的 SQLite 数据库；对象存储（S3 兼容）是长期权威；bucket 条件写决定唯一 owner；不依赖共识服务。
+2. **状态一切皆 cell。** 每个状态单元是一个有名字的 SQLite 数据库；对象存储（S3 兼容）是长期权威；默认 bucket 条件写决定唯一 owner；可选 Redis/Kvrocks 协调权威替代 owner/lease/wake 的桶操作，业务数据耐久链不变，切换必须离线迁移。见 [协调后端设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
 3. **计算与状态分层。** `cellhive-workerd` 负责执行；所有持久化数据经 `cell-agent`。
 4. **固定状态层 + 弹性执行层。** `cell-agent` 是固定集群（有身份的节点）；`do-runtime` 是分布式弹性执行层，本地盘可临时。
 5. **可移植。** 运行时不依赖特权或 FUSE；默认可在托管/受限 Kubernetes 上运行。

@@ -252,3 +252,31 @@ cell-agent `/metrics` 现在额外暴露：
 恢复路径现在用 `Truncate` + `WriteAt` 直接写目标 SQLite 文件，不再额外分配 `commit*pageSize` 的整库缓冲；仍然会持有从对象存储读入的 segment 数据，因此 bucket 下载/compaction 的峰值需要继续单独观察。
 
 恢复写入按最多 1MiB 的连续页 run 合并后一次 `WriteAt`，避免每页 4KiB 一次 syscall；run buffer 固定有界，不会回到整库缓冲。
+
+## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署本地 Compose，未部署生产）
+
+GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 StatefulSet，
+持久 PVC、AOF `appendfsync always`、`noeviction`，不配置会回退版本的副本自动提升。
+镜像须固定 digest，凭据由 `coordinationRedis.existingSecret` 的 `REDIS_PASSWORD`
+提供；agent 单独读取同一 Secret 的 `CELLHIVE_COORDINATION_BACKEND` URL。
+仅 agent 和离线迁移 Job 可访问 Redis。节点失联时不得强删 Redis Pod 或强挂卷；
+须确认旧进程已隔离，不能以可用性为由放宽协调版本单调性。
+切换时将 `userRuntime.autoscalingEnabled=false`，停止 runtime 和全部 agent，
+备份协调元数据后执行初始化；激活后恢复副本数和 HPA。不要回滚到旧 COS 写入者。
+本配置准备不等于生产已完成切换。
+
+默认 `CELLHIVE_COORDINATION_BACKEND=object`。Redis 模式配置：
+
+```sh
+export CELLHIVE_COORDINATION_BACKEND=redis://127.0.0.1:6379/0
+```
+
+所有 agent 使用相同 Redis 数据库与桶配置；协调和共享调度 namespace 从 bucket 配置自动生成。旧独立 URL/region/SCHEDULE_MODE 环境项必须删除；旧实验 region 的已激活绑定不会自动迁移。Redis 配置持久化、`maxmemory-policy noeviction`；不支持可能丢失已确认写入的透明副本提升，也不能从旧备份直接恢复并继续发授权。
+
+首次切换须停掉全部 agent/runtime、旧二进制和后台写者，确保没有在途写入。然后使用相同桶配置执行 `cell-agent coordination-init --offline`。命令先在桶写后端绑定，复制 owner/owner-gen、节点、fleet 选主与 wake 记录，最后激活。中断后保持停写、使用原配置重跑；已激活时重跑会拒绝覆盖。普通启动不会初始化空 Redis，绑定后的新二进制也拒绝 object 模式。旧二进制不知道此绑定，必须由部署层禁止启动。
+
+日常 owner、lease 和 wake 查询不回 COS；Lua CAS 不使用 COS append/root/ETag 模拟。普通 claim 把 owner-gen 高水位更新和 owner 发布并为一次 Lua；独占维护和资源清理路径使用单次 Lua 预留代次，再 CAS 发布，以保留未知结果回收语义；也不再执行 owner-gen 的读/CAS 循环。owner 释放不清除代次高水位和退役历史。节点按 node/session 统计全部 owner（含休眠）；resident 使用真实本机打开句柄，owned resident 是本机维护集合与打开句柄的交集，采样不是跨节点原子快照。CPU 为进程相邻采样间的核使用率（10000 表示一个核满载），RSS 为进程当前驻留内存；cgroup v2 内存余量覆盖整个容器。未支持的平台/无限制 cgroup 不伪造可用值，通过 valid 字段区分。
+
+Redis URL 自动启用共享 ZSET 调度；object 模式使用 cluster 本地 deadline。Redis authority 下 owner/lease/wake 都走 Redis；业务消息、消费进度、Cron 记录和清理证明继续在 cell。保留低频对账，不能因为启用 ZSET 就关闭恢复发现。重复通知通过 revision 防止旧 ACK 吃掉新通知；不承诺外部副作用 exactly-once。
+
+Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护，不重新执行初始化覆盖已激活状态；必须先隔离旧 session，再进行专门的协调重建与数据链恢复。本批不提供自动灾难重建/在线后端切换。自动均衡策略和恢复扫描完全消除不在本批实现范围；持久 outbox 已实现，见调度验收报告。

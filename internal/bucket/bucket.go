@@ -118,3 +118,16 @@ type Bucket interface {
 	// PresignGet returns a short-lived read URL (ADR-030). Optional.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
+
+// OwnerClaimer can publish an owner and allocate its non-reusable epoch in one
+// atomic operation. body must contain the epoch:0 placeholder. Empty expected
+// means create. The implementation preserves the epoch high-water after release.
+type OwnerClaimer interface {
+	ClaimOwner(context.Context, string, []byte, string, uint64) ([]byte, string, error)
+}
+
+// OwnerEpochAllocator reserves an epoch for maintenance operations which must
+// know their exact epoch even if the later publication response is lost.
+type OwnerEpochAllocator interface {
+	ReserveOwnerEpoch(context.Context, string, uint64) (uint64, error)
+}
