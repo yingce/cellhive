@@ -75,7 +75,7 @@ async function dispatchQueues(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    await finishInvocationBestEffort(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e), error_stack:typeof e?.stack === "string"?e.stack:"", failure_stage:"worker_load"});
     return workerLoadFailure(e);
   }
   const batch = messages.map((m) => ({
@@ -107,7 +107,7 @@ async function dispatchQueues(req, env, ctx) {
       invocation_id: invocation.invocation_id,
     });
   } catch (e) {
-    await finishInvocationBestEffort(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e), error_stack:typeof e?.stack === "string"?e.stack:"", failure_stage:"dispatch"});
     return json({ error: "handler_failed", message: String(e) }, 500);
   }
 }
@@ -124,7 +124,7 @@ async function dispatchTimers(req, env, ctx) {
   try {
     stub = await loadWorker(env, ctx, body);
   } catch (e) {
-    await finishInvocationBestEffort(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e), error_stack:typeof e?.stack === "string"?e.stack:"", failure_stage:"worker_load"});
     return workerLoadFailure(e);
   }
   const event = { scheduledTime: scheduled_time_ms || Date.now(), cron: cron || undefined, traceparent: body.traceparent, request_id: body.request_id };
@@ -134,7 +134,7 @@ async function dispatchTimers(req, env, ctx) {
     if (execution.error) return json({error:"handler_failed",message:execution.error,invocation_id:invocation.invocation_id,...errorDiagnostics(stackErrorName(execution.error_stack),execution.error_stack)},500);
     return json({ ...execution.value,result:publicInvocationResult(execution.value?.result), kind: kind || "cron", worker, scheduled_time_ms: event.scheduledTime,invocation_id:invocation.invocation_id });
   } catch (e) {
-    await finishInvocationBestEffort(env, invocation, {error:String(e)});
+    await finishInvocationBestEffort(env, invocation, {error:String(e), error_stack:typeof e?.stack === "string"?e.stack:"", failure_stage:"dispatch"});
     let name="",stack="";try{name=e&&e.name;stack=e&&e.stack;}catch{}
     return json({ error: "handler_failed", message: String(e), ...errorDiagnostics(name,stack) }, 500);
   }
@@ -158,7 +158,8 @@ async function startInvocation(env,body,kind) {
   // the handler but do not persist a possibly opted-out Worker's invocation.
   const source = kind === "queue" ? [body.namespace,body.worker,body.queue,(body.messages||[]).map(m=>m.id).sort()]
     : kind === "workflow" ? [body.namespace,body.worker,body.workflow,body.id]
-    : [body.namespace,body.worker,body.token||"",body.scheduled_time_ms,body.cron];
+    : kind === "fetch" ? [body.namespace,body.worker,body.request_id || crypto.randomUUID()]
+    : body.token ? [body.namespace,body.worker,body.token] : [body.namespace,body.worker,body.scheduled_time_ms,body.cron];
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(source))));
   const logical = [...digest].map(b=>b.toString(16).padStart(2,"0")).join("");
   const messages=[];
@@ -177,7 +178,8 @@ async function startInvocation(env,body,kind) {
   body.traceparent = traceparent;
   return {
     invocation_id:invocationId,request_id:requestId,traceparent,logical_id:kind+":"+logical,namespace:body.namespace,worker:body.worker,kind,resource:body.queue||body.cron||body.workflow||"",
-    attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):1,
+    attempt:kind==="queue"?Math.max(1,...(body.messages||[]).map(m=>m.attempts||1)):(Number.isSafeInteger(body.attempt)&&body.attempt>0?body.attempt:null),
+    scheduled_time_ms:kind==="cron"&&Number.isSafeInteger(body.scheduled_time_ms)?body.scheduled_time_ms:null,
     started_ms:Date.now(),status:"running",messages,producer_links:producerLinks,
     _logging_enabled: env.CH_INVOCATION_LOGS === "1",
   };
@@ -199,6 +201,7 @@ async function finishInvocation(env, record, execution) {
   const finishedMs=Date.now();
   const status=error?"failed":retry?"retry":"success";
   const [traceId,spanId]=traceIds(record.traceparent);
+  const diagnostics=errorDiagnostics(stackErrorName(execution.error_stack || value.error_stack),execution.error_stack || value.error_stack);
   const attributes={
     "cellhive.invocation":true,
     "cellhive.invocation_id":record.invocation_id,
@@ -209,12 +212,20 @@ async function finishInvocation(env, record, execution) {
     "cellhive.logical_id":record.logical_id,
     "cellhive.resource":record.resource,
     "cellhive.attempt":record.attempt,
+    "cellhive.scheduled_time_ms":record.scheduled_time_ms,
+    "cellhive.outcome_scope":"handler",
     "cellhive.outcome":status,
     "cellhive.started_ms":record.started_ms,
     "cellhive.finished_ms":finishedMs,
     "cellhive.duration_ms":finishedMs-(record.started_ms||finishedMs),
     "cellhive.retry_requested":status==="retry",
+    "cellhive.status":Number.isInteger(execution.status)?execution.status:null,
     "cellhive.error":String(error).slice(0,2048),
+    "cellhive.error_name":error?diagnostics.error_name:null,
+    "cellhive.error_frame":error?(diagnostics.error_frame||null):null,
+    "cellhive.failure_stage":error?(execution.failure_stage||"handler"):null,
+    // The failure boundary does not establish who caused the failure.
+    "cellhive.error_origin":error?"unknown":null,
     "cellhive.ack_count":ack.length,
     "cellhive.retry_count":retryIDs.size,
   };
@@ -239,10 +250,12 @@ async function dispatchServiceFetch(req, env, ctx) {
   if (!namespace || !worker || !bundle_sha) {
     return json({ error: "bad_request", message: "namespace, worker, bundle_sha are required" }, 400);
   }
+  const invocation = await startInvocation(env, body, "fetch");
   let stub;
   try {
     stub = await loadWorker(env, ctx, { namespace, worker, bundle_sha, version, storage_id: body.storage_id, bindings: bindings || {}, vars: vars || {} });
   } catch (e) {
+    await finishInvocationBestEffort(env,invocation,{error:String(e),error_stack:typeof e?.stack === "string"?e.stack:"",failure_stage:"worker_load",status:502});
     return workerLoadFailure(e);
   }
   const m = method || "GET";
@@ -270,8 +283,11 @@ async function dispatchServiceFetch(req, env, ctx) {
     });
     const outHeaders = { "content-type": r.headers.get("content-type") || "text/plain" };
     try { outHeaders["x-cellhive-resp-headers"] = btoa(JSON.stringify(respHeaders)); } catch (e) { /* non-Latin header */ }
-    return new Response(await r.arrayBuffer(), { status: r.status, headers: outHeaders });
+    const bytes = await r.arrayBuffer();
+    await finishInvocationBestEffort(env,invocation,{status:r.status,error:r.status>=500?"Handler returned HTTP "+r.status:"",failure_stage:"handler_response"});
+    return new Response(bytes, { status: r.status, headers: outHeaders });
   } catch (e) {
+    await finishInvocationBestEffort(env,invocation,{error:String(e),error_stack:typeof e?.stack === "string"?e.stack:"",failure_stage:"dispatch",status:500});
     return json({ error: "service_failed", message: String(e) }, 500);
   }
 }

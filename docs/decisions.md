@@ -4394,3 +4394,11 @@ Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁
 - Outbox 保留持久 revision/ACK、权威与耐久检查。owned 候选低频快照、通知优先、轮转扫描；限制并行度和整轮时间，未处理/失败候选保留，避免单个冷 cell 阻塞整轮。轮转游标仅越过实际尝试或已跳过的候选，预算耗尽未执行项不得推进游标；ACK 保留原耐久写门禁但不发送 relay 自通知，业务写通知不变。
 
 验收见 [修复报告](reports/2026-11-24-redis-review-fixes.md) 与 docs/known-issues.md；全量 make test、build/vet 和六个相关包 race 通过。不改变托管 Redis 回退故障模型，也不代表线上修复。
+
+## 2026-11-24 Redis review 后续优化（本地验证通过，未部署）
+
+shared hint 失败保留重投递，采用按 member 的 1/2/4/8/16/32/60 秒有界退避；新发布重置失败计数，失败旧 claim 不得覆盖并发新通知的 deadline。每轮仍最多处理 32 项，共享 3 秒 handler 时间预算（Redis claim/收尾 I/O 另受客户端超时限制），handler 失败不终止其他候选；Redis 操作失败终止本轮。claim 返回真实 member 与 payload，损坏或缺失 payload 通过原 token/revision ACK 清理，并发新发布继续保留。新增失败计数 hash 与现有 hint 同生命周期，不改变权威或业务 ACK。
+
+Redis ListPage 使用每批最多 128 个键的原子元数据读取，返回 HSTRLEN 与 revision，不下载正文；保留 generation guard、缺失跳过、混合物理页边界和游标语义。锁排序、启动策略、epoch 释放和混合目录枚举不在此批修改范围。测试使用隔离 Redis；不宣称托管故障切换安全或生产性能收益。
+
+本地验收：隔离 Redis 7.2 / Kvrocks 定向回归、scheduleindex/coordination race、make test、make build、make vet 和 git diff --check 通过。详情见 [验证报告](reports/2026-11-24-redis-review-optimization.md)。

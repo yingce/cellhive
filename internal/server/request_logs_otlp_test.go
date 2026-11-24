@@ -47,7 +47,8 @@ func TestRequestLogExportsFunctionRequest(t *testing.T) {
 	payload, _ := json.Marshal(requestLogPayload{
 		Namespace: "acme", Worker: "meme-api", RequestID: "req-1", Method: "POST",
 		Path: "/functions/v1/meme-api/v1/share-links/x/open", Route: "functions",
-		Status: 504, StartedMs: 1000, FinishedMs: 61000, Outcome: "error",
+		Diagnostics: map[string]string{"cellhive.failure_stage": "handler", "cellhive.error": "upstream failed", "cellhive.error_origin": "unknown", "private": "must not export"},
+		Status:      504, StartedMs: 1000, FinishedMs: 61000, Outcome: "error",
 	})
 	response := do(t, s.Handler(), http.MethodPost, "/v1/internal/request-log", "tok", payload)
 	if response.Code != http.StatusOK {
@@ -69,10 +70,14 @@ func TestRequestLogExportsFunctionRequest(t *testing.T) {
 		"cellhive.event_type": "fetch", "cellhive.request_id": "req-1",
 		"cellhive.method": "POST", "cellhive.path": "/functions/v1/meme-api/v1/share-links/x/open",
 		"cellhive.route": "functions", "cellhive.outcome": "error",
+		"cellhive.failure_stage": "handler", "cellhive.error": "upstream failed", "cellhive.error_origin": "unknown",
 	} {
 		if got := attrs[key]; got == nil || got.GetStringValue() != want {
 			t.Errorf("%s = %v, want %q", key, got, want)
 		}
+	}
+	if attrs["private"] != nil {
+		t.Fatal("unexpected diagnostic key exported")
 	}
 	if got := attrs["cellhive.invocation"]; got == nil || !got.GetBoolValue() {
 		t.Errorf("cellhive.invocation = %v, want true", got)

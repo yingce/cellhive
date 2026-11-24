@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { internalHeaders, authorized as verifyInternal } from '../platform/jwt.js';
@@ -7,7 +8,7 @@ import { SOURCE_CACHE_BYTES } from '../platform/lifecycle.js';
 const signingKey=Buffer.alloc(32,7).toString('base64url');
 const source = readFileSync(new URL('./internal.js', import.meta.url), 'utf8');
 function harness(metadata, bundle='export default {}') {
-  const context = vm.createContext({ internalHeaders, verifyInternal, Request, Response, URL, TextEncoder, console, crypto: { randomUUID: ()=>'test' },
+  const context = vm.createContext({ internalHeaders, verifyInternal, Request, Response, URL, TextEncoder, console, crypto: webcrypto,
     bindingStub(){}, workerLimits:()=>({}), quotaSource:()=>'', invocationSource:()=>'',
     checkedWorkerGet: async (_loader,id,code)=>({id,code,getEntrypoint:()=>({handleFetch:async()=>new Response('ok'),callMethod:async()=> 'ok'})}),
     budgetErrorBody:()=>null,

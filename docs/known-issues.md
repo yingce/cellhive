@@ -282,3 +282,11 @@ Cron 待重试状态已改为驻留内存，重启/驱逐/换 owner 丢弃该轮
 确认 Cron 跨周期失败后延后 cutoff、Nudge 被 Pass I/O 阻塞、Redis 混合前缀分页反复全量 List 三个问题。同步优化纯 Redis CommonPrefixes 与 outbox 候选扫描/整轮预算。上述问题已本地修复；新增边界回归、全量 make test、build/vet、coordination/scheduleindex/cron/timer/owner/server race 通过。Redis 使用独立本机实例，未验证托管主从回退或线上性能收益；生产状态不变。见 [修复报告](reports/2026-11-24-redis-review-fixes.md)。
 
 第二轮复审发现并本地修复 outbox worker 全部阻塞时未执行候选饥饿，以及 ACK 自通知导致淘汰后重新开库的问题。两项回归均先在旧实现失败、修复后通过；本轮完整验证状态见上述修复报告，未部署。
+
+## 2026-11-24 Redis review 后续优化（本地验证通过，未部署）
+
+shared hint 失败保留重投递，采用按 member 的 1/2/4/8/16/32/60 秒有界退避；新发布重置失败计数，失败旧 claim 不得覆盖并发新通知的 deadline。每轮仍最多处理 32 项，共享 3 秒 handler 时间预算（Redis claim/收尾 I/O 另受客户端超时限制），handler 失败不终止其他候选；Redis 操作失败终止本轮。claim 返回真实 member 与 payload，损坏或缺失 payload 通过原 token/revision ACK 清理，并发新发布继续保留。新增失败计数 hash 与现有 hint 同生命周期，不改变权威或业务 ACK。
+
+Redis ListPage 使用每批最多 128 个键的原子元数据读取，返回 HSTRLEN 与 revision，不下载正文；保留 generation guard、缺失跳过、混合物理页边界和游标语义。锁排序、启动策略、epoch 释放和混合目录枚举不在此批修改范围。测试使用隔离 Redis；不宣称托管故障切换安全或生产性能收益。
+
+本地验收：隔离 Redis 7.2 / Kvrocks 定向回归、scheduleindex/coordination race、make test、make build、make vet 和 git diff --check 通过。详情见 [验证报告](reports/2026-11-24-redis-review-optimization.md)。

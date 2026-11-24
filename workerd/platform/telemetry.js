@@ -258,3 +258,27 @@ export async function exportLogRecords(env, records) {
     /* best-effort: the invocation itself already succeeded */
   }
 }
+
+// Failure boundaries are evidence, not ownership. Never inspect response bodies.
+export function invocationFailureAttributes(stage, error, status) {
+  const allowed = ['worker_load','bundle_fetch','binding_setup','runtime_capacity','handler','handler_response','dispatch'];
+  const boundary = allowed.includes(stage) ? stage : 'unknown';
+  let name='Error', message='', stack='';
+  try { name=error?.name || 'Error'; message=error == null ? '' : String(error); stack=typeof error?.stack === 'string' ? error.stack : ''; } catch {}
+  const safe = value => String(value).replace(/bearer\s+[^\s,;]+/gi,'Bearer [redacted]')
+    .replace(/(token|password|secret|api[_-]?key|authorization)"?\s*[=:]\s*"?[^"\s,;]+/gi,'credential=[redacted]')
+    .replace(/https?:\/\/[^\s]+/g,'[url]').slice(0,2048);
+  let frame=null;
+  for(const line of stack.slice(0,8192).split('\n')) {
+    if(!line.trim().startsWith('at ')) continue;
+    const m=/([^/\\\s():?#]+):([1-9][0-9]{0,5}):([1-9][0-9]{0,5})\)?$/.exec(line.trim());
+    if(m && /^[A-Za-z0-9_.-]{1,80}$/.test(m[1])) { frame=m[1]+':'+m[2]+':'+m[3]; break; }
+  }
+  return {
+    'cellhive.failure_stage':boundary,
+    'cellhive.error_origin':boundary==='runtime_capacity'?'platform':'unknown',
+    'cellhive.error_name':error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name)?name:null,
+    'cellhive.error_frame':frame,
+    'cellhive.error':safe(message || (boundary==='handler_response'?'Handler returned HTTP '+status:'Invocation failed at '+boundary)),
+  };
+}

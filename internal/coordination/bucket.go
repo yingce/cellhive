@@ -225,19 +225,17 @@ func (b *Bucket) ListPage(c context.Context, p, after string, limit int) ([]buck
 				boundary = last
 			}
 		}
+		selected := keys[:0]
 		for _, k := range keys {
-			if !Selected(k) || (boundary != "" && k > boundary) {
-				continue
+			if Selected(k) && (boundary == "" || k <= boundary) {
+				selected = append(selected, k)
 			}
-			raw, e, err := b.Store.Get(c, k)
-			if errors.Is(err, bucket.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, "", err
-			}
-			out = append(out, bucket.ObjectInfo{Key: k, Size: int64(len(raw)), ETag: e})
 		}
+		metadata, err := b.Store.metadata(c, selected)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, metadata...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	if boundary != "" {

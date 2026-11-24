@@ -90,6 +90,13 @@ if request_id == "" { request_id = ns + ":" + worker }
 category = if invocation == true {
   if event_type == "queue" { "queue_operation" } else if event_type == "scheduled" || event_type == "cron" { "cron_dispatch" } else { "function_request" }
 } else { "user_console" }
+# A caught handler exception can still produce a successful wrapper transport.
+# Keep it out of the business-success stream; cron is the final handler result.
+outcome_scope = if event_type == "scheduled" { "wrapper_transport" } else { "handler" }
+if invocation == true && event_type == "scheduled" && outcome == "ok" {
+  category = "runtime_telemetry"
+  outcome = "transport_ok"
+}
 .category = category
 message = string(.message) ?? ""
 .occurred_at = format_timestamp!(.timestamp, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
@@ -118,7 +125,22 @@ detail = if exc_name != "" && exc_message != "" {
 } else {
   exc_name
 }
-invocation_failed = invocation == true && (outcome == "exception" || is_object(first_exception))
+handler_error = string(get(attrs, ["cellhive.error"]) ?? "") ?? ""
+if detail == "" { detail = handler_error }
+# Do not copy credential-bearing error text or signed URLs into the digest.
+detail = replace(detail, r'(?i)bearer\s+[^\s,;]+', "Bearer [redacted]")
+detail = replace(detail, r'(?i)(token|password|secret|api[_-]?key|authorization)"?\s*[=:]\s*"?[^"\s,;]+', "credential=[redacted]")
+detail = replace(detail, r'https?://[^\s]+', "[url]")
+invocation_failed = invocation == true && (outcome == "failed" || outcome == "error" || outcome == "exception" || is_object(first_exception) || handler_error != "")
+if invocation_failed {
+  .severity = "error"
+  .status = 500
+  if event_type == "scheduled" {
+    category = "cron_dispatch"
+    .category = category
+    if outcome == "transport_ok" { outcome = "failed" }
+  }
+}
 .error_code = null
 .error_message = null
 if invocation_failed {
@@ -135,9 +157,25 @@ trace_id = if exists(.trace_id) { string!(.trace_id) } else { "" }
 span_id = if exists(.span_id) { string!(.span_id) } else { "" }
 .trace_id = if trace_id == "" { null } else { trace_id }
 .span_id = if span_id == "" { null } else { span_id }
+error_name = to_string(get(attrs, ["cellhive.error_name"]) ?? null) ?? ""
+error_frame = to_string(get(attrs, ["cellhive.error_frame"]) ?? null) ?? ""
+failure_stage = to_string(get(attrs, ["cellhive.failure_stage"]) ?? null) ?? ""
+error_name = if invocation_failed && match(error_name, r'^[A-Za-z][A-Za-z0-9_.-]{0,63}$') { error_name } else { null }
+error_frame = if invocation_failed && match(error_frame, r'^[A-Za-z0-9_.-]{1,80}:[1-9][0-9]{0,5}:[1-9][0-9]{0,5}$') { error_frame } else { null }
+failure_stage = if invocation_failed { if match(failure_stage, r'^(handler|worker_load|bundle_fetch|binding_setup|runtime_capacity|handler_response|dispatch)$') { failure_stage } else { "unknown" } } else { null }
+error_origin = if invocation_failed { if failure_stage == "runtime_capacity" { "platform" } else { "unknown" } } else { null }
 .payload = {
   "event_type": event_type,
   "outcome": outcome,
+  "outcome_scope": outcome_scope,
+  "error_name": error_name,
+  "error_frame": error_frame,
+  "failure_stage": failure_stage,
+  "error_origin": error_origin,
+  "logical_id": get(attrs, ["cellhive.logical_id"]) ?? null,
+  "scheduled_time_ms": get(attrs, ["cellhive.scheduled_time_ms"]) ?? null,
+  "attempt": get(attrs, ["cellhive.attempt"]) ?? null,
+  "retry_requested": get(attrs, ["cellhive.retry_requested"]) ?? null,
   "script_version": script_version,
   "namespace": ns,
   "worker": worker,

@@ -24,6 +24,7 @@ import (
 // LogMetadata carries invocation context without coupling telemetry to the
 // server's Tail DTO. JSON fields retain their original workerd values.
 type LogMetadata struct {
+	Diagnostics   map[string]string
 	EventType     string
 	MessageArgs   []json.RawMessage
 	ScriptVersion json.RawMessage
@@ -285,6 +286,12 @@ func ExportLogWithMetadata(ns, worker, level, message string, atMs int64, traceI
 	}
 	if len(meta.Exceptions) > 0 {
 		rec.AddAttributes(attribute.String("cellhive.exceptions", string(meta.Exceptions)))
+	}
+	// Only diagnostic fields emitted by the trusted runtime may pass through.
+	for _, key := range []string{"cellhive.error", "cellhive.error_name", "cellhive.error_frame", "cellhive.failure_stage", "cellhive.error_origin"} {
+		if value := meta.Diagnostics[key]; value != "" && len(value) <= 2048 {
+			rec.AddAttributes(attribute.String(key, value))
+		}
 	}
 	if meta.Invocation {
 		rec.AddAttributes(attribute.Bool("cellhive.invocation", true))

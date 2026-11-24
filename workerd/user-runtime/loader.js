@@ -348,7 +348,7 @@ async function fixedFetch(req,env,ctx,app,worker,version,url){
   return runWorker(req,env,ctx,app,worker,version,version.class_storage||{},version.deleted_classes||[]);
 }
 
-import { traceparent as newTraceparent, startSpan, endSpan, flushSpans, postTelemetry, fileLog } from "telemetry.js";
+import { traceparent as newTraceparent, startSpan, endSpan, flushSpans, postTelemetry, fileLog, invocationFailureAttributes } from "telemetry.js";
 
 // --- worker ---------------------------------------------------------------
 
@@ -404,7 +404,7 @@ function otlpHex(id) {
   for (let i = 0; i < out.length; i++) out[i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
-function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs, diagnostics = {}) {
   let pathname = "/";
   try { pathname = new URL(req.url).pathname; } catch (e) { /* keep fallback */ }
   const publicPath = req.headers.get("x-vwork-path-prefix") || pathname;
@@ -419,6 +419,7 @@ function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedM
     ["cellhive.status", status], ["cellhive.started_ms", startedMs],
     ["cellhive.finished_ms", finishedMs], ["cellhive.duration_ms", Math.max(0, finishedMs - startedMs)],
     ["cellhive.outcome", outcome],
+    ...Object.entries(diagnostics).filter(([,v])=>v!==null),
   ];
   const record = [
     ...otlpFixed64(1, BigInt(finishedMs) * 1000000n),
@@ -436,7 +437,7 @@ function otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedM
   ];
   return new Uint8Array(otlpBytes(1, resourceLogs));
 }
-async function recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs) {
+async function recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs, diagnostics = {}) {
   if (env.FILE_LOG_TOKEN) {
     let path = "/";
     try { path = new URL(req.url).pathname; } catch (_) {}
@@ -448,6 +449,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
       "cellhive.route":"functions", "cellhive.status":status, "cellhive.outcome":outcome,
       "cellhive.started_ms":startedMs, "cellhive.finished_ms":finishedMs,
       "cellhive.duration_ms":Math.max(0,finishedMs-startedMs),
+      ...diagnostics,
     }, "invocation", status>=500?"error":"info", finishedMs, req.headers.get("traceparent") || "");
     return;
   }
@@ -461,7 +463,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
     try {
       const r = await postTelemetry(url, {
         method: "POST", headers,
-        body: otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs),
+        body: otlpRequestLogProtobuf(env, app, worker, req, status, outcome, startedMs, finishedMs, diagnostics),
       });
       if (!r || r.ok) return;
       console.error(JSON.stringify({ event: "request_log_otlp_failed", status: r.status }));
@@ -480,6 +482,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
     request_id: req.headers.get("x-request-id") || crypto.randomUUID(),
     method: req.method, path: publicPath, route: "functions",
     status, started_ms: startedMs, finished_ms: finishedMs, outcome,
+    diagnostics,
     traceparent: req.headers.get("traceparent") || "",
   });
   await postTelemetry(env.CELL_URL.replace(/\/$/, "") + "/v1/internal/request-log", {
@@ -489,15 +492,20 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
   const startedMs = Date.now();
   let res;
+  const diagnostics = {};
   try {
-    res = await runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses);
+    res = await runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses, diagnostics);
     return res;
+  } catch (error) {
+    Object.assign(diagnostics, invocationFailureAttributes("dispatch", error, 500));
+    throw error;
   } finally {
     const finishedMs = Date.now();
     const status = res && res.status ? res.status : 500;
     const outcome = status >= 500 ? "error" : "ok";
+    if(status>=500 && !diagnostics["cellhive.failure_stage"]) Object.assign(diagnostics, invocationFailureAttributes("handler_response",null,status));
     if (env.CH_INVOCATION_LOGS === "1") {
-      const log = recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs)
+      const log = recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs, diagnostics)
         .catch(e => console.error(JSON.stringify({ event: "request_log_failed", worker, error: String(e) })));
       if (ctx && ctx.waitUntil) ctx.waitUntil(log);
       else void log;
@@ -505,15 +513,17 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   }
 }
 
-async function runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
+async function runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses, diagnostics = {}) {
+  const failure=(stage,error,status)=>Object.assign(diagnostics,invocationFailureAttributes(stage,error,status));
   const key = workerVersionKey(app, worker, version);
   const cold = !preparedCache.has(key) && !preparedInflight.has(key);
-  if(cold&&coldLoads>=16)return text('runtime cold-load capacity exhausted',503);
+  if(cold&&coldLoads>=16){failure('runtime_capacity',null,503);return text('runtime cold-load capacity exhausted',503);}
   if(cold)coldLoads++;
   let plan;
   try {
     plan = await preparedWorker(env, app, worker, version, classStorage, deletedClasses);
   } catch (e) {
+    failure(e?.stage === "bundle" ? "bundle_fetch" : e?.stage === "binding" ? "binding_setup" : "worker_load", e?.cause || e, 502);
     const body = budgetErrorBody(e);
     if (body) {
       return new Response(JSON.stringify(body), {
@@ -530,7 +540,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
   const tailOn=tailEnabled(env,app.namespace,worker);
   let lease;
   try { lease=await residentWorker(env,ctx,app,worker,version,plan,tailOn); }
-  catch(e){return text(String(e).includes('runtime_capacity')?'runtime load capacity exhausted':'worker load failed',503);}
+  catch(e){failure(String(e).includes('runtime_capacity')?'runtime_capacity':'worker_load',e,503);return text(String(e).includes('runtime_capacity')?'runtime load capacity exhausted':'worker load failed',503);}
   const finish=()=>{
     lease.release();
     scheduleSweep(env,ctx);
@@ -546,6 +556,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
       return res;
     } catch (e) {
       finish();
+      failure("handler",e,500);
       return text("worker error: " + e, 500);
     }
   }
@@ -563,6 +574,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
     return res;
   } catch (e) {
     finish();
+    failure("handler",e,500);
     endSpan(span, { code: 2, message: String(e) });
     ctx.waitUntil(flushSpans(env));
     return text("worker error: " + e, 500);

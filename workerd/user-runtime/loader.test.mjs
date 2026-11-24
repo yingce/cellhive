@@ -102,6 +102,7 @@ test('sampled response and resident release do not wait for telemetry export',as
   let finishExport, released=0, settled=false;
   const exportPromise=new Promise(resolve=>finishExport=resolve), background=[];
   const c=vm.createContext({preparedCache:new Map([['key',true]]),coldLoads:0,workerVersionKey:()=> 'key',preparedWorker:async()=>({}),tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){released++;}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:true}),startSpan:()=>({}),endSpan(){},flushSpans:()=>exportPromise,managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(failed)throw Error('tenant failed');return {status:200};}})}),text:(_s,status)=>({status})});
+  vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
   vm.runInContext(extract('async function runWorker(', 'function workerVersionKey('),c);
   const result=c.runWorker({}, {}, {waitUntil:p=>background.push(p)}, {namespace:'ns'}, 'fn', {}, null, []).then(r=>{settled=true;return r;});
   // All mocks except export settle immediately; run through their microtasks.
@@ -399,6 +400,7 @@ test('business response does not wait for a hung invocation-log collector', asyn
   const pendingLog = new Promise(resolve => { finish = resolve; });
   const background = [];
   const c = vm.createContext({Date, console, runWorkerInner:async()=>({status:200}), recordRequestLog:()=>pendingLog});
+  vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
   vm.runInContext(extract('async function runWorker(', 'async function runWorkerInner('), c);
   const pendingResponse = c.runWorker({}, {CH_INVOCATION_LOGS:'1'}, {waitUntil:p=>background.push(p)}, {}, 'w').then(r=>{settled=true;return r;});
   try {
@@ -416,6 +418,7 @@ test('concurrent cold requests share one preparation admission; distinct loads r
     bundle:async()=>{loads++;await gate;return 'source';},bindingSpec:async()=>({}),workerPlan:()=>({workerCode:{}}),checkWorkerBudgets(){},
     tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:false}),
     managedStub:()=>({getEntrypoint:()=>({fetch:async()=>({status:200})})}),text:(body,status)=>({body,status}),budgetErrorBody:()=>null});
+  vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
   vm.runInContext(extract('async function runWorkerInner(', '// workerPlan contains'),c);
   const call=w=>c.runWorkerInner({}, {}, {}, {namespace:'ns'}, w, {version:1,bundle_sha:'sha'}, {}, []);
   const same=Array.from({length:64},()=>call('same'));
@@ -428,4 +431,40 @@ test('concurrent cold requests share one preparation admission; distinct loads r
   const results=await Promise.all([...same,...other]);
   assert.equal(results.filter(x=>x.status!==200).length,0);
   assert.equal(c.coldLoads,0);
+});
+
+test('fetch summaries retain failure boundary in file and protobuf export', async()=>{
+ const records=[];
+ const c=vm.createContext({URL,Request,Response,Headers,crypto:webcrypto,TextEncoder,Date,BigInt,Uint8Array,JSON,console,fileLog:(_e,a)=>records.push(a)});
+ vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
+ vm.runInContext(extract('function otlpVarint(', 'async function runWorker('),c);
+ const d=c.invocationFailureAttributes('handler_response',null,502);
+ await c.recordRequestLog({FILE_LOG_TOKEN:'enabled'},{namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
+ assert.equal(records[0]['cellhive.failure_stage'],'handler_response');
+ assert.equal(records[0]['cellhive.error_origin'],'unknown');
+ const wire=c.otlpRequestLogProtobuf({}, {namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
+ assert.ok(Buffer.from(wire).includes(Buffer.from('handler_response')));
+ const e=c.invocationFailureAttributes('handler',new TypeError('bad token=private'),500);
+ assert.equal(e['cellhive.error_name'],'TypeError');
+ assert.equal(e['cellhive.error'].includes('private'),false);
+});
+
+test('fetch loading and execution failures have different diagnostics on sampled and unsampled paths',async()=>{
+ for(const sampled of [false,true]) for(const scenario of ['bundle_fetch','binding_setup','worker_load','handler','handler_response','runtime_capacity']) {
+  const logs=[],pending=[];
+  const c=vm.createContext({Date,Response,JSON,preparedCache:new Map([['key',true]]),preparedInflight:new Map(),coldLoads:0,workerVersionKey:()=> 'key',
+   preparedWorker:async()=>{if(['bundle_fetch','binding_setup'].includes(scenario))throw {stage:scenario==='bundle_fetch'?'bundle':'binding',cause:Error('upstream failed')};return {};},
+   tailEnabled:()=>false,residentWorker:async()=>{if(scenario==='worker_load')throw Error('load failed');if(scenario==='runtime_capacity')throw Error('runtime_capacity');return {entry:{},release(){}};},scheduleSweep(){},
+   prepareRequest:request=>({request,sampled}),startSpan:()=>({}),endSpan(){},flushSpans:async()=>{},budgetErrorBody:()=>null,
+   managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(scenario==='handler')throw TypeError('bad value');return {status:502};}})}),
+   text:(body,status)=>({body,status}), recordRequestLog:async(...args)=>logs.push(args.at(-1))});
+  vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
+  vm.runInContext(extract('async function runWorker(', 'function workerVersionKey('),c);
+  const response=await c.runWorker({}, {CH_INVOCATION_LOGS:'1'}, {waitUntil:p=>pending.push(p)}, {namespace:'ns'}, 'fn', {}, null, []);
+  await Promise.all(pending);
+  assert.ok(response.status>=500);
+  assert.equal(logs.length,1);
+  assert.equal(logs[0]['cellhive.failure_stage'],scenario);
+  assert.equal(logs[0]['cellhive.error_origin'],scenario==='runtime_capacity'?'platform':'unknown');
+ }
 });

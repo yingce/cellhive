@@ -169,3 +169,32 @@ func (s *Store) OwnedCount(ctx context.Context, node, session string) (int, erro
 	return int(v.(int64)), nil
 }
 func (s *Store) String() string { return fmt.Sprintf("Redis coordination generation %s", s.generation) }
+
+// metadata reads bounded batches without transferring potentially large values.
+// Each batch checks the authority generation and samples size/revision atomically.
+func (s *Store) metadata(ctx context.Context, keys []string) ([]bucket.ObjectInfo, error) {
+	var out []bucket.ObjectInfo
+	for start := 0; start < len(keys); start += 128 {
+		batch := keys[start:min(start+128, len(keys))]
+		args := make([]any, len(batch))
+		for j, k := range batch {
+			args[j] = k
+		}
+		v, err := s.eval(ctx, `local out={}
+for j=2,#ARGV do
+ local k=ARGV[j]
+ if redis.call('HEXISTS',KEYS[2],k)==1 then
+  table.insert(out,k);table.insert(out,redis.call('HSTRLEN',KEYS[2],k));table.insert(out,redis.call('HGET',KEYS[3],k) or '')
+ end
+end
+return out`, args...)
+		if err != nil {
+			return nil, err
+		}
+		parts := v.([]any)
+		for j := 0; j < len(parts); j += 3 {
+			out = append(out, bucket.ObjectInfo{Key: parts[j].(string), Size: parts[j+1].(int64), ETag: parts[j+2].(string)})
+		}
+	}
+	return out, nil
+}
