@@ -20,18 +20,18 @@ func TestDispatchCronRetryExhaustsAtLimit(t *testing.T) {
 	d := &recordingDispatcher{err: errors.New("handler failed")}
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
-	if n, err := DispatchDueWithCommit(t.Context(), st, d, 2000, 1, time.Hour, 2, log, nil); n != 0 || err != nil {
-		t.Fatalf("first dispatch = %d %v", n, err)
+	for _, now := range []int64{2000, 6000, 14000, 30000, 62000, 126000} {
+		if n, err := DispatchDueWithCommit(t.Context(), st, d, now, 1, time.Hour, log, nil); n != 0 || err != nil {
+			t.Fatalf("dispatch = %d %v", n, err)
+		}
 	}
-	if n, err := DispatchDueWithCommit(t.Context(), st, d, 7000, 1, time.Hour, 2, log, nil); n != 0 || err != nil {
-		t.Fatalf("exhausting dispatch = %d %v", n, err)
-	}
+
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	var got map[string]any
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &got); err != nil {
 		t.Fatalf("log json: %v: %s", err, buf.String())
 	}
-	if got["msg"] != "timer dispatch exhausted" || got["attempt"] != float64(2) || got["max_attempts"] != float64(2) || got["retry_scheduled"] != false {
+	if got["msg"] != "timer dispatch exhausted" || got["attempt"] != float64(6) || got["max_attempts"] != float64(6) || got["retry_scheduled"] != false {
 		t.Fatalf("exhaustion log = %s", buf.String())
 	}
 	if fired, err := st.IsFired(t.Context(), tm.Token, 8000); err != nil || !fired {
@@ -52,7 +52,7 @@ func TestDispatchFailureLogsDoNotExposeArbitraryErrors(t *testing.T) {
 		var buf bytes.Buffer
 		gateCalls := 0
 		gate := func(context.Context, func() error) error { gateCalls++; return errors.New("secret-gate") }
-		n, err := DispatchDueWithCommit(t.Context(), st, &recordingDispatcher{err: errors.New("secret-payload")}, 1000, 1, time.Hour, 0, slog.New(slog.NewJSONHandler(&buf, nil)), gate)
+		n, err := DispatchDueWithCommit(t.Context(), st, &recordingDispatcher{err: errors.New("secret-payload")}, 1000, 1, time.Hour, slog.New(slog.NewJSONHandler(&buf, nil)), gate)
 		if n != 0 || err != nil {
 			t.Fatalf("dispatch = %d %v", n, err)
 		}

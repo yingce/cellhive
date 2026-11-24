@@ -226,11 +226,9 @@ type Config struct {
 	QueueLease      time.Duration
 	QueueRetryDelay time.Duration
 	// TimerBatch/TimerFiredTTL bound one due-dispatch pass and how long a fired
-	// marker is kept (ADR-152). CronMaxAttempts is the terminal retry budget for
-	// one cron occurrence; 0 keeps the legacy unbounded behavior (ADR-305).
-	TimerBatch      int
-	TimerFiredTTL   time.Duration
-	CronMaxAttempts int
+	// marker is kept (ADR-152). Cron retries use a fixed six-failure ceiling.
+	TimerBatch    int
+	TimerFiredTTL time.Duration
 	// Waker knobs (ADR-152): batch, fired marker TTL and the error-backoff cap.
 	WakerBatch      int
 	WakerFiredTTL   time.Duration
@@ -613,7 +611,6 @@ func FromEnv() Config {
 		QueueRetryDelay:              envDuration("CELLHIVE_QUEUE_RETRY_DELAY", 30*time.Second),
 		TimerBatch:                   envInt("CELLHIVE_TIMER_BATCH", 256),
 		TimerFiredTTL:                envDuration("CELLHIVE_TIMER_FIRED_TTL", 24*time.Hour),
-		CronMaxAttempts:              envInt("CELLHIVE_CRON_MAX_ATTEMPTS", 10),
 		NSRPS:                        nsRPS,
 		NSBurst:                      nsBurst,
 		AutoscaleMin:                 envInt("CELLHIVE_AUTOSCALE_MIN", 1),

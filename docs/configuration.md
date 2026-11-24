@@ -170,7 +170,7 @@ CELLHIVE_CELL_IDLE=5m
 |---|---|---|
 | `CELLHIVE_TIMER_INTERVAL` | `1s` (0 关) | 到期计时派发 |
 | `CELLHIVE_TIMER_BATCH` / `_FIRED_TTL` | `256` / `24h` | 单 pass 到期上限 / fired 标记保留 |
-| `CELLHIVE_CRON_MAX_ATTEMPTS` | `10` | 单个 cron occurrence 的终止重试预算；达到后消费 slot（ADR-305）。0=保持旧的无上限行为 |
+| `CELLHIVE_CRON_MAX_ATTEMPTS` | 已移除 | 2026-11-24 起不再读取；Cron 固定最多 6 次失败尝试，采用 celld 重试策略 |
 | `CELLHIVE_QUEUE_INTERVAL` | `1s` (0 关) | Queue 本地通知和到期检查，正常对账每分钟一次 |
 | `CELLHIVE_QUEUE_BATCH` / `_LEASE` | `0`（store 默认） | 单批消息数 / 可见性租约 |
 | `CELLHIVE_QUEUE_RETRY_DELAY` | `30s` | 失败批次的重投延迟（重试上限/DLQ 由 per-consumer 配置） |

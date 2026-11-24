@@ -147,3 +147,15 @@ func TestCronDispatchKeepsPersistedExpression(t *testing.T) {
 		t.Fatalf("legacy slot expression=%q", got)
 	}
 }
+
+func TestCronRetryNextAcrossWorkerExpressions(t *testing.T) {
+	e := &cronEnricher{at: time.Now(), targets: map[string][]control.CronTarget{"acme\x00web": {
+		{Cron: "0 * * * *"}, {Cron: "*/5 * * * *"},
+	}}}
+	after := time.Date(2026, 11, 24, 10, 0, 3, 0, time.UTC)
+	next, err := e.Next(t.Context(), "acme/__cron__/web", after.UnixMilli())
+	want := time.Date(2026, 11, 24, 10, 5, 0, 0, time.UTC).UnixMilli()
+	if err != nil || next != want {
+		t.Fatalf("next=%d want=%d err=%v", next, want, err)
+	}
+}

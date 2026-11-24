@@ -86,8 +86,8 @@ Queue 启动时及正常运行期间每分钟对账已登记的消费者，发�
 **Timer（派发）**
 - 轮询 `CELLHIVE_TIMER_INTERVAL`（默认 1s，0=关）；单 pass 到期上限 `CELLHIVE_TIMER_BATCH`（默认 **256**）；fired 标记保留 `CELLHIVE_TIMER_FIRED_TTL`（默认 **24h**，防重复派发）。
 - 派发 at-least-once：成功后才标记 fired；崩溃/失败留待下轮。
-- 失败 cron token 的下一次尝试时间与次数写入 timer cell SQLite，按 5 秒起、最多 5 分钟的指数退避；原 slot/due_ms 不变，同 token 重复物化不清除退避，其他 timer 类型保持原重试语义（ADR-211）。
-- 单个 cron occurrence 默认最多尝试 `CELLHIVE_CRON_MAX_ATTEMPTS`（默认 **10**）次；达到预算后在同一事务内写 fired、删除 timer/retry 行并输出 `timer dispatch exhausted`，不再无限重试。`0` 保留旧的无上限行为。租户仍可用 `controller.noRetry()` 提前终止永久错误（ADR-305）。
+- Cron 失败后按 4/8/16/32/64 秒退避（从失败结束计时），第 6 次失败结束。原始 slot/表达式、失败次数和下一轮 cutoff 仅保存在当前驻留 cell 内存。SQLite/outbox 只保存重试唤醒标记与 deadline；重开 timer wrapper 保留内存状态，但重启、驱逐或换 owner 不恢复它，孤立标记及旧版持久重试行会被消费而不执行。重复物化不能覆盖重试标记。其他 timer 类型保持原重试语义。
+- 同一 worker 所有 Cron 表达式的下一次正常 occurrence 优先于旧轮重试（相等也优先），延迟轮询不补跑越过 cutoff 的重试。仅重试失败表达式，传给 handler 的 `scheduledTime` 保持原值。次数耗尽/下一轮优先时消费该 token，写 fired 并移除 timer/retry。`CELLHIVE_CRON_MAX_ATTEMPTS` 已移除；`controller.noRetry()` 仍可提前终止。此修订覆盖 ADR-211/305 的重试语义，普通 slot 物化与停机补跑规则不变。
 - 已物化的 Cron slot 在移除或修改触发器后仍按原计划时间和原表达式投递给当前活跃 worker；活跃 worker 没有新 Cron 也可接收待投递 slot。控制面暂时不可读或 worker 已不存在时保留 timer 并退避，不发送缺失身份的请求（ADR-281）。
 
 **Waker（单 fleet wake + 死节点恢复）**

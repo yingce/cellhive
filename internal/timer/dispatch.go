@@ -14,7 +14,7 @@ import (
 // fired only after a successful dispatch (at-least-once). It prunes expired
 // fired rows and returns how many timers were dispatched.
 func DispatchDue(ctx context.Context, st *Store, d Dispatcher, nowMs int64, batch int, firedTTL time.Duration, log *slog.Logger) (int, error) {
-	return DispatchDueWithCommit(ctx, st, d, nowMs, batch, firedTTL, 0, log, nil)
+	return DispatchDueWithCommit(ctx, st, d, nowMs, batch, firedTTL, log, nil)
 }
 
 // Commit wraps each timer mutation with the owning cell's durability gate.
@@ -22,9 +22,16 @@ func DispatchDue(ctx context.Context, st *Store, d Dispatcher, nowMs int64, batc
 type Commit func(ctx context.Context, fn func() error) error
 
 // DispatchDueWithCommit dispatches due timers with the owning cell's durability
-// gate. cronMaxAttempts bounds the retry budget of one cron occurrence; <= 0
-// keeps the legacy unbounded behavior (ADR-305).
-func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs int64, batch int, firedTTL time.Duration, cronMaxAttempts int, log *slog.Logger, commit Commit) (int, error) {
+// gate. Cron uses celld's fixed failure ceiling.
+func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs int64, batch int, firedTTL time.Duration, log *slog.Logger, commit Commit) (int, error) {
+	clock := st.Now
+	if clock == nil {
+		clock = time.Now
+	}
+	passStarted := clock()
+	mem := st.cronMemory()
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
 	write := func(ctx context.Context, fn func() error) error {
 		if commit != nil {
 			return commit(ctx, fn)
@@ -46,6 +53,19 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 	}
 	n := 0
 	for _, t := range due {
+		if t.Kind == KindCron && t.retrying {
+			owed, ok := mem.owed[t.Token]
+			if !ok || (owed.cutoff > 0 && nowMs+clock().Sub(passStarted).Milliseconds() >= owed.cutoff) {
+				if err := write(ctx, func() error { return st.MarkFired(ctx, t.Token, nowMs+firedTTL.Milliseconds()) }); err != nil {
+					log.Warn("cron orphan or superseded retry cleanup failed", "token", t.Token)
+				} else {
+					delete(mem.owed, t.Token)
+				}
+				continue
+			}
+			t = owed.timer
+			t.retrying = true
+		}
 		dispatchCtx := ctx
 		if t.Kind == KindCron {
 			source := bucket.CronDispatch
@@ -81,21 +101,19 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 			}
 			observeFire(string(t.Kind), "failed")
 			if t.Kind == KindCron {
-				var retryAt int64
-				var attempt int
-				var exhausted bool
-				retryErr := write(bucket.WithReadSource(ctx, bucket.CronRetry), func() error {
-					var err error
-					retryAt, attempt, exhausted, err = st.ScheduleRetryBounded(ctx, t.Token, nowMs, cronMaxAttempts, nowMs+firedTTL.Milliseconds())
-					return err
-				})
+				retryNow := nowMs + clock().Sub(passStarted).Milliseconds()
+				retryAt, attempt, exhausted, retryErr := st.retryCron(bucket.WithReadSource(ctx, bucket.CronRetry), t, retryNow, retryNow+firedTTL.Milliseconds(), mem, write)
 				if retryErr != nil {
 					log.LogAttrs(ctx, slog.LevelWarn, "timer retry schedule failed", append(attrs, slog.Bool("retry_scheduled", false), slog.String("retry_error_code", "retry_schedule_failed"))...)
 				} else if exhausted {
-					observeFire(string(t.Kind), "exhausted")
-					log.LogAttrs(ctx, slog.LevelWarn, "timer dispatch exhausted", append(attrs, slog.Int("attempt", attempt), slog.Int("max_attempts", cronMaxAttempts), slog.Bool("retry_scheduled", false))...)
+					reason, message := "exhausted", "timer dispatch exhausted"
+					if attempt < CronMaxFailures {
+						reason, message = "superseded", "cron retry superseded by next occurrence"
+					}
+					observeFire(string(t.Kind), reason)
+					log.LogAttrs(ctx, slog.LevelWarn, message, append(attrs, slog.Int("attempt", attempt), slog.Int("max_attempts", CronMaxFailures), slog.Bool("retry_scheduled", false))...)
 				} else {
-					log.LogAttrs(ctx, slog.LevelWarn, "timer dispatch failed", append(attrs, slog.Int("attempt", attempt), slog.Bool("retry_scheduled", true), slog.Int64("retry_at_ms", retryAt), slog.Int64("retry_delay_ms", retryAt-nowMs))...)
+					log.LogAttrs(ctx, slog.LevelWarn, "timer dispatch failed", append(attrs, slog.Int("attempt", attempt), slog.Bool("retry_scheduled", true), slog.Int64("retry_at_ms", retryAt), slog.Int64("retry_delay_ms", retryAt-retryNow))...)
 				}
 			} else {
 				log.LogAttrs(ctx, slog.LevelWarn, "timer dispatch failed", append(attrs, slog.String("retry_policy", "next_poll"))...)
@@ -107,6 +125,7 @@ func DispatchDueWithCommit(ctx context.Context, st *Store, d Dispatcher, nowMs i
 			log.Warn("timer mark fired failed", "token", t.Token, "err", err)
 			continue
 		}
+		delete(mem.owed, t.Token)
 		observeFire(string(t.Kind), "ok")
 		n++
 	}

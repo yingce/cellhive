@@ -4381,3 +4381,7 @@ Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁
 ### 2026-11-24 GZ 限时 trace 日志诊断
 
 新增 CELLHIVE_TRACE_LOG_UNTIL 限时 RecordOnly stdout span 日志，补充 object GET/LIST、local validation、epoch chain 阶段。无凭据/正文/完整 URL，原 sampled 位和 ARMS 采样不变。目的为定位 5–6 秒冷访问，目前未据此确认根因或修复延迟；不包含 Redis recovery v3 迁移。
+
+## Cron retry celld parity（2026-11-24，本地实现与测试通过，未部署）
+
+按用户明确选择，覆盖 ADR-211/305 的 Cron 重试策略：固定 6 次失败预算，4/8/16/32/64 秒退避；同一 worker 所有表达式的下一次 occurrence 优先（相等也优先），过期重试不补跑。失败表达式、原始 scheduledTime、次数与 cutoff 仅存当前驻留 cell 内存；持久层只保留重试唤醒标记，重启/驱逐/换 owner 后清理孤立标记，不还原失败任务。旧版持久 retry 行也直接消费。取消生产 CronMaxAttempts 配置；其他 timer 类型不变。普通 occurrence 的物化/停机补跑行为不在本次变更范围。实现与验收见 docs/superpowers/specs/2026-11-24-cron-celld-retry-design.md。

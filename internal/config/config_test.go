@@ -301,8 +301,8 @@ func TestLoadRootKeyFromFile(t *testing.T) {
 // TestDispatchDefaults pins the timer/queue/waker defaults (ADR-152).
 func TestDispatchDefaults(t *testing.T) {
 	c := FromEnv()
-	if c.TimerBatch != 256 || c.TimerFiredTTL != 24*time.Hour || c.CronMaxAttempts != 10 {
-		t.Fatalf("timer defaults = %d/%v/%d", c.TimerBatch, c.TimerFiredTTL, c.CronMaxAttempts)
+	if c.TimerBatch != 256 || c.TimerFiredTTL != 24*time.Hour {
+		t.Fatalf("timer defaults = %d/%v", c.TimerBatch, c.TimerFiredTTL)
 	}
 	if c.WakerBatch != 256 || c.WakerFiredTTL != 24*time.Hour || c.WakerBackoffMax != time.Minute {
 		t.Fatalf("waker defaults = %d/%v/%v", c.WakerBatch, c.WakerFiredTTL, c.WakerBackoffMax)
@@ -315,7 +315,7 @@ func TestDispatchDefaults(t *testing.T) {
 	t.Setenv("CELLHIVE_TIMER_BATCH", "64")
 	t.Setenv("CELLHIVE_CRON_MAX_ATTEMPTS", "4")
 	c = FromEnv()
-	if c.WakerBackoffMax != 2*time.Minute || c.QueueRetryDelay != 5*time.Second || c.TimerBatch != 64 || c.CronMaxAttempts != 4 {
+	if c.WakerBackoffMax != 2*time.Minute || c.QueueRetryDelay != 5*time.Second || c.TimerBatch != 64 {
 		t.Fatalf("overrides not applied: %+v", c)
 	}
 }

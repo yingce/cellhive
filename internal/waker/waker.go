@@ -21,14 +21,13 @@ type Waker struct {
 	Open       func(ctx context.Context, scope string) (*timer.Store, error)
 	Own        func(ctx context.Context, scope string) (bool, error)
 	// Admit pins one prepared scope through open, dispatch, commit and reads.
-	Admit           func(context.Context, string) (func(), error)
-	Commit          func(ctx context.Context, scope string, fn func() error) error
-	Forget          func(ctx context.Context, scope string) error
-	Dispatcher      timer.Dispatcher
-	Interval        time.Duration
-	Batch           int
-	FiredTTL        time.Duration
-	CronMaxAttempts int
+	Admit      func(context.Context, string) (func(), error)
+	Commit     func(ctx context.Context, scope string, fn func() error) error
+	Forget     func(ctx context.Context, scope string) error
+	Dispatcher timer.Dispatcher
+	Interval   time.Duration
+	Batch      int
+	FiredTTL   time.Duration
 	// BackoffMax caps the loop delay after consecutive errors (ADR-152). The
 	// base delay is Interval; 0 or <= Interval disables extra backoff.
 	BackoffMax time.Duration
@@ -146,7 +145,6 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 	if err != nil {
 		return 0, true, err
 	}
-	now := w.nowMs()
 	for _, scope := range scopes {
 		if w.Own != nil {
 			owned, oerr := w.Own(ctx, scope)
@@ -192,7 +190,7 @@ func (w *Waker) Pass(ctx context.Context) (dispatched int, leader bool, err erro
 			if w.Commit != nil {
 				commit = func(cctx context.Context, fn func() error) error { return w.Commit(cctx, scope, fn) }
 			}
-			n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, now, w.Batch, w.FiredTTL, w.CronMaxAttempts, w.log(), commit)
+			n, err := timer.DispatchDueWithCommit(ctx, st, w.Dispatcher, w.nowMs(), w.Batch, w.FiredTTL, w.log(), commit)
 			if err != nil {
 				w.log().Warn("waker dispatch pass failed", "scope", scope, "err", err)
 				return 0

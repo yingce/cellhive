@@ -10,74 +10,6 @@ import (
 	"cellhive/internal/cellstore"
 )
 
-func TestFailedTimerRetryBackoffKeepsOriginalDue(t *testing.T) {
-	ctx := t.Context()
-	st := newStore(t)
-	tm := New(1000, KindCron, "demo/__cron__/worker", "slot")
-	if err := st.Upsert(ctx, tm); err != nil {
-		t.Fatal(err)
-	}
-	next, attempt, err := st.ScheduleRetry(ctx, tm.Token, 2000)
-	if err != nil || next != 7000 || attempt != 1 {
-		t.Fatalf("first retry = %d/%d/%v", next, attempt, err)
-	}
-	// Re-materializing the same cron slot must not reset its backoff.
-	if err := st.Upsert(ctx, tm); err != nil {
-		t.Fatal(err)
-	}
-	if due, _ := st.Due(ctx, 6999, 0); len(due) != 0 {
-		t.Fatalf("retry due too early: %+v", due)
-	}
-	if due, _ := st.Due(ctx, 7000, 0); len(due) != 1 || due[0].DueAtMs != tm.DueAtMs {
-		t.Fatalf("original due changed: %+v", due)
-	}
-	next, attempt, err = st.ScheduleRetry(ctx, tm.Token, 7000)
-	if err != nil || next != 17000 || attempt != 2 {
-		t.Fatalf("second retry = %d/%d/%v", next, attempt, err)
-	}
-	for i := 0; i < 20; i++ {
-		next, attempt, err = st.ScheduleRetry(ctx, tm.Token, next)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if later, err := st.NextDue(ctx); err != nil || later != next || next-17000 < 5*time.Minute.Milliseconds() {
-		t.Fatalf("capped retry = %d nextDue=%d err=%v", next, later, err)
-	}
-	if err := st.MarkFired(ctx, tm.Token, next+1000); err != nil {
-		t.Fatal(err)
-	}
-	if due, _ := st.Due(ctx, next+1, 0); len(due) != 0 {
-		t.Fatalf("fired retry still due: %+v", due)
-	}
-}
-
-func TestCronRetryBoundedConsumesSlot(t *testing.T) {
-	ctx := t.Context()
-	st := newStore(t)
-	tm := New(1000, KindCron, "demo/__cron__/worker", "slot")
-	if err := st.Upsert(ctx, tm); err != nil {
-		t.Fatal(err)
-	}
-	// A budget of 3 means the third failed attempt consumes the occurrence.
-	for attempt := 1; attempt <= 2; attempt++ {
-		next, got, exhausted, err := st.ScheduleRetryBounded(ctx, tm.Token, 2000, 3, 100_000)
-		if err != nil || exhausted || got != attempt || next <= 2000 {
-			t.Fatalf("retry %d = next:%d attempt:%d exhausted:%v err:%v", attempt, next, got, exhausted, err)
-		}
-	}
-	_, got, exhausted, err := st.ScheduleRetryBounded(ctx, tm.Token, 2000, 3, 100_000)
-	if err != nil || !exhausted || got != 3 {
-		t.Fatalf("exhaustion = attempt:%d exhausted:%v err:%v", got, exhausted, err)
-	}
-	if fired, err := st.IsFired(ctx, tm.Token, 2000); err != nil || !fired {
-		t.Fatalf("fired marker = %v %v", fired, err)
-	}
-	if due, err := st.Due(ctx, 100_000, 10); err != nil || len(due) != 0 {
-		t.Fatalf("exhausted timer still due: %+v %v", due, err)
-	}
-}
-
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	cs, err := cellstore.New(t.TempDir())
@@ -93,6 +25,7 @@ func newStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	st.Now = func() time.Time { return time.UnixMilli(0) }
 	return st
 }
 

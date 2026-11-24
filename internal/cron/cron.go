@@ -163,3 +163,8 @@ func (s Schedule) nextAtOrAfter(slot time.Time) time.Time {
 	}
 	return time.Time{}
 }
+
+// Next returns the first scheduled minute strictly after at.
+func (s Schedule) Next(at time.Time) time.Time {
+	return s.nextAtOrAfter(at.UTC().Truncate(time.Minute).Add(time.Minute))
+}

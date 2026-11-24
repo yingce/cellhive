@@ -58,10 +58,11 @@ func TestTimerFailureLogsSafeCorrelationAndRetry(t *testing.T) {
 			if err := st.Upsert(t.Context(), tm); err != nil {
 				t.Fatal(err)
 			}
+			st.Now = func() time.Time { return time.UnixMilli(0) }
 			d := NewHTTP(srv.URL+"?secret=query-secret", jwtTestKey)
 			var buf bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&buf, nil))
-			for i, now := range []int64{1000, 6000} {
+			for i, now := range []int64{1000, 5000} {
 				buf.Reset()
 				n, err := timer.DispatchDue(t.Context(), st, enrichedDispatcher{d}, now, 10, time.Hour, log)
 				if err != nil || n != 0 {
@@ -71,7 +72,7 @@ func TestTimerFailureLogsSafeCorrelationAndRetry(t *testing.T) {
 				if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 					t.Fatal(err)
 				}
-				want := map[string]any{"ns": "acme", "scope": tm.Scope, "worker": "web", "token": tm.Token, "kind": "cron", "scheduled_time_ms": float64(1000), "attempt": float64(i + 1), "http_status": float64(500), "target_host": strings.TrimPrefix(srv.URL, "http://"), "target_path": "/v1/timers/dispatch", "retry_delay_ms": float64(5000 * (i + 1))}
+				want := map[string]any{"ns": "acme", "scope": tm.Scope, "worker": "web", "token": tm.Token, "kind": "cron", "scheduled_time_ms": float64(1000), "attempt": float64(i + 1), "http_status": float64(500), "target_host": strings.TrimPrefix(srv.URL, "http://"), "target_path": "/v1/timers/dispatch", "retry_delay_ms": float64(4000 * (i + 1))}
 				for k, v := range want {
 					if got[k] != v {
 						t.Errorf("%s=%v want %v; log=%s", k, got[k], v, buf.String())
@@ -91,7 +92,7 @@ func TestTimerFailureLogsSafeCorrelationAndRetry(t *testing.T) {
 						t.Errorf("leaked %q: %s", secret, buf.String())
 					}
 				}
-				if due, err := st.Due(t.Context(), now+4999, 10); err != nil || len(due) != 0 {
+				if due, err := st.Due(t.Context(), now+3999, 10); err != nil || len(due) != 0 {
 					t.Fatalf("retry fired early: %v %v", due, err)
 				}
 			}

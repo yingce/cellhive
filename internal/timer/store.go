@@ -17,6 +17,10 @@ type Store struct {
 	cell *cellstore.Cell
 	// Index, when set, keeps the bucket wake index in sync (ADR-099).
 	Index Index
+	// Now is an optional dispatch clock for deterministic tests.
+	Now func() time.Time
+	// CronNext returns the next regular occurrence across this worker, strictly after afterMs.
+	CronNext func(context.Context, string, int64) (int64, error)
 }
 
 const schema = `
@@ -49,7 +53,7 @@ func InsertTx(ctx context.Context, tx *sql.Tx, t Timer) error {
 	if !t.Kind.Valid() || t.Token == "" {
 		return fmt.Errorf("timer: invalid transactional timer")
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO timers(token,due_ms,kind,scope,occurrence) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM fired WHERE token=?) ON CONFLICT(token) DO UPDATE SET due_ms=excluded.due_ms,kind=excluded.kind,scope=excluded.scope,occurrence=excluded.occurrence`, t.Token, t.DueAtMs, string(t.Kind), t.Scope, t.Occurrence, t.Token)
+	_, err := tx.ExecContext(ctx, `INSERT INTO timers(token,due_ms,kind,scope,occurrence) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM fired WHERE token=?) ON CONFLICT(token) DO UPDATE SET due_ms=excluded.due_ms,kind=excluded.kind,scope=excluded.scope,occurrence=excluded.occurrence WHERE NOT EXISTS (SELECT 1 FROM timer_retry WHERE token=excluded.token)`, t.Token, t.DueAtMs, string(t.Kind), t.Scope, t.Occurrence, t.Token)
 	return err
 }
 
@@ -239,63 +243,6 @@ func (s *Store) MarkFired(ctx context.Context, token string, expiresMs int64) er
 	}
 	_ = s.syncIndex(ctx)
 	return nil
-}
-
-// ScheduleRetry keeps the timer's original due time while deferring the next
-// attempt. The retry state is durable in the same cell as the timer itself.
-func (s *Store) ScheduleRetry(ctx context.Context, token string, nowMs int64) (retryAfterMs int64, attempt int, err error) {
-	retryAfterMs, attempt, _, err = s.ScheduleRetryBounded(ctx, token, nowMs, 0, 0)
-	return retryAfterMs, attempt, err
-}
-
-// ScheduleRetryBounded is ScheduleRetry with a terminal retry budget.
-// maxAttempts <= 0 keeps the legacy unbounded behavior. When the budget is
-// reached, the occurrence is consumed (fired marker) and its timer/retry rows
-// are removed atomically, so a permanently failing cron handler cannot retry
-// forever. firedUntilMs is the fired-marker expiry used for that terminal
-// state.
-func (s *Store) ScheduleRetryBounded(ctx context.Context, token string, nowMs int64, maxAttempts int, firedUntilMs int64) (retryAfterMs int64, attempt int, exhausted bool, err error) {
-	_, err = s.cell.Tx(ctx, func(tx *sql.Tx) error {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM timers WHERE token=?`, token).Scan(&exists); err != nil {
-			return err
-		}
-		err := tx.QueryRowContext(ctx, `SELECT attempt FROM timer_retry WHERE token=?`, token).Scan(&attempt)
-		if err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		attempt++
-		if maxAttempts > 0 && attempt >= maxAttempts {
-			exhausted = true
-			if _, err := tx.ExecContext(ctx, `INSERT INTO fired(token, expires_ms) VALUES(?,?)
-				ON CONFLICT(token) DO UPDATE SET expires_ms=excluded.expires_ms`, token, firedUntilMs); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE token = ?`, token); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM timer_retry WHERE token = ?`, token); err != nil {
-				return err
-			}
-			return nil
-		}
-		delay := 5 * time.Second
-		for n := 1; n < attempt && delay < 5*time.Minute; n++ {
-			delay *= 2
-		}
-		if delay > 5*time.Minute {
-			delay = 5 * time.Minute
-		}
-		retryAfterMs = nowMs + delay.Milliseconds()
-		_, err = tx.ExecContext(ctx, `INSERT INTO timer_retry(token,attempt,retry_after_ms) VALUES(?,?,?)
-			ON CONFLICT(token) DO UPDATE SET attempt=excluded.attempt,retry_after_ms=excluded.retry_after_ms`, token, attempt, retryAfterMs)
-		return err
-	})
-	if err != nil {
-		return 0, 0, false, err
-	}
-	_ = s.syncIndex(ctx)
-	return retryAfterMs, attempt, exhausted, nil
 }
 
 // IsFired reports whether a token was fired and its TTL has not expired.

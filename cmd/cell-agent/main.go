@@ -560,6 +560,7 @@ func main() {
 	if shared != nil {
 		timerIndex = scheduleindex.TimerIndex{Durable: wakeIdx, Shared: shared}
 	}
+	var cronNext func(context.Context, string, int64) (int64, error)
 	openTimer := func(tctx context.Context, sc cell.Scope) (*timer.Store, error) {
 		if sc.Class == "__kv__" || sc.Class == "__queue__" {
 			blocked, err := rep.ResourceBlocked(tctx, sc)
@@ -579,6 +580,7 @@ func main() {
 			return nil, err
 		}
 		st.Index = timerIndex
+		st.CronNext = cronNext
 		return st, nil
 	}
 	var dispatcher timer.Dispatcher = timer.NoopDispatcher{Log: log}
@@ -588,6 +590,8 @@ func main() {
 	// Cron timers carry only a cell scope; enrich the dispatch with the owning
 	// worker + its active bundle so user-runtime can run scheduled() (ADR-070).
 	enricher := &cronEnricher{next: dispatcher}
+	cronNext = enricher.Next
+
 	dispatcher = enricher
 	// Workflows: KindWorkflowSleep timers resume the slept instance; other kinds
 	// pass through to user-runtime (owner-aware control reads are wired below).
@@ -687,7 +691,6 @@ func main() {
 		timerRunner = &timer.Runner{
 			Registry: timerReg, Open: openTimerScope, Dispatcher: dispatcher,
 			Interval: cfg.TimerInterval, Batch: cfg.TimerBatch, FiredTTL: cfg.TimerFiredTTL,
-			CronMaxAttempts: cfg.CronMaxAttempts,
 			Forget: func(fctx context.Context, scope string) error {
 				return forgetDeletedWake(fctx, scope)
 			},
@@ -708,11 +711,10 @@ func main() {
 	var wakerRunner *waker.Waker
 	if cfg.WakerInterval > 0 {
 		wakerRunner = &waker.Waker{
-			Election:        waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL),
-			Batch:           cfg.WakerBatch,
-			FiredTTL:        cfg.WakerFiredTTL,
-			CronMaxAttempts: cfg.CronMaxAttempts,
-			BackoffMax:      cfg.WakerBackoffMax,
+			Election:   waker.NewElection(b, cfg.NodeID, cfg.SessionID, cfg.WakerTTL),
+			Batch:      cfg.WakerBatch,
+			FiredTTL:   cfg.WakerFiredTTL,
+			BackoffMax: cfg.WakerBackoffMax,
 			// DeadScopes reads the bucket wake index (scopes with a pending
 			// timer) and keeps only those whose owner is gone, so the waker covers
 			// timers/alarms after an owner dies without listing every cell.
@@ -2547,6 +2549,29 @@ type cronEnricher struct {
 	mu      sync.Mutex
 	targets map[string][]control.CronTarget // ns\x00worker -> targets (one per cron)
 	at      time.Time
+}
+
+func (e *cronEnricher) Next(ctx context.Context, scope string, after int64) (int64, error) {
+	sc, err := cell.ParseScope(scope)
+	if err != nil {
+		return 0, err
+	}
+	targets, err := e.lookup(ctx, sc.Namespace, sc.ID)
+	if err != nil {
+		return 0, err
+	}
+	var earliest int64
+	for _, target := range targets {
+		sch, err := cron.Parse(target.Cron)
+		if err != nil {
+			return 0, err
+		}
+		next := sch.Next(time.UnixMilli(after))
+		if !next.IsZero() && (earliest == 0 || next.UnixMilli() < earliest) {
+			earliest = next.UnixMilli()
+		}
+	}
+	return earliest, nil
 }
 
 func (e *cronEnricher) Dispatch(ctx context.Context, t timer.Timer) error {

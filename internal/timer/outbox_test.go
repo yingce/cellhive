@@ -1,6 +1,7 @@
 package timer
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
@@ -43,7 +44,7 @@ func TestSchedulingOutboxAtomicRetryAndCancel(t *testing.T) {
 	if !published.Pending || !published.HasDue || published.DueMs != 1000 {
 		t.Fatalf("insert: %+v", published)
 	}
-	if _, _, err := st.ScheduleRetry(ctx, tm.Token, 2000); err != nil {
+	if _, _, _, err := st.retryCron(ctx, tm, 2000, 100000, st.cronMemory(), func(_ context.Context, fn func() error) error { return fn() }); err != nil {
 		t.Fatal(err)
 	}
 	// A publisher completing an older revision cannot erase the retry.
@@ -51,7 +52,7 @@ func TestSchedulingOutboxAtomicRetryAndCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := read()
-	if !retry.Pending || retry.DueMs != 7000 || retry.Revision <= published.Revision {
+	if !retry.Pending || retry.DueMs != 6000 || retry.Revision <= published.Revision {
 		t.Fatalf("retry: %+v", retry)
 	}
 	if err := scheduleoutbox.Ack(ctx, st.cell, scheduleoutbox.Timer, retry.Revision); err != nil {
@@ -60,7 +61,7 @@ func TestSchedulingOutboxAtomicRetryAndCancel(t *testing.T) {
 	if read().Pending {
 		t.Fatal("successful acknowledgement stayed pending")
 	}
-	if err := st.RemoveByOccurrence(ctx, tm.Occurrence); err != nil {
+	if err := st.MarkFired(ctx, tm.Token, 100000); err != nil {
 		t.Fatal(err)
 	}
 	cancelled := read()

@@ -1285,6 +1285,9 @@ func OpenAt(ctx context.Context, path string) (*Cell, error) {
 // WAL read lock) so a controlled TRUNCATE checkpoint can be taken without
 // losing frames the capture has not consumed. See AcquireReadLock.
 type Cell struct {
+	// Ephemeral belongs to this resident handle only; never replicated or restored.
+	Ephemeral sync.Map
+
 	DB     *sql.DB
 	Scope  cell.Scope
 	Path   string
@@ -1338,6 +1341,7 @@ func (c *Cell) Close() error {
 		}
 	}
 	c.closed.Store(true)
+	c.Ephemeral.Clear()
 	_ = c.ReleaseReadLock(context.Background())
 	if c.kvUpsert != nil {
 		_ = c.kvUpsert.Close()
