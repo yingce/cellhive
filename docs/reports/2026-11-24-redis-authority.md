@@ -1,6 +1,6 @@
 # Redis/Kvrocks 协调权威本地验证
 
-最新状态：已部署本机常驻 Compose，未部署生产；下文“未部署”为此前测试时状态。见 [本地部署记录](2026-11-24-local-redis-compose.md)。
+最新状态：已部署本机常驻 Compose 和 GZ Redis fleet；SG/USW 未切换。下文“未部署”为此前测试时状态。见 [本地部署记录](2026-11-24-local-redis-compose.md) 和 [GZ 部署记录](2026-11-24-gz-redis-fleet.md)。
 
 日期：2026-11-24。分支：`feat/redis-coordination`。未提交、未推送、未部署；不代表 SG/USW/GZ 已切换或生产账单降幅。
 

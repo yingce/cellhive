@@ -4341,3 +4341,11 @@ timer/Queue 通过与业务事务同提交的 schedule_outbox revision 记录待
 本地 overlay 启动持久 Redis，单参数同时启用协调与共享调度；基础 Compose 默认仍为 object。Redis 不发布宿主端口，使用 AOF appendfsync always 与 noeviction。既有本机实例停写、完整备份后离线迁移，保留原桶和卷。仅本地已部署，生产未切换；见 [本地部署记录](reports/2026-11-24-local-redis-compose.md)。
 
 同日本机进一步启用双 agent fleet：独立数据卷、共享远程桶及 Redis、显式 fleet durability 和各自可互访的 peer URL。提供 `docker-compose.fleet.yml` overlay；保留协议规定的无 peer 时本地 spool 行为。同机验证不作为跨机高可用证明。
+
+### 2026-11-24 GZ Redis fleet 发布
+
+GZ 从独立发布分支 `e7577f8c` 构建 agent-only 镜像，revision 4 先部署单实例 Redis，revision 5 停写后迁移，revision 6 恢复双 agent fleet。Redis 使用持久 PVC/AOF always/noeviction，不使用托管服务的自动副本提升；现有业务数据和恢复日志仍留在 COS。仅 GZ 切换，SG/USW 保持原后端。验收与运维边界见 [GZ 发布记录](reports/2026-11-24-gz-redis-fleet.md)。
+
+### 2026-11-24 shared outbox 本地数据库边界
+
+GZ 发布采样发现：owned scope 包含原生 DO 的 host/actor，而 outbox relay 对非驻留 scope 无条件调用 Store.Cell，会反复触发不属于 agent 本地 SQLite 的 LTX 恢复。relay 只检查已有 agent 本地数据库，文件不存在时不 hydration；正常接管/Queue/Timer 恢复负责打开冷 cell，之后 relay 才处理其 outbox。已有且被驱逐的本地文件仍能重新打开、证明耐久并发布。新增来源归因 shared_schedule，不能用丢弃 pending revision 或关闭耐久证明降低请求量。

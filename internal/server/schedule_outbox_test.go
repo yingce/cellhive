@@ -242,4 +242,44 @@ func TestScheduleOutboxSweepDefersUntilPublished(t *testing.T) {
 	if n := store.Sweep(ctx); n != 1 || store.IsOpen(sc) {
 		t.Fatalf("successful publication did not allow eviction: count=%d open=%v", n, store.IsOpen(sc))
 	}
+	if err := s.FlushScheduleOutbox(ctx, sc, true, func(_ context.Context, h scheduleindex.Hint) error {
+		if h.Due != due {
+			t.Fatalf("evicted deadline=%d, want %d", h.Due, due)
+		}
+		published++
+		return nil
+	}); err != nil || published != 2 {
+		t.Fatalf("evicted local outbox not reconciled: published=%d err=%v", published, err)
+	}
+}
+
+func TestScheduleOutboxDoesNotHydrateOwnedNativeScope(t *testing.T) {
+	ctx := t.Context()
+	b, _ := bucket.NewFSBucket(t.TempDir())
+	store, _ := cellstore.New(t.TempDir())
+	defer store.Close()
+	om := &owner.Manager{B: b, NodeID: "n", Session: "s", OwnerTTL: time.Hour}
+	sc := cell.Scope{Namespace: "test", Class: "__do__", ID: "native-host"}
+	if _, err := om.Claim(ctx, sc, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	store.Hydrate = func(context.Context, cell.Scope, string) error {
+		return errors.New("outbox discovery attempted remote hydration for a native/cold scope")
+	}
+	s := New(Deps{Cfg: config.Config{NodeID: "n"}, Store: store, Owner: om, Bucket: b})
+	for _, reconcile := range []bool{true, false, true} {
+		if err := s.FlushScheduleOutbox(ctx, sc, reconcile, func(context.Context, scheduleindex.Hint) error {
+			t.Fatal("published outbox for scope with no local database")
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if store.IsOpen(sc) {
+		t.Fatal("opened a native scope in the agent store")
+	}
+	scopes, err := store.LocalScopes()
+	if err != nil || len(scopes) != 0 {
+		t.Fatal(scopes, err)
+	}
 }

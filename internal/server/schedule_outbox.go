@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -76,6 +78,17 @@ func (s *Server) FlushScheduleOutbox(ctx context.Context, sc cell.Scope, reconci
 	}
 	if !live {
 		return owner.ErrNotOwner
+	}
+	// Native DO scopes are owned here but their SQLite lives in workerd.
+	// Only existing agent-local databases can contain a local outbox. Normal
+	// takeover/queue/timer recovery opens cold cells; eviction retains the file.
+	if !wasResident {
+		path := filepath.Join(s.Store.DataDir, "cells", sc.Namespace, sc.Class, sc.ID+".db")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
 	}
 	release, err := s.BeginResourceRequest(ctx, sc)
 	if err != nil {

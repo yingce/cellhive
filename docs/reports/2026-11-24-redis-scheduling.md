@@ -1,6 +1,6 @@
 # Redis/Kvrocks 调度补齐
 
-最新状态：已部署本机常驻 Compose，未部署生产；下文“未部署”为此前测试时状态。见 [本地部署记录](2026-11-24-local-redis-compose.md)。
+最新状态：已部署本机常驻 Compose 和 GZ Redis fleet；SG/USW 未切换。下文“未部署”为此前测试时状态。见 [本地部署记录](2026-11-24-local-redis-compose.md) 和 [GZ 部署记录](2026-11-24-gz-redis-fleet.md)。
 
 2026-11-24，`feat/redis-coordination` 本地未提交改动，未推送、未部署。承接 [协调权威报告](2026-11-24-redis-authority.md)；本报告取代其中“调度持久 outbox 尚未实现”的历史状态。
 

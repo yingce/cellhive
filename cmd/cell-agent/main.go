@@ -1326,7 +1326,10 @@ func main() {
 		indexDone := make(chan struct{})
 		go func() { defer close(indexDone); shared.Run(indexCtx, srv.DeliverScheduleHint) }()
 		outboxDone := make(chan struct{})
-		go func() { defer close(outboxDone); srv.RunScheduleOutbox(indexCtx, shared.Publish) }()
+		go func() {
+			defer close(outboxDone)
+			srv.RunScheduleOutbox(bucket.WithReadSource(indexCtx, bucket.SharedSchedule), shared.Publish)
+		}()
 		defer func() { stopIndex(); <-outboxDone }()
 		defer func() { stopIndex(); <-indexDone }()
 	}

@@ -232,7 +232,9 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已从独立源码 `892c9797` 部署 SG/USW/GZ，租约 TTL 仍为 10 秒；全量 test/build/vet、相关 race 和十分钟生产健康验证通过，见 [发布记录](reports/2026-11-24-peer-recovery-release.md)。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。
 
-## Redis/Kvrocks 权威 adapter（2026-11-24，本地实施）
+## Redis/Kvrocks 权威 adapter（2026-11-24）
+
+最新状态：本地 Compose 与 GZ 已切换，SG/USW 未切换；本节此前“未部署生产”为切换前验收状态，见 [GZ 发布记录](reports/2026-11-24-gz-redis-fleet.md)。
 
 新增可选协调权威后端；本地 Redis/Kvrocks 集成、双进程恢复、全量 test/build/vet 与关键 race 已通过，未部署生产。见 [验证报告](reports/2026-11-24-redis-authority.md)。与旧二进制不支持混跑；切换须离线迁移。Redis 元数据丢失不支持自动重建或透明切换至可能回退的副本。普通启动必须拒绝缺失 generation，不能把旧授权当不存在。业务数据与恢复日志仍在原存储。契约见 [设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
 
@@ -248,3 +250,7 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - 2026-11-24：已切换本机常驻 Compose，保留原 MinIO/数据卷；KV、Queue 重试、Cron、Alarm 和持久卷重启验证通过。GZ 切换已按用户要求停止，生产仍用原后端。见 [本地部署记录](reports/2026-11-24-local-redis-compose.md)。
 - 同日本机改为双 agent fleet，独立卷并验证实际 follower 确认；仍为同一宿主机，不能抵抗宿主机故障。无 peer 时按现有协议先落本地 spool。
+
+- GZ 使用集群内单实例持久 Redis，AOF always/noeviction；未使用可能回退已确认版本的托管 Redis 副本提升。节点失联不得强删 Redis Pod/强挂卷。切换启动期间 agent-1 连接 Redis 被拒绝并重启一次后恢复；稳定性观察与剩余遥测告警见发布记录。
+
+- GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已定位并准备限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。

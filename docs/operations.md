@@ -253,7 +253,7 @@ cell-agent `/metrics` 现在额外暴露：
 
 恢复写入按最多 1MiB 的连续页 run 合并后一次 `WriteAt`，避免每页 4KiB 一次 syscall；run buffer 固定有界，不会回到整库缓冲。
 
-## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署本地 Compose，未部署生产）
+## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署本地 Compose 和 GZ）
 
 GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 StatefulSet，
 持久 PVC、AOF `appendfsync always`、`noeviction`，不配置会回退版本的副本自动提升。
@@ -263,7 +263,7 @@ GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 Statefu
 须确认旧进程已隔离，不能以可用性为由放宽协调版本单调性。
 切换时将 `userRuntime.autoscalingEnabled=false`，停止 runtime 和全部 agent，
 备份协调元数据后执行初始化；激活后恢复副本数和 HPA。不要回滚到旧 COS 写入者。
-本配置准备不等于生产已完成切换。
+GZ 已完成离线切换（revision 6）；发布与验证记录见 [GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。SG/USW 未切换。
 
 默认 `CELLHIVE_COORDINATION_BACKEND=object`。Redis 模式配置：
 
