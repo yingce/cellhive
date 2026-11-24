@@ -253,7 +253,7 @@ cell-agent `/metrics` 现在额外暴露：
 
 恢复写入按最多 1MiB 的连续页 run 合并后一次 `WriteAt`，避免每页 4KiB 一次 syscall；run buffer 固定有界，不会回到整库缓冲。
 
-## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署本地 Compose 和 GZ）
+## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署 SG / USW / GZ）
 
 GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 StatefulSet，
 持久 PVC、AOF `appendfsync always`、`noeviction`，不配置会回退版本的副本自动提升。
@@ -263,7 +263,7 @@ GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 Statefu
 须确认旧进程已隔离，不能以可用性为由放宽协调版本单调性。
 切换时将 `userRuntime.autoscalingEnabled=false`，停止 runtime 和全部 agent，
 备份协调元数据后执行初始化；激活后恢复副本数和 HPA。不要回滚到旧 COS 写入者。
-GZ 已完成离线切换及 outbox 读放大修复（revision 7）；发布与验证记录见 [GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。SG/USW 未切换。
+GZ 首次切换及 outbox 修复见 [历史 GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。三地区现已切到 Redis 与 recovery index v2，版本见下文。
 
 默认 `CELLHIVE_COORDINATION_BACKEND=object`。Redis 模式配置：
 
@@ -281,7 +281,7 @@ Redis URL 自动启用共享 ZSET 调度；object 模式使用 cluster 本地 de
 
 Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护，不重新执行初始化覆盖已激活状态；必须先隔离旧 session，再进行专门的协调重建与数据链恢复。本批不提供自动灾难重建/在线后端切换。自动均衡策略和恢复扫描完全消除不在本批实现范围；持久 outbox 已实现，见调度验收报告。
 
-### Redis 待恢复 session 索引升级（本地实现，未部署）
+### Redis 待恢复 session 索引升级（已部署 SG / USW / GZ）
 
 新版本使用 Redis pending-session 索引发现恢复候选，COS 保留 node-log 正文和条件写。
 首次 `coordination-init --offline` 自动创建索引。已有 Redis 集群必须：
@@ -294,4 +294,4 @@ Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护
 新程序拒绝 v1 或缺少索引 marker；旧 v1 程序拒绝 v2 绑定。不可回退旧二进制或跳过离线升级直接滚动。
 普通恢复发现无 COS List；启动只点查拟使用的 session ID，实际恢复仍点查/CAS 正文。
 索引登记后、COS 创建前崩溃可能留下额外候选；缺失正文不能直接删除候选，以免漏掉迟到创建。
-当前 GZ revision 7 尚未执行此升级。
+当前 SG revision 150、USW revision 142、GZ revision 9 已执行此升级；见 [三地区发布记录](reports/2026-11-24-all-regions-redis-recovery-release.md)。本地常驻 Compose 未在此次生产发布中更新。

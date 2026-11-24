@@ -1,6 +1,6 @@
 # Redis recovery discovery
 
-Status: locally implemented and verified; not deployed. Extends Redis authority design without moving durable node-log bodies out of object storage.
+Status: deployed to SG revision 150, USW revision 142 and GZ revision 9; see the all-regions release report for acceptance. Extends Redis authority design without moving durable node-log bodies out of object storage.
 
 ## Contract
 

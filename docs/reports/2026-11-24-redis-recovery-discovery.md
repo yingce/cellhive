@@ -1,6 +1,6 @@
 # Redis pending-session discovery 验证
 
-状态：本地实现；未提交、未部署。GZ 仍为 revision 7，未操作集群或常驻 Compose。原分支未提交改动保留。
+最新状态：已提交独立发布分支并部署 SG/USW/GZ，见 [三地区发布记录](2026-11-24-all-regions-redis-recovery-release.md)。以下为发布前本地验收；本地常驻 Compose 未在本次生产发布中更新，原工作分支未提交改动保留。
 
 ## 实现边界
 

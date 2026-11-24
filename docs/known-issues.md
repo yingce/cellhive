@@ -234,7 +234,7 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 ## Redis/Kvrocks 权威 adapter（2026-11-24）
 
-最新状态：本地 Compose 与 GZ 已切换，SG/USW 未切换；本节此前“未部署生产”为切换前验收状态，见 [GZ 发布记录](reports/2026-11-24-gz-redis-fleet.md)。
+最新状态：本地 Compose 与 SG/USW/GZ 已切换 Redis；三地区同时启用 recovery index v2，见 [三地区发布记录](reports/2026-11-24-all-regions-redis-recovery-release.md)；本节此前“未部署生产”为切换前验收状态，见 [GZ 发布记录](reports/2026-11-24-gz-redis-fleet.md)。
 
 新增可选协调权威后端；本地 Redis/Kvrocks 集成、双进程恢复、全量 test/build/vet 与关键 race 已通过，未部署生产。见 [验证报告](reports/2026-11-24-redis-authority.md)。与旧二进制不支持混跑；切换须离线迁移。Redis 元数据丢失不支持自动重建或透明切换至可能回退的副本。普通启动必须拒绝缺失 generation，不能把旧授权当不存在。业务数据与恢复日志仍在原存储。契约见 [设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
 
@@ -255,4 +255,4 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 - GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已在 revision 7 发布限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。
 
-- Redis recovery discovery 已本地实现，验证见 [记录](reports/2026-11-24-redis-recovery-discovery.md)，尚未部署；当前 GZ revision 7 仍周期扫描 node-logs。新版本要求离线补齐 pending-session 索引，不能直接滚动混用旧写者。epoch GC 当前仍使用周期检查，事件驱动方案尚未落地。
+- Redis recovery discovery 已部署 SG 150、USW 142、GZ 9；本地验证见 [记录](reports/2026-11-24-redis-recovery-discovery.md)，生产验收见上述三地区发布记录。普通恢复发现已不再周期扫描 COS node-logs。新版本要求离线补齐 pending-session 索引，不能直接滚动混用旧写者。epoch GC 当前仍使用周期检查，事件驱动方案尚未落地。

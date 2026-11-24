@@ -1,6 +1,6 @@
 # Redis/Kvrocks 协调权威后端
 
-状态：用户已批准方向，本地实施；未部署。此文修订此前 shared 仅辅助索引的限制。
+状态：已部署 SG / USW / GZ；版本与验收见三地区发布记录。此文修订此前 shared 仅辅助索引的限制。
 
 ## 契约
 
@@ -28,4 +28,4 @@ wake 的持久写改走 Redis，保留先持久状态再发布的顺序及低频
 
 配置收敛修订：Redis URL 同时启用 shared 调度；独立调度开关和 URL/region 环境项移除，namespace 从 bucket 配置派生。旧环境项和无效 URL 报错；已激活旧 namespace 绑定不自动迁移。见 docs/configuration.md 与 decisions.md 2026-11-24 单入口决策。
 
-2026-11-24 recovery discovery 扩展（本地实施，未部署）：Redis 新版绑定升级为 v2，增加 pending-session 索引；COS 正文仍是恢复权威。现有 v1 集群须停写执行 `coordination-recovery-init --offline`。见 [扩展设计](2026-11-24-redis-recovery-discovery-design.md)。
+2026-11-24 recovery discovery 扩展（已部署三地区）：Redis 新版绑定升级为 v2，增加 pending-session 索引；COS 正文仍是恢复权威。现有 v1 集群须停写执行 `coordination-recovery-init --offline`。见 [扩展设计](2026-11-24-redis-recovery-discovery-design.md)。

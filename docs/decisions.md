@@ -4352,8 +4352,12 @@ GZ 发布采样发现：owned scope 包含原生 DO 的 host/actor，而 outbox 
 
 2026-11-24 GZ revision 7：`d5a0d38f` 已发布 outbox 本地数据库边界修复；真实 KV、Queue/重试、Cron、Alarm 验证通过。180 秒稳定窗口 COS GET 5.215→0.215 次/秒，LIST 0.161→0.242 次/秒；负载未固定，不作账单降幅承诺。详细证据与稳定性结果见上述 GZ 发布记录。
 
-### 2026-11-24 Redis recovery discovery（本地实现，未部署）
+### 2026-11-24 Redis recovery discovery（已部署三地区，版本见后续发布记录）
 
 Redis 模式将待恢复 session 发现迁至 generation-guarded Redis 索引；必须先登记 hint 再创建 COS node-log，只有观察到 sealed 正文才可移除。COS 保留恢复正文与 CAS，Redis 故障不回退扫描。已有安装需停写执行一次性索引初始化，新程序拒绝未初始化索引。设计与崩溃边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-discovery-design.md)。epoch GC 的事件驱动候选登记另行实施，本次不改变删除条件。
 
-本地验收：全量 make test、build/vet、nodelog/recovery/coordination race，以及 Redis/object 两种后端的真实双进程恢复测试通过；Redis 发现测试断言零 node-log COS GET/LIST，实际恢复保留正文点查。未提交、未部署，见 [验证记录](reports/2026-11-24-redis-recovery-discovery.md)。
+发布前本地验收：全量 make test、build/vet、nodelog/recovery/coordination race，以及 Redis/object 两种后端的真实双进程恢复测试通过；Redis 发现测试断言零 node-log COS GET/LIST，实际恢复保留正文点查。当时未提交、未部署，见 [验证记录](reports/2026-11-24-redis-recovery-discovery.md)。
+
+### 2026-11-24 三地区 Redis / recovery index v2 发布
+
+源码 `5ba2cee3` 从独立分支发布，GZ revision 9、SG revision 150、USW revision 142。各区使用独立持久 Redis（AOF always/noeviction），按停写、备份、离线初始化、恢复业务执行；GZ 为 v1→v2，SG/USW 为 COS→Redis v2。三地区 KV/Queue 重试/Cron/Alarm 均通过；最终观察与采样见 [发布记录](reports/2026-11-24-all-regions-redis-recovery-release.md)。epoch GC 本轮未改，仍周期检查；普通恢复发现不再扫描 COS node-logs。
