@@ -290,3 +290,7 @@ shared hint 失败保留重投递，采用按 member 的 1/2/4/8/16/32/60 秒有
 Redis ListPage 使用每批最多 128 个键的原子元数据读取，返回 HSTRLEN 与 revision，不下载正文；保留 generation guard、缺失跳过、混合物理页边界和游标语义。锁排序、启动策略、epoch 释放和混合目录枚举不在此批修改范围。测试使用隔离 Redis；不宣称托管故障切换安全或生产性能收益。
 
 本地验收：隔离 Redis 7.2 / Kvrocks 定向回归、scheduleindex/coordination race、make test、make build、make vet 和 git diff --check 通过。详情见 [验证报告](reports/2026-11-24-redis-review-optimization.md)。
+
+### 2026-11-24 后续本机部署
+
+Redis review 后续优化与 invocation 日志诊断已随源码 `8fa81f58` 部署本机 Compose，未推送、未发布云端。无权威数据迁移；Vector 配置仅本地实际日志重放验证，本机未配置持续 OTLP 采集。功能验收及保留告警见 [部署记录](reports/2026-11-24-local-redis-logging-review-release.md)。

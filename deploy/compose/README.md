@@ -58,3 +58,7 @@ docker compose -f deploy/compose/docker-compose.yml \
 ## 本机恢复权威 v3
 
 当前本机 active 配置已更新为 `cellhive:local-recovery-v3-20261124`，binding v3，两个 agent 保持 fleet，epoch GC 周期 `1h`、首次 `1m`。Session 正文与 DO 恢复指针在 Redis；旧桶副本不再更新。不能直接回退旧镜像或 Redis 备份。见 [部署验收](../../docs/reports/2026-11-24-local-recovery-v3.md)。云上版本未随此次本机部署改变。
+
+## 2026-11-24 Redis / 日志优化本机更新
+
+active 配置现固定 `cellhive:local-8fa81f58`（源码 `8fa81f58`）；四业务服务已更新，仍为双 agent fleet 与 recovery authority v3，无数据迁移。KV、Queue 重试、Cron、DO Alarm 和实际失败日志验证通过。日志目前保留在本机 spool，未配置独立 CellHive Vector/OTLP 接收端；两份 Vector 配置已用实际日志隔离重放验证。见 [部署记录](../../docs/reports/2026-11-24-local-redis-logging-review-release.md)。
