@@ -7,7 +7,7 @@ CellHive is a self-hosted **Cloudflare Workers-compatible** runtime for teams th
 Design tenets:
 
 1. **Workerd changes live only in the fork repo.** The compute layer uses `cellhive-workerd`, an upstream-tracking fork with CellHive per-invocation limits; this repo does not inline-patch workerd, it integrates through `workerLoader`, bindings, capnp and process flags.
-2. **All state is a cell.** Each state unit is a named SQLite database; S3-compatible object storage is the long-term authority; bucket conditional writes determine the unique owner; no consensus service is required.
+2. **All state is a cell.** Each state unit is a named SQLite database; S3-compatible object storage is the long-term authority; bucket conditional writes determine ownership by default. Optional Redis authority handles owner/lease/wake metadata without changing the durable data chain; changing backends requires offline migration.
 3. **Compute and state are layered.** `cellhive-workerd` is responsible for execution; all persistent data goes through `cell-agent`.
 4. **Fixed state layer + elastic execution layer.** `cell-agent` is a fixed cluster (nodes with identities); `do-runtime` is a distributed elastic execution layer, and its local disk may be temporary.
 5. **Portable.** The runtime does not depend on privileges or FUSE; by default it can run on managed/restricted Kubernetes.
@@ -16,7 +16,7 @@ Design tenets:
 
 - Global edge network, cross-region replication, Cloudflare account API compatibility;
 - Modifying workerd inside the CellHive repo, or introducing a second JS engine (workerd changes go to `yingce/cellhive-workerd`);
-- Depending on NATS / kvrocks / Valkey / etcd / APISIX;
+- Introducing additional NATS / etcd / APISIX coordination or gateway components;
 - A standalone gateway component (ingress responsibilities are handled by the operations edge proxy + user-runtime; see ADR-017; the platform does not distribute edge configuration, ADR-132);
 - Supporting CF capabilities that workerd itself does not provide (Python Workers, Cache API, Vectorize, Hyperdrive, Browser Rendering, Email Workers, etc.).
 
@@ -28,10 +28,19 @@ Design tenets:
 | `user-runtime` | Go + cellhive-workerd (`cmd/user-runtime`) | :8081 public / :8088 internal privileged | Worker routing/version resolution/header sanitization + tenant Worker loading and execution. **Implemented**: `:8081` public loader (route projection fetch + version bundle loading + facade env + header sanitization, **ADR-068**) and `:8088` internal dispatch (queue/scheduled handler; ADR-067/070), with static assets on the public side (ADR-069) | No | No |
 | `do-runtime` | cellhive-workerd (`cmd/do-runtime`) + Go supervisor (`cmd/do-supervisor`) | :8788 | Native Durable Object execution; **distributed and elastic**. **Implemented**: host-actor skeleton (facets + localDisk, ADR-077) + ownership/fencing/drain/residency (ADR-078) + supervisor capture/output gate (ADR-083) + alarm (ADR-079) + WS 1012/cross-node forwarding (ADR-080/084) + cross-node cold activation/per-object recovery (ADR-084) + bindings inside DO (ADR-090) + session policy (ADR-107) + owner epoch fencing/configurable lease/object index (ADR-108/109) | Local disk may be temporary (working copy) | **Yes** |
 | `cell-agent` | Go (fixed cluster) | :7001 internal REST (Go↔Go also uses this port, ADR-136) / :8082 admin | cell data + replication + leases + control plane + owner resolution + timer dispatch + **sole bucket credentials** | Yes (owns SQLite itself) | No (handles drain itself) |
+| Redis (optional coordination backend) | Redis + Lua CAS / ZSET | :6379 (configurable) | Owner/epoch, node leases, fleet elections, session/DO recovery metadata and due indexes; business state remains in cells | Yes (external) | — |
 | Object storage | S3-compatible object storage | — | Authoritative state + code + assets | Yes (external) | — |
 | `cellhive` CLI | Go | — | Packaging/deployment/operations | No | — |
 
 > There is no `gateway`, `cell-router` (changed to a library), standalone `control`, standalone `scheduler`, `d1-runtime`, or `kv-runtime`.
+
+## Architecture Diagram
+
+![CellHive architecture](../assets/architecture-workerd-fork.png)
+
+[Editable SVG](../assets/architecture-workerd-fork.svg) · [Standalone view](../assets/architecture-workerd-fork.html)
+
+This shows the Redis-mode source architecture. Redis provides coordination authority and due indexes; durable business data remains in cells. Redis failures do not fall back to object storage. Default object mode retains bucket conditional writes; backend changes require offline migration. Session/DO metadata follows the v3 contract; this is not a regional deployment inventory. See the [recovery authority design](../superpowers/specs/2026-11-24-redis-recovery-authority-design.md).
 
 ## Topology
 
@@ -45,7 +54,8 @@ Internal (private network + internal token, **direct connection, not through Tra
   do-runtime ◀─owner routing/WS─ user-runtime (host adapter → cell-agent resolves owner)
   do-runtime ──WAL reporting/claim/recovery──▶ cell-agent :7001 (direct, HTTP)
   cell-agent ↔ cell-agent (ensemble/acquire/release, direct, HTTP :7001)
-  cell-agent ──only──▶ object storage
+  cell-agent ──CAS / leases / due indexes──▶ Redis (Redis mode)
+  cell-agent ──LTX / durable data / code / assets──▶ object storage
 
 Fixed: cell-agent cluster (≥2)   Elastic: do-runtime nodes (can be added/removed, temporary disk)
 
@@ -67,7 +77,8 @@ Fixed: cell-agent cluster (≥2)   Elastic: do-runtime nodes (can be added/remov
 │                · cell storage/replication/leases/epoch · owner resolution library · timer dispatch │
 │                · control plane (:8082) · sole object-storage credentials and data endpoints │
 ├───────────────────────────────────────────────────────────────┤
-│ Authoritative storage  S3-compatible object storage           │
+│ Coordination authority  Redis (owner / lease / fleet / wake)  │
+│ Durable data  SQLite + replicated LTX → S3 / COS / OSS         │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,7 +164,9 @@ All are unified as timers: due entries are stored in the SQLite of their owning 
 | Worker bundle / version metadata | Object storage (content-addressed) + control-plane cell |
 | KV / D1 / Queue / Workflow data | Each respective cell's SQLite, replicated to object storage via cell-agent |
 | DO data | workerd actor SQLite (working copy) → replicated to object storage via cell-agent |
-| cell owner / node lease | Object storage (conditional writes) |
+| cell owner / node lease / fleet election | Redis CAS in Redis mode; bucket conditional writes in default object mode |
+| Wake / due indexes | Redis + ZSET in Redis mode; execution still validates cell state |
+| Session records / DO recovery pointers | Redis CAS under v3; recovery payloads remain in replication/object storage |
 | Route / version / identity / key metadata | Control-plane cell (**single database**, ADR-117; app is the `ns` column in the table) |
 | R2 / ASSETS objects | Object storage |
 

@@ -7,7 +7,7 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 设计信条：
 
 1. **workerd 改动只在 fork 仓库。** 计算层使用 `cellhive-workerd`（跟踪上游并加入 CellHive 逐调用限额）；本仓不内联 patch workerd，只通过 `workerLoader`、bindings、capnp 配置和进程开关集成。
-2. **状态一切皆 cell。** 每个状态单元是一个有名字的 SQLite 数据库；对象存储（S3 兼容）是长期权威；默认 bucket 条件写决定唯一 owner；可选 Redis/Kvrocks 协调权威替代 owner/lease/wake 的桶操作，业务数据耐久链不变，切换必须离线迁移。见 [协调后端设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
+2. **状态一切皆 cell。** 每个状态单元是一个有名字的 SQLite 数据库；对象存储（S3 兼容）是长期权威；默认 bucket 条件写决定唯一 owner；可选 Redis 协调权威替代 owner/lease/wake 的桶操作，业务数据耐久链不变，切换必须离线迁移。见 [协调后端设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
 3. **计算与状态分层。** `cellhive-workerd` 负责执行；所有持久化数据经 `cell-agent`。
 4. **固定状态层 + 弹性执行层。** `cell-agent` 是固定集群（有身份的节点）；`do-runtime` 是分布式弹性执行层，本地盘可临时。
 5. **可移植。** 运行时不依赖特权或 FUSE；默认可在托管/受限 Kubernetes 上运行。
@@ -16,7 +16,7 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 
 - 全球边缘网络、跨区域复制、Cloudflare 账户 API 兼容；
 - 在 CellHive 主仓内修改 workerd，或引入第二套 JS 引擎（workerd 改动只提交到 `yingce/cellhive-workerd`）；
-- 依赖 NATS / kvrocks / Valkey / etcd / APISIX；
+- 引入 NATS / etcd / APISIX 等额外协调或网关组件；
 - 独立 gateway 组件（入口职责由运维边缘代理 + user-runtime 承担，见 ADR-017；平台不下发边缘配置，ADR-132）；
 - 支持 workerd 本身不具备的 CF 能力（Python Workers、Cache API、Vectorize、Hyperdrive、Browser Rendering、Email Workers 等）。
 
@@ -28,10 +28,19 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 | `user-runtime` | Go + cellhive-workerd（`cmd/user-runtime`） | :8081 公开 / :8088 内部特权 | Worker 路由/版本解析/清头 + 租户 Worker 加载执行。**已实现**：`:8081` 公开 loader（路由投影拉取 + 版本 bundle 加载 + facade env + 清头，**ADR-068**）与 `:8088` 内部派发（queue/scheduled handler；ADR-067/070），公开侧含静态资产（ADR-069） | 否 | 否 |
 | `do-runtime` | cellhive-workerd（`cmd/do-runtime`）+ 内置Go supervisor（`internal/doruntimeapp`） | :8788 | 原生 Durable Object 执行；**分布式弹性**。**已实现**：host-actor 骨架（facets + localDisk，ADR-077）+ 归属/栅栏/排空/驻留（ADR-078）+ supervisor 捕获/输出门（ADR-083）+ alarm（ADR-079）+ WS 1012/跨节点转发（ADR-080/084）+ 跨节点冷激活/按对象恢复（ADR-084）+ DO 内 bindings（ADR-090）+ session policy（ADR-107）+ owner epoch 栅栏/租约可配/对象索引（ADR-108/109） | 本地盘可临时（工作副本） | **是** |
 | `cell-agent` | Go（固定集群） | :7001 内部 REST（Go↔Go 亦走此口，ADR-136）/ :8082 admin | cell 数据 + 复制 + 租约 + 控制面 + owner 解析 + 计时派发 + **唯一桶凭据** | 是（自己拥有 SQLite） | 否（自身处理 drain） |
+| Redis（可选协调后端） | Redis + Lua CAS / ZSET | :6379（可配置） | owner/epoch、node lease、fleet 选主、session/DO 恢复元数据、到期索引；业务状态仍由 cell 保存 | 是（外部） | — |
 | 对象存储 | S3 兼容对象存储 | — | 权威状态 + code + assets | 是（外部） | — |
 | `cellhive` CLI | Go | — | 打包/部署/运维 | 否 | — |
 
 > 没有 `gateway`、`cell-router`（改为库）、独立 `control`、独立 `scheduler`、`d1-runtime`、`kv-runtime`。
+
+## 架构图
+
+![CellHive 架构](assets/architecture-workerd-fork.png)
+
+[可编辑 SVG](assets/architecture-workerd-fork.svg) · [独立查看](assets/architecture-workerd-fork.html)
+
+图示为 Redis 协调模式的源码架构。Redis 承担协调权威与到期索引，不是业务数据缓存替代品；Redis 故障不回退 COS。默认对象模式仍使用桶条件写，后端切换须离线迁移。session/DO 恢复元数据以 v3 契约为准，图不代表所有区域部署版本；见[恢复权威设计](superpowers/specs/2026-11-24-redis-recovery-authority-design.md)。
 
 ## 拓扑
 
@@ -45,7 +54,8 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
   do-runtime ◀─owner 路由/WS─ user-runtime（host adapter → cell-agent 解析 owner）
   do-runtime ──WAL 上报/claim/恢复──▶ cell-agent :7001（直连，HTTP）
   cell-agent ↔ cell-agent（ensemble/acquire/release，直连，HTTP :7001）
-  cell-agent ──唯一──▶ 对象存储
+  cell-agent ──CAS / lease / 到期索引──▶ Redis（Redis 模式）
+  cell-agent ──LTX / 业务数据 / code / assets──▶ 对象存储
 
 固定：cell-agent 集群（≥2）   弹性：do-runtime 节点（可增删，临时盘）
 
@@ -67,7 +77,8 @@ CellHive 是一个自托管的 **Cloudflare Workers 兼容**运行时，面向�
 │          · cell 存储/复制/租约/epoch · owner 解析库 · 计时派发   │
 │          · 控制面（:8082）· 唯一对象存储凭据与数据端点           │
 ├───────────────────────────────────────────────────────────────┤
-│ 权威存储 S3 兼容对象存储            │
+│ 协调权威 Redis（owner / lease / fleet / wake）                │
+│ 耐久数据 SQLite + LTX 复制 → S3 / COS / OSS                    │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,7 +164,9 @@ Worker → env.NS.get(id).fetch() → host adapter
 | Worker bundle / 版本元数据 | 对象存储（内容寻址）+ 控制面 cell |
 | KV / D1 / Queue / Workflow 数据 | 各自 cell 的 SQLite，经 cell-agent 复制到对象存储 |
 | DO 数据 | workerd actor SQLite（工作副本）→ 经 cell-agent 复制到对象存储 |
-| cell owner / 节点 lease | 对象存储（条件写） |
+| cell owner / 节点 lease / fleet 选主 | Redis 模式为 Redis CAS；默认对象模式为桶条件写 |
+| wake / 到期调度索引 | Redis 模式为 Redis + ZSET；执行仍核对 cell 状态 |
+| session 正文 / DO 恢复指针 | Redis v3 为 Redis CAS；恢复 payload 仍在复制链/对象存储 |
 | 路由 / 版本 / 身份 / 密钥元数据 | 控制面 cell（**单库**，ADR-117；app 是表里的 `ns` 列） |
 | R2 / ASSETS 对象 | 对象存储 |
 
