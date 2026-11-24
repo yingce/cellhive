@@ -262,11 +262,11 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 
 用户选择采用腾讯云托管 Redis，GZ / SG / USW 已切换并完成常规验收；主从故障切换安全未验收。异步复制与自动主从提升可能丢失已确认的 owner/revision/lease/schedule 写；当前 generation 仅能拒绝空库或不匹配世代，不能检测同世代回退。Lua CAS 不解决此限制，不能宣称此故障模型下协调 RPO=0 或 fencing 安全已验证。异常必须停写并隔离旧 session 后人工恢复，不自动回退 COS 或历史 Redis。
 
-### 2026-11-24 Redis recovery authority v3（本地实施，未部署）
+### 2026-11-24 Redis recovery authority v3（本地、SG、USW 已部署）
 
 Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁移。epoch GC 默认周期改为 1 小时，首次仍为 1 分钟，每节点集中遍历 OwnedScopes；事件驱动尚未实现。设计与兼容性边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-authority-design.md)。
 
-本地 v3 验收：全量 make test、build/vet、coordination/nodelog/recovery race、object/Redis 双进程恢复均通过；尚未部署，见 [报告](reports/2026-11-24-redis-recovery-authority-v3.md)。
+本地 v3 验收：全量 make test、build/vet、coordination/nodelog/recovery race、object/Redis 双进程恢复均通过，见 [本地验收](reports/2026-11-24-redis-recovery-authority-v3.md)。SG revision 153、USW revision 145 已离线升级 v3；GZ 仍为 v2。发布与性能观察见 [记录](reports/2026-11-24-sg-usw-recovery-v3-release.md)。
 
 
 ### 2026-11-24 GZ 限时 trace 日志诊断

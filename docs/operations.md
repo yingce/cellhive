@@ -305,7 +305,7 @@ GZ 复用现有托管实例，SG / USW 新建 1 GiB Redis 7.0 标准主从并转
 
 GZ / SG / USW 均已完成切换，Helm revision 分别为 10 / 151 / 143。旧 Redis StatefulSet/Service 已移除，PVC 保留；临时测试应用与迁移 Pod 已清理。SG / USW 包月实付合计 ¥77.33，自动续费已开启（2026-11-24 按用户要求设置并回读确认）、2026-12-24 到期。验收与回滚边界见 [托管 Redis 切换报告](reports/2026-11-24-managed-redis-cutover.md)。
 
-### Redis 恢复权威 v3（本地实现，尚未部署）
+### Redis 恢复权威 v3（本地、SG、USW 已部署）
 
 v3 将 node-log 正文和 DO recovery pointer 一并迁至 Redis，替代上文 v2 的 COS 正文点查/CAS。部署前停止所有写者、备份 Redis 与历史桶元数据，再用新版本执行 `cell-agent coordination-recovery-init --offline`。命令将 binding 标为 v3/loading，复制所有 session（含 sealed 与 CoveredSeq）及 DO 指针，建立恢复索引，最后激活。旧 v1/v2 二进制拒绝 v3，新程序拒绝未升级的 v1/v2。中断后保持停写重试；active v3 重复执行只校验 ready，绝不从历史 COS 覆盖新 Redis 状态。Redis 故障无 COS 回退。
 
@@ -315,3 +315,5 @@ GC 默认 `CELLHIVE_EPOCH_GC_INTERVAL=1h`、`CELLHIVE_EPOCH_GC_INITIAL=1m`；每
 ### 临时 trace 阶段日志
 
 `CELLHIVE_TRACE_LOG_UNTIL` 为 RFC3339 绝对截止时间，必须在未来 24 小时内；未设置、过期或无效时关闭。启用后原本未采样的 Go span 只做 RecordOnly 并输出到 stdout 的 `trace_span` JSON，不改变传给下游的 sampled 标记，也不将这些额外 span 发给 ARMS。记录 trace/span/parent ID、阶段、起始时间、耗时及白名单 scope/object key 等属性；不记录请求正文、header、完整 URL 或错误消息。独立 4096 条非阻塞队列防止日志背压阻塞请求；队列满会丢弃诊断日志。自动到期后恢复原采样行为。入口 function_request 总耗时包含 Worker 准备，JS http.server span 从准备完成后开始；两者差值可识别尚未细分的 Worker 准备耗时。
+
+2026-11-24：SG revision 153、USW revision 145 已按上述停写流程升级，运行源码 `7df788d3`；GZ 仍为 v2，不可混用其迁移状态。限时 trace 日志与业务验证见 [发布记录](reports/2026-11-24-sg-usw-recovery-v3-release.md)。

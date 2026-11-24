@@ -4371,11 +4371,11 @@ Redis 模式将待恢复 session 发现迁至 generation-guarded Redis 索引；
 
 迁移与实际包月订单核验、三个区域的功能及 10 分钟稳定性验收已通过，见 [托管 Redis 切换报告](reports/2026-11-24-managed-redis-cutover.md)。
 
-### 2026-11-24 Redis recovery authority v3（本地实施，未部署）
+### 2026-11-24 Redis recovery authority v3（本地、SG、USW 已部署）
 
 Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁移。epoch GC 默认周期改为 1 小时，首次仍为 1 分钟，每节点集中遍历 OwnedScopes；事件驱动尚未实现。设计与兼容性边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-authority-design.md)。
 
-本地 v3 验收：全量 make test、build/vet、coordination/nodelog/recovery race、object/Redis 双进程恢复均通过；尚未部署，见 [报告](reports/2026-11-24-redis-recovery-authority-v3.md)。
+本地 v3 验收：全量 make test、build/vet、coordination/nodelog/recovery race、object/Redis 双进程恢复均通过，见 [本地验收](reports/2026-11-24-redis-recovery-authority-v3.md)。SG revision 153、USW revision 145 已离线升级 v3；GZ 仍为 v2。发布与性能观察见 [记录](reports/2026-11-24-sg-usw-recovery-v3-release.md)。
 
 
 ### 2026-11-24 GZ 限时 trace 日志诊断
