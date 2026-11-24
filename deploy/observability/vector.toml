@@ -163,7 +163,12 @@ failure_stage = to_string(get(attrs, ["cellhive.failure_stage"]) ?? null) ?? ""
 error_name = if invocation_failed && match(error_name, r'^[A-Za-z][A-Za-z0-9_.-]{0,63}$') { error_name } else { null }
 error_frame = if invocation_failed && match(error_frame, r'^[A-Za-z0-9_.-]{1,80}:[1-9][0-9]{0,5}:[1-9][0-9]{0,5}$') { error_frame } else { null }
 failure_stage = if invocation_failed { if match(failure_stage, r'^(handler|worker_load|bundle_fetch|binding_setup|runtime_capacity|handler_response|dispatch)$') { failure_stage } else { "unknown" } } else { null }
-error_origin = if invocation_failed { if failure_stage == "runtime_capacity" { "platform" } else { "unknown" } } else { null }
+status_kind = if event_type == "fetch" { "http" } else { "invocation" }
+function_result = to_string(get(attrs, ["cellhive.function_result"]) ?? null) ?? "unknown"
+function_result = if match(function_result, r'^(returned|threw|not_started|unknown)$') { function_result } else { "unknown" }
+function_completed = if function_result == "returned" || function_result == "threw" { true } else if function_result == "not_started" { false } else { null }
+error_origin = if invocation_failed { if function_completed == true { "user_function" } else if failure_stage == "runtime_capacity" { "platform" } else { "unknown" } } else { null }
+root_cause_origin = if invocation_failed { "unknown" } else { null }
 .payload = {
   "event_type": event_type,
   "outcome": outcome,
@@ -172,6 +177,10 @@ error_origin = if invocation_failed { if failure_stage == "runtime_capacity" { "
   "error_frame": error_frame,
   "failure_stage": failure_stage,
   "error_origin": error_origin,
+  "root_cause_origin": root_cause_origin,
+  "function_result": function_result,
+  "function_completed": function_completed,
+  "status_kind": status_kind,
   "logical_id": get(attrs, ["cellhive.logical_id"]) ?? null,
   "scheduled_time_ms": get(attrs, ["cellhive.scheduled_time_ms"]) ?? null,
   "attempt": get(attrs, ["cellhive.attempt"]) ?? null,

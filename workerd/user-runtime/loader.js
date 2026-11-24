@@ -504,6 +504,8 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
     const status = res && res.status ? res.status : 500;
     const outcome = status >= 500 ? "error" : "ok";
     if(status>=500 && !diagnostics["cellhive.failure_stage"]) Object.assign(diagnostics, invocationFailureAttributes("handler_response",null,status));
+    if(!diagnostics["cellhive.function_result"]) diagnostics["cellhive.function_result"]=res?"returned":"unknown";
+    diagnostics["cellhive.status_kind"]="http";
     if (env.CH_INVOCATION_LOGS === "1") {
       const log = recordRequestLog(env, app, worker, req, status, outcome, startedMs, finishedMs, diagnostics)
         .catch(e => console.error(JSON.stringify({ event: "request_log_failed", worker, error: String(e) })));

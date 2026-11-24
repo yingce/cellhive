@@ -13,6 +13,8 @@ for filename in ['vector.toml','vector-logs.toml']:
  ('queue requested retry','queue','retry',{},'.error_code == null && .payload.failure_stage == null'),
  ('fetch return error','fetch','error',{'cellhive.failure_stage':'handler_response'},'.error_code == "CELLHIVE_INVOCATION_FAILED" && .payload.failure_stage == "handler_response" && .payload.error_origin == "unknown"'),
  ('capacity failure','fetch','error',{'cellhive.failure_stage':'runtime_capacity'},'.payload.failure_stage == "runtime_capacity" && .payload.error_origin == "platform"'),
+ ('completed user handler','queue','failed',{'cellhive.function_result':'threw'},'.payload.function_completed == true && .payload.function_result == "threw" && .payload.error_origin == "user_function" && .payload.root_cause_origin == "unknown"'),
+ ('not started','fetch','failed',{'cellhive.function_result':'not_started','cellhive.failure_stage':'worker_load'},'.payload.function_completed == false && .payload.error_origin == "unknown"'),
  ('safe diagnostics','cron','failed',{'cellhive.error':'INTERNAL_ERROR','cellhive.error_name':'Error','cellhive.error_frame':'tenant.js:49:20','cellhive.failure_stage':'handler','cellhive.error_origin':'user'},'.payload.error_name == "Error" && .payload.error_frame == "tenant.js:49:20" && .payload.failure_stage == "handler" && .payload.error_origin == "unknown"'),
  ('unsafe diagnostics','cron','failed',{'cellhive.error_name':'Bearer private','cellhive.error_frame':'https://private/tenant.js:1:1','cellhive.failure_stage':'private'},'.payload.error_name == null && .payload.error_frame == null && .payload.failure_stage == "unknown"'),
   ('handler success','cron','success',{},'.category == "cron_dispatch" && .payload.outcome == "success" && .error_code == null'),

@@ -106,7 +106,9 @@ test('failed invocation exports safe location and stage without claiming root ca
   assert.equal(a['cellhive.error_name'],'Error');
   assert.equal(a['cellhive.error_frame'],'tenant.js:49:20');
   assert.equal(a['cellhive.failure_stage'],'handler');
-  assert.equal(a['cellhive.error_origin'],'unknown');
+  assert.equal(a['cellhive.error_origin'],'user_function');
+  assert.equal(a['cellhive.function_result'],'threw');
+  assert.equal(a['cellhive.status'],500);
   assert.equal(JSON.stringify(a).includes('private'),false);
 });
 
@@ -135,5 +137,6 @@ test('internal service fetch records returned HTTP failure without reading respo
  const a=h.context.captured[0].attributes;
  assert.equal(a['cellhive.event_type'],'fetch');assert.equal(a['cellhive.status'],502);
  assert.equal(a['cellhive.failure_stage'],'handler_response');
+ assert.equal(a['cellhive.function_result'],'returned');
  assert.equal(JSON.stringify(a).includes('private-body'),false);
 });

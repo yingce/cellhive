@@ -441,7 +441,8 @@ test('fetch summaries retain failure boundary in file and protobuf export', asyn
  const d=c.invocationFailureAttributes('handler_response',null,502);
  await c.recordRequestLog({FILE_LOG_TOKEN:'enabled'},{namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
  assert.equal(records[0]['cellhive.failure_stage'],'handler_response');
- assert.equal(records[0]['cellhive.error_origin'],'unknown');
+ assert.equal(records[0]['cellhive.error_origin'],'user_function');
+ assert.equal(records[0]['cellhive.function_result'],'returned');
  const wire=c.otlpRequestLogProtobuf({}, {namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
  assert.ok(Buffer.from(wire).includes(Buffer.from('handler_response')));
  const e=c.invocationFailureAttributes('handler',new TypeError('bad token=private'),500);
@@ -465,6 +466,6 @@ test('fetch loading and execution failures have different diagnostics on sampled
   assert.ok(response.status>=500);
   assert.equal(logs.length,1);
   assert.equal(logs[0]['cellhive.failure_stage'],scenario);
-  assert.equal(logs[0]['cellhive.error_origin'],scenario==='runtime_capacity'?'platform':'unknown');
+  assert.equal(logs[0]['cellhive.error_origin'],scenario==='runtime_capacity'?'platform':scenario==='handler_response'?'user_function':'unknown');
  }
 });

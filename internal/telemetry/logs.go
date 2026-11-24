@@ -288,7 +288,7 @@ func ExportLogWithMetadata(ns, worker, level, message string, atMs int64, traceI
 		rec.AddAttributes(attribute.String("cellhive.exceptions", string(meta.Exceptions)))
 	}
 	// Only diagnostic fields emitted by the trusted runtime may pass through.
-	for _, key := range []string{"cellhive.error", "cellhive.error_name", "cellhive.error_frame", "cellhive.failure_stage", "cellhive.error_origin"} {
+	for _, key := range []string{"cellhive.error", "cellhive.error_name", "cellhive.error_frame", "cellhive.failure_stage", "cellhive.error_origin", "cellhive.function_result", "cellhive.status_kind"} {
 		if value := meta.Diagnostics[key]; value != "" && len(value) <= 2048 {
 			rec.AddAttributes(attribute.String(key, value))
 		}

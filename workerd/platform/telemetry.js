@@ -274,9 +274,12 @@ export function invocationFailureAttributes(stage, error, status) {
     const m=/([^/\\\s():?#]+):([1-9][0-9]{0,5}):([1-9][0-9]{0,5})\)?$/.exec(line.trim());
     if(m && /^[A-Za-z0-9_.-]{1,80}$/.test(m[1])) { frame=m[1]+':'+m[2]+':'+m[3]; break; }
   }
+  const functionResult=boundary==='handler_response'?'returned':boundary==='handler' && frame?.startsWith('tenant.js:')?'threw':['worker_load','bundle_fetch','binding_setup','runtime_capacity'].includes(boundary)?'not_started':'unknown';
   return {
+    'cellhive.function_result':functionResult,
+    'cellhive.status_kind':'http',
     'cellhive.failure_stage':boundary,
-    'cellhive.error_origin':boundary==='runtime_capacity'?'platform':'unknown',
+    'cellhive.error_origin':functionResult==='returned'||functionResult==='threw'?'user_function':boundary==='runtime_capacity'?'platform':'unknown',
     'cellhive.error_name':error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name)?name:null,
     'cellhive.error_frame':frame,
     'cellhive.error':safe(message || (boundary==='handler_response'?'Handler returned HTTP '+status:'Invocation failed at '+boundary)),

@@ -202,6 +202,8 @@ async function finishInvocation(env, record, execution) {
   const status=error?"failed":retry?"retry":"success";
   const [traceId,spanId]=traceIds(record.traceparent);
   const diagnostics=errorDiagnostics(stackErrorName(execution.error_stack || value.error_stack),execution.error_stack || value.error_stack);
+  const stage=execution.failure_stage || "handler";
+  const result=stage==="worker_load"?"not_started":stage==="dispatch"?"unknown":stage==="handler_response"?"returned":error?"threw":"returned";
   const attributes={
     "cellhive.invocation":true,
     "cellhive.invocation_id":record.invocation_id,
@@ -219,13 +221,15 @@ async function finishInvocation(env, record, execution) {
     "cellhive.finished_ms":finishedMs,
     "cellhive.duration_ms":finishedMs-(record.started_ms||finishedMs),
     "cellhive.retry_requested":status==="retry",
-    "cellhive.status":Number.isInteger(execution.status)?execution.status:null,
+    "cellhive.status":Number.isInteger(execution.status)?execution.status:error?500:null,
+    "cellhive.status_kind":record.kind==="fetch"?"http":"invocation",
+    "cellhive.function_result":result,
     "cellhive.error":String(error).slice(0,2048),
     "cellhive.error_name":error?diagnostics.error_name:null,
     "cellhive.error_frame":error?(diagnostics.error_frame||null):null,
     "cellhive.failure_stage":error?(execution.failure_stage||"handler"):null,
     // The failure boundary does not establish who caused the failure.
-    "cellhive.error_origin":error?"unknown":null,
+    "cellhive.error_origin":error?(result==="threw"||result==="returned"?"user_function":"unknown"):null,
     "cellhive.ack_count":ack.length,
     "cellhive.retry_count":retryIDs.size,
   };
