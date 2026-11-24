@@ -4351,3 +4351,9 @@ GZ 从独立发布分支 `e7577f8c` 构建 agent-only 镜像，revision 4 先部
 GZ 发布采样发现：owned scope 包含原生 DO 的 host/actor，而 outbox relay 对非驻留 scope 无条件调用 Store.Cell，会反复触发不属于 agent 本地 SQLite 的 LTX 恢复。relay 只检查已有 agent 本地数据库，文件不存在时不 hydration；正常接管/Queue/Timer 恢复负责打开冷 cell，之后 relay 才处理其 outbox。已有且被驱逐的本地文件仍能重新打开、证明耐久并发布。新增来源归因 shared_schedule，不能用丢弃 pending revision 或关闭耐久证明降低请求量。
 
 2026-11-24 GZ revision 7：`d5a0d38f` 已发布 outbox 本地数据库边界修复；真实 KV、Queue/重试、Cron、Alarm 验证通过。180 秒稳定窗口 COS GET 5.215→0.215 次/秒，LIST 0.161→0.242 次/秒；负载未固定，不作账单降幅承诺。详细证据与稳定性结果见上述 GZ 发布记录。
+
+### 2026-11-24 Redis recovery discovery（本地实现，未部署）
+
+Redis 模式将待恢复 session 发现迁至 generation-guarded Redis 索引；必须先登记 hint 再创建 COS node-log，只有观察到 sealed 正文才可移除。COS 保留恢复正文与 CAS，Redis 故障不回退扫描。已有安装需停写执行一次性索引初始化，新程序拒绝未初始化索引。设计与崩溃边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-discovery-design.md)。epoch GC 的事件驱动候选登记另行实施，本次不改变删除条件。
+
+本地验收：全量 make test、build/vet、nodelog/recovery/coordination race，以及 Redis/object 两种后端的真实双进程恢复测试通过；Redis 发现测试断言零 node-log COS GET/LIST，实际恢复保留正文点查。未提交、未部署，见 [验证记录](reports/2026-11-24-redis-recovery-discovery.md)。

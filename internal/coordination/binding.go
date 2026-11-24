@@ -27,7 +27,7 @@ func readBinding(ctx context.Context, b bucket.Bucket) (binding, string, error) 
 	if err = json.Unmarshal(raw, &v); err != nil {
 		return v, "", err
 	}
-	if v.Version != 1 || v.Region == "" || v.Generation == "" || (v.State != "loading" && v.State != "active") {
+	if (v.Version != 1 && v.Version != 2) || v.Region == "" || v.Generation == "" || (v.State != "loading" && v.State != "active") {
 		return v, "", errors.New("coordination: invalid binding")
 	}
 	return v, e, nil
@@ -43,12 +43,19 @@ func CheckObjectMode(ctx context.Context, b bucket.Bucket) error {
 	return errors.New("coordination: bucket is bound to Redis; object authority forbidden")
 }
 func Open(ctx context.Context, b bucket.Bucket, endpoint, region string) (*Bucket, error) {
+	return openBound(ctx, b, endpoint, region, false)
+}
+
+func openBound(ctx context.Context, b bucket.Bucket, endpoint, region string, offlineUpgrade bool) (*Bucket, error) {
 	v, _, err := readBinding(ctx, b)
 	if err != nil {
 		return nil, fmt.Errorf("coordination binding: %w", err)
 	}
 	if v.State != "active" || v.Region != region {
 		return nil, errors.New("coordination: binding is not active for this region")
+	}
+	if v.Version != 2 && !offlineUpgrade {
+		return nil, errors.New("coordination: offline coordination-recovery-init required before indexed recovery startup")
 	}
 	s, err := New(endpoint, region)
 	if err != nil {
@@ -59,7 +66,14 @@ func Open(ctx context.Context, b bucket.Bucket, endpoint, region string) (*Bucke
 		s.Close()
 		return nil, err
 	}
-	return &Bucket{Base: b, Store: s}, nil
+	wrapped := &Bucket{Base: b, Store: s}
+	if !offlineUpgrade {
+		if err = wrapped.RecoveryIndexReady(ctx); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	return wrapped, nil
 }
 
 // Initialize is OFFLINE ONLY. The operator must stop all writers, including
@@ -81,7 +95,7 @@ func Initialize(ctx context.Context, b bucket.Bucket, endpoint, region string) e
 		if n != 0 {
 			return errors.New("coordination: Redis namespace is not empty")
 		}
-		v = binding{Version: 1, Region: region, Generation: nonce(), State: "loading"}
+		v = binding{Version: 2, Region: region, Generation: nonce(), State: "loading"}
 		raw, _ := json.Marshal(v)
 		etag, err = o.ConditionalCreate(ctx, BindingKey, raw)
 	}
@@ -106,7 +120,13 @@ func Initialize(ctx context.Context, b bucket.Bucket, endpoint, region string) e
 			return e
 		}
 		if g == v.Generation {
-			// Crash after Redis activation but before binding activation: only finish.
+			// Crash after Redis activation: repeat the offline seed before
+			// publishing the indexed-protocol binding (also covers legacy v1).
+			s.generation = v.Generation
+			if e = s.seedRecoveryIndex(ctx, b); e != nil {
+				return e
+			}
+			v.Version = 2
 			v.State = "active"
 			raw, _ := json.Marshal(v)
 			_, e = o.CAS(ctx, BindingKey, raw, etag)
@@ -135,11 +155,15 @@ func Initialize(ctx context.Context, b bucket.Bucket, endpoint, region string) e
 			}
 		}
 	}
+	if err = s.seedRecoveryIndex(ctx, b); err != nil {
+		return err
+	}
 	_, err = s.eval(ctx, `redis.call('SET',KEYS[1],ARGV[2]); return 1`, v.Generation)
 	if err != nil {
 		return err
 	}
 	v.State = "active"
+	v.Version = 2
 	raw, _ := json.Marshal(v)
 	_, err = o.CAS(ctx, BindingKey, raw, etag)
 	return err

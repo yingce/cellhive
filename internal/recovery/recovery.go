@@ -203,7 +203,11 @@ func (m *Manager) RecoverLiveScope(ctx context.Context, rec nodelog.Record, scop
 // sessions take the fast path (graceful handoff already uploaded everything). It
 // returns the number of segments collected and the number of sessions recovered.
 func (m *Manager) RecoverNode(ctx context.Context, nl *nodelog.Manager, deadNode string) (segments, sessions int, err error) {
-	recs, err := nl.ListNode(ctx, deadNode)
+	read := nl.ListNode
+	if nl.Index != nil {
+		read = nl.ListPendingNode
+	}
+	recs, err := read(ctx, deadNode)
 	if err != nil {
 		return 0, 0, err
 	}

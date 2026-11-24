@@ -27,3 +27,5 @@ wake 的持久写改走 Redis，保留先持久状态再发布的顺序及低频
 真实隔离 Redis 与 Kvrocks：并发 CAS 单胜者、ABA、迟到释放、owner 接管与旧 session 拒绝、权威丢失拒绝服务、迁移中断重试、零桶元数据点查、owner 休眠计数；任务领取重投递/重复通知/旧 ACK；流式与分页数据路径不退化。全量 go test/build/vet 与关键包 race。报告必须区分本地通过、未验收与未部署。
 
 配置收敛修订：Redis URL 同时启用 shared 调度；独立调度开关和 URL/region 环境项移除，namespace 从 bucket 配置派生。旧环境项和无效 URL 报错；已激活旧 namespace 绑定不自动迁移。见 docs/configuration.md 与 decisions.md 2026-11-24 单入口决策。
+
+2026-11-24 recovery discovery 扩展（本地实施，未部署）：Redis 新版绑定升级为 v2，增加 pending-session 索引；COS 正文仍是恢复权威。现有 v1 集群须停写执行 `coordination-recovery-init --offline`。见 [扩展设计](2026-11-24-redis-recovery-discovery-design.md)。

@@ -30,6 +30,9 @@ func (m *Manager) DiscoverPending(ctx context.Context) (*Listing, error) {
 }
 
 func (m *Manager) pendingListing(ctx context.Context, prefix string) ([]string, map[string][]byte, error) {
+	if m.Index != nil {
+		return m.Index.PendingRecoverySessions(ctx, prefix)
+	}
 	m.terminalMu.Lock()
 	terminal := make(map[string]bool, len(m.terminal))
 	for k := range m.terminal {

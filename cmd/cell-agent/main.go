@@ -104,12 +104,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "coordination-init" {
+	if len(os.Args) > 1 && (os.Args[1] == "coordination-init" || os.Args[1] == "coordination-recovery-init") {
 		if len(os.Args) != 3 || os.Args[2] != "--offline" || cfg.CoordinationBackend != "redis" {
 			log.Error("coordination-init requires --offline, stopped writers and redis backend")
 			os.Exit(2)
 		}
-		if err := coordination.Initialize(context.Background(), b, cfg.CoordinationRedisURL, cfg.CoordinationRegion); err != nil {
+		initialize := coordination.Initialize
+		if os.Args[1] == "coordination-recovery-init" {
+			initialize = coordination.InitializeRecoveryIndex
+		}
+		if err := initialize(context.Background(), b, cfg.CoordinationRedisURL, cfg.CoordinationRegion); err != nil {
 			log.Error("coordination initialization failed", "err", err)
 			os.Exit(1)
 		}

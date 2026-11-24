@@ -75,6 +75,7 @@ var ErrEnsembleMismatch = errors.New("nodelog: session ensemble mismatch")
 
 // Manager reads and writes node-log records.
 type Manager struct {
+	Index      PendingIndex
 	terminalMu sync.Mutex
 	terminal   map[string]bool
 	B          bucket.Bucket
@@ -85,7 +86,9 @@ type Manager struct {
 // New creates a node-log manager for a node. The owned object view enforces
 // that every node-log key stays under the reserved node-logs/ prefix.
 func New(b bucket.Bucket, nodeID string) *Manager {
+	index, _ := b.(PendingIndex)
 	return &Manager{
+		Index:  index,
 		B:      b,
 		Objs:   objectstore.NewOwned(b, objectstore.PrefixNodeLogs, objectstore.OwnerNodeLog),
 		NodeID: nodeID,
@@ -164,6 +167,11 @@ func (m *Manager) open(ctx context.Context, session string, epoch uint64, follow
 		UpdatedMs:    time.Now().UnixMilli(),
 	}
 	data, _ := json.Marshal(r)
+	if m.Index != nil {
+		if err := m.Index.RegisterRecoverySession(ctx, Key(m.NodeID, session), data); err != nil {
+			return Record{}, err
+		}
+	}
 	_, err := m.conditionalCreate(ctx, Key(m.NodeID, session), data)
 	if err != nil {
 		if errors.Is(err, bucket.ErrPrecondition) {
@@ -217,6 +225,12 @@ func (m *Manager) Get(ctx context.Context, node, session string) (Record, string
 	if err := json.Unmarshal(data, &r); err != nil {
 		return Record{}, "", fmt.Errorf("nodelog: corrupt record: %w", err)
 	}
+	if r.Node != node || r.Session != session {
+		return Record{}, "", fmt.Errorf("nodelog: identity mismatch for %s", Key(node, session))
+	}
+	if err := m.removeSealed(ctx, r); err != nil {
+		return Record{}, "", err
+	}
 	return r, e, nil
 }
 
@@ -235,7 +249,7 @@ func (m *Manager) SetStatus(ctx context.Context, node, session string, status St
 	if _, err := m.cas(ctx, Key(node, session), data, e); err != nil {
 		return Record{}, err
 	}
-	return r, nil
+	return r, m.removeSealed(ctx, r)
 }
 
 // SealCovered records the durable follower coverage and seals the session in
@@ -252,7 +266,7 @@ func (m *Manager) SealCovered(ctx context.Context, node, session string, covered
 	if _, err := m.cas(ctx, Key(node, session), data, e); err != nil {
 		return Record{}, err
 	}
-	return r, nil
+	return r, m.removeSealed(ctx, r)
 }
 
 // Seal marks a session sealed (graceful stop or completed recovery).

@@ -280,3 +280,18 @@ export CELLHIVE_COORDINATION_BACKEND=redis://127.0.0.1:6379/0
 Redis URL 自动启用共享 ZSET 调度；object 模式使用 cluster 本地 deadline。Redis authority 下 owner/lease/wake 都走 Redis；业务消息、消费进度、Cron 记录和清理证明继续在 cell。保留低频对账，不能因为启用 ZSET 就关闭恢复发现。重复通知通过 revision 防止旧 ACK 吃掉新通知；不承诺外部副作用 exactly-once。
 
 Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护，不重新执行初始化覆盖已激活状态；必须先隔离旧 session，再进行专门的协调重建与数据链恢复。本批不提供自动灾难重建/在线后端切换。自动均衡策略和恢复扫描完全消除不在本批实现范围；持久 outbox 已实现，见调度验收报告。
+
+### Redis 待恢复 session 索引升级（本地实现，未部署）
+
+新版本使用 Redis pending-session 索引发现恢复候选，COS 保留 node-log 正文和条件写。
+首次 `coordination-init --offline` 自动创建索引。已有 Redis 集群必须：
+
+1. 停止全部业务入口、runtime、agent 和其他写者，备份现有协调状态及 node-log。
+2. 用新版本运行 `cell-agent coordination-recovery-init --offline`，沿用相同 bucket/Redis 配置。
+3. 命令一次性枚举 COS 历史 node-log，补齐非 sealed 候选，写入 ready marker，升级桶绑定到 v2。失败保持停写，修复后重试。
+4. 仅启动新版本参与者，再验证 fleet 写入、恢复、重启及 KV/Queue/Alarm/Cron。
+
+新程序拒绝 v1 或缺少索引 marker；旧 v1 程序拒绝 v2 绑定。不可回退旧二进制或跳过离线升级直接滚动。
+普通恢复发现无 COS List；启动只点查拟使用的 session ID，实际恢复仍点查/CAS 正文。
+索引登记后、COS 创建前崩溃可能留下额外候选；缺失正文不能直接删除候选，以免漏掉迟到创建。
+当前 GZ revision 7 尚未执行此升级。

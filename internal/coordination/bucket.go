@@ -99,7 +99,11 @@ func (b *Bucket) List(c context.Context, p string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out = append(out, more...)
+	for _, k := range more {
+		if Selected(k) {
+			out = append(out, k)
+		}
+	}
 	sort.Strings(out)
 	return out, nil
 }
