@@ -1,6 +1,7 @@
 package cellstore
 
 import (
+	"cellhive/internal/telemetry"
 	"context"
 	"database/sql"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 // validateLocal runs only inside the scope's opening gate. This is a watermark
 // floor, not a content identity check; locally leading commits must be retained.
 func (s *Store) validateLocal(ctx context.Context, sc cell.Scope, path string, interactive bool) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "cell.validate_local")
+	defer span.End()
 	ctx, cancel := s.hydrateContext(ctx)
 	defer cancel()
 	release, err := s.hydrateSlot(ctx, interactive)

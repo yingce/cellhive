@@ -295,3 +295,7 @@ Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护
 普通恢复发现无 COS List；启动只点查拟使用的 session ID，实际恢复仍点查/CAS 正文。
 索引登记后、COS 创建前崩溃可能留下额外候选；缺失正文不能直接删除候选，以免漏掉迟到创建。
 当前 GZ revision 7 尚未执行此升级。
+
+### 临时 trace 阶段日志
+
+`CELLHIVE_TRACE_LOG_UNTIL` 为 RFC3339 绝对截止时间，必须在未来 24 小时内；未设置、过期或无效时关闭。启用后原本未采样的 Go span 只做 RecordOnly 并输出到 stdout 的 `trace_span` JSON，不改变传给下游的 sampled 标记，也不将这些额外 span 发给 ARMS。记录 trace/span/parent ID、阶段、起始时间、耗时及白名单 scope/object key 等属性；不记录请求正文、header、完整 URL 或错误消息。独立 4096 条非阻塞队列防止日志背压阻塞请求；队列满会丢弃诊断日志。自动到期后恢复原采样行为。入口 function_request 总耗时包含 Worker 准备，JS http.server span 从准备完成后开始；两者差值可识别尚未细分的 Worker 准备耗时。

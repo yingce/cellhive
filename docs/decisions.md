@@ -4357,3 +4357,7 @@ GZ 发布采样发现：owned scope 包含原生 DO 的 host/actor，而 outbox 
 Redis 模式将待恢复 session 发现迁至 generation-guarded Redis 索引；必须先登记 hint 再创建 COS node-log，只有观察到 sealed 正文才可移除。COS 保留恢复正文与 CAS，Redis 故障不回退扫描。已有安装需停写执行一次性索引初始化，新程序拒绝未初始化索引。设计与崩溃边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-discovery-design.md)。epoch GC 的事件驱动候选登记另行实施，本次不改变删除条件。
 
 本地验收：全量 make test、build/vet、nodelog/recovery/coordination race，以及 Redis/object 两种后端的真实双进程恢复测试通过；Redis 发现测试断言零 node-log COS GET/LIST，实际恢复保留正文点查。未提交、未部署，见 [验证记录](reports/2026-11-24-redis-recovery-discovery.md)。
+
+### 2026-11-24 GZ 限时 trace 日志诊断
+
+新增 CELLHIVE_TRACE_LOG_UNTIL 限时 RecordOnly stdout span 日志，补充 object GET/LIST、local validation、epoch chain 阶段。无凭据/正文/完整 URL，原 sampled 位和 ARMS 采样不变。目的为定位 5–6 秒冷访问，目前未据此确认根因或修复延迟；不包含 Redis recovery v3 迁移。

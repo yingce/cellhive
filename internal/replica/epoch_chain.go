@@ -1,6 +1,7 @@
 package replica
 
 import (
+	"cellhive/internal/telemetry"
 	"context"
 	"fmt"
 	"path"
@@ -24,6 +25,8 @@ type epochFile struct {
 // epochs strictly below the successor's first TXID, and accept only a
 // predecessor ending exactly at that cut. A late intermediate epoch is skipped.
 func (m *Manager) epochChain(ctx context.Context, s cell.Scope, maxEpoch uint64) ([]epochFile, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "replica.epoch_chain")
+	defer span.End()
 	epochs, err := m.epochDirs(ctx, s, maxEpoch)
 	if err != nil {
 		return nil, err

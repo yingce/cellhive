@@ -83,6 +83,8 @@ cellAgent:
   durability: ""
   # Temporary diagnostics only; unset after collection (default info).
   logLevel: ""
+  # Temporary stdout trace diagnostics; RFC3339 deadline at most 24h ahead.
+  traceLogUntil: ""
   # Upgrade every bucket participant to validate before enabling reclaim.
   authorityMode: legacy
   authorityReclaimACK: ""

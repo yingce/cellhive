@@ -117,6 +117,10 @@ spec:
                   name: {{ . | quote }}
                   key: CELLHIVE_COORDINATION_BACKEND
             {{- end }}
+            {{- with .Values.cellAgent.traceLogUntil }}
+            - name: CELLHIVE_TRACE_LOG_UNTIL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.cellAgent.logLevel }}
             - name: CELLHIVE_LOG_LEVEL
               value: {{ . | quote }}

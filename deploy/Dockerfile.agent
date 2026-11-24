@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Agent-only release: retain the accepted runtime/workerd artifacts unchanged.
-ARG RUNTIME_IMAGE=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:dc68536738177a541c061667ff0bc111912d2bab2d13826ca3d2bb113ddc3f25
+ARG RUNTIME_IMAGE=sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:deb75d2a88d052d21b619c93beed5e76ce92b6def2dde98117979f52fab89cdb
 FROM golang:1.27-bookworm AS build
 WORKDIR /src
 ENV CGO_ENABLED=1 CGO_CFLAGS="-O2 -g -DSQLITE_ENABLE_FILESTAT"

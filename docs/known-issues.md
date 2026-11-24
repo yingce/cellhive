@@ -256,3 +256,7 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 - GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已在 revision 7 发布限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。
 
 - Redis recovery discovery 已本地实现，验证见 [记录](reports/2026-11-24-redis-recovery-discovery.md)，尚未部署；当前 GZ revision 7 仍周期扫描 node-logs。新版本要求离线补齐 pending-session 索引，不能直接滚动混用旧写者。epoch GC 当前仍使用周期检查，事件驱动方案尚未落地。
+
+### 2026-11-24 GZ 限时 trace 日志诊断
+
+新增 CELLHIVE_TRACE_LOG_UNTIL 限时 RecordOnly stdout span 日志，补充 object GET/LIST、local validation、epoch chain 阶段。无凭据/正文/完整 URL，原 sampled 位和 ARMS 采样不变。目的为定位 5–6 秒冷访问，目前未据此确认根因或修复延迟；不包含 Redis recovery v3 迁移。
