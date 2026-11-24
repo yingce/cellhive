@@ -51,7 +51,7 @@ func authorityKey(key string) bool {
 		return ownKey(key) || strings.HasSuffix(key, "/owner-gen") || pointFenceKey(key)
 	}
 	return strings.HasPrefix(key, "r2meta/") || strings.HasPrefix(key, "r2/.mpu/v2/states/") || strings.HasPrefix(key, "nodes/") || strings.HasPrefix(key, "node-logs/") ||
-		key == "fleet/drain-token.json" || key == "fleet/waker.json"
+		key == "fleet/drain-token.json" || key == "fleet/waker.json" || key == "fleet/coordination.json"
 }
 
 func ownKey(key string) bool {

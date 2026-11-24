@@ -1,5 +1,8 @@
 # Cell 协议
 
+> 2026-11-24 可选 Redis/Kvrocks 协调后端：本文的 bucket owner/lease 条件操作描述默认 object 后端；redis 模式将这些协调读写路由到 Redis，保留 session/epoch、租约 self-fence、恢复与耐久证明语义。普通 claim 的代次分配与 owner 发布合为单次 Lua；维护路径的代次分配也使用原子 Lua。初始化、后端绑定及故障边界见 [设计](superpowers/specs/2026-11-24-redis-authority-design.md) 与 [运维](operations.md#可选-rediskvrocks-协调权威2026-11-24本地实现未部署)。本地实现，未部署。
+
+
 本文件定义 CellHive 状态层的核心协议：身份与寻址、单写者租约、代次围栏、复制与持久化证明、发现机制、bucket 约束。实现语言为 Go，复制实现参照 LiteFS/`superfly/ltx`。
 
 ## 1. 什么是 cell

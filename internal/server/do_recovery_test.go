@@ -1,11 +1,15 @@
 package server
 
 import (
+	"cellhive/internal/bucket"
+	"cellhive/internal/coordination"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,8 +22,14 @@ import (
 )
 
 func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
+	for _, backend := range []string{"object", "redis"} {
+		t.Run(backend, func(t *testing.T) { runTestDORecoverScopeWhileCellAgentSessionStaysLive(t, backend) })
+	}
+}
+
+func runTestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T, backend string) {
 	ctx := context.Background()
-	s, _ := newTestServer(t)
+	s := newDORecoveryServer(t, backend)
 	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil))
 	if err := s.Lease.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatal(err)
@@ -79,8 +89,14 @@ func TestDORecoverScopeWhileCellAgentSessionStaysLive(t *testing.T) {
 }
 
 func TestDORecoveryPointerABARoundTrip(t *testing.T) {
+	for _, backend := range []string{"object", "redis"} {
+		t.Run(backend, func(t *testing.T) { runTestDORecoveryPointerABARoundTrip(t, backend) })
+	}
+}
+
+func runTestDORecoveryPointerABARoundTrip(t *testing.T, backend string) {
 	ctx := context.Background()
-	s, _ := newTestServer(t)
+	s := newDORecoveryServer(t, backend)
 	s.Recovery = recovery.New(s.Replica, peer.NewHTTPTransport(testAuthConfig(config.Config{}).TokenPeer, nil))
 	if err := s.Lease.Publish(ctx, lease.Load{}); err != nil {
 		t.Fatal(err)
@@ -117,4 +133,54 @@ func TestDORecoveryPointerABARoundTrip(t *testing.T) {
 	if err := s.ensureDORecoveryPointer(ctx, sc, stale); err == nil {
 		t.Fatal("old owner replaced newer recovery pointer")
 	}
+}
+
+// Metadata must never touch the object backend after the offline import.
+type rejectRecoveryMetadata struct{ bucket.Bucket }
+
+func recoveryMetadataKey(k string) bool {
+	return strings.HasPrefix(k, "node-logs/") || strings.HasSuffix(k, "/do-recovery.json")
+}
+func (b *rejectRecoveryMetadata) Get(c context.Context, k string) ([]byte, string, error) {
+	if recoveryMetadataKey(k) {
+		return nil, "", fmt.Errorf("unexpected COS recovery GET: %s", k)
+	}
+	return b.Bucket.Get(c, k)
+}
+func (b *rejectRecoveryMetadata) ConditionalCreate(c context.Context, k string, v []byte) (string, error) {
+	if recoveryMetadataKey(k) {
+		return "", fmt.Errorf("unexpected COS recovery create: %s", k)
+	}
+	return b.Bucket.ConditionalCreate(c, k, v)
+}
+func (b *rejectRecoveryMetadata) CAS(c context.Context, k string, v []byte, e string) (string, error) {
+	if recoveryMetadataKey(k) {
+		return "", fmt.Errorf("unexpected COS recovery CAS: %s", k)
+	}
+	return b.Bucket.CAS(c, k, v, e)
+}
+func newDORecoveryServer(t *testing.T, backend string) *Server {
+	t.Helper()
+	if backend == "object" {
+		s, _ := newTestServer(t)
+		return s
+	}
+	endpoint := os.Getenv("CELLHIVE_TEST_COORDINATION_URL")
+	if endpoint == "" {
+		t.Skip("requires isolated Redis")
+	}
+	s, _ := newTestServerWithBucket(t, func(base bucket.Bucket) bucket.Bucket {
+		region := fmt.Sprintf("do-recovery-test-%d", time.Now().UnixNano())
+		if err := coordination.Initialize(t.Context(), base, endpoint, region); err != nil {
+			t.Fatal(err)
+		}
+		b, err := coordination.Open(t.Context(), base, endpoint, region)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { b.Close() })
+		b.Base = &rejectRecoveryMetadata{Bucket: base}
+		return b
+	})
+	return s
 }

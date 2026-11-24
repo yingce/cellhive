@@ -653,6 +653,32 @@ func (b *Batcher) Flush(ctx context.Context) error {
 	return nil
 }
 
+// ReplaySpool synchronously proves existing spool entries before activation.
+// It can be called before Start, when no producer or background replay exists.
+// A failure leaves unresolved entries on disk and must prevent startup recovery.
+func (b *Batcher) ReplaySpool(ctx context.Context) error {
+	if b.spool == nil {
+		return ctx.Err()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		before := b.spool.Count()
+		entries, err := b.spool.load(512, true)
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 && before == 0 {
+			return nil
+		}
+		b.replayEntries(ctx, entries)
+		if remaining := b.spool.Count(); remaining >= before {
+			return fmt.Errorf("upload: %d spooled segment(s) still unproven", remaining)
+		}
+	}
+}
+
 // Stop flushes and waits for the loop to finish.
 func (b *Batcher) Stop() {
 	b.closeOnce.Do(func() {})

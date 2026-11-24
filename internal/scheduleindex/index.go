@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cellhive/internal/cell"
+	"cellhive/internal/control"
 	"cellhive/internal/timer"
 
 	"github.com/redis/go-redis/v9"
@@ -27,7 +28,7 @@ type Hint struct {
 
 func (h Hint) Valid() bool {
 	sc, err := cell.ParseScope(h.Scope)
-	return err == nil && h.Due >= 0 && (h.Kind == "timer" || h.Kind == "queue" && sc.Class == "__queue__")
+	return err == nil && h.Due >= 0 && (h.Kind == "timer" || h.Kind == "queue" && sc.Class == "__queue__" || (h.Kind == "cron" || h.Kind == "purge" || h.Kind == "resource-cleanup") && sc == control.Scope())
 }
 
 type Index struct {
@@ -54,8 +55,8 @@ func New(endpoint, region string, log *slog.Logger) (*Index, error) {
 	opt.ReadTimeout = time.Second
 	opt.WriteTimeout = time.Second
 	opt.ContextTimeoutEnabled = true
-	prefix := "cellhive:{" + region + ".0}:"
-	return &Index{client: redis.NewClient(opt), keys: []string{prefix + "due", prefix + "claims"}, pending: make(chan Hint, 1024), log: log}, nil
+	prefix := "cellhive:{" + region + ".0}:v2:"
+	return &Index{client: redis.NewClient(opt), keys: []string{prefix + "due", prefix + "claims", prefix + "revisions", prefix + "claimed-revisions", prefix + "payloads", prefix + "pending-due"}, pending: make(chan Hint, 1024), log: log}, nil
 }
 func (i *Index) Close() error { return i.client.Close() }
 
@@ -67,23 +68,44 @@ func (i *Index) Notify(h Hint) {
 		i.dropped.Add(1)
 	}
 }
+
+// Publish synchronously persists a hint. Durable outbox relay ACKs only after success.
+func (i *Index) Publish(ctx context.Context, h Hint) error { return i.publish(ctx, h) }
+func hintKey(h Hint) string                                { return h.Kind + "\x00" + h.Scope }
 func (i *Index) publish(ctx context.Context, h Hint) error {
+	if !h.Valid() {
+		return errors.New("invalid schedule hint")
+	}
 	raw, err := json.Marshal(h)
 	if err != nil {
 		return err
 	}
-	return i.client.ZAddNX(ctx, i.keys[0], redis.Z{Score: float64(h.Due), Member: string(raw)}).Err()
+	var revision [16]byte
+	if _, err := rand.Read(revision[:]); err != nil {
+		return err
+	}
+	return i.client.Eval(ctx, publishScript, i.keys, hintKey(h), h.Due, hex.EncodeToString(revision[:]), string(raw)).Err()
 }
 
+// Re-publication during a claim must survive the old consumer's ACK.
+const publishScript = `
+local score=redis.call('ZSCORE',KEYS[1],ARGV[1])
+if not score then redis.call('ZADD',KEYS[1],ARGV[2],ARGV[1])
+elseif redis.call('HGET',KEYS[2],ARGV[1]) then
+ local pending=redis.call('HGET',KEYS[6],ARGV[1]);if not pending or tonumber(ARGV[2])<tonumber(pending) then redis.call('HSET',KEYS[6],ARGV[1],ARGV[2]) end
+elseif tonumber(ARGV[2])<tonumber(score) then redis.call('ZADD',KEYS[1],ARGV[2],ARGV[1]) end
+redis.call('HSET',KEYS[3],ARGV[1],ARGV[3]);redis.call('HSET',KEYS[5],ARGV[1],ARGV[4]);return 1`
 const claimScript = `local m=redis.call('ZRANGEBYSCORE',KEYS[1],'-inf',ARGV[1],'LIMIT',0,1)
 if #m==0 then return {} end
-redis.call('ZADD',KEYS[1],ARGV[2],m[1])
-redis.call('HSET',KEYS[2],m[1],ARGV[3])
-return m`
+redis.call('ZADD',KEYS[1],ARGV[2],m[1]);redis.call('HSET',KEYS[2],m[1],ARGV[3])
+redis.call('HSET',KEYS[4],m[1],redis.call('HGET',KEYS[3],m[1]) or '');redis.call('HDEL',KEYS[6],m[1])
+return {redis.call('HGET',KEYS[5],m[1]) or ''}`
 const ackScript = `if redis.call('HGET',KEYS[2],ARGV[1])~=ARGV[2] then return 0 end
-redis.call('ZREM',KEYS[1],ARGV[1])
-redis.call('HDEL',KEYS[2],ARGV[1])
-return 1`
+local current=redis.call('HGET',KEYS[3],ARGV[1]) or ''
+local claimed=redis.call('HGET',KEYS[4],ARGV[1]) or ''
+if current~=claimed then redis.call('ZADD',KEYS[1],redis.call('HGET',KEYS[6],ARGV[1]) or '0',ARGV[1])
+else redis.call('ZREM',KEYS[1],ARGV[1]);redis.call('HDEL',KEYS[3],ARGV[1]);redis.call('HDEL',KEYS[5],ARGV[1]) end
+redis.call('HDEL',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[4],ARGV[1]);redis.call('HDEL',KEYS[6],ARGV[1]);return 1`
 
 func (i *Index) claim(ctx context.Context, now time.Time, token string) (string, error) {
 	items, err := i.client.Eval(ctx, claimScript, i.keys, now.UnixMilli(), now.Add(30*time.Second).UnixMilli(), token).StringSlice()
@@ -93,8 +115,24 @@ func (i *Index) claim(ctx context.Context, now time.Time, token string) (string,
 	return items[0], nil
 }
 func (i *Index) ack(ctx context.Context, item, token string) (int64, error) {
-	return i.client.Eval(ctx, ackScript, i.keys, item, token).Int64()
+	var h Hint
+	if err := json.Unmarshal([]byte(item), &h); err != nil {
+		return 0, err
+	}
+	return i.client.Eval(ctx, ackScript, i.keys, hintKey(h), token).Int64()
 }
+
+// retry releases only our failed claim. A newer claimant is never disturbed.
+func (i *Index) retry(ctx context.Context, item, token string, now time.Time) (int64, error) {
+	var h Hint
+	if err := json.Unmarshal([]byte(item), &h); err != nil {
+		return 0, err
+	}
+	return i.client.Eval(ctx, `if redis.call('HGET',KEYS[2],ARGV[1])~=ARGV[2] then return 0 end
+redis.call('ZADD',KEYS[1],ARGV[3],ARGV[1])
+redis.call('HDEL',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[4],ARGV[1]);redis.call('HDEL',KEYS[6],ARGV[1]);return 1`, i.keys, hintKey(h), token, now.Add(time.Second).UnixMilli()).Int64()
+}
+
 func (i *Index) consume(ctx context.Context, handle func(context.Context, Hint) error) error {
 	for range 32 {
 		var nonce [16]byte
@@ -112,7 +150,8 @@ func (i *Index) consume(ctx context.Context, handle func(context.Context, Hint) 
 			err = handle(work, h)
 			cancel()
 			if err != nil {
-				return err
+				_, retryErr := i.retry(ctx, item, token, time.Now())
+				return errors.Join(err, retryErr)
 			}
 		}
 		if _, err = i.ack(ctx, item, token); err != nil {

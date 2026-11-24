@@ -23,6 +23,7 @@ import (
 	"cellhive/internal/cellstore"
 	"cellhive/internal/config"
 	"cellhive/internal/control"
+	"cellhive/internal/coordination"
 	"cellhive/internal/lease"
 	"cellhive/internal/nodelog"
 	"cellhive/internal/owner"
@@ -59,9 +60,23 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 	}
 	adminToken := func() string { return mint(creds.Admin, "token/admin", "admin", "") }
 	bindingToken := func(name string) string { return mint(creds.Binding, "token/scope", "binding", name) }
-	b, err := bucket.NewFSBucket(filepath.Join(root, "bucket"))
+	fs, err := bucket.NewFSBucket(filepath.Join(root, "bucket"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	var b bucket.Bucket = fs
+	coordinationURL := os.Getenv("CELLHIVE_SESSION_E2E_REDIS_URL")
+	coordinationRegion := config.CoordinationNamespace("", filepath.Join(root, "bucket"), "")
+	if coordinationURL != "" {
+		if err := coordination.Initialize(t.Context(), fs, coordinationURL, coordinationRegion); err != nil {
+			t.Fatal(err)
+		}
+		cb, err := coordination.Open(t.Context(), fs, coordinationURL, coordinationRegion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cb.Close()
+		b = cb
 	}
 	type agent struct {
 		node, session, dir, rest, admin string
@@ -119,6 +134,9 @@ func TestSessionRecoveryProcesses(t *testing.T) {
 			}
 		}
 		env := map[string]string{"CELLHIVE_ROOT_KEY": secret, "CELLHIVE_NODE_ID": a.node, "CELLHIVE_SESSION_ID": session, "CELLHIVE_DATA_DIR": a.dir, "CELLHIVE_BUCKET_DIR": filepath.Join(root, "bucket"), "CELLHIVE_REST_ADDR": a.rest, "CELLHIVE_ADMIN_ADDR": a.admin, "CELLHIVE_ADVERTISE": a.rest, "CELLHIVE_PEER_URL": "http://" + a.rest, "CELLHIVE_LEASE_TTL": "3s", "CELLHIVE_DURABILITY": "fleet", "CELLHIVE_UPLOAD_INTERVAL": "100ms", "CELLHIVE_EPOCH_GC_INTERVAL": "0s", "CELLHIVE_WAKE_REPAIR_INTERVAL": "0s", "CELLHIVE_WAKER_INTERVAL": "0s", "CELLHIVE_TIMER_INTERVAL": "0s", "CELLHIVE_CRON_INTERVAL": "0s", "CELLHIVE_REBALANCE_INTERVAL": "0s", "CELLHIVE_CELL_IDLE": "0s"}
+		if coordinationURL != "" {
+			env["CELLHIVE_COORDINATION_BACKEND"] = coordinationURL
+		}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}

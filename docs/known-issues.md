@@ -231,3 +231,44 @@ SG 约 172 秒采样记录两台 agent 合计 15099 次 GET 类操作；未观�
 - 2026-11-24：剩余 GET 已完成 SG 限时 HTTP debug 与三地区来源采样；SG revision 146 已恢复普通日志。确认正常续租 4 GET + 1 Append、2 秒 peer 刷新、Recovery 5 秒选主与 Cron/wake 多阶段读取是主要开销。agent-1 日志存在轮转缺口，双节点 metrics 完整；无任务 span，不能称完整分布式 trace。本次未改请求逻辑，见 [诊断报告](reports/2026-11-24-get-trace.md)。
 
 - 2026-11-24：peer/recovery 有界观察复用及 30 秒恢复维护周期已从独立源码 `892c9797` 部署 SG/USW/GZ，租约 TTL 仍为 10 秒；全量 test/build/vet、相关 race 和十分钟生产健康验证通过，见 [发布记录](reports/2026-11-24-peer-recovery-release.md)。将延后后台发现故障/新 session，显式接管校验与同步恢复保持；共享 fleet 扫描和 node-log/lease 合并尚未实施，不能宣称后台 GET 已整体解决。见 [设计](reports/2026-11-24-peer-recovery-read-reuse.md)。
+
+## Redis/Kvrocks 权威 adapter（2026-11-24）
+
+最新状态：本地 Compose 与 SG/USW/GZ 已切换 Redis；三地区同时启用 recovery index v2，见 [三地区发布记录](reports/2026-11-24-all-regions-redis-recovery-release.md)；本节此前“未部署生产”为切换前验收状态，见 [GZ 发布记录](reports/2026-11-24-gz-redis-fleet.md)。
+
+新增可选协调权威后端；本地 Redis/Kvrocks 集成、双进程恢复、全量 test/build/vet 与关键 race 已通过，未部署生产。见 [验证报告](reports/2026-11-24-redis-authority.md)。与旧二进制不支持混跑；切换须离线迁移。Redis 元数据丢失不支持自动重建或透明切换至可能回退的副本。普通启动必须拒绝缺失 generation，不能把旧授权当不存在。业务数据与恢复日志仍在原存储。契约见 [设计](superpowers/specs/2026-11-24-redis-authority-design.md)。
+
+## Redis 调度补齐（2026-11-24）
+
+已补充事务 outbox、Cron/清理共享 deadline 和真实 workerd 验收脚本；待发布 outbox 暂缓驱逐，但不阻挡其他干净 cell。此前 Redis owner/KV 恢复演练不等于全部定时业务验收。见 [设计](superpowers/specs/2026-11-24-redis-scheduling-completion.md)，当前范围及验证结果见 [调度报告](reports/2026-11-24-redis-scheduling.md)，未部署生产。
+
+- 2026-11-24 完整 E2E 新发现并本地修复启动 upload-spool 顺序：旧异步重放可能晚于接管/恢复，导致 SQLite 恢复旧桶切点后落后于上传尾部。改为恢复前严格同步重放，失败/损坏/历史 quarantine 阻断启动并保留文件。默认/object、Redis、Kvrocks 六套矩阵及故障验收进展见 [调度报告](reports/2026-11-24-redis-scheduling.md)。尚未部署生产。
+
+- 2026-11-24 shared 即时接管已补齐：到期提示确认 owner 已死后走原恢复/CAS 门禁，失败提示条件重试；live owner 和 retired 防护保持。禁用分钟级扫描对本次验收的贡献（周期 10 分钟）后，Redis/Kvrocks 后端恢复并重启 agent 至 Queue/Alarm 完成分别约 3/2 秒；本地单次小规模结果，未部署生产，非生产 SLO。见 [调度报告](reports/2026-11-24-redis-scheduling.md)。
+
+- 2026-11-24 配置已收敛为 `CELLHIVE_COORDINATION_BACKEND=redis://...` / `rediss://...` 自动启用共享调度，无独立 SCHEDULE_MODE。namespace 从 bucket 配置生成，旧实验 region 的 binding 不自动迁移；旧拆分环境项会报错而非静默忽略。Redis/Kvrocks 单参数业务调度、快速故障恢复、双进程恢复及默认 object Bindings 验收通过，详见 [协调报告](reports/2026-11-24-redis-authority.md)。未部署生产。
+
+- 2026-11-24：已切换本机常驻 Compose，保留原 MinIO/数据卷；KV、Queue 重试、Cron、Alarm 和持久卷重启验证通过。当时 GZ 切换按用户要求暂停；后续已完成 GZ revision 7 发布，见下文。见 [本地部署记录](reports/2026-11-24-local-redis-compose.md)。
+- 同日本机改为双 agent fleet，独立卷并验证实际 follower 确认；仍为同一宿主机，不能抵抗宿主机故障。无 peer 时按现有协议先落本地 spool。
+
+- GZ 使用集群内单实例持久 Redis，AOF always/noeviction；未使用可能回退已确认版本的托管 Redis 副本提升。节点失联不得强删 Redis Pod/强挂卷。最终版本两个 agent 启动时连接 Redis 被拒绝，各重启一次后恢复；稳定性观察与剩余遥测告警见发布记录。
+
+- GZ 首轮 Redis 采样发现 outbox 对 native DO scope 的重复 hydration，导致 other/LTX GET 和 List 增加。已在 revision 7 发布限定为已有 agent-local 数据库的修复；缺失本地数据库不由 outbox relay 触发恢复。最终生产采样见 GZ 发布记录。
+
+- Redis recovery discovery 已部署 SG 150、USW 142、GZ 9；本地验证见 [记录](reports/2026-11-24-redis-recovery-discovery.md)，生产验收见上述三地区发布记录。普通恢复发现已不再周期扫描 COS node-logs。新版本要求离线补齐 pending-session 索引，不能直接滚动混用旧写者。epoch GC 当前仍使用周期检查，事件驱动方案尚未落地。
+
+
+## 2026-11-24 托管 Redis 协调回退限制
+
+用户选择采用腾讯云托管 Redis，GZ / SG / USW 已切换并完成常规验收；主从故障切换安全未验收。异步复制与自动主从提升可能丢失已确认的 owner/revision/lease/schedule 写；当前 generation 仅能拒绝空库或不匹配世代，不能检测同世代回退。Lua CAS 不解决此限制，不能宣称此故障模型下协调 RPO=0 或 fencing 安全已验证。异常必须停写并隔离旧 session 后人工恢复，不自动回退 COS 或历史 Redis。
+
+### 2026-11-24 Redis recovery authority v3（本地实施，未部署）
+
+Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁移。epoch GC 默认周期改为 1 小时，首次仍为 1 分钟，每节点集中遍历 OwnedScopes；事件驱动尚未实现。设计与兼容性边界见 [设计](superpowers/specs/2026-11-24-redis-recovery-authority-design.md)。
+
+本地 v3 验收：全量 make test、build/vet、coordination/nodelog/recovery race、object/Redis 双进程恢复均通过；尚未部署，见 [报告](reports/2026-11-24-redis-recovery-authority-v3.md)。
+
+
+### 2026-11-24 GZ 限时 trace 日志诊断
+
+新增 CELLHIVE_TRACE_LOG_UNTIL 限时 RecordOnly stdout span 日志，补充 object GET/LIST、local validation、epoch chain 阶段。无凭据/正文/完整 URL，原 sampled 位和 ARMS 采样不变。目的为定位 5–6 秒冷访问，目前未据此确认根因或修复延迟；不包含 Redis recovery v3 迁移。

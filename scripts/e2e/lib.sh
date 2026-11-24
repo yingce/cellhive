@@ -35,6 +35,18 @@ E2E_ADMIN_PORT=$((E2E_PORT_BASE + 1))
 E2E_RT_PORT=$((E2E_PORT_BASE + 2))
 E2E_RT_INTERNAL=$((E2E_PORT_BASE + 3))
 
+# Opt-in authority matrix for the standard suites. Each script gets its own
+# region and fresh FS bucket, initialized before any agent starts.
+if [[ -n "${E2E_COORDINATION_URL:-}" ]]; then
+  export CELLHIVE_COORDINATION_BACKEND="$E2E_COORDINATION_URL"
+  mkdir -p "$E2E_BASE/bucket"
+  CELLHIVE_BUCKET_DIR="$E2E_BASE/bucket" CELLHIVE_DATA_DIR="$E2E_BASE/init" \
+    "$E2E_BIN/cell-agent" coordination-init --offline >"$E2E_BASE/init.log" 2>&1 || {
+      echo "coordination init failed: $E2E_BASE/init.log" >&2
+      exit 1
+    }
+fi
+
 e2e_log() { printf '[e2e] %s\n' "$*"; }
 e2e_fail() { printf '[e2e] FAIL: %s\n' "$*" >&2; exit 1; }
 e2e_need() { [ "$1" = "$2" ] || e2e_fail "${3:-expected '$2', got '$1'}"; }

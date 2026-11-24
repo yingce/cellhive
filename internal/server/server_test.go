@@ -44,11 +44,19 @@ import (
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
+	return newTestServerWithBucket(t, nil)
+}
+
+func newTestServerWithBucket(t *testing.T, wrap func(bucket.Bucket) bucket.Bucket) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	b, err := bucket.NewFSBucket(dir)
+	base, err := bucket.NewFSBucket(dir)
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
+	}
+	var b bucket.Bucket = base
+	if wrap != nil {
+		b = wrap(b)
 	}
 	cfg := config.Config{NodeID: "node-1", TokenPeer: "tok", TokenInternal: "tok", TokenDispatch: "tok", ScopeSecret: "tok", TokenLog: "tok", AdminToken: "admin-tok", BucketDir: dir, Durability: "auto", BucketWait: true}
 	cfg = testAuthConfig(cfg)

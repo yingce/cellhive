@@ -55,11 +55,13 @@ type Store struct {
 	env *Envelope
 	now func() time.Time
 
-	mu         sync.Mutex
-	migrated   map[*cellstore.Cell]bool
-	purgeWake  chan struct{}
-	projBuilds atomic.Int64
-	resourceMu sync.Mutex
+	mu        sync.Mutex
+	migrated  map[*cellstore.Cell]bool
+	purgeWake chan struct{}
+	// SchedulePurge publishes a non-authoritative deadline; set before serving.
+	SchedulePurge func(time.Time)
+	projBuilds    atomic.Int64
+	resourceMu    sync.Mutex
 	// Set only by fault tests to stop after all deploy rows are
 	// written but before Cell.Tx commits them.
 	onDeployBeforeCommit func()

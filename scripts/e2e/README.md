@@ -189,3 +189,40 @@ checks the public 64MiB upload limit. These native tests require the existing
 `CELLHIVE_NATIVE_TEST_PROVIDER=cos` credential environment and shared test lock.
 
 `hk-review.py --suite do-idle-retirement` runs the native DO owner handoff and five idle/reopen cycles against HK COS, with 16 concurrent cold reads at each reopen. Uses the explicit existing paging/lifecycle fork via `--workerd`.
+
+### Redis/Kvrocks business scheduling
+
+`CELLHIVE_WORKERD=/path/to/current/fork bash scripts/e2e/redis-scheduling.sh redis`
+(or `kvrocks`) starts a disposable loopback-only Docker database and fresh FS bucket,
+initializes Redis coordination offline, then runs a real cell-agent, user-runtime,
+and DO runtime. It verifies Queue delivery and explicit retry, a naturally due
+one-minute Cron calling `scheduled()`, and DO Alarm set, postponement, cancellation,
+and retry after a tenant exception. It discards inherited environment configuration;
+no production credentials or bucket settings are passed through. Required images:
+`redis:7.2-alpine` and `apache/kvrocks:latest`. The supplied workerd must advertise
+`do-paging/1`, `do-paging-fail-stop/1`, and `do-paging-lifecycle/1`.
+
+Use `E2E_PORT_BASE` for an unused port range (default 29400), and `E2E_BIN` for the
+binaries under test. Artifacts are retained by default; `E2E_KEEP=0` removes them.
+Containers/processes are stopped after each run. This single-agent local acceptance
+does not prove multi-agent takeover, Redis outage/restart recovery, or production
+object-store durability. Rebuild binaries after scheduling implementation changes.
+
+The six standard suites also accept `E2E_COORDINATION_URL=redis://127.0.0.1:<port>`.
+Use only a disposable local Redis/Kvrocks instance: each script initializes its
+fresh FS bucket and a unique Redis region offline, enabling shared scheduling.
+Run the same six targets sequentially with an isolated environment and unused
+`E2E_PORT_BASE`; the default without this option remains object authority.
+
+`E2E_SCHEDULE_OUTAGE=1 bash scripts/e2e/redis-scheduling.sh redis` (or `kvrocks`)
+adds acknowledged delayed Queue/Alarm recovery after backend stop/start and
+agent SIGKILL. It keeps backend storage and restarts the agent from its existing
+directory; this does not prove Redis data-loss recovery or automatic process
+restart. Backend PING readiness and Docker's changed published port are checked
+before restarting the agent.
+
+Set both `E2E_SCHEDULE_OUTAGE=1 E2E_FAST_RECOVERY=1` for the fast recovery gate.
+It sets waker/wake-repair to 10 minutes and requires delayed Queue/Alarm recovery
+within 20 seconds, measured after backend PING readiness and before restarting
+the agent. The injected backend-down interval is excluded. JSON timing evidence
+is written to `recovery-results.json`; this local fixture is not a production SLO.

@@ -1,0 +1,89 @@
+{{- if .Values.coordinationRedis.enabled }}
+{{- $secret := required "coordinationRedis.existingSecret is required" .Values.coordinationRedis.existingSecret }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-coordination-redis
+spec:
+  clusterIP: None
+  selector:
+    app: coordination-redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - {name: redis, port: 6379, targetPort: 6379}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-coordination-redis
+spec:
+  serviceName: {{ .Release.Name }}-coordination-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coordination-redis
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: coordination-redis
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: redis
+          image: {{ .Values.coordinationRedis.image | quote }}
+          command: ["sh", "-ec"]
+          args:
+            - 'exec redis-server --appendonly yes --appendfsync always --maxmemory-policy noeviction --requirepass "$REDISCLI_AUTH"'
+          env:
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret | quote }}
+                  key: REDIS_PASSWORD
+          ports:
+            - {name: redis, containerPort: 6379}
+          readinessProbe:
+            exec:
+              command: ["sh", "-ec", "redis-cli ping | grep -qx PONG"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - {name: data, mountPath: /data}
+          resources:
+            {{- toYaml .Values.coordinationRedis.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.coordinationRedis.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.coordinationRedis.storage | quote }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-coordination-redis
+spec:
+  podSelector:
+    matchLabels:
+      app: coordination-redis
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cell-agent
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        - podSelector:
+            matchLabels:
+              app: coordination-init
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - {protocol: TCP, port: 6379}
+  egress: []
+{{- end }}

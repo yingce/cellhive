@@ -19,32 +19,63 @@ type scheduleRequest struct {
 	Epoch         uint64
 }
 
-// DeliverScheduleHint routes only to an address supplied by the existing owner
-// manager. A stale or abandoned hint cannot appoint a new owner.
+// DeliverScheduleHint routes to live owners, or requests the ordinary fenced
+// takeover gate for an absent/dead owner. The hint itself never grants authority.
 func (s *Server) DeliverScheduleHint(ctx context.Context, h scheduleindex.Hint) error {
 	ctx = bucket.WithReadSource(ctx, bucket.SharedSchedule)
 	sc, err := cell.ParseScope(h.Scope)
 	if err != nil || !h.Valid() {
 		return errors.New("invalid scheduling hint")
 	}
-	o, _, err := s.Owner.ResolveRoute(ctx, sc)
-	// Durable orphan discovery handles takeover when there is no current owner.
-	if errors.Is(err, owner.ErrUnowned) {
-		return nil
+	if s.Owner == nil || !s.ackAllowed(time.Now()) {
+		return owner.ErrNotOwner
 	}
-	if err != nil {
+	o, _, err := s.Owner.ResolveRoute(ctx, sc)
+	missing := errors.Is(err, owner.ErrUnowned)
+	if err != nil && !missing {
 		return err
 	}
-	if o.Retired {
+	if !missing && o.Retired {
 		return nil
+	}
+	live := false
+	if !missing {
+		live, err = s.Owner.Live(ctx, o, time.Now())
+		if err != nil {
+			return err
+		}
+	}
+	if !live {
+		if s.ScheduleAcquire == nil {
+			return owner.ErrNotOwner
+		}
+		acquired, err := s.ScheduleAcquire(ctx, sc)
+		if err != nil {
+			return err
+		}
+		if !acquired {
+			return owner.ErrNotOwner
+		}
+		// Re-read authority after the callback. Another claimant may have won;
+		// never synthesize a request from the old tuple or the callback alone.
+		o, _, err = s.Owner.Resolve(ctx, sc)
+		if err != nil {
+			return err
+		}
+		if o.Retired || o.Node != s.Owner.NodeID || o.Session != s.Owner.Session {
+			return owner.ErrNotOwner
+		}
+		live, err = s.Owner.Live(ctx, o, time.Now())
+		if err != nil {
+			return err
+		}
+		if !live {
+			return owner.ErrNotOwner
+		}
 	}
 	req := scheduleRequest{Hint: h, Node: o.Node, Session: o.Session, Epoch: o.Epoch}
 	if o.Node == s.Cfg.NodeID {
 		return s.acceptScheduleHint(ctx, req)
-	}
-	live, err := s.Owner.Live(ctx, o, time.Now())
-	if err != nil || !live {
-		return err
 	}
 	err = s.cleanupRPC(ctx, o.Address, "/v1/internal/schedule/hint", req, nil)
 	if err != nil {
@@ -66,12 +97,25 @@ func (s *Server) acceptScheduleHint(ctx context.Context, req scheduleRequest) er
 		return owner.ErrNotOwner
 	}
 	// Both runners acquire their normal resource and owner gates after the nudge.
-	if h.Kind == "queue" {
+	switch h.Kind {
+	case "cron":
+		if s.CronNudge == nil {
+			return errors.New("cron scheduler unavailable")
+		}
+		s.CronNudge()
+	case "purge":
+		if s.Control == nil {
+			return errors.New("control store unavailable")
+		}
+		s.Control.NudgePurge()
+	case "resource-cleanup":
+		s.NudgeResourceCleanup()
+	case "queue":
 		if s.QueueLocalNudge == nil {
 			return errors.New("queue runner unavailable")
 		}
 		s.QueueLocalNudge(sc.Namespace, sc.ID)
-	} else {
+	default:
 		if s.Timers == nil {
 			return errors.New("timer registry unavailable")
 		}

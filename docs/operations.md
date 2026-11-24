@@ -31,7 +31,7 @@
 | 资源清理、app/worker purge | 删除事件、到期重试，空闲每分钟对账 | 检查控制 owner，按持久任务执行；purge 有分批工作时按 5 秒推进。退役历史另走上述小时级补扫。 |
 | Queue、Timer、Cron | Queue 收到通知或到期时派发，每分钟对账；驻留 timer 默认 1 秒；Cron 按 UTC 分钟，失败时默认 30 秒重试 | 按候选做 owner、持久状态检查与派发。shared 模式另有每秒 Redis 到期查询。 |
 | 孤儿 wake、wake 修复 | waker 默认 1 分钟，过期索引清理间隔 10 分钟，本机修复默认 5 分钟 | 检查持久到期索引、接管孤儿、修复已知 scope。 |
-| Fold、epoch GC、复制上传 | fold 每秒检查本机候选，epoch GC 默认首次 1 分钟后、之后每 5 分钟；上传刷新默认 30 秒 | 按 scope 和条件做归并、回收或上传；常规 compaction 由事件唤醒。 |
+| Fold、epoch GC、复制上传 | fold 每秒检查本机候选，epoch GC 默认首次 1 分钟后、之后每 1 小时（每节点一个 goroutine 遍历 OwnedScopes）；上传刷新默认 30 秒 | 按 scope 和条件做归并、回收或上传；常规 compaction 由事件唤醒。 |
 | R2 multipart、Workflow、审计 | multipart 启动 1 分钟后扫第一页，整轮结束后间隔 1 小时，续页和错误重试间隔 1 分钟；Workflow 策略每分钟、启用默认保留策略时每 10 分钟；审计保留每小时 | multipart 检查旧上传；其余按控制面投影、owner 和保留策略执行。 |
 | 交权补偿、磁盘维护、代理 | 交权每 5 秒先检查本机待重试集合；启用磁盘维护时默认 1 分钟；ProxySQL 配置后每 30 秒、Hyperdrive 代理健康每 5 秒 | 交权集合为空时没有 COS 请求；代理健康探测访问代理端点。按需启用的 rebalance 和 bundle/asset GC 默认关闭。 |
 
@@ -252,3 +252,66 @@ cell-agent `/metrics` 现在额外暴露：
 恢复路径现在用 `Truncate` + `WriteAt` 直接写目标 SQLite 文件，不再额外分配 `commit*pageSize` 的整库缓冲；仍然会持有从对象存储读入的 segment 数据，因此 bucket 下载/compaction 的峰值需要继续单独观察。
 
 恢复写入按最多 1MiB 的连续页 run 合并后一次 `WriteAt`，避免每页 4KiB 一次 syscall；run buffer 固定有界，不会回到整库缓冲。
+
+## 可选 Redis/Kvrocks 协调权威（2026-11-24，已部署 SG / USW / GZ）
+
+初始 GZ 发布方案采用 Chart 可选 `coordinationRedis.enabled` 单实例 StatefulSet，
+持久 PVC、AOF `appendfsync always`、`noeviction`，不配置会回退版本的副本自动提升。
+镜像须固定 digest，凭据由 `coordinationRedis.existingSecret` 的 `REDIS_PASSWORD`
+提供；agent 单独读取同一 Secret 的 `CELLHIVE_COORDINATION_BACKEND` URL。
+仅 agent 和离线迁移 Job 可访问 Redis。节点失联时不得强删 Redis Pod 或强挂卷；
+须确认旧进程已隔离，不能以可用性为由放宽协调版本单调性。
+切换时将 `userRuntime.autoscalingEnabled=false`，停止 runtime 和全部 agent，
+备份协调元数据后执行初始化；激活后恢复副本数和 HPA。不要回滚到旧 COS 写入者。
+GZ 首次切换及 outbox 修复见 [历史 GZ 部署记录](reports/2026-11-24-gz-redis-fleet.md)。三地区现已切到 Redis 与 recovery index v2，版本见下文。
+
+默认 `CELLHIVE_COORDINATION_BACKEND=object`。Redis 模式配置：
+
+```sh
+export CELLHIVE_COORDINATION_BACKEND=redis://127.0.0.1:6379/0
+```
+
+所有 agent 使用相同 Redis 数据库与桶配置；协调和共享调度 namespace 从 bucket 配置自动生成。旧独立 URL/region/SCHEDULE_MODE 环境项必须删除；旧实验 region 的已激活绑定不会自动迁移。Redis 配置持久化、`maxmemory-policy noeviction`；不支持可能丢失已确认写入的透明副本提升，也不能从旧备份直接恢复并继续发授权。
+
+首次切换须停掉全部 agent/runtime、旧二进制和后台写者，确保没有在途写入。然后使用相同桶配置执行 `cell-agent coordination-init --offline`。命令先在桶写后端绑定，复制 owner/owner-gen、节点、fleet 选主与 wake 记录，最后激活。中断后保持停写、使用原配置重跑；已激活时重跑会拒绝覆盖。普通启动不会初始化空 Redis，绑定后的新二进制也拒绝 object 模式。旧二进制不知道此绑定，必须由部署层禁止启动。
+
+日常 owner、lease 和 wake 查询不回 COS；Lua CAS 不使用 COS append/root/ETag 模拟。普通 claim 把 owner-gen 高水位更新和 owner 发布并为一次 Lua；独占维护和资源清理路径使用单次 Lua 预留代次，再 CAS 发布，以保留未知结果回收语义；也不再执行 owner-gen 的读/CAS 循环。owner 释放不清除代次高水位和退役历史。节点按 node/session 统计全部 owner（含休眠）；resident 使用真实本机打开句柄，owned resident 是本机维护集合与打开句柄的交集，采样不是跨节点原子快照。CPU 为进程相邻采样间的核使用率（10000 表示一个核满载），RSS 为进程当前驻留内存；cgroup v2 内存余量覆盖整个容器。未支持的平台/无限制 cgroup 不伪造可用值，通过 valid 字段区分。
+
+Redis URL 自动启用共享 ZSET 调度；object 模式使用 cluster 本地 deadline。Redis authority 下 owner/lease/wake 都走 Redis；业务消息、消费进度、Cron 记录和清理证明继续在 cell。保留低频对账，不能因为启用 ZSET 就关闭恢复发现。重复通知通过 revision 防止旧 ACK 吃掉新通知；不承诺外部副作用 exactly-once。
+
+Redis generation 丢失：保持集群停写，不删除桶绑定来绕过保护，不重新执行初始化覆盖已激活状态；必须先隔离旧 session，再进行专门的协调重建与数据链恢复。本批不提供自动灾难重建/在线后端切换。自动均衡策略和恢复扫描完全消除不在本批实现范围；持久 outbox 已实现，见调度验收报告。
+
+### Redis 待恢复 session 索引升级（已部署 SG / USW / GZ）
+
+新版本使用 Redis pending-session 索引发现恢复候选，COS 保留 node-log 正文和条件写。
+首次 `coordination-init --offline` 自动创建索引。已有 Redis 集群必须：
+
+1. 停止全部业务入口、runtime、agent 和其他写者，备份现有协调状态及 node-log。
+2. 用新版本运行 `cell-agent coordination-recovery-init --offline`，沿用相同 bucket/Redis 配置。
+3. 命令一次性枚举 COS 历史 node-log，补齐非 sealed 候选，写入 ready marker，升级桶绑定到 v2。失败保持停写，修复后重试。
+4. 仅启动新版本参与者，再验证 fleet 写入、恢复、重启及 KV/Queue/Alarm/Cron。
+
+新程序拒绝 v1 或缺少索引 marker；旧 v1 程序拒绝 v2 绑定。不可回退旧二进制或跳过离线升级直接滚动。
+普通恢复发现无 COS List；启动只点查拟使用的 session ID，实际恢复仍点查/CAS 正文。
+索引登记后、COS 创建前崩溃可能留下额外候选；缺失正文不能直接删除候选，以免漏掉迟到创建。
+当前 SG revision 150、USW revision 142、GZ revision 9 已执行此升级；见 [三地区发布记录](reports/2026-11-24-all-regions-redis-recovery-release.md)。本地常驻 Compose 未在此次生产发布中更新。
+
+
+### 托管 Redis endpoint 迁移（2026-11-24，三地区已完成）
+
+GZ 复用现有托管实例，SG / USW 新建 1 GiB Redis 7.0 标准主从并转为 1 个月包月。云实例使用 noeviction、主节点读写、同 VPC 子网安全组。当前托管自动切换可能丢失已确认协调写，部署接受这一限制；见 Redis authority spec 和 known-issues，不宣称托管故障切换 RPO=0。
+
+切换必须停止 HPA、入口 runtime、DO runtime 和全部 agent；完整备份 Redis 所有数据库内的键并保留类型、二进制值和绝对过期时间。向空目标库导入，校验所有未过期键及 generation / revisions，再更新 coordination Secret endpoint。已有 bucket binding 保持原值，不运行 coordination-init。恢复服务后验证旧 KV、新 KV、Queue 重试、Cron、Alarm，保留原 Redis PVC；旧 Redis 不能重新成为在线写入端。发生问题只在目标尚未接受业务写时直接回退，目标已写入后须停写并重新进行完整迁移。
+
+GZ / SG / USW 均已完成切换，Helm revision 分别为 10 / 151 / 143。旧 Redis StatefulSet/Service 已移除，PVC 保留；临时测试应用与迁移 Pod 已清理。SG / USW 包月实付合计 ¥77.33，自动续费已开启（2026-11-24 按用户要求设置并回读确认）、2026-12-24 到期。验收与回滚边界见 [托管 Redis 切换报告](reports/2026-11-24-managed-redis-cutover.md)。
+
+### Redis 恢复权威 v3（本地实现，尚未部署）
+
+v3 将 node-log 正文和 DO recovery pointer 一并迁至 Redis，替代上文 v2 的 COS 正文点查/CAS。部署前停止所有写者、备份 Redis 与历史桶元数据，再用新版本执行 `cell-agent coordination-recovery-init --offline`。命令将 binding 标为 v3/loading，复制所有 session（含 sealed 与 CoveredSeq）及 DO 指针，建立恢复索引，最后激活。旧 v1/v2 二进制拒绝 v3，新程序拒绝未升级的 v1/v2。中断后保持停写重试；active v3 重复执行只校验 ready，绝不从历史 COS 覆盖新 Redis 状态。Redis 故障无 COS 回退。
+
+GC 默认 `CELLHIVE_EPOCH_GC_INTERVAL=1h`、`CELLHIVE_EPOCH_GC_INITIAL=1m`；每个 agent 一个 goroutine 顺序遍历本机 OwnedScopes。仍保留恢复链、安全复核、上一代与一小时对象年龄宽限期；一小时检查周期与一小时宽限期是不同参数。此改动不自动更新线上配置/镜像。
+
+
+### 临时 trace 阶段日志
+
+`CELLHIVE_TRACE_LOG_UNTIL` 为 RFC3339 绝对截止时间，必须在未来 24 小时内；未设置、过期或无效时关闭。启用后原本未采样的 Go span 只做 RecordOnly 并输出到 stdout 的 `trace_span` JSON，不改变传给下游的 sampled 标记，也不将这些额外 span 发给 ARMS。记录 trace/span/parent ID、阶段、起始时间、耗时及白名单 scope/object key 等属性；不记录请求正文、header、完整 URL 或错误消息。独立 4096 条非阻塞队列防止日志背压阻塞请求；队列满会丢弃诊断日志。自动到期后恢复原采样行为。入口 function_request 总耗时包含 Worker 准备，JS http.server span 从准备完成后开始；两者差值可识别尚未细分的 Worker 准备耗时。

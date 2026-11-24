@@ -2,9 +2,12 @@ package bucket
 
 import (
 	"bytes"
+	"cellhive/internal/telemetry"
 	"context"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"log/slog"
 	"net/http"
 	"os"
@@ -134,6 +137,8 @@ func isNotFound(err error) bool {
 
 // Get implements Bucket.
 func (b *S3Bucket) Get(ctx context.Context, key string) ([]byte, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.Get", trace.WithAttributes(attribute.String("object.key", key)))
+	defer span.End()
 	b.gets.Add(1)
 	out, err := b.client.GetObject(objectGetContext(ctx, key), &s3.GetObjectInput{Bucket: &b.bucket, Key: &key})
 	if err != nil {
@@ -152,6 +157,8 @@ func (b *S3Bucket) Get(ctx context.Context, key string) ([]byte, string, error) 
 
 // RangedGet implements Bucket.
 func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64) ([]byte, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.RangedGet", trace.WithAttributes(attribute.String("object.key", key)))
+	defer span.End()
 	if off < 0 || length <= 0 {
 		return nil, "", fmt.Errorf("bucket: invalid range off=%d length=%d", off, length)
 	}
@@ -180,6 +187,8 @@ func (b *S3Bucket) RangedGet(ctx context.Context, key string, off, length int64)
 // append history. Providers that ignore suffix ranges still return the full
 // object; the caller trims it and stays correct.
 func (b *S3Bucket) TailGet(ctx context.Context, key string, n int) ([]byte, int64, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.TailGet", trace.WithAttributes(attribute.String("object.key", key)))
+	defer span.End()
 	if n <= 0 {
 		n = segProbeBytes
 	}
@@ -332,6 +341,8 @@ func (b *S3Bucket) Stat(ctx context.Context, key string) (int64, string, error) 
 
 // CommonPrefixes implements PrefixLister with S3 delimiter listings.
 func (b *S3Bucket) CommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.CommonPrefixes", trace.WithAttributes(attribute.String("object.prefix", prefix)))
+	defer span.End()
 	if delimiter == "" {
 		delimiter = "/"
 	}
@@ -358,6 +369,8 @@ func (b *S3Bucket) CommonPrefixes(ctx context.Context, prefix, delimiter string)
 
 // ListSizes implements SizeLister from the S3 list response (no per-object GET).
 func (b *S3Bucket) ListSizes(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.ListSizes", trace.WithAttributes(attribute.String("object.prefix", prefix)))
+	defer span.End()
 	b.lists.Add(1)
 	var out []ObjectInfo
 	var token *string
@@ -380,6 +393,8 @@ func (b *S3Bucket) ListSizes(ctx context.Context, prefix string) ([]ObjectInfo, 
 // ListPage implements PagedLister with S3 StartAfter/MaxKeys: one bounded list
 // call per page, sizes from the list response, no per-object GET.
 func (b *S3Bucket) ListPage(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.ListPage", trace.WithAttributes(attribute.String("object.prefix", prefix)))
+	defer span.End()
 	if limit <= 0 {
 		limit = 100
 	}
@@ -412,6 +427,8 @@ func (b *S3Bucket) Delete(ctx context.Context, key string) error {
 
 // List implements Bucket (operator/diagnostic use only).
 func (b *S3Bucket) List(ctx context.Context, prefix string) ([]string, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "object.List", trace.WithAttributes(attribute.String("object.prefix", prefix)))
+	defer span.End()
 	b.lists.Add(1)
 	var keys []string
 	var token *string

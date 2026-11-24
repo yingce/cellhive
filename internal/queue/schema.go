@@ -2,6 +2,7 @@ package queue
 
 import (
 	"cellhive/internal/cellstore"
+	"cellhive/internal/scheduleoutbox"
 	"context"
 	"database/sql"
 	"sync"
@@ -55,5 +56,8 @@ func schemaCurrent(ctx context.Context, db *sql.DB) (bool, error) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM queue_meta WHERE key='idempotency-v1'`).Scan(&done); err != nil {
 		return false, err
 	}
-	return done == 1, nil
+	if done != 1 {
+		return false, nil
+	}
+	return scheduleoutbox.Current(ctx, db, scheduleoutbox.Queue)
 }

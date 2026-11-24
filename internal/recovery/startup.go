@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -19,7 +20,22 @@ func (m *Manager) RecoverLocal(ctx context.Context, nl *nodelog.Manager, node, c
 	delay := time.Second
 	for {
 		attempt, cancel := context.WithTimeout(ctx, 15*time.Minute)
-		recs, err := nl.ListNode(attempt, node)
+		var recs []nodelog.Record
+		var err error
+		if nl.Index != nil {
+			// Pending discovery intentionally excludes sealed history. Preserve
+			// the fresh-session check with an exact authority read, not a List.
+			_, _, err = nl.Get(attempt, node, current)
+			if err == nil {
+				cancel()
+				return fmt.Errorf("session id %s was already used; restart with a fresh session", current)
+			}
+			if errors.Is(err, nodelog.ErrNotFound) {
+				recs, err = nl.ListPendingNode(attempt, node)
+			}
+		} else {
+			recs, err = nl.ListNode(attempt, node)
+		}
 		if err == nil {
 			for _, rec := range recs {
 				if rec.Session == current {

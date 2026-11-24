@@ -5,7 +5,7 @@ CellHive 的 AI/编码代理工作约定。设计契约以 `docs/` 为准，**�
 ## 项目要点
 
 - 计算层：**`cellhive-workerd` fork**（`yingce/cellhive-workerd`），fork 改动只在 fork 仓；本仓只用 `workerLoader`/bindings/capnp 集成。
-- 状态层：**一切皆 cell**（`<ns>/<class>/<id>`），SQLite + 对象存储为权威，bucket 条件写决定 owner，epoch fence，RPO=0。
+- 状态层：**一切皆 cell**（`<ns>/<class>/<id>`），SQLite + 对象存储保存业务权威数据；默认 bucket 条件写决定 owner，可选 Redis/Kvrocks 协调权威（2026-11-24 修订），epoch fence，RPO=0。
 - `cell-agent`（Go，固定集群）：状态 + 控制面 + owner 解析 + 计时派发 + **唯一桶凭据**。
 - `do-runtime`（workerd + supervisor）：原生 DO，分布式弹性，**不持桶凭据**。
 - `user-runtime`：入口（路由/版本）+ 租户执行；`:8081` 公开、`:8088` 内部。
@@ -52,5 +52,5 @@ make fmt     # gofmt -w .
 
 - 不在本仓内 patch / fork workerd；workerd 改动提交到 `yingce/cellhive-workerd`；
 - 不引入第二套 JS 引擎；
-- 默认 cluster 调度使用本地 deadline 与现有 bucket 发现；显式 shared 调度可使用 Redis/Kvrocks 辅助索引。写权和耐久证明沿用 COS 与 cell 协议。不引入 NATS/etcd/APISIX；
+- 默认对象模式的 cluster 调度使用本地 deadline 与现有 bucket 发现；`CELLHIVE_COORDINATION_BACKEND=redis://...` / `rediss://...` 同时启用 Redis/Kvrocks 协调权威和 shared 到期索引，无独立 SCHEDULE_MODE。Redis coordination 后端承接 owner/lease/wake 权威，必须离线迁移且故障不回退 COS；耐久证明与 fencing 沿用 cell 协议；2026-11-24 托管 Redis 部署接受异步主从自动提升可能回退已确认协调写的限制，不宣称此故障模型下协调 RPO=0 或 fencing 安全已验证，见 docs/superpowers/specs/2026-11-24-redis-authority-design.md。不引入 NATS/etcd/APISIX；
 - 不在热路径 List bucket。

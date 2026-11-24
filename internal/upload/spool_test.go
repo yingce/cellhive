@@ -453,3 +453,61 @@ func TestSpoolMaxUnderConcurrency(t *testing.T) {
 		t.Fatalf("Count = %d, want %d", got, max)
 	}
 }
+
+func TestReplaySpoolBeforeStartPreservesFailureAndRestoresTail(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := OpenSpool(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cell.Scope{Namespace: "restart", Class: "__queue__", ID: "q"}
+	if _, err := sp.Append(sc, 1, [][]byte{[]byte("acknowledged-tail")}); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen as a fresh process; no Start or timer tick may be needed.
+	sp, err = OpenSpool(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &flakySink{fail: true}
+	b := New(sink, nil, 64, 1<<20, time.Hour)
+	b.SetSpool(sp)
+	if err := b.ReplaySpool(t.Context()); err == nil || sp.Count() != 1 {
+		t.Fatalf("failed recovery must retain tail: err=%v count=%d", err, sp.Count())
+	}
+	sink.setFail(false)
+	if err := b.ReplaySpool(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, segments, _ := sink.snapshot()
+	if sp.Count() != 0 || segments != 1 {
+		t.Fatalf("tail not proven: count=%d segments=%d", sp.Count(), segments)
+	}
+}
+
+func TestReplaySpoolCorruptionBlocksRepeatedStartup(t *testing.T) {
+	for _, suffix := range []string{".spool", ".spool.corrupt"} {
+		t.Run(suffix, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "00000000000000000001"+suffix)
+			if err := os.WriteFile(path, []byte("broken-tail"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				sp, err := OpenSpool(dir, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b := New(&fakeSink{}, nil, 64, 1<<20, time.Hour)
+				b.SetSpool(sp)
+				if err := b.ReplaySpool(t.Context()); err == nil {
+					t.Fatal("corrupt tail accepted")
+				}
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != "broken-tail" {
+					t.Fatalf("evidence changed: %q %v", got, err)
+				}
+			}
+		})
+	}
+}

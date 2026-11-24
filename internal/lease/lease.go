@@ -20,16 +20,22 @@ var ErrFenced = errors.New("node lease fenced; restart with a new session")
 
 // Load is the node load sample exposed for discovery and autoscaling.
 type Load struct {
-	OwnedCells     int   `json:"owned_cells"`
-	Weight         int   `json:"placement_weight"`
-	ResidentCells  int   `json:"resident_cells"`
-	RSSBytes       int64 `json:"rss_bytes"`
-	CPUPercentX100 int   `json:"cpu_percent_x100"`
-	Pressured      bool  `json:"pressured"`
-	MemoryHeadroom int64 `json:"memory_headroom"`
-	ShedCells      int   `json:"shed_cells"`
-	Restoring      int   `json:"restoring"`
-	SampledMs      int64 `json:"sampled_ms"`
+	OwnedResidentCells int   `json:"owned_resident_cells"`
+	DormantCells       int   `json:"dormant_cells"`
+	OwnedComplete      bool  `json:"owned_complete"`
+	ProcessSampleValid bool  `json:"process_sample_valid"`
+	MemoryLimit        int64 `json:"memory_limit"`
+	MemorySampleValid  bool  `json:"memory_sample_valid"`
+	OwnedCells         int   `json:"owned_cells"`
+	Weight             int   `json:"placement_weight"`
+	ResidentCells      int   `json:"resident_cells"`
+	RSSBytes           int64 `json:"rss_bytes"`
+	CPUPercentX100     int   `json:"cpu_percent_x100"`
+	Pressured          bool  `json:"pressured"`
+	MemoryHeadroom     int64 `json:"memory_headroom"`
+	ShedCells          int   `json:"shed_cells"`
+	Restoring          int   `json:"restoring"`
+	SampledMs          int64 `json:"sampled_ms"`
 }
 
 // NodeLease is a node's self-published liveness record.

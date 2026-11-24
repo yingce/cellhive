@@ -1,0 +1,26 @@
+# Apply after docker-compose.yml and docker-compose.local.yml.
+# Both agents must share a remote bucket; their /data volumes are independent.
+services:
+  cell-agent:
+    environment:
+      CELLHIVE_BUCKET: ${CELLHIVE_BUCKET:?fleet requires a shared S3/COS/MinIO bucket}
+      CELLHIVE_DURABILITY: fleet
+      CELLHIVE_PEER_URL: http://cell-agent:7001
+  cell-agent-b:
+    extends:
+      file: docker-compose.yml
+      service: cell-agent
+    environment:
+      CELLHIVE_NODE_ID: cell-agent-b
+      CELLHIVE_ADVERTISE: cell-agent-b:7001
+      CELLHIVE_PEER_URL: http://cell-agent-b:7001
+      CELLHIVE_BUCKET: ${CELLHIVE_BUCKET:?fleet requires a shared S3/COS/MinIO bucket}
+      CELLHIVE_COORDINATION_BACKEND: redis://redis:6379/0
+      CELLHIVE_DURABILITY: fleet
+    volumes:
+      - cell-agent-b-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+volumes:
+  cell-agent-b-data:

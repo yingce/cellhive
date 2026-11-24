@@ -75,6 +75,10 @@ const maxCommitJSONBytes = ((maxSegmentBytes + 2) / 3 * 4) + (1 << 20)
 
 // Deps are the Server's dependencies.
 type Deps struct {
+	ProjectMaintenance func(kind string, at time.Time)
+	CronNudge          func()
+	ScheduleAcquire    func(context.Context, cell.Scope) (bool, error)
+
 	Cfg             config.Config
 	Bucket          bucket.Bucket
 	Lease           *lease.Manager
@@ -135,6 +139,9 @@ type Deps struct {
 
 // Server wires the HTTP surface for a cell-agent node.
 type Server struct {
+	scheduleOutboxMu      sync.Mutex
+	scheduleOutboxPending map[string]cell.Scope
+
 	Deps
 	doPointers              sync.Map // capture scope -> persisted doRecoveryPointer
 	resourceRep             *replica.Manager

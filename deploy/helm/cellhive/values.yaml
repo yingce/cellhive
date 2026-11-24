@@ -77,8 +77,14 @@ config:
   cosSecretKey: ""
 
 cellAgent:
+  # Agent-only Secret containing CELLHIVE_COORDINATION_BACKEND (Redis URL).
+  coordinationSecret: ""
+  # Empty keeps the process default (auto); fleet requires live peer capacity.
+  durability: ""
   # Temporary diagnostics only; unset after collection (default info).
   logLevel: ""
+  # Temporary stdout trace diagnostics; RFC3339 deadline at most 24h ahead.
+  traceLogUntil: ""
   # Upgrade every bucket participant to validate before enabling reclaim.
   authorityMode: legacy
   authorityReclaimACK: ""
@@ -111,6 +117,7 @@ cellAgent:
 runtimeHostAliases: []
 
 userRuntime:
+  autoscalingEnabled: true
   # Optional image fields merged over global image; leaves DO runtimes unchanged.
   image: {}
   # Node-wide Queue/Cron/Workflow invocation records and OTLP invocation logs.
@@ -183,3 +190,15 @@ ingress:
   publicHost: ""       # optional public static/Worker host
   tlsSecret: ""       # optional TLS secret name
   annotations: {}
+
+# Optional single-instance authority. PVC retained on scale-down; no replicas
+# are promoted automatically. Never force-delete its Pod while its node may live.
+coordinationRedis:
+  enabled: false
+  image: redis:7.2-alpine
+  existingSecret: ""
+  storageClassName: cbs
+  storage: 20Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}

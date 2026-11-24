@@ -21,6 +21,9 @@ var ErrGenContention = errors.New("owner: generation bump contention")
 // fence (ADR-078).
 var ErrGenCorrupt = errors.New("owner: corrupt generation record")
 
+// ErrGenExhausted prevents uint64 wraparound from reusing a previous epoch.
+var ErrGenExhausted = errors.New("owner: generation exhausted")
+
 // genKey is the monotonic generation counter for a scope. Unlike the owner
 // record it is never deleted, so epochs are never reused even after release
 // (WDL: "the generation key is a fence, not a cache", ADR-078).
@@ -32,6 +35,13 @@ func genKey(s cell.Scope) string { return s.Key() + "/owner-gen" }
 // generation key is missing, the new epoch still has to exceed it.
 func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope, floor uint64) (uint64, error) {
 	key := genKey(s)
+	if allocator, ok := m.B.(bucket.OwnerEpochAllocator); ok {
+		epoch, err := allocator.ReserveOwnerEpoch(ctx, key, floor)
+		if err == nil {
+			m.epochBumps.Add(1)
+		}
+		return epoch, err
+	}
 	for attempt := 0; attempt < 8; attempt++ {
 		data, e, err := m.B.Get(ctx, key)
 		var g uint64
@@ -46,6 +56,9 @@ func (m *Manager) nextEpoch(ctx context.Context, s cell.Scope, floor uint64) (ui
 			g = 0
 		default:
 			return 0, err
+		}
+		if g == ^uint64(0) || floor == ^uint64(0) {
+			return 0, ErrGenExhausted
 		}
 		next := g + 1
 		if next <= floor {
@@ -79,13 +92,9 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
-		epoch, gerr := m.nextEpoch(ctx, s, 0)
-		if gerr != nil {
-			return cell.Owner{}, gerr
-		}
-		o := m.ownerFor(epoch, now, node, advertise, role, ttl)
-		data, _ := cell.MarshalOwner(o)
-		if _, cerr := m.B.ConditionalCreate(ctx, Key(s), data); cerr != nil {
+		o := m.ownerFor(0, now, node, advertise, role, ttl)
+		o, cerr := m.publishClaim(ctx, s, o, "", 0, true)
+		if cerr != nil {
 			return cell.Owner{}, cerr // lost the race
 		}
 		m.Invalidate(s)
@@ -107,14 +116,10 @@ func (m *Manager) ClaimAs(ctx context.Context, s cell.Scope, node, advertise str
 		}
 	}
 	takeover := cur.Node != node
-	epoch, gerr := m.nextEpoch(ctx, s, cur.Epoch)
-	if gerr != nil {
-		return cell.Owner{}, gerr
-	}
-	o := m.ownerFor(epoch, now, node, advertise, role, ttl)
+	o := m.ownerFor(0, now, node, advertise, role, ttl)
 	o.RetirementJob, o.RetiredEpoch = cur.RetirementJob, cur.RetiredEpoch
-	data, _ := cell.MarshalOwner(o)
-	if _, cerr := m.B.CAS(ctx, Key(s), data, e); cerr != nil {
+	o, cerr := m.publishClaim(ctx, s, o, e, cur.Epoch, true)
+	if cerr != nil {
 		if takeover {
 			m.takeoverFailed.Add(1)
 		}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -157,12 +158,20 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 		attribute.String("service.instance.id", cfg.NodeID),
 		attribute.String("cellhive.node_id", cfg.NodeID),
 	)
+	var sampler sdktrace.Sampler = reportedSampler{fallback: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))}
+	deadline := traceLogDeadline()
+	if !deadline.IsZero() {
+		sampler = diagnosticSampler{fallback: sampler, until: deadline}
+	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(5*time.Second)),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(reportedSampler{fallback: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))}),
+		sdktrace.WithSampler(sampler),
 		sdktrace.WithIDGenerator(telemetryIDGenerator{}),
 	)
+	if !deadline.IsZero() {
+		tp.RegisterSpanProcessor(newTraceLogProcessor(os.Stdout, deadline))
+	}
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	enabled.Store(true)

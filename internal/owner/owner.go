@@ -428,21 +428,17 @@ func (m *Manager) claimLocked(ctx context.Context, s cell.Scope, now time.Time, 
 	cur, e, err := m.Resolve(ctx, s)
 	switch {
 	case errors.Is(err, ErrUnowned):
-		epoch, gerr := m.nextEpoch(ctx, s, 0)
-		if gerr != nil {
-			return cell.Owner{}, gerr
-		}
 		if reset != nil {
 			if err := reset(ctx, s); err != nil {
 				return cell.Owner{}, err
 			}
 		}
-		o := m.newOwner(epoch, now)
+		o := m.newOwner(0, now)
 		if exclusive {
 			o.Address = ""
 		}
-		data, _ := cell.MarshalOwner(o)
-		if _, cerr := m.B.ConditionalCreate(ctx, Key(s), data); cerr != nil {
+		o, cerr := m.publishClaim(ctx, s, o, "", 0, !exclusive)
+		if cerr != nil {
 			// Failure may mean the write committed but its response was lost.
 			if exclusive {
 				m.deferExclusiveRelease(s, o.Epoch)
@@ -494,17 +490,13 @@ func (m *Manager) claimLocked(ctx context.Context, s cell.Scope, now time.Time, 
 			return cur, err
 		}
 	}
-	epoch, gerr := m.nextEpoch(ctx, s, cur.Epoch)
-	if gerr != nil {
-		return cell.Owner{}, gerr
-	}
-	o := m.newOwner(epoch, now)
+	o := m.newOwner(0, now)
 	if exclusive {
 		o.Address = ""
 	}
 	o.RetirementJob, o.RetiredEpoch = cur.RetirementJob, cur.RetiredEpoch
-	data, _ := cell.MarshalOwner(o)
-	if _, cerr := m.B.CAS(ctx, Key(s), data, e); cerr != nil {
+	o, cerr := m.publishClaim(ctx, s, o, e, cur.Epoch, !exclusive)
+	if cerr != nil {
 		if exclusive {
 			m.deferExclusiveRelease(s, o.Epoch)
 		}
