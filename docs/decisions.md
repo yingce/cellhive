@@ -4385,3 +4385,12 @@ Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁
 ## Cron retry celld parity（2026-11-24，本地实现与测试通过，未部署）
 
 按用户明确选择，覆盖 ADR-211/305 的 Cron 重试策略：固定 6 次失败预算，4/8/16/32/64 秒退避；同一 worker 所有表达式的下一次 occurrence 优先（相等也优先），过期重试不补跑。失败表达式、原始 scheduledTime、次数与 cutoff 仅存当前驻留 cell 内存；持久层只保留重试唤醒标记，重启/驱逐/换 owner 后清理孤立标记，不还原失败任务。旧版持久 retry 行也直接消费。取消生产 CronMaxAttempts 配置；其他 timer 类型不变。普通 occurrence 的物化/停机补跑行为不在本次变更范围。实现与验收见 docs/superpowers/specs/2026-11-24-cron-celld-retry-design.md。
+
+## 2026-11-24 Redis review 修订（本地验证通过，未部署）
+
+- Cron 重试 cutoff 以原始 scheduledTime 之后的下一次正常 occurrence 为准；首次执行跨过该时间后失败，也不得重新延后 cutoff。退避仍从失败完成时间计算。
+- Cron Nudge 只发布合并通知，不等待 Pass 的 I/O 锁；Pass 消费通知后重查版本，保留本 slot 的成功写入集合。
+- Redis 混合前缀分页使用底层有界物理页与 Redis 有界范围合并，保留底层游标边界、空页续扫和对象元数据；不逐页全量 List。Redis 纯前缀目录枚举跳过已发现子树，不下载其全部键；不新增持久索引或迁移要求。
+- Outbox 保留持久 revision/ACK、权威与耐久检查。owned 候选低频快照、通知优先、轮转扫描；限制并行度和整轮时间，未处理/失败候选保留，避免单个冷 cell 阻塞整轮。轮转游标仅越过实际尝试或已跳过的候选，预算耗尽未执行项不得推进游标；ACK 保留原耐久写门禁但不发送 relay 自通知，业务写通知不变。
+
+验收见 [修复报告](reports/2026-11-24-redis-review-fixes.md) 与 docs/known-issues.md；全量 make test、build/vet 和六个相关包 race 通过。不改变托管 Redis 回退故障模型，也不代表线上修复。

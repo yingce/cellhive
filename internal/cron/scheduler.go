@@ -46,6 +46,7 @@ type Scheduler struct {
 	// A zero deadline means the current plans contain no future trigger.
 	ProjectNext func(context.Context, time.Time) error
 	wake        chan struct{}
+	wakeOnce    sync.Once
 
 	mu           sync.Mutex
 	nextCheck    time.Time
@@ -107,28 +108,23 @@ func (s *Scheduler) log() *slog.Logger {
 	return slog.Default()
 }
 
-// Nudge forces fresh version checks without discarding successful slot writes.
+// wakeChannel is independent of the pass lock, which is held across I/O.
+func (s *Scheduler) wakeChannel() chan struct{} {
+	s.wakeOnce.Do(func() { s.wake = make(chan struct{}, 1) })
+	return s.wake
+}
+
+// Nudge coalesces notifications without waiting for discovery or persistence.
 func (s *Scheduler) Nudge() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nextCheck = time.Time{}
-	if s.wake == nil {
-		s.wake = make(chan struct{}, 1)
-	}
 	select {
-	case s.wake <- struct{}{}:
+	case s.wakeChannel() <- struct{}{}:
 	default:
 	}
 }
 
 // Start runs the scheduler loop until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
-	s.mu.Lock()
-	if s.wake == nil {
-		s.wake = make(chan struct{}, 1)
-	}
-	wake := s.wake
-	s.mu.Unlock()
+	wake := s.wakeChannel()
 	go func() {
 		interval := s.Interval
 		if interval <= 0 {
@@ -171,6 +167,11 @@ func (s *Scheduler) Start(ctx context.Context) {
 func (s *Scheduler) Pass(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	select {
+	case <-s.wakeChannel():
+		s.nextCheck = time.Time{}
+	default:
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}

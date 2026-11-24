@@ -33,7 +33,9 @@ func (s *Store) retryCron(ctx context.Context, t Timer, now, expires int64, mem 
 	cutoff := prior.cutoff
 	if s.CronNext != nil && cutoff == 0 {
 		var err error
-		cutoff, err = s.CronNext(ctx, t.Scope, now)
+		// The execution itself may have crossed the next slot. Its failure
+		// must not move the original occurrence's retry cutoff forward.
+		cutoff, err = s.CronNext(ctx, t.Scope, t.DueAtMs)
 		if err != nil {
 			return 0, 0, false, err
 		}

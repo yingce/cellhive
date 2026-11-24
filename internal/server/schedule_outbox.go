@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"cellhive/internal/cell"
@@ -162,7 +163,7 @@ func (s *Server) FlushScheduleOutbox(ctx context.Context, sc cell.Scope, reconci
 			return err
 		}
 		if snapshot.Pending {
-			if err = s.CaptureWrite(ctx, sc, func() error { return scheduleoutbox.Ack(ctx, c, kind, snapshot.Revision) }); err != nil {
+			if err = s.capturedWriteWithoutScheduleNotification(ctx, sc, func() error { return scheduleoutbox.Ack(ctx, c, kind, snapshot.Revision) }); err != nil {
 				return err
 			}
 		}
@@ -170,10 +171,14 @@ func (s *Server) FlushScheduleOutbox(ctx context.Context, sc cell.Scope, reconci
 	return nil
 }
 
+// RunScheduleOutbox prioritizes dirty notifications and scans a minute-level
+// owned snapshot fairly. A bounded worker pool shares one pass deadline.
 func (s *Server) RunScheduleOutbox(ctx context.Context, publish func(context.Context, scheduleindex.Hint) error) {
-	if s.Store == nil || s.Owner == nil {
+	if s.Store == nil || s.Owner == nil || publish == nil {
 		return
 	}
+	s.scheduleOutboxActive.Store(true)
+	defer s.scheduleOutboxActive.Store(false)
 	if scopes, err := s.Store.LocalScopes(); err == nil {
 		for _, sc := range scopes {
 			s.NudgeScheduleOutbox(sc)
@@ -184,58 +189,128 @@ func (s *Server) RunScheduleOutbox(ctx context.Context, publish func(context.Con
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	last := map[string]time.Time{}
-	cursor := ""
+	var owned []cell.Scope
+	var refreshed time.Time
+	ownedCursor, pendingCursor := "", ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		candidates := map[string]cell.Scope{}
-		for _, o := range s.Owner.OwnedScopes() {
-			candidates[o.Scope.String()] = o.Scope
+		now := time.Now()
+		if refreshed.IsZero() || now.Sub(refreshed) >= time.Minute {
+			owned = owned[:0]
+			live := map[string]bool{}
+			for _, o := range s.Owner.OwnedScopes() {
+				owned = append(owned, o.Scope)
+				live[o.Scope.String()] = true
+			}
+			sort.Slice(owned, func(i, j int) bool { return owned[i].String() < owned[j].String() })
+			s.scheduleOutboxMu.Lock()
+			for k := range last {
+				if _, pending := s.scheduleOutboxPending[k]; !live[k] && !pending {
+					delete(last, k)
+				}
+			}
+			s.scheduleOutboxMu.Unlock()
+			refreshed = now
 		}
+		candidates := make([]cell.Scope, 0, 128)
+		var pendingSelected []string
+		var ownedSelected []cell.Scope
+		seen := map[string]bool{}
 		s.scheduleOutboxMu.Lock()
-		for k, sc := range s.scheduleOutboxPending {
-			candidates[k] = sc
-		}
-		s.scheduleOutboxMu.Unlock()
-		keys := make([]string, 0, len(candidates))
-		for k := range candidates {
+		keys := make([]string, 0, len(s.scheduleOutboxPending))
+		for k := range s.scheduleOutboxPending {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		start := sort.SearchStrings(keys, cursor)
-		for start < len(keys) && keys[start] <= cursor {
-			start++
-		}
-		if start == len(keys) {
-			start = 0
-		}
-		for n := 0; n < min(128, len(keys)); n++ {
+		start := sort.Search(len(keys), func(i int) bool { return keys[i] > pendingCursor })
+		for n := 0; n < min(64, len(keys)); n++ {
 			key := keys[(start+n)%len(keys)]
-			sc := candidates[key]
-			cursor = key
-			s.scheduleOutboxMu.Lock()
+			candidates = append(candidates, s.scheduleOutboxPending[key])
+			seen[key] = true
 			delete(s.scheduleOutboxPending, key)
-			s.scheduleOutboxMu.Unlock()
-			reconcile := time.Since(last[key]) >= time.Minute
-			work, cancel := context.WithTimeout(ctx, 3*time.Second)
-			err := s.FlushScheduleOutbox(work, sc, reconcile, publish)
-			cancel()
-			if err == nil || errors.Is(err, owner.ErrNotOwner) || errors.Is(err, owner.ErrUnowned) {
-				if err == nil && reconcile {
+			pendingSelected = append(pendingSelected, key)
+		}
+		s.scheduleOutboxMu.Unlock()
+		start = sort.Search(len(owned), func(i int) bool { return owned[i].String() > ownedCursor })
+		for n := 0; n < min(64, len(owned)); n++ {
+			sc := owned[(start+n)%len(owned)]
+			key := sc.String()
+			ownedSelected = append(ownedSelected, sc)
+			if !seen[key] && s.Owner.TracksLocal(sc) {
+				candidates = append(candidates, sc)
+				seen[key] = true
+			}
+		}
+		type work struct {
+			sc        cell.Scope
+			reconcile bool
+		}
+		type result struct {
+			work
+			err       error
+			attempted bool
+		}
+		jobs := make(chan work, len(candidates))
+		results := make(chan result, len(candidates))
+		for _, sc := range candidates {
+			jobs <- work{sc: sc, reconcile: now.Sub(last[sc.String()]) >= time.Minute}
+		}
+		close(jobs)
+		pass, cancel := context.WithTimeout(ctx, 3*time.Second)
+		var wg sync.WaitGroup
+		for n := 0; n < min(4, len(candidates)); n++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for job := range jobs {
+					err := pass.Err()
+					attempted := err == nil
+					if attempted {
+						err = s.FlushScheduleOutbox(pass, job.sc, job.reconcile, publish)
+					}
+					results <- result{job, err, attempted}
+				}
+			}()
+		}
+		wg.Wait()
+		cancel()
+		close(results)
+		attempted := make(map[string]bool, len(candidates))
+		for r := range results {
+			key := r.sc.String()
+			attempted[key] = r.attempted
+			switch {
+			case r.err == nil:
+				if r.reconcile {
 					last[key] = time.Now()
 				}
-			} else if ctx.Err() == nil {
-				s.NudgeScheduleOutbox(sc)
-				s.Log.Debug("schedule outbox retained", "scope", key, "err", err)
+			case errors.Is(r.err, owner.ErrNotOwner), errors.Is(r.err, owner.ErrUnowned):
+				delete(last, key)
+			default:
+				s.NudgeScheduleOutbox(r.sc)
+				if ctx.Err() == nil {
+					s.Log.Debug("schedule outbox retained", "scope", key, "err", r.err)
+				}
 			}
 		}
-		for k := range last {
-			if _, ok := candidates[k]; !ok {
-				delete(last, k)
+		// Keep unattempted candidates ahead of retries on the next pass. Moving
+		// to the last selected key would repeat the same saturated worker batch.
+		for _, key := range pendingSelected {
+			if !attempted[key] {
+				break
 			}
+			pendingCursor = key
+		}
+		for _, sc := range ownedSelected {
+			key := sc.String()
+			if seen[key] && !attempted[key] {
+				break
+			}
+			ownedCursor = key
 		}
 	}
 }

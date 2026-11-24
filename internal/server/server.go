@@ -139,6 +139,7 @@ type Deps struct {
 
 // Server wires the HTTP surface for a cell-agent node.
 type Server struct {
+	scheduleOutboxActive  atomic.Bool
 	scheduleOutboxMu      sync.Mutex
 	scheduleOutboxPending map[string]cell.Scope
 
@@ -3515,6 +3516,18 @@ func (s *Server) CaptureWrite(ctx context.Context, sc cell.Scope, fn func() erro
 // durable proof covering it (RPO=0). With no capture configured it is a plain
 // local write (dev/no-replication mode).
 func (s *Server) capturedWrite(ctx context.Context, scope cell.Scope, write func() error) error {
+	// A failed durability wait may still leave a committed outbox revision.
+	// The relay proves it durable before publication; notifications grant nothing.
+	if s.scheduleOutboxActive.Load() {
+		defer s.NudgeScheduleOutbox(scope)
+	}
+	return s.capturedWriteWithoutScheduleNotification(ctx, scope, write)
+}
+
+// capturedWriteWithoutScheduleNotification preserves the durability gate for
+// relay ACKs, which do not create new scheduling work. Business writes must use
+// capturedWrite so a committed revision is notified even if its proof fails.
+func (s *Server) capturedWriteWithoutScheduleNotification(ctx context.Context, scope cell.Scope, write func() error) error {
 	if !s.ackAllowed(time.Now()) {
 		return owner.ErrNotOwner
 	}

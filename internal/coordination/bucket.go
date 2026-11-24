@@ -167,39 +167,90 @@ func (b *Bucket) ListPage(c context.Context, p, after string, limit int) ([]buck
 			return x.ListPage(c, p, after, limit)
 		}
 	}
-	var keys []string
-	var err error
-	if purePrefix(p) {
-		keys, err = b.Store.list(c, p, after, limit+1)
-	} else {
-		keys, err = b.List(c, p)
-		i := sort.SearchStrings(keys, after)
-		if i < len(keys) && keys[i] == after {
-			i++
+	// Native pages may end at a physical generation key, including empty
+	// logical pages. Never advance the merged cursor beyond either source's
+	// inspected boundary. Re-reading a bounded suffix is safe; skipping it is not.
+	var out []bucket.ObjectInfo
+	boundary := ""
+	if !purePrefix(p) {
+		if pager, ok := b.Base.(bucket.PagedLister); ok {
+			page, next, err := pager.ListPage(c, p, after, limit)
+			if err != nil {
+				return nil, "", err
+			}
+			if next != "" && next <= after {
+				return nil, "", errors.New("coordination: base cursor did not advance")
+			}
+			boundary = next
+			for _, info := range page {
+				if info.Key > after && !Selected(info.Key) {
+					out = append(out, info)
+				}
+			}
+		} else {
+			// Compatibility for backends without a native pager only.
+			keys, err := b.Base.List(c, p)
+			if err != nil {
+				return nil, "", err
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if k <= after || Selected(k) {
+					continue
+				}
+				if len(out) == limit {
+					boundary = out[len(out)-1].Key
+					break
+				}
+				n, e, err := b.Stat(c, k)
+				if errors.Is(err, bucket.ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					return nil, "", err
+				}
+				out = append(out, bucket.ObjectInfo{Key: k, Size: n, ETag: e})
+			}
 		}
-		keys = keys[i:]
 	}
-	if err != nil {
-		return nil, "", err
-	}
-	next := ""
-	if len(keys) > limit {
-		keys = keys[:limit]
-		next = keys[len(keys)-1]
-	}
-	out := make([]bucket.ObjectInfo, 0, len(keys))
-	for _, k := range keys {
-		n, e, err := b.Stat(c, k)
-		if errors.Is(err, bucket.ErrNotFound) {
-			continue
-		}
+	if mayContain(p) {
+		keys, err := b.Store.list(c, p, after, limit+1)
 		if err != nil {
 			return nil, "", err
 		}
-		out = append(out, bucket.ObjectInfo{Key: k, Size: n, ETag: e})
+		if len(keys) > limit {
+			keys = keys[:limit]
+			last := keys[len(keys)-1]
+			if boundary == "" || last < boundary {
+				boundary = last
+			}
+		}
+		for _, k := range keys {
+			if !Selected(k) || (boundary != "" && k > boundary) {
+				continue
+			}
+			raw, e, err := b.Store.Get(c, k)
+			if errors.Is(err, bucket.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, "", err
+			}
+			out = append(out, bucket.ObjectInfo{Key: k, Size: int64(len(raw)), ETag: e})
+		}
 	}
-	return out, next, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if boundary != "" {
+		n := sort.Search(len(out), func(i int) bool { return out[i].Key > boundary })
+		out = out[:n]
+	}
+	if len(out) > limit {
+		out = out[:limit]
+		boundary = out[len(out)-1].Key
+	}
+	return out, boundary, nil
 }
+
 func (b *Bucket) ListSizes(c context.Context, p string) ([]bucket.ObjectInfo, error) {
 	if !mayContain(p) {
 		if x, ok := b.Base.(bucket.SizeLister); ok {
@@ -228,6 +279,9 @@ func (b *Bucket) CommonPrefixes(c context.Context, p, d string) ([]string, error
 	}
 	if d == "" {
 		return nil, errors.New("coordination: empty delimiter")
+	}
+	if purePrefix(p) {
+		return b.Store.commonPrefixes(c, p, d)
 	}
 	keys, err := b.List(c, p)
 	if err != nil {

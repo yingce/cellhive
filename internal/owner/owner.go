@@ -784,6 +784,15 @@ func (m *Manager) forgetOwned(s cell.Scope) {
 	m.touchMu.Unlock()
 }
 
+// TracksLocal reports advisory maintenance membership without copying the
+// whole owned set. It grants no authority; callers still fence remote work.
+func (m *Manager) TracksLocal(s cell.Scope) bool {
+	m.ownedMu.Lock()
+	defer m.ownedMu.Unlock()
+	_, ok := m.owned[s.String()]
+	return ok
+}
+
 // OwnedScopes returns a snapshot of the scopes this node currently claims.
 func (m *Manager) OwnedScopes() []OwnedScope {
 	m.ownedMu.Lock()

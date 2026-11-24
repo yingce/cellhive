@@ -276,3 +276,9 @@ Session 正文和 DO 恢复指针纳入 Redis CAS，需停写执行 v3 离线迁
 ### Cron retry celld parity（2026-11-24，本地实现与测试通过，未部署）
 
 Cron 待重试状态已改为驻留内存，重启/驱逐/换 owner 丢弃该轮重试；这是用户选择的语义，不保证失败轮次最终送达。旧 durable retry 行升级时消费。普通未执行 occurrence 仍沿用现有调度器，本次不改变停机补跑。验收状态见对应 spec/plan。
+
+## 2026-11-24 Redis review 修复（本地验证通过，未部署）
+
+确认 Cron 跨周期失败后延后 cutoff、Nudge 被 Pass I/O 阻塞、Redis 混合前缀分页反复全量 List 三个问题。同步优化纯 Redis CommonPrefixes 与 outbox 候选扫描/整轮预算。上述问题已本地修复；新增边界回归、全量 make test、build/vet、coordination/scheduleindex/cron/timer/owner/server race 通过。Redis 使用独立本机实例，未验证托管主从回退或线上性能收益；生产状态不变。见 [修复报告](reports/2026-11-24-redis-review-fixes.md)。
+
+第二轮复审发现并本地修复 outbox worker 全部阻塞时未执行候选饥饿，以及 ACK 自通知导致淘汰后重新开库的问题。两项回归均先在旧实现失败、修复后通过；本轮完整验证状态见上述修复报告，未部署。
