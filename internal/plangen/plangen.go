@@ -383,7 +383,7 @@ func (b *Builder) wrapperModules(tenant string, spec map[string]json.RawMessage,
 export default { fetch(req, env, ctx) { return handleFetch(req, env, ctx); } };
 `},
 		{Name: "wrapper.js", Source: platformConsts(spec) + wrapper},
-		{Name: "__cellhive-bindings.js", Source: platformConsts(spec) + `import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);`},
+		{Name: "__cellhive-bindings.js", Source: platformConsts(spec) + `import "__cellhive-quota.js"; import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);`},
 		{Name: "tenant.js", Source: tenant},
 		{Name: "facades.js", Source: facades},
 		{Name: "rpc-codec.js", Source: rpc},

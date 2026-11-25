@@ -316,6 +316,7 @@ export function invocationSource() {
   `;
 }
 
+// Install quota on raw RPC stubs before constructing local facades.
 // Evaluate before tenant.js so module-scope captures of imported env bindings
 // receive the local stream/trace facades too. Keep the static generator in sync.
-export const BINDING_INIT_SOURCE = 'import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);';
+export const BINDING_INIT_SOURCE = 'import "__cellhive-quota.js"; import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);';

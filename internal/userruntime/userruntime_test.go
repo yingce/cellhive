@@ -5838,6 +5838,8 @@ export default { async fetch() { return new Response("probe"); } };
 
 // nonFetchEnvTenant exercises queue()/scheduled() with the worker's bindings.
 const nonFetchEnvTenant = `
+import {env as importedEnv} from "cloudflare:workers";
+const capturedDB = importedEnv.DB;
 export default {
   async fetch() { return new Response("tenant"); },
   async queue(batch, env) {
@@ -5853,8 +5855,18 @@ export default {
     return "q:kv=" + kv + ";var=" + (env.MY_VAR || "-") + ";b=" + shape;
   },
   async scheduled(event, env) {
-    const kv = env.KV ? await env.KV.get("k") : null;
-    return "s:kv=" + kv + ";var=" + (env.MY_VAR || "-");
+    const results = await Promise.allSettled([
+      env.DB.prepare("SELECT 1 AS n").all(),
+      Promise.resolve().then(() => env.KV.put("k", "v")),
+    ]);
+    const failures = results.filter(r => r.status === "rejected");
+    if (failures.length) throw Error(failures.map(r => String(r.reason)).join(", "));
+    try { await capturedDB.prepare("SELECT 1 AS n").all(); }
+    catch (error) {
+      if (error.code === "subrequest_limit_exceeded") return "row=" + results[0].value.results[0].n + ";var=" + env.MY_VAR;
+      throw error;
+    }
+    throw Error("captured D1 bypassed subrequest limit");
   },
 };
 `
@@ -5882,9 +5894,23 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"bindings": map[string]any{"KV": map[string]any{"kind": "kv", "ns": "acme", "name": "KV", "authorization": map[string]any{"ns": "acme", "kind": "kv", "name": "KV", "worker": "consumer", "version": 3, "resource": "acme/__kv__/main"}}},
-				"vars":     map[string]any{"MY_VAR": "x"},
+				"limits": map[string]int{"subrequests": 2},
+				"bindings": map[string]any{
+					"DB": map[string]any{
+						"kind": "d1", "ns": "acme", "name": "DB",
+						"authorization": map[string]any{"ns": "acme", "kind": "d1", "name": "DB", "worker": "consumer", "version": 3, "resource": "acme/db"},
+					},
+					"KV": map[string]any{
+						"kind": "kv", "ns": "acme", "name": "KV",
+						"authorization": map[string]any{"ns": "acme", "kind": "kv", "name": "KV", "worker": "consumer", "version": 3, "resource": "acme/__kv__/main"},
+					},
+				},
+				"vars": map[string]any{"MY_VAR": "x"},
 			})
+		case "/v1/kv/put":
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/d1/query":
+			io.WriteString(w, `{"results":[{"columns":["n"],"rows":[[1]]}]}`)
 		case "/v1/kv/get":
 			_, _ = w.Write([]byte("hello"))
 		default:
@@ -5984,8 +6010,8 @@ func TestUserRuntimeDispatchInjectsBindings(t *testing.T) {
 		t.Fatalf("bindings lookup version = %q, want 3 (must match the dispatched version)", got)
 	}
 	// Scheduled dispatch shares the same isolate/env resolution.
-	if out := dispatch("/v1/timers/dispatch", "consumer", 3); out["result"] != "s:kv=hello;var=x" {
-		t.Fatalf("scheduled result = %v, want s:kv=hello;var=x", out["result"])
+	if out := dispatch("/v1/timers/dispatch", "consumer", 3); out["result"] != "row=1;var=x" {
+		t.Fatalf("scheduled dispatch = %v, want D1 row and enforced quota", out)
 	}
 	// Fail open: a failing binding-spec fetch must not wedge the dispatch.
 	if out := dispatch("/v1/queues/dispatch", "nobind", 1); out["result"] != "q:kv=null;var=-;b=true:true:1:string:function:function:function:function" {
