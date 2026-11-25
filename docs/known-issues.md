@@ -4,11 +4,12 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
-## 2026-11-25 KV PUT 连接复用（已部署 GZ user-runtime）
+## 2026-11-25 KV PUT 连接复用（已部署 GZ / SG / USW user-runtime）
 
 - Worker KV PUT 成功后未读取确认响应体，真实 workerd 对照中每次写入均建立新连接。现已完整消费确认响应，以复用连接；不修改授权、owner/epoch 或持久化确认。
-- 真实 workerd 回归 `TestUserRuntimeKVPutReusesAgentConnections`：修复前 16 次顺序 PUT 使用 16 条连接；修复后连接复用断言通过；KV 流式/字节写入、TTL/metadata 两项真实 workerd 回归及 104 项平台 JS 测试也通过。GZ 隔离对照中，8 并发约 2800 次 PUT 的连接数由每请求一条降至 8–16 条，但未观察到稳定的吞吐提升。2026-11-25 从 GZ 线上基线 `6ec5b4cb` 提取修复为发布提交 `5259b5b3`，仅更新 GZ user-runtime（Helm revision 16）；cell-agent、DO runtime 和 workerd 二进制未变。发布基线另通过 3 项真实 workerd KV 回归和 89 项平台 JS 测试。SG/USW 未部署。发布后 K8s 内网真实 KV 两轮测试共 1,745,180 次成功、0 次失败；32 并发 Worker GET 3471–3538/s、PUT 1781–1847/s（HPA 2→3 副本，非严格固定拓扑对照）。测试 KV 后台清理完成、测试 App 已删除。
-- GZ DNS NetworkPolicy 的 Service53/Pod5353 端口错误已单独在线修复；其性能改善不能归入本项代码改动。
+- 真实 workerd 回归 `TestUserRuntimeKVPutReusesAgentConnections`：修复前 16 次顺序 PUT 使用 16 条连接；修复后连接复用断言通过；KV 流式/字节写入、TTL/metadata 两项真实 workerd 回归及 104 项平台 JS 测试也通过。GZ 隔离对照中，8 并发约 2800 次 PUT 的连接数由每请求一条降至 8–16 条，但未观察到稳定的吞吐提升。2026-11-25 从 GZ 线上基线 `6ec5b4cb` 提取修复为发布提交 `5259b5b3`，仅更新 GZ user-runtime（Helm revision 16）；cell-agent、DO runtime 和 workerd 二进制未变。发布基线另通过 3 项真实 workerd KV 回归和 89 项平台 JS 测试。随后将同一修复部署到 SG（Helm revision 156）和 USW（revision 148），仅替换两区当前镜像中的 bindings.js；其 cell-agent、DO runtime、workerd 和 Go 二进制均未改变。发布后 K8s 内网真实 KV 两轮测试共 1,745,180 次成功、0 次失败；32 并发 Worker GET 3471–3538/s、PUT 1781–1847/s（HPA 2→3 副本，非严格固定拓扑对照）。测试 KV 后台清理完成、测试 App 已删除。
+- SG/USW 发布后 K8s 内网真实 KV 两轮验证分别为 1,200,826 / 1,194,197 次成功，均 0 失败；覆盖直连 agent、跨 agent 转发和 Worker 的读写及内容校验。两区测试 KV 后台清理完成、资源列表为空、测试应用和 Pod 已删除。
+- GZ / SG / USW DNS NetworkPolicy 均确认存在 Service53/Pod5353 端口错误，已分别在线修正为 named `dns-udp`；其性能改善不能归入本项代码改动。SG/USW 各 30 次 runtime 内 DNS 检查全部 HTTP200，解析最长分别为 6.883ms / 2.514ms。
 
 ## 2026-11-23 KV / Queue 退役巡检
 
