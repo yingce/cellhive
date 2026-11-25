@@ -4,6 +4,12 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
+## 2026-11-25 KV PUT 连接复用（本地修复，未部署）
+
+- Worker KV PUT 成功后未读取确认响应体，真实 workerd 对照中每次写入均建立新连接。现已完整消费确认响应，以复用连接；不修改授权、owner/epoch 或持久化确认。
+- 真实 workerd 回归 `TestUserRuntimeKVPutReusesAgentConnections`：修复前 16 次顺序 PUT 使用 16 条连接；修复后连接复用断言通过；KV 流式/字节写入、TTL/metadata 两项真实 workerd 回归及 104 项平台 JS 测试也通过。GZ 隔离对照中，8 并发约 2800 次 PUT 的连接数由每请求一条降至 8–16 条，但未观察到稳定的吞吐提升。代码修复尚未部署。
+- GZ DNS NetworkPolicy 的 Service53/Pod5353 端口错误已单独在线修复；其性能改善不能归入本项代码改动。
+
 ## 2026-11-23 KV / Queue 退役巡检
 
 本地将已完成记录移出分钟级 COS 复查。一轮历史遍历结束后冷却一小时，期间继续处理分页和错误。进程重启会重新遍历，积压和故障可能延长回收时间。现有协议尚不能自动证明所有跨节点在途 PUT 和可重放上传已排空，因此还不能永久退出。见[后台定时访问](operations.md#cell-agent-后台定时访问)。

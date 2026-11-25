@@ -171,6 +171,8 @@ export class KV extends TracedEntrypoint {
       method: "POST", headers: scopeHeaders(p), body,
     });
     await must(r, "kv.put");
+    // Release the complete acknowledgement so workerd can reuse the agent connection.
+    await r.arrayBuffer();
   }
   // getWithMetadata returns { value, metadata } like Cloudflare KV.
   async getWithMetadata(key, options) {
