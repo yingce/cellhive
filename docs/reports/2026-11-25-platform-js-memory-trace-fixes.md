@@ -1,6 +1,6 @@
 # 平台 JS 内存与 trace 修复（2026-11-25）
 
-范围：本地工作区修复 Tail、R2 平台 binding、并发 trace、Assets binding 四项问题；未提交、未部署、未重启线上服务。
+范围：本文记录 Tail、R2 平台 binding、并发 trace、Assets binding 四项问题的本地修复验收。验收时尚未提交或部署；后续 `23d6821f` 已推送并部署本机 Compose，见 [发布记录](2026-11-25-platform-js-local-release.md)，云端未操作。
 
 ## 实现
 

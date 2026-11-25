@@ -4411,12 +4411,12 @@ Redis review 后续优化与 invocation 日志诊断已随源码 `8fa81f58` 部�
 
 源码 `8fa81f58` 已推送并发布 SG revision 154、USW 146、GZ 13；GZ 经停写备份完成恢复权威 v3 迁移，不能回退旧 v2 写者。三区业务验证、各十分钟观察、真实失败日志经 Vector 进入 SLS 的分类与脱敏检查通过。既有 Cron 失败、部分 fold deferred 未修复，托管 Redis 主从回退安全未验收。详情见 [发布记录](reports/2026-11-24-redis-logging-three-regions-release.md)。
 
-## 2026-11-25 平台 JS 内存与调用上下文修复（本地验证通过，未部署）
+## 2026-11-25 平台 JS 内存与调用上下文修复（本机已部署，云端未部署）
 
 - Tail 全局 8 MiB / 10000 条为所有 worker ring 共享的记录大小预算；任一索引淘汰必须清除旧记录引用，全局淘汰同步移除 scoped 索引。序列化大小不是精确堆内存；仍保留单 worker 1 MiB / 1000 条与 200 worker 上限。
 - R2 get 返回上游流，只有显式消费方法聚合；跨 RPC 后在调用方重建消费方法，body 与这些方法共用一次消费状态，不 tee 或复制完整正文。
 - Assets binding 传递 HEAD，GET 流式转发；agent HEAD 使用对象元数据点查，GET 使用 Objects.OpenReader 并关闭 reader，不降级为全量 Get 或 List。
 - trace/request ID 属于异步调用上下文，跨 isolate 显式传递；不得从共享可变全局推断调用者。缺失上下文为空，不能继承最近一次其他请求。
-- 本轮仅本地修复与回归，不代表生产发布或线上 OOM 验证。
+- 修复先完成本地回归，后按用户指令将 `23d6821f` 推送并部署本机 Compose；云端未发布，未做线上 OOM 验证。见 [本机发布记录](reports/2026-11-25-platform-js-local-release.md)。
 
 本地实现及测试证据、R2 agent 端既有聚合读取和 FS/COS 元数据边界见 [验收记录](reports/2026-11-25-platform-js-memory-trace-fixes.md)。
