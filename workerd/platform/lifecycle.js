@@ -181,7 +181,7 @@ export function managedModules(code, target, nonce, specs = {}, failureAttribute
       const nonce=${JSON.stringify(nonce)};
       const failureAttributes=${failureAttributes.toString()};
       const diagnosticHeader='x-cellhive-invocation-failure';
-      const failure=(stage,error,origin)=>new Response('worker error',{status:500,headers:{
+      const failure=(stage,error,origin)=>new Response(String(error),{status:500,headers:{
         [diagnosticHeader]:encodeURIComponent(JSON.stringify(failureAttributes(stage,error,500,origin)))
       }});
       function cleanResponse(res){
@@ -195,7 +195,7 @@ export function managedModules(code, target, nonce, specs = {}, failureAttribute
           try{
             const ctx=life.context(this.ctx), T=target[${JSON.stringify(target)}];
             let res, captured=null;
-            const onFailure=error=>{captured={error};return new Response('worker error',{status:500});};
+            const onFailure=error=>{captured={error};return new Response(String(error),{status:500});};
             try {
               res=await runInvocation(async()=>{
                 ${target === 'CellHiveHost' ? `const handler=new T(ctx,this.env);

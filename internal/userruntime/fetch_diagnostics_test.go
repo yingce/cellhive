@@ -89,7 +89,7 @@ func TestManagedFetchDiagnosticsAcrossWorkerdRPC(t *testing.T) {
 					if res.Header.Get("x-cellhive-invocation-failure") != "" {
 						t.Fatal("internal diagnostics leaked")
 					}
-					if route == "/throw" && (res.StatusCode != 500 || string(body) != "worker error") {
+					if route == "/throw" && (res.StatusCode != 500 || string(body) != "TypeError: hello token=private") {
 						t.Fatalf("response=%d %s", res.StatusCode, body)
 					}
 					select {

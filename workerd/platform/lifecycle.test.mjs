@@ -174,7 +174,7 @@ test('managed fetch preserves sanitized user throw before RPC serialization',asy
  const d=JSON.parse(decodeURIComponent(res.headers.get('x-cellhive-invocation-failure')));
  assert.equal(d['cellhive.error_origin'],'user_function');assert.equal(d['cellhive.function_result'],'threw');
  assert.equal(d['cellhive.error_frame'],'tenant.js:14:7');assert.equal(d['cellhive.error_name'],'TypeError');
- assert.doesNotMatch(JSON.stringify(d),/private/);assert.equal(await res.text(),'worker error');assert.equal(c.life.idle(),true);
+ assert.doesNotMatch(JSON.stringify(d),/private/);assert.equal(await res.text(),String(err));assert.equal(c.life.idle(),true);
 });
 test('managed fetch strips forged diagnostics without consuming response body',async()=>{
  let pulls=0;
