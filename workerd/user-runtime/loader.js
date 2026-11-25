@@ -99,7 +99,7 @@ function managedCode(entry) {
   const modules=Object.assign({},base.modules);
   // Track importable waitUntil as well as ctx.waitUntil in the same child state.
   modules['tenant.js']=modules['tenant.js'].replaceAll('"cloudflare:workers"','"__cellhive-workers.js"').replaceAll("'cloudflare:workers'","'__cellhive-workers.js'");
-  Object.assign(modules,managedModules(base,entry.plan.directFetch?'default':'CellHiveHost',entry.nonce,entry.plan.spec));
+  Object.assign(modules,managedModules(base,entry.plan.directFetch?'default':'CellHiveHost',entry.nonce,entry.plan.spec,invocationFailureAttributes));
   const flags=base.limits?.subRequests?[...base.compatibilityFlags.filter(f=>f!=='no_nodejs_als'),'nodejs_als']:base.compatibilityFlags;
   return Object.assign({},base,{mainModule:'__cellhive-managed.js',modules,compatibilityFlags:[...new Set(flags)]});
 }
@@ -477,6 +477,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
   const publicPath = req.headers.get("x-vwork-path-prefix") || pathname;
   const body = JSON.stringify({
     namespace: app.namespace, worker,
+    script_version: Number(diagnostics["cellhive.script_version"]) || 0,
     request_id: req.headers.get("x-request-id") || crypto.randomUUID(),
     method: req.method, path: publicPath, route: "functions",
     status, started_ms: startedMs, finished_ms: finishedMs, outcome,
@@ -490,7 +491,7 @@ async function recordRequestLog(env, app, worker, req, status, outcome, startedM
 async function runWorker(req, env, ctx, app, worker, version, classStorage, deletedClasses) {
   const startedMs = Date.now();
   let res;
-  const diagnostics = {};
+  const diagnostics = {"cellhive.script_version":String(version?.version || 0)};
   try {
     res = await runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses, diagnostics);
     return res;
@@ -513,6 +514,23 @@ async function runWorker(req, env, ctx, app, worker, version, classStorage, dele
   }
 }
 
+// Only called on the managed child response, whose normal tenant headers have
+// already been stripped. This is not a diagnostic channel for arbitrary fetches.
+function consumeInvocationFailure(res, diagnostics) {
+  const header='x-cellhive-invocation-failure';
+  const raw=res.headers?.get(header);
+  if(raw===null||raw===undefined)return res;
+  const headers=new Headers(res.headers);headers.delete(header);
+  const clean=new Response(res.body,{status:res.status,statusText:res.statusText,headers,...(res.webSocket?{webSocket:res.webSocket}:{})});
+  if(raw.length<=32768)try {
+    const d=JSON.parse(decodeURIComponent(raw));
+    for(const key of ['function_result','status_kind','failure_stage','error_origin','error_name','error_frame','error']) {
+      const value=d['cellhive.'+key];
+      if(typeof value==='string'&&value.length<=2048)diagnostics['cellhive.'+key]=value;
+    }
+  }catch{}
+  return clean;
+}
 async function runWorkerInner(req, env, ctx, app, worker, version, classStorage, deletedClasses, diagnostics = {}) {
   const failure=(stage,error,status)=>Object.assign(diagnostics,invocationFailureAttributes(stage,error,status));
   const key = workerVersionKey(app, worker, version);
@@ -548,7 +566,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
   const traced = prepareRequest(req, env);
   if (!traced.sampled) {
     try {
-      const res=await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
+      const res=consumeInvocationFailure(await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request),diagnostics);
       // The child Lifetime owns the response body through EOF/cancel/error.
       // Retirement also checks child status, so another host stream wrapper is
       // unnecessary once the fetch RPC has completed.
@@ -567,7 +585,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
     "cellhive.worker": worker,
   }, null, traced.request.headers.get("traceparent"));
   try {
-    const res = await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
+    const res = consumeInvocationFailure(await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request),diagnostics);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
     ctx.waitUntil(flushSpans(env));
     finish();

@@ -50,6 +50,10 @@ func TestRequestLogExportsFunctionRequest(t *testing.T) {
 		Diagnostics: map[string]string{"cellhive.failure_stage": "handler", "cellhive.error": "upstream failed", "cellhive.error_origin": "unknown", "private": "must not export"},
 		Status:      504, StartedMs: 1000, FinishedMs: 61000, Outcome: "error",
 	})
+	var wire map[string]any
+	_ = json.Unmarshal(payload, &wire)
+	wire["script_version"] = 7
+	payload, _ = json.Marshal(wire)
 	response := do(t, s.Handler(), http.MethodPost, "/v1/internal/request-log", "tok", payload)
 	if response.Code != http.StatusOK {
 		t.Fatalf("request-log = %d %s", response.Code, response.Body.String())
@@ -67,7 +71,7 @@ func TestRequestLogExportsFunctionRequest(t *testing.T) {
 		attrs[attr.Key] = attr.Value
 	}
 	for key, want := range map[string]string{
-		"cellhive.event_type": "fetch", "cellhive.request_id": "req-1",
+		"cellhive.script_version": "7", "cellhive.event_type": "fetch", "cellhive.request_id": "req-1",
 		"cellhive.method": "POST", "cellhive.path": "/functions/v1/meme-api/v1/share-links/x/open",
 		"cellhive.route": "functions", "cellhive.outcome": "error",
 		"cellhive.failure_stage": "handler", "cellhive.error": "upstream failed", "cellhive.error_origin": "unknown",

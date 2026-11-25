@@ -260,8 +260,8 @@ export async function exportLogRecords(env, records) {
 }
 
 // Failure boundaries are evidence, not ownership. Never inspect response bodies.
-export function invocationFailureAttributes(stage, error, status) {
-  const allowed = ['worker_load','bundle_fetch','binding_setup','runtime_capacity','handler','handler_response','dispatch'];
+export function invocationFailureAttributes(stage, error, status, origin = "") {
+  const allowed = ['worker_load','bundle_fetch','binding_setup','runtime_capacity','handler','handler_response','response_processing','dispatch'];
   const boundary = allowed.includes(stage) ? stage : 'unknown';
   let name='Error', message='', stack='';
   try { name=error?.name || 'Error'; message=error == null ? '' : String(error); stack=typeof error?.stack === 'string' ? error.stack : ''; } catch {}
@@ -274,12 +274,12 @@ export function invocationFailureAttributes(stage, error, status) {
     const m=/([^/\\\s():?#]+):([1-9][0-9]{0,5}):([1-9][0-9]{0,5})\)?$/.exec(line.trim());
     if(m && /^[A-Za-z0-9_.-]{1,80}$/.test(m[1])) { frame=m[1]+':'+m[2]+':'+m[3]; break; }
   }
-  const functionResult=boundary==='handler_response'?'returned':boundary==='handler' && frame?.startsWith('tenant.js:')?'threw':['worker_load','bundle_fetch','binding_setup','runtime_capacity'].includes(boundary)?'not_started':'unknown';
+  const functionResult=boundary==='handler_response'||boundary==='response_processing'?'returned':boundary==='handler'&&origin==='user_function'?'threw':boundary==='handler' && !origin && frame?.startsWith('tenant.js:')?'threw':['worker_load','bundle_fetch','binding_setup','runtime_capacity'].includes(boundary)?'not_started':'unknown';
   return {
     'cellhive.function_result':functionResult,
     'cellhive.status_kind':'http',
     'cellhive.failure_stage':boundary,
-    'cellhive.error_origin':functionResult==='returned'||functionResult==='threw'?'user_function':boundary==='runtime_capacity'?'platform':'unknown',
+    'cellhive.error_origin':origin==='platform'||origin==='user_function'?origin:boundary==='response_processing'?'unknown':functionResult==='returned'||functionResult==='threw'?'user_function':boundary==='runtime_capacity'?'platform':'unknown',
     'cellhive.error_name':error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name)?name:null,
     'cellhive.error_frame':frame,
     'cellhive.error':safe(message || (boundary==='handler_response'?'Handler returned HTTP '+status:'Invocation failed at '+boundary)),

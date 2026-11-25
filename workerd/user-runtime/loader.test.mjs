@@ -420,7 +420,7 @@ test('concurrent cold requests share one preparation admission; distinct loads r
     tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:false}),
     managedStub:()=>({getEntrypoint:()=>({fetch:async()=>({status:200})})}),text:(body,status)=>({body,status}),budgetErrorBody:()=>null});
   vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
-  vm.runInContext(extract('async function runWorkerInner(', '// workerPlan contains'),c);
+  vm.runInContext(extract('function consumeInvocationFailure(', '// workerPlan contains'),c);
   const call=w=>c.runWorkerInner({}, {}, {}, {namespace:'ns'}, w, {version:1,bundle_sha:'sha'}, {}, []);
   const same=Array.from({length:64},()=>call('same'));
   const other=Array.from({length:15},(_,i)=>call('other'+i));
@@ -439,13 +439,15 @@ test('fetch summaries retain failure boundary in file and protobuf export', asyn
  const c=vm.createContext({URL,Request,Response,Headers,crypto:webcrypto,TextEncoder,Date,BigInt,Uint8Array,JSON,console,fileLog:(_e,a)=>records.push(a)});
  vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
  vm.runInContext(extract('function otlpVarint(', 'async function runWorker('),c);
- const d=c.invocationFailureAttributes('handler_response',null,502);
+ const d={...c.invocationFailureAttributes('handler_response',null,502),'cellhive.script_version':'7'};
  await c.recordRequestLog({FILE_LOG_TOKEN:'enabled'},{namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
+ assert.equal(records[0]['cellhive.script_version'],'7');
  assert.equal(records[0]['cellhive.failure_stage'],'handler_response');
  assert.equal(records[0]['cellhive.error_origin'],'user_function');
  assert.equal(records[0]['cellhive.function_result'],'returned');
  const wire=c.otlpRequestLogProtobuf({}, {namespace:'vwork-111'},'research-site',new Request('https://app.test/'),502,'error',1,2,d);
  assert.ok(Buffer.from(wire).includes(Buffer.from('handler_response')));
+ assert.ok(Buffer.from(wire).includes(Buffer.from('cellhive.script_version')));
  const e=c.invocationFailureAttributes('handler',new TypeError('bad token=private'),500);
  assert.equal(e['cellhive.error_name'],'TypeError');
  assert.equal(e['cellhive.error'].includes('private'),false);
@@ -469,4 +471,29 @@ test('fetch loading and execution failures have different diagnostics on sampled
   assert.equal(logs[0]['cellhive.failure_stage'],scenario);
   assert.equal(logs[0]['cellhive.error_origin'],scenario==='runtime_capacity'?'platform':scenario==='handler_response'?'user_function':'unknown');
  }
+});
+
+test('loader consumes child diagnostics on both tracing paths and removes internal header',async()=>{
+ for(const sampled of [false,true]) {
+ const logs=[],pending=[];
+ const d={'cellhive.error_origin':'user_function','cellhive.function_result':'threw','cellhive.failure_stage':'handler','cellhive.error':'Error: hello','cellhive.error_frame':'tenant.js:14:7'};
+ const c=vm.createContext({Date,Response,Headers,JSON,decodeURIComponent,preparedCache:new Map([['key',true]]),preparedInflight:new Map(),coldLoads:0,workerVersionKey:()=> 'key',preparedWorker:async()=>({}),
+ tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){}}),scheduleSweep(){},prepareRequest:request=>({request:{...request,headers:new Headers()},sampled}),startSpan:()=>({}),endSpan(){},flushSpans:async()=>{},
+ managedStub:()=>({getEntrypoint:()=>({fetch:async()=>new Response('worker error',{status:500,headers:{'x-cellhive-invocation-failure':encodeURIComponent(JSON.stringify(d))}})})}),
+ text:(body,status)=>new Response(body,{status}),recordRequestLog:async(...args)=>logs.push(args.at(-1))});
+ vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
+ vm.runInContext(extract('async function runWorker(', 'function workerVersionKey('),c);
+ const response=await c.runWorker({}, {CH_INVOCATION_LOGS:'1'}, {waitUntil:p=>pending.push(p)}, {namespace:'ns'}, 'fn', {version:7}, null, []);
+ await Promise.all(pending);
+ assert.equal(response.headers.has('x-cellhive-invocation-failure'),false);
+ assert.equal(logs[0]['cellhive.error_origin'],'user_function');assert.equal(logs[0]['cellhive.function_result'],'threw');
+ assert.equal(logs[0]['cellhive.error_frame'],'tenant.js:14:7');assert.equal(logs[0]['cellhive.script_version'],'7');
+ }
+});
+test('request log fallback carries script version outside diagnostics',async()=>{
+ let body;
+ const c=vm.createContext({Headers,URL,Date,JSON,crypto:webcrypto,internalHeaders:async()=>({}),postTelemetry:async(_url,init)=>{body=JSON.parse(init.body);}});
+ vm.runInContext(extract('async function recordRequestLog(', 'async function runWorker('),c);
+ await c.recordRequestLog({CELL_URL:'http://cell',CELL_TOKEN:'test'},{namespace:'ns'},'fn',new Request('https://app.test/'),200,'ok',1,2,{'cellhive.script_version':'7'});
+ assert.equal(body.script_version,7);
 });

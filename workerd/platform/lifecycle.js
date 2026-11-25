@@ -167,7 +167,7 @@ export class RuntimeCapacity {
 
 // This source runs INSIDE the dynamic Worker. Never call abortIsolate in the
 // static platform host. Nonces are incarnation identifiers, not credentials.
-export function managedModules(code, target, nonce, specs = {}){
+export function managedModules(code, target, nonce, specs = {}, failureAttributes = () => ({})){
   const main=code.mainModule;
   return {
     '__cellhive-state.js': `export ${Lifetime.toString()}; export const life=new Lifetime(); globalThis.__cellhiveLife=life;`,
@@ -179,15 +179,37 @@ export function managedModules(code, target, nonce, specs = {}){
       import {life} from '__cellhive-state.js';
       import * as target from ${JSON.stringify(main)};
       const nonce=${JSON.stringify(nonce)};
+      const failureAttributes=${failureAttributes.toString()};
+      const diagnosticHeader='x-cellhive-invocation-failure';
+      const failure=(stage,error,origin)=>new Response('worker error',{status:500,headers:{
+        [diagnosticHeader]:encodeURIComponent(JSON.stringify(failureAttributes(stage,error,500,origin)))
+      }});
+      function cleanResponse(res){
+        if(!res.headers.has(diagnosticHeader))return res;
+        const headers=new Headers(res.headers);headers.delete(diagnosticHeader);
+        return new Response(res.body,{status:res.status,statusText:res.statusText,headers,...(res.webSocket?{webSocket:res.webSocket}:{})});
+      }
       export class CellHiveManagedFetch extends WorkerEntrypoint {
         async fetch(req){
           const release=life.hold();
           try{
             const ctx=life.context(this.ctx), T=target[${JSON.stringify(target)}];
-            const handler=typeof T==='function'?new T(ctx,this.env):T;
-            const res=await runInvocation(()=>handler.fetch(req,this.env,ctx));
-            return life.response(res);
-          }finally{release();}
+            let res, captured=null;
+            const onFailure=error=>{captured={error};return new Response('worker error',{status:500});};
+            try {
+              res=await runInvocation(async()=>{
+                ${target === 'CellHiveHost' ? `const handler=new T(ctx,this.env);
+                return handler.fetch(req,this.env,ctx,onFailure);` : `try {
+                  const handler=typeof T==='function'?new T(ctx,this.env):T;
+                  return await handler.fetch(req,this.env,ctx);
+                }catch(error){return onFailure(error);}`}
+              });
+            } catch(error) {return failure('handler',error,'platform');}
+            if(captured!==null)return failure('handler',captured.error,'user_function');
+            try {return await life.response(cleanResponse(res));}
+            catch(error){return failure('response_processing',error,'');}
+          }catch(error){return failure('handler',error,'platform');}
+          finally{release();}
         }
       }
       export class CellHiveLifecycle extends WorkerEntrypoint {

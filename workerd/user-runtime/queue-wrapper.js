@@ -48,10 +48,14 @@ export class CellHiveHost extends WorkerEntrypoint {
     return this.env;
   }
 
-  async fetch(req) {
+  async fetch(req, _env, _ctx, onFailure) {
     if (typeof tenant.fetch !== "function") return new Response("worker has no fetch handler", { status: 501 });
     return runWithTrace({ traceparent: traceOf(req), requestId: req.headers.get("x-request-id") },
-      () => runInvocation(() => tenant.fetch(req, withR2Metadata(this.#bindings()), this.ctx)));
+      () => runInvocation(async () => {
+        const bindings = withR2Metadata(this.#bindings());
+        try { return await tenant.fetch(req, bindings, this.ctx); }
+        catch (error) { if (onFailure) return onFailure(error); throw error; }
+      }));
   }
 
   async handleFetch(req) {

@@ -152,3 +152,54 @@ test('lifecycle status reports live websocket count', () => {
   const code = managedModules({ mainModule: 'tenant.js', compatibilityFlags: [] }, 'default', 'nonce')['__cellhive-managed.js'];
   assert.match(code, /sockets:life\.sockets/);
 });
+
+// Execute the generated entrypoint; only the native imports are replaced.
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+const failureSource=readFileSync(new URL('./telemetry.js',import.meta.url),'utf8');
+function managedHarness(handler, response) {
+  const c=vm.createContext({Response,Headers,encodeURIComponent,JSON, target:{default:handler},
+    WorkerEntrypoint:class {ctx={waitUntil(){}};env={};}, life:new Lifetime(),runInvocation:fn=>fn()});
+  vm.runInContext(failureSource.slice(failureSource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
+  if(response)c.life.response=response;
+  const modules=managedModules({mainModule:'tenant.js'},'default','nonce',{},c.invocationFailureAttributes);
+  vm.runInContext(modules['__cellhive-managed.js'].replace(/^\s*import .*;$/gm,'').replace(/export class /g,'class ')+'\nglobalThis.entry=new CellHiveManagedFetch();',c);
+  return c;
+}
+test('managed fetch preserves sanitized user throw before RPC serialization',async()=>{
+ const err=new TypeError('hello token=private https://private.test/path');err.stack='TypeError: hello\n    at fetch (tenant.js:14:7)';
+ const c=managedHarness({fetch(){throw err;}});
+ const res=await c.entry.fetch(new Request('https://app.test/'));
+ assert.equal(res.status,500);
+ const d=JSON.parse(decodeURIComponent(res.headers.get('x-cellhive-invocation-failure')));
+ assert.equal(d['cellhive.error_origin'],'user_function');assert.equal(d['cellhive.function_result'],'threw');
+ assert.equal(d['cellhive.error_frame'],'tenant.js:14:7');assert.equal(d['cellhive.error_name'],'TypeError');
+ assert.doesNotMatch(JSON.stringify(d),/private/);assert.equal(await res.text(),'worker error');assert.equal(c.life.idle(),true);
+});
+test('managed fetch strips forged diagnostics without consuming response body',async()=>{
+ let pulls=0;
+ const c=managedHarness({fetch(){return new Response(new ReadableStream({pull(){pulls++;}},{highWaterMark:0}),{headers:{'x-cellhive-invocation-failure':'forged'}});}});
+ const res=await c.entry.fetch(new Request('https://app.test/'));
+ assert.equal(res.headers.has('x-cellhive-invocation-failure'),false);assert.equal(pulls,0);await res.body.cancel();
+});
+test('managed response processing failure is separate from a user throw',async()=>{
+ const c=managedHarness({fetch(){return new Response('ok');}},()=>{throw new Error('response plumbing failed');});
+ const res=await c.entry.fetch(new Request('https://app.test/'));
+ const d=JSON.parse(decodeURIComponent(res.headers.get('x-cellhive-invocation-failure')));
+ assert.equal(d['cellhive.error_origin'],'unknown');assert.equal(d['cellhive.function_result'],'returned');
+});
+test('platform invocation setup failure is not attributed to tenant code',async()=>{
+ const c=managedHarness({fetch(){throw Error('must not run');}});
+ c.runInvocation=()=>{throw Error('invocation context failed');};
+ const res=await c.entry.fetch(new Request('https://app.test/'));
+ const d=JSON.parse(decodeURIComponent(res.headers.get('x-cellhive-invocation-failure')));
+ assert.equal(d['cellhive.error_origin'],'platform');
+});
+test('a rejected tenant response stream is not automatically blamed on platform plumbing',async()=>{
+ const c=managedHarness({fetch(){return new Response(new ReadableStream({start(controller){controller.error(new Error('tenant stream failed'));}}),{headers:{'content-type':'text/plain'}});}});
+ const res=await c.entry.fetch(new Request('https://app.test/'));
+ const d=JSON.parse(decodeURIComponent(res.headers.get('x-cellhive-invocation-failure')));
+ assert.equal(d['cellhive.failure_stage'],'response_processing');
+ assert.equal(d['cellhive.error_origin'],'unknown');
+ assert.equal(d['cellhive.function_result'],'returned');
+});

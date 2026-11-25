@@ -4420,3 +4420,5 @@ Redis review 后续优化与 invocation 日志诊断已随源码 `8fa81f58` 部�
 - 修复先完成本地回归，后按用户指令将 `23d6821f` 推送并部署本机 Compose；云端未发布，未做线上 OOM 验证。见 [本机发布记录](reports/2026-11-25-platform-js-local-release.md)。
 
 本地实现及测试证据、R2 agent 端既有聚合读取和 FS/COS 元数据边界见 [验收记录](reports/2026-11-25-platform-js-memory-trace-fixes.md)。
+
+2026-11-25 HTTP fetch 诊断边界修订（本地，未部署）：动态用户处理器抛错在 RPC 前捕获脱敏原始 name/message/frame，以 user_function/threw 标识；绑定包装器自身失败标识 platform；响应处理失败保留 response_processing/returned，无法区分租户响应流错误与生命周期故障时责任为 unknown。内部诊断响应头在正常租户响应和公网出口两端剥离，不能由租户返回头伪造。worker_load / 未捕获 RPC 异常没有责任证据时保留 unknown。HTTP 请求日志三种出口补齐实际选定 script_version；具体约定见 docs/observability.md。
