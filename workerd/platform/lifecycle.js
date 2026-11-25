@@ -215,7 +215,8 @@ export function quotaSource(max, specs) {
         const v=Reflect.get(target,key,target);
         if(typeof v!=='function')return v;
         return (...args)=>{
-          const local=(kind==='d1'&&(key==='prepare'||key==='bind'))||(kind==='do'&&localMethods.has(key))||(kind==='workflow'&&key==='get')||(kind==='r2'&&key==='resumeMultipartUpload');
+          const method=key==='traceCall'?args[0]:key;
+          const local=(kind==='d1'&&(method==='prepare'||method==='bind'))||(kind==='do'&&localMethods.has(method))||(kind==='workflow'&&method==='get')||(kind==='r2'&&method==='resumeMultipartUpload');
           if(!local)consume();
           // RPC stubs expose arbitrary method names; reading apply from a
           // stub attempts a remote RPC call instead of invoking the function.
@@ -292,3 +293,7 @@ export function invocationSource() {
     }
   `;
 }
+
+// Evaluate before tenant.js so module-scope captures of imported env bindings
+// receive the local stream/trace facades too. Keep the static generator in sync.
+export const BINDING_INIT_SOURCE = 'import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);';

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CountLRU, cacheSource, sourceCache } from '../platform/lifecycle.js';
+import { BINDING_INIT_SOURCE, CountLRU, cacheSource, sourceCache } from '../platform/lifecycle.js';
 
 const source = readFileSync(new URL('./host.js', import.meta.url), 'utf8');
 const hostSource = source.slice(source.indexOf('export class Host'), source.indexOf('async function fetchBundle'))
@@ -36,7 +36,7 @@ function harness(opts = {}) {
   };
   class DurableObject { constructor(context, env) { this.ctx = context; this.env = env; } }
   const context = vm.createContext({
-    DurableObject, Response, Request, Headers, URL, Uint8Array, TextEncoder, TextDecoder,
+    BINDING_INIT_SOURCE, DurableObject, Response, Request, Headers, URL, Uint8Array, TextEncoder, TextDecoder,
     AbortSignal, Date, setTimeout, clearTimeout, console, crypto: { randomUUID: () => 'nonce' },
     wsNet: 0, boundActors: new Set(), CountLRU, FACET_CACHE_MAX: 512, FACET_IDLE_MS: opts.idle ?? 60000, FACET_SWEEP_MS: opts.sweep ?? 0, BUNDLE_CACHE_MAX: 64,
     sourceCache, cacheSource, claims: new Map(), tenantRequest: (req) => req,

@@ -189,6 +189,7 @@ const config :Workerd.Config = (
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
+      compatibilityFlags = ["nodejs_als"],
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-user-runtime")),
         (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),
@@ -233,6 +234,7 @@ const config :Workerd.Config = (
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
+      compatibilityFlags = ["nodejs_als"],
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-user-runtime-loader")),
         (name = "CELL_URL", fromEnvironment = "CELLHIVE_HOST_CELL_URL"),

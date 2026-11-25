@@ -6612,9 +6612,8 @@ func TestUserRuntimeTraceContextPropagation(t *testing.T) {
 	if string(raw) != given {
 		t.Fatalf("tenant saw %q, want the client's traceparent", string(raw))
 	}
-	// The props-bound binding path (bindings.js, loader isolate) now sees the
-	// request's trace context too, because the loader sets it on its own global
-	// (ADR-167). It must carry the client's traceparent.
+	// The props-bound binding path receives invocation context explicitly over
+	// RPC; it must carry the client's traceparent without shared globals.
 	mu.Lock()
 	defer mu.Unlock()
 	if facadeTrace != given {

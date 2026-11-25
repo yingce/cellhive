@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
@@ -9,7 +10,7 @@ const key = Buffer.alloc(32, 7).toString('base64url');
 function facades() {
   const source = readFileSync(new URL('./facades.js', import.meta.url), 'utf8')
     .replace(/import\s*\{[^}]+\}\s*from\s*"[^"]+";/g, '').replace(/^export /gm, '');
-  const context = vm.createContext({ Request, Response, Headers, URL, TextEncoder, TextDecoder, Uint8Array, btoa, atob, MAX_DO_ENVELOPE_BYTES, MAX_DO_REQUEST_BYTES });
+  const context = vm.createContext({AsyncLocalStorage, Request, Response, Headers, URL, TextEncoder, TextDecoder, Uint8Array, btoa, atob, MAX_DO_ENVELOPE_BYTES, MAX_DO_REQUEST_BYTES });
   vm.runInContext(source + '\nglobalThis.api = {buildBindings, makeKV, makeDOTransport};', context);
   return context.api;
 }

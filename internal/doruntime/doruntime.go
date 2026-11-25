@@ -121,6 +121,7 @@ const config :Workerd.Config = (
         (name = "log-tail.js", esModule = embed "log-tail.js"),
       ],
       compatibilityDate = "2026-06-15",
+      compatibilityFlags = ["nodejs_als"],
       bindings = [
         (name = "LOADER", workerLoader = (id = "cellhive-do-runtime")),
         (name = "HOST", durableObjectNamespace = "Host"),

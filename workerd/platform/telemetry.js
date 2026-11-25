@@ -90,16 +90,16 @@ export function traceparentForSpan(span) {
 }
 
 // sampled reports whether the active trace should be recorded.
-export function sampled() {
-  const p = parseTraceparent(globalThis.__cellhiveTraceparent);
+export function sampled(traceparent = "") {
+  const p = parseTraceparent(traceparent);
   return p.sampled;
 }
 
 // startSpan begins a span; returns null when the trace is not sampled. parent
 // may be another platform span when work is nested in this isolate.
-export function startSpan(name, attrs = {}, parent = null) {
-  const p = parseTraceparent(globalThis.__cellhiveTraceparent);
-  if (!p.sampled) return null;
+export function startSpan(name, attrs = {}, parent = null, traceparent = "") {
+  const p = parseTraceparent(traceparent);
+  if (!parent && !p.sampled) return null;
   const span = {
     trace_id: parent ? parent.trace_id : p.traceId,
     span_id: randomHex(8),

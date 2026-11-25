@@ -2,7 +2,7 @@
 import { bindingStub, WorkflowBridgeTarget } from "bindings.js";
 import { authorized as verifyInternal, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
-import { ByteLRU, cacheSource, sourceCache, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
+import { BINDING_INIT_SOURCE, ByteLRU, cacheSource, sourceCache, jsonWeight, quotaSource, invocationSource } from "lifecycle.js";
 import { exportLogRecords, traceIds } from "telemetry.js";
 import { decode, encode } from "rpc-codec.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
@@ -419,13 +419,14 @@ async function loadWorkflowWorker(env, ctx, body) {
   }
   const workerCode = {
     compatibilityDate: body.compat_date || spec.compat_date || "2026-06-15",
-    compatibilityFlags: (body.limits || spec.limits)?.subrequests ? [...new Set([...(body.compat_flags || spec.compat_flags || []), "nodejs_als"])] : (body.compat_flags || spec.compat_flags || []),
+    compatibilityFlags: [...new Set([...(body.compat_flags || spec.compat_flags || []).filter(f => f !== "no_nodejs_als"), "nodejs_als"])],
     limits: workerLimits(body.limits || spec.limits),
     mainModule: "entry.js",
     modules: {
       "entry.js": `export * from "workflow-wrapper.js"; export { CellHiveLifecycle } from "__cellhive-lifecycle.js";`,
       "__cellhive-lifecycle.js": `import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers"; export class CellHiveLifecycle extends WorkerEntrypoint { retire() { abortIsolate("cellhive: retired"); } }`,
       "workflow-wrapper.js": platformConsts(spec && spec.bindings) + env.WF_WRAPPER_SRC,
+      "__cellhive-bindings.js": platformConsts(spec && spec.bindings) + BINDING_INIT_SOURCE,
       "cellhive-workflow.js": env.WF_BASE_SRC,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
@@ -449,7 +450,7 @@ async function loadWorkflowWorker(env, ctx, body) {
 // credentials and URLs remain in the host (ADR-186/230).
 function platformConsts(spec, tailKey = "") {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
+  return `;const __cellhivePlatform = Object.freeze({ tracedBindings: ${JSON.stringify(Object.entries(spec || {}).filter(([, s]) => s.kind !== "hyperdrive").map(([name]) => name))}, kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
 }
 
 // tenantEnv builds the loaded env: vars + migrated entrypoint stubs. The
@@ -497,6 +498,7 @@ async function loadWorker(env, ctx, body) {
       "entry.js": `export * from "wrapper.js"; export { CellHiveLifecycle } from "__cellhive-lifecycle.js";`,
       "__cellhive-lifecycle.js": `import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers"; export class CellHiveLifecycle extends WorkerEntrypoint { retire() { abortIsolate("cellhive: retired"); } }`,
       "wrapper.js": platformConsts(spec && spec.bindings, tailKey) + env.WRAPPER_SRC,
+      "__cellhive-bindings.js": platformConsts(spec && spec.bindings) + BINDING_INIT_SOURCE,
       "tenant.js": source,
       "facades.js": env.FACADES_SRC,
       "rpc-codec.js": env.RPC_CODEC_SRC,

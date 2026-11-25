@@ -9,6 +9,88 @@ import {
   RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const traceContexts = new AsyncLocalStorage();
+const emptyTrace = Object.freeze({ traceparent: "", requestId: "" });
+export function currentTrace() { return traceContexts.getStore() || emptyTrace; }
+export function runWithTrace(context, fn) {
+  return traceContexts.run(Object.freeze({
+    traceparent: typeof context?.traceparent === "string" ? context.traceparent : "",
+    requestId: typeof context?.requestId === "string" ? context.requestId : "",
+  }), fn);
+}
+
+// ALS is isolate-local. Carry context explicitly over the trusted binding RPC,
+// including calls made after awaits and from waitUntil callbacks.
+const tracedStubs = new WeakMap();
+export function traceStub(stub) {
+  if (!stub || (typeof stub !== "object" && typeof stub !== "function")) return stub;
+  if (tracedStubs.has(stub)) return tracedStubs.get(stub);
+  const proxy = new Proxy(stub, {
+    get(target, prop, receiver) {
+      if (typeof prop !== "string" || prop === "then" || prop === "constructor" || prop === "toJSON" || prop === "traceCall") return Reflect.get(target, prop, receiver);
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      if (prop === "fetch") return (input, init) => {
+        // Native fetch transports WebSocket upgrades; generic JSRPC cannot
+        // serialize a Response carrying a WebSocket. Carry trace in headers.
+        const request = new Request(input, init);
+        const context = currentTrace();
+        if (!request.headers.has("traceparent") && context.traceparent) request.headers.set("traceparent", context.traceparent);
+        if (!request.headers.has("x-request-id") && context.requestId) request.headers.set("x-request-id", context.requestId);
+        return target.fetch(request);
+      };
+      return (...args) => {
+        const result = target.traceCall(prop, args, currentTrace());
+        if (["get", "createMultipartUpload", "resumeMultipartUpload"].includes(prop)) {
+          return Promise.resolve(result).then(value => value && typeof value.traceCall === "function" ? traceStub(value) : value);
+        }
+        return result;
+      };
+    },
+  });
+  tracedStubs.set(stub, proxy);
+  tracedStubs.set(proxy, proxy);
+  return proxy;
+}
+
+const bindingEnvironments = new WeakMap();
+const preparedBindingValues = new WeakSet();
+export function prepareBindingEnv(env, config) {
+  if (bindingEnvironments.has(env)) return bindingEnvironments.get(env);
+  const wrapped = new Map();
+  let needsProxy = false;
+  const names = new Set([...(config.tracedBindings || []), ...["kv", "d1", "do", "queue", "r2"].flatMap(kind => config[kind + "Bindings"] || [])]);
+  for (const name of names) {
+    if (!env[name]) continue;
+    if (preparedBindingValues.has(env[name])) { wrapped.set(name, env[name]); continue; }
+    let value = (config.tracedBindings || []).includes(name) ? traceStub(env[name]) : env[name];
+    if (config.kvBindings?.includes(name)) value = makeKVFromStub(value);
+    else if (config.d1Bindings?.includes(name)) value = makeD1FromStub(value);
+    else if (config.doBindings?.includes(name)) value = makeDOFromStub(value);
+    else if (config.queueBindings?.includes(name)) value = makeQueueFromStub(value);
+    else if (config.r2Bindings?.includes(name)) value = wrapR2Metadata(value);
+    preparedBindingValues.add(value);
+    wrapped.set(name, value);
+    try { Object.defineProperty(env, name, { value, configurable: true, writable: true, enumerable: true }); } catch (_) { needsProxy = true; }
+  }
+  if (!needsProxy) { bindingEnvironments.set(env, env); return env; }
+  // Use a separate target: Proxy invariants prohibit replacing the value of a
+  // non-configurable, non-writable property on the original static env.
+  const proxy = new Proxy({}, {
+    get(_target, prop) { return wrapped.has(prop) ? wrapped.get(prop) : env[prop]; },
+    set(_target, prop, value) { const ok = Reflect.set(env, prop, value); if (ok) wrapped.delete(prop); return ok; },
+    deleteProperty(_target, prop) { const ok = Reflect.deleteProperty(env, prop); if (ok) wrapped.delete(prop); return ok; },
+    has(_target, prop) { return prop in env; },
+    ownKeys() { return Reflect.ownKeys(env); },
+    getOwnPropertyDescriptor(_target, prop) { return prop in env ? { configurable: true, enumerable: true, writable: true, value: wrapped.has(prop) ? wrapped.get(prop) : env[prop] } : undefined; },
+  });
+  bindingEnvironments.set(env, proxy);
+  bindingEnvironments.set(proxy, proxy);
+  return proxy;
+}
+
 const bindingClaims = Symbol("binding claims");
 function headers(platform, claims) {
   if (claims !== undefined && (!claims || typeof claims !== "object" || Array.isArray(claims))) {
@@ -32,9 +114,8 @@ async function pfetch(platform, url, opts) {
   if (platform.authorization && !new Headers(opts?.headers).has("authorization")) {
     opts = {...opts, headers: {...opts?.headers, authorization: await platform.authorization()}};
   }
-  // W3C trace context: the loaded-worker wrapper sets the inbound request's
-  // traceparent on globalThis; every facade call carries it (ADR-146).
-  const tp = globalThis.__cellhiveTraceparent;
+  // The wrapper owns an invocation-local trace context (ADR-146).
+  const tp = currentTrace().traceparent;
   if (tp) {
     opts = Object.assign({}, opts || {});
     opts.headers = Object.assign({}, opts.headers || {});
@@ -126,18 +207,21 @@ function kvReadType(options) {
 // may be instantiated once per JSRPC call, so batching inside the platform stub
 // cannot observe sibling Promise.all() calls.
 export function makeKVFromStub(stub) {
-  let pending = null;
+  // A batch has one transport trace and one quota context. Never mix requests,
+  // even when they enqueue during the same microtask turn.
+  const pending = new Map();
   const enqueue = (key, type, withMetadata) => {
-    if (!pending) {
-      pending = [];
-      const batch = pending;
-      queueMicrotask(() => flush(batch));
+    const context = currentTrace();
+    let batch = pending.get(context);
+    if (!batch) {
+      batch = [];
+      pending.set(context, batch);
+      queueMicrotask(() => flush(context, batch));
     }
-    return new Promise((resolve, reject) => pending.push({ key, type, withMetadata, resolve, reject }));
+    return new Promise((resolve, reject) => batch.push({ key, type, withMetadata, resolve, reject }));
   };
-  const flush = async (batch) => {
-    if (pending !== batch) return;
-    pending = null;
+  const flush = async (context, batch) => {
+    pending.delete(context);
     try {
       for (let start = 0; start < batch.length; start += 256) {
         const items = batch.slice(start, start + 256);
@@ -625,22 +709,10 @@ export function makeR2(platform, ns, bucket, scopeToken) {
       httpMetadata: md.http || {}, customMetadata: md.custom || {}, checksums,
     };
   }
-  function body(buf, info, range) {
-    const o = Object.assign({}, info);
-    o.bodyUsed = false;
-    if (range) o.range = { offset: range.offset, length: range.length === undefined ? buf.byteLength : range.length };
-    // Non-enumerable like Cloudflare's prototype methods, so spread/JSON see
-    // only the data fields.
-    const methods = {
-      arrayBuffer: async () => { o.bodyUsed = true; return buf; },
-      text: async () => { o.bodyUsed = true; return new TextDecoder().decode(buf); },
-      json: async () => { o.bodyUsed = true; return JSON.parse(new TextDecoder().decode(buf)); },
-      blob: async () => { o.bodyUsed = true; return new Blob([buf]); },
-    };
-    for (const [name, fn] of Object.entries(methods)) {
-      Object.defineProperty(o, name, { value: fn, enumerable: false, writable: true, configurable: true });
-    }
-    return o;
+  function body(response, info, range) {
+    const o = Object.assign({}, info, { body: response.body });
+    if (range) o.range = { offset: range.offset, length: range.length ?? Number(response.headers.get("content-length") || 0) };
+    return localR2Body(o);
   }
 
   return {
@@ -667,7 +739,7 @@ export function makeR2(platform, ns, bucket, scopeToken) {
       const r = await pfetch(platform, base + "object?" + q({ ns, bucket, key }), { headers: h });
       if (r.status === 404 || r.status === 304) return null;
       await must(r, "r2.get");
-      return body(await r.arrayBuffer(), objFromResponse(r, key), options.range);
+      return body(r, objFromResponse(r, key), options.range);
     },
     async head(key) {
       const r = await pfetch(platform, base + "object?" + q({ ns, bucket, key, head: 1 }), { headers: headers(platform, scopeToken) });
@@ -722,8 +794,8 @@ export function makeQueue(platform, ns, queue, scopeToken) {
 // another isolate, so it receives the current invocation context explicitly.
 export function makeQueueFromStub(stub) {
   const context = () => ({
-    traceparent: globalThis.__cellhiveTraceparent || "",
-    requestId: globalThis.__cellhiveRequestId || "",
+    traceparent: currentTrace().traceparent || "",
+    requestId: currentTrace().requestId || "",
   });
   return {
     send(body, options = {}) { return stub.send(body, options, context()); },
@@ -909,6 +981,18 @@ function makeD1Session(database, initialBookmark) {
 // arguments are serialized by value, so a method running on the binding side
 // cannot mutate the caller's Headers object; the function must run in the
 // caller's isolate to write into the same Headers instance (Cloudflare parity).
+// One stream, one consumption state. Never tee or retain a buffered copy.
+function localR2Body(object) {
+  if (!object || !("body" in object)) return object;
+  const out = { ...object };
+  const response = new Response(object.body);
+  Object.defineProperty(out, "bodyUsed", { enumerable: true, get: () => response.bodyUsed });
+  for (const method of ["arrayBuffer", "text", "json", "blob"]) {
+    Object.defineProperty(out, method, { value: () => response[method](), configurable: true });
+  }
+  return out;
+}
+
 export function wrapR2Metadata(bucket) {
   const map = {
     contentType: "content-type",
@@ -922,7 +1006,7 @@ export function wrapR2Metadata(bucket) {
     get(target, prop, receiver) {
       if (prop === "get" || prop === "head" || prop === "put") {
         return async (...args) => {
-          const obj = await target[prop](...args);
+          const obj = localR2Body(await target[prop](...args));
           if (!obj) return obj;
           const write = (hdrs) => {
             for (const [k, v] of Object.entries(obj.httpMetadata || {})) {

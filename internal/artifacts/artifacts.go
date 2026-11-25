@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -374,6 +375,24 @@ func (s *Store) GetAsset(ctx context.Context, ns, worker, token, path string) ([
 		return nil, err
 	}
 	return objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts).Get(ctx, key)
+}
+
+// OpenAsset opens one immutable asset version without buffering its body.
+func (s *Store) OpenAsset(ctx context.Context, ns, worker, token, path string) (io.ReadCloser, int64, string, error) {
+	key, err := AssetKey(ns, worker, token, path)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts).OpenReader(ctx, key)
+}
+
+// StatAsset reads metadata only; unsupported providers do not fall back to Get.
+func (s *Store) StatAsset(ctx context.Context, ns, worker, token, path string) (int64, string, error) {
+	key, err := AssetKey(ns, worker, token, path)
+	if err != nil {
+		return 0, "", err
+	}
+	return objectstore.NewOwned(s.B, objectstore.PrefixAssets, objectstore.OwnerArtifacts).Stat(ctx, key)
 }
 
 // PresignAsset returns a short-lived read URL for an asset.

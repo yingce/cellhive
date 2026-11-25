@@ -232,7 +232,14 @@ function storeRecords(namespace, worker, records, props) {
     globalItems.push(item);
     globalBytes += size;
     while (globalItems.length - globalHead > 10000 || globalBytes > 8 * maxBytes) {
-      globalBytes -= globalItems[globalHead++].size;
+      const expired = globalItems[globalHead];
+      globalItems[globalHead++] = null; // release immediately, not at array compaction
+      globalBytes -= expired.size;
+      const owner = rings.get(JSON.stringify([expired.namespace, expired.worker]));
+      if (owner?.items[0] === expired) {
+        owner.items.shift();
+        owner.bytes -= expired.size;
+      }
     }
     if (globalHead > 10000) { globalItems = globalItems.slice(globalHead); globalHead = 0; }
     while (ring.items.length > maxEvents || ring.bytes > maxBytes) {

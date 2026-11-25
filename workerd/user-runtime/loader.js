@@ -14,7 +14,7 @@
 import { bindingStub, setServiceLoader } from "bindings.js";
 import { authorized, internalHeaders } from "jwt.js";
 import { budgetErrorBody, checkWorkerBudgets, estimateWorkerCode, workerLimits } from "budget.js";
-import { ByteLRU, Lifetime, RuntimeCapacity, cacheSource, sourceCache, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
+import { BINDING_INIT_SOURCE, ByteLRU, Lifetime, RuntimeCapacity, cacheSource, sourceCache, jsonWeight, managedModules, quotaSource, invocationSource } from "lifecycle.js";
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI, Hyperdrive , DurableObjectNamespace, WorkflowBinding, Vectorize, Assets } from "bindings.js";
 export { TenantTail } from "log-tail.js";
 import { tailQuery, readLogCapture } from "log-tail.js";
@@ -366,8 +366,6 @@ function prepareRequest(req, env) {
     sampled = Number.isFinite(ratio) && Math.random() < ratio;
     tp = newTraceparent(sampled);
   }
-  globalThis.__cellhiveTraceparent = tp;
-  globalThis.__cellhiveTraceSampled = sampled;
   const headers = new Headers(req.headers);
   for (const k of [...headers.keys()]) {
     if (k.toLowerCase().startsWith("x-cellhive-")) headers.delete(k);
@@ -567,7 +565,7 @@ async function runWorkerInner(req, env, ctx, app, worker, version, classStorage,
     "http.method": req.method,
     "cellhive.namespace": app.namespace,
     "cellhive.worker": worker,
-  });
+  }, null, traced.request.headers.get("traceparent"));
   try {
     const res = await managedStub(env,ctx,lease.entry).getEntrypoint('CellHiveManagedFetch').fetch(traced.request);
     endSpan(span, { code: res.status >= 500 ? 2 : 0 });
@@ -646,6 +644,7 @@ function workerPlan(env, version, source, spec) {
       mainModule: "wrapper.js",
       modules: {
         "wrapper.js": platformConsts(spec, tailKey) + env.WRAPPER_SRC,
+        "__cellhive-bindings.js": platformConsts(spec) + BINDING_INIT_SOURCE,
         "tenant.js": source,
         "facades.js": env.FACADES_SRC,
         "rpc-codec.js": env.RPC_CODEC_SRC,
@@ -738,7 +737,7 @@ function platformConsts(spec, tailKey = "") {
   // any later statement, so the const must exist before the try block (a const
   // declared after use is in the temporal dead zone).
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
+  return `;const __cellhivePlatform = Object.freeze({ tracedBindings: ${JSON.stringify(Object.entries(spec || {}).filter(([, s]) => s.kind !== "hyperdrive").map(([name]) => name))}, kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, queueBindings: ${JSON.stringify(names("queue"))}, doBindings: ${JSON.stringify(names("do"))} }); const __cellhiveTailKey = ${JSON.stringify(tailKey)};\n`;
 }
 
 // --- assets ---------------------------------------------------------------

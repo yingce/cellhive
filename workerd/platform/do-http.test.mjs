@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
@@ -5,7 +6,7 @@ import assert from 'node:assert/strict';
 import {MAX_DO_ENVELOPE_BYTES, MAX_DO_REQUEST_BYTES} from './rpc-codec.js';
 const source=readFileSync(new URL('./facades.js',import.meta.url),'utf8').replace(/import\s*\{[^}]+\}\s*from\s*"[^"]+";/g,'').replace(/^export /gm,'');
 function transport(fetcher){
- const c=vm.createContext({Request,Response,Headers,URL,Uint8Array,TextEncoder,TextDecoder,ReadableStream,btoa,atob,console,MAX_DO_ENVELOPE_BYTES,MAX_DO_REQUEST_BYTES});
+ const c=vm.createContext({AsyncLocalStorage,Request,Response,Headers,URL,Uint8Array,TextEncoder,TextDecoder,ReadableStream,btoa,atob,console,MAX_DO_ENVELOPE_BYTES,MAX_DO_REQUEST_BYTES});
  vm.runInContext(source+'\nglobalThis.make = makeDOTransport;',c);
  return c.make({url:'http://agent',fetcher:{fetch:fetcher}},{ns:'demo',worker:'web',class:'Room',bundle_sha:'sha',direct:false});
 }

@@ -26,7 +26,7 @@ import {
 } from "rpc-codec.js";
 import { startSpan, endSpan, flushSpans, traceparentForSpan, postTelemetry } from "telemetry.js";
 import { budgetErrorBody, checkedWorkerGet, workerLimits } from "budget.js";
-import { CountLRU, cacheSource, sourceCache, quotaSource } from "lifecycle.js";
+import { BINDING_INIT_SOURCE, CountLRU, cacheSource, sourceCache, quotaSource } from "lifecycle.js";
 
 export { KV, D1Database, R2Bucket, QueueProducer, ServiceBinding, AI , DurableObjectNamespace, WorkflowBinding, Vectorize } from "bindings.js";
 export { TenantTail } from "log-tail.js";
@@ -685,7 +685,7 @@ async function connect(req, env, url, ticket) {
 // URLs/tokens remain in the trusted host and never enter dynamic WorkerCode.
 function platformConsts(spec) {
   const names = (kind) => Object.entries(spec || {}).filter(([, b]) => b && b.kind === kind).map(([n]) => n);
-  return `;const __cellhivePlatform = Object.freeze({ kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
+  return `;const __cellhivePlatform = Object.freeze({ tracedBindings: ${JSON.stringify(Object.entries(spec || {}).filter(([, s]) => s.kind !== "hyperdrive").map(([name]) => name))}, kvBindings: ${JSON.stringify(names("kv"))}, d1Bindings: ${JSON.stringify(names("d1"))}, r2Bindings: ${JSON.stringify(names("r2"))}, doBindings: ${JSON.stringify(names("do"))} });\n`;
 }
 
 function buildFacetEnv(ctx, hostEnv, bs, spec) {
@@ -1007,7 +1007,7 @@ const WRAP_SRC = `function __wrap(Inner) {
   class Wrapped extends __Base {
     constructor(ctx, env) { super(ctx, env); inners.set(this, new Inner(ctx, env)); }
     __inner() { return inners.get(this); }
-    fetch(r) { const i = this.__inner(); return typeof i.fetch === "function" ? runInvocation(() => i.fetch(r, this.env)) : super.fetch(r); }
+    fetch(r) { return runWithTrace({traceparent:r.headers.get("traceparent"),requestId:r.headers.get("x-request-id")}, () => { const i = this.__inner(); return typeof i.fetch === "function" ? runInvocation(() => i.fetch(r, this.env)) : super.fetch(r); }); }
     alarm(...a) { const i = this.__inner(); return typeof i.alarm === "function" ? runInvocation(() => i.alarm(...a)) : super.alarm(...a); }
     webSocketMessage(...a) { const i = this.__inner(); return typeof i.webSocketMessage === "function" ? runInvocation(() => i.webSocketMessage(...a)) : super.webSocketMessage(...a); }
     webSocketClose(...a) { const i = this.__inner(); return typeof i.webSocketClose === "function" ? runInvocation(() => i.webSocketClose(...a)) : super.webSocketClose(...a); }
@@ -1045,6 +1045,7 @@ function renderFacetModule(classes) {
   return [
     'import "bindings-wrapper.js";',
     'import { runInvocation } from "__cellhive-quota.js";',
+    'import { runWithTrace } from "facades.js";',
     'import { DurableObject as __Base } from "cellhive-do.js";',
     'import * as __tenant from "tenant.js";',
     'export * from "tenant.js";',
@@ -1189,14 +1190,13 @@ export class Host extends DurableObject {
       if (body) return json(body, 500);
       throw e;
     }
-    globalThis.__cellhiveTraceparent = spec.traceparent || "";
     const span = startSpan("do.invoke", {
       kind: "server",
       "cellhive.namespace": spec.namespace,
       "cellhive.worker": spec.worker,
       "cellhive.class": spec.class,
       "cellhive.do_kind": spec.kind || "fetch",
-    });
+    }, null, spec.traceparent);
     let res;
     if (spec.kind === "alarm") {
       try {
@@ -1514,7 +1514,7 @@ export class Host extends DurableObject {
       const facetMain = facetSrc ? "cellhive-facet.js" : "bindings-wrapper.js";
       const workerCode = {
         compatibilityDate: spec.compat_date || "2026-06-15",
-        compatibilityFlags: spec.limits?.subrequests ? [...new Set([...(spec.compat_flags || []), "nodejs_als"])] : (spec.compat_flags || []),
+        compatibilityFlags: [...new Set([...(spec.compat_flags || []).filter(f => f !== "no_nodejs_als"), "nodejs_als"])],
         limits: workerLimits(spec.limits),
         // Keep the lifecycle entrypoint alongside the DO exports so the host
         // can retire the loaded Worker after its last facet is released.
@@ -1527,6 +1527,7 @@ export class Host extends DurableObject {
             // Only binding-name metadata enters the wrapper; platform secrets
             // remain in the host worker (ADR-186).
             "bindings-wrapper.js": platformConsts(bs.bindings) + this.env.BINDINGS_WRAPPER_SRC,
+            "__cellhive-bindings.js": platformConsts(bs.bindings) + BINDING_INIT_SOURCE,
             "tenant.js": bundle,
             "cellhive-do.js": this.env.CELLHIVE_DO_SRC,
             "facades.js": this.env.FACADES_SRC,

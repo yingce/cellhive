@@ -14,7 +14,7 @@ import {
   decode, encode, encodedSize, MAX_RPC_BYTES,
   RPC_METHOD_RE, RPC_RESERVED_METHODS, DO_ID_HEADER,
 } from "rpc-codec.js";
-import { makeDOTransport } from "facades.js";
+import { makeDOTransport, currentTrace, runWithTrace } from "facades.js";
 import { mintJWT, internalHeaders } from "jwt.js";
 
 function q(params) {
@@ -24,12 +24,27 @@ function q(params) {
     .join("&");
 }
 
-// W3C trace context: the tenant isolate wrapper (queue-wrapper.js) sets the
-// inbound request's traceparent on globalThis; every internal call carries it so
-// cell-agent and the dispatch path stay in one trace (ADR-146).
-export function setTraceContext(traceparent) {
-  if (traceparent) globalThis.__cellhiveTraceparent = traceparent;
-  else delete globalThis.__cellhiveTraceparent;
+// Only already-public concrete methods may be dispatched. Context is diagnostic
+// metadata, never authorization; claims still come exclusively from host props.
+function tracedCall(target, method, args, context) {
+  if (typeof method !== "string" || method === "constructor" || method === "traceCall" || method.startsWith("_") || !Array.isArray(args)) throw new TypeError("invalid traced binding call");
+  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target), method);
+  if (!descriptor || typeof descriptor.value !== "function") {
+    if (!(target instanceof ServiceBinding) || ["then", "toJSON"].includes(method)) throw new TypeError("unknown binding method");
+    return runWithTrace(context, () => serviceRpc(target.ctx, target.env, target.ctx.props)(method, args));
+  }
+  return runWithTrace(context, () => descriptor.value.apply(target, args));
+}
+class TracedRpcTarget extends RpcTarget {
+  traceCall(method, args, context) { return tracedCall(this, method, args, context); }
+}
+class TracedEntrypoint extends WorkerEntrypoint {
+  traceCall(method, args, context) { return tracedCall(this, method, args, context); }
+  fetch(input, init) {
+    const request = new Request(input, init);
+    return runWithTrace({ traceparent: request.headers.get("traceparent"), requestId: request.headers.get("x-request-id") },
+      () => this._fetch(request));
+  }
 }
 
 async function bindingAuthorization(env, authorization) {
@@ -50,7 +65,7 @@ async function call(env, path, init) {
     delete opts.headers.__bindingClaims;
     opts.headers.authorization = await bindingAuthorization(env, claims);
   }
-  const tp = globalThis.__cellhiveTraceparent;
+  const tp = currentTrace().traceparent;
   if (tp && !opts.headers["traceparent"]) opts.headers["traceparent"] = tp;
   if (env.PLATFORM && typeof env.PLATFORM.fetch === "function") return env.PLATFORM.fetch(url, opts);
   return fetch(url, opts);
@@ -120,7 +135,7 @@ function kvKeyOut(k) {
 }
 
 // KV is the Phase-0 pilot capability.
-export class KV extends WorkerEntrypoint {
+export class KV extends TracedEntrypoint {
   async get(key, options) {
     const type = options && typeof options === "object" ? options.type : options;
     const p = this.ctx.props;
@@ -279,7 +294,7 @@ class D1PreparedStatement extends RpcTarget {
   }
 }
 
-export class D1Database extends WorkerEntrypoint {
+export class D1Database extends TracedEntrypoint {
   // Sessions retain the D1 API shape. CellHive has a single strong owner rather
   // than read replicas, so the bookmark is a monotonic cell txid and every
   // session query already executes on the authoritative owner.
@@ -378,44 +393,16 @@ function r2ObjectFromResponse(res, key) {
   };
 }
 
-// r2ObjectBody returns the Cloudflare R2ObjectBody shape. workerd RPC
-// serializes the data fields by value and the body methods as callable stubs,
-// so `obj.size`/`obj.httpMetadata` AND `await obj.text()` both work across the
-// isolate boundary. The methods are non-enumerable like Cloudflare's prototype
-// methods, so JSON.stringify/spread/Object.keys see only the data fields (an
-// enumerable RPC-stub function would break JSON serialization).
-function r2ObjectBody(buf, info, range) {
-  const body = Object.assign({}, info, { bodyUsed: false });
-  if (range) {
-    body.range = { offset: range.offset, length: range.length === undefined ? buf.byteLength : range.length };
-  }
-  body.arrayBuffer = async () => buf;
-  body.text = async () => new TextDecoder().decode(buf);
-  body.json = async () => JSON.parse(new TextDecoder().decode(buf));
-  body.blob = async () => new Blob([buf]);
-  // Cloudflare R2ObjectBody.body is a ReadableStream, and writeHttpMetadata
-  // copies httpMetadata onto a Headers object (R2 binding compatibility).
-  body.body = new Blob([buf]).stream();
-  body.writeHttpMetadata = (headers) => {
-    const md = info.httpMetadata || {};
-    const map = {
-      contentType: "content-type",
-      contentLanguage: "content-language",
-      contentDisposition: "content-disposition",
-      contentEncoding: "content-encoding",
-      cacheControl: "cache-control",
-      cacheExpiry: "cache-expiry",
-    };
-    for (const [k, v] of Object.entries(md)) {
-      if (v === undefined || v === null || v === "") continue;
-      headers.set(map[k] || k.toLowerCase(), String(v));
-    }
-    return headers;
-  };
-  return body;
+// Transfer only the upstream stream and metadata through RPC. Consumption
+// methods must be rebuilt in the receiving isolate (wrapR2Metadata); keeping
+// closures over a Response here would retain a second owner of the stream.
+function r2ObjectBody(response, info, range) {
+  const out = Object.assign({}, info, { body: response.body });
+  if (range) out.range = { offset: range.offset, length: range.length ?? Number(response.headers.get("content-length") || 0) };
+  return out;
 }
 
-class R2MultipartUpload extends RpcTarget {
+class R2MultipartUpload extends TracedRpcTarget {
   constructor(env, props, key, uploadId) {
     super();
     this.env = env;
@@ -451,7 +438,7 @@ class R2MultipartUpload extends RpcTarget {
   }
 }
 
-export class R2Bucket extends WorkerEntrypoint {
+export class R2Bucket extends TracedEntrypoint {
   async put(key, value, options = {}) {
     const p = this.ctx.props;
     const body = typeof value === "string" ? value : value;
@@ -482,7 +469,7 @@ export class R2Bucket extends WorkerEntrypoint {
     if (r.status === 404 || r.status === 304) return null;
     await must(r, "r2.get");
     const info = r2ObjectFromResponse(r, key);
-    return r2ObjectBody(await r.arrayBuffer(), info, options.range);
+    return r2ObjectBody(r, info, options.range);
   }
   async head(key) {
     const p = this.ctx.props;
@@ -535,7 +522,7 @@ export class R2Bucket extends WorkerEntrypoint {
   }
 }
 
-export class QueueProducer extends WorkerEntrypoint {
+export class QueueProducer extends TracedEntrypoint {
   async send(body, options = {}, context = {}) {
     const p = this.ctx.props;
     const encoded = encodeQueueBody(body, options.contentType);
@@ -585,7 +572,7 @@ function aiOpenAIBody(model, inputs) {
 }
 
 // AI (BYO OpenAI-compatible): env.AI.run(model, inputs) -> POST <AI_URL>/chat/completions.
-export class AI extends WorkerEntrypoint {
+export class AI extends TracedEntrypoint {
   async run(model, inputs) {
     const env = this.env;
     if (!env.AI_URL) throw new Error("ai: AI_URL is not configured");
@@ -654,7 +641,7 @@ function serviceRpc(ctx, env, props) {
       // RpcTarget/streams/typed values survive. No cell-agent hop, no JSON.
       const stub = await serviceLoader(ctx, env, { ns: props.ns, worker: props.target, version: props.version });
       const host = stub.getEntrypoint("CellHiveHost");
-      return await host.callMethod(props.entrypoint || "", method, args, globalThis.__cellhiveTraceparent);
+      return await host.callMethod(props.entrypoint || "", method, args, currentTrace().traceparent);
     }
     // props.ns is the (possibly cross-namespace) target; the scope token stays
     // bound to the caller, so the request carries both (ADR-144).
@@ -672,7 +659,7 @@ function serviceRpc(ctx, env, props) {
   };
 }
 
-export class ServiceBinding extends WorkerEntrypoint {
+export class ServiceBinding extends TracedEntrypoint {
   constructor(ctx, env) {
     super(ctx, env);
     const props = ctx.props || {};
@@ -691,7 +678,7 @@ export class ServiceBinding extends WorkerEntrypoint {
     });
   }
 
-  async fetch(input, init) {
+  async _fetch(input, init) {
     const p = this.ctx.props;
     const req = input instanceof Request ? input : new Request(input, init);
     // Native same-instance path (ADR-102): load the pinned target locally and
@@ -701,11 +688,12 @@ export class ServiceBinding extends WorkerEntrypoint {
       const stub = await serviceLoader(this.ctx, this.env, { ns: p.ns, worker: p.target, version: p.version });
       const host = stub.getEntrypoint("CellHiveHost");
       const clean = new Request(req);
+      if (!clean.headers.has("traceparent") && currentTrace().traceparent) clean.headers.set("traceparent", currentTrace().traceparent);
       for (const k of [...clean.headers.keys()]) {
         if (k.toLowerCase().startsWith("x-cellhive-")) clean.headers.delete(k);
       }
       if (p.entrypoint) {
-        return await host.callMethod(p.entrypoint, "fetch", [clean]);
+        return await host.callMethod(p.entrypoint, "fetch", [clean], clean.headers.get("traceparent"));
       }
       return await host.handleFetch(clean);
     }
@@ -781,7 +769,7 @@ function doTransportFor(env, props) {
   return t;
 }
 
-export class DurableObjectNamespace extends WorkerEntrypoint {
+export class DurableObjectNamespace extends TracedEntrypoint {
   #transport() {
     return doTransportFor(this.env, this.ctx.props || {});
   }
@@ -792,7 +780,7 @@ export class DurableObjectNamespace extends WorkerEntrypoint {
   // the id as a leading argument, the return is a generic RPC value and a
   // WebSocket refuses to serialize. The object id therefore rides in a header
   // (DO_ID_HEADER), stripped before the call so tenant DO code never sees it.
-  async fetch(request) {
+  async _fetch(request) {
     const id = String(request.headers.get(DO_ID_HEADER) || "");
     const clean = new Request(request);
     clean.headers.delete(DO_ID_HEADER);
@@ -813,7 +801,7 @@ export class DurableObjectNamespace extends WorkerEntrypoint {
 
 // WorkflowInstanceTarget is the CF-shaped instance returned by get(id); every
 // method is data-only so it survives workerLoader RPC.
-class WorkflowInstanceTarget extends RpcTarget {
+class WorkflowInstanceTarget extends TracedRpcTarget {
   #b;
   #id;
   constructor(b, id) {
@@ -835,10 +823,10 @@ class WorkflowInstanceTarget extends RpcTarget {
 
 // WorkflowBinding is the platform-side workflow namespace (create/get/...):
 // the tenant env holds only this stub.
-export class WorkflowBinding extends WorkerEntrypoint {
+export class WorkflowBinding extends TracedEntrypoint {
   #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/workflow/"; }
   async #headers() {
-    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization), "content-type": "application/json"};
+    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization), "content-type": "application/json", traceparent: currentTrace().traceparent};
   }
   async __call(path, method, extra, body) {
     const props = this.ctx.props || {};
@@ -876,10 +864,10 @@ export class WorkflowBinding extends WorkerEntrypoint {
 
 // Vectorize is the platform-side index binding (ADR-158): data-only methods,
 // so the tenant env needs no transport for it.
-export class Vectorize extends WorkerEntrypoint {
+export class Vectorize extends TracedEntrypoint {
   #base() { return this.env.CELL_URL.replace(/\/$/, "") + "/v1/vectorize/"; }
   async #hdrs() {
-    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization)};
+    return {authorization: await bindingAuthorization(this.env, this.ctx.props.authorization), traceparent: currentTrace().traceparent};
   }
   #qp(extra) {
     const p = this.ctx.props || {};
@@ -1036,19 +1024,27 @@ export function bindingStub(ctx, spec) {
 
 // Workers Static Assets binding. The trusted platform worker is the only code
 // that knows the namespace, worker and immutable asset token.
-export class Assets extends WorkerEntrypoint {
-  async fetch(input) {
-    const req = input instanceof Request ? input : new Request(input);
+export class Assets extends TracedEntrypoint {
+  async _fetch(input, init) {
+    const req = new Request(input, init);
+    if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
     const p = this.ctx.props || {};
     const u = new URL(req.url);
     const path = u.pathname.replace(/^\/+/, "") || "index.html";
     const q = `?ns=${encodeURIComponent(p.ns)}&worker=${encodeURIComponent(p.worker)}&token=${encodeURIComponent(p.token)}&path=${encodeURIComponent(path)}`;
-    const r = await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/asset" + q, { headers: await internalHeaders(this.env.CELL_TOKEN) });
-    if (r.status === 404) return new Response(null, { status: 404 });
-    if (!r.ok) return new Response("asset fetch failed", { status: 502 });
+    const r = await this.env.PLATFORM.fetch(this.env.CELL_URL.replace(/\/$/, "") + "/v1/internal/asset" + q, { method: req.method, headers: await internalHeaders(this.env.CELL_TOKEN) });
+    if (!r.ok) {
+      await r.body?.cancel();
+      return r.status === 404 ? new Response(null, { status: 404 }) : new Response("asset fetch failed", { status: 502 });
+    }
     const headers = new Headers({ "content-type": contentType(path) });
-    const body = await r.arrayBuffer();
-    return new Response(req.method === "HEAD" ? null : body, { status: 200, headers });
+    const length = r.headers.get("content-length");
+    if (length !== null) headers.set("content-length", length);
+    if (req.method === "HEAD") {
+      await r.body?.cancel();
+      return new Response(null, { status: 200, headers });
+    }
+    return new Response(r.body, { status: 200, headers });
   }
 }
 

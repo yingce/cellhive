@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { encode, decode } from './rpc-codec.js';

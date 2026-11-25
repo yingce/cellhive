@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const source=readFileSync(new URL('./facades.js',import.meta.url),'utf8');
-const context=vm.createContext({});
-vm.runInContext(source.slice(source.indexOf('export function wrapR2Metadata'),source.indexOf('export function buildBindings')).replace('export function','function'),context);
+const context=vm.createContext({Response});
+vm.runInContext(source.slice(source.indexOf('function localR2Body'),source.indexOf('export function buildBindings')).replace('export function','function'),context);
 const {wrapR2Metadata}=context;
 for (const method of ['get','head','put']) {
  test(`R2 ${method} metadata writes caller Headers`,async()=>{

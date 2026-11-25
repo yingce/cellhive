@@ -4,44 +4,16 @@
 // calls the named WorkflowEntrypoint class's run(event, step). `step` calls back
 // to cell-agent to memoize step results and schedule sleeps, so a re-dispatched
 // attempt resumes from the last durable step.
+import "__cellhive-bindings.js";
 import { WorkerEntrypoint, env as __env } from "cloudflare:workers";
 import * as tenant from "tenant.js";
 import { NonRetryableError, WorkflowTimeoutError } from "cellhive-workflow.js";
-import { buildBindings, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub, wrapR2Metadata } from "facades.js";
+import { prepareBindingEnv, runWithTrace } from "facades.js";
 import { runInvocation } from "__cellhive-quota.js";
 
 // Rebuild synchronous tenant-isolate APIs over the props-bound capabilities.
 
-try {
-
-  for (const name of __cellhivePlatform.kvBindings) {
-    if (__env[name]) {
-      Object.defineProperty(__env, name, { value: makeKVFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
-    }
-  }
-  if (__cellhivePlatform.doBindings.length > 0) {
-    for (const name of __cellhivePlatform.doBindings) {
-      if (__env[name]) {
-        Object.defineProperty(__env, name, {
-          value: makeDOFromStub(__env[name]),
-          writable: true, configurable: true, enumerable: true,
-        });
-      }
-    }
-  }
-  for (const name of __cellhivePlatform.d1Bindings) {
-    if (__env[name]) {
-      Object.defineProperty(__env, name, { value: makeD1FromStub(__env[name]), writable: true, configurable: true, enumerable: true });
-    }
-  }
-  for (const name of __cellhivePlatform.queueBindings) {
-    if (__env[name]) {
-      Object.defineProperty(__env, name, { value: makeQueueFromStub(__env[name]), writable: true, configurable: true, enumerable: true });
-    }
-  }
-} catch (e) {
-  /* leave unpatched */
-}
+prepareBindingEnv(__env, __cellhivePlatform);
 
 class SleepSignal {}
 class StopSignal {}
@@ -59,26 +31,7 @@ function b64decode(s) {
 
 // WorkflowEntrypoint receives env at construction time. Re-apply the R2
 // metadata facade so this.env.BUCKET.writeHttpMetadata stays tenant-local.
-const __r2EnvCache = new WeakMap();
-function withR2Metadata(env) {
-  if (!env || typeof env !== "object" || !__cellhivePlatform?.r2Bindings?.length) return env;
-  let cached = __r2EnvCache.get(env);
-  if (cached) return cached;
-  const wrapped = new Map();
-  const proxy = new Proxy(env, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof prop !== "string" || value === undefined || value === null) return value;
-      if (__cellhivePlatform.r2Bindings.includes(prop)) {
-        if (!wrapped.has(prop)) wrapped.set(prop, wrapR2Metadata(value));
-        return wrapped.get(prop);
-      }
-      return value;
-    },
-  });
-  __r2EnvCache.set(env, proxy);
-  return proxy;
-}
+function withR2Metadata(env) { return prepareBindingEnv(env, __cellhivePlatform); }
 
 export class CellHiveWorkflow extends WorkerEntrypoint {
   async handleRun(className, eventJson, workflowBridge) {
@@ -89,22 +42,19 @@ export class CellHiveWorkflow extends WorkerEntrypoint {
     const env = this.env;
     const bindings = withR2Metadata(env);
     const step = makeStep(workflowBridge, eventJson.instanceId);
-    const inst = new cls(this.ctx, bindings);
-    globalThis.__cellhiveTraceparent = eventJson.traceparent || "";
-    globalThis.__cellhiveRequestId = eventJson.request_id || "";
-    try {
-      const out = await runInvocation(() => inst.run(eventJson.event, step));
-      await finish(workflowBridge, eventJson.instanceId, out);
-      return { status: "complete" };
-    } catch (e) {
-      if (e instanceof SleepSignal) return { status: "sleeping" };
-      if (e instanceof StopSignal) return { status: "stopped" };
-      await finishError(workflowBridge, eventJson.instanceId, String(e && e.message ? e.message : e));
-      return { status: "errored", error: String(e && e.message ? e.message : e) };
-    } finally {
-      delete globalThis.__cellhiveTraceparent;
-      delete globalThis.__cellhiveRequestId;
-    }
+    return runWithTrace({ traceparent: eventJson.traceparent, requestId: eventJson.request_id }, async () => {
+      const inst = new cls(this.ctx, bindings);
+      try {
+        const out = await runInvocation(() => inst.run(eventJson.event, step));
+        await finish(workflowBridge, eventJson.instanceId, out);
+        return { status: "complete" };
+      } catch (e) {
+        if (e instanceof SleepSignal) return { status: "sleeping" };
+        if (e instanceof StopSignal) return { status: "stopped" };
+        await finishError(workflowBridge, eventJson.instanceId, String(e && e.message ? e.message : e));
+        return { status: "errored", error: String(e && e.message ? e.message : e) };
+      }
+    });
   }
 }
 

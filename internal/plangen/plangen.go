@@ -383,6 +383,7 @@ func (b *Builder) wrapperModules(tenant string, spec map[string]json.RawMessage,
 export default { fetch(req, env, ctx) { return handleFetch(req, env, ctx); } };
 `},
 		{Name: "wrapper.js", Source: platformConsts(spec) + wrapper},
+		{Name: "__cellhive-bindings.js", Source: platformConsts(spec) + `import { env } from "cloudflare:workers"; import { prepareBindingEnv } from "facades.js"; prepareBindingEnv(env, __cellhivePlatform);`},
 		{Name: "tenant.js", Source: tenant},
 		{Name: "facades.js", Source: facades},
 		{Name: "rpc-codec.js", Source: rpc},
@@ -419,8 +420,9 @@ func (b *Builder) platformService() (staticgen.Service, error) {
 			{Name: "facades.js", Source: facades},
 			{Name: "rpc-codec.js", Source: rpc},
 		},
-		CompatibilityDate: "2026-06-15",
-		GlobalOutbound:    "cap-egress",
+		CompatibilityDate:  "2026-06-15",
+		CompatibilityFlags: []string{"nodejs_als"},
+		GlobalOutbound:     "cap-egress",
 		Bindings: []staticgen.Binding{
 			{Name: "CELL_URL", Text: b.cfg.CellURL},
 			{Name: "CELL_TOKEN", Text: b.cfg.CellToken},
@@ -512,8 +514,12 @@ func platformConsts(spec map[string]json.RawMessage) string {
 		return out
 	}
 	encode := func(v []string) string { b, _ := json.Marshal(v); return string(b) }
-	return fmt.Sprintf(";const __cellhivePlatform = Object.freeze({ kvBindings: %s, d1Bindings: %s, r2Bindings: %s, queueBindings: %s, doBindings: %s }); const __cellhiveTailKey = \"\";\n",
-		encode(names("kv")), encode(names("d1")), encode(names("r2")), encode(names("queue")), encode(names("do")))
+	var traced []string
+	for _, kind := range []string{"kv", "d1", "r2", "queue", "do", "workflow", "vectorize", "ai", "service", "assets"} {
+		traced = append(traced, names(kind)...)
+	}
+	return fmt.Sprintf(";const __cellhivePlatform = Object.freeze({ tracedBindings: %s, kvBindings: %s, d1Bindings: %s, r2Bindings: %s, queueBindings: %s, doBindings: %s }); const __cellhiveTailKey = \"\";\n",
+		encode(traced), encode(names("kv")), encode(names("d1")), encode(names("r2")), encode(names("queue")), encode(names("do")))
 }
 
 func hasFlag(flags []string, want string) bool {
@@ -557,7 +563,8 @@ func quotaSource(limits json.RawMessage, kinds map[string]string) string {
         const v=Reflect.get(target,key,target);
         if(typeof v!=='function')return v;
         return (...args)=>{
-          const local=(kind==='d1'&&(key==='prepare'||key==='bind'))||(kind==='do'&&localMethods.has(key))||(kind==='workflow'&&key==='get')||(kind==='r2'&&key==='resumeMultipartUpload');
+          const method=key==='traceCall'?args[0]:key;
+          const local=(kind==='d1'&&(method==='prepare'||method==='bind'))||(kind==='do'&&localMethods.has(method))||(kind==='workflow'&&method==='get')||(kind==='r2'&&method==='resumeMultipartUpload');
           if(!local)consume();
           // RPC stubs expose arbitrary method names; reading apply from a
           // stub attempts a remote RPC call instead of invoking the function.

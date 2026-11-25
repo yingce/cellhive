@@ -217,15 +217,38 @@ func (s *Server) handleAssetGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	data, err := st.GetAsset(r.Context(), q.Get("ns"), q.Get("worker"), q.Get("token"), q.Get("path"))
+	var size int64
+	var body io.ReadCloser
+	var err error
+	if r.Method == http.MethodHead {
+		size, _, err = st.StatAsset(r.Context(), q.Get("ns"), q.Get("worker"), q.Get("token"), q.Get("path"))
+	} else {
+		body, size, _, err = st.OpenAsset(r.Context(), q.Get("ns"), q.Get("worker"), q.Get("token"), q.Get("path"))
+	}
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		switch {
+		case errors.Is(err, artifacts.ErrBadPath):
+			writeErr(w, http.StatusBadRequest, "bad_path", err.Error())
+		case errors.Is(err, bucket.ErrNotFound):
+			writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		case errors.Is(err, bucket.ErrNotSupported):
+			writeErr(w, http.StatusNotImplemented, "not_supported", "asset streaming or metadata unavailable")
+		default:
+			writeErr(w, http.StatusInternalServerError, "asset_read_failed", "asset read failed")
+		}
 		return
 	}
+	if body != nil {
+		defer body.Close()
+	}
 	w.Header().Set("content-type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	if body != nil {
+		if _, err := io.Copy(w, body); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
 }
 
 // handleAssetURL returns a short-lived presigned read URL for an asset.

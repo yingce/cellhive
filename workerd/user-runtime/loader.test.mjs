@@ -101,7 +101,7 @@ test('sampled response and resident release do not wait for telemetry export',as
  for(const failed of [false,true]) {
   let finishExport, released=0, settled=false;
   const exportPromise=new Promise(resolve=>finishExport=resolve), background=[];
-  const c=vm.createContext({preparedCache:new Map([['key',true]]),coldLoads:0,workerVersionKey:()=> 'key',preparedWorker:async()=>({}),tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){released++;}}),scheduleSweep(){},prepareRequest:request=>({request,sampled:true}),startSpan:()=>({}),endSpan(){},flushSpans:()=>exportPromise,managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(failed)throw Error('tenant failed');return {status:200};}})}),text:(_s,status)=>({status})});
+  const c=vm.createContext({preparedCache:new Map([['key',true]]),coldLoads:0,workerVersionKey:()=> 'key',preparedWorker:async()=>({}),tailEnabled:()=>false,residentWorker:async()=>({entry:{},release(){released++;}}),scheduleSweep(){},prepareRequest:request=>({request:{...request,headers:new Headers()},sampled:true}),startSpan:()=>({}),endSpan(){},flushSpans:()=>exportPromise,managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(failed)throw Error('tenant failed');return {status:200};}})}),text:(_s,status)=>({status})});
   vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);
   vm.runInContext(extract('async function runWorker(', 'function workerVersionKey('),c);
   const result=c.runWorker({}, {}, {waitUntil:p=>background.push(p)}, {namespace:'ns'}, 'fn', {}, null, []).then(r=>{settled=true;return r;});
@@ -115,10 +115,11 @@ test('sampled response and resident release do not wait for telemetry export',as
 
 test('non-fetch entrypoints keep the isolate alive until the handler settles', async () => {
   const wrapper = readFileSync(new URL('./queue-wrapper.js', import.meta.url), 'utf8')
+    .replace('import "__cellhive-bindings.js";', '')
     .replace('import { WorkerEntrypoint, env as __env } from "cloudflare:workers";', 'const WorkerEntrypoint = class {}; const __env = {};')
     .replace('import { loggedInvocation, dispatchDebug } from "__cellhive-invocation.js";', 'const loggedInvocation=(fn)=>fn(); const dispatchDebug=()=>{};')
     .replace('import * as tenantMod from "tenant.js";', 'const tenantMod={default:{}};')
-    .replace('import { buildBindings, wrapR2Metadata, makeKVFromStub, makeD1FromStub, makeDOFromStub, makeQueueFromStub } from "facades.js";', 'const buildBindings=()=>({}); const wrapR2Metadata=x=>x; const makeKVFromStub=x=>x; const makeD1FromStub=x=>x; const makeDOFromStub=x=>x; const makeQueueFromStub=x=>x;')
+    .replace('import { prepareBindingEnv, runWithTrace } from "facades.js";', 'const prepareBindingEnv=x=>x; const runWithTrace=(_c,fn)=>fn(); const buildBindings=()=>({}); const wrapR2Metadata=x=>x; const makeKVFromStub=x=>x; const makeD1FromStub=x=>x; const makeDOFromStub=x=>x; const makeQueueFromStub=x=>x;')
     .replace('import { runInvocation } from "__cellhive-quota.js";', 'const runInvocation=(fn)=>fn();')
     .replace('export class CellHiveHost', 'class CellHiveHost')
     .replace('export function withR2Metadata', 'function withR2Metadata')
@@ -456,7 +457,7 @@ test('fetch loading and execution failures have different diagnostics on sampled
   const c=vm.createContext({Date,Response,JSON,preparedCache:new Map([['key',true]]),preparedInflight:new Map(),coldLoads:0,workerVersionKey:()=> 'key',
    preparedWorker:async()=>{if(['bundle_fetch','binding_setup'].includes(scenario))throw {stage:scenario==='bundle_fetch'?'bundle':'binding',cause:Error('upstream failed')};return {};},
    tailEnabled:()=>false,residentWorker:async()=>{if(scenario==='worker_load')throw Error('load failed');if(scenario==='runtime_capacity')throw Error('runtime_capacity');return {entry:{},release(){}};},scheduleSweep(){},
-   prepareRequest:request=>({request,sampled}),startSpan:()=>({}),endSpan(){},flushSpans:async()=>{},budgetErrorBody:()=>null,
+   prepareRequest:request=>({request:{...request,headers:new Headers()},sampled}),startSpan:()=>({}),endSpan(){},flushSpans:async()=>{},budgetErrorBody:()=>null,
    managedStub:()=>({getEntrypoint:()=>({fetch:async()=>{if(scenario==='handler')throw TypeError('bad value');return {status:502};}})}),
    text:(body,status)=>({body,status}), recordRequestLog:async(...args)=>logs.push(args.at(-1))});
   vm.runInContext(telemetrySource.slice(telemetrySource.indexOf('export function invocationFailureAttributes')).replace(/^export /gm,''),c);

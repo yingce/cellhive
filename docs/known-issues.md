@@ -298,3 +298,7 @@ Redis review 后续优化与 invocation 日志诊断已随源码 `8fa81f58` 部�
 ### 2026-11-24 Redis / invocation 日志优化三区发布
 
 源码 `8fa81f58` 已推送并发布 SG revision 154、USW 146、GZ 13；GZ 经停写备份完成恢复权威 v3 迁移，不能回退旧 v2 写者。三区业务验证、各十分钟观察、真实失败日志经 Vector 进入 SLS 的分类与脱敏检查通过。既有 Cron 失败、部分 fold deferred 未修复，托管 Redis 主从回退安全未验收。详情见 [发布记录](reports/2026-11-24-redis-logging-three-regions-release.md)。
+
+## 2026-11-25 平台 JS 修复（本地验证通过，未部署）
+
+Tail 引用残留与 ring 共享预算、R2 平台 JS 全量缓冲、共享 trace、Assets binding HEAD/GET 全量读取已在本地修复并通过回归，尚未部署。R2 agent 的 Snapshot.Get/GetRange 聚合路径本轮未改，不宣称端到端零缓冲或线上 OOM 已验证。实现、真实 workerd 测试与范围见 [验收记录](reports/2026-11-25-platform-js-memory-trace-fixes.md)；契约见 decisions.md 同日条目。

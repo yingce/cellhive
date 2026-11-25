@@ -7,7 +7,7 @@ const key=Buffer.alloc(32,7).toString('base64url');
 test('cached KV binding refreshes JWT on each call without exposing key in props',async()=>{
  const source=readFileSync(new URL('./bindings.js',import.meta.url),'utf8').replace(/^import .*?;\n/gms,'').replace(/^export /gm,'');
  let now=1700000000;const calls=[];
- const context=vm.createContext({WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT:(k,id,c)=>mintJWT(k,id,c,now),internalHeaders,URL,Headers,Request,Response,TextEncoder,TextDecoder,makeDOTransport(){}});
+ const context=vm.createContext({currentTrace:()=>({traceparent:"",requestId:""}),runWithTrace:(_c,fn)=>fn(),WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT:(k,id,c)=>mintJWT(k,id,c,now),internalHeaders,URL,Headers,Request,Response,TextEncoder,TextDecoder,makeDOTransport(){}});
  vm.runInContext(source+'\nglobalThis.KV=KV;',context);
  const props={ns:'acme',kind:'kv',name:'KV',authorization:{ns:'acme',kind:'kv',name:'KV',worker:'web',version:1,resource:'acme/__kv__/main'}};
  const binding=new context.KV({props},{CELL_URL:'http://local',BINDING_SIGNING_KEY:key,PLATFORM:{fetch:async(url,opts)=>{calls.push(opts.headers);return new Response('ok')}}});
@@ -26,7 +26,7 @@ test('cached KV binding refreshes JWT on each call without exposing key in props
 test('binding props cannot override JWT purpose, subject or refresh timestamps', async () => {
  const source=readFileSync(new URL('./bindings.js',import.meta.url),'utf8').replace(/^import .*?;\n/gms,'').replace(/^export /gm,'');
  let sent;
- const context=vm.createContext({WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT,internalHeaders,Headers});
+ const context=vm.createContext({currentTrace:()=>({traceparent:"",requestId:""}),runWithTrace:(_c,fn)=>fn(),WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT,internalHeaders,Headers});
  vm.runInContext(source+'\nglobalThis.KV=KV;',context);
  const authorization={ns:'acme',kind:'kv',name:'DATA',type:'admin',sub:'attacker',aud:'other',iat:1,exp:2};
  const binding=new context.KV({props:{ns:'acme',authorization}},{CELL_URL:'http://agent',BINDING_SIGNING_KEY:key,PLATFORM:{fetch:async(_url,opts)=>{sent=new Headers(opts.headers);return new Response('ok')}}});
@@ -39,7 +39,7 @@ test('binding props cannot override JWT purpose, subject or refresh timestamps',
 
 test('DO transport cache separates binding authorization identities', async () => {
  const source=readFileSync(new URL('./bindings.js',import.meta.url),'utf8').replace(/^import .*?;\n/gms,'').replace(/^export /gm,'');
- const context=vm.createContext({WorkerEntrypoint:class{},RpcTarget:class{},mintJWT,internalHeaders,makeDOTransport:(platform)=>platform});
+ const context=vm.createContext({currentTrace:()=>({traceparent:"",requestId:""}),runWithTrace:(_c,fn)=>fn(),WorkerEntrypoint:class{},RpcTarget:class{},mintJWT,internalHeaders,makeDOTransport:(platform)=>platform});
  vm.runInContext(source+'\nglobalThis.transport=doTransportFor;',context);
  const env={CELL_URL:'http://local',BINDING_SIGNING_KEY:key};
  const props={ns:'acme',worker:'web',class:'Room',version:1,authorization:{ns:'acme',kind:'do',name:'FIRST'}};
@@ -60,7 +60,7 @@ for (const [kind, entrypoint, invoke] of [
 ]) test(`${kind} platform entrypoint mints fresh JWT with pinned props`, async () => {
  const source=readFileSync(new URL('./bindings.js',import.meta.url),'utf8').replace(/^import .*?;\n/gms,'').replace(/^export /gm,'');
  let now=1700000000; const calls=[];
- const context=vm.createContext({WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT:(k,id,c)=>mintJWT(k,id,c,now),internalHeaders,URL,Headers,Request,Response,TextEncoder,TextDecoder,btoa,atob});
+ const context=vm.createContext({currentTrace:()=>({traceparent:"",requestId:""}),runWithTrace:(_c,fn)=>fn(),WorkerEntrypoint:class{constructor(ctx,env){this.ctx=ctx;this.env=env}},RpcTarget:class{},mintJWT:(k,id,c)=>mintJWT(k,id,c,now),internalHeaders,URL,Headers,Request,Response,TextEncoder,TextDecoder,btoa,atob});
  vm.runInContext(source+`\nglobalThis.Binding=${entrypoint};`,context);
  const props={ns:'acme',kind,name:'DATA',target:'target',version:2,authorization:{ns:'acme',kind,name:'DATA'}};
  const binding=new context.Binding({props},{CELL_URL:'http://agent',BINDING_SIGNING_KEY:key,PLATFORM:{fetch:async(url,opts)=>{calls.push({url,...opts});return Response.json({results:[{statement_count:1}],id:'one'})}}});
