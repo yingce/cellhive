@@ -190,6 +190,7 @@ export class KV extends TracedEntrypoint {
     const p = this.ctx.props;
     const r = await call(this.env, "/v1/kv/delete?" + q({ ns: p.ns, key }), { method: "DELETE", headers: scopeHeaders(p) });
     await must(r, "kv.delete");
+    await r.arrayBuffer();
   }
 
   async list(options = {}) {
@@ -437,6 +438,7 @@ class R2MultipartUpload extends TracedRpcTarget {
       q({ ns: p.ns, bucket: p.name, key: this.key, upload_id: this.uploadId }),
       { method: "DELETE", headers: scopeHeaders(p) });
     await must(r, "r2.abort");
+    await r.arrayBuffer();
   }
 }
 
@@ -484,6 +486,7 @@ export class R2Bucket extends TracedEntrypoint {
     const p = this.ctx.props;
     const r = await call(this.env, "/v1/r2/object?" + q({ ns: p.ns, bucket: p.name, key }), { method: "DELETE", headers: scopeHeaders(p) });
     await must(r, "r2.delete");
+    await r.arrayBuffer();
   }
   async createMultipartUpload(key) {
     const p = this.ctx.props;
