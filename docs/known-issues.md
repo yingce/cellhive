@@ -4,6 +4,13 @@ _更新：2026-11-15；历史验收按日期列出。当前数据安全修复已
 
 历史问题、逐轮修复与旧阶段清单已移到 [历史记录](archive/known-issues-history-2026-11-10.md)。其中“待实现/验证中”只描述当时状态，不应直接作为当前任务；归档也不等于把未核实事项自动关闭。设计契约见 [decisions](decisions.md)，产品边界见 [compatibility matrix](compatibility-matrix.md)。
 
+## 2026-11-26 KV/R2 delete ack 连接复用（已部署 GZ user-runtime）
+
+- Worker `KV.delete`、`R2.delete`、`R2.abort` 成功后未读取确认响应体，与 PUT 同一根因：workerd HTTP/1 连接不能回池。现已完整消费确认响应；不修改授权、owner/epoch 或持久化确认。
+- 真实 workerd 回归 `TestUserRuntimeAckReusesAgentConnections`：修复前 kv-delete / r2-delete / r2-abort 各 16 次顺序调用用 16 条连接；修复后三子项通过。`TestUserRuntimeKVPutReusesAgentConnections` 仍通过。
+- 主线提交 `87092d75`。GZ 从当时现役 user-runtime digest `4fa01536` 薄层只替换 `/app/workerd/platform/bindings.js`，镜像 `sgccr.ccs.tencentyun.com/vwork/cellhive@sha256:dd29eb22ab07255174e625ea6da3d5f6661180729b18b45fc32263439b944b4b`；Helm revision 20，仅更新 user-runtime。cell-agent、DO runtime、workerd 二进制、SG、USW 未变。
+- GZ 内网 Worker 验收：put 写入 `v`、delete 后 get 返回 `null`；测试 App/资源已删除，探测 Pod 与本地凭据已移除。不声称吞吐提升，也不覆盖 SG/USW。
+
 ## 2026-11-25 KV PUT 连接复用（已部署 GZ / SG / USW user-runtime）
 
 - Worker KV PUT 成功后未读取确认响应体，真实 workerd 对照中每次写入均建立新连接。现已完整消费确认响应，以复用连接；不修改授权、owner/epoch 或持久化确认。
